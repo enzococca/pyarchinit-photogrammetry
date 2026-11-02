@@ -45,7 +45,9 @@ sent as).
 
 A question that cannot be answered - the local server stopped, too slow, a key refused - ends with a red line
 that names the address or the reason; the pane stays usable. *Stop* ends a question while the model is still
-writing; *New conversation* forgets the history.
+writing; *New conversation* forgets the history. Choosing another model (kind, model or address) or opening
+another project also starts a new conversation: the chat is cleared with a line saying why, so the chat and
+*What is sent* always tell the same conversation.
 
 ## The script editor
 

@@ -12,6 +12,7 @@ import logging
 import textwrap
 import threading
 import time
+import weakref
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
@@ -23,7 +24,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 from ..assistant import privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
-from .assistant_settings import KIND_NAMES, KINDS, saved_kind, saved_model
+from .assistant_settings import (KIND_NAMES, KINDS, keep_thread, park, release_thread, same_provider, saved_kind,
+                                 saved_model)
 from .i18n import current, tr
 from .icons import icon
 
@@ -50,7 +52,7 @@ class AssistantWorker(QObject):
     text = Signal(str)
     finished = Signal(object)  # the Turn
     failed = Signal(str)
-    resolved = Signal(int, object)  # the request number, the provider (None)
+    resolved = Signal(int, object, str)  # the request number, the provider (None), why there is none
 
     def __init__(self):
         super().__init__()
@@ -84,9 +86,16 @@ class AssistantWorker(QObject):
             turn = fn(assistant)
         except Exception as exc:  # noqa: BLE001 - said in the conversation, the pane stays usable
             log.warning("assistente: %s", exc, exc_info=True)
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self._emit(self.failed, f"{type(exc).__name__}: {exc}")
             return
-        self.finished.emit(turn)
+        self._emit(self.finished, turn)
+
+    @staticmethod
+    def _emit(signal, value) -> None:
+        try:
+            signal.emit(value)
+        except RuntimeError:  # parked (the window went away while the model hung): nobody listens any more
+            log.debug("assistente: risposta di un thread parcheggiato", exc_info=True)
 
     @Slot(str)
     def ask(self, question: str) -> None:
@@ -102,12 +111,13 @@ class AssistantWorker(QObject):
         from . import app_settings
         from .assistant_settings import provider_from_settings
 
+        why: list[str] = []
         try:
-            provider = provider_from_settings(app_settings())
-        except Exception:  # noqa: BLE001
+            provider = provider_from_settings(app_settings(), why)
+        except Exception as exc:  # noqa: BLE001
             log.warning("assistente: provider", exc_info=True)
-            provider = None
-        self.resolved.emit(request, provider)
+            provider, why = None, [str(exc)]
+        self.resolved.emit(request, provider, why[0] if why else "")
 
 
 class _Editor(QPlainTextEdit):
@@ -149,6 +159,11 @@ class AssistantPane(QWidget):
         self._stream_at: int | None = None
         self._script_source = ""
         self._script_running = False
+        self._started = False  # a question was asked in the conversation on screen
+        self._warned = False  # the warning line written in it (external models)
+        self._skip_note = False
+        self._doc_ref = None  # the project the conversation on screen is about
+        self._asking = None  # the assistant the question in progress was asked of
         self._build()
         self._show_kind(saved_kind(self._settings()), None)
 
@@ -279,10 +294,15 @@ class AssistantPane(QWidget):
         self.warning.setVisible(kind not in (None, "local"))
 
     def set_provider(self, provider: Provider | None) -> None:
-        """The model that answers from now on: a new conversation (each has its own privacy filter)."""
+        """The model that answers from now on: a new conversation (each has its own privacy filter). A conversation
+        already on screen is cleared, with a line naming the new model: the chat and *Cosa viene inviato* always
+        tell the same conversation."""
         self._request += 1  # a provider still being found is no longer wanted
         if self._busy and self._worker is not None:
-            self._worker.cancel()
+            self._worker.cancel()  # its answer belongs to the old conversation: dropped when it arrives
+        if self._started:
+            label = provider.label if provider is not None else tr("nessun modello")
+            self._clear_chat(tr("Modello cambiato: nuova conversazione con {0}", label))
         if provider is None:
             self.assistant = None
         else:
@@ -305,10 +325,22 @@ class AssistantPane(QWidget):
         self.reload()
 
     def reload(self) -> None:
-        """The provider of the settings found again (in the thread of the assistant)."""
+        """After the settings or the combo: the same kind, model and address keep the conversation; another one
+        starts a new conversation (the chat cleared, saying so) and its provider is found in the assistant's
+        thread."""
+        settings = self._settings()
         self._fill_models()
+        if self.assistant is not None and same_provider(settings, self.assistant.provider):
+            k = self.model_box.findData(self.assistant.provider.kind)
+            if k >= 0:
+                self.model_box.setItemText(k, self.assistant.provider.label)
+            return
+        if self._busy and self._worker is not None:
+            self._worker.cancel()
+        if self._started:
+            self._clear_chat(tr("Modello cambiato: nuova conversazione"))
         self.assistant = None
-        self._show_kind(saved_kind(self._settings()), None)
+        self._show_kind(saved_kind(settings), None)
         self._find_provider()
 
     def _find_provider(self) -> None:
@@ -316,8 +348,8 @@ class AssistantPane(QWidget):
         self._start()
         self._resolve.emit(self._request)
 
-    @Slot(int, object)
-    def _resolved(self, request: int, provider) -> None:
+    @Slot(int, object, str)
+    def _resolved(self, request: int, provider, why: str) -> None:
         if request != self._request:
             return
         self.set_provider(provider)
@@ -326,8 +358,8 @@ class AssistantPane(QWidget):
             return
         if provider is None:
             self._set_busy(False)
-            self._error_line(tr("Nessun modello disponibile: avvia un server locale (LM Studio, llama.cpp, Ollama, "
-                                "Unsloth) o scegli Claude o OpenAI in Impostazioni..."))
+            self._error_line(why or tr("Nessun modello disponibile: avvia un server locale (LM Studio, llama.cpp, "
+                                       "Ollama, Unsloth) o scegli Claude o OpenAI in Impostazioni..."))
             return
         self._busy = False
         self._dispatch(*waiting)
@@ -356,6 +388,7 @@ class AssistantPane(QWidget):
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.resolved.connect(self._resolved)
+        keep_thread(self._thread, self._worker)  # never destroyed while it runs, also if the window is dropped
         self._thread.start()
 
     def shutdown(self) -> None:
@@ -364,9 +397,11 @@ class AssistantPane(QWidget):
             return
         self._worker.cancel()
         self._thread.quit()
-        if not self._thread.wait(SHUTDOWN_MS):
+        if self._thread.wait(SHUTDOWN_MS):
+            release_thread(self._thread)
+        else:  # a provider that ignores cancel: the thread is parked, the program ends all the same
             log.warning("assistente: il thread non si è fermato in tempo")
-            _ORPHANS.append((self._thread, self._worker))
+            park(self._thread, self._worker)
         self._thread = self._worker = None
 
     @property
@@ -379,6 +414,7 @@ class AssistantPane(QWidget):
         self.b_send.setEnabled(not busy)
         self.b_stop.setEnabled(busy)
         self.b_ask_error.setEnabled(not busy)
+        self.b_new.setEnabled(not busy)
 
     # ------------------------------------------------------------------ asking
     def _send(self) -> None:
@@ -411,7 +447,17 @@ class AssistantPane(QWidget):
     def _dispatch(self, mode: str, *args: str) -> None:
         self._start()
         self._set_busy(True)
-        if self.assistant.external and not getattr(self.assistant, "_warned", True):
+        doc = self._main.doc
+        if self._started and self._doc_ref is not None and self._doc_ref() is not doc:
+            # another project: the conversation ends here as the assistant ends it (its note is not repeated)
+            self.assistant.new_conversation()
+            self._clear_chat(tr("Il progetto è cambiato: nuova conversazione"))
+            self._skip_note = True
+        self._doc_ref = _weak(doc)
+        self._started = True
+        self._asking = self.assistant
+        if self.assistant.external and not self._warned:
+            self._warned = True
             self._paragraph(f'<p style="color:{COLOURS["orange"]}"><i>{html.escape(tr(privacy.WARNING))}</i></p>')
         shown = args[0] if mode == "ask" else tr("Lo script si è fermato con un errore: perché?")
         self._paragraph(f"<p><b>{html.escape(tr('Domanda'))}:</b> {html.escape(shown).replace(chr(10), '<br>')}</p>")
@@ -466,12 +512,20 @@ class AssistantPane(QWidget):
 
     @Slot(object)
     def _on_finished(self, turn: Turn) -> None:
+        if self._asking is not self.assistant:  # asked of a model since replaced: not this conversation
+            self._asking = None
+            self._set_busy(False)
+            return
+        self._asking = None
         self._drop_stream()
-        if turn.note:
+        skip_note, self._skip_note = self._skip_note, False
+        if turn.note and not skip_note:
             self._paragraph(f"<p><i>{html.escape(turn.note)}</i></p>")
         if turn.text:
             markdown = QTextDocument()
-            markdown.setMarkdown(turn.text)
+            # no HTML: a model writing <US12> or <percorso> in its prose is shown as written
+            markdown.setMarkdown(turn.text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+                                 | QTextDocument.MarkdownFeature.MarkdownNoHTML)
             cursor = self._end()
             cursor.insertBlock()
             cursor.insertFragment(QTextDocumentFragment(markdown))
@@ -490,6 +544,10 @@ class AssistantPane(QWidget):
 
     @Slot(str)
     def _on_failed(self, text: str) -> None:
+        stale, self._asking = self._asking is not self.assistant, None
+        if stale:
+            self._set_busy(False)
+            return
         self._drop_stream()
         self._error_line(text)
         self._set_busy(False)
@@ -502,11 +560,22 @@ class AssistantPane(QWidget):
                 pass
 
     def new_conversation(self) -> None:
+        if self._busy:
+            return
         if self.assistant is not None:
             self.assistant.new_conversation()
+        self._clear_chat()
+
+    def _clear_chat(self, line: str = "") -> None:
+        """The chat emptied (and what belongs to it), with ``line`` saying why."""
         self.chat.clear()
         self.scripts = []
         self._stream_at = None
+        self._started = False
+        self._warned = False
+        self._skip_note = False
+        if line:
+            self._paragraph(f"<p><i>{html.escape(line)}</i></p>")
 
     def show_sent(self) -> None:
         SentDialog(self, self.assistant).exec()
@@ -569,7 +638,11 @@ class AssistantPane(QWidget):
         self.output.appendPlainText(tr("Salvato in {0}", target))
 
 
-_ORPHANS: list = []  # threads that did not stop in time: never destroyed while they run
+def _weak(obj):
+    try:
+        return weakref.ref(obj)
+    except TypeError:
+        return lambda: obj
 
 
 class SentDialog(QDialog):

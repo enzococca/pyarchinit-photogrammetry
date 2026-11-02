@@ -45,7 +45,10 @@ inviato come).
 
 Una domanda che non può avere risposta - il server locale fermo, troppo lento, una chiave rifiutata - finisce
 con una riga rossa che dice l'indirizzo o il motivo; il pannello resta utilizzabile. *Ferma* interrompe una
-domanda mentre il modello scrive ancora; *Nuova conversazione* dimentica la storia.
+domanda mentre il modello scrive ancora; *Nuova conversazione* dimentica la storia. Scegliere un altro modello
+(tipo, modello o indirizzo) o aprire un altro progetto comincia anch'esso una nuova conversazione: la chat si
+svuota con una riga che dice perché, così la chat e *Cosa viene inviato* raccontano sempre la stessa
+conversazione.
 
 ## L'editor di script
 

@@ -3,6 +3,7 @@ models of each, the keys (only in the system keychain or the environment, never 
 the connection. :func:`provider_from_settings` turns the saved settings into a provider."""
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 from typing import Any, Callable
@@ -51,9 +52,16 @@ def score_of(settings, kind: str) -> float | None:
         return None
 
 
-def provider_from_settings(settings) -> Provider | None:
+def provider_from_settings(settings, why: list[str] | None = None) -> Provider | None:
     """The provider of the saved settings, or None when the kind needs a key that is missing (Claude, OpenAI), no
-    OpenAI model was chosen, or no local server answers (the saved address first, then the usual ports)."""
+    OpenAI model was chosen, or no local server answers (the saved address first, then the usual ports). ``why``,
+    when given, receives the reason of a None, in the words of the interface."""
+
+    def none(reason: str) -> None:
+        if why is not None:
+            why.append(reason)
+        return None
+
     kind = saved_kind(settings)
     model = saved_model(settings, kind)
     try:
@@ -68,21 +76,89 @@ def provider_from_settings(settings) -> Provider | None:
                     return OpenAICompatible(base, model or (models[0] if models else ""), kind="local")
             found = probe_local()
             if not found:
-                return None
+                return none(tr("Nessun server locale risponde (LM Studio, llama.cpp, Ollama, Unsloth): avvialo con un "
+                               "modello caricato, o scegli Claude o OpenAI in Impostazioni..."))
             _, url, models = found[0]
             chosen = model if (model and (model in models or not models)) else (models[0] if models else "")
             return OpenAICompatible(url, chosen, kind="local")
         if not keys.get_key(kind):
-            return None
+            if kind == "claude":
+                return none(tr("Manca la chiave di Claude: salvala in Impostazioni... o usa la variabile d'ambiente "
+                               "ANTHROPIC_API_KEY"))
+            return none(tr("Manca la chiave di OpenAI: salvala in Impostazioni... o usa la variabile d'ambiente "
+                           "OPENAI_API_KEY"))
         if kind == "openai":
-            return make_provider("openai", model, OPENAI_URL) if model else None
+            if not model:
+                return none(tr("Nessun modello OpenAI scelto: sceglilo in Impostazioni... (Aggiorna i modelli)"))
+            return make_provider("openai", model, OPENAI_URL)
         return make_provider("claude", model or DEFAULT_CLAUDE)
     except ProviderError as exc:  # the library missing, an address refused
         log.info("assistente: %s", exc)
-        return None
+        return none(str(exc))
 
 
-# ---------------------------------------------------------------- work in a thread
+def same_provider(settings, provider) -> bool:
+    """True when ``provider`` is the one the saved settings name (kind, model, address): nothing to change."""
+    if provider is None:
+        return False
+    kind = saved_kind(settings)
+    if getattr(provider, "kind", None) != kind:
+        return False
+    model = saved_model(settings, kind)
+    if model and getattr(provider, "model", None) != model:
+        return False
+    base = _text(settings, "base_url").rstrip("/")
+    return not (kind == "local" and base and getattr(provider, "base_url", base) != base)
+
+
+# ---------------------------------------------------------------- threads that must never be destroyed running
+
+EXIT_WAIT_MS = 2000  # at exit, how long a thread still working is waited for
+_LIVE: dict = {}  # QThread -> the objects it needs (worker...): every thread of the assistant until it ends
+_PARKED: list = []
+
+
+def keep_thread(thread: QThread, *objects) -> None:
+    """``thread`` and ``objects`` stay referenced until :func:`release_thread` (or the end of the program)."""
+    _LIVE[thread] = objects
+
+
+def release_thread(thread: QThread) -> None:
+    _LIVE.pop(thread, None)
+
+
+def park(thread: QThread, *objects) -> None:
+    """A thread that did not stop (a call that ignores cancel): never destroyed while it runs. It becomes a child
+    of the main thread's QThread object, which Qt never deletes before the process ends: so neither the garbage
+    collector nor PySide's clean-up at exit (which deletes every QObject owned by Python) destroys it - that would
+    abort the program ("QThread: Destroyed while thread is still running") - and the process ending stops it."""
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance()
+    try:
+        if app is not None and thread.thread() is app.thread():
+            thread.setParent(app.thread())
+    except RuntimeError:  # already gone
+        log.debug("park", exc_info=True)
+    _PARKED.append((thread, objects))
+    _LIVE.pop(thread, None)
+
+
+@atexit.register
+def _finish_threads() -> None:
+    """At exit: every thread of the assistant asked to stop and waited for a moment; one still running is parked."""
+    for thread, objects in list(_LIVE.items()):
+        try:
+            for obj in objects:
+                cancel = getattr(obj, "cancel", None)
+                if callable(cancel):
+                    cancel()
+            thread.quit()
+            if not thread.wait(EXIT_WAIT_MS):
+                park(thread, *objects)
+        except RuntimeError:  # already deleted by Qt
+            pass
+    _LIVE.clear()
 
 
 class _Job(QObject):
@@ -107,7 +183,7 @@ class _Relay(QObject):
     """Lives in the interface thread: the results of a job reach the dialog through its slots (queued)."""
 
     def __init__(self, owner: "Background", on_done, on_error):
-        super().__init__(owner)
+        super().__init__()
         self.owner, self.on_done, self.on_error = owner, on_done, on_error
 
     @Slot(object)
@@ -122,16 +198,19 @@ class _Relay(QObject):
 
     @Slot()
     def end(self) -> None:
-        self.owner._forget(self)
+        owner, self.owner = self.owner, None
+        if owner is not None:
+            owner._forget(self)
 
 
 class Background(QObject):
     """Short calls (list the models, try the connection, find the servers) in threads of their own; the callbacks
-    run in the interface thread. :meth:`wait` before the owner goes away."""
+    run in the interface thread. :meth:`drop` when the owner goes away: the calls still running are not waited for,
+    their results are dropped and their threads end by themselves (kept referenced until then)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.jobs: dict[_Relay, tuple[QThread, _Job]] = {}
+        self.jobs: dict[_Relay, QThread] = {}
 
     def start(self, fn: Callable[[], Any], on_done=None, on_error=None) -> None:
         thread, job = QThread(), _Job(fn)
@@ -143,29 +222,23 @@ class Background(QObject):
         job.failed.connect(thread.quit)
         thread.finished.connect(relay.end)
         thread.started.connect(job.run)
-        self.jobs[relay] = (thread, job)
+        self.jobs[relay] = thread
+        keep_thread(thread, job, relay)
         thread.start()
 
     def _forget(self, relay: _Relay) -> None:
-        thread, _job = self.jobs.pop(relay, (None, None))
-        if thread is not None:
-            thread.wait()
+        thread = self.jobs.pop(relay, None) or next((t for t, o in _LIVE.items() if relay in o), None)
         relay.on_done = relay.on_error = None
-        relay.deleteLater()
+        if thread is not None:
+            thread.wait()  # finished: returns at once
+            release_thread(thread)
 
-    def wait(self, ms: int = 15000) -> None:
-        """Waits for the calls still running; one that does not end in ``ms`` is kept alive (never a thread
-        destroyed while it runs) and its result is dropped."""
-        for relay, (thread, job) in list(self.jobs.items()):
+    def drop(self) -> None:
+        """The results of the calls still running are dropped; nothing is waited for."""
+        for relay, thread in list(self.jobs.items()):
             relay.on_done = relay.on_error = None
             thread.quit()
-            if not thread.wait(ms):
-                relay.setParent(None)
-                _ORPHANS.append((thread, job, relay))
-        self.jobs.clear()
-
-
-_ORPHANS: list = []  # calls that outlived their dialog: kept until the program ends
+        self.jobs.clear()  # the threads stay in _LIVE until they end (relay.end) or the program does
 
 
 # ---------------------------------------------------------------- the dialog
@@ -379,7 +452,12 @@ class AssistantSettingsDialog(QDialog):
         except ProviderError as exc:
             from . import main_window as mwmod
 
-            mwmod.message(self, "warning", tr("Assistente"), str(exc))
+            if keys.keyring_available() and exc.__cause__ is not None:
+                text = tr("Il portachiavi ha rifiutato la chiave: {0}", exc.__cause__)
+            else:
+                text = tr("Nessun portachiavi disponibile su questo computer: la chiave non può essere conservata "
+                          "(usa la variabile d'ambiente {0})", keys.ENV[kind])
+            mwmod.message(self, "warning", tr("Assistente"), text)
             return False
         (self.key_claude if kind == "claude" else self.key_openai).clear()
         (self.key_state_claude if kind == "claude" else self.key_state_openai).setText(self._key_state(kind))
@@ -409,9 +487,9 @@ class AssistantSettingsDialog(QDialog):
         super().accept()
 
     def done(self, result: int) -> None:
-        self.background.wait()
+        self.background.drop()  # never waits: a slow network does not hold the window
         super().done(result)
 
 
-__all__ = ["SETTINGS", "KINDS", "KIND_NAMES", "provider_from_settings", "saved_kind", "saved_model", "score_of",
-           "AssistantSettingsDialog", "Background"]
+__all__ = ["SETTINGS", "KINDS", "KIND_NAMES", "provider_from_settings", "same_provider", "saved_kind", "saved_model",
+           "score_of", "AssistantSettingsDialog", "Background", "keep_thread", "release_thread", "park"]

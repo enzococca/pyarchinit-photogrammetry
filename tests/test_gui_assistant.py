@@ -346,3 +346,213 @@ def test_editor_tab_is_four_spaces(window):
     QApplication.sendEvent(pane.editor, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Tab,
                                                   Qt.KeyboardModifier.NoModifier, "\t"))
     assert pane.editor.toPlainText() == "    "
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_angle_brackets_in_an_answer_stay_whole(window):
+    w, app = window
+    pane = w.assistant
+    pane.set_provider(FakeProvider([text("La quota <US12> e il muro <img src=x onerror=alert(1)> fine riga")]))
+    pane.ask("dove?")
+    _wait(app, pane)
+    shown = pane.chat.toPlainText()
+    assert "La quota <US12> e il muro <img src=x onerror=alert(1)> fine riga" in shown
+
+
+def test_a_new_model_starts_a_new_conversation(window):
+    from pyarchinit_photogrammetry.gui import app_settings
+    from pyarchinit_photogrammetry.gui.assistant_pane import SentDialog
+    from pyarchinit_photogrammetry.gui.assistant_settings import SETTINGS
+
+    w, app = window
+    pane = w.assistant
+    s = app_settings()
+    s.setValue(SETTINGS["kind"], "claude")
+    s.setValue(SETTINGS["model_claude"], "finto")
+    first = FakeProvider([text("Primo.")], kind="claude")
+    pane.set_provider(first)
+    pane.ask("prima domanda")
+    _wait(app, pane)
+    kept = pane.assistant
+    pane.reload()  # the settings did not change (OK without changes): everything stays
+    assert pane.assistant is kept and "prima domanda" in pane.chat.toPlainText()
+    assert "prima domanda" in SentDialog(pane, pane.assistant).log.toPlainText()
+    s.setValue(SETTINGS["model_claude"], "claude-opus-5")  # another model: a new conversation
+    pane._find_provider = lambda: None  # no resolution in this test: the provider is given below
+    pane.reload()
+    shown = pane.chat.toPlainText()
+    assert "prima domanda" not in shown and "nuova conversazione" in shown.lower()
+    pane.set_provider(FakeProvider([text("Secondo.")], kind="claude"))
+    assert "Niente ancora." in SentDialog(pane, pane.assistant).log.toPlainText()  # consistent with the chat
+    pane.ask("seconda")
+    _wait(app, pane)
+    assert pane.chat.toPlainText().count(privacy.WARNING) == 1
+
+
+def test_provider_given_while_talking_clears_the_chat(window):
+    w, app = window
+    pane = w.assistant
+    pane.set_provider(FakeProvider([text("Uno.")], kind="local"))
+    pane.ask("uno?")
+    _wait(app, pane)
+    other = FakeProvider([text("Due.")], kind="local")
+    other.label = "Altro modello"
+    pane.set_provider(other)
+    shown = pane.chat.toPlainText()
+    assert "uno?" not in shown and "Altro modello" in shown and pane.scripts == []
+
+
+def test_new_conversation_is_off_while_a_question_runs(window):
+    w, app = window
+    pane = w.assistant
+
+    class Slow(FakeProvider):
+        def complete(self, messages, tools=None, on_text=None, cancel=None):
+            while not (cancel and cancel()):
+                time.sleep(0.02)
+            return text("")
+
+    pane.set_provider(Slow([text("")]))
+    pane.ask("lenta")
+    assert not pane.b_new.isEnabled()
+    pane.stop()
+    _wait(app, pane)
+    assert pane.b_new.isEnabled()
+
+
+def test_project_switch_clears_the_chat_and_warns_again(window, monkeypatch):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app = window
+    pane = w.assistant
+    pane.set_provider(FakeProvider([text("Risposta.")], kind="claude"))
+    pane.ask("prima")
+    _wait(app, pane)
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    monkeypatch.setattr(mwmod.application, "document", ppg.Document())  # another project in the window
+    pane.ask("dopo")
+    _wait(app, pane)
+    shown = pane.chat.toPlainText()
+    assert "prima" not in shown.split(privacy.WARNING)[-1] and "dopo" in shown
+    assert shown.count(privacy.WARNING) == 1 and shown.index(privacy.WARNING) < shown.index("dopo")
+    assert "progetto è cambiato" in shown.lower()
+    assert shown.lower().count("progetto è cambiato") == 1  # said once, not again by the answer's note
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize("kind, setup, words", [
+    ("claude", {}, "chiave di Claude"),
+    ("openai", {"key": "sk-x"}, "modello OpenAI"),
+    ("local", {}, "server locale"),
+])
+def test_the_missing_model_says_why(window, _memory_keyring, monkeypatch, kind, setup, words):
+    from pyarchinit_photogrammetry.assistant import providers
+    from pyarchinit_photogrammetry.gui import app_settings
+    from pyarchinit_photogrammetry.gui.assistant_settings import SETTINGS
+
+    w, app = window
+    monkeypatch.setattr(providers, "LOCAL_SERVERS", {})
+    s = app_settings()
+    s.setValue(SETTINGS["kind"], kind)
+    s.setValue(SETTINGS["base_url"], "")
+    s.setValue(SETTINGS["model_openai"], "")
+    if "key" in setup:
+        _memory_keyring[(keys.SERVICE, kind)] = setup["key"]
+    pane = w.assistant
+    pane.reload()
+    pane.ask("ci sei?")
+    _wait(app, pane)
+    assert words in pane.chat.toPlainText() and pane.b_send.isEnabled()
+
+
+def test_keychain_errors_are_translated(window, monkeypatch):
+    from pyarchinit_photogrammetry.gui import app_settings, i18n
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+    from pyarchinit_photogrammetry.gui.assistant_settings import AssistantSettingsDialog
+
+    w, app = window
+    monkeypatch.setattr(keys, "keyring_available", lambda: False)
+    shown = []
+    monkeypatch.setattr(mwmod, "message", lambda *a, **k: shown.append(a[3]))
+    i18n.set_current("en")
+    try:
+        dialog = AssistantSettingsDialog(w, app_settings())
+        dialog.key_claude.setText("sk-ant-x")
+        dialog.b_save_claude.click()
+        dialog.reject()
+    finally:
+        i18n.set_current("it")
+    assert shown and "keychain" in shown[0] and "portachiavi" not in shown[0]
+
+
+def test_settings_dialog_closes_at_once_with_a_slow_call(window):
+    from pyarchinit_photogrammetry.gui import app_settings
+    from pyarchinit_photogrammetry.gui.assistant_settings import AssistantSettingsDialog
+
+    w, app = window
+    dialog = AssistantSettingsDialog(w, app_settings())
+    gate = threading.Event()
+    dialog.background.start(lambda: gate.wait(10), lambda r: None, lambda e: None)
+    t0 = time.monotonic()
+    dialog.reject()
+    assert time.monotonic() - t0 < 1.0
+    gate.set()
+
+
+_EXIT_SCRIPT = r"""
+import os, sys, time
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, sys.argv[1])
+from pyarchinit_photogrammetry.gui import assistant_pane as ap
+from pyarchinit_photogrammetry.gui import assistant_settings as st
+from pyarchinit_photogrammetry.assistant.providers import Reply
+
+class Hung:  # never looks at cancel
+    kind, model, label = "local", "m", "hung"
+    def complete(self, messages, tools=None, on_text=None, cancel=None):
+        time.sleep(30)
+        return Reply("", [], "end", {})
+    def list_models(self): return ["m"]
+    def check(self): return "ok"
+
+class Window:
+    doc = None
+    history = None
+
+st.EXIT_WAIT_MS = 200
+ap.SHUTDOWN_MS = 200
+pane = ap.AssistantPane(Window())
+pane.set_provider(Hung())
+pane.ask("x")
+t0 = time.monotonic()
+while time.monotonic() - t0 < 1.0:
+    app.processEvents()
+    time.sleep(0.01)
+if sys.argv[2] == "shutdown":
+    pane.shutdown()
+del pane
+print("exiting", flush=True)
+sys.exit(0)
+"""
+
+
+@pytest.mark.parametrize("how", ["shutdown", "atexit"])
+def test_the_program_exits_with_a_hung_model(tmp_path, how):
+    import subprocess
+    import sys
+
+    script = tmp_path / "hung.py"
+    script.write_text(_EXIT_SCRIPT, encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software")
+    t0 = time.monotonic()
+    r = subprocess.run([sys.executable, str(script), str(tmp_path / "settings"), how], env=env,
+                       capture_output=True, text=True, timeout=25)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "exiting" in r.stdout and "Destroyed while thread" not in r.stderr
+    assert time.monotonic() - t0 < 20
