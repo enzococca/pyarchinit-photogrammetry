@@ -80,7 +80,10 @@ sopra funzionano gli strumenti del programma: pietre, disegno delle US, QGIS, es
 Una faccia tiene solo la superficie dentro la sua **fascia di profondità** (di base 0,5 m davanti al piano e 0,3 m
 dietro). Quello che sta più avanti, come un ponteggio o un testimone lasciato davanti al muro, resta fuori. Se la
 superficie tocca il limite della fascia, la sintesi della forma lo dice: una parte del muro può restarne fuori, quindi
-rifai la faccia con una fascia più larga.
+rifai la faccia con una fascia più larga. Se dietro la faccia, dentro la fascia, c'è una seconda superficie (un piano
+arretrato, il muro dietro un parapetto, una risega) con le profondità più di 10 cm dietro quelle della faccia, la
+faccia è solo la superficie davanti: le celle dietro restano fuori dall'adattamento e dalla carta dello spanciamento, e
+la sintesi dice quante sono.
 
 Il pannello elenca ogni faccia con larghezza, altezza, risoluzione e i disegni che contiene (pietre, US, quote,
 punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel progetto, se non chiedi di toglierlo.
@@ -97,7 +100,9 @@ punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel prog
   guarda, blu dentro il muro) e una legenda. La sintesi ne dà il 0,5° e il 99,5° percentile e l'rms.
 - **Sezioni**: sezioni orizzontali del modello alle quote scelte, sovrapposte in un DXF (ognuna alla sua quota) e in
   un SVG (disegnato lungo la faccia, con la profondità esagerata). Gli scarti fra loro si misurano a stazioni lungo la
-  faccia, dalla sezione più bassa, verso chi guarda.
+  faccia, verso chi guarda, dalla sezione più bassa che incontra la faccia (il testo dice quale se non è la più
+  bassa). A ogni stazione il plugin prende la superficie che la faccia vede, mai il retro di un muro spesso: una
+  traccia cliccata sull'asse del muro dà gli stessi scarti, e la sintesi dice che la traccia non è sulla faccia.
 - **Asse di una torre tonda**: i cerchi adattati alle sezioni a più quote. L'asse che passa per i loro centri dà
   inclinazione, direzione e cm/m; ogni quota dà il suo raggio e il fuori tondo (l'escursione del raggio fra il 0,5° e
   il 99,5° percentile).
@@ -128,12 +133,19 @@ pietra disegnata lì, quindi puoi correggerle a mano. **Misura le pietre** poi l
 - **per pietra**: larghezza e altezza (l'ingombro lungo `u` e `v`), area e ellisse equivalente (asse maggiore e
   minore, allungamento = maggiore / minore, orientamento dell'asse maggiore rispetto all'orizzontale della faccia). Dà
   anche la rettangolarità: l'area divisa per l'area del rettangolo minimo che la contiene;
-- **quota di malta**: 1 − l'area delle pietre divisa per l'area del muro. L'area del muro sono i limiti della faccia,
-  o un poligono che disegni sulla faccia con **Area del muro...**, tenuto per le volte successive;
-- **filari**: i centri delle pietre ordinati per quota e separati dove due vicini distano più di metà dell'altezza
-  mediana delle pietre. Un gruppo è un filare se ha 3 pietre o più con i centri entro un quarto del suo spessore (rms)
-  dalla retta che li attraversa. Ogni filare dà la quota media, il numero di pietre, lo spessore (l'altezza mediana
-  delle sue pietre) e la pendenza.
+- **quota di malta**: 1 − l'area delle pietre divisa per l'area del muro. L'area delle pietre è la loro unione: due
+  contorni sovrapposti per più di metà sono la stessa pietra disegnata due volte (un secondo passaggio dello strumento
+  Pietre, una correzione a mano) e contano una volta, tenendo il più recente; la sintesi dice quante sono state unite.
+  L'area del muro sono i limiti della faccia come sono ora, o un poligono che disegni sulla faccia con **Area del
+  muro...**, tenuto per le volte successive;
+- **filari**: ogni pietra unita alla vicina a destra con cui condivide almeno metà dell'altezza; le catene così fatte
+  sono i filari, quindi un filare inclinato di qualche grado resta un filare. Una catena è un filare se ha 3 pietre o
+  più con i centri entro un quarto del suo spessore (rms) dalla retta che li attraversa. Ogni filare dà la quota
+  media, il numero di pietre, lo spessore (l'altezza mediana delle sue pietre) e la pendenza.
+
+Una pietra disegnata in più parti si misura sulla parte maggiore. Le pietre con il lato minore sotto quattro pixel del
+prospetto della faccia (un frammento, una scheggia di SAM) restano fuori dalle misure e vengono nominate con la
+posizione; si rifiuta solo una faccia in cui sono troppo piccole quasi tutte.
 
 Le tabelle vengono scritte in `pietre.csv`, `filari.csv`, `pietre.xlsx` (fogli *Pietre*, *Filari*, *Sintesi*) e in un
 GeoPackage (`pietre_misure`, nelle `(u, v)` della faccia e in 3D sul suo piano).
@@ -147,7 +159,11 @@ lo sostengono:
 |---|---|
 | **a filari** | almeno il **70 %** delle pietre sta in filari di **3 pietre o più** inclinati meno di **2°** |
 | **regolare** | lo spessore dei filari varia poco: deviazione mediana assoluta / mediana **< 20 %** (non valutabile con meno di due filari) |
-| **a conci squadrati** | allungamento mediano delle pietre **< 2** e rettangolarità mediana **> 0,8** |
+| **a conci squadrati** | rettangolarità mediana delle pietre **> 0,8** |
+| **allungati** | allungamento mediano delle pietre **2 o più** (si aggiunge alla parola precedente) |
+
+I numeri si confrontano come la riga li mostra (20 % non è sotto il 20 %). Un filare inclinato di 2° o più resta un
+filare, ma le sue pietre non contano come pietre in filari.
 
 Le parole opposte sono *senza filari evidenti*, *irregolare* e *di pietre non squadrate*. Le regole non conoscono la
 pietra, la lavorazione, il periodo o la tecnica costruttiva. Dicono com'è la forma delle cose sulla faccia, e il tipo
@@ -183,10 +199,16 @@ rapporti...** legge la loro geometria sulla faccia (`v` verso l'alto) e propone:
 |---|---|
 | **si appoggia a** | un'unità sopra un'altra che la tocca per almeno il **20 %** della propria larghezza |
 | **taglia** | un'unità il cui contorno interrompe un filare delle pietre di un'altra: la retta per i centri del filare, dentro l'altra unità, entra nella prima. Questa regola vuole le pietre misurate |
-| **copre** | un'unità che racchiude la sommità di un'altra: ne segue almeno il 90 % della sommità e scende ai suoi lati da entrambe le parti |
+| **copre** | un'unità sopra un'altra (il suo punto più basso non sotto la sommità dell'altra) che ne segue almeno il 90 % della sommità e la copre per tutta la larghezza |
+| **riempie** | un'unità racchiusa da un'altra: dentro di essa, con l'altra che ne segue almeno il 90 % del contorno - un'apertura o una lacuna tamponata in un muro. Il muro intorno non riceve altri rapporti con essa |
 
-Per una coppia si propone il rapporto più forte: *taglia*, poi *copre*, poi *si appoggia a*. Ognuno viene con la sua
-evidenza, per esempio *"USM 13 racchiude la sommità di USM 11 (100 % della sommità) e scende ai suoi lati"*.
+Per una coppia si propone il rapporto più forte: *riempie*, poi *taglia*, poi *copre*, poi *si appoggia a*. Ognuno
+viene con la sua evidenza, per esempio *"USM 13 sta sopra USM 11, ne segue la sommità per il 100 % e lo copre per
+tutta la larghezza"*. Il contatto di *si appoggia a* si misura dentro la larghezza dell'altra unità.
+
+Le regole leggono forme sulla faccia. Non distinguono un taglio da un giunto dritto dove un'unità si appoggia a
+un'altra, né il taglio di un'apertura tamponata dall'apertura stessa: il taglio, quando lo vedi, è un'unità a sé che
+disegni.
 
 La finestra mostra le proposte **senza spunta**. Si tengono solo quelle che spunti, e **niente viene scritto senza la
 tua verifica**. **Salva in PyArchInit** poi, attraverso il bridge del programma:
@@ -198,8 +220,8 @@ tua verifica**. **Salva in PyArchInit** poi, attraverso il bridge del programma:
 
 Salvare di nuovo non scrive niente due volte.
 
-Nell'esempio le due unità, il muro a filari e il pietrame sopra, hanno dato la proposta attesa: *USM 2 si appoggia a
-USM 1*, che la tocca per il 100 % della sua larghezza.
+Nell'esempio le due unità, il muro a filari e il pietrame steso su tutta la sua sommità, hanno dato la proposta
+attesa: *USM 2 copre USM 1*.
 
 ## Uscite
 
@@ -214,9 +236,11 @@ USM 1*, che la tocca per il 100 % della sua larghezza.
     con la tabella `pietre_misure` aggiunta accanto a `pietre`;
   - le tabelle CSV ed Excel, le sezioni, il raster dello spanciamento, i confronti e il JSON del muro.
 - **IFC del muro...**: IFC4 con le convenzioni del programma (metri, `IfcMapConversion` su un'origine tonda):
-  - un **`IfcWall`** il cui solido è il contorno della faccia (l'area del muro disegnata, altrimenti i suoi limiti)
-    estruso dentro il muro: fra due facce rilevate che guardano in versi opposti lo spessore è **misurato** fra i
-    loro piani adattati; con una faccia sola è lo spessore che indichi;
+  - un **`IfcWall`** il cui solido è il contorno di una faccia (l'area del muro disegnata, altrimenti i suoi limiti)
+    estruso dentro il muro. Due facce piane sono le due parti di un muro se guardano in versi opposti entro **15°** e
+    stanno a meno di **3 m**: lo spessore è allora **misurato** fra i loro piani adattati. Ogni altra faccia - un muro
+    rilevato da una parte sola, ogni lato di una torre poligonale (i lati opposti non sono le due facce di un muro) -
+    fa un `IfcWall` suo con lo spessore che indichi; senza, si nominano le facce che lo richiedono;
   - **`Pset_PyArchInit_Masonry`**: strapiombo, p90 dello spanciamento, pietre, filari, quota di malta, la riga del
     tipo, i conteggi, lo spessore e la sua origine;
   - le USM come **`IfcBuildingElementPart`** del muro, con `Pset_PyArchInit_US`, e i rapporti accettati come
@@ -226,7 +250,9 @@ USM 1*, che la tocca per il 100 % della sua larghezza.
 - **Apri la faccia in QGIS**: un progetto QGIS nelle coordinate della faccia (spiegata). Contiene l'ortofoto, lo
   spanciamento con una scala divergente, i disegni e le pietre con le misure. Anche il progetto QGIS della pianta
   riceve le misure delle pietre, in 3D sul piano della faccia.
-- *File > Esporta*: **Muro (IFC)** e **Tavola della faccia (PDF)**.
+- *File > Esporta*: **Muro (IFC)** e **Tavola della faccia (PDF)**. L'esportazione IFC non può chiedere uno
+  spessore: un muro il cui spessore non è misurato fra due facce lì viene rifiutato, e *IFC del muro...* nel pannello
+  lo chiede.
 
 Il plugin scrive solo in `<dati del chunk>/masonry/<muro>/<faccia>/` e nelle cartelle che scegli. I prospetti e i
 disegni del programma non cambiano formato.
@@ -250,13 +276,15 @@ ppg plugin masonry list|remove PROGETTO ["Muro nord" [FACCIA]] [--elevations]
 
 - La **forma** si misura sul prospetto della faccia alla sua risoluzione, dentro la sua fascia di profondità. Un muro
   che strapiomba fuori dalla fascia viene tagliato, e la sintesi lo dice.
-- I **filari** si trovano dalle quote dei centri delle pietre. Filari molto inclinati che si sovrappongono in quota
-  lungo una faccia lunga possono fondersi in un solo gruppo, che poi non supera la prova del filare.
+- I **filari** sono catene di pietre affiancate. Dove le pietre di due filari si sovrappongono per metà dell'altezza
+  (un'apparecchiatura irregolare) possono unirsi in una catena sola, che poi non supera la prova del filare.
 - La **quota di malta** e il **tipo** dipendono dalle pietre disegnate. Le pietre mancanti, agli estremi di una
   faccia o dove l'ortofoto ha dei vuoti, alzano la quota di malta.
 - La regola **taglia** vuole le pietre misurate e un filare interrotto. Un taglio che corre lungo un filare senza
   interromperlo non viene trovato.
 - Il **muro IFC** è un prisma: il contorno di una faccia estruso attraverso il muro. Strapiombo e spanciamento stanno
   nel suo Pset, non nella sua forma. La faccia sviluppata di una torre tonda non diventa una lastra IFC.
+- Una seconda superficie dietro la faccia si mette da parte se sta più di 10 cm dietro; un arretramento minore fa
+  parte della faccia e si vede nello spanciamento.
 - Non previsti nella 0.1.0: USM automatiche, disegno dei giunti di malta, datazione, analisi strutturale, solidi 3D
   delle pietre, volte e tetti (vedi [Elementi architettonici](architecture.md)).

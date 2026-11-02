@@ -79,7 +79,9 @@ tools work on it: stones, US drawing, QGIS, exports.
 A face keeps only the surface within its **depth band** (0.5 m in front of the plane and 0.3 m behind it, by default).
 Whatever stands further in front, such as scaffolding or a section left in front of the wall, is left out. When the
 surface touches the edge of the band, the shape's summary says so: part of the wall may be outside it, so make the
-face again with a wider band.
+face again with a wider band. When a second surface stands behind the face within the band (a set-back storey, the
+wall behind a parapet, a *risega*), with its depths more than 10 cm behind those of the face, only the front surface
+is the face: the cells behind are left out of the fit and of the bulge map, and the summary says how many.
 
 The pane lists each face with its width, height, resolution and the drawings it holds (stones, US, spot heights,
 points). Removing a face takes it out of the wall. Its elevation stays in the project unless you ask to remove it too.
@@ -95,7 +97,9 @@ points). Removing a face takes it out of the wall. Its elevation stays in the pr
   wall) and a legend. The summary gives its 0.5th and 99.5th percentiles and its rms.
 - **Sections**: horizontal slices of the model at the heights you choose, stacked in one DXF (each at its height) and
   one SVG (drawn along the face, with the depth exaggerated). The offsets between them are measured at stations along
-  the face, from the lowest section, towards the viewer.
+  the face, towards the viewer, from the lowest section that meets the face (the text says which when it is not the
+  lowest). At each station the plugin takes the surface the face sees, never the back of a thick wall: a trace
+  clicked on the wall's axis gives the same offsets, and the summary says that the trace is not on the face.
 - **Axis of a round tower**: the circles fitted to the slices at several heights. The axis through their centres gives
   its inclination, direction and cm/m; each height gives its radius and out-of-round (the spread of the radius,
   0.5th to 99.5th percentile).
@@ -126,12 +130,18 @@ you can correct them by hand. **Measure the stones** then reads them:
 - **per stone**: its width and height (its extent along `u` and `v`), area, and the best-fit ellipse (major and minor
   axes, elongation = major / minor, orientation of the major axis from the face's horizontal). It also gives
   rectangularity: the area over the area of the smallest enclosing rectangle;
-- **mortar share**: 1 − the stones' area over the wall's area. The wall's area is the face's bounds, or a polygon you
-  draw on the face with **Wall area...**, kept for the next runs;
-- **courses**: the stones' centres sorted by height and split where two neighbours are further apart than half the
-  median stone height. A group is a course when it has 3 stones or more whose centres lie within a quarter of its
-  thickness (rms) of the line through them. Each course gives its mean height, number of stones, thickness (the median
-  height of its stones) and slope.
+- **mortar share**: 1 − the stones' area over the wall's area. The stones' area is their union: two outlines that
+  overlap by more than half are the same stone drawn twice (a second run of the stone tool, a correction by hand) and
+  count once, the later one kept, and the summary says how many were merged. The wall's area is the face's bounds as
+  they are now, or a polygon you draw on the face with **Wall area...**, kept for the next runs;
+- **courses**: each stone joined to its neighbour on the right that shares at least half of its height with it; the
+  chains so made are the courses, so a course sloping a few degrees stays one course. A chain is a course when it has
+  3 stones or more whose centres lie within a quarter of its thickness (rms) of the line through them. Each course
+  gives its mean height, number of stones, thickness (the median height of its stones) and slope.
+
+A stone drawn in several parts is measured on its largest part. Stones smaller than four pixels of the face's
+elevation on their smaller side (a fragment, a sliver of SAM) are left out of the measures and named with their
+position; only a face where most stones are too small is refused.
 
 The tables are written as `pietre.csv`, `filari.csv`, `pietre.xlsx` (the sheets *Pietre*, *Filari*, *Sintesi*) and a
 GeoPackage (`pietre_misure`, in the face's `(u, v)` and in 3D on its plane).
@@ -145,7 +155,11 @@ it says the numbers behind it:
 |---|---|
 | **coursed** (*a filari*) | at least **70 %** of the stones sit in courses of **3 stones or more** sloping less than **2°** |
 | **regular** (*regolare*) | the courses' thickness varies little: median absolute deviation / median **< 20 %** (not assessable with fewer than two courses) |
-| **squared** (*a conci squadrati*) | the stones' median elongation **< 2** and median rectangularity **> 0.8** |
+| **squared** (*a conci squadrati*) | the stones' median rectangularity **> 0.8** |
+| **elongated** (*allungati*) | the stones' median elongation **2 or more** (added to the previous word) |
+
+The numbers are compared as the line shows them (20 % is not under 20 %). A course sloping 2° or more is still a
+course, but its stones do not count as coursed.
 
 The opposite words are *senza filari evidenti* (uncoursed), *irregolare* and *di pietre non squadrate*. The rules do
 not know the stone, the dressing, the period or the building technique. They say what the shapes on the face are,
@@ -181,10 +195,15 @@ relationships...** reads their geometry on the face (`v` upwards) and proposes:
 |---|---|
 | **si appoggia a** (abuts) | a unit above another, touching it along at least **20 %** of its own width |
 | **taglia** (cuts) | a unit whose outline interrupts a course of the stones of another: the line through the course's centres, within the other unit, enters the first. This rule needs the stones measured |
-| **copre** (covers) | a unit that encloses the top of another: it runs along at least 90 % of the other's top and goes down beside it on both sides |
+| **copre** (covers) | a unit above another (its lowest point not below the other's top) that runs along at least 90 % of the other's top and spans its whole width |
+| **riempie** (fills) | a unit enclosed by another: within it, the other running along at least 90 % of its outline - an opening or a gap blocked inside a wall. The wall around it gets no other relationship to it |
 
-For one pair the strongest relationship is proposed: *taglia*, then *copre*, then *si appoggia a*. Each comes with its
-evidence, for example *"USM 13 encloses the top of USM 11 (100 % of the top) and goes down beside it"*.
+For one pair the strongest relationship is proposed: *riempie*, then *taglia*, then *copre*, then *si appoggia a*.
+Each comes with its evidence, for example *"USM 13 lies above USM 11, runs along 100 % of its top and spans its whole
+width"*. The contact of *si appoggia a* is measured within the other unit's width.
+
+The rules read shapes on the face. They cannot tell a cut from a straight joint where one unit abuts another, nor the
+cut of a blocked opening from the opening itself: the cut, when you see one, is a unit of its own that you draw.
 
 The dialog shows the proposals **unticked**. Only those you tick are kept, and **nothing is written without your
 check**. **Save in PyArchInit** then, through the program's bridge:
@@ -196,8 +215,8 @@ check**. **Save in PyArchInit** then, through the program's bridge:
 
 Saving again writes nothing twice.
 
-In the example the two units, the coursed wall and the rubble on top of it, gave the expected proposal: *USM 2 si
-appoggia a USM 1*, touching along 100 % of its width.
+In the example the two units, the coursed wall and the rubble lying on its whole top, gave the expected proposal:
+*USM 2 copre USM 1*.
 
 ## Outputs
 
@@ -212,9 +231,11 @@ appoggia a USM 1*, touching along 100 % of its width.
     `pietre_misure` added beside `pietre`;
   - the CSV and Excel tables, the sections, the bulge raster, the comparisons and the wall's JSON.
 - **Wall IFC...**: IFC4 with the program's conventions (metres, `IfcMapConversion` on a round origin):
-  - an **`IfcWall`** whose solid is the outline of the face (the wall's area drawn on it, else its bounds) extruded into
-    the wall: between two surveyed faces that look away from each other, the thickness is **measured** between their
-    fitted planes; with one face, it is the thickness you give;
+  - an **`IfcWall`** whose solid is the outline of a face (the wall's area drawn on it, else its bounds) extruded into
+    the wall. Two plane faces are the two sides of one wall when they look within **15°** of opposite ways and lie
+    less than **3 m** apart: the thickness is then **measured** between their fitted planes. Every other face - a wall
+    surveyed on one side, each side of a polygonal tower (its opposite sides are not the two faces of one wall) - makes
+    an `IfcWall` of its own with the thickness you give; without it, the faces that need it are named;
   - **`Pset_PyArchInit_Masonry`**: lean, bulge p90, stones, courses, mortar share, the type line, the counts, the
     thickness and where it came from;
   - the USM as **`IfcBuildingElementPart`** of the wall, with `Pset_PyArchInit_US`, and the accepted relationships as
@@ -224,7 +245,8 @@ appoggia a USM 1*, touching along 100 % of its width.
 - **Open the face in QGIS**: a QGIS project in the face's coordinates (unfolded). It holds the orthophoto, the bulge
   with a diverging ramp, the drawings and the stones with their measures. The QGIS project of the plan also gets the
   stones' measures in 3D on the face's plane.
-- *File > Export*: **Wall (IFC)** and **Plate of the face (PDF)**.
+- *File > Export*: **Wall (IFC)** and **Plate of the face (PDF)**. The IFC exporter cannot ask a thickness: a wall
+  whose thickness is not measured between two faces is refused there, and *Wall IFC...* in the pane asks it.
 
 The plugin writes only under `<chunk data>/masonry/<wall>/<face>/` and in the folders you choose. The program's
 elevations and drawings keep their formats.
@@ -248,13 +270,15 @@ ppg plugin masonry list|remove PROJECT ["North wall" [FACE]] [--elevations]
 
 - The **shape** is measured on the face's elevation at its resolution, within its depth band. A wall leaning out of
   the band is cut short, and the summary says so.
-- **Courses** are found from the heights of the stones' centres. Courses that slope strongly and overlap in height
-  across a long face can merge into one group, which then fails the course test.
+- **Courses** are chains of stones side by side. Where the stones of two courses overlap by half their height (an
+  irregular bond), they may join in one chain, which then fails the course test.
 - The **mortar share** and the **type** depend on the stones drawn. Missing stones, at the ends of a face or where the
   orthophoto has gaps, raise the mortar share.
 - The rule **taglia** needs the stones measured and a course interrupted. A cut that runs along a course without
   breaking it is not found.
 - The **IFC wall** is a prism: the outline of one face extruded across the wall. The lean and the bulge are in its
   Pset, not in its shape. The developed face of a round tower does not make an IFC slab.
+- A second surface behind the face is set aside when it is more than 10 cm behind; a set-back closer than that is
+  part of the face and shows in the bulge.
 - Not done in 0.1.0: automatic USM, mortar joints drawn, dating, structural analysis, 3D stone solids, vaults and roofs
   (see [Architectural elements](architecture.md)).
