@@ -62,6 +62,7 @@ ICONS = {
     "demo_db": ("mdi6.database-check-outline", "olive"),
     # views
     "view3d": ("mdi6.rotate-3d", "orange"), "view_ortho": ("mdi6.map", "amber"),
+    "trackball": ("mdi6.rotate-orbit", "orange"), "pivot": ("mdi6.image-filter-center-focus-weak", "orange"),
     "view_photo": ("mdi6.image-outline", "blue"), "console": ("mdi6.console", "slate"),
     "assistant": ("mdi6.robot-outline", "teal"),
     "log": ("mdi6.text-box-outline", "grey"), "theme": ("mdi6.theme-light-dark", "grey"),

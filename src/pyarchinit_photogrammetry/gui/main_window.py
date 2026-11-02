@@ -1312,6 +1312,9 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
         self._act(m, tr("Ortofoto / DEM"), lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
         self._act(m, tr("Foto"), lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
+        for a in self.model_view.trackball_actions.values():
+            tbmenu.addAction(a)
         m.addSeparator()
         tmenu = m.addMenu(icon("theme"), tr("Tema"))
         tgroup = QActionGroup(self)
