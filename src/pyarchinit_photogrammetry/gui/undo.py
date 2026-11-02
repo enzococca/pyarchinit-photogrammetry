@@ -24,11 +24,11 @@ import json
 import logging
 import os
 import shutil
-import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..io.files import clone  # noqa: F401 - also the name the window and tests know
 from .i18n import tr
 
 log = logging.getLogger("pyarchinit_photogrammetry")
@@ -38,24 +38,6 @@ PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sect
               "patches": "Patch dell'ortofoto", "region": "Regione di ricostruzione"}
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
                  "reconstruction": "Punti di legame", "model_textured": "Texture"}
-
-
-def clone(src: Path, dst: Path) -> None:
-    """Copy a file or a folder; on macOS a copy-on-write clone (instant, no space taken)."""
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "darwin":
-        try:
-            import ctypes
-
-            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-            if libc.clonefile(os.fsencode(str(src)), os.fsencode(str(dst)), 0) == 0:
-                return
-        except Exception:  # pragma: no cover - another file system: a plain copy
-            pass
-    if src.is_dir():
-        shutil.copytree(src, dst)
-    else:
-        shutil.copy2(src, dst)
 
 
 def _remove(path: Path) -> None:
@@ -334,3 +316,193 @@ class UndoHistory:
                 drop()
             except Exception as exc:  # noqa: BLE001 - forgetting an entry never stops the window
                 log.warning("Annulla: %s non dimenticato (%s)", e.text, exc)
+
+
+# ---------------------------------------------------------------- a script, undone as one step
+SKIPPED_FOLDERS = {".script_undo", ".removed", "undo", "versions"}  # never "new files" of a script
+
+
+def snapshot_document(doc) -> dict:
+    """The project as JSON-able data: ``{chunk key: chunk.to_dict()}`` (deep copies), ``"meta"`` the project's
+    and ``"order"`` the keys of the chunks in their order."""
+    import copy
+
+    out: dict = {c.key: copy.deepcopy(c.to_dict()) for c in doc.chunks}
+    out["meta"] = copy.deepcopy(doc.meta)
+    out["order"] = [c.key for c in doc.chunks]
+    return out
+
+
+def chunk_keys(snapshot: dict) -> list:
+    return list(snapshot.get("order") or [k for k in snapshot if k not in ("meta", "order")])
+
+
+def files_under(folder) -> set[Path]:
+    """The files under ``folder`` (paths), the folders of versions, of the copies of Modifica > Annulla and of
+    the removals left out."""
+    folder = Path(folder)
+    out: set[Path] = set()
+    if not folder.exists():
+        return out
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d not in SKIPPED_FOLDERS]
+        out.update(Path(root) / f for f in files)
+    return out
+
+
+def _move(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _remove(dst)
+    shutil.move(str(src), str(dst))
+
+
+class ScriptAction:
+    """An entry of Modifica > Annulla for a script (``history.push(label, action, document=True)``): everything
+    it changed in the project goes back in one step, and comes again with Ripeti.
+
+    ``before``/``after``: :func:`snapshot_document` before and after the script - every chunk (cameras, markers,
+    scale bars, products, meta) and the project's meta; ``versions``: ``(chunk key, product, version id)`` of
+    the products the script wrote again, kept first as versions (``core.versions.keep_during``): undo makes them
+    active again and puts the script's products aside, redo swaps them back; ``new_files``: files the script
+    wrote under the project's folder (not products, not versions): moved aside and back; ``new_chunks``: the
+    keys of the chunks it added (out of the project, their folder aside); ``removed_chunks``: ``{key: index}`` of
+    the chunks it removed (back in their place). What is put aside lives in ``<project files>/.script_undo``
+    while the entry can be redone. :meth:`drop` (the entry falls out of the history): the versions made are
+    deleted when the script's products are the active ones, what was put aside when they are not."""
+
+    def __init__(self, window, before: dict, after: dict, versions: list[tuple[int, str, str]], new_files: list[Path],
+                 new_chunks: list[int], removed_chunks: dict):
+        self.window, self.before, self.after = window, before, after
+        self.versions = list(versions)
+        self.new_files, self.new_chunks, self.removed_chunks = list(new_files), list(new_chunks), dict(removed_chunks)
+        self.doc = window.doc
+        self.root = self.doc.files_dir
+        self.hold = self.root / ".script_undo" / uuid.uuid4().hex[:12]
+        self.held: dict = {}  # (key, product, vid) -> entry of the script's product put aside
+        self.applied = True
+
+    # ------------------------------------------------------------------ helpers
+    def _chunk(self, key):
+        return next((c for c in self.doc.chunks if c.key == key), None)
+
+    def _set_chunk(self, chunk, data: dict) -> None:
+        """``chunk`` as ``data`` says, the same object (the window holds it)."""
+        import copy
+
+        from ..core.chunk import Chunk
+
+        new = Chunk.from_dict(copy.deepcopy(data), self.doc)
+        for name in ("label", "enabled", "crs", "transform", "sensors", "cameras", "markers", "scalebars",
+                     "products", "meta"):
+            setattr(chunk, name, getattr(new, name))
+        chunk._tie_points = None
+        chunk._surface_cache = {}
+
+    def _set_document(self, snap: dict) -> None:
+        import copy
+
+        from ..core.chunk import Chunk
+
+        doc = self.doc
+        keys = chunk_keys(snap)
+        chunks = []
+        for key in keys:
+            ch = self._chunk(key)
+            if ch is None:
+                ch = Chunk.from_dict(copy.deepcopy(snap[key]), doc)
+            else:
+                self._set_chunk(ch, snap[key])
+            chunks.append(ch)
+        doc.chunks[:] = chunks
+        doc.meta.clear()
+        doc.meta.update(copy.deepcopy(snap["meta"]))
+
+    def _version_entry(self, key, product: str, vid: str) -> dict:
+        from ..core import versions as v
+
+        ch = self._chunk(key)
+        if product in v.PRODUCTS:
+            for e in ((self.after.get(key) or {}).get("meta", {}).get("versions") or {}).get(product, []):
+                if e["id"] == vid:
+                    return e
+            raise KeyError(f"{product}: no version {vid}")
+        return v.copied_entry(ch, product, vid, (self.before.get(key) or {}).get("products", {}).get(product))
+
+    def _rel(self, path: Path) -> Path:
+        return Path(path).relative_to(self.root)
+
+    # ------------------------------------------------------------------ undo / redo
+    def undo(self) -> None:
+        from ..core import versions as v
+
+        self.window._before_script_step()
+        for path in self.new_files:
+            path = Path(path)
+            if path.exists() or path.is_symlink():
+                _move(path, self.hold / "files" / self._rel(path))
+        for key in self.new_chunks:
+            folder = self.root / f"chunk_{key}"
+            if folder.exists():
+                _move(folder, self.hold / "chunks" / folder.name)
+        for key, product, vid in reversed(self.versions):
+            ch = self._chunk(key)
+            if ch is None:
+                continue
+            entry = self._version_entry(key, product, vid)
+            origin = (self.after.get(key) or {}).get("products", {}).get(product)
+            held = v.set_aside(ch, product, f"{vid}-script", origin=origin)
+            if held is not None:
+                self.held[(key, product, vid)] = held
+            v.bring_back(ch, product, entry)
+        self._set_document(self.before)
+        self.applied = False
+        self.window._after_script_step()
+
+    def redo(self) -> None:
+        from ..core import versions as v
+
+        self.window._before_script_step()
+        for key in self.new_chunks:
+            folder = self.hold / "chunks" / f"chunk_{key}"
+            if folder.exists():
+                _move(folder, self.root / folder.name)
+        self._set_document(self.after)
+        for key, product, vid in self.versions:
+            ch = self._chunk(key)
+            if ch is None:
+                continue
+            origin = (self.before.get(key) or {}).get("products", {}).get(product)
+            v.set_aside(ch, product, vid, origin=origin)  # the product as it was before: its version again
+            held = self.held.pop((key, product, vid), None)
+            if held is not None:
+                v.bring_back(ch, product, held)
+        for path in self.new_files:
+            src = self.hold / "files" / self._rel(Path(path))
+            if src.exists():
+                _move(src, Path(path))
+        self._set_document(self.after)
+        self.applied = True
+        self.window._after_script_step()
+
+    def drop(self) -> None:
+        from ..core import versions as v
+
+        if self.applied and self.window.doc is self.doc:  # the versions kept for the undo are not needed now
+            for key, product, vid in self.versions:
+                ch = self._chunk(key)
+                if ch is None:
+                    continue
+                if product in v.PRODUCTS:
+                    if any(e["id"] == vid for e in v.versions(ch, product)):
+                        v.delete(ch, product, vid)
+                else:
+                    shutil.rmtree(ch.data_dir / "versions" / product / vid, ignore_errors=True)
+            if self.versions:
+                self.window.setWindowModified(True)
+        else:  # undone: the script's products put aside go
+            for (key, product, _vid), held in self.held.items():
+                ch = self._chunk(key)
+                if ch is not None:
+                    shutil.rmtree(ch.data_dir / "versions" / product / held["id"], ignore_errors=True)
+            self.held.clear()
+        shutil.rmtree(self.hold, ignore_errors=True)

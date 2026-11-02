@@ -6,8 +6,9 @@ può ripetere in uno script, in un ciclo o su molti chunk. Uno script si lancia 
 * dalla **console Python** della finestra, un pannello in basso che si porta davanti dal menu *Vista* o con
   ++ctrl+shift+p++ ([Pannelli](gui/panes.md#console-python)): una riga alla volta; un `for` o un `def` prosegue nelle
   righe seguenti, dopo il prompt `...`, e finisce con una riga vuota;
-* da **Strumenti > Esegui script Python...** ([Menu](gui/menus.md#strumenti)): il file viene letto ed eseguito con gli
-  stessi nomi della console, e la console mostra ciò che stampa;
+* da **Strumenti > Esegui script Python...** ([Menu](gui/menus.md#strumenti)): il file viene letto ed eseguito in
+  secondo piano, la finestra resta viva e *Modifica > Annulla* riprende tutto lo script in un solo passo; la console
+  mostra ciò che stampa;
 * dalla riga di comando, `ppg run script.py [--project progetto.ppg] [argomenti]`, senza finestra.
 
 ## I nomi che uno script trova
@@ -21,7 +22,21 @@ Nella console e in **Esegui script Python...** questi nomi sono già pronti, leg
 | `app` | lo stato dell'applicazione (`ppg.app`): `app.document` è il progetto aperto, lo stesso di `doc` |
 | `ppg` | il pacchetto, con `import pyarchinit_photogrammetry as ppg` già fatto |
 | `np` | NumPy |
-| `window` | la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()` (dalla 1.7.0) |
+| `window` | nella console, la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`; in **Esegui script Python...** un sostituto che chiede alla finestra, subito dopo la riga dello script: `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")`, `window.refresh()` |
+
+**Esegui script Python...** (dalla 1.7.0) aggiunge questi nomi, perché lo script gira in secondo piano, lontano dalla
+finestra:
+
+| Nome | Che cos'è |
+| --- | --- |
+| `polygon` | i poligoni selezionati nella vista 2D quando lo script è partito, uniti (una geometria shapely), oppure `None` |
+| `cameras` | le foto selezionate nel pannello *Foto* quando lo script è partito |
+| `progress` | il segnalatore del passo: `progress(0.5, "a metà")` fa avanzare la barra della finestra di avanzamento |
+| `cancel` | `cancel()` ferma lo script se nella finestra di avanzamento è stato premuto *Annulla* (altrimenti restituisce `False`): chiamalo nei cicli lunghi |
+
+Ciò che lo script stampa va nella console e, riga per riga, nei dettagli della finestra di avanzamento. Un errore ferma
+lo script e il suo traceback va nella console, dopo ciò che aveva stampato; `exit()` o `raise SystemExit(...)` chiude lo
+script, mai il programma. Mentre uno script gira non parte un altro passo (lo dice la barra di stato).
 
 Con `ppg run` non c'è la finestra: c'è solo il progetto, con `ppg.app.document`.
 
@@ -33,13 +48,26 @@ chunk = doc.chunk
 print(chunk.label, len(chunk.cameras), "foto")
 ```
 
-!!! note "In arrivo nella 1.7.0"
-    Lo script lanciato con *Esegui script Python...* girerà in secondo piano, così la finestra resta viva, e
-    *Modifica > Annulla* lo riprenderà in un solo passo. Tra i suoi nomi ci saranno anche `polygon` (l'area
-    selezionata nella vista 2D), `cameras` (le foto selezionate nel pannello *Foto*) e `progress` (per dire a che punto
-    è uno script lungo). La console eseguirà un blocco di più righe incollato in una volta. Tutti e due prenderanno
-    anche `SystemExit`: uno script scritto per `ppg run` che si ferma con `raise SystemExit(...)` chiuderà lo script,
-    non il programma.
+## Che cosa riprende *Modifica > Annulla* di uno script
+
+Uno script lanciato con **Esegui script Python...** è una sola voce di *Modifica > Annulla*, col nome del suo file, e
+*Modifica > Ripeti* lo rifà. È una sola voce anche quando lo script si è fermato a metà per un errore: torna indietro
+anche ciò che aveva fatto prima dell'errore. Riprende:
+
+* ogni chunk com'era: foto e loro pose, sensori, marker, barre di scala, regione, impostazioni e disegni tenuti nel
+  chunk, e le impostazioni del progetto (tra cui il chunk attivo);
+* i prodotti che lo script ha ricostruito - nuvola densa, modello e texture, DEM, ortofoto, punti di legame, mappa
+  delle normali: prima che lo script ne scriva uno, il prodotto com'era viene conservato (come versione per i primi
+  quattro) e Annulla lo rende di nuovo quello attivo, con gli stessi file. La versione fatta così compare tra le
+  versioni finché la voce si può annullare, e viene cancellata quando la voce esce dalla cronologia;
+* i chunk che lo script ha aggiunto (fuori dal progetto, con la loro cartella) e quelli che ha tolto (di nuovo al loro
+  posto);
+* i file che lo script ha scritto nella cartella del progetto (`<progetto>.ppg.files`) e che prima non c'erano.
+
+Non riprende ciò che lo script ha fatto fuori dal progetto: schede scritte in PyArchInit, disegni mandati al
+GeoPackage dal vivo di QGIS, file esportati altrove. Quando lo script ha fatto chiamate del genere, la finestra le
+elenca alla fine ("Non annullabili: ..."). Non riporta nemmeno una versione conservata che lo script ha cancellato, né
+i file fuori dalla cartella del progetto che ha cambiato.
 
 ## Il chunk attivo e i suoi prodotti
 

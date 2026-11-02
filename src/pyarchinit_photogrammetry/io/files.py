@@ -99,4 +99,26 @@ def replace_file(src: str | Path, dst: str | Path) -> None:
             time.sleep(delay)
 
 
-__all__ = ["replace_file", "RETRY_DELAYS"]
+def clone(src: str | Path, dst: str | Path) -> None:
+    """Copy a file or a folder to ``dst`` (its folder made); on macOS a copy-on-write clone (instant, no space
+    taken), elsewhere - or on another file system - a plain copy."""
+    import shutil
+
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            if libc.clonefile(os.fsencode(str(src)), os.fsencode(str(dst)), 0) == 0:
+                return
+        except Exception:  # pragma: no cover - another file system: a plain copy
+            pass
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
+__all__ = ["replace_file", "clone", "RETRY_DELAYS"]

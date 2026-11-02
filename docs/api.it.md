@@ -681,6 +681,7 @@ versioni conservate stanno in `versions/<prodotto>/<id>/` dentro la cartella del
 | --- | --- |
 | `versions.keep_active(chunk, product, move=False)` | mette la versione attiva tra quelle conservate; restituisce la voce |
 | `versions.restore(chunk, product, entry)` | annulla un `keep_active(move=True)` (una costruzione fallita) |
+| `versions.keep_during(chunk)` | contesto: i prodotti riscritti al suo interno vengono prima conservati (uno script, per *Modifica > Annulla*) |
 | `versions.set_active_name(chunk, product, name)` | dà un nome alla versione attiva (predefinito `DEM del 16/10 11:20 (classi 2)`) |
 | `versions.active_info(chunk, product)` | nome e data della versione attiva |
 | `versions.versions(chunk, product)` | le versioni conservate |
@@ -1085,6 +1086,20 @@ chunk (`gui.undo.clone`: `clonefile` su macOS, altrimenti una copia) in `<dati c
 `set_state(parts, names, products)` e scambiano i file; `rebase()` dopo un'elaborazione (non una
 modifica); `reset()` per un altro progetto o chunk (copie eliminate). La finestra registra a ogni
 cambiamento del progetto, `run_task(..., undo=True)` per le modifiche fatte in background.
+
+Un passo che si annulla da sé entra con `push(text, action, document=True)`: `action.undo()`, `action.redo()` e, se
+c'è, `action.drop()` quando la voce esce dalla cronologia. Uno script è un passo di questo tipo:
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `MainWindow.run_script_source(source, label="Script", on_done=None)` | esegue `source` nel worker (`assistant.scripts.run_script`), con i nomi preparati nel thread dell'interfaccia; alla fine - anche con un errore - una sola voce `label` di *Modifica > Annulla*; `on_done(result)`; `False` se un altro passo è in corso |
+| `assistant.scripts.run_script(source, namespace, progress, name="script")` | lo esegue con `progress` e `cancel` tra i nomi; restituisce `ScriptResult(output, error, traceback, external, elapsed)`; solo `Cancelled` si propaga, `SystemExit` chiude lo script |
+| `assistant.scripts.ExternalCalls()` | gestore di contesto: le chiamate di `EXTERNAL` (scritture in PyArchInit, `LiveLink.write`, `io.exports.export_*`) fatte come sempre ed elencate in `calls` |
+| `gui.undo.snapshot_document(doc)` | `{chiave del chunk: chunk.to_dict()}` con `"meta"` e `"order"` |
+| `gui.undo.files_under(folder)` | i file sotto una cartella, senza versioni, copie di Annulla e rimozioni |
+| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks)` | la voce di uno script: chunk e impostazioni del progetto dalle istantanee, i prodotti conservati come versioni scambiati con quelli dello script, file e chunk nuovi messi da parte e rimessi |
+| `versions.keep_during(chunk)` | finché si è dentro (`chunk.keep_versions`), ogni prodotto che i costruttori riscrivono viene prima conservato, una volta (`Chunk._before_product_write(name)`) |
+| `versions.set_aside(chunk, product, id)` / `versions.bring_back(chunk, product, entry)` | il prodotto attivo portato fuori dal progetto (non elencato) e rimesso |
 
 ## Elaborazione batch
 

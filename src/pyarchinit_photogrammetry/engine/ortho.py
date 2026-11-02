@@ -1198,6 +1198,8 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
+    if product:
+        chunk._before_product_write("orthomosaic")
     replace_file(tmp, out_path)  # in one move, under a program reading the orthomosaic (RustGIS through the link)
     if not product:
         progress(1.0, f"Orthomosaic {w}x{h} px")

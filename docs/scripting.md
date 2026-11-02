@@ -6,8 +6,8 @@ repeated, in a loop or on many chunks, in a script. A script runs in three place
 * the **Python console** of the window, a pane at the bottom brought to the front from the *View* menu or with
   ++ctrl+shift+p++ ([Panes](gui/panes.md#python-console)): one line at a time; a `for` or a `def` goes on over the
   following lines, after the `...` prompt, and ends with an empty line;
-* **Tools > Run Python script...** ([Menus](gui/menus.md#tools)): the file is read and run with the same names as the
-  console, and the console shows what it prints;
+* **Tools > Run Python script...** ([Menus](gui/menus.md#tools)): the file is read and run in the background, the
+  window stays alive and *Edit > Undo* takes the whole script back in one step; the console shows what it prints;
 * the command line, `ppg run script.py [--project project.ppg] [arguments]`, with no window.
 
 ## The names a script finds
@@ -21,7 +21,20 @@ In the console and in **Run Python script...** these names are ready, bound to t
 | `app` | the application state (`ppg.app`): `app.document` is the open project, the same as `doc` |
 | `ppg` | the package, `import pyarchinit_photogrammetry as ppg` already done |
 | `np` | NumPy |
-| `window` | the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()` (from 1.7.0) |
+| `window` | in the console, the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`; in **Run Python script...** a stand-in that asks the window, after the script's own line: `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")`, `window.refresh()` |
+
+**Run Python script...** (from 1.7.0) adds these, since the script runs in the background, away from the window:
+
+| Name | What it is |
+| --- | --- |
+| `polygon` | the polygons selected in the 2D view when the script started, merged (a shapely geometry), or `None` |
+| `cameras` | the photos selected in the *Photos* pane when the script started |
+| `progress` | the reporter of the step: `progress(0.5, "half way")` moves the bar of the progress window |
+| `cancel` | `cancel()` stops the script when *Cancel* was pressed in the progress window (else it returns `False`): call it in long loops |
+
+What the script prints goes to the console and, line by line, to the details of the progress window. An error stops
+the script and its traceback goes to the console, after what it printed; `exit()` or `raise SystemExit(...)` ends the
+script, never the program. While a script runs, another step does not start (the status bar says so).
 
 With `ppg run` there is no window: only the project, through `ppg.app.document`.
 
@@ -33,12 +46,25 @@ chunk = doc.chunk
 print(chunk.label, len(chunk.cameras), "photos")
 ```
 
-!!! note "Coming in 1.7.0"
-    The script run by *Run Python script...* will work in the background, so that the window stays alive, and
-    *Edit > Undo* will take it back as one step. Its names will then include `polygon` (the area selected in the 2D
-    view), `cameras` (the photos selected in the *Photos* pane) and `progress` (to report how far a long script has
-    got). The console will run a block of several lines pasted at once. Both will catch `SystemExit` as well: a script
-    written for `ppg run` that stops with `raise SystemExit(...)` will end the script, not the program.
+## What *Edit > Undo* takes back of a script
+
+A script run by **Run Python script...** is one entry of *Edit > Undo*, named after its file, and *Edit > Redo* does
+it again. It is one entry also when the script failed halfway: what it had done before the error goes back as well.
+It takes back:
+
+* every chunk as it was: cameras and their poses, sensors, markers, scale bars, the region, the settings and the
+  drawings kept in the chunk, and the project's own settings (the active chunk among them);
+* the products the script built again - dense cloud, model and its texture, DEM, orthomosaic, tie points, normal
+  map: before the script writes one, the product as it was is kept (as a version for the first four), and undo makes
+  it the active one again, the very same files. The version made this way is listed among the versions while the
+  entry can be undone, and deleted when the entry leaves the history;
+* the chunks the script added (out of the project, with their folder) and those it removed (back in their place);
+* the files the script wrote inside the project's folder (`<project>.ppg.files`), which did not exist before.
+
+It does not take back what the script did outside the project: records written to PyArchInit, the drawings sent to
+QGIS's live GeoPackage, files exported elsewhere. When the script made such calls, the window lists them after it
+("Not undoable: ..."). Nor does it bring back a kept version the script deleted, or files outside the project's folder
+it changed.
 
 ## The active chunk and its products
 

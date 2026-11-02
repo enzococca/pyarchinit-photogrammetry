@@ -200,6 +200,7 @@ def crop_raster_product(chunk: Chunk, product: str, region) -> Path:
     out = chunk.own_product_path(product)
     tmp = out.with_name(out.stem + "_ritaglio.tif")
     crop_raster(path, tmp, region)
+    chunk._before_product_write(product)
     replace_file(tmp, out)
     chunk._set_product(product, out)
     return out

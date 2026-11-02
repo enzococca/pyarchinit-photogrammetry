@@ -46,6 +46,9 @@ class Chunk:
     meta: dict = field(default_factory=dict)
     _tie_points: PointCloud | None = field(default=None, repr=False)
     _surface_cache: dict = field(default_factory=dict, repr=False)  # markers measured in one photo
+    # while a script runs (core.versions.keep_during): every product it writes again is kept first as a version
+    keep_versions: bool = field(default=False, repr=False, compare=False)
+    _kept_during: dict = field(default_factory=dict, repr=False, compare=False)  # product -> version id
 
     # ------------------------------------------------------------------ paths
     @property
@@ -72,6 +75,15 @@ class Chunk:
                  "orthomosaic": "orthomosaic.tif", "normal_map": "normal_map.tif"}
         return self.data_dir / files.get(name, f"{name}.dat")
 
+    def _before_product_write(self, name: str) -> None:
+        """Called by every builder right before it writes the file of the product ``name``: while
+        :attr:`keep_versions` is on (a script runs, :func:`.versions.keep_during`) the product as it is
+        now is kept first - once per product - so that *Annulla lo script* can bring it back."""
+        if self.keep_versions:
+            from . import versions
+
+            versions.before_write(self, name)
+
     # ------------------------------------------------------------ properties
     @property
     def aligned_cameras(self) -> list[Camera]:
@@ -87,6 +99,7 @@ class Chunk:
     def tie_points(self, value: PointCloud | None) -> None:
         self._tie_points = value
         if value is not None and self.document is not None:
+            self._before_product_write("tie_points")
             path = value.save_ply(self.data_dir / "tie_points.ply")
             self._set_product("tie_points", path)
 
@@ -97,6 +110,7 @@ class Chunk:
 
     @point_cloud.setter
     def point_cloud(self, value: PointCloud) -> None:
+        self._before_product_write("point_cloud")
         path = value.save_ply(self.data_dir / "point_cloud.ply")
         self._set_product("point_cloud", path)
 

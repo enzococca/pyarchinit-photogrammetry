@@ -143,3 +143,34 @@ def test_undo_in_the_window(window):
     w.runner.wait()
     app.processEvents()
     assert len(w.history.entries) == entries
+
+
+def test_script_entry_dropped(window):
+    """A script's entry that falls out of the history: the versions kept for its undo go when its products are the
+    active ones; what was put aside goes when they are not."""
+    from pyarchinit_photogrammetry.core import versions
+    from pyarchinit_photogrammetry.gui.undo import ScriptAction, files_under, snapshot_document
+
+    w, app = window
+    ch = w.chunk
+    kept = len(versions.versions(ch, "dem"))
+    snap = snapshot_document(w.doc)
+    assert set(snap) >= {ch.key, "meta", "order"} and snap[ch.key]["products"]["dem"] == ch.products["dem"]
+    assert not any("versions" in f.parts for f in files_under(w.doc.files_dir))
+    assert w.run_script_source("chunk.build_dem(resolution=0.02)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    action = w.history.entries[-1].action
+    assert isinstance(action, ScriptAction) and len(versions.versions(ch, "dem")) == kept + 1
+    w.history.reset()  # the entry falls out while the script's DEM is the active one: its version goes
+    assert len(versions.versions(w.chunk, "dem")) == kept
+    assert not (w.chunk.data_dir / "versions" / "dem" / action.versions[0][2]).exists()
+    assert w.run_script_source("chunk.build_dem(resolution=0.03)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    action = w.history.entries[-1].action
+    w.history.undo()
+    aside = w.chunk.data_dir / "versions" / "dem" / f"{action.versions[0][2]}-script"
+    assert aside.exists()  # the script's DEM put aside, for Ripeti
+    w.history.reset()
+    assert not aside.exists() and len(versions.versions(w.chunk, "dem")) == kept

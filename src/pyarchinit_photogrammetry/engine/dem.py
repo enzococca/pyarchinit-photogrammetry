@@ -376,6 +376,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
                                           despike=despike, interpolate=interpolate,
                                           max_fill=None if classes is None else 100)
     out = np.where(np.isfinite(dem), dem, NODATA).astype(np.float32)
+    chunk._before_product_write("dem")
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}

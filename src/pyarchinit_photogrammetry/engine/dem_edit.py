@@ -128,6 +128,7 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     z_out = z.copy()
     z_out[inside] = znew
     kept = None
+    chunk._before_product_write("dem")
     if keep_version:  # the DEM as it was stays among the versions, under its name
         when = datetime.datetime.now().strftime("%d/%m %H:%M")
         old_name = versions.active_info(chunk, "dem")["name"]

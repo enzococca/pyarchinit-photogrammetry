@@ -1169,6 +1169,7 @@ def coregister_chunk(chunk, reference, stable=None, exclude=None, tilt: bool = T
         tmp.unlink(missing_ok=True)
         raise
     params = {k: v for k, v in (chunk.meta.get("dem") or {}).items() if k != "coregistration"}
+    chunk._before_product_write("dem")
     kept = versions.keep_active(chunk, "dem", move=True)
     try:
         own = chunk.own_product_path("dem")

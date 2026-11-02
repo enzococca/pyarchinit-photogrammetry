@@ -195,6 +195,7 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     progress(0.0, "Checking the photos")
     cams, _bad = readable_cameras(chunk, skip_unreadable)
     own = chunk.own_product_path("orthomosaic")
+    chunk._before_product_write("orthomosaic")
     if _external(chunk):
         progress(0.005, f"Copy of {path.name} into the project (the original file is not changed)")
         tmp = own.with_name("orthomosaic.tmp.tif")
@@ -653,6 +654,7 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
                else np.zeros(len(faces), int))
     cache = ImageCache(chunk, 3, correction_for(chunk, bool((chunk.meta.get("texture") or {}).get("colour_correction"))))
     written, renamed = 0, False
+    chunk._before_product_write("model_textured")
     for n_page, pg in enumerate(np.unique(page_of)):  # each page of the texture the faces are on
         path = pages[pg]
         atlas = cv2.imread(str(path), cv2.IMREAD_COLOR)

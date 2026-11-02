@@ -488,6 +488,8 @@ def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progres
         source = "dem"
         normals = _DemNormals(chunk, transform, shape, crs)
     out = Path(path) if path is not None else chunk.own_product_path("normal_map")
+    if path is None:
+        chunk._before_product_write("normal_map")
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
         # a model that covers no cell: with "auto" the DEM instead, asked for by name a transparent map

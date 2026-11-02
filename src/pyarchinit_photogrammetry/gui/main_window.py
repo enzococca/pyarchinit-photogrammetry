@@ -320,6 +320,41 @@ class _GuiCalls(QObject):
             log.exception("function run in the interface thread failed")
 
 
+class _WindowProxy:
+    """``window`` in a script that runs in the worker thread: what it asks of the window is done in the interface
+    thread, soon after (:meth:`MainWindow.call_in_gui`); nothing is returned. The window itself is never touched
+    from the worker."""
+
+    def __init__(self, window):
+        self._window = window
+
+    def show_raster(self, kind: str | None = None) -> None:
+        """The orthophoto (``"ortho"``) or the DEM (``"dem"``) of the active chunk in the 2D view; None: the
+        orthophoto when there is one."""
+        w = self._window
+
+        def show():
+            ch = w.chunk
+            if ch is None:
+                return
+            w._show_raster(kind or ("ortho" if ch.orthomosaic_path is not None else "dem"))
+
+        w.call_in_gui(show)
+
+    def show_model(self, kind: str | None = None) -> None:
+        """``kind`` of the active chunk in the 3D view ("model", "model_textured", "point_cloud", "tie_points",
+        "cameras"); None: the best it has."""
+        self._window.call_in_gui(self._window._show_model, kind)
+
+    def log(self, text) -> None:
+        """A line in the Log pane."""
+        self._window.call_in_gui(self._window.log_pane.info, str(text))
+
+    def refresh(self) -> None:
+        """The window shows the project again."""
+        self._window.call_in_gui(self._window.refresh_all)
+
+
 class _StatusBar(QStatusBar):
     """The status bar: its messages in the language of the interface (also those of the engine)."""
 
@@ -13062,27 +13097,133 @@ class MainWindow(QMainWindow):
         self.run_task("Esportazione IFC", job, done, refresh=False, save=False)
 
     def run_script(self) -> None:
+        """*Esegui script Python...*: the file chosen run in the worker (:meth:`run_script_source`), its output in
+        the console; Modifica > Annulla takes it back in one step."""
         path, _ = QFileDialog.getOpenFileName(self, tr("Script Python"), self._last_dir(), "Python (*.py)")
         if not path:
             return
         src = Path(path).read_text(encoding="utf-8")
         self._show_pane(self.bottom_tabs, self.console)
         self.console.write(tr("# esecuzione di {0}\n", path))
-        ns = self._namespace()
-        ns["__name__"] = "__main__"
-        ns["__file__"] = path
-        import contextlib
 
-        from .panels import _Stream
+        def done(result) -> None:
+            if result.output:
+                self.console.write(result.output if result.output.endswith("\n") else result.output + "\n")
+            if result.error:
+                self.console.write(result.traceback or result.error + "\n")
 
-        stream = _Stream(self.console.write)
+        self.run_script_source(src, Path(path).name, on_done=done, path=path)
+
+    def _namespace_for_worker(self) -> dict:
+        """The names a script run in the worker sees, built in the interface thread: ``doc``, ``chunk``, ``app``,
+        ``ppg``, ``np``, ``polygon`` (the polygons selected in the 2D view, merged; None), ``cameras`` (the photos
+        selected in the Foto pane) and ``window`` (:class:`_WindowProxy`: what it asks is done in the interface
+        thread)."""
+        import pyarchinit_photogrammetry as ppg
+
         try:
-            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-                exec(compile(src, path, "exec"), ns)
-        except Exception:
-            self.console.write(traceback.format_exc())
-        self._after_console()
-        self.refresh_all()
+            polygon = self.selected_polygon()
+        except Exception:  # noqa: BLE001 - no selection to give
+            polygon = None
+        try:
+            cameras = list(self.selected_cameras())
+        except Exception:  # noqa: BLE001
+            cameras = []
+        return {"doc": self.doc, "chunk": self.chunk, "app": application, "ppg": ppg, "np": np, "polygon": polygon,
+                "cameras": cameras, "window": _WindowProxy(self), "__name__": "__main__"}
+
+    def run_script_source(self, source: str, label: str = "Script", on_done=None, path: str | None = None) -> bool:
+        """Run the Python ``source`` on the project in the worker thread (``assistant.scripts.run_script``): the
+        window stays usable, the progress window shows what it prints and can stop it. Whatever it changes in the
+        project - every chunk, the products it builds again (the previous ones kept first as versions), the files
+        it writes in the project's folder, the chunks it adds or removes - becomes ONE entry ``label`` of Modifica
+        > Annulla, also when it fails halfway. The calls it makes that cannot be undone (PyArchInit, QGIS's live
+        GeoPackage, exports) are said afterwards. ``on_done(result)``: the :class:`ScriptResult`, also on error.
+        Returns False when another step is running (said in the status bar)."""
+        from ..assistant.scripts import ScriptResult, run_script
+        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
+            return False
+        doc = self.doc
+        self._store_drawings()  # the drawings of the window are in the snapshot
+        namespace = self._namespace_for_worker()
+        if path:
+            namespace["__file__"] = path
+        before = snapshot_document(doc)
+        files0 = files_under(doc.files_dir)
+        chunks = list(doc.chunks)
+        for ch in chunks:
+            ch.keep_versions = True
+            ch._kept_during = {}
+        name = path or label
+
+        def job(progress):
+            try:
+                return run_script(source, namespace, progress, name=name)
+            except Cancelled:
+                return ScriptResult("", tr("Script annullato"), None, [], 0.0)
+
+        def finish(result) -> None:
+            made = []
+            for ch in chunks:
+                ch.keep_versions = False
+                made += [(ch.key, product, vid) for product, vid in ch._kept_during.items() if vid]
+                ch._kept_during = {}
+            after = snapshot_document(doc)
+            keys0 = set(chunk_keys(before))
+            new_chunks = [k for k in chunk_keys(after) if k not in keys0]
+            removed = {k: i for i, k in enumerate(chunk_keys(before)) if k not in set(chunk_keys(after))}
+            new_folders = [doc.files_dir / f"chunk_{k}" for k in new_chunks]
+            new_files = sorted(f for f in files_under(doc.files_dir) - files0
+                               if not any(f.is_relative_to(d) for d in new_folders))
+            try:
+                differs = before != after
+            except Exception:  # noqa: BLE001 - arrays inside: compared as changed
+                differs = True
+            changed = bool(made or new_files or new_chunks or removed or differs)
+            if changed and self.history is not None:
+                self.history.push(label, ScriptAction(self, before, after, made, new_files, new_chunks, removed),
+                                  document=True)
+            with self._history_paused():
+                self._after_script_step(modified=changed)
+            if result.external:
+                calls = list(dict.fromkeys(result.external))
+                self._script_message(tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > "
+                                        "Annulla non riporta indietro.\n\nNon annullabili: {0}", ", ".join(calls)))
+            if result.error:
+                self.log_pane.warning(tr("{0}: {1}", label, result.error))
+            if on_done is not None:
+                on_done(result)
+
+        def failed(summary: str, details: str) -> None:
+            finish(ScriptResult("", summary, details, [], 0.0))
+
+        started = self.runner.run(label, job, finish, failed)
+        if not started:
+            for ch in chunks:
+                ch.keep_versions = False
+                ch._kept_during = {}
+        return started
+
+    def _script_message(self, text: str) -> None:
+        """A message after a script (non-native, as every message of the window)."""
+        self.log_pane.warning(text)
+        message(self, "warning", APP_TITLE, text)
+
+    def _before_script_step(self) -> None:
+        """Before *Annulla* or *Ripeti* of a script moves files of the project: nothing of the window holds them."""
+        self._release_views()
+
+    def _after_script_step(self, modified: bool = True) -> None:
+        """After a script, or its undo or redo: the window shows the project as it is now."""
+        self._reload_drawings(redraw=False)
+        self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk is not None else [])
+        self.refresh_all(reset_views=True)
+        self._clear_stale_photo()
+        if modified:
+            self.setWindowModified(True)
 
     # ---------------------------------------------------------------- PyArchInit
     def pyarchinit_connect(self, ask: bool = False, config: str | Path | None = None, url: str | None = None,

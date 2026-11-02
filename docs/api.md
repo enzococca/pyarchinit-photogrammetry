@@ -661,6 +661,7 @@ listed in `chunk.meta["versions"]` with name, date and the parameters they were 
 | --- | --- |
 | `versions.keep_active(chunk, product, move=False)` | puts the active version among the kept ones; returns the entry |
 | `versions.restore(chunk, product, entry)` | undoes a `keep_active(move=True)` (a build that failed) |
+| `versions.keep_during(chunk)` | context: the products written again inside are kept first (a script, for *Edit > Undo*) |
 | `versions.set_active_name(chunk, product, name)` | names the active version (by default `DEM del 16/10 11:20 (classi 2)`) |
 | `versions.active_info(chunk, product)` | name and date of the active version |
 | `versions.versions(chunk, product)` | the kept versions |
@@ -1052,6 +1053,20 @@ after a change keeps the parts of `get_state()` (JSON-able) that differ from the
 `rebase()` after processing (not an edit); `reset()` for another project or chunk (copies deleted).
 The window records on every change of the project, `run_task(..., undo=True)` for edits made in
 the background.
+
+A step that undoes itself goes in with `push(text, action, document=True)`: `action.undo()`, `action.redo()` and,
+when it has one, `action.drop()` when the entry leaves the history. A script is one such step:
+
+| Call | Description |
+| --- | --- |
+| `MainWindow.run_script_source(source, label="Script", on_done=None)` | runs `source` in the worker (`assistant.scripts.run_script`), the namespace built in the interface thread; when it ends - also with an error - one entry `label` of *Edit > Undo*; `on_done(result)`; `False` when another step is running |
+| `assistant.scripts.run_script(source, namespace, progress, name="script")` | runs it with `progress` and `cancel` in the namespace; returns `ScriptResult(output, error, traceback, external, elapsed)`; only `Cancelled` propagates, `SystemExit` ends the script |
+| `assistant.scripts.ExternalCalls()` | context manager: the calls of `EXTERNAL` (PyArchInit writes, `LiveLink.write`, `io.exports.export_*`) made as usual and listed in `calls` |
+| `gui.undo.snapshot_document(doc)` | `{chunk key: chunk.to_dict()}` with `"meta"` and `"order"` |
+| `gui.undo.files_under(folder)` | the files under a folder, without versions, undo copies and removals |
+| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks)` | the entry of a script: chunks and project meta from the snapshots, the products kept as versions swapped with the script's, new files and chunks moved aside and back |
+| `versions.keep_during(chunk)` | while inside (`chunk.keep_versions`), every product the builders write again is kept first, once (`Chunk._before_product_write(name)`) |
+| `versions.set_aside(chunk, product, id)` / `versions.bring_back(chunk, product, entry)` | the active product moved out of the project (not listed) and back |
 
 ## Batch processing
 

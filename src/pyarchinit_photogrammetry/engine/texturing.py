@@ -579,6 +579,7 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
                               correction)
     paths = [chunk.data_dir / ("model_texture.jpg" if k == 0 else f"model_texture_{k}.jpg")
              for k in range(len(atlases))]
+    chunk._before_product_write("model_textured")
     for old in chunk.data_dir.glob("model_texture_*.jpg"):  # pages of an earlier, larger texture
         if old not in paths:
             old.unlink()
