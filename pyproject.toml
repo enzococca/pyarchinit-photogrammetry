@@ -31,6 +31,7 @@ dependencies = [
     # 3.5 and 3.6 (PROJ 9.2, 9.3) have none of them. 3.7 has wheels for every Python from 3.10
     "shapely>=2.0",
     "trimesh>=4.0",
+    "rtree>=1.0",  # trimesh's ray casting (engine.visibility) when Open3D is not there; wheels down to Windows ARM64
     "contourpy>=1.1",
     "ezdxf>=1.1",
     "matplotlib>=3.7",  # drawings (pottery, plugins' sections and logs); came only through pyvista before
