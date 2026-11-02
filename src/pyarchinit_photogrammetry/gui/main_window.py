@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
         lab.setObjectName("pageSubtitle")
         db.addWidget(lab)
         # short texts in the bar (menus keep the full names, tooltips show them)
-        for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
+        for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "US"),
                          (self.draw_actions["vertices"], "Vertici"), (self.draw_actions["reshape"], "Rimodella"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["area"], "Area"),
@@ -1458,7 +1458,7 @@ class MainWindow(QMainWindow):
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
                          (self.a_sel_delete, "Elimina"),
-                         (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
+                         (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella"),
                          (self.a_contours, "Curve"), (self.a_volume, "Volume"), (self.a_slice, "Pianta a quota"),
                          (self.a_qgis_open, "QGIS")):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):

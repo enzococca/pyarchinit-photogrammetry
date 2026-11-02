@@ -2779,7 +2779,8 @@
   "Nessuna linea di rottura: disegnale con lo strumento Linee.": "No break lines: draw them with the Lines tool.",
   "TIN non leggibile": "TIN not readable",
   "Esportazione del TIN non riuscita": "Export of the TIN failed",
-  "Esportazione delle linee non riuscita": "Export of the lines failed"
+  "Esportazione delle linee non riuscita": "Export of the lines failed",
+  "Cancella": "Clear"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
