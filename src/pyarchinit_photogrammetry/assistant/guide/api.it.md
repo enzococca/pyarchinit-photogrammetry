@@ -1426,6 +1426,24 @@ delle foto, fusione, correzione del colore) e scrive i file in `<dati chunk>/ele
 mostra una vista); senza, la parte del modello dentro la fascia di profondità. La voce dice `kind`,
 `bounds`, `v_is_height` e, per una sezione, il file `profile`. Riga di comando: `ppg elevation`.
 
+### Disegni sui prospetti e sulle sezioni
+
+La finestra tiene ciò che si disegna su un prospetto o una sezione nel suo sistema:
+`chunk.meta["drawings"]["frames"][<id del prospetto>] = {"units", "quote", "points", "stones"}`, in metri `(u, v)`;
+i disegni della pianta restano in cima a `chunk.meta["drawings"]` (i progetti senza `frames` si leggono come prima).
+`MainWindow.drawings_frame` è None sulla pianta, l'id del prospetto quando ne è mostrato uno. Una quota su un
+prospetto tiene `u`, `v` e ha `x`, `y`, `quota_q` = il suo punto nel mondo sulla superficie.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | il punto nel mondo (CRS del chunk) di `(u, v)` alla profondità `d`; `d` None: sulla superficie, dal rilievo (serve `chunk`; None dove il rilievo non ha valore) |
+| `relief_at(chunk, entry, u, v)` | la profondità della superficie in `(u, v)` |
+| `frame_drawings(chunk, id)` | i disegni tenuti con il prospetto `id` |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None)` | `{"dxf", "svg", "gpkg"}`: DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, GeoPackage (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)` con una colonna `geom_world` in WKT nel CRS del chunk) |
+| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | il DXF e l'SVG registrati come media "Prospetto"/"Sezione" del sito (miniatura: l'ortofoto), id tenuti in `entry["media"]`: una seconda chiamata non registra nulla di nuovo |
+
+Il collegamento dal vivo con QGIS e il pacchetto QField portano solo i disegni della pianta.
+
 ## Maschere delle foto
 
 Una maschera è un PNG a un canale grande quanto la sua foto, bianco dove la foto conta e nero dove è

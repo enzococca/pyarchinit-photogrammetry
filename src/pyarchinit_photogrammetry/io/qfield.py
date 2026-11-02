@@ -13,6 +13,10 @@ and the edits made there brought back.
   that record: units and spot heights added, changed (outline or attributes) and deleted, applied
   to the drawings of the chunk (``meta["drawings"]``). They reach PyArchInit with the usual
   publishing (*Pubblica in PyArchInit*, *Salva modifiche in PyArchInit*).
+
+Only the drawings of the plan travel (the top of ``meta["drawings"]``): those made on an elevation or a
+section are in its own (u, v) frame (``meta["drawings"]["frames"]``) and go out with it
+(:func:`..engine.elevation.export_drawings`).
 """
 from __future__ import annotations
 

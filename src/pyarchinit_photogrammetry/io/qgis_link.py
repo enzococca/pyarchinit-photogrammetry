@@ -24,6 +24,10 @@ and rows deleted; the program never overwrites them before it has read them. The
 other tables are computed by the program (contour lines, zones, plugin drawings) and stay
 one-way.
 
+Only the drawings of the plan are in the file: while an elevation or a section is shown the window leaves the
+GeoPackage as it is, and what is drawn there - in the (u, v) of the elevation - goes out with the elevation
+(:func:`..engine.elevation.export_drawings`); edits read from QGIS meanwhile go to the plan.
+
 * :class:`LiveLink` / :func:`export_layers` write the GeoPackage (no GDAL needed).
 * :func:`build_project` creates the ``.qgs`` with QGIS's own Python (styles, labels, auto refresh).
 * :func:`open_in_qgis` starts QGIS on the project.

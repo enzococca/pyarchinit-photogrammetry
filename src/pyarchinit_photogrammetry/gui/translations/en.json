@@ -2654,7 +2654,11 @@
   "Le foto selezionate e l'area selezionata sono quelle del chunk attivo: rendi attivo prima questo chunk.": "The selected photos and the selected area belong to the active chunk: make this chunk the active one first.",
   "Un'elaborazione è in corso: lo script non parte": "A processing task is running: the script does not start",
   "Script annullato": "Script cancelled",
-  "Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.": "The script can no longer be undone: the project changed after it, with a step that is not in Edit > Undo. The entry was removed."
+  "Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.": "The script can no longer be undone: the project changed after it, with a step that is not in Edit > Undo. The entry was removed.",
+  "Fuori dal rilievo del prospetto: quota non letta": "Outside the relief of the elevation: height not read",
+  "Disegni del prospetto non esportati": "Drawings of the elevation not exported",
+  "sezione": "section",
+  "prospetto": "elevation"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3511,6 +3515,9 @@
   "Nuovo chunk «{0}»": "New chunk «{0}»",
   "Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di profondità e gli altri prodotti.": "Created «{0}»: {1} photos of {2}, {3} markers. It is the active chunk: build the depth maps and the other products.",
   "Mappa delle normali dal {0}: rosso est, verde nord, blu alto": "Normal map from the {0}: red east, green north, blue up",
-  "Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > Annulla non riporta indietro.\n\nNon annullabili: {0}": "The script also did things outside the project, which Edit > Undo does not take back.\n\nNot undoable: {0}"
+  "Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > Annulla non riporta indietro.\n\nNon annullabili: {0}": "The script also did things outside the project, which Edit > Undo does not take back.\n\nNot undoable: {0}",
+  " I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala e GeoPackage.": " The drawings made on the elevation in {0}_disegni: DXF, SVG at scale and GeoPackage.",
+  "Sito {0}, {1} «{2}»: {3} schede US nuove e {4} aggiornate, senza geometria in pianta (le unità sono disegnate sul {1}); {5} quote in pyarchinit_quote; {6} disegni registrati come media.": "Site {0}, {1} «{2}»: {3} new US forms and {4} updated, without a geometry in plan (the units are drawn on the {1}); {5} spot heights in pyarchinit_quote; {6} drawings registered as media.",
+  "\n{0} unità senza numero di US non sono state scritte.": "\n{0} units without a US number were not written."
  }
 }

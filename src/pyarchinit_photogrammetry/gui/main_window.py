@@ -462,6 +462,10 @@ class MainWindow(QMainWindow):
         self.probe_points: list[dict] = []  # measuring points: x, y and the values of the products (engine.probe)
         self._probe_obj = None  # the products of the chunk open for the readout under the mouse
         self.stones: dict[str, list] = {}  # name of the raster -> outlines of its stones (polygons)
+        # the frame of the drawings above (units, quote, probe_points, stones): None = the plan (the chunk's CRS),
+        # else the id of the elevation or section shown, whose drawings are in its own (u, v)
+        self.drawings_frame: str | None = None
+        self._pa_parked: list = []  # units loaded from PyArchInit (plan) while an elevation is shown
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
@@ -1520,6 +1524,8 @@ class MainWindow(QMainWindow):
         self.probe_points = []
         self._probe_reset()
         self.stones = {}
+        self.drawings_frame = None  # a new project opens on the plan
+        self._pa_parked = []
         self._sam_obj = None
         self.classifier = None
         self.sections = []
@@ -1592,6 +1598,7 @@ class MainWindow(QMainWindow):
         that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
         reflectance orthomosaic) with the drawings on top."""
         self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
+        self._set_drawings_frame(None)  # a raster of the plan: the drawings of the plan
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
         if path is None:
@@ -4206,11 +4213,13 @@ class MainWindow(QMainWindow):
     def _undo_state(self) -> dict:
         """What Modifica > Annulla takes back, as JSON-able parts (see ``gui.undo``)."""
         ch = self.chunk
+        frames = self._undo_frames()
         state = {"chunk": None if ch is None else ch.key,
                  "labels": self.ortho_view.layer_settings,
-                 "units": [{**u.to_dict(), "attributes": dict(u.attributes or {})} for u in self.units],
-                 "quote": [dict(q) for q in self.quote], "sections": [dict(x) for x in self.sections],
-                 "probe": [dict(q) for q in self.probe_points],
+                 "units": {k: f[0] for k, f in frames.items() if f[0]},
+                 "quote": {k: f[1] for k, f in frames.items() if f[1]},
+                 "sections": [dict(x) for x in self.sections],
+                 "probe": {k: f[2] for k, f in frames.items() if f[2]},
                  "pa": {"deleted": sorted(self.pa_deleted), "geom": sorted(self.pa_geom_changed),
                         "pending": sorted(int(k) for k in self.pa_pending)}}
         if ch is not None:
@@ -4218,6 +4227,58 @@ class MainWindow(QMainWindow):
                          excluded=ch.meta.get("marker_excluded"),
                          patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"))
         return state
+
+    @staticmethod
+    def _undo_units(units) -> list:
+        """Units as the snapshots of Modifica > Annulla keep them: those drawn first, then those of PyArchInit."""
+        drawn = [u for u in units if not MainWindow._is_pa_unit(u)]
+        return [{**u.to_dict(), "attributes": dict(u.attributes or {})}
+                for u in drawn + [u for u in units if MainWindow._is_pa_unit(u)]]
+
+    def _undo_frames(self) -> dict:
+        """The drawings of every frame of the active chunk - "" the plan, else the id of an elevation -, as
+        ``(units, quote, points)`` JSON-able: those shown from the window, the others as the chunk keeps them.
+        Showing another frame changes none of them, so it is not an edit."""
+        ch = self.chunk
+        current = self.drawings_frame or ""
+        out = {current: (self._undo_units(self.units), [dict(q) for q in self.quote],
+                         [dict(q) for q in self.probe_points])}
+        if ch is None:
+            return out
+        if current:
+            units, quote, points = self._chunk_drawings(ch)
+            out[""] = (self._undo_units(units + self._pa_parked), quote, points)
+        for eid in ((ch.meta.get("drawings") or {}).get("frames") or {}):
+            if eid != current:
+                units, quote, points = self._chunk_drawings(ch, eid)
+                out[eid] = (self._undo_units(units), quote, points)
+        return out
+
+    def _undo_other_frames(self, state: dict) -> None:
+        """The drawings of the frames not shown put back as ``state`` has them (an edit made on another elevation, or
+        on the plan, undone from here): into the chunk, the units of PyArchInit of the plan aside."""
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        ch = self.chunk
+        if ch is None:
+            return
+        current = self.drawings_frame or ""
+        stored = set(((ch.meta.get("drawings") or {}).get("frames") or {}))
+        keys = (stored | {""} | {k for part in ("units", "quote", "probe") for k in (state.get(part) or {})}) - {current}
+        for key in keys:
+            frame = key or None
+            units, quote, points = self._chunk_drawings(ch, frame)
+            if frame is None:
+                units = units + self._pa_parked
+            if "units" in state:
+                units = [UnitPolygon.from_dict(d) for d in (state["units"] or {}).get(key) or []]
+            if "quote" in state:
+                quote = [dict(q) for q in (state["quote"] or {}).get(key) or []]
+            if "probe" in state:
+                points = [dict(q) for q in (state["probe"] or {}).get(key) or []]
+            if frame is None:
+                self._pa_parked = [u for u in units if self._is_pa_unit(u)]
+            self._store_chunk_drawings(ch, units, quote, points, frame=frame)
 
     def _undo_apply(self, state: dict, parts: set, products: list) -> None:
         """Put back the ``parts`` of a snapshot (and show the ``products`` whose files came back)."""
@@ -4230,12 +4291,15 @@ class MainWindow(QMainWindow):
         if parts & {"units", "quote", "sections", "pa", "probe"}:
             from ..archaeo.stratigraphy import UnitPolygon
 
+            current = self.drawings_frame or ""
+            if parts & {"units", "quote", "probe"}:
+                self._undo_other_frames(state)
             if "probe" in state:
-                self.probe_points = [dict(q) for q in state["probe"] or []]
+                self.probe_points = [dict(q) for q in (state["probe"] or {}).get(current) or []]
             follow = []
             if "units" in state:
                 before = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
-                self.units = [UnitPolygon.from_dict(d) for d in state["units"] or []]
+                self.units = [UnitPolygon.from_dict(d) for d in (state["units"] or {}).get(current) or []]
                 for u in self.units:  # a polygon back as it was: its proxy too
                     b = before.get((u.attributes or {}).get(ID_FIELD))
                     if b is None:
@@ -4244,7 +4308,7 @@ class MainWindow(QMainWindow):
                     if moved or (b.tipo, b.us, b.area) != (u.tipo, u.us, u.area):
                         follow.append((u, (b.tipo, b.us, b.area), moved))
             if "quote" in state:
-                self.quote = [dict(q) for q in state["quote"] or []]
+                self.quote = [dict(q) for q in (state["quote"] or {}).get(current) or []]
             if "sections" in state:
                 traces = {s.get(ID_FIELD): s for s in self.sections if s.get(ID_FIELD)}
                 self.sections = [dict(x) for x in state["sections"] or []]
@@ -4904,8 +4968,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("Marker {0}: nessuna foto lo vede", m.label), 10000)
 
     def _draw_markers_on_raster(self) -> None:
-        """The markers with a position as a layer of the orthophoto/DEM view."""
+        """The markers with a position as a layer of the orthophoto/DEM view (on an elevation, those on its plane)."""
         view = self.ortho_view
+        entry = self._frame_entry()
+        if entry is not None:
+            self._draw_elevation_layers(entry)
+            return
         view.remove_layer("Marker")
         ch = self.chunk
         if ch is None or view.tr is None:
@@ -6560,10 +6628,18 @@ class MainWindow(QMainWindow):
         if not ortho.exists():
             self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry['name']))
             return
+        self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
         if relief.exists():
             self.ortho_view.set_dem(relief)
+        with self.ortho_view.batch():
+            for i, u in enumerate(self.units):
+                self._draw_unit(u, i)
+            for i, q in enumerate(self.quote):
+                self._draw_quota(q, i)
+            for i, q in enumerate(self.probe_points):
+                self._draw_probe_point(q, i)
         self._draw_stones()
         self._draw_elevation_layers(entry)
         self.show_view(self.ortho_view)
@@ -6607,12 +6683,22 @@ class MainWindow(QMainWindow):
         frame = ortho.parent / "frame.json"
         if frame.exists():
             shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
-        from ..engine.elevation import write_profile_dxf
+        from ..engine.elevation import export_drawings, frame_drawings, write_profile_dxf
 
+        if self.drawings_frame == entry["id"]:
+            self._store_drawings()  # the drawings shown go into the chunk first
+        drawn = ""
+        if frame_drawings(self.chunk, entry["id"]):
+            try:
+                export_drawings(self.chunk, entry, folder, stem=stem)
+                drawn = tr(" I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala e GeoPackage.", stem)
+            except Exception as exc:  # noqa: BLE001 - the products are written: say what failed
+                self._exc(tr("Disegni del prospetto non esportati"), exc)
         if write_profile_dxf(self.chunk, entry, Path(folder) / f"{stem}_profilo.dxf") is not None:
-            self._info("Prospetto", tr("Ortofoto, rilievo, piano e profilo (DXF) di «{0}» in {1}.", entry['name'], folder))
+            self._info("Prospetto", tr("Ortofoto, rilievo, piano e profilo (DXF) di «{0}» in {1}.", entry['name'], folder)
+                       + drawn)
             return
-        self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder))
+        self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder) + drawn)
 
     def delete_elevation(self, entry: dict, chunk=None) -> None:
         """The elevation out of the project, as Rimuovi in the workspace (Modifica > Annulla brings it back)."""
@@ -7801,7 +7887,9 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- drawings saved with the project
     def _store_drawings(self) -> None:
         """Units drawn here (not those loaded from PyArchInit) and spot heights go into the
-        active chunk, so they come back when the project is reopened."""
+        active chunk, so they come back when the project is reopened: those of the plan at the top of
+        ``chunk.meta["drawings"]``, those of an elevation or a section shown in its own frame
+        (``chunk.meta["drawings"]["frames"][<elevation id>]``, in its ``(u, v)``)."""
         ch = self.chunk
         if ch is None:
             return
@@ -7810,33 +7898,59 @@ class MainWindow(QMainWindow):
         # Keep untouched projects unchanged, including snapshots used by Undo.
         if self.ortho_view.layer_settings or "layer_labels" in ch.meta:
             ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
-        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
+        if self.drawings_frame is not None:
+            self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points, frame=self.drawings_frame,
+                                       stones=stones)
+            return
+        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points)
         if stones:
             ch.meta["stones"] = stones
         else:
             ch.meta.pop("stones", None)
 
     @staticmethod
-    def _store_chunk_drawings(ch, units: list, quote: list, points: list) -> None:
+    def _store_chunk_drawings(ch, units: list, quote: list, points: list, frame: str | None = None,
+                              stones: dict | None = None) -> None:
         """``units`` (those drawn here: not those loaded from PyArchInit), ``quote`` and the measuring ``points`` into
-        ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active."""
+        ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active.
+        ``frame``: the id of the elevation they were drawn on (None: the plan), with its ``stones`` (``{key: [WKT]}``;
+        None keeps those it has). The drawings of the other frames stay as they are."""
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in quote]
         points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in points]
-        if units or quote or points:
-            ch.meta["drawings"] = {"units": units, "quote": quote, **({"points": points} if points else {})}
+        data = ch.meta.get("drawings") or {}
+        frames = dict(data.get("frames") or {})
+        if frame is None:
+            new = {"units": units, "quote": quote, **({"points": points} if points else {})} \
+                if units or quote or points else {}
+        else:
+            new = {k: v for k, v in data.items() if k != "frames"}
+            if stones is None:
+                stones = (frames.get(frame) or {}).get("stones") or {}
+            stones = {k: v for k, v in stones.items() if v}
+            if units or quote or points or stones:
+                frames[frame] = {"units": units, "quote": quote, **({"points": points} if points else {}),
+                                 **({"stones": stones} if stones else {})}
+            else:
+                frames.pop(frame, None)
+        if frames:
+            new["frames"] = frames
+        if new:
+            ch.meta["drawings"] = new
         else:
             ch.meta.pop("drawings", None)
 
     @staticmethod
-    def _chunk_drawings(ch) -> tuple[list, list, list]:
-        """The units, spot heights and measuring points ``ch`` keeps (:meth:`_store_chunk_drawings`); a broken record
-        is left out, said in the log."""
+    def _chunk_drawings(ch, frame: str | None = None) -> tuple[list, list, list]:
+        """The units, spot heights and measuring points ``ch`` keeps (:meth:`_store_chunk_drawings`) on the plan, or
+        on the elevation ``frame``; a broken record is left out, said in the log."""
         from ..archaeo.stratigraphy import UnitPolygon
 
         data = (ch.meta.get("drawings") or {}) if ch is not None else {}
+        if frame is not None:
+            data = (data.get("frames") or {}).get(frame) or {}
         units = []
         for d in data.get("units", []):
             try:
@@ -7849,6 +7963,61 @@ class MainWindow(QMainWindow):
         quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
         points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
         return units, quote, points
+
+    def _frame_stones(self, ch, frame: str | None) -> dict:
+        """The stones of the plan (``chunk.meta["stones"]``, by the name of the raster) or of the elevation ``frame``
+        (by its id), as polygons. The key "elevation.tif" of the projects before 1.7.0 - shared by every elevation,
+        its stones cannot be given to one - is left out, said in the log."""
+        from shapely import wkt
+
+        if ch is None:
+            return {}
+        rows = (ch.meta.get("stones") or {}) if frame is None else \
+            (((ch.meta.get("drawings") or {}).get("frames") or {}).get(frame) or {}).get("stones") or {}
+        out = {}
+        for key, items in rows.items():
+            if frame is None and key == "elevation.tif":
+                log.info("Pietre disegnate sui prospetti prima della 1.7.0 (%d) lasciate fuori: non si sa di quale "
+                         "prospetto fossero", len(items))
+                continue
+            try:
+                out[key] = [wkt.loads(r) for r in items]
+            except Exception as exc:  # a broken record must not stop the project from opening
+                log.warning("Pietre non lette dal progetto: %s", exc)
+        return out
+
+    def _stones_key(self) -> str | None:
+        """The key of the stones of the image shown: the id of the elevation, or the name of the raster of the plan."""
+        if self.drawings_frame is not None:
+            return self.drawings_frame
+        return self.ortho_view.path.name if self.ortho_view.path is not None else None
+
+    def _frame_entry(self, frame: str | None = None) -> dict | None:
+        """The entry of the elevation the drawings are on (``frame``, by default the one shown)."""
+        frame = self.drawings_frame if frame is None else frame
+        if frame is None or self.chunk is None:
+            return None
+        return next((e for e in self.chunk.meta.get("elevations") or [] if e.get("id") == frame), None)
+
+    @staticmethod
+    def _is_pa_unit(u) -> bool:
+        return str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")
+
+    def _set_drawings_frame(self, frame: str | None) -> None:
+        """The drawings of the plan (``frame`` None) or of the elevation ``frame`` in the window: those shown so far
+        go into the chunk first. The units loaded from PyArchInit belong to the plan: they wait aside on an
+        elevation."""
+        if frame == self.drawings_frame:
+            return
+        self._sam_cancel()
+        self._store_drawings()
+        if self.drawings_frame is None:
+            self._pa_parked = [u for u in self.units if self._is_pa_unit(u)]
+        self.drawings_frame = frame
+        self._restore_drawings()
+        if frame is None:
+            self.units += self._pa_parked
+            self._pa_parked = []
 
     def _activate_chunk(self, chunk) -> None:
         """Another chunk becomes the active one: the drawings of the one left stay with it (the
@@ -7873,6 +8042,7 @@ class MainWindow(QMainWindow):
                                   self._rustgis.chunk_label))
         self._sam_cancel()
         self.doc.chunk = chunk
+        self.drawings_frame = None  # the plan of the chunk now active
         self._reload_drawings(redraw=False)
         self.proxies_pane.set_proxies(chunk.meta.get("proxies", []) if chunk is not None else [])
         self.refresh_all(reset_views=True)
@@ -7881,28 +8051,27 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._poll_rustgis)  # RustGIS gets the chunk now active
 
     def _reload_drawings(self, redraw: bool = True) -> None:
-        """The drawings of the active chunk read again from the project; the units loaded from
-        PyArchInit (of the site, not of a chunk) stay."""
-        from_pa = [u for u in self.units
-                   if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        """The drawings of the active chunk read again from the project (those of the frame shown: the plan or an
+        elevation); the units loaded from PyArchInit (of the site, not of a chunk) stay."""
+        from_pa = [u for u in self.units if self._is_pa_unit(u)] + self._pa_parked
+        if self._frame_entry() is None:  # the elevation shown went (another chunk, undone): the plan
+            self.drawings_frame = None
         self._restore_drawings()
-        self.units += from_pa
+        if self.drawings_frame is None:
+            self.units += from_pa
+            self._pa_parked = []
+        else:
+            self._pa_parked = from_pa
         if redraw:
             self._redraw_overlays()
 
     def _restore_drawings(self) -> None:
+        """The drawings of the frame of the window (:attr:`drawings_frame`) from the active chunk."""
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
-        self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
+        self.units, self.quote, self.probe_points = self._chunk_drawings(ch, self.drawings_frame)
         self._ensure_ppg_ids()
-        from shapely import wkt
-
-        self.stones = {}
-        for key, rows in ((ch.meta.get("stones") or {}) if ch is not None else {}).items():
-            try:
-                self.stones[key] = [wkt.loads(r) for r in rows]
-            except Exception as exc:  # a broken record must not stop the project from opening
-                log.warning("Pietre non lette dal progetto: %s", exc)
+        self.stones = self._frame_stones(ch, self.drawings_frame)
 
     def _redraw_drawings(self) -> None:
         self._redraw_overlays()
@@ -8083,7 +8252,8 @@ class MainWindow(QMainWindow):
             attrs["_gid"] = q["gid"]
         z = q.get("quota_q")
         label = f"{float(z):.2f}" if z not in (None, "") else "?"
-        self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
+        x, y = (q["u"], q["v"]) if self.drawings_frame is not None and "u" in q else (q["x"], q["y"])
+        self.ortho_view.add_point(float(x), float(y), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
 
     # ---------------------------------------------------------------- measuring points
     def _probe(self):
@@ -8154,8 +8324,25 @@ class MainWindow(QMainWindow):
 
     def _quota_clicked(self, x: float, y: float) -> None:
         """A spot height at the clicked point: elevation from the DEM, then the columns of
-        pyarchinit_quote (asked once; "non chiedere più" keeps the values for the next points)."""
-        z = self._dem_value(x, y)
+        pyarchinit_quote (asked once; "non chiedere più" keeps the values for the next points). On an
+        elevation or a section the point keeps its ``(u, v)`` there; its height is the world Z of the
+        surface (from the relief of the elevation), ``x``, ``y`` its world position in plan."""
+        where = {}
+        entry = self._frame_entry()
+        if entry is not None:
+            from ..engine.elevation import world_of
+
+            p = world_of(entry, x, y, None, chunk=self.chunk)
+            where = {"u": float(x), "v": float(y)}
+            if p is None:
+                z = None
+            else:
+                x, y, z = float(p[0]), float(p[1]), float(p[2])
+        else:
+            z = self._dem_value(x, y)
+        if entry is not None and z is None:
+            self.statusBar().showMessage(tr("Fuori dal rilievo del prospetto: quota non letta"), 8000)
+            return
         keep = getattr(self, "_quota_keep", None)
         if keep is not None:
             v = dict(keep)
@@ -8178,7 +8365,7 @@ class MainWindow(QMainWindow):
                                                 "strumento per tornare a chiederli)"), 15000)
             if v.get("disegnatore"):
                 self.settings.setValue("pa/disegnatore", v["disegnatore"])
-        q = {"x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
+        q = {**where, "x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
         from ..engine.precision import precision_at
 
         sigma = precision_at(self.chunk, x, y) if self.chunk is not None else None
@@ -8452,7 +8639,7 @@ class MainWindow(QMainWindow):
         self._draw_sections()
 
     def _draw_sections(self) -> None:
-        if self.ortho_view.tr is None:
+        if self.ortho_view.tr is None or self.drawings_frame is not None:  # plan traces: not on an elevation
             return
         with self.ortho_view.batch():
             for sdict in self.sections:
@@ -8814,7 +9001,7 @@ class MainWindow(QMainWindow):
         if probe_gone:
             self.probe_points = [q for i, q in enumerate(self.probe_points) if i not in probe_gone]
         if stones_gone and self.ortho_view.path is not None:
-            key = self.ortho_view.path.name
+            key = self._stones_key()
             self.stones[key] = [s for i, s in enumerate(self.stones.get(key, [])) if i not in stones_gone]
         for sdict in sections:
             self._delete_section(sdict, confirm=False, redraw=False)
@@ -8951,7 +9138,8 @@ class MainWindow(QMainWindow):
         self._ensure_ppg_ids()  # copies of a unit (a part split off) get an identity of their own
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
+                                            PROFILE_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -8969,12 +9157,16 @@ class MainWindow(QMainWindow):
             self._draw_quota(q, i)
         for i, q in enumerate(self.probe_points):
             self._draw_probe_point(q, i)
-        self._draw_sections()
-        for name, lines in self.line_layers.items():
-            for coords, color, label, attrs, width in lines:
-                v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
-        self._draw_patches()
-        self._draw_markers_on_raster()
+        entry = self._frame_entry()
+        if entry is not None:  # an elevation: its markers and profile, nothing of the plan
+            self._draw_elevation_layers(entry)
+        else:
+            self._draw_sections()
+            for name, lines in self.line_layers.items():
+                for coords, color, label, attrs, width in lines:
+                    v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_patches()
+            self._draw_markers_on_raster()
         self._draw_stones()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
@@ -9299,7 +9491,10 @@ class MainWindow(QMainWindow):
     def _export_qgis_layers(self, force: bool = False) -> dict:
         """The drawings of the active chunk into the live GeoPackage, with the key of the chunk; never over another
         chunk's edits not read yet (:meth:`_live_file_ours`: read first, or a moment later). The files, or {} when
-        nothing could be written."""
+        nothing could be written. Only the plan: while an elevation is shown the file keeps the plan's drawings (those
+        of an elevation are in its own (u, v), exported with it)."""
+        if self.drawings_frame is not None:
+            return {}
         try:
             link = self._qgis_live_link()
             if not self._live_file_ours(link):
@@ -9576,18 +9771,25 @@ class MainWindow(QMainWindow):
                                               "le sue modifiche non sono state riprese", table, ch.refused[0],
                                               ch.refused[1])))
         proxies, recut, lines = [], [], []
-        if other:  # its drawings, not the window's, for as long as its edits are applied
+        # the plan of the active chunk while an elevation is shown: its drawings, not those shown, take the edits
+        aside = not other and self.drawings_frame is not None
+        if other or aside:  # its drawings, not the window's, for as long as its edits are applied
             shown = (self.units, self.quote, self.probe_points)
-            self.units, self.quote, self.probe_points = self._chunk_drawings(chunk)
+            self.units, self.quote, self.probe_points = self._chunk_drawings(target)
+            if aside:
+                self.units += self._pa_parked
         try:
             if changes.get("unita") and not changes["unita"].refused:
                 lines += self._qgis_units(changes["unita"], srs, proxies)
             if changes.get("quote") and not changes["quote"].refused:
                 lines += self._qgis_quote(changes["quote"], srs)
         finally:
-            if other:
+            if other or aside:
                 theirs = (self.units, self.quote, self.probe_points)
                 self.units, self.quote, self.probe_points = shown
+        if aside:
+            self._pa_parked = [u for u in theirs[0] if self._is_pa_unit(u)]
+            self._store_chunk_drawings(target, *theirs)  # the plan keeps them; the elevation shown is stored below
         unit_lines = len(lines)
         sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
         if sections:
@@ -11610,7 +11812,7 @@ class MainWindow(QMainWindow):
         v = self.ortho_view
         if PATCH_LAYER in v.layers:
             v.remove_layer(PATCH_LAYER)
-        if self.chunk is None or v.kind != "ortho" or v.tr is None:
+        if self.chunk is None or v.kind != "ortho" or v.tr is None or self.drawings_frame is not None:
             return
         from ..engine import patches as P
 
@@ -12925,7 +13127,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("stones/min", v["min_size"])
         self.settings.setValue("stones/max", v["max_size"])
-        path, key = view.path, view.path.name
+        path, key = view.path, self._stones_key()
 
         def job(p):
             return find_stones(path, self._segmenter(), bounds=bounds, min_size=v["min_size"], max_size=v["max_size"],
@@ -12951,7 +13153,7 @@ class MainWindow(QMainWindow):
         if view.path is None or view.tr is None:
             return
         with view.batch():
-            for i, g in enumerate(self.stones.get(view.path.name, [])):
+            for i, g in enumerate(self.stones.get(self._stones_key(), [])):
                 for part in getattr(g, "geoms", [g]):
                     view.add_polygon(np.asarray(part.exterior.coords)[:, :2], "", "#5b3a1e", fill_alpha=0,
                                      layer=STONES_LAYER, attrs={"n": i + 1, "area_m2": round(g.area, 4),
@@ -12962,7 +13164,7 @@ class MainWindow(QMainWindow):
         from ..archaeo.stones import export_stones
 
         view = self.ortho_view
-        stones = self.stones.get(view.path.name, []) if view.path is not None else []
+        stones = self.stones.get(self._stones_key(), []) if view.path is not None else []
         if not stones:
             self._warn("Nessuna pietra su questa immagine: usa lo strumento SAM «Pietre» (trascina un riquadro).")
             return
@@ -13476,6 +13678,9 @@ class MainWindow(QMainWindow):
         site = self._ensure_site("Unità e quote vengono scritte nel sito del progetto.")
         if not site:
             return
+        if self._frame_entry() is not None:
+            self._publish_elevation_drawings(site, what)
+            return
         units, quote, no_us = self._publishable()
         if what == "units":
             quote = []
@@ -13510,6 +13715,63 @@ class MainWindow(QMainWindow):
                                                                                            "pubblicate.",
                                                     no_us)
                                                  if no_us and units else ""))
+
+        self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
+
+    def _publish_elevation_drawings(self, site: str, what: str = "both") -> None:
+        """*Salva in PyArchInit* with an elevation or a section shown: its units create or update their US forms (the
+        fields only: a drawing in (u, v) has no geometry in plan), its spot heights go into ``pyarchinit_quote`` at
+        their world position, and its drawings (DXF, SVG) are registered as media "Prospetto" or "Sezione" of the
+        site, linked to those US - once (``entry["media"]``)."""
+        from ..engine.elevation import export_drawings
+
+        entry = self._frame_entry()
+        units = [u for u in self.units if u.tipo != "UT" and u.us] if what != "quote" else []
+        no_us = sum(1 for u in self.units if u.tipo != "UT" and not u.us)
+        quote = [q for q in self.quote if q.get("gid") is None] if what != "units" else []
+        self._store_drawings()
+        ch, pa, crs = self.chunk, self.pa, self.chunk.crs
+        folder = ch.data_dir / Path(entry["orthophoto"]).parent / "disegni"
+        stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in entry["name"]) + "_" + entry["id"]
+        fields = [(u, str(u.area or "1"), str(u.us), u.tipo or "US",
+                   {k: v for k, v in (u.attributes or {}).items()
+                    if not str(k).startswith("_") and k not in ("gid", "sito", "area", "us", "unita_tipo", "tipo")})
+                  for u in units]
+
+        def job(p):
+            p(0.1, "Schede US")
+            made = updated = 0
+            links = []
+            for _u, area, us, tipo, values in fields:
+                record = pa.us_record(site, area, us, tipo)
+                if record is None:
+                    pa.create_us(site, area, us, tipo, **values)
+                    made += 1
+                else:
+                    pa.update_us(int(record["id_us"]), **values)
+                    updated += 1
+                links.append((area, us, tipo))
+            p(0.5, "Quote")
+            gq = pa.publish_quote(quote, site, crs=crs) if quote else []
+            p(0.7, "Disegni del prospetto")
+            paths = export_drawings(ch, entry, folder, stem=stem)
+            known = dict(entry.get("media") or {})
+            ids = pa.register_elevation_media(ch, entry, paths, sito=site, link_us=links)
+            return made, updated, gq, len([k for k in entry.get("media") or {} if k not in known]), ids
+
+        def done(r):
+            made, updated, gq, new_media, _ids = r
+            for q, g in zip(quote, gq):
+                q["gid"] = g
+            self._redraw_overlays()
+            self._dirty(True)
+            self.pa_pane.refresh()
+            kind = tr("sezione") if entry.get("kind") == "section" else tr("prospetto")
+            self._info("PyArchInit", tr("Sito {0}, {1} «{2}»: {3} schede US nuove e {4} aggiornate, senza geometria in "
+                                        "pianta (le unità sono disegnate sul {1}); {5} quote in pyarchinit_quote; {6} "
+                                        "disegni registrati come media.", site, kind, entry["name"], made, updated,
+                                        len(gq), new_media)
+                       + (tr("\n{0} unità senza numero di US non sono state scritte.", no_us) if no_us else ""))
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
 

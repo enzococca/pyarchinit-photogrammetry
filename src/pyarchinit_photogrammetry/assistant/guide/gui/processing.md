@@ -326,14 +326,37 @@ with its true heights. The markers that lie on the plane are drawn on it with th
 The elevations are listed in the workspace (*Elevations*): a double click shows the orthophoto in the raster view
 with the relief as Z under the cursor (distance from the plane towards the viewer: bulges and leans of a wall);
 the right click exports orthophoto, relief, plane and profile, or deletes them. Measures on an elevation are in
-its metres; the units drawn on the raster view belong to the plan, so draw them on the orthomosaic. From the
-command line:
+its metres. From the command line:
 
 ```bash
 ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
 ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 ```
+
+### Drawings on elevations and sections
+
+What is drawn while an elevation or a section is shown - units (US, USM), spot heights, measuring points, stones -
+belongs to it, in its own metres (u, v), and never appears on the plan; what is drawn on the orthomosaic never
+appears on an elevation. Opening the plan or another elevation keeps the drawings of the one left with it, and they
+come back with it, also when the project is opened again. *Modifica > Annulla* takes back an edit on the elevation
+where it was made.
+
+* A **spot height** clicked on an elevation takes the height of the surface there (the world Z of the point of the
+  model, read through the relief), and its position in plan; on the elevation it shows that height.
+* The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*). Stones drawn
+  on elevations by versions before 1.7.0 were shared by all of them: they are left out when the project opens.
+* **Export** (right click on the elevation) writes, beside orthophoto, relief, plane and profile, its drawings:
+  `<name>_disegni.dxf` in the metres of the elevation (layers US, USM, QUOTE, PIETRE, PUNTI and PROFILO for a
+  section), `<name>_disegni.svg` at scale over the orthophoto, and `<name>_disegni.gpkg` with the table `frame`
+  (the plane) and the drawings in (u, v), each with a column `geom_world`: the same drawing in the reference system
+  of the chunk (on the plane), so QGIS can place it.
+* **Salva in PyArchInit** with an elevation shown writes the US forms of its units (created or updated, the fields
+  only: a drawing on an elevation has no geometry in plan, and the message says so), the spot heights in
+  `pyarchinit_quote` at their position in plan, and registers its drawings (DXF and SVG) as media of the site,
+  "Prospetto" or "Sezione" in `documentazione_table`, linked to those US - once: a second save registers nothing new.
+* The **live link** with QGIS or RustGIS and the **QField** package carry the drawings of the plan only; those of an
+  elevation go through its GeoPackage.
 
 ## Editing the DEM
 

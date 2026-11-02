@@ -335,14 +335,39 @@ prospetto si legge con le sue quote vere. I marker che stanno sul piano vi sono 
 I prospetti sono elencati nell'area di lavoro (*Prospetti*): un doppio clic mostra l'ortofoto nella vista raster
 con il rilievo come Z sotto il cursore (distanza dal piano verso chi guarda: rigonfiamenti e strapiombi di un
 muro); il clic destro esporta ortofoto, rilievo, piano e profilo, o li elimina. Le misure su un prospetto sono
-nei suoi metri; le US disegnate sulla vista raster appartengono alla pianta, quindi vanno disegnate
-sull'ortofoto. Dalla riga di comando:
+nei suoi metri. Dalla riga di comando:
 
 ```bash
 ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
 ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 ```
+
+### Disegni sui prospetti e sulle sezioni
+
+Ciò che si disegna mentre è mostrato un prospetto o una sezione - unità (US, USM), quote, punti di misura, pietre -
+appartiene a quel prospetto, nei suoi metri (u, v), e non compare mai sulla pianta; ciò che si disegna
+sull'ortofoto non compare mai su un prospetto. Aprendo la pianta o un altro prospetto i disegni di quello lasciato
+restano con lui e tornano con lui, anche quando il progetto viene riaperto. *Modifica > Annulla* riporta indietro
+una modifica sul prospetto in cui è stata fatta.
+
+* Una **quota** cliccata su un prospetto prende la quota della superficie in quel punto (la Z del punto del
+  modello, letta attraverso il rilievo) e la sua posizione in pianta; sul prospetto mostra quella quota.
+* Le **pietre** trovate con SAM su un prospetto sono sue (ogni prospetto ha il suo layer *Pietre*). Le pietre
+  disegnate sui prospetti dalle versioni precedenti alla 1.7.0 erano condivise da tutti: all'apertura del progetto
+  vengono lasciate fuori.
+* **Esporta** (clic destro sul prospetto) scrive, oltre a ortofoto, rilievo, piano e profilo, i suoi disegni:
+  `<nome>_disegni.dxf` nei metri del prospetto (layer US, USM, QUOTE, PIETRE, PUNTI e PROFILO per una sezione),
+  `<nome>_disegni.svg` in scala sopra l'ortofoto, e `<nome>_disegni.gpkg` con la tabella `frame` (il piano) e i
+  disegni in (u, v), ognuno con una colonna `geom_world`: lo stesso disegno nel sistema di riferimento del chunk
+  (sul piano), così QGIS può collocarlo.
+* **Salva in PyArchInit** con un prospetto mostrato scrive le schede US delle sue unità (create o aggiornate, solo
+  i campi: un disegno su un prospetto non ha geometria in pianta, e il messaggio lo dice), le quote in
+  `pyarchinit_quote` nella loro posizione in pianta, e registra i suoi disegni (DXF e SVG) come media del sito,
+  "Prospetto" o "Sezione" in `documentazione_table`, collegati a quelle US - una volta sola: un secondo
+  salvataggio non registra nulla di nuovo.
+* Il **collegamento dal vivo** con QGIS o RustGIS e il pacchetto **QField** portano solo i disegni della pianta;
+  quelli di un prospetto passano dal suo GeoPackage.
 
 ## Modificare il DEM
 

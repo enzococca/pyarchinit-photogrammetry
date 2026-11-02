@@ -103,7 +103,7 @@ def _save_preview(img: Image.Image, out: str, max_size, dpi) -> None:
 def register_media(db, path: str | Path, mediatype: str | None = None, descrizione: str = "",
                    tags: str = "['fotogrammetria']", links: list[tuple[str, int]] | None = None,
                    copy_to: str | Path | None = None, overwrite: bool = False, thumb_dir: str | None = None,
-                   resize_dir: str | None = None) -> int:
+                   resize_dir: str | None = None, preview: Image.Image | None = None) -> int:
     """Register a file as PyArchInit media and link it to entities.
 
     ``links``: ``[(entity_type, id_entity)]`` e.g. ``[("US", 12)]``.
@@ -112,6 +112,8 @@ def register_media(db, path: str | Path, mediatype: str | None = None, descrizio
     ``overwrite=True``: then the file and its previews are refreshed and the existing
     ``id_media`` is reused (missing links are added). Everything is written in one
     transaction: if a preview fails nothing is left in the database.
+    ``preview``: the image of the thumbnail and of the resized copy, for a file that is not an image
+    (a drawing in DXF or SVG: the orthophoto it was drawn on).
     Returns ``id_media``.
     """
     src = Path(path)
@@ -155,7 +157,9 @@ def register_media(db, path: str | Path, mediatype: str | None = None, descrizio
             else:
                 thumb_name = f"{id_media}_{name}_thumb.png"
                 resize_name = f"{id_media}_{name}.png"
-                if ext in (".tif", ".tiff"):
+                if preview is not None:
+                    prev = preview.convert("RGB")
+                elif ext in (".tif", ".tiff"):
                     prev = raster_preview(target, RESIZE_SIZE)
                 else:
                     with Image.open(target) as im:

@@ -1383,6 +1383,24 @@ in `frame.json`). `bounds=(u0, v0, u1, v1)` builds only that part (what a view s
 part of the model inside the depth band. The entry says `kind`, `bounds`, `v_is_height` and, for a
 section, the `profile` file. CLI: `ppg elevation`.
 
+### Drawings on elevations and sections
+
+The window keeps what is drawn on an elevation or a section in its own frame:
+`chunk.meta["drawings"]["frames"][<elevation id>] = {"units", "quote", "points", "stones"}`, in `(u, v)` metres;
+the plan drawings stay at the top of `chunk.meta["drawings"]` (projects without `frames` read as before).
+`MainWindow.drawings_frame` is None on the plan, the elevation id while one is shown. A spot height on an
+elevation keeps `u`, `v` and has `x`, `y`, `quota_q` = its world point on the surface.
+
+| Call | Description |
+| --- | --- |
+| `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | the world point (chunk CRS) of `(u, v)` at the depth `d`; `d` None: on the surface, from the relief (needs `chunk`; None where the relief has no value) |
+| `relief_at(chunk, entry, u, v)` | the depth of the surface at `(u, v)` |
+| `frame_drawings(chunk, id)` | the drawings kept with the elevation `id` |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None)` | `{"dxf", "svg", "gpkg"}`: DXF in `(u, v)` (layers US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG at 1:`scale` over the orthophoto, GeoPackage (table `frame` with the plane; `unita`, `quote`, `punti`, `pietre` in `(u, v)` with a `geom_world` WKT column in the chunk's CRS) |
+| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | the DXF and SVG registered as media "Prospetto"/"Sezione" of the site (thumbnail: the orthophoto), ids kept in `entry["media"]`: a second call registers nothing new |
+
+The QGIS live link and the QField package carry the plan drawings only.
+
 ## Masks of the photos
 
 A mask is a single-channel PNG as large as its photo, white where the photo counts and black where it
