@@ -196,6 +196,8 @@ multispettrali, termiche e satellitari, i plugin.
 | **Patch dell'ortofoto (assegna immagini)** | quale foto usare in un'area dell'ortofoto: [vedi sotto](#strumenti-patch-dellortofoto) |
 | **Curve di livello...** | le curve dal DEM, come layer da interrogare ed esportare |
 | **Volume scavo / riporto...** | il volume tolto e aggiunto rispetto a un piano o a un DEM di prima |
+| **TIN...** | una rete di triangoli dal DEM, dal terreno della nuvola o dalle quote, con le linee di rottura come spigoli ([TIN e linee di rottura](../tin.md)) |
+| **TIN e linee di rottura** | di nuovo il TIN, *Curve di livello dal TIN...*, *Volume dal TIN...*, *DEM dal TIN*, *Esporta TIN...*, *Disegna linee di rottura*, *Esporta le linee di rottura...* |
 | **Proponi US e rapporti (Extended Matrix)...** | numero, tipo e rapporti stratigrafici per le unità senza numero ([proposta US](archaeology.md#proposta-di-us-e-rapporti)) |
 | **Fasi dello scavo (volumi e rapporti)...** | un rilievo per fase: volumi tra le fasi e rapporti suggeriti ([fasi](archaeology.md#fasi-dello-scavo)) |
 | **Coregistra DEM...** | sposta il DEM sul DEM di un altro rilievo dove il terreno non è cambiato ([coregistrazione](processing.md#coregistrazione-dei-dem)) |
@@ -400,6 +402,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | **Pannelli** | ogni pannello aperto o chiuso: [vedi sotto](#vista-pannelli) |
 | **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++; anche l'*Assistente*) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
+| **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
 | **Tema** | chiaro o scuro, ricordato |
 | **Lingua / Language** | italiano o inglese, al prossimo avvio (*Riavvia ora* riapre subito il progetto) |
 

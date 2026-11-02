@@ -1247,6 +1247,54 @@ DEM com'era viene prima conservato come versione; un DEM di un altro programma v
 copia nella cartella del chunk; overview aggiornate nella finestra; `chunk.meta["dem_edits"]` elenca
 le modifiche.
 
+## TIN e linee di rottura
+
+Il TIN di un chunk ([TIN e linee di rottura](tin.md)) è il prodotto `tin`: `tin/tin.npz` + `tin.json` nella cartella
+del chunk, in coordinate locali (mondo = locale + `origin`, un numero tondo di chilometri), `chunk.meta["tin"]`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.tin.build_tin(chunk, source="dem", max_error=None, breaklines=None, boundary=None, spots=True, classes=None)` | costruisce e conserva il TIN; restituisce un `Tin`; CLI `ppg tin build` |
+| `engine.tin.chunk_tin(chunk)` | il TIN conservato dal chunk, o None |
+| `engine.tin.tin_to_dem(chunk, resolution=None, name=None)` | il TIN rasterizzato come DEM attivo (il DEM di prima resta come versione, "DEM dal TIN"); CLI `ppg tin dem` |
+| `engine.tin.contours(tin, interval, base=0.0, index_every=5)` | curve di livello, esatte sui triangoli: `[{"elevation", "index", "coords"}]` |
+| `engine.tin.tin_contours(chunk, interval=None)` | lo stesso sul TIN del chunk (equidistanza predefinita: circa 50 livelli); CLI `ppg tin contours` |
+| `engine.tin.volume(tin, reference=None)` | scavo e riporto esatti rispetto a una quota o a un piano `(a, b, c)`; CLI `ppg tin volume` |
+| `engine.tin.tin_volume(chunk, reference=None)` | lo stesso sul TIN del chunk |
+| `engine.tin.export(tin, path, crs=None)` | `.dxf`, `.ply`, `.obj`, `.gpkg`, `.xml`/`.landxml`; CLI `ppg tin export` |
+| `engine.tin.report(tin)` | il TIN in poche righe |
+| `engine.tin.read_landxml(path)` | vertici e triangoli di una superficie LandXML |
+| `engine.tin.triangulate(xy, constraints=None)` | la sola triangolazione di Delaunay vincolata (`Triangulation`) |
+| `archaeo.breaklines.records(chunk, frame=None)` | le linee disegnate sulla pianta, o sul prospetto `frame` |
+| `archaeo.breaklines.new_record(kind, coords, attributes=None)` | il record di una linea (`breakline`, `soft`, `boundary`) |
+| `archaeo.breaklines.for_tin(recs)` | i record come `breaklines` di `build_tin` |
+| `archaeo.breaklines.as_arrays(recs)` | i record come array (n, 3) per `chunk.edit_dem(breaklines=...)` |
+| `archaeo.breaklines.write_lines(recs, path, crs=None)` | `.dxf`, `.gpkg` o `.geojson` |
+
+**`build_tin(...)`**: `source` `"dem"` raffina il DEM finché ogni cella è entro `max_error` (predefinito il doppio
+del rumore del DEM, l'NMAD attorno a una mediana 3 x 3, e almeno `FLOOR_CELLS` = un quinto di cella; al massimo
+`MAX_VERTICES` = 2 M); `"cloud"` prende il terreno della nuvola densa (classe 2, o `classes`) diradato alla sua
+spaziatura; `"spots"` solo le quote puntuali e le linee di rottura. `breaklines` sono dizionari `{id, kind, coords}`:
+`breakline` spigoli vincolati (quote dalla linea, o dal DEM ai vertici che non ne hanno), `soft` solo i vertici,
+`boundary` un vincolo chiuso fuori dal quale non resta alcun triangolo; `boundary` (un poligono shapely, mondo) fa lo
+stesso; `spots` mette le quote puntuali del chunk come vertici con la loro quota. I vincoli che si incrociano sono
+spezzati in un vertice nuovo.
+
+**`Tin`**: `origin`, `xy`, `z`, `triangles` (antiorari), `constrained` (coppie di vertici), `spots`, `source`,
+`info` (tolleranza, giri, `error_max`, `error_p95`, `warnings`); `world_xy`, `world_xyz`, `n_vertices`,
+`n_triangles`, `save(folder)`, `Tin.load(path)`.
+
+**`volume(tin, reference)`**: le chiavi di `archaeo.terrain.volume` (`area_m2`, `cut_m3`, `fill_m3`, `net_m3`,
+`above_m3`, `below_m3`, `quota_min`, `quota_max`); con un riferimento lo scavo è il TIN sotto di esso, il riporto
+quello sopra; con None il vertice più basso fa da fondo e `cut_m3` è il deposito sopra di esso.
+
+**Senza il nucleo nativo** (`pyarchinit-photogrammetry-core` >= 0.7, API 10, il crate spade) `triangulate` usa la
+triangolazione di Delaunay di SciPy: i vincoli sono ignorati (`Triangulation.native` False) e `info["warnings"]`
+contiene `engine.tin.NOT_CONSTRAINED`; rasterizzazione, curve e volumi usano le stesse formule in NumPy.
+
+`chunk.edit_dem(..., lines="drawn")` conserva anche le quote delle linee di rottura disegnate sulla pianta che
+raggiungono l'area.
+
 ## Calcolatore raster
 
 | Chiamata | Descrizione |
@@ -1698,6 +1746,8 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `engine.tin` | `build_tin`, `chunk_tin`, `tin_to_dem`, `contours`, `tin_contours`, `volume`, `tin_volume`, `export`, `read_landxml`, `report`, `triangulate`, `rasterize`, `contour_segments`, `prism_volume`, `Tin` |
+| `archaeo.breaklines` | `records`, `new_record`, `for_tin`, `as_arrays`, `write_lines`, `KINDS` |
 | `archaeo.coreg` | `coregister` (ricerca iniziale sulle pendenze per spostamenti di metri, poi spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (GlobalId IFC dal `node_uuid` di una scheda US), `read_ifc_elements` |
@@ -1723,6 +1773,9 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | `ppg.demo.create_demo(folder, process=False)` | foto di una trincea sintetica + GCP, progetto, mesh di ceramica, database PyArchInit (`DemoData`) |
 | `pyarchinit_photogrammetry.gui.main(argv)` | avvia l'interfaccia desktop (`ppg-gui`) |
 | `ppg.core.progress.Progress` | callback di avanzamento con intervalli `sub()`; `cancel()` ferma ogni sotto-passo |
+| `window.model_view.pivot()` | il centro di rotazione della vista 3D (coordinate mondo del chunk), o None |
+| `window.model_view.set_pivot(point, recentre=False)` | un nuovo centro di rotazione; la vista si sposta solo con `recentre` ([Vista 3D e trackball](gui/view3d.md)) |
+| `window.model_view.set_trackball_mode(mode)` | quando si disegna la trackball: `"auto"`, `"always"`, `"never"` |
 
 
 ## Aggiunte nella 0.3

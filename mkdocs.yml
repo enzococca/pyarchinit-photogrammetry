@@ -83,6 +83,7 @@ plugins:
             Desktop interface: Interfaccia
             Menus: Menu
             Panes: Pannelli
+            3D view and trackball: Vista 3D e trackball
             Photos and markers: Foto e marker
             Processing: Elaborazione
             Drawing and measures: Disegno e misure
@@ -91,6 +92,7 @@ plugins:
             Exports and reports: Esportazioni e rapporti
             Errors and updates: Errori e aggiornamenti
             The assistant: L'assistente
+            TIN and break lines: TIN e linee di rottura
             Python API: API Python
             Scripts: Script
             PyArchInit: PyArchInit
@@ -163,6 +165,7 @@ nav:
           - gui/index.md
           - Menus: gui/menus.md
           - Panes: gui/panes.md
+          - 3D view and trackball: gui/view3d.md
           - Photos and markers: gui/photos-markers.md
           - Processing: gui/processing.md
           - Drawing and measures: gui/drawing.md
@@ -171,6 +174,7 @@ nav:
           - Exports and reports: gui/exports.md
           - Errors and updates: gui/help.md
           - The assistant: gui/assistant.md
+      - TIN and break lines: tin.md
       - Python API: api.md
       - Scripts: scripting.md
       - PyArchInit: pyarchinit.md

@@ -20,6 +20,7 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Quota** | una quota per `pyarchinit_quote` ([sotto](#quote)) |
 | ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Punto** | un punto di misura: quota, temperatura, bande e indici |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | un marker dove fai clic ([marker](photos-markers.md#marker)) |
+| | **Linee** | linee di rottura, linee morbide e contorni per il TIN e la modifica del DEM; il tipo nel suo menu ([TIN e linee di rottura](../tin.md#linee-di-rottura)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | unità e pietre disegnate da Segment Anything ([sotto](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto ([patch](processing.md#patch-dellortofoto)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Elimina** | gli elementi selezionati (++delete++) |

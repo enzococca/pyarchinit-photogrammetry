@@ -9,12 +9,14 @@ part.
 
 - :material-menu: **[Menus](menus.md)** - every command, menu by menu
 - :material-dock-left: **[Panes](panes.md)** - workspace, references, layers, photos, sections, log
+- :material-rotate-3d-variant: **[3D view and trackball](view3d.md)** - turning, panning, zooming, the centre of rotation, keys
 - :material-camera-marker: **[Photos and markers](photos-markers.md)** - photos, masks, markers, scale bars
 - :material-cog-play: **[Processing](processing.md)** - from the alignment to the orthophoto, versions, cleaning
 - :material-draw: **[Drawing and measures](drawing.md)** - units, sections, spot heights, measures, SAM
 - :material-shovel: **[Tools for archaeology](archaeology.md)** - PyArchInit, QGIS, proxies, matrix, phases, pottery
 - :material-leaf: **[Multispectral and thermal](multispectral.md)** - reflectance, indices, temperatures
 - :material-export: **[Exports and reports](exports.md)** - PDF report, Excel tables, web formats, imports
+- :material-triangle-outline: **[TIN and break lines](../tin.md)** - triangle network, break lines, contours, volumes
 - :material-lifebuoy: **[Errors and updates](help.md)** - log, diagnosis, updates
 
 </div>
@@ -124,8 +126,9 @@ them (in the workspace ++f2++ renames instead).
 
     </div>
 
-    Tie points, dense cloud, shaded or textured model, cameras and markers. *Show* chooses what; left drag
-    orbits, right or middle drag pans, the wheel zooms.
+    Tie points, dense cloud, shaded or textured model, the TIN, cameras and markers. *Show* chooses what; the
+    left drag turns the scene with the trackball, right or middle drag pans, the wheel zooms toward the cursor, a
+    double click sets the centre of rotation: see [3D view and trackball](view3d.md).
 
     The bar above the view has the tools that work in 3D:
 

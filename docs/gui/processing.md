@@ -336,7 +336,7 @@ ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 
 ### Drawings on elevations and sections
 
-What is drawn while an elevation or a section is shown - units (US, USM), spot heights, measuring points, stones -
+What is drawn while an elevation or a section is shown - units (US, USM), spot heights, measuring points, stones, lines -
 belongs to it, in its own metres (u, v), and never appears on the plan; what is drawn on the orthomosaic never
 appears on an elevation. Opening the plan or another elevation keeps the drawings of the one left with it, and they
 come back with it, also when the project is opened again. *Modifica > Annulla* takes back an edit on the elevation

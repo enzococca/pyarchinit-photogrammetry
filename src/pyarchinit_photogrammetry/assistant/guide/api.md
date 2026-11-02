@@ -1210,6 +1210,52 @@ outside it), `idw`, `constant` (`value`, default the median of the ring); `break
 kept as a version first; a DEM of another program is edited as a copy in the chunk folder;
 overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits.
 
+## TIN and break lines
+
+The TIN of a chunk ([TIN and break lines](tin.md)) is the product `tin`: `tin/tin.npz` + `tin.json` in the chunk
+folder, in local coordinates (world = local + `origin`, a round number of kilometres), `chunk.meta["tin"]`.
+
+| Call | Description |
+| --- | --- |
+| `engine.tin.build_tin(chunk, source="dem", max_error=None, breaklines=None, boundary=None, spots=True, classes=None)` | builds and keeps the TIN; returns a `Tin`; CLI `ppg tin build` |
+| `engine.tin.chunk_tin(chunk)` | the TIN kept by the chunk, or None |
+| `engine.tin.tin_to_dem(chunk, resolution=None, name=None)` | the TIN rasterised as the active DEM (the DEM before kept as a version, "DEM dal TIN"); CLI `ppg tin dem` |
+| `engine.tin.contours(tin, interval, base=0.0, index_every=5)` | contour lines, exact on the triangles: `[{"elevation", "index", "coords"}]` |
+| `engine.tin.tin_contours(chunk, interval=None)` | the same on the chunk's TIN (default interval: about 50 levels); CLI `ppg tin contours` |
+| `engine.tin.volume(tin, reference=None)` | exact cut and fill against a height or a plane `(a, b, c)`; CLI `ppg tin volume` |
+| `engine.tin.tin_volume(chunk, reference=None)` | the same on the chunk's TIN |
+| `engine.tin.export(tin, path, crs=None)` | `.dxf`, `.ply`, `.obj`, `.gpkg`, `.xml`/`.landxml`; CLI `ppg tin export` |
+| `engine.tin.report(tin)` | the TIN in a few lines |
+| `engine.tin.read_landxml(path)` | vertices and triangles of a LandXML surface |
+| `engine.tin.triangulate(xy, constraints=None)` | the constrained Delaunay triangulation alone (`Triangulation`) |
+| `archaeo.breaklines.records(chunk, frame=None)` | the lines drawn on the plan, or on the elevation `frame` |
+| `archaeo.breaklines.new_record(kind, coords, attributes=None)` | a line record (`breakline`, `soft`, `boundary`) |
+| `archaeo.breaklines.for_tin(recs)` | records as the `breaklines` of `build_tin` |
+| `archaeo.breaklines.as_arrays(recs)` | records as (n, 3) arrays for `chunk.edit_dem(breaklines=...)` |
+| `archaeo.breaklines.write_lines(recs, path, crs=None)` | `.dxf`, `.gpkg` or `.geojson` |
+
+**`build_tin(...)`**: `source` `"dem"` refines the DEM until every cell is within `max_error` (default twice the
+DEM's noise, the NMAD around a 3 x 3 median, and at least `FLOOR_CELLS` = a fifth of a cell; at most `MAX_VERTICES`
+= 2 M); `"cloud"` takes the ground of the dense cloud (class 2, or `classes`) thinned to its spacing; `"spots"` the
+spot heights and the break lines only. `breaklines` are dicts `{id, kind, coords}`: `breakline` constraint edges
+(their heights from the line, or from the DEM at the vertices without one), `soft` vertices only, `boundary` a closed
+constraint outside which no triangle is kept; `boundary` (a shapely polygon, world) does the same; `spots` puts the
+chunk's spot heights in as vertices with their height. Crossing constraints are split at a new vertex.
+
+**`Tin`**: `origin`, `xy`, `z`, `triangles` (counter-clockwise), `constrained` (vertex pairs), `spots`, `source`,
+`info` (tolerance, rounds, `error_max`, `error_p95`, `warnings`); `world_xy`, `world_xyz`, `n_vertices`,
+`n_triangles`, `save(folder)`, `Tin.load(path)`.
+
+**`volume(tin, reference)`**: the keys of `archaeo.terrain.volume` (`area_m2`, `cut_m3`, `fill_m3`, `net_m3`,
+`above_m3`, `below_m3`, `quota_min`, `quota_max`); with a reference, cut is the TIN below it, fill above it; with
+None the lowest vertex is the floor and `cut_m3` the deposit above it.
+
+**Without the native core** (`pyarchinit-photogrammetry-core` >= 0.7, API 10, the crate spade) `triangulate` uses
+SciPy's Delaunay triangulation: constraints are ignored (`Triangulation.native` False) and `info["warnings"]` holds
+`engine.tin.NOT_CONSTRAINED`; rasterisation, contours and volumes run the same formulas in NumPy.
+
+`chunk.edit_dem(..., lines="drawn")` also keeps the heights of the break lines drawn on the plan that reach the area.
+
 ## Raster calculator
 
 | Call | Description |
@@ -1651,6 +1697,8 @@ assistant ("limited for scripts" under 2).
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `engine.tin` | `build_tin`, `chunk_tin`, `tin_to_dem`, `contours`, `tin_contours`, `volume`, `tin_volume`, `export`, `read_landxml`, `report`, `triangulate`, `rasterize`, `contour_segments`, `prism_volume`, `Tin` |
+| `archaeo.breaklines` | `records`, `new_record`, `for_tin`, `as_arrays`, `write_lines`, `KINDS` |
 | `archaeo.coreg` | `coregister` (initial search on the slopes for shifts of metres, then the Nuth & Kääb shift with bias and tilt on the stable ground), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (IFC GlobalId from the `node_uuid` of a US form), `read_ifc_elements` |
@@ -1675,6 +1723,9 @@ assistant ("limited for scripts" under 2).
 | `ppg.demo.create_demo(folder, process=False)` | synthetic trench photos + GCPs, project, pottery meshes, PyArchInit DB (`DemoData`) |
 | `pyarchinit_photogrammetry.gui.main(argv)` | starts the desktop interface (`ppg-gui`) |
 | `ppg.core.progress.Progress` | progress callback with `sub()` ranges; `cancel()` stops every sub-step |
+| `window.model_view.pivot()` | the centre of rotation of the 3D view (world coordinates of the chunk), or None |
+| `window.model_view.set_pivot(point, recentre=False)` | a new centre of rotation; the view moves only with `recentre` ([3D view and trackball](gui/view3d.md)) |
+| `window.model_view.set_trackball_mode(mode)` | when the trackball is drawn: `"auto"`, `"always"`, `"never"` |
 
 
 ## Added in 0.3

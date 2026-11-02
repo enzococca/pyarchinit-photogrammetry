@@ -196,6 +196,8 @@ thermal and satellite captures, plugins.
 | **Orthophoto patch (assign images)** | which photo to use in an area of the orthophoto: [see below](#tools-orthophoto-patch) |
 | **Contour lines...** | the contours of the DEM, as a layer to query and export |
 | **Cut / fill volume...** | the volume removed and added against a plane or a DEM of before |
+| **TIN...** | a network of triangles from the DEM, the ground of the cloud or the spot heights, with the break lines as edges ([TIN and break lines](../tin.md)) |
+| **TIN and break lines** | the TIN again, *Contour lines from the TIN...*, *Volume from the TIN...*, *DEM from the TIN*, *Export TIN...*, *Draw break lines*, *Export the break lines...* |
 | **Propose US and relationships (Extended Matrix)...** | number, type and stratigraphic relationships for the units with no number ([US proposal](archaeology.md#us-proposal)) |
 | **Excavation phases (volumes and relationships)...** | a survey per phase: volumes between phases and relationships suggested ([phases](archaeology.md#excavation-phases)) |
 | **Coregister DEM...** | moves the DEM onto the DEM of another survey where the ground did not change ([coregistration](processing.md#dem-coregistration)) |
@@ -400,6 +402,7 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | **Panes** | every pane open or closed: [see below](#view-panes) |
 | **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++; also the *Assistant*) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
+| **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
 | **Theme** | light or dark, remembered |
 | **Lingua / Language** | Italian or English, at the next start (*Restart now* opens the project again at once) |
 

@@ -345,7 +345,7 @@ ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 
 ### Disegni sui prospetti e sulle sezioni
 
-Ciò che si disegna mentre è mostrato un prospetto o una sezione - unità (US, USM), quote, punti di misura, pietre -
+Ciò che si disegna mentre è mostrato un prospetto o una sezione - unità (US, USM), quote, punti di misura, pietre, linee -
 appartiene a quel prospetto, nei suoi metri (u, v), e non compare mai sulla pianta; ciò che si disegna
 sull'ortofoto non compare mai su un prospetto. Aprendo la pianta o un altro prospetto i disegni di quello lasciato
 restano con lui e tornano con lui, anche quando il progetto viene riaperto. *Modifica > Annulla* riporta indietro

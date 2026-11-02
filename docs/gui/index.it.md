@@ -8,12 +8,14 @@ pagina mostra la finestra e come è organizzata; le altre pagine di questa sezio
 
 - :material-menu: **[Menu](menus.md)** - tutti i comandi, menu per menu
 - :material-dock-left: **[Pannelli](panes.md)** - area di lavoro, riferimenti, layer, foto, sezioni, log
+- :material-rotate-3d-variant: **[Vista 3D e trackball](view3d.md)** - ruotare, spostare, avvicinare, il centro di rotazione, tasti
 - :material-camera-marker: **[Foto e marker](photos-markers.md)** - foto, maschere, marker, barre di scala
 - :material-cog-play: **[Elaborazione](processing.md)** - dall'allineamento all'ortofoto, versioni, pulizia
 - :material-draw: **[Disegno e misure](drawing.md)** - unità, sezioni, quote, misure, SAM
 - :material-shovel: **[Strumenti per l'archeologia](archaeology.md)** - PyArchInit, QGIS, proxy, matrix, fasi, ceramica
 - :material-leaf: **[Multispettrale e termico](multispectral.md)** - riflettanza, indici, temperature
 - :material-export: **[Esportazioni e rapporti](exports.md)** - rapporto PDF, tabelle Excel, formati web, importazioni
+- :material-triangle-outline: **[TIN e linee di rottura](../tin.md)** - rete di triangoli, linee di rottura, curve, volumi
 - :material-lifebuoy: **[Errori e aggiornamenti](help.md)** - log, diagnostica, aggiornamenti
 
 </div>
@@ -125,8 +127,10 @@ all'altra (nell'area di lavoro ++f2++ invece rinomina).
 
     </div>
 
-    Punti di legame, nuvola densa, modello ombreggiato o con texture, camere e marker. *Mostra* sceglie cosa;
-    trascinare con il tasto sinistro ruota, con il destro o il centrale sposta, la rotella ingrandisce.
+    Punti di legame, nuvola densa, modello ombreggiato o con texture, il TIN, camere e marker. *Mostra* sceglie
+    cosa; trascinare con il tasto sinistro ruota la scena con la trackball, con il destro o il centrale sposta, la
+    rotella avvicina verso il cursore, un doppio clic sceglie il centro di rotazione: vedi
+    [Vista 3D e trackball](view3d.md).
 
     La barra sopra la vista ha gli strumenti che lavorano in 3D:
 
