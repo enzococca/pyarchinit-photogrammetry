@@ -105,13 +105,12 @@ finestra le stesse chiamate stanno nel menu *Flusso di lavoro*.
 
 I tre script qui sotto sono scritti per la console Python, dove `window` è la finestra stessa. Usano le funzioni che
 il programma ha dalla 1.7.0: `chunk.region_from_markers(...)` e `chunk.build_normal_map(...)` (i primi due esempi, una
-chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando).
-
-!!! note "In arrivo nella 1.7.0"
-    `doc.duplicate_chunk(...)` e `chunk.set_cameras_enabled(...)` sono le funzioni del terzo esempio, e
-    `window.selected_polygon()` diventa il nome pubblico della selezione della vista 2D (in uno script lanciato con
-    *Esegui script Python...* la stessa area è il nome `polygon`). Quello script è scritto come sarà: nelle versioni
-    prima della 1.7.0 non gira.
+chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando, *Strumenti > Regione sui marker...* e
+*Strumenti > Mappa delle normali...* nella finestra), poi `doc.duplicate_chunk(...)`, `chunk.set_cameras_enabled(...)` e
+`window.selected_polygon()`, il nome pubblico della selezione della vista 2D (in uno script lanciato con *Esegui script
+Python...* la stessa area è il nome `polygon`) nel terzo (`ppg duplicate-chunk` e `ppg photos disable` dalla riga di
+comando; nella finestra *Duplica chunk...* nel clic destro di un chunk nell'Area di lavoro e *Disattiva le N foto
+selezionate* nel clic destro del pannello Foto).
 
 ### La regione sul piano di tre marker
 

@@ -141,6 +141,23 @@ class Chunk:
                 return c
         raise KeyError(label_or_key)
 
+    def set_cameras_enabled(self, cameras: Iterable[Camera | str], enabled: bool) -> int:
+        """Enable or disable photos (objects of the chunk, keys or labels): a disabled photo stays in
+        the chunk with its pose but alignment, depth maps, orthomosaic and texture leave it out from
+        their next run. Returns how many photos changed; KeyError for a name that is not there
+        (nothing changed then)."""
+        targets = []
+        for c in cameras:
+            cam = c if isinstance(c, Camera) and any(c is own for own in self.cameras) else self.camera(
+                c.key if isinstance(c, Camera) else c)
+            targets.append(cam)
+        changed = 0
+        for cam in {id(c): c for c in targets}.values():
+            if cam.enabled != bool(enabled):
+                cam.enabled = bool(enabled)
+                changed += 1
+        return changed
+
     def marker(self, label_or_key) -> Marker:
         for m in self.markers:
             if m.key == label_or_key or m.label == label_or_key or (m.code is not None and m.code == label_or_key):

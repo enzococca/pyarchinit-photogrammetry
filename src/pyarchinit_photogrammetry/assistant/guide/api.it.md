@@ -569,6 +569,11 @@ sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci 
 | `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | porta `chunks` (oggetti Chunk, chiavi o etichette; predefinito: gli altri chunk abilitati) nel sistema mondo e nel CRS di `reference`; restituisce un rapporto |
 | `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | nuovo chunk (etichetta predefinita `Merged chunk`) nel sistema del primo chunk; quelli di partenza restano |
 | `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | riga di comando (riferimento predefinito: il chunk attivo) |
+| `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | nuovo chunk (etichetta predefinita `<etichetta> (copia)`) con le foto `cameras` di `chunk` (tutte con None) e le loro pose e il loro stato attivo, i marker con le proiezioni su quelle foto, le barre di scala, trasformazione, CRS e impostazioni; un modello COLMAP scritto dalle pose, così le mappe di profondità girano senza allineare; i punti di legame copiati quando si tengono tutte le foto; i prodotti mai copiati (`keep_products` è riservato); `chunk` non cambia; CLI `ppg duplicate-chunk` |
+| `chunk.set_cameras_enabled(cameras, enabled)` | attiva o disattiva foto (oggetti, chiavi o etichette; KeyError per un nome che non c'è): una foto disattivata tiene la sua posa, allineamento, mappe di profondità, ortofoto e texture la lasciano fuori; restituisce quante sono cambiate; CLI `ppg photos enable\|disable` |
+| `engine.chunks.cameras_in_area(chunk, polygon)` | le foto la cui immagine inquadra la superficie dentro `polygon` (coordinate del chunk) |
+| `ppg duplicate-chunk project.ppg [--chunk C] [--photos nomi.txt \| --area WKT] [--label L]` | riga di comando: tutte le foto, quelle elencate in un file di testo (una per riga) o quelle che inquadrano un poligono (WKT, GeoJSON o un file GeoJSON) |
+| `ppg photos enable\|disable project.ppg NOMI... [--chunk C]` | riga di comando: foto per etichetta (o chiave) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | riga di comando (predefinito: tutti i chunk abilitati) |
 
 Metodi di `align_chunks`:
@@ -1200,7 +1205,9 @@ come etichette o codici.
 pendenze con il kernel di Horn; `"model"` lancia un raggio verticale verso il basso sul centro di ogni
 cella (`RaycastingScene` di Open3D, tasselli di 1024 x 1024 raggi) e prende la normale della faccia
 che incontra, ogni normale rivolta verso l'alto; `"auto"` è `"model"` quando il chunk ha un modello
-che Open3D riesce a caricare, altrimenti `"dem"`. `chunk.meta["normal_map"]["source"]` dice quale è
+che Open3D riesce a caricare e leggere e che copre qualche cella della griglia, altrimenti `"dem"`. Un
+modello chiesto per nome che non copre nessuna cella dà una mappa tutta trasparente (con un avviso nel
+registro); un DEM che non ne copre nessuna è un errore. `chunk.meta["normal_map"]["source"]` dice quale è
 stato usato. A vale 255 dove l'ortofoto è opaca (la sua banda alfa, o la sua maschera: nodata, una
 maschera interna) e c'è una normale; R, G e B valgono 0 dove A è 0. La griglia viene calcolata e
 scritta a blocchi di righe (`engine.normalmap.NORMAL_BLOCK_ROWS`), quindi un'ortofoto grande richiede
@@ -1618,7 +1625,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
-| `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |

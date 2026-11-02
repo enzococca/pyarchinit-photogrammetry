@@ -399,53 +399,23 @@ def _encode(normals: np.ndarray, opaque: np.ndarray) -> np.ndarray:
     return out
 
 
-def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progress | None = None):
-    """The normal map of the surface on exactly the grid of the orthomosaic (width, height,
-    transform and CRS read from it, none for a local chunk): an RGBA uint8 GeoTIFF with R = east,
-    G = north, B = up of the unit normal (``(n + 1) / 2 * 255``) and A = 255 where there is a
-    surface under an opaque pixel of the orthomosaic (its alpha band, or its mask: nodata or an
-    internal mask); RGB is 0 where A is 0. ``source``: ``"dem"`` (the DEM resampled on the grid,
-    Horn's kernel), ``"model"`` (a ray straight down on every cell, the normal of the face it
-    meets; Open3D) or ``"auto"`` (the model when the chunk has one and Open3D loads, else the DEM).
-    The grid is made and written in blocks of rows (:data:`NORMAL_BLOCK_ROWS`), so the memory is
-    the one of a block whatever the size of the orthomosaic. Written to ``path`` (default the
-    product ``normal_map`` of the chunk, ``normal_map.tif``); the path returned."""
-    from pathlib import Path
+class _Uncovered(RuntimeError):
+    """The surface (DEM or model) has a normal on no cell of the grid."""
 
+
+def _write_normal_map(normals, source: str, ortho, out, transform, shape, crs, progress: Progress,
+                      empty: bool) -> int:
+    """The normal map of ``normals`` written to ``out`` block by block (a ``.part`` file put in place at the
+    end, removed on a failure); ``normals`` closed. A surface covering no cell raises :class:`_Uncovered`
+    unless ``empty``: then the map is written all transparent, with a warning. Returns the opaque cells."""
     import rasterio
     from rasterio.windows import Window
 
     from ..io.files import replace_file
     from .dem import finish_geotiff, geotiff_profile
 
-    progress = as_progress(progress)
-    if source not in ("auto", "dem", "model"):
-        raise ValueError(f"source: 'auto', 'dem' or 'model', not {source!r}")
-    ortho = chunk.orthomosaic_path
-    if ortho is None or not ortho.exists():
-        raise RuntimeError("build the orthomosaic first: the normal map takes its grid")
-    with rasterio.open(ortho) as o:
-        transform, shape, crs = o.transform, (o.height, o.width), o.crs
-    if crs and crs.is_geographic:
-        raise RuntimeError("the normal map needs an orthomosaic in a projected CRS (metres), not in degrees")
     h, w = shape
-    normals = None
-    if source in ("auto", "model"):
-        model = chunk.product_path("model")
-        if source == "model" or (model is not None and model.exists()):
-            try:
-                normals = _ModelNormals(chunk, transform, shape)
-                source = "model"
-            except RuntimeError:
-                if source == "model":
-                    raise
-                log.warning("normal map: the model cannot be used, the DEM instead", exc_info=True)
-    if normals is None:
-        source = "dem"
-        normals = _DemNormals(chunk, transform, shape, crs)
     progress(0.0, f"Mappa delle normali dal {'modello' if source == 'model' else 'DEM'}")
-    out = Path(path) if path is not None else chunk.own_product_path("normal_map")
-    out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.stem + ".part" + out.suffix)
     rows = _block_rows(w)
     blocks = [(r0, min(r0 + rows, h)) for r0 in range(0, h, rows)]
@@ -460,8 +430,10 @@ def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progres
                 dst.write(rgba, window=window)
                 opaque_cells += int(np.count_nonzero(rgba[3]))
             if not normals.any:
-                raise RuntimeError("the DEM does not cover the orthomosaic" if source == "dem"
-                                   else "the model does not cover the orthomosaic")
+                what = "the DEM" if source == "dem" else "the model"
+                if not empty:
+                    raise _Uncovered(f"{what} does not cover the orthomosaic")
+                log.warning("normal map: %s does not cover the orthomosaic, the map is transparent", what)
             progress(0.9, "Mappa delle normali: livelli ridotti")
             finish_geotiff(dst)
         replace_file(part, out)
@@ -470,6 +442,64 @@ def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progres
         raise
     finally:
         normals.close()
+    return opaque_cells
+
+
+def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progress | None = None):
+    """The normal map of the surface on exactly the grid of the orthomosaic (width, height,
+    transform and CRS read from it, none for a local chunk): an RGBA uint8 GeoTIFF with R = east,
+    G = north, B = up of the unit normal (``(n + 1) / 2 * 255``) and A = 255 where there is a
+    surface under an opaque pixel of the orthomosaic (its alpha band, or its mask: nodata or an
+    internal mask); RGB is 0 where A is 0. ``source``: ``"dem"`` (the DEM resampled on the grid,
+    Horn's kernel), ``"model"`` (a ray straight down on every cell, the normal of the face it
+    meets; Open3D) or ``"auto"`` (the model when the chunk has one, Open3D loads, the model can be
+    read and covers some cell; else the DEM). A model asked for by name that covers no cell gives a
+    map transparent everywhere (with a warning); a DEM that covers none raises. The grid is made and written in blocks of rows (:data:`NORMAL_BLOCK_ROWS`), so the memory is
+    the one of a block whatever the size of the orthomosaic. Written to ``path`` (default the
+    product ``normal_map`` of the chunk, ``normal_map.tif``); the path returned."""
+    from pathlib import Path
+
+    import rasterio
+
+    progress = as_progress(progress)
+    if source not in ("auto", "dem", "model"):
+        raise ValueError(f"source: 'auto', 'dem' or 'model', not {source!r}")
+    ortho = chunk.orthomosaic_path
+    if ortho is None or not ortho.exists():
+        raise RuntimeError("build the orthomosaic first: the normal map takes its grid")
+    with rasterio.open(ortho) as o:
+        transform, shape, crs = o.transform, (o.height, o.width), o.crs
+    if crs and crs.is_geographic:
+        raise RuntimeError("the normal map needs an orthomosaic in a projected CRS (metres), not in degrees")
+    h, w = shape
+    auto = source == "auto"
+    normals = None
+    if source in ("auto", "model"):
+        model = chunk.product_path("model")
+        if source == "model" or (model is not None and model.exists()):
+            try:
+                normals = _ModelNormals(chunk, transform, shape)
+                source = "model"
+            except (RuntimeError, ValueError, OSError):  # ValueError, OSError: a model file that cannot be read
+                if not auto:
+                    raise
+                log.warning("normal map: the model cannot be used, the DEM instead", exc_info=True)
+    if normals is None:
+        source = "dem"
+        normals = _DemNormals(chunk, transform, shape, crs)
+    out = Path(path) if path is not None else chunk.own_product_path("normal_map")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # a model that covers no cell: with "auto" the DEM instead, asked for by name a transparent map
+        opaque_cells = _write_normal_map(normals, source, ortho, out, transform, shape, crs, progress,
+                                         empty=source == "model" and not auto)
+    except _Uncovered:
+        if not (auto and source == "model"):
+            raise
+        log.warning("normal map: the model does not cover the orthomosaic, the DEM instead")
+        source = "dem"
+        opaque_cells = _write_normal_map(_DemNormals(chunk, transform, shape, crs), source, ortho, out, transform,
+                                         shape, crs, progress, empty=False)
     if path is None:
         chunk._set_product("normal_map", out)
         chunk.meta["normal_map"] = {"source": source}

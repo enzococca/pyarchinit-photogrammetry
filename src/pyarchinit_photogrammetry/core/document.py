@@ -124,6 +124,19 @@ class Document:
         return merge_chunks(self, chunks, label=label, merge_markers=merge_markers, merge_tie_points=merge_tie_points,
                             merge_point_clouds=merge_point_clouds, merge_models=merge_models, progress=progress)
 
+    def duplicate_chunk(self, chunk: Chunk, cameras=None, label: str | None = None,
+                        keep_products: bool = False) -> Chunk:
+        """A new chunk (at the end) with the photos ``cameras`` of ``chunk`` (all when None): their
+        sensors, poses and enabled flags, the markers with the projections on those photos only, the
+        scale bars, transform, CRS and the settings of the chunk (its ``meta`` without what belongs to
+        products, versions, drawings and proxies). A COLMAP model is written from the poses, so depth
+        maps, dense cloud and the rest can be built again without aligning; the tie points are copied
+        when every photo is kept. Products are never copied (``keep_products`` is reserved and must be
+        False). ``label``: default ``"<label> (copia)"``. ``chunk`` is not changed."""
+        from ..engine.chunks import duplicate_chunk
+
+        return duplicate_chunk(self, chunk, cameras, label=label, keep_products=keep_products)
+
     # ---------------------------------------------------------------- I/O
     def save(self, path: str | Path | None = None) -> Path:
         if path is not None:

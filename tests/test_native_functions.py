@@ -285,3 +285,174 @@ def test_cli_region_and_normal_map(processed, tmp_path):
     again = ppg.Document.open(doc.path).chunk
     assert "normal_map" in again.products and again.product_path("normal_map").exists()
     assert "normal_map.tif" in r.output
+
+
+# ---------------------------------------------------------------- duplicate a chunk, enable or disable photos
+def _six(ch):
+    """Six nadir photos of the trench in a block of two rows by three (inside the grid of 4 x 5): each has
+    partners among the others for its depth map."""
+    return [ch.camera(f"IMG_{i:04d}") for i in (6, 7, 8, 11, 12, 13)]
+
+
+def _snapshot(ch):
+    import json
+
+    return json.dumps(ch.to_dict(), sort_keys=True, default=str)
+
+
+def test_duplicate_chunk_with_some_photos_rebuilds_depth_maps(processed, tmp_path):
+    from pyarchinit_photogrammetry.engine.confidence import depth_maps
+
+    doc, ch = _copy(processed, tmp_path)
+    assert len(ch.cameras) == 28
+    before = _snapshot(ch)
+    files_before = sorted(p.name for p in ch.data_dir.iterdir())
+    six = _six(ch)
+    keys = {c.key for c in six}
+    dup = doc.duplicate_chunk(ch, six, label="Sei foto")
+    assert dup in doc.chunks and dup is not ch and dup.key != ch.key and dup.label == "Sei foto"
+    assert dup.data_dir != ch.data_dir
+    assert len(dup.cameras) == 6 and {c.key for c in dup.cameras} == keys
+    assert all(c.aligned for c in dup.cameras) and all(c is not s for c in dup.cameras for s in six)
+    for c in dup.cameras:  # the same poses
+        assert np.allclose(c.transform, ch.camera(c.key).transform)
+    assert set(dup.sensors) == {c.sensor_key for c in six}
+    assert [m.label for m in dup.markers] == [m.label for m in ch.markers]
+    assert sum(len(m.projections) for m in dup.markers) < sum(len(m.projections) for m in ch.markers)
+    assert all(set(m.projections) <= keys for m in dup.markers)
+    assert np.allclose(dup.transform, ch.transform) and dup.crs == ch.crs
+    for name in ("point_cloud", "model", "dem", "orthomosaic", "tie_points"):
+        assert name not in dup.products  # products never copied; tie points only with every photo
+    for key in ("orthomosaic", "dense", "versions", "drawings", "proxies"):
+        assert key not in dup.meta
+    assert dup.product_path("reconstruction").exists()
+    dup.build_depth_maps(quality="low")
+    assert len(depth_maps(dup)) == 6
+    assert _snapshot(ch) == before  # the source chunk untouched
+    assert sorted(p.name for p in ch.data_dir.iterdir()) == files_before
+    doc.save()
+    import pyarchinit_photogrammetry as ppg
+
+    again = ppg.Document.open(doc.path)
+    assert [len(c.cameras) for c in again.chunks] == [28, 6]
+
+
+def test_duplicate_chunk_all_photos_keeps_tie_points(processed, tmp_path):
+    doc, ch = _copy(processed, tmp_path)
+    ch.cameras[3].enabled = False
+    dup = doc.duplicate_chunk(ch)
+    assert dup.label == f"{ch.label} (copia)"
+    assert len(dup.cameras) == len(ch.cameras)
+    assert [c.enabled for c in dup.cameras] == [c.enabled for c in ch.cameras]
+    assert dup.product_path("tie_points").exists()
+    assert dup.product_path("tie_points").parent == dup.data_dir
+    assert len(dup.tie_points) == len(ch.tie_points)
+    assert sum(len(m.projections) for m in dup.markers) == sum(len(m.projections) for m in ch.markers)
+    assert len(dup.scalebars) == len(ch.scalebars)
+    assert not {"point_cloud", "model", "dem", "orthomosaic"} & set(dup.products)
+    with pytest.raises(ValueError):  # a camera of another chunk
+        doc.duplicate_chunk(dup, [ch.cameras[0]])
+
+
+def test_set_cameras_enabled_and_builders_honour_it(processed, tmp_path):
+    from pyarchinit_photogrammetry.engine.confidence import depth_maps
+
+    _doc, ch = _copy(processed, tmp_path)
+    six = {c.key for c in _six(ch)}
+    others = [c for c in ch.cameras if c.key not in six]
+    assert len(others) == 22
+    # by object, by key and by label
+    mixed = others[:8] + [c.key for c in others[8:15]] + [c.label for c in others[15:]]
+    assert ch.set_cameras_enabled(mixed, False) == 22
+    assert ch.set_cameras_enabled(mixed, False) == 0  # nothing changes the second time
+    assert {c.key for c in ch.aligned_cameras} == six
+    with pytest.raises(KeyError):
+        ch.set_cameras_enabled(["nessuna foto"], False)
+    seen = []
+    ch.build_orthomosaic(resolution=0.05, progress=lambda f, m: seen.append(m or ""))
+    assert ch.meta["orthomosaic"]["photos"] == 6
+    assert any("from 6 photos" in m for m in seen)
+    ch.build_depth_maps(quality="low")
+    assert len(depth_maps(ch)) == 6
+    assert ch.set_cameras_enabled(others, True) == 22 and len(ch.aligned_cameras) == 28
+
+
+def test_cli_duplicate_chunk_and_photos(processed, tmp_path):
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _copy(processed, tmp_path)
+    six = _six(ch)
+    names = tmp_path / "foto.txt"
+    names.write_text("\n".join(c.label for c in six) + "\n")
+    r = CliRunner().invoke(app, ["duplicate-chunk", str(doc.path), "--photos", str(names), "--label", "Sei"])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    again = ppg.Document.open(doc.path)
+    assert [c.label for c in again.chunks] == [ch.label, "Sei"] and len(again.chunks[1].cameras) == 6
+    r = CliRunner().invoke(app, ["photos", "disable", str(doc.path), six[0].label, six[1].label, "--chunk", "Sei"])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    again = ppg.Document.open(doc.path)
+    assert sum(not c.enabled for c in again.chunks[1].cameras) == 2
+    assert all(c.enabled for c in again.chunks[0].cameras)
+    r = CliRunner().invoke(app, ["photos", "enable", str(doc.path), six[0].label, "--chunk", "Sei"])
+    assert r.exit_code == 0 and "1" in r.output
+    r = CliRunner().invoke(app, ["photos", "disable", str(doc.path), "nessuna"])
+    assert r.exit_code == 2
+    r = CliRunner().invoke(app, ["duplicate-chunk", str(doc.path), "--area", "POLYGON((0 0, 1 0, 1 1, 0 0))"])
+    assert r.exit_code == 2  # an area far from the photos: no photo
+    r = CliRunner().invoke(app, ["duplicate-chunk", str(doc.path), "--area", "non un poligono"])
+    assert r.exit_code == 2
+
+
+# ---------------------------------------------------------------- the normal map: what falls back to the DEM
+def test_normal_map_auto_falls_back_on_a_model_that_cannot_be_read(processed, tmp_path, monkeypatch):
+    pytest.importorskip("open3d")
+    from pyarchinit_photogrammetry.io import mesh_ply
+
+    _doc, ch = _copy(processed, tmp_path)
+
+    def broken(*_a, **_k):
+        raise ValueError("not a PLY")
+
+    monkeypatch.setattr(mesh_ply, "read_mesh", broken)
+    ch.build_normal_map()
+    assert ch.meta["normal_map"]["source"] == "dem"
+    with pytest.raises(ValueError):
+        ch.build_normal_map(source="model")
+
+
+def test_normal_map_of_a_model_covering_no_cell(processed, tmp_path, monkeypatch):
+    pytest.importorskip("open3d")
+    import rasterio
+
+    from pyarchinit_photogrammetry.engine import normalmap as N
+
+    _doc, ch = _copy(processed, tmp_path)
+
+    def nowhere(self, r0, r1):
+        return np.full((r1 - r0, self.shape[1], 3), np.nan, np.float32)
+
+    monkeypatch.setattr(N._ModelNormals, "block", nowhere)
+    path = N.normal_map_on_grid(ch, source="model", path=tmp_path / "vuota.tif")
+    with rasterio.open(path) as n:
+        assert n.read(4).max() == 0  # transparent everywhere
+    ch.build_normal_map()  # "auto": the DEM instead
+    assert ch.meta["normal_map"]["source"] == "dem"
+    with rasterio.open(ch.product_path("normal_map")) as n:
+        assert n.read(4).max() == 255
+
+
+def test_cli_normal_map_bad_parameters(processed, tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _copy(processed, tmp_path)
+    r = CliRunner().invoke(app, ["normal-map", str(doc.path), "--source", "lidar"])
+    assert r.exit_code == 2 and "auto, dem or model" in r.output
+    ch.products.pop("orthomosaic")
+    doc.save()
+    r = CliRunner().invoke(app, ["normal-map", str(doc.path)])
+    assert r.exit_code == 2 and "orthomosaic" in r.output

@@ -70,7 +70,7 @@ tiene i pulsanti che non ci stanno):
 
 | Su... | Comandi |
 | --- | --- |
-| un chunk | *Rendi attivo*, *Rinomina...*, *Attiva* o *Disattiva*, *Rimuovi chunk* |
+| un chunk | *Rendi attivo*, *Rinomina...*, *Duplica chunk...* (tutte le sue foto, quelle selezionate nel pannello Foto o quelle che inquadrano il poligono selezionato sull'ortofoto: un nuovo chunk con le loro pose, dove mappe di profondità e il resto si costruiscono di nuovo senza allineare), *Attiva* o *Disattiva*, *Rimuovi chunk* |
 | nuvola densa, modello, DEM, ortofoto | *Mostra*, *Conserva una copia come versione*, *Rinomina questa versione...*, *Rimuovi* |
 | una versione conservata | *Mostra*, *Rendi attiva*, *Differenza con il DEM attivo*, *Esporta...*, *Rinomina...*, *Rimuovi* |
 | una foto | *Apri*, *Attiva* o *Disattiva*, *Rimuovi la foto* |
@@ -195,7 +195,8 @@ un'area - con *Mostra tutte* e *Precedente* / *Successiva*. I filtri vengono da:
 * un nuovo marker, che filtra le foto su di sé.
 
 Il clic destro sulle miniature misura anche la **qualità delle immagini** (la nitidezza di ogni foto confrontata
-con le più nitide; *sfocata* sotto 0,5), disattiva le foto sfocate, attiva o disattiva quelle selezionate,
+con le più nitide; *sfocata* sotto 0,5), disattiva le foto sfocate, attiva o disattiva quelle selezionate (una foto disattivata tiene la sua posa, la sua
+miniatura è velata di grigio con un distintivo grigio e le elaborazioni successive la lasciano fuori),
 imposta le loro maschere e il loro modello di obiettivo (vedi [Foto e marker](photos-markers.md)).
 
 ## Sezioni

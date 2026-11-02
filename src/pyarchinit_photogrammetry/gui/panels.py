@@ -29,7 +29,8 @@ OTHER_PRODUCTS = {"depth_maps": "Mappe di profondità", "coverage": "Copertura d
                   "svf": "Sky-view factor", "openness_pos": "Openness positiva", "openness_neg": "Openness negativa",
                   "slrm": "Rilievo locale (SLRM)", "msrm": "Rilievo multiscala (MSRM)",
                   "multi_hillshade": "Ombreggiatura da 16 direzioni", "ms:reflectance": "Ortofoto di riflettanza",
-                  "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche"}
+                  "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche",
+                  "normal_map": "Mappa delle normali"}
 
 
 def product_name(key: str) -> str:
@@ -311,6 +312,14 @@ class WorkspaceTree(QTreeWidget):
                 it.setIcon(0, icon("fieldcheck"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "coverage"))
                 it.setToolTip(0, tr("Doppio clic per vederla: quante foto inquadrano ogni punto (rosso: meno di tre)"))
+                ci.addChild(it)
+            normals = ch.product_path("normal_map")
+            if normals is not None and normals.exists():
+                it = QTreeWidgetItem([tr("Mappa delle normali")])
+                it.setIcon(0, icon("relief"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "normal_map"))
+                it.setToolTip(0, tr("Doppio clic per vederla: rosso est, verde nord, blu alto, sulla griglia "
+                                    "dell'ortofoto"))
                 ci.addChild(it)
             prec = ch.product_path("dem_precision")
             if prec is not None and prec.exists():
@@ -635,13 +644,16 @@ class PhotosPane(QListWidget):
         return pm
 
     @staticmethod
-    def _icon(pm: QPixmap, aligned: bool, flags: tuple = (0, 0)) -> QIcon:
+    def _icon(pm: QPixmap, aligned: bool, flags: tuple = (0, 0), enabled: bool = True) -> QIcon:
         """The thumbnail with the aligned badge and, at the bottom, the markers on the photo:
-        green = measured, blue = estimated and to be confirmed (as Metashape's flags)."""
+        green = measured, blue = estimated and to be confirmed (as Metashape's flags). A disabled
+        photo: the thumbnail veiled in grey and a grey badge with a bar."""
         out = QPixmap(pm)
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        col = QColor(PALETTE["green"] if aligned else PALETTE["red"])
+        if not enabled:
+            p.fillRect(out.rect(), QColor(128, 128, 128, 150))
+        col = QColor("#7a7a7a" if not enabled else PALETTE["green"] if aligned else PALETTE["red"])
         p.setBrush(QBrush(col))
         p.setPen(QColor("white"))
         p.drawEllipse(5, 5, 18, 18)
@@ -649,7 +661,7 @@ class PhotosPane(QListWidget):
         f.setBold(True)
         f.setPointSize(11)
         p.setFont(f)
-        p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "✓" if aligned else "✕")
+        p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "–" if not enabled else "✓" if aligned else "✕")
         x = 5
         for count, colour in ((flags[0], "#30a050"), (flags[1], "#2f7fd8")):
             if count:
@@ -676,7 +688,7 @@ class PhotosPane(QListWidget):
         f = self._flags.get(getattr(cam, "key", None))
         text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
         if not getattr(cam, "enabled", True):
-            text += " (disattivata)"
+            text += tr(" (disattivata: le prossime elaborazioni la lasciano fuori)")
         meta = getattr(cam, "meta", None) or {}
         if meta.get("panorama"):
             text += tr("\nFaccia «{0}» della foto 360° {1}", meta.get('face'), meta['panorama'])
@@ -695,7 +707,8 @@ class PhotosPane(QListWidget):
             cam = it.data(Qt.ItemDataRole.UserRole)
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
-            it.setIcon(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]))
+            it.setIcon(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2],
+                                  getattr(cam, "enabled", True)))
             it.setToolTip(self._tooltip(cam))
 
     def set_filter(self, keys=None, title: str = "", focus=None) -> int:
@@ -741,7 +754,8 @@ class PhotosPane(QListWidget):
         for cam in chunk.cameras:
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
-            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]),
+            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2],
+                                            getattr(cam, "enabled", True)),
                                  cam.label)
             it.setData(Qt.ItemDataRole.UserRole, cam)
             it.setToolTip(self._tooltip(cam))
@@ -767,7 +781,8 @@ class PhotosPane(QListWidget):
         self._cache[path] = pm
         for it in self._items.get(path, []):
             cam = it.data(Qt.ItemDataRole.UserRole)
-            it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2]))
+            it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2],
+                                  getattr(cam, "enabled", True)))
             if img.isNull():
                 it.setToolTip(tr("{0}\nfoto non leggibile (file vuoto o mancante)", cam.path))
         self._done += 1

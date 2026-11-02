@@ -27,7 +27,9 @@ gnss_app = typer.Typer(help="GNSS positions of the photos: their quality per fli
 app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
+photos_app = typer.Typer(help="Enable or disable photos: a disabled photo keeps its pose, the next steps leave it out")
 app.add_typer(gnss_app, name="gnss")
+app.add_typer(photos_app, name="photos")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -308,6 +310,74 @@ def normal_map_cmd(project: Path,
         raise typer.BadParameter(str(exc)) from exc
     doc.save()
     typer.echo(f"normal map from the {ch.meta.get('normal_map', {}).get('source', source)}: {path}")
+
+
+@app.command("duplicate-chunk")
+def duplicate_chunk_cmd(project: Path, chunk: Optional[str] = None,
+                        photos: Optional[Path] = typer.Option(None, help="text file with the names of the photos "
+                                                              "to keep, one a line"),
+                        area: Optional[str] = typer.Option(None, help="polygon (WKT, GeoJSON or a GeoJSON file) in "
+                                                           "the coordinates of the chunk: the photos framing it"),
+                        label: Optional[str] = typer.Option(None, help="name of the new chunk (default: "
+                                                            "'<name> (copia)')")):
+    """A copy of the chunk with all its photos or some of them, with their poses: depth maps, dense
+    cloud and the rest can be built on it again without aligning. Products are not copied."""
+    from .engine.chunks import cameras_in_area
+
+    if photos is not None and area is not None:
+        raise typer.BadParameter("give --photos or --area, not both")
+    doc, ch = _open(project, chunk)
+    cams = None
+    if photos is not None:
+        names = [n.strip() for n in photos.read_text(encoding="utf-8").splitlines() if n.strip()]
+        try:
+            cams = [ch.camera(n) for n in _photo_names(ch, names)]
+        except KeyError as exc:
+            raise typer.BadParameter(f"no photo {exc.args[0]!r} in the chunk {ch.label}") from exc
+    elif area is not None:
+        polygon = _polygons([area])
+        try:
+            cams = cameras_in_area(ch, polygon)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if not cams:
+            raise typer.BadParameter("no photo frames the area")
+    try:
+        dup = doc.duplicate_chunk(ch, cams, label=label)
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    doc.save()
+    typer.echo(f"chunk {dup.label}: {len(dup.cameras)} photos of {len(ch.cameras)}, {len(dup.markers)} markers")
+
+
+def _photo_names(ch, names: list[str]) -> list:
+    """Names of photos of the command line: a label, else a key when it is a number."""
+    labels = {c.label for c in ch.cameras}
+    return [n if n in labels or not n.isdigit() else int(n) for n in names]
+
+
+def _photos_enabled(project: Path, names: list[str], chunk: Optional[str], enabled: bool) -> None:
+    doc, ch = _open(project, chunk)
+    try:
+        n = ch.set_cameras_enabled(_photo_names(ch, names), enabled)
+    except KeyError as exc:
+        raise typer.BadParameter(f"no photo {exc.args[0]!r} in the chunk {ch.label}") from exc
+    doc.save()
+    typer.echo(f"{n} photos {'enabled' if enabled else 'disabled'} in {ch.label}")
+
+
+@photos_app.command("enable")
+def photos_enable(project: Path, names: list[str] = typer.Argument(..., help="photo names (or keys)"),
+                  chunk: Optional[str] = None):
+    """Enable photos: the next alignment and builds use them."""
+    _photos_enabled(project, names, chunk, True)
+
+
+@photos_app.command("disable")
+def photos_disable(project: Path, names: list[str] = typer.Argument(..., help="photo names (or keys)"),
+                   chunk: Optional[str] = None):
+    """Disable photos: they keep their pose, the next alignment and builds leave them out."""
+    _photos_enabled(project, names, chunk, False)
 
 
 @app.command("colour-scan")

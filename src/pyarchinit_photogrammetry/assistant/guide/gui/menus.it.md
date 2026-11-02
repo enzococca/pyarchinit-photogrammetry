@@ -203,6 +203,8 @@ multispettrali, termiche e satellitari, i plugin.
 | **Calibra il colore con la tabella colori...** | una ColorChecker fotografata nello scavo rende confrontabili i colori Munsell |
 | **Visualizzazioni del rilievo...** | sky-view factor, openness, rilievo locale e multiscala, ombreggiature ([rilievo](archaeology.md#visualizzazioni-del-rilievo)) |
 | **Calcolatore raster...** | formule sui raster del progetto, anche quelli dei plugin, come in QGIS ([calcolatore](archaeology.md#calcolatore-raster)) |
+| **Regione sui marker...** | una regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto), con il suo spessore lungo la normale: mappe di profondità, nuvola densa e modello ne restano dentro |
+| **Mappa delle normali...** | le normali della superficie (modello o DEM) sulla griglia dell'ortofoto, rosso est, verde nord, blu alto; mostrata nella vista 2D ed elencata nell'Area di lavoro |
 | **Opzioni delle sezioni...** · **Pianta a quota (slice orizzontale)...** | da cosa tagliare le sezioni (modello o nuvola, classi); una pianta a una quota |
 | **Profilo ceramico da mesh...** | diametri, altezza e profilo di un vaso o di un frammento ([ceramica](archaeology.md#profili-ceramici)) |
 | **Proxy 3D delle US...** | i solidi delle unità per l'Extended Matrix e il BIM ([proxy](archaeology.md#proxy-3d-delle-us)) |

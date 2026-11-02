@@ -549,6 +549,11 @@ then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
 | --- | --- |
 | `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | moves `chunks` (Chunk objects, keys or labels; default: the other enabled chunks) into the world frame and CRS of `reference`; returns a report |
 | `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | new chunk (default label `Merged chunk`) in the frame of the first chunk; the inputs are kept |
+| `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | new chunk (default label `<label> (copia)`) with the photos `cameras` of `chunk` (all when None) and their poses and enabled flags, the markers with the projections on those photos, the scale bars, transform, CRS and settings; a COLMAP model written from the poses, so depth maps run without aligning; the tie points copied when every photo is kept; products never copied (`keep_products` is reserved); `chunk` is not changed; CLI `ppg duplicate-chunk` |
+| `chunk.set_cameras_enabled(cameras, enabled)` | enables or disables photos (objects, keys or labels; KeyError for a name that is not there): a disabled photo keeps its pose, alignment, depth maps, orthomosaic and texture leave it out; returns how many changed; CLI `ppg photos enable\|disable` |
+| `engine.chunks.cameras_in_area(chunk, polygon)` | the photos whose image frames the surface inside `polygon` (chunk coordinates) |
+| `ppg duplicate-chunk project.ppg [--chunk C] [--photos names.txt \| --area WKT] [--label L]` | command line: all the photos, those named in a text file (one a line), or those framing a polygon (WKT, GeoJSON or a GeoJSON file) |
+| `ppg photos enable\|disable project.ppg NAMES... [--chunk C]` | command line: photos by label (or key) |
 | `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | command line (default reference: the active chunk) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | command line (default: all enabled chunks) |
 
@@ -1163,8 +1168,9 @@ first, then as a key (`markers.gcp.resolve_marker`): with targets, give keys as 
 **`chunk.build_normal_map(source)`**: `"dem"` resamples the DEM on the grid (bilinear) and takes the
 slopes with Horn's kernel; `"model"` casts a ray straight down on every cell centre (Open3D
 `RaycastingScene`, tiles of 1024 x 1024 rays) and takes the normal of the face it meets, every
-normal turned upwards; `"auto"` is `"model"` when the chunk has a model that Open3D can load,
-else `"dem"`. `chunk.meta["normal_map"]["source"]` says which one was used. A is 255 where the
+normal turned upwards; `"auto"` is `"model"` when the chunk has a model that Open3D can load and
+read and that covers some cell of the grid, else `"dem"`. A model asked for by name that covers no cell
+gives a map transparent everywhere (with a warning in the log); a DEM that covers none is an error. `chunk.meta["normal_map"]["source"]` says which one was used. A is 255 where the
 orthomosaic is opaque (its alpha band, or its mask: nodata, an internal mask) and there is a normal;
 R, G and B are 0 where A is 0. The grid is made and written in blocks of rows
 (`engine.normalmap.NORMAL_BLOCK_ROWS`), so a large orthomosaic needs the memory of a block only. A
@@ -1572,7 +1578,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
-| `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |

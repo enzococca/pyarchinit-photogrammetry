@@ -1288,7 +1288,89 @@ def _without_position(m: Marker) -> Marker:
     return Marker(key=m.key, label=m.label, projections=m.projections)
 
 
-__all__ = ["align_chunks", "merge_chunks", "resolve_chunk", "common_markers", "common_cameras", "marker_position",
+# what ``chunk.meta`` says of products, versions, drawings and proxies: not carried into a duplicate, which has none
+DUPLICATE_DROPPED_META = ("versions", "active_versions", "drawings", "proxies", "dense", "point_cloud_source",
+                          "point_cloud_cleaning", "confidence", "model", "texture", "dem", "dem_edits", "precision",
+                          "orthomosaic", "normal_map", "relief", "elevations", "calculator", "field_check", "stones",
+                          "pottery", "splat")
+
+
+def _cameras_of(chunk: "Chunk", cameras) -> list[Camera]:
+    """The cameras of ``chunk`` named by ``cameras`` (objects of the chunk, keys or labels), in the order
+    of the chunk; ValueError for a camera of another chunk, KeyError for a name that is not there."""
+    keys = set()
+    for c in cameras:
+        if isinstance(c, Camera):
+            if not any(c is own for own in chunk.cameras):
+                raise ValueError(f"the photo {c.label} is not a photo of the chunk {chunk.label}")
+            keys.add(c.key)
+        else:
+            keys.add(chunk.camera(c).key)
+    return [c for c in chunk.cameras if c.key in keys]
+
+
+def cameras_in_area(chunk: "Chunk", polygon) -> list[Camera]:
+    """The cameras of ``chunk`` whose photo frames some of the surface (DEM or model) inside
+    ``polygon`` (chunk coordinates), in the order of the chunk (:func:`.patches.photos_for_area`)."""
+    from .patches import photos_for_area
+
+    keys = {r["key"] for r in photos_for_area(chunk, polygon, limit=100_000) if r.get("coverage", 0) > 0}
+    return [c for c in chunk.cameras if c.key in keys]
+
+
+def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | None = None,
+                    keep_products: bool = False) -> "Chunk":
+    """See :meth:`Document.duplicate_chunk`."""
+    import copy
+
+    from .sfm import write_reconstruction_from_chunk
+
+    if keep_products:
+        raise ValueError("keep_products is reserved: a duplicate has no products in this version")
+    if not any(chunk is c for c in doc.chunks):
+        raise ValueError("the chunk does not belong to this document")
+    chosen = list(chunk.cameras) if cameras is None else _cameras_of(chunk, cameras)
+    if not chosen:
+        raise ValueError("no photo to put in the new chunk")
+    every = len(chosen) == len(chunk.cameras)
+    keys = {c.key for c in chosen}
+    dup = doc.add_chunk(label or f"{chunk.label} (copia)")
+    try:
+        shutil.rmtree(dup.data_dir, ignore_errors=True)  # a fresh folder (a removed chunk may have left one)
+        dup.crs = chunk.crs
+        dup.transform = np.asarray(chunk.transform, float).copy()
+        dup.enabled = chunk.enabled
+        meta = copy.deepcopy(chunk.meta)
+        for key in DUPLICATE_DROPPED_META:
+            meta.pop(key, None)
+        dup.meta = meta
+        dup.cameras = [copy.deepcopy(c) for c in chosen]
+        used = {c.sensor_key for c in chosen}
+        dup.sensors = {k: copy.deepcopy(s) for k, s in chunk.sensors.items() if k in used}
+        dup.markers = []
+        for m in chunk.markers:
+            new = copy.deepcopy(m)
+            new.projections = {k: p for k, p in new.projections.items() if k in keys}
+            dup.markers.append(new)
+        present = {m.key for m in dup.markers}
+        dup.scalebars = [copy.deepcopy(b) for b in chunk.scalebars if b.marker_a in present and b.marker_b in present]
+        tie = chunk.tie_points
+        if every and tie is not None:
+            src = chunk.product_path("tie_points")
+            out = dup.data_dir / src.name
+            shutil.copy2(src, out)
+            dup._set_product("tie_points", out)
+        if any(c.aligned for c in dup.cameras):
+            # the poses as a COLMAP model observing the tie points of the source: depth maps run on it
+            write_reconstruction_from_chunk(dup, points=tie)
+    except BaseException:
+        doc.remove_chunk(dup)
+        raise
+    return dup
+
+
+__all__ = ["align_chunks", "merge_chunks", "duplicate_chunk", "cameras_in_area", "resolve_chunk", "common_markers", "common_cameras",
+           "marker_position",
            "pose_similarity", "icp", "global_guesses", "fpfh_features", "ransac_rigid", "ransac_hypotheses",
            "registration_quality",
            "registration_cloud", "scene_depth", "affine_inverse", "ALIGN_METHODS", "INITIAL_GUESSES"]

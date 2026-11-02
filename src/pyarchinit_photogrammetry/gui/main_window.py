@@ -1050,6 +1050,12 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Calcolatore raster..."), lambda: self.raster_calculator(), processing=True,
                   icon_name="calculator",
                   tip=tr("Formule sui raster del progetto, anche quelli dei plugin, come nel calcolatore raster di QGIS"))
+        self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
+                  tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
+                         "nuvola densa e modello restano dentro il suo spessore"))
+        self._act(m, tr("Mappa delle normali..."), self.build_normal_map, processing=True, icon_name="relief",
+                  tip=tr("Le normali della superficie sulla griglia dell'ortofoto (stessi pixel, stesse coordinate): "
+                         "rosso est, verde nord, blu alto"))
         self._act(m, tr("Opzioni delle sezioni..."), self.section_options, icon_name="line")
         self.a_slice = self._act(m, tr("Pianta a quota (slice orizzontale)..."), self.plan_slice, processing=True,
                                  icon_name="slice")
@@ -3318,6 +3324,66 @@ class MainWindow(QMainWindow):
                                                  merge_tie_points=v["tie_points"], merge_point_clouds=v["clouds"],
                                                  merge_models=v["models"], progress=p), done)
 
+    def duplicate_chunk(self, chunk=None) -> None:
+        """*Duplica chunk...* (menu of a chunk in the Area di lavoro): a new chunk with all the photos of
+        ``chunk`` (default the active one), the photos selected in the Photos pane or those framing the
+        polygon selected on the orthophoto, with their poses (:meth:`Document.duplicate_chunk`); it becomes
+        the active chunk. Products are not copied: depth maps and the rest are built again on it."""
+        ch = chunk if chunk is not None else self.chunk
+        if ch is None:
+            self._warn("Nessun chunk attivo.")
+            return
+        selected = self.selected_cameras() if ch is self.chunk else []
+        options = [tr("Tutte le foto ({0})", len(ch.cameras)),
+                   tr("Le {0} foto selezionate nel pannello Foto", len(selected)),
+                   tr("Le foto dell'area selezionata sull'ortofoto")]
+        answer = choice(self, "question", tr("Duplica chunk"),
+                        tr("Quali foto vanno nel nuovo chunk? Le foto tengono la loro posizione: mappe di profondità, "
+                           "nuvola densa e gli altri prodotti si costruiscono di nuovo sul nuovo chunk, senza "
+                           "allineare."), options)
+        if answer is None:
+            return
+        area = None
+        if answer == 1 and not selected:
+            self._warn("Seleziona prima le foto nel pannello Foto.")
+            return
+        if answer == 2:
+            area = self.selected_polygon()
+            if area is None:
+                self._warn("Seleziona un poligono sull'ortofoto o sul DEM (strumento Seleziona).")
+                return
+            if ch is not self.chunk:
+                self._warn("L'area selezionata è quella del chunk attivo: rendi attivo prima questo chunk.")
+                return
+        default = tr("{0} (copia)", ch.label)
+        v = ParamDialog.ask(self, "Duplica chunk", [Field("label", "Nome del nuovo chunk", default, kind="text")])
+        if not v:
+            return
+        label = (v.get("label") or "").strip() or default
+        doc = self.doc
+        cams = None if answer == 0 else list(selected) if answer == 1 else None
+
+        def make(progress):
+            from ..engine.chunks import cameras_in_area
+
+            chosen = cams
+            if area is not None:
+                progress(0.0, tr("Foto che inquadrano l'area"))
+                chosen = cameras_in_area(ch, area)
+                if not chosen:
+                    raise RuntimeError(tr("Nessuna foto inquadra l'area selezionata."))
+            progress(0.3, tr("Nuovo chunk «{0}»", label))
+            return doc.duplicate_chunk(ch, chosen, label=label)
+
+        def done(dup):
+            self._activate_chunk(dup)
+            self._dirty(True)
+            self.log_pane.info(tr("Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di "
+                                  "profondità e gli altri prodotti.", dup.label, len(dup.cameras), len(ch.cameras),
+                                  len(dup.markers)))
+
+        self.run_task("Duplica chunk", make, done)
+
     def add_photos(self, folder: bool = False) -> None:
         if not self._need_chunk():
             return
@@ -4032,9 +4098,20 @@ class MainWindow(QMainWindow):
             return
         self.enable_photos(low_quality(self.chunk), False)
 
+    def selected_cameras(self) -> list:
+        """The photos selected in the Photos pane (cameras of the active chunk)."""
+        return self.photos.selected_cameras()
+
     def enable_photos(self, cams, enabled: bool) -> None:
-        for c in cams:
-            c.enabled = bool(enabled)
+        """Enable or disable photos of the active chunk (:meth:`Chunk.set_cameras_enabled`): a disabled photo
+        keeps its pose, the next alignment and builds leave it out; its thumbnail shows it."""
+        cams = list(cams)
+        own = [c for c in cams if self.chunk is not None and any(c is k for k in self.chunk.cameras)]
+        if own:
+            self.chunk.set_cameras_enabled(own, enabled)
+        for c in cams:  # photos of another chunk: set directly
+            if not any(c is k for k in own):
+                c.enabled = bool(enabled)
         self.photos.update_flags()
         self._dirty(True)
         self.statusBar().showMessage(tr("{0} foto {1}: valgono dal prossimo allineamento o dalla prossima costruzione",
@@ -5440,7 +5517,12 @@ class MainWindow(QMainWindow):
         self.set_draw_mode("crop")
 
     def _selected_polygon(self):
-        """The polygons selected in the orthophoto view, merged (a unit, a section of a layer)."""
+        """The old name of :meth:`selected_polygon`, kept for scripts and plugins."""
+        return self.selected_polygon()
+
+    def selected_polygon(self):
+        """The polygons selected in the orthophoto view, merged (a unit, a section of a layer); None
+        when no polygon is selected. Coordinates of the active chunk (a shapely geometry)."""
         from shapely.geometry import Polygon
         from shapely.ops import unary_union
 
@@ -5823,6 +5905,63 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         self.model_view.refresh(reset=False)
         self.statusBar().showMessage(tr("Nessuna regione: si ricostruisce tutto ciò che le foto vedono"), 8000)
+
+    def region_from_markers(self) -> None:
+        """*Strumenti > Regione sui marker...*: a thin region on the plane of three markers (a wall, an
+        object), its thickness along the normal (:meth:`Chunk.region_from_markers`)."""
+        if not self._need_chunk(aligned=True):
+            return
+        placed = [m for m in self.chunk.markers if m.position is not None]
+        if len(placed) < 3:
+            self._warn("Servono tre marker con una posizione (collocati su almeno due foto o sulla superficie).")
+            return
+        choices = [(m.key, m.label) for m in placed]
+        v = ParamDialog.ask(self, "Regione sui marker", [
+            Field("a", "Marker A (l'asse u va da A verso B)", placed[0].key, choices=choices),
+            Field("b", "Marker B", placed[1].key, choices=choices),
+            Field("c", "Marker C (fuori dalla linea A-B)", placed[2].key, choices=choices),
+            Field("thickness", "Spessore lungo la normale (m)", 0.2, minimum=0.001, maximum=1e6, decimals=3)],
+            intro="Una scatola sottile sul piano dei tre marker, centrata sul piano: depth map, nuvola densa e "
+                  "modello costruiti da ora in poi ne restano dentro. L'estensione nel piano è quella della "
+                  "regione di prima, altrimenti quella dei punti di legame.")
+        if not v:
+            return
+        try:
+            self.chunk.region_from_markers(v["a"], v["b"], v["c"], float(v["thickness"]))
+        except (KeyError, ValueError, RuntimeError) as exc:
+            self._exc("Regione non impostata", exc)
+            return
+        self._region_changed("Regione sul piano dei marker")
+
+    def build_normal_map(self) -> None:
+        """*Strumenti > Mappa delle normali...*: the normal map on the grid of the orthophoto, from the model
+        or the DEM (:meth:`Chunk.build_normal_map`), shown in the 2D view when done."""
+        if not self._need_chunk(product="orthomosaic"):
+            return
+        ch = self.chunk
+        v = ParamDialog.ask(self, "Mappa delle normali", [
+            Field("source", "Superficie", "auto",
+                  choices=[("auto", "Automatica (il modello se c'è, altrimenti il DEM)"), ("model", "Modello"),
+                           ("dem", "DEM")])],
+            intro="Un GeoTIFF RGBA sulla stessa griglia dell'ortofoto: rosso est, verde nord, blu alto. Per il "
+                  "rilievo dei muri e il ri-illuminamento in altri programmi.")
+        if not v:
+            return
+        self.run_task("Mappa delle normali", lambda p: ch.build_normal_map(v["source"], progress=p),
+                      lambda _path: self.show_normal_map())
+
+    def show_normal_map(self) -> None:
+        """The normal map of the active chunk in the 2D view, as an image on the orthophoto's grid."""
+        ch = self.chunk
+        path = ch.product_path("normal_map") if ch is not None else None
+        if path is None or not path.exists():
+            self._warn("Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).")
+            return
+        self._load_raster("ortho", path)
+        self.show_view(self.ortho_view)
+        source = (ch.meta.get("normal_map") or {}).get("source")
+        self.statusBar().showMessage(tr("Mappa delle normali dal {0}: rosso est, verde nord, blu alto",
+                                        tr("modello") if source == "model" else tr("DEM")), 15000)
 
     # ---------------------------------------------------------------- DEM editing
     def _dem_edit_drawn(self, xy) -> None:
@@ -6668,6 +6807,8 @@ class MainWindow(QMainWindow):
                 self.show_precision_map()
             elif payload == "coverage":
                 self.show_coverage_map()
+            elif payload == "normal_map":
+                self.show_normal_map()
             elif payload in ("dem", "orthomosaic"):
                 self._show_raster("dem" if payload == "dem" else "ortho")
             elif isinstance(payload, str) and payload.startswith("ms:"):
@@ -11677,6 +11818,7 @@ class MainWindow(QMainWindow):
             a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
             a.setEnabled(chunk is not self.chunk)
             menu.addAction(icon("rename"), tr("Rinomina..."), lambda: self.rename_chunk(chunk))
+            menu.addAction(icon("add_chunk"), tr("Duplica chunk..."), lambda: self.duplicate_chunk(chunk))
             if chunk.enabled:
                 menu.addAction(icon("disable"), tr("Disattiva"), lambda: self.set_chunks_enabled([chunk], False))
             else:

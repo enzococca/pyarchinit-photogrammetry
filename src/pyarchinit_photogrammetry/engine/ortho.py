@@ -1207,7 +1207,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
                                  "blend_sigma": float(ctx.blend_sigma), "colour_correction": correction is not None,
                                  "ghosting": ctx.ghosting, "fill_holes": ctx.fill_holes,
                                  "hidden_classes": hidden_classes, "max_angle": float(max_angle),
-                                 "max_cameras": int(max_cameras)}
+                                 "max_cameras": int(max_cameras), "photos": len(cams)}
     if patches:
         chunk.meta["orthomosaic"]["patches"] = [dict(p) for p in patches]
         chunk.meta["orthomosaic"]["applied_patches"] = [dict(p) for p in patches]

@@ -2624,7 +2624,34 @@
   "{project} = cartella del progetto, {name} = nome del progetto, {chunk} = nome del chunk": "{project} = project folder, {name} = project name, {chunk} = chunk name",
   "Ø fondo (cm)": "Base Ø (cm)",
   "Ø max (cm)": "Max Ø (cm)",
-  "Ø orlo (cm)": "Rim Ø (cm)"
+  "Ø orlo (cm)": "Rim Ø (cm)",
+  "Duplica chunk": "Duplicate chunk",
+  "Duplica chunk...": "Duplicate chunk...",
+  "Le foto dell'area selezionata sull'ortofoto": "The photos of the area selected on the orthophoto",
+  "Quali foto vanno nel nuovo chunk? Le foto tengono la loro posizione: mappe di profondità, nuvola densa e gli altri prodotti si costruiscono di nuovo sul nuovo chunk, senza allineare.": "Which photos go into the new chunk? The photos keep their position: depth maps, dense cloud and the other products are built again on the new chunk, without aligning.",
+  "Seleziona prima le foto nel pannello Foto.": "Select the photos in the Photos pane first.",
+  "L'area selezionata è quella del chunk attivo: rendi attivo prima questo chunk.": "The selected area belongs to the active chunk: make this chunk the active one first.",
+  "Foto che inquadrano l'area": "Photos framing the area",
+  "Nessuna foto inquadra l'area selezionata.": "No photo frames the selected area.",
+  "Regione sui marker...": "Region on markers...",
+  "Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, nuvola densa e modello restano dentro il suo spessore": "A thin reconstruction region on the plane of three markers (a wall, an object): depth maps, dense cloud and model stay within its thickness",
+  "Mappa delle normali...": "Normal map...",
+  "Le normali della superficie sulla griglia dell'ortofoto (stessi pixel, stesse coordinate): rosso est, verde nord, blu alto": "The normals of the surface on the grid of the orthophoto (same pixels, same coordinates): red east, green north, blue up",
+  "Servono tre marker con una posizione (collocati su almeno due foto o sulla superficie).": "Three markers with a position are needed (placed on at least two photos or on the surface).",
+  "Regione sui marker": "Region on markers",
+  "Marker A (l'asse u va da A verso B)": "Marker A (the u axis goes from A towards B)",
+  "Marker B": "Marker B",
+  "Marker C (fuori dalla linea A-B)": "Marker C (off the line A-B)",
+  "Spessore lungo la normale (m)": "Thickness along the normal (m)",
+  "Una scatola sottile sul piano dei tre marker, centrata sul piano: depth map, nuvola densa e modello costruiti da ora in poi ne restano dentro. L'estensione nel piano è quella della regione di prima, altrimenti quella dei punti di legame.": "A thin box on the plane of the three markers, centred on the plane: depth maps, dense cloud and model built from now on stay inside it. Its extent in the plane is that of the previous region, else that of the tie points.",
+  "Regione sul piano dei marker": "Region on the plane of the markers",
+  "Mappa delle normali": "Normal map",
+  "Automatica (il modello se c'è, altrimenti il DEM)": "Automatic (the model when there is one, else the DEM)",
+  "Un GeoTIFF RGBA sulla stessa griglia dell'ortofoto: rosso est, verde nord, blu alto. Per il rilievo dei muri e il ri-illuminamento in altri programmi.": "An RGBA GeoTIFF on the same grid as the orthophoto: red east, green north, blue up. For the survey of walls and relighting in other programs.",
+  "Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).": "Build the normal map first (Tools > Normal map).",
+  "modello": "model",
+  "Doppio clic per vederla: rosso est, verde nord, blu alto, sulla griglia dell'ortofoto": "Double click to see it: red east, green north, blue up, on the grid of the orthophoto",
+  " (disattivata: le prossime elaborazioni la lasciano fuori)": " (disabled: the next steps leave it out)"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3476,6 +3503,11 @@
   "«{0}» non è andato a buon fine: qui le quote non si possono convertire fra l'ellissoide e il geoide del sistema del chunk, con nessuna griglia: PROJ non ha una trasformazione che lo faccia in questo luogo. Nel pannello GNSS (Sistema e quote) scegli un altro sistema di coordinate.": "\"{0}\" did not succeed: here the heights cannot be converted between the ellipsoid and the geoid of the system of the chunk with any grid: PROJ has no transformation that does it at this place. In the GNSS pane (System and heights) choose another coordinate system.",
   "«{0}» è il chunk attivo: diventa attivo «{1}».": "«{0}» is the active chunk: «{1}» becomes the active one.",
   "• di «{0}»: {1}": "• of «{0}»: {1}",
-  "• il chunk «{0}» ({1} foto) con i suoi prodotti": "• the chunk «{0}» ({1} photos) with its products"
+  "• il chunk «{0}» ({1} foto) con i suoi prodotti": "• the chunk «{0}» ({1} photos) with its products",
+  "Le {0} foto selezionate nel pannello Foto": "The {0} photos selected in the Photos pane",
+  "{0} (copia)": "{0} (copy)",
+  "Nuovo chunk «{0}»": "New chunk «{0}»",
+  "Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di profondità e gli altri prodotti.": "Created «{0}»: {1} photos of {2}, {3} markers. It is the active chunk: build the depth maps and the other products.",
+  "Mappa delle normali dal {0}: rosso est, verde nord, blu alto": "Normal map from the {0}: red east, green north, blue up"
  }
 }

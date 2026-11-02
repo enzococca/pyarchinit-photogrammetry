@@ -104,13 +104,12 @@ aligned are used. In the window the same calls are in the *Workflow* menu.
 
 The three scripts below are written for the Python console, where `window` is the window itself. They use the
 functions the program has from 1.7.0 on: `chunk.region_from_markers(...)` and `chunk.build_normal_map(...)` (the
-first two examples, one call each; `ppg region-markers` and `ppg normal-map` on the command line).
-
-!!! note "Coming in 1.7.0"
-    `doc.duplicate_chunk(...)` and `chunk.set_cameras_enabled(...)` are the functions of the third example, and
-    `window.selected_polygon()` becomes the public name of the selection of the 2D view (in a script run with
-    *Run Python script...* the same area is the name `polygon`). That script is written as it will be: it does
-    not run in the versions before 1.7.0.
+first two examples, one call each; `ppg region-markers` and `ppg normal-map` on the command line, *Tools > Region on
+markers...* and *Tools > Normal map...* in the window), then `doc.duplicate_chunk(...)`, `chunk.set_cameras_enabled(...)`
+and `window.selected_polygon()`, the public name of the selection of the 2D view (in a script run with *Run Python
+script...* the same area is the name `polygon`) in the third one (`ppg duplicate-chunk` and `ppg photos disable` on the
+command line; in the window *Duplicate chunk...* on the right click of a chunk in the Workspace and *Disable the N
+selected photos* on the right click in the Photos pane).
 
 ### The region on the plane of three markers
 

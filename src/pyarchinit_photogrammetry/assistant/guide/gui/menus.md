@@ -203,6 +203,8 @@ thermal and satellite captures, plugins.
 | **Calibrate the colour with the colour chart...** | a ColorChecker photographed in the trench makes the Munsell colours comparable |
 | **Relief visualisations...** | sky-view factor, openness, local and multi-scale relief, hillshades ([relief](archaeology.md#relief-visualisations)) |
 | **Raster calculator...** | formulas on the rasters of the project, those of the plugins too, as in QGIS ([calculator](archaeology.md#raster-calculator)) |
+| **Region on markers...** | a thin reconstruction region on the plane of three markers (a wall, an object), its thickness along the normal: depth maps, dense cloud and model stay inside it |
+| **Normal map...** | the normals of the surface (model or DEM) on the grid of the orthophoto, red east, green north, blue up; shown in the 2D view and listed in the Workspace |
 | **Section options...** · **Plan slice (horizontal slice)...** | what the sections cut (model or cloud, classes); a plan at a height |
 | **Pottery profile from a mesh...** | diameters, height and profile of a vessel or a sherd ([pottery](archaeology.md#pottery-profiles)) |
 | **3D proxies of the units...** | the solids of the units for the Extended Matrix and BIM ([proxies](archaeology.md#us-proxies)) |

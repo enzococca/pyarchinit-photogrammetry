@@ -69,7 +69,7 @@ buttons that do not fit):
 
 | On... | Commands |
 | --- | --- |
-| a chunk | *Make active*, *Rename...*, *Enable* or *Disable*, *Remove chunk* |
+| a chunk | *Make active*, *Rename...*, *Duplicate chunk...* (all its photos, those selected in the Photos pane or those framing the polygon selected on the orthophoto: a new chunk with their poses, where depth maps and the rest are built again without aligning), *Enable* or *Disable*, *Remove chunk* |
 | the dense cloud, the model, the DEM, the orthophoto | *Show*, *Keep a copy as a version*, *Rename this version...*, *Remove* |
 | a kept version | *Show*, *Make active*, *Difference with the active DEM*, *Export...*, *Rename...*, *Remove* |
 | a photo | *Open*, *Enable* or *Disable*, *Remove the photo* |
@@ -189,7 +189,7 @@ or of an area - with *Show all* and *Previous* / *Next*. The filters come from:
 
 The right click on the thumbnails also measures the **image quality** (the sharpness of every photo compared
 with the sharpest ones; *blurred* under 0.5), disables the blurred photos, enables or disables the selected
-ones, sets their masks and their lens model (see [Photos and markers](photos-markers.md)).
+ones (a disabled photo keeps its pose, its thumbnail is greyed with a grey badge, and the next steps leave it out), sets their masks and their lens model (see [Photos and markers](photos-markers.md)).
 
 ## Sections
 
