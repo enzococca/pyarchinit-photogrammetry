@@ -524,32 +524,76 @@ def sample_mesh_colors(sd: SceneData, n: int = 350_000, light=(0.3, -0.4, 0.85))
     return pts, np.clip(col, 0, 255).astype(np.uint8)
 
 
-@dataclass
 class OrbitCamera:
-    target: np.ndarray
-    distance: float
-    yaw: float = -60.0  # degrees around the up axis
-    pitch: float = 35.0  # degrees above the horizon
-    fov: float = 40.0
-    up: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
+    """A camera looking at ``target`` from ``distance``, with an orientation of its own: the rows of
+    :meth:`basis` (right, down, forward). ``yaw`` and ``pitch`` are read from the orientation and
+    setting one of them gives back the camera without roll at those angles, as before the trackball."""
 
-    def basis(self) -> np.ndarray:
-        """Rows: right, down, forward (OpenCV-like camera axes) in world."""
+    def __init__(self, target, distance: float, yaw: float = -60.0, pitch: float = 35.0, fov: float = 40.0,
+                 up=None):
+        self.target = np.asarray(target, np.float64)
+        self.distance = float(distance)
+        self.fov = float(fov)
+        self.up = np.array([0.0, 0.0, 1.0]) if up is None else np.asarray(up, np.float64)
+        self.R = self._from_angles(yaw, pitch)
+
+    def _frame(self):
         up = self.up / np.linalg.norm(self.up)
         ref = np.array([1.0, 0, 0]) if abs(up[0]) < 0.9 else np.array([0.0, 1, 0])
         e1 = np.cross(up, ref)
         e1 /= np.linalg.norm(e1)
-        e2 = np.cross(up, e1)
-        y, p = np.radians(self.yaw), np.radians(self.pitch)
+        return up, e1, np.cross(up, e1)
+
+    def _from_angles(self, yaw: float, pitch: float) -> np.ndarray:
+        up, e1, e2 = self._frame()
+        y, p = np.radians(yaw), np.radians(pitch)
         horiz = np.cos(y) * e1 + np.sin(y) * e2
         back = np.cos(p) * horiz + np.sin(p) * up  # from target towards the eye
-        fwd = -back
+        return self.looking(-back, up, e1)
+
+    @staticmethod
+    def looking(fwd, up, fallback=None) -> np.ndarray:
+        """The orientation looking along ``fwd`` with ``up`` at the top of the screen."""
+        fwd = np.asarray(fwd, np.float64) / np.linalg.norm(fwd)
         right = np.cross(fwd, up)
         if np.linalg.norm(right) < 1e-9:
-            right = e1
+            right = np.asarray(fallback if fallback is not None else [1.0, 0, 0], np.float64)
+            right = right - (right @ fwd) * fwd
         right /= np.linalg.norm(right)
         down = np.cross(fwd, right)
         return np.vstack([right, down, fwd])
+
+    @property
+    def yaw(self) -> float:
+        up, e1, e2 = self._frame()
+        back = -self.R[2]
+        horiz = back - (back @ up) * up
+        if np.linalg.norm(horiz) < 1e-12:  # straight down: the top of the screen tells the direction
+            horiz = -self.R[1] if back @ up > 0 else self.R[1]
+        return float(np.degrees(np.arctan2(horiz @ e2, horiz @ e1)))
+
+    @yaw.setter
+    def yaw(self, value: float) -> None:
+        self.R = self._from_angles(value, self.pitch)
+
+    @property
+    def pitch(self) -> float:
+        up = self.up / np.linalg.norm(self.up)
+        return float(np.degrees(np.arcsin(np.clip(-self.R[2] @ up, -1.0, 1.0))))
+
+    @pitch.setter
+    def pitch(self, value: float) -> None:
+        self.R = self._from_angles(self.yaw, value)
+
+    def basis(self) -> np.ndarray:
+        """Rows: right, down, forward (OpenCV-like camera axes) in world."""
+        return self.R.copy()
+
+    def rotate(self, Q: np.ndarray, about) -> None:
+        """Turn the camera by the rotation ``Q`` (world) around the point ``about``."""
+        about = np.asarray(about, np.float64)
+        self.R = self.R @ Q.T
+        self.target = about + Q @ (self.target - about)
 
     @property
     def eye(self) -> np.ndarray:
