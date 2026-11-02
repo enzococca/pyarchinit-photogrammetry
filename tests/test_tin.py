@@ -152,7 +152,75 @@ def test_contours_of_a_plane_are_straight(tmp_path, rng):
         assert np.abs(d[:, 0] * v[1] - d[:, 1] * v[0]).max() < 1e-8  # every vertex on one straight line
 
 
+def test_contours_through_vertices_on_a_level(tmp_path):
+    """Heights in whole metres, levels every metre: vertices lie exactly on the levels, the lines
+    still join and follow the triangles."""
+    pts = [(X0 + x, Y0 + y, float(x + y)) for x in range(5) for y in range(5)]
+    _doc, ch = _chunk(tmp_path, pts)
+    tin = T.build_tin(ch, source="spots")
+    lines = T.contours(tin, 1.0)
+    for c in lines:
+        p = c["coords"] - [X0, Y0]
+        assert np.allclose(p.sum(axis=1), c["elevation"], atol=1e-12)
+    levels = sorted({c["elevation"] for c in lines})
+    assert levels[0] >= 0 and levels[-1] <= 8
+    inner = [c for c in lines if 0 < c["elevation"] < 8]
+    assert inner and all(len([d for d in lines if d["elevation"] == c["elevation"]]) == 1 for c in inner)
+    with pytest.raises(ValueError, match="index_every"):
+        T.contours(tin, 1.0, index_every=0)
+    with pytest.raises(ValueError, match="interval"):
+        T.contours(tin, 0.0)
+
+
+def test_break_lines_must_be_finite(tmp_path):
+    _doc, ch = _wall_chunk(tmp_path)
+    bad = [{"id": "x", "coords": [(X0, Y0, 0.0), (float("nan"), Y0 + 1, 0.0)]}]
+    with pytest.raises(ValueError, match="not finite"):
+        T.build_tin(ch, source="spots", breaklines=bad)
+    with pytest.raises(ValueError, match="kind"):
+        T.build_tin(ch, source="spots", breaklines=[{"kind": "hard", "coords": WALL_LINES[0]["coords"]}])
+
+
 # ------------------------------------------------------------------------------- the DEM's refinement
+def _ring_dem(n, res, noise=0.002):
+    r, c = np.mgrid[0:n, 0:n]
+    x, y = c * res, r * res
+    dem = 50 + 0.5 * np.sin(x / 7) * np.cos(y / 5) + noise * np.random.default_rng(0).standard_normal((n, n))
+    rr = np.hypot(r - n / 2, c - n / 2)
+    dem[(rr < n * 0.3) | (rr > n * 0.5)] = np.nan  # a ring survey: empty in the middle and at the corners
+    return dem
+
+
+@pytest.mark.parametrize("core", ["native", "numpy"])
+def test_a_ring_survey_with_and_without_the_core(tmp_path, monkeypatch, core):
+    if core == "native" and not _native.supports("tin"):
+        pytest.skip("the native core with the TIN kernels (API 10)")
+    monkeypatch.setenv("PPG_NATIVE", "1" if core == "native" else "0")
+    res, n = 0.05, 400
+    dem = _ring_dem(n, res)
+    _doc, ch = _chunk(tmp_path, dem=dem, res=res, origin=(X0, Y0 + n * res))
+    tin = T.build_tin(ch, source="dem")
+    # the noise is measured on the ring, not in the empty middle: no fallback tolerance
+    assert tin.info["tolerance"] == "noise" and 0.002 < tin.info["max_error"] < 0.01
+    assert not tin.info["warnings"] and tin.info["error_max"] <= tin.info["max_error"] + 1e-5
+    T.tin_to_dem(ch)
+    import rasterio
+
+    with rasterio.open(ch.product_path("dem")) as src:
+        out = src.read(1)
+        empty = out == src.nodata
+    assert empty[np.isnan(dem)].all()  # nothing over the hole nor outside the ring
+    assert empty[np.isfinite(dem)].mean() < 0.001
+
+
+def test_the_fallback_tolerance_is_said(tmp_path):
+    flat = np.full((60, 60), 3.0)  # no noise to measure
+    _doc, ch = _chunk(tmp_path, dem=flat, res=0.1, origin=(X0, Y0 + 6.0))
+    tin = T.build_tin(ch, source="dem")
+    assert tin.info["tolerance"] == "default" and tin.info["max_error"] == T.DEFAULT_TOLERANCE
+    assert any("could not be measured" in w for w in tin.info["warnings"])
+    assert "noise of the DEM not measured" in T.report(tin)
+
 def test_refinement_reaches_the_tolerance_with_few_vertices(tmp_path):
     res, n = 0.02, 300
     x, y = _cells(n, n, res, (X0, Y0 + 6.0))
@@ -228,6 +296,11 @@ def test_exports_read_back(tmp_path):
     path = T.export(tin, tmp_path / "tin.gpkg", CRS)
     tris = gpkg.read_table(path, "tin_triangoli")
     assert len(tris) == tin.n_triangles and tris[0][0].has_z
+    import sqlite3
+
+    with sqlite3.connect(path) as con:
+        zflags = dict(con.execute("SELECT table_name, z FROM gpkg_geometry_columns").fetchall())
+    assert zflags == {"tin_triangoli": 1, "tin_spigoli": 1, "tin_quote": 1}
     quote = gpkg.read_table(path, "tin_quote")
     assert sorted(round(g.z, 6) for g, _ in quote) == sorted(round(float(v), 6) for v in tin.z[tin.spots])
     assert len(gpkg.read_table(path, "tin_spigoli")) == (2 if len(tin.constrained) else 0)

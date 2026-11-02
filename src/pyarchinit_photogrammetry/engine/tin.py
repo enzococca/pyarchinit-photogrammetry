@@ -10,8 +10,8 @@ constraint edges the triangles never cross.
 The kernels - the constrained Delaunay triangulation (the crate spade), the rasterisation, the
 contour segments and the exact volumes - are in the native core (``ppg_core``, API 10). Without it
 the numpy fallbacks run: scipy's Delaunay triangulation, which cannot hold constraints (they are
-ignored, with a warning in the report and in the log), matplotlib's linear interpolator, and the
-same contour and volume formulas in numpy.
+ignored, with a warning in the report and in the log), and the kernels' own rasterisation, contour
+and volume formulas in numpy.
 
 The TIN is kept as ``<chunk data>/tin/tin.npz`` + ``tin.json`` (product ``tin``,
 ``chunk.meta["tin"]``), in local coordinates: world = local + ``origin`` (a round number of
@@ -120,21 +120,61 @@ def rasterize(xy, z, triangles, x0: float, y0: float, cell: float, width: int, h
     out = np.full((height, width), np.nan, np.float32)
     if len(tri) == 0 or width == 0 or height == 0:
         return out
-    from matplotlib.tri import LinearTriInterpolator, Triangulation as MplTriangulation
-
-    used = np.unique(tri)
-    remap = np.full(len(xy), -1, np.int64)
-    remap[used] = np.arange(len(used))
-    t = MplTriangulation(xy[used, 0], xy[used, 1], remap[tri])
-    interp = LinearTriInterpolator(t, z[used])
-    xs = x0 + (np.arange(width) + 0.5) * cell
-    step = max(1, 2_000_000 // max(width, 1))
-    for r0 in range(0, height, step):
-        rows = np.arange(r0, min(height, r0 + step))
-        gx, gy = np.meshgrid(xs, y0 - (rows + 0.5) * cell)
-        v = interp(gx, gy)
-        out[rows] = np.ma.filled(v.astype(np.float64), np.nan).astype(np.float32)
+    _rasterize_numpy(xy, z, tri, float(x0), float(y0), float(cell), out)
     return out
+
+
+RASTER_SLACK = 1e-6  # cells: the box of a triangle widened against the rounding of its corners (as the kernel)
+RASTER_EPS = -1e-9  # barycentric tolerance: cells on an edge or on the hull despite the rounding (as the kernel)
+
+
+def _rasterize_numpy(xy, z, tri, x0, y0, cell, out, pairs: int = 4_000_000) -> None:
+    """What the kernel does, in numpy: every triangle against the cell centres of its box, in blocks
+    of triangles of about ``pairs`` (triangle, cell) pairs; a cell takes the first triangle (in
+    order) that holds it, with the kernel's formulas - the same values to the last bit."""
+    height, width = out.shape
+    p = xy[tri]
+    h = z[tri]
+    det = (p[:, 1, 0] - p[:, 0, 0]) * (p[:, 2, 1] - p[:, 0, 1]) - (p[:, 2, 0] - p[:, 0, 0]) * (p[:, 1, 1] - p[:, 0, 1])
+    lo, hi = p.min(axis=1), p.max(axis=1)
+    r0 = np.maximum(np.ceil((y0 - hi[:, 1]) / cell - 0.5 - RASTER_SLACK), 0)
+    r1 = np.minimum(np.floor((y0 - lo[:, 1]) / cell - 0.5 + RASTER_SLACK), height - 1)
+    c0 = np.maximum(np.ceil((lo[:, 0] - x0) / cell - 0.5 - RASTER_SLACK), 0)
+    c1 = np.minimum(np.floor((hi[:, 0] - x0) / cell - 0.5 + RASTER_SLACK), width - 1)
+    ok = (det != 0) & np.isfinite(det) & (r1 >= r0) & (c1 >= c0)
+    idx = np.nonzero(ok)[0]
+    if len(idx) == 0:
+        return
+    r0, c0 = r0[idx].astype(np.int64), c0[idx].astype(np.int64)
+    bw = c1[idx].astype(np.int64) - c0 + 1
+    count = (r1[idx].astype(np.int64) - r0 + 1) * bw
+    ends = np.cumsum(count)
+    start = 0
+    flat = out.reshape(-1)
+    while start < len(idx):  # blocks of triangles, in order
+        stop = int(np.searchsorted(ends, (ends[start - 1] if start else 0) + pairs, side="right"))
+        stop = max(stop, start + 1)
+        k = np.repeat(np.arange(start, stop), count[start:stop])
+        first = np.cumsum(count[start:stop]) - count[start:stop]
+        j = np.arange(len(k)) - np.repeat(first, count[start:stop])
+        row = r0[k] + j // bw[k]
+        col = c0[k] + j % bw[k]
+        t = idx[k]
+        x = x0 + (col + 0.5) * cell
+        y = y0 - (row + 0.5) * cell
+        a, b_, c = p[t, 0], p[t, 1], p[t, 2]
+        l1 = ((x - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (y - a[:, 1])) / det[t]
+        l2 = ((b_[:, 0] - a[:, 0]) * (y - a[:, 1]) - (x - a[:, 0]) * (b_[:, 1] - a[:, 1])) / det[t]
+        l0 = 1.0 - l1 - l2
+        inside = (l0 >= RASTER_EPS) & (l1 >= RASTER_EPS) & (l2 >= RASTER_EPS)
+        cells = row[inside] * width + col[inside]
+        cells, keep = np.unique(cells, return_index=True)  # the first triangle of each cell
+        sel = np.nonzero(inside)[0][keep]
+        free = np.isnan(flat[cells])
+        sel, cells = sel[free], cells[free]
+        hh = h[t[sel]]
+        flat[cells] = (l0[sel] * hh[:, 0] + l1[sel] * hh[:, 1] + l2[sel] * hh[:, 2]).astype(np.float32)
+        start = stop
 
 
 def contour_segments(xy, z, triangles, levels) -> tuple[np.ndarray, np.ndarray]:
@@ -343,6 +383,8 @@ def normalise_lines(lines) -> list[dict]:
             arr[i, :len(c)] = c[:3]
         if width < 3:
             arr[:, 2] = np.nan
+        if not np.isfinite(arr[:, :2]).all() or np.isinf(arr[:, 2]).any():
+            raise ValueError(f"break line {ln.get('id', k)}: a vertex is not finite")
         out.append({"id": ln.get("id", k), "kind": kind, "coords": arr})
     return out
 
@@ -389,18 +431,26 @@ class _Dem:
         near = z[np.clip(np.rint(r).astype(int), 0, self.height - 1), np.clip(np.rint(c).astype(int), 0, self.width - 1)]
         return np.where(np.isfinite(v), v, near)  # a missing corner: the nearest cell
 
-    def noise(self) -> float:
-        """NMAD of the cells around a 3 x 3 median, on a window of at most 1000 x 1000 cells in the middle."""
+    def noise(self, windows: int = 3, side: int = 340) -> float:
+        """NMAD of the cells around a 3 x 3 median, on ``windows`` x ``windows`` windows of at most
+        ``side`` cells spread over the DEM (a ring survey has nothing in the middle); 0 when no window
+        has 100 cells with a height."""
         from scipy import ndimage
 
         h, w = self.z.shape
-        r0, c0 = max(0, h // 2 - 500), max(0, w // 2 - 500)
-        win = self.z[r0:r0 + 1000, c0:c0 + 1000]
-        ok = np.isfinite(win)
-        if ok.sum() < 100:
+        res = []
+        for fr in (np.arange(windows) + 0.5) / windows:
+            for fc in (np.arange(windows) + 0.5) / windows:
+                r0, c0 = max(0, int(fr * h) - side // 2), max(0, int(fc * w) - side // 2)
+                win = self.z[r0:r0 + side, c0:c0 + side]
+                ok = np.isfinite(win)
+                if ok.sum() < 100:
+                    continue
+                med = ndimage.median_filter(np.where(ok, win, np.nanmedian(win)), size=3)
+                res.append((win - med)[ok])
+        if not res:
             return 0.0
-        med = ndimage.median_filter(np.where(ok, win, np.nanmedian(win)), size=3)
-        res = (win - med)[ok]
+        res = np.concatenate(res)
         return float(1.4826 * np.median(np.abs(res - np.median(res))))
 
 
@@ -607,6 +657,8 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
         xy, z, tri, con, spot_idx, info_dem = _refine_dem(b, dem, origin, max_error, bounds_local,
                                                           progress.sub(0.02, 0.9))
         info.update(info_dem)
+        if info_dem["tolerance"] == "default":
+            warnings.append(f"the noise of the DEM could not be measured: tolerance of {DEFAULT_TOLERANCE:g} m")
         if info_dem["capped"]:
             warnings.append(f"the refinement stopped at {MAX_VERTICES:,} vertices before reaching the tolerance")
     else:
@@ -688,8 +740,10 @@ def _refine_dem(b: _Builder, dem: _Dem, origin, max_error, bounds_local, progres
     if max_error is None:
         noise = dem.noise()
         tol = max(MIN_TOLERANCE, 2 * noise) if noise > 0 else DEFAULT_TOLERANCE
+        tolerance = "noise" if noise > 0 else "default"
     else:
         tol = float(max_error)
+        tolerance = "given"
     if tol <= 0:
         raise ValueError("max_error must be positive")
     valid = np.isfinite(dem.z)
@@ -763,7 +817,8 @@ def _refine_dem(b: _Builder, dem: _Dem, origin, max_error, bounds_local, progres
             br, bc = br[worst], bc[worst]
         chosen[br, bc] = True
     xy, z, tri, con, spot_idx = _compact(xy, z, tri, t.constrained, b.spot_mask(len(xy)))
-    info = {"max_error": tol, "rounds": rounds, "dem_cells": n_measure, "capped": capped, "dem_factor": dem.factor}
+    info = {"max_error": tol, "tolerance": tolerance, "rounds": rounds, "dem_cells": n_measure, "capped": capped,
+            "dem_factor": dem.factor}
     return xy, z, tri, con, spot_idx, info
 
 
@@ -844,8 +899,10 @@ def contours(tin: Tin, interval: float, base: float = 0.0, index_every: int = 5)
     ``[{"elevation", "index", "coords" (N, 2) world}]`` as :func:`..archaeo.terrain.contours`."""
     import shapely
 
-    if interval <= 0:
+    if not interval > 0:
         raise ValueError("the interval must be positive")
+    if int(index_every) < 1:
+        raise ValueError("index_every must be 1 or more: an index contour every N levels")
     lo, hi = float(tin.z.min()), float(tin.z.max())
     ns = np.arange(int(np.ceil((lo - base) / interval)), int(np.floor((hi - base) / interval)) + 1)
     levels = np.round(base + ns * interval, 9)
@@ -906,7 +963,10 @@ def report(tin: Tin) -> str:
     lines = [f"TIN ({tin.source}): {tin.n_vertices} vertices, {tin.n_triangles} triangles, "
              f"{len(tin.constrained)} constrained edges, {len(tin.spots)} spot heights"]
     if "max_error" in i:
-        lines.append(f"tolerance {i['max_error']:.4g} m, {i.get('rounds', 0)} rounds of refinement")
+        how = {"noise": "twice the noise of the DEM", "default": "default: the noise of the DEM not measured",
+               "given": "given"}.get(i.get("tolerance"), "")
+        lines.append(f"tolerance {i['max_error']:.4g} m ({how}), {i.get('rounds', 0)} rounds of refinement"
+                     if how else f"tolerance {i['max_error']:.4g} m, {i.get('rounds', 0)} rounds of refinement")
     if "error_max" in i:
         lines.append(f"against the DEM: max {i['error_max']:.4f} m, 95% within {i['error_p95']:.4f} m")
     lines += [f"warning: {w}" for w in i.get("warnings", [])]

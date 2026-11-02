@@ -838,8 +838,7 @@ def test_tin_kernels_agree_with_the_fallbacks(monkeypatch, rng):
     tri = b.triangles
     a, b = both(monkeypatch, lambda: tin.rasterize(xy, z, tri, -20.013, 19.987, 0.0731, 560, 550))
     assert a.dtype == b.dtype == np.float32
-    assert np.array_equal(np.isfinite(a), np.isfinite(b))
-    assert np.nanmax(np.abs(a.astype(float) - b)) < 1e-6 * 101
+    assert np.array_equal(a, b, equal_nan=True)  # the same formulas in numpy
     levels = np.arange(98.5, 101.6, 0.25)
     (sa, ka), (sb, kb) = both(monkeypatch, lambda: tin.contour_segments(xy, z, tri, levels))
     assert len(sa) > 1000 and np.array_equal(ka, kb) and np.array_equal(sa, sb)
@@ -870,3 +869,40 @@ def test_tin_constraints_only_with_the_native_core(monkeypatch):
     assert not a.native and len(a.new_xy) == 0
     assert b.native and np.allclose(b.new_xy, [[2, 2]]) and len(b.constrained) == 4
     assert {tuple(r) for r in b.new_on.tolist()} <= {(0, 2), (1, 3)}
+
+
+def test_tin_numpy_raster_is_the_kernels_with_holes_inside(monkeypatch, rng):
+    """Triangles taken out in the middle (a ring survey): the numpy rasteriser needs no valid
+    triangulation of the hull and gives the kernel's values to the last bit."""
+    from pyarchinit_photogrammetry.engine import tin
+
+    xy = rng.uniform(0, 30, (4000, 2))
+    z = 10 + np.cos(xy[:, 0] / 4) * np.sin(xy[:, 1] / 5)
+    tri = tin.triangulate(xy).triangles
+    centre = xy[tri].mean(axis=1)
+    ring = tri[np.abs(np.hypot(*(centre - 15).T) - 10) < 4]
+    a, b = both(monkeypatch, lambda: tin.rasterize(xy, z, ring, 0.0123, 29.987, 0.0571, 520, 521))
+    assert np.isnan(a[260, 260]) and np.isfinite(a).mean() > 0.3
+    assert np.array_equal(a, b, equal_nan=True)
+    a, b = both(monkeypatch, lambda: tin.rasterize(xy, z, tri, 0.0123, 29.987, 0.0571, 520, 521))
+    assert np.array_equal(a, b, equal_nan=True)
+
+
+def test_tin_kernels_refuse_bad_input():
+    xy = np.array([[0, 0], [1, 0], [np.nan, 1]], float)
+    with pytest.raises(ValueError, match="point 2 is not finite"):
+        ppg_core.tin_triangulate(xy, np.zeros((0, 2), np.int64))
+    good = np.array([[0, 0], [1, 0], [0, 1]], float)
+    tri = np.array([[0, 1, 2]], np.int64)
+    with pytest.raises(ValueError, match="too large"):
+        ppg_core.tin_rasterize(good, np.zeros(3), tri, 0.0, 1.0, 0.1, 2 ** 40, 2 ** 40)
+
+
+def test_tin_volume_is_the_same_at_every_run(rng):
+    from pyarchinit_photogrammetry.engine import tin
+
+    xy = rng.uniform(0, 100, (200_000, 2))
+    z = rng.uniform(-1, 1, len(xy))
+    tri = tin.triangulate(xy).triangles
+    first = tin.prism_volume(xy, z, tri, 0.0)
+    assert all(tin.prism_volume(xy, z, tri, 0.0) == first for _ in range(20))
