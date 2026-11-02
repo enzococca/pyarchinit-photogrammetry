@@ -79,9 +79,11 @@ tools work on it: stones, US drawing, QGIS, exports.
 A face keeps only the surface within its **depth band** (0.5 m in front of the plane and 0.3 m behind it, by default).
 Whatever stands further in front, such as scaffolding or a section left in front of the wall, is left out. When the
 surface touches the edge of the band, the shape's summary says so: part of the wall may be outside it, so make the
-face again with a wider band. When a second surface stands behind the face within the band (a set-back storey, the
-wall behind a parapet, a *risega*), with its depths more than 10 cm behind those of the face, only the front surface
-is the face: the cells behind are left out of the fit and of the bulge map, and the summary says how many.
+face again with a wider band. When a second surface stands within the band, behind the face (a set-back storey, the
+wall behind a parapet, a *risega*) or in front of it (a board, a bush, a buttress), with its depths more than 10 cm
+from those of the face, the surface with the larger share of the cells is the face: the other is left out of the fit
+and of the bulge map, and the summary says how many cells it took and on which side. When the two shares are within
+5 % of each other the front one is kept and the summary says they are comparable: draw the face again, narrower.
 
 The pane lists each face with its width, height, resolution and the drawings it holds (stones, US, spot heights,
 points). Removing a face takes it out of the wall. Its elevation stays in the project unless you ask to remove it too.
@@ -132,12 +134,15 @@ you can correct them by hand. **Measure the stones** then reads them:
   rectangularity: the area over the area of the smallest enclosing rectangle;
 - **mortar share**: 1 − the stones' area over the wall's area. The stones' area is their union: two outlines that
   overlap by more than half are the same stone drawn twice (a second run of the stone tool, a correction by hand) and
-  count once, the later one kept, and the summary says how many were merged. The wall's area is the face's bounds as
-  they are now, or a polygon you draw on the face with **Wall area...**, kept for the next runs;
+  count once, the later one kept, and the summary says how many were merged; a stone drawn wholly inside another is
+  left out and named too. The wall's area is the face's bounds as they are now, or a polygon you draw on the face with
+  **Wall area...**, kept for the next runs;
 - **courses**: each stone joined to its neighbour on the right that shares at least half of its height with it; the
-  chains so made are the courses, so a course sloping a few degrees stays one course. A chain is a course when it has
-  3 stones or more whose centres lie within a quarter of its thickness (rms) of the line through them. Each course
-  gives its mean height, number of stones, thickness (the median height of its stones) and slope.
+  chains so made are the courses, so a course sloping a few degrees stays one course. Two chains at the same height
+  and slope with a gap of up to three stone widths between them (a stone SAM missed, a putlog hole, a repair) are one
+  course. A chain is a course when it has 3 stones or more whose centres lie within a quarter of its thickness (rms)
+  of the line through them. Each course gives its mean height, number of stones, thickness (the median height of its
+  stones) and slope.
 
 A stone drawn in several parts is measured on its largest part. Stones smaller than four pixels of the face's
 elevation on their smaller side (a fragment, a sliver of SAM) are left out of the measures and named with their
@@ -232,10 +237,13 @@ In the example the two units, the coursed wall and the rubble lying on its whole
   - the CSV and Excel tables, the sections, the bulge raster, the comparisons and the wall's JSON.
 - **Wall IFC...**: IFC4 with the program's conventions (metres, `IfcMapConversion` on a round origin):
   - an **`IfcWall`** whose solid is the outline of a face (the wall's area drawn on it, else its bounds) extruded into
-    the wall. Two plane faces are the two sides of one wall when they look within **15°** of opposite ways and lie
-    less than **3 m** apart: the thickness is then **measured** between their fitted planes. Every other face - a wall
-    surveyed on one side, each side of a polygonal tower (its opposite sides are not the two faces of one wall) - makes
-    an `IfcWall` of its own with the thickness you give; without it, the faces that need it are named;
+    the wall. Two plane faces are the two sides of one wall when they look within **15°** of opposite ways, lie less
+    than **3 m** apart and have the wall between them: the model's slice at mid-height, between the two surfaces at
+    that height, must meet nothing but them (an inner wall, a corridor, the cavity of a double wall refuse the pair;
+    without a model, the two first rules decide). The thickness is then **measured** between the two surfaces, on a
+    leaning or bulging wall as well. Every other face - a wall surveyed on one side, the sides of a tower or of one
+    polygonal slice (its opposite sides are never the two faces of one wall) - makes an `IfcWall` of its own with the
+    thickness you give; without it, the faces that need it are named;
   - **`Pset_PyArchInit_Masonry`**: lean, bulge p90, stones, courses, mortar share, the type line, the counts, the
     thickness and where it came from;
   - the USM as **`IfcBuildingElementPart`** of the wall, with `Pset_PyArchInit_US`, and the accepted relationships as
@@ -278,7 +286,11 @@ ppg plugin masonry list|remove PROJECT ["North wall" [FACE]] [--elevations]
   breaking it is not found.
 - The **IFC wall** is a prism: the outline of one face extruded across the wall. The lean and the bulge are in its
   Pset, not in its shape. The developed face of a round tower does not make an IFC slab.
-- A second surface behind the face is set aside when it is more than 10 cm behind; a set-back closer than that is
-  part of the face and shows in the bulge.
+- A second surface, behind the face or in front of it, is set aside when it is more than 10 cm from the face and
+  takes fewer cells than the face; a set-back closer than that is part of the face and shows in the bulge, and an
+  obstacle that covers more of the face than the wall becomes the face: draw the face around it.
+- Two faces are paired into one IFC wall only where the model between them is solid at mid-height. A face not yet
+  measured takes its surface from the elevation's relief; where the relief has no value at the sampled point the
+  face's plane is used, and a heavily battered wall may be refused until **Shape** has run on it.
 - Not done in 0.1.0: automatic USM, mortar joints drawn, dating, structural analysis, 3D stone solids, vaults and roofs
   (see [Architectural elements](architecture.md)).

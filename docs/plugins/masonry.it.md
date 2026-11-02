@@ -80,10 +80,12 @@ sopra funzionano gli strumenti del programma: pietre, disegno delle US, QGIS, es
 Una faccia tiene solo la superficie dentro la sua **fascia di profondità** (di base 0,5 m davanti al piano e 0,3 m
 dietro). Quello che sta più avanti, come un ponteggio o un testimone lasciato davanti al muro, resta fuori. Se la
 superficie tocca il limite della fascia, la sintesi della forma lo dice: una parte del muro può restarne fuori, quindi
-rifai la faccia con una fascia più larga. Se dietro la faccia, dentro la fascia, c'è una seconda superficie (un piano
-arretrato, il muro dietro un parapetto, una risega) con le profondità più di 10 cm dietro quelle della faccia, la
-faccia è solo la superficie davanti: le celle dietro restano fuori dall'adattamento e dalla carta dello spanciamento, e
-la sintesi dice quante sono.
+rifai la faccia con una fascia più larga. Se dentro la fascia c'è una seconda superficie, dietro la faccia (un piano
+arretrato, il muro dietro un parapetto, una risega) o davanti (una tavola, un cespuglio, un contrafforte), con le
+profondità più di 10 cm da quelle della faccia, la faccia è la superficie con più celle: l'altra resta fuori
+dall'adattamento e dalla carta dello spanciamento, e la sintesi dice quante celle ha preso e da che parte sta. Se le
+due parti si equivalgono (entro il 5 %) si tiene quella davanti e la sintesi dice che sono paragonabili: ridisegna
+la faccia più stretta.
 
 Il pannello elenca ogni faccia con larghezza, altezza, risoluzione e i disegni che contiene (pietre, US, quote,
 punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel progetto, se non chiedi di toglierlo.
@@ -136,12 +138,15 @@ pietra disegnata lì, quindi puoi correggerle a mano. **Misura le pietre** poi l
 - **quota di malta**: 1 − l'area delle pietre divisa per l'area del muro. L'area delle pietre è la loro unione: due
   contorni sovrapposti per più di metà sono la stessa pietra disegnata due volte (un secondo passaggio dello strumento
   Pietre, una correzione a mano) e contano una volta, tenendo il più recente; la sintesi dice quante sono state unite.
-  L'area del muro sono i limiti della faccia come sono ora, o un poligono che disegni sulla faccia con **Area del
-  muro...**, tenuto per le volte successive;
+  Anche una pietra disegnata tutta dentro un'altra resta fuori e viene nominata. L'area del muro sono i limiti della
+  faccia come sono ora, o un poligono che disegni sulla faccia con **Area del muro...**, tenuto per le volte
+  successive;
 - **filari**: ogni pietra unita alla vicina a destra con cui condivide almeno metà dell'altezza; le catene così fatte
-  sono i filari, quindi un filare inclinato di qualche grado resta un filare. Una catena è un filare se ha 3 pietre o
-  più con i centri entro un quarto del suo spessore (rms) dalla retta che li attraversa. Ogni filare dà la quota
-  media, il numero di pietre, lo spessore (l'altezza mediana delle sue pietre) e la pendenza.
+  sono i filari, quindi un filare inclinato di qualche grado resta un filare. Due catene alla stessa quota e con la
+  stessa pendenza, separate da un vuoto fino a tre larghezze di pietra (una pietra che SAM non ha visto, una buca
+  pontaia, un rifacimento), sono un filare solo. Una catena è un filare se ha 3 pietre o più con i centri entro un
+  quarto del suo spessore (rms) dalla retta che li attraversa. Ogni filare dà la quota media, il numero di pietre,
+  lo spessore (l'altezza mediana delle sue pietre) e la pendenza.
 
 Una pietra disegnata in più parti si misura sulla parte maggiore. Le pietre con il lato minore sotto quattro pixel del
 prospetto della faccia (un frammento, una scheggia di SAM) restano fuori dalle misure e vengono nominate con la
@@ -237,10 +242,13 @@ attesa: *USM 2 copre USM 1*.
   - le tabelle CSV ed Excel, le sezioni, il raster dello spanciamento, i confronti e il JSON del muro.
 - **IFC del muro...**: IFC4 con le convenzioni del programma (metri, `IfcMapConversion` su un'origine tonda):
   - un **`IfcWall`** il cui solido è il contorno di una faccia (l'area del muro disegnata, altrimenti i suoi limiti)
-    estruso dentro il muro. Due facce piane sono le due parti di un muro se guardano in versi opposti entro **15°** e
-    stanno a meno di **3 m**: lo spessore è allora **misurato** fra i loro piani adattati. Ogni altra faccia - un muro
-    rilevato da una parte sola, ogni lato di una torre poligonale (i lati opposti non sono le due facce di un muro) -
-    fa un `IfcWall` suo con lo spessore che indichi; senza, si nominano le facce che lo richiedono;
+    estruso dentro il muro. Due facce piane sono le due parti di un muro se guardano in versi opposti entro **15°**,
+    stanno a meno di **3 m** e hanno il muro in mezzo: la sezione del modello a metà altezza, fra le due superfici a
+    quella quota, non deve incontrare altro che loro (un muro interno, un corridoio, la camera d'aria di un muro doppio
+    rifiutano la coppia; senza modello decidono le prime due regole). Lo spessore è allora **misurato** fra le due
+    superfici, anche su un muro inclinato o spanciato. Ogni altra faccia - un muro rilevato da una parte sola, i lati
+    di una torre o di una stessa sezione poligonale (i lati opposti non sono mai le due facce di un muro) - fa un
+    `IfcWall` suo con lo spessore che indichi; senza, si nominano le facce che lo richiedono;
   - **`Pset_PyArchInit_Masonry`**: strapiombo, p90 dello spanciamento, pietre, filari, quota di malta, la riga del
     tipo, i conteggi, lo spessore e la sua origine;
   - le USM come **`IfcBuildingElementPart`** del muro, con `Pset_PyArchInit_US`, e i rapporti accettati come
@@ -284,7 +292,11 @@ ppg plugin masonry list|remove PROGETTO ["Muro nord" [FACCIA]] [--elevations]
   interromperlo non viene trovato.
 - Il **muro IFC** è un prisma: il contorno di una faccia estruso attraverso il muro. Strapiombo e spanciamento stanno
   nel suo Pset, non nella sua forma. La faccia sviluppata di una torre tonda non diventa una lastra IFC.
-- Una seconda superficie dietro la faccia si mette da parte se sta più di 10 cm dietro; un arretramento minore fa
-  parte della faccia e si vede nello spanciamento.
+- Una seconda superficie, dietro la faccia o davanti, si mette da parte se sta a più di 10 cm dalla faccia e prende
+  meno celle di lei; un arretramento minore fa parte della faccia e si vede nello spanciamento, e un ostacolo che
+  copre più celle del muro diventa lui la faccia: disegna la faccia intorno.
+- Due facce si accoppiano in un muro IFC solo dove il modello fra loro è pieno a metà altezza. Una faccia non ancora
+  misurata prende la superficie dal rilievo del prospetto; dove il rilievo non ha un valore nel punto campionato si
+  usa il piano della faccia, e un muro a scarpa molto inclinato può venire rifiutato finché non ci lanci **Forma**.
 - Non previsti nella 0.1.0: USM automatiche, disegno dei giunti di malta, datazione, analisi strutturale, solidi 3D
   delle pietre, volte e tetti (vedi [Elementi architettonici](architecture.md)).
