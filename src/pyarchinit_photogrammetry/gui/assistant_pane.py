@@ -24,8 +24,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 from ..assistant import privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
-from .assistant_settings import (KIND_NAMES, KINDS, keep_thread, park, release_thread, same_provider, saved_kind,
-                                 saved_model)
+from .assistant_settings import (KIND_NAMES, KINDS, context_chars_of, keep_thread, park, release_thread,
+                                 same_provider, saved_kind, saved_model)
 from .i18n import current, tr
 from .icons import icon
 
@@ -306,7 +306,8 @@ class AssistantPane(QWidget):
         if provider is None:
             self.assistant = None
         else:
-            self.assistant = Assistant(provider, lambda: self._main.doc, None, language=current())
+            self.assistant = Assistant(provider, lambda: self._main.doc, None, language=current(),
+                                       context_chars=context_chars_of(self._settings()))
         self._show_kind(getattr(provider, "kind", "local") if provider is not None else None, provider)
         if provider is not None:  # the model that answers, as the provider names it
             k = self.model_box.findData(provider.kind)

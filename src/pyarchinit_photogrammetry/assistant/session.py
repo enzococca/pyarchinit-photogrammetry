@@ -32,7 +32,7 @@ from typing import Any, Callable
 from .facts import TOOLS, run_tool
 from .knowledge import Index, guide_folder
 from .privacy import WARNING, Filter
-from .providers import Message, Provider, ProviderError, Reply, ToolCall
+from .providers import ContextOverflow, Message, Provider, ProviderError, Reply, ToolCall
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,18 @@ GUIDE_LABEL = {"it": "guida", "en": "guide"}
 TOOL_LABEL = {"it": "strumento", "en": "tool"}
 ERROR_LABEL = {"it": "errore", "en": "error"}
 FROM_TEXT = {"it": "chiamata letta dal testo", "en": "call read from the text"}
+ALREADY = {"it": "già chiamato", "en": "already called"}
+HAVE_RESULTS = {"it": "hai già i risultati: rispondi", "en": "you already have the results: answer"}
+TRUNCATED = {"it": "… [troncato]", "en": "… [truncated]"}
+OMITTED = {"it": "(risultato omesso)", "en": "(result omitted)"}
+TOO_LONG = {"it": "La conversazione supera il contesto del modello{tokens}: inizia una nuova conversazione",
+            "en": "The conversation exceeds the context of the model{tokens}: start a new conversation"}
+TOKENS = {"it": " ({0} token)", "en": " ({0} tokens)"}
+
+TOOL_RESULT_CHARS = 4000  # of one tool result sent back to the model
+KEEP_TOOL_RESULTS = 12  # a local model gets the last ones in full, the older ones as OMITTED
+LOCAL_CONTEXT_CHARS = 80_000  # the default budget of a request to a local model
+REPEAT_ROUNDS = 2  # consecutive rounds of calls already made: the loop stops
 
 _INSTRUCTIONS = {
     "it": (
@@ -217,8 +229,13 @@ class Assistant:
     coordinates are not filtered is the first entry of ``sent`` of the first external turn of a conversation."""
 
     def __init__(self, provider: Provider, document: Callable[[], Any], index: Index | None,
-                 language: str = "it", filter_: Filter | None = None, max_tool_rounds: int = 8):
+                 language: str = "it", filter_: Filter | None = None, max_tool_rounds: int = 8,
+                 context_chars: int | None = None):
         self.provider = provider
+        # the budget of one request in characters: a local model's default LOCAL_CONTEXT_CHARS, none for the services
+        if context_chars is None and getattr(provider, "kind", "local") == "local":
+            context_chars = LOCAL_CONTEXT_CHARS
+        self.context_chars = int(context_chars) if context_chars else None
         self._document = document
         self.index = index
         self.language = _language(language)
@@ -350,7 +367,45 @@ class Assistant:
             label += f" - {FROM_TEXT[lang]}"
         safe = self._filter.facts(result)
         content = json.dumps(safe, ensure_ascii=False, default=str)
+        if len(content) > TOOL_RESULT_CHARS:  # one result never fills the context by itself
+            content = content[:TOOL_RESULT_CHARS] + TRUNCATED[lang]
         return Message("tool", content, tool_call_id=call.id, error="error" in result), label
+
+    def _fit(self, messages: list[Message]) -> list[Message]:
+        """The request as it is sent: a local model gets the last KEEP_TOOL_RESULTS tool results in full and the
+        older ones as one OMITTED line; then, while the request is longer than ``context_chars``, the oldest tool
+        results still in full are omitted too. ``messages`` is not changed."""
+        out = list(messages)
+        omitted = OMITTED[self.language]
+        tools = [i for i, m in enumerate(out) if m.role == "tool" and m.content != omitted]
+        if not self.external:
+            for i in tools[:-KEEP_TOOL_RESULTS] if len(tools) > KEEP_TOOL_RESULTS else []:
+                out[i] = _omitted(out[i], omitted)
+            tools = tools[-KEEP_TOOL_RESULTS:]
+        if self.context_chars:
+            total = sum(len(m.content) for m in out)
+            for i in tools:
+                if total <= self.context_chars:
+                    break
+                total -= len(out[i].content) - len(omitted)
+                out[i] = _omitted(out[i], omitted)
+        return out
+
+    def _complete(self, messages: list[Message], tools, stream, cancel, state: dict) -> Reply:
+        """One round: the request fitted to the budget; a server that says the context is exceeded gets one more
+        try with the oldest half of the tool results omitted (``messages`` changed in place)."""
+        while True:
+            try:
+                return self.provider.complete(self._fit(messages), tools, on_text=stream, cancel=cancel)
+            except ContextOverflow as exc:
+                omitted = OMITTED[self.language]
+                full = [i for i, m in enumerate(messages) if m.role == "tool" and m.content != omitted]
+                if state.get("retried") or not full:
+                    tokens = TOKENS[self.language].format(exc.tokens) if exc.tokens else ""
+                    raise ProviderError(TOO_LONG[self.language].format(tokens=tokens)) from exc
+                state["retried"] = True
+                for i in full[:max(1, len(full) // 2)]:
+                    messages[i] = _omitted(messages[i], omitted)
 
     def ask(self, question: str, on_text: Callable[[str], None] | None = None,
             cancel: Callable[[], bool] | None = None) -> Turn:
@@ -384,26 +439,42 @@ class Assistant:
                 on_text(self._filter.incoming(delta))
 
         rounds = 0
+        repeats = 0  # consecutive rounds made only of calls already made in this turn
+        done: dict[str, Message] = {}  # the result of every call made in this turn, by name and arguments
+        state: dict = {}
         earlier = ""  # the text of the rounds that ended in tool calls
         reply: Reply | None = None
         try:
             while True:
-                with_tools = rounds < self.max_tool_rounds
+                with_tools = rounds < self.max_tool_rounds and repeats < REPEAT_ROUNDS
                 if not with_tools and rounds:
-                    messages.append(Message("user", ANSWER_NOW[lang]))
-                    turn.sent.append(self._mark(ANSWER_NOW[lang]))
-                reply = self.provider.complete(messages, TOOLS if with_tools else None, on_text=stream,
-                                              cancel=cancel)
+                    # the bound of the rounds first; else the model only repeated calls it already made
+                    last = ANSWER_NOW[lang] if rounds >= self.max_tool_rounds else HAVE_RESULTS[lang]
+                    messages.append(Message("user", last))
+                    turn.sent.append(self._mark(last))
+                reply = self._complete(messages, TOOLS if with_tools else None, stream, cancel, state)
                 if not (reply.tool_calls and with_tools and reply.stop != "refusal") or _cancelled(cancel):
                     break
                 messages.append(Message("assistant", reply.text, tool_calls=[_as_written(c) for c in reply.tool_calls]))
+                new_call = False
                 for call in reply.tool_calls:
                     if call.from_text:  # the model wrote the call in its text: said where what left is said
                         turn.sent.append(self._mark(f"[{FROM_TEXT[lang]}: {call.name}]"))
-                    message, label = self._run_call(call, document)
+                    key = _call_key(call)
+                    earlier_result = done.get(key)
+                    if earlier_result is not None:  # the same call again: the result it had, not run again
+                        message = Message("tool", earlier_result.content, tool_call_id=call.id,
+                                          error=earlier_result.error)
+                        turn.sent.append(self._mark(f"[{ALREADY[lang]}: {call.name}]"))
+                        turn.read.append(f"{TOOL_LABEL[lang]}: {call.name} - {ALREADY[lang]}")
+                    else:
+                        new_call = True
+                        message, label = self._run_call(call, document)
+                        done[key] = message
+                        turn.read.append(label)
                     messages.append(message)
                     turn.sent.append(self._mark(message.content))
-                    turn.read.append(label)
+                repeats = 0 if new_call else repeats + 1
                 if reply.text:
                     earlier = (earlier + "\n" + reply.text) if earlier else reply.text
                     if on_text is not None:
@@ -441,6 +512,20 @@ def _ref(document: Any) -> Any:
         return weakref.ref(document)
     except TypeError:
         return lambda: document
+
+
+def _call_key(call: ToolCall) -> str:
+    """The same tool with the same arguments: the same key."""
+    try:
+        arguments = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        arguments = repr(call.arguments)
+    return f"{call.name}\0{arguments}"
+
+
+def _omitted(message: Message, text: str) -> Message:
+    return Message(message.role, text, tool_calls=message.tool_calls, tool_call_id=message.tool_call_id,
+                   error=message.error)
 
 
 def _as_written(call: ToolCall) -> ToolCall:

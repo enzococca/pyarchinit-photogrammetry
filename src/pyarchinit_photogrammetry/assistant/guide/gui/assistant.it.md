@@ -47,7 +47,7 @@ per domanda, il testo esatto uscito dal computer, e la tabella dei nomi sostitui
 inviato come).
 
 Una domanda che non può avere risposta - il server locale fermo, troppo lento, una chiave rifiutata - finisce
-con una riga rossa che dice l'indirizzo o il motivo; il pannello resta utilizzabile. *Ferma* interrompe una
+con una riga rossa che dice l'indirizzo o il motivo; il pannello resta utilizzabile. Una chiamata che il modello ha già fatto nella stessa risposta non viene eseguita di nuovo (*Cosa viene inviato* dice "già chiamato"), e a un modello che ripete solo le sue chiamate viene chiesto di rispondere. I risultati degli strumenti sono tagliati a 4000 caratteri e, con un modello locale, solo gli ultimi 12 vanno interi (i più vecchi come "(risultato omesso)"), entro 80 000 caratteri per richiesta (`assistant/context_chars` nelle impostazioni). Quando il server dice che la conversazione supera il contesto del modello, i risultati più vecchi vengono lasciati fuori ancora una volta; se non basta, inizia una nuova conversazione. *Ferma* interrompe una
 domanda mentre il modello scrive ancora; *Nuova conversazione* dimentica la storia. Scegliere un altro modello
 (tipo, modello o indirizzo) o aprire un altro progetto comincia anch'esso una nuova conversazione: la chat si
 svuota con una riga che dice perché, così la chat e *Cosa viene inviato* raccontano sempre la stessa

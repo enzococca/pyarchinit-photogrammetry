@@ -80,6 +80,35 @@ class ProviderError(Exception):
     """A provider cannot answer (address refused, server down or cut off, key missing or rejected)."""
 
 
+class ContextOverflow(ProviderError):
+    """The request is longer than the context of the model (a server's HTTP 400 that says so). ``tokens``: the
+    size of the context the server named, None when it did not."""
+
+    def __init__(self, message: str, tokens: int | None = None):
+        super().__init__(message)
+        self.tokens = tokens
+
+
+# how servers say the request does not fit: llama.cpp "exceeds the available context size (32768 tokens)",
+# LM Studio "...context length of 4096...", "...the context overflows...", OpenAI "context_length_exceeded"
+_OVERFLOW = re.compile(r"context[ _](size|length|window)|exceeds the available context|context overflows|n_ctx",
+                       re.IGNORECASE)
+_CONTEXT_TOKENS = re.compile(r"context[ _](?:size|length|window)[^0-9]{0,20}?(\d[\d,.]*)|n_ctx\D{0,5}(\d+)",
+                             re.IGNORECASE)
+
+
+def context_overflow(detail: str, where: str) -> ContextOverflow | None:
+    """A :class:`ContextOverflow` when the error text ``detail`` of an HTTP 400 says the context is exceeded."""
+    if not detail or not _OVERFLOW.search(detail):
+        return None
+    m = _CONTEXT_TOKENS.search(detail)
+    tokens = None
+    if m:
+        digits = re.sub(r"\D", "", m.group(1) or m.group(2) or "")
+        tokens = int(digits) if digits else None
+    return ContextOverflow(f"{where} ha risposto 400: {detail}", tokens)
+
+
 @runtime_checkable
 class Provider(Protocol):
     kind: str   # "local" | "claude" | "openai"
@@ -291,6 +320,9 @@ class OpenAICompatible:
                 detail = ""
             if exc.code in (401, 403):
                 raise ProviderError(f"{_address(url)}: chiave non valida o senza permesso ({exc.code})") from exc
+            overflow = context_overflow(detail, _address(url)) if exc.code in (400, 413) else None
+            if overflow is not None:
+                raise overflow from exc
             raise ProviderError(f"{_address(url)} ha risposto {exc.code}: {detail or exc.reason}") from exc
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
             reason = getattr(exc, "reason", exc)

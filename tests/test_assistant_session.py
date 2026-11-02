@@ -221,7 +221,7 @@ def test_tool_rounds_are_bounded(doc, fake_tools):
     assert S.ANSWER_NOW["it"] in turn.sent
     # every round streamed live, separated by a line
     assert "".join(pieces) == "Controllo...\n" * 3 + "Il DEM ha 7 cm."
-    assert len([n for n, _, _ in fake_tools]) == 3
+    assert len([n for n, _, _ in fake_tools]) == 1  # the same call again is answered from its result, not run
 
 
 def test_a_model_that_ignores_the_last_call_still_answers(doc, fake_tools):

@@ -147,6 +147,14 @@ class _OpenAI:
                 body = json.loads(self.rfile.read(n))
                 fake.posts.append(body)
                 answer = fake.answers[min(len(fake.posts), len(fake.answers)) - 1]  # in order, the last repeated
+                if isinstance(answer, tuple):  # (status, body): an HTTP error
+                    raw = answer[1].encode()
+                    self.send_response(answer[0])
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 if not body.get("stream"):
                     self._json({"choices": [{"message": {"role": "assistant", "content": answer},
                                              "finish_reason": "stop"}]})
@@ -307,3 +315,18 @@ def test_a_slow_script_is_stopped_and_counted_as_failed(small):
     slow = result["scripts"]["results"][0]
     assert not slow["passed"] and slow["attempts"] == 2 and "tempo scaduto" in slow["detail"]
     assert evaluate.SCRIPT_TIMEOUT == 120.0
+
+
+def test_a_context_error_of_llama_cpp_is_retried_shorter_then_said_without_the_address(small, openai_server):
+    project, _ = small
+    overflow = (400, '{"error":{"code":400,"message":"request (40000 tokens) exceeds the available context size '
+                     '(32768 tokens), try increasing it","type":"exceed_context_size_error"}}')
+    call = '```json\n{"name": "project_summary", "arguments": {}}\n```'
+    server = openai_server([call, overflow, "Ecco il riassunto."])
+    turn = _local_assistant(server, project).ask("Riassumi il progetto")
+    assert turn.text == "Ecco il riassunto." and len(server.posts) == 3
+    assert len(json.dumps(server.posts[2]["messages"])) < len(json.dumps(server.posts[1]["messages"]))
+    server = openai_server([call, overflow, overflow])
+    turn = _local_assistant(server, project).ask("Riassumi il progetto")
+    assert turn.error == ("La conversazione supera il contesto del modello (32768 token): inizia una nuova "
+                          "conversazione")

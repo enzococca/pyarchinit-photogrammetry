@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 SETTINGS = {"kind": "assistant/kind", "base_url": "assistant/base_url", "model_local": "assistant/model_local",
             "model_claude": "assistant/model_claude", "model_openai": "assistant/model_openai",
-            "score": "assistant/score_{kind}"}
+            "score": "assistant/score_{kind}", "context_chars": "assistant/context_chars"}
 KINDS = ("local", "claude", "openai")
 KIND_NAMES = {"local": "Locale", "claude": "Claude", "openai": "OpenAI"}
 SCRIPT_SCORE = 2.0  # under this score of the last evaluation a kind is "limited for scripts"
@@ -50,6 +50,16 @@ def score_of(settings, kind: str) -> float | None:
         return None if value in (None, "") else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def context_chars_of(settings) -> int | None:
+    """The budget in characters of one request to a local model (``assistant/context_chars``), None for the default
+    of the session (80 000)."""
+    try:
+        value = int(float(settings.value(SETTINGS["context_chars"]) or 0))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def provider_from_settings(settings, why: list[str] | None = None) -> Provider | None:
@@ -491,5 +501,5 @@ class AssistantSettingsDialog(QDialog):
         super().done(result)
 
 
-__all__ = ["SETTINGS", "KINDS", "KIND_NAMES", "provider_from_settings", "same_provider", "saved_kind", "saved_model",
+__all__ = ["SETTINGS", "KINDS", "KIND_NAMES", "context_chars_of", "provider_from_settings", "same_provider", "saved_kind", "saved_model",
            "score_of", "AssistantSettingsDialog", "Background", "keep_thread", "release_thread", "park"]

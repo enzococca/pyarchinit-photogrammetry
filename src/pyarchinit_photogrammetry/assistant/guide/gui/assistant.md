@@ -47,7 +47,7 @@ question, the exact text that left the computer, and the table of the names the 
 sent as).
 
 A question that cannot be answered - the local server stopped, too slow, a key refused - ends with a red line
-that names the address or the reason; the pane stays usable. *Stop* ends a question while the model is still
+that names the address or the reason; the pane stays usable. A call the model already made in the same answer is not run again (*What is sent* says "already called"), and a model that only repeats its calls is asked to answer. Tool results are cut at 4000 characters and, with a local model, only the last 12 are sent in full (the older ones as "(result omitted)"), within a budget of 80 000 characters a request (`assistant/context_chars` in the settings). When the server says the conversation exceeds the context of the model, the oldest results are left out once more; if that is not enough, start a new conversation. *Stop* ends a question while the model is still
 writing; *New conversation* forgets the history. Choosing another model (kind, model or address) or opening
 another project also starts a new conversation: the chat is cleared with a line saying why, so the chat and
 *What is sent* always tell the same conversation.
