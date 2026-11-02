@@ -7,7 +7,7 @@ avvio sono in tre gruppi:
 | --- | --- |
 | a sinistra | [Area di lavoro](#area-di-lavoro), [Riferimenti](#riferimenti), [Layer](#layer) - sempre presenti |
 | a destra | [PyArchInit](#pyarchinit), [Proxy US](#proxy-us), [Multispettrale e Termico](multispectral.md), i pannelli dei plugin |
-| in basso | [Foto](#foto), [Sezioni](#sezioni), [Console Python](#console-python), [Log](#log) |
+| in basso | [Foto](#foto), [Sezioni](#sezioni), [Console Python](#console-python), [Assistente](#assistente), [Log](#log) |
 
 Le schede di un gruppo sono in alto, ognuna con l'icona del suo pannello; la barra del titolo sotto di esse
 dice quale pannello è davanti.
@@ -221,6 +221,15 @@ disegnano è in [Disegno e misure](drawing.md#sezioni).
 
 Una console Python con il progetto a portata di mano: `doc` (il progetto), `chunk` (il chunk attivo), `app`,
 `ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. Un blocco incollato di più righe viene eseguito subito. ++ctrl+shift+p++ la porta davanti.
+
+## Assistente
+
+![Il pannello Assistente](../img/gui/pane-assistant.it.png)
+
+A sinistra una conversazione con un modello linguistico sul progetto e sul programma - un modello su questo
+computer, Claude o OpenAI - con il pallino che dice se qualcosa esce dal computer e *Cosa viene inviato*;
+a destra un editor di script: *Esegui* fa girare lo script sul progetto in background e *Annulla lo script*
+riporta tutto indietro in un passo. Tutto è in [L'assistente](assistant.md).
 
 ## Log
 

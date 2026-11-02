@@ -63,6 +63,7 @@ ICONS = {
     # views
     "view3d": ("mdi6.rotate-3d", "orange"), "view_ortho": ("mdi6.map", "amber"),
     "view_photo": ("mdi6.image-outline", "blue"), "console": ("mdi6.console", "slate"),
+    "assistant": ("mdi6.robot-outline", "teal"),
     "log": ("mdi6.text-box-outline", "grey"), "theme": ("mdi6.theme-light-dark", "grey"),
     "language": ("mdi6.translate", "grey"),
     "top_view": ("mdi6.arrow-collapse-down", "grey"), "home_view": ("mdi6.home-outline", "grey"),

@@ -90,6 +90,7 @@ plugins:
             Multispectral and thermal: Multispettrale e termico
             Exports and reports: Esportazioni e rapporti
             Errors and updates: Errori e aggiornamenti
+            The assistant: L'assistente
             Python API: API Python
             Scripts: Script
             PyArchInit: PyArchInit
@@ -169,6 +170,7 @@ nav:
           - Multispectral and thermal: gui/multispectral.md
           - Exports and reports: gui/exports.md
           - Errors and updates: gui/help.md
+          - The assistant: gui/assistant.md
       - Python API: api.md
       - Scripts: scripting.md
       - PyArchInit: pyarchinit.md

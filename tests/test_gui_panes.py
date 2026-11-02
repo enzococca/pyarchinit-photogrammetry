@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QLabel  # noqa: E402
 
 LEFT = ["pane_workspace", "pane_reference", "pane_layers"]  # the fixed panes
 RIGHT = ["pane_pyarchinit", "pane_proxies", "pane_multispectral", "pane_thermal", "pane_gnss"]  # beside them: the tools
-BOTTOM = ["pane_photos", "pane_sections", "pane_console", "pane_log"]
+BOTTOM = ["pane_photos", "pane_sections", "pane_console", "pane_assistant", "pane_log"]
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +78,7 @@ def test_every_pane_is_a_dock_of_its_own(make_window, qapp):
     docks = {d.objectName(): d for d in w.findChildren(QDockWidget)}
     panes = dict(zip(LEFT + RIGHT + BOTTOM,
                      [w.workspace, w.reference, w.layers_pane, w.pa_pane, w.proxies_pane, w.ms_pane, w.thermal_pane, w.gnss_pane,
-                      w.photos_panel, w.sections_pane, w.console, w.log_pane]))
+                      w.photos_panel, w.sections_pane, w.console, w.assistant, w.log_pane]))
     assert set(panes) <= set(docks)
     for name, pane in panes.items():  # in a scroll area: a pane taller than a laptop screen scrolls
         scroll = docks[name].widget()
@@ -127,14 +127,14 @@ def test_fixed_panes_stay_the_others_close_and_come_back_from_the_menu(make_wind
         assert dock.toggleViewAction().isChecked() and not dock.toggleViewAction().isEnabled()
         assert button(dock, "float").isVisibleTo(dock) and not button(dock, "close").isVisibleTo(dock)
     others = [d for d in w.panes.docks if d not in fixed]
-    assert len(others) == 9 and all(d.features() & feature.DockWidgetClosable for d in others)
+    assert len(others) == 10 and all(d.features() & feature.DockWidgetClosable for d in others)
     assert all(button(d, "close").isVisibleTo(d) for d in others)
     assert button(others[0], "close").toolTip() == "Chiudi il pannello: Vista > Pannelli lo riapre"
     view = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Vista")
     assert w.panes.menu.menuAction() in view.actions()
     menu = {a.text(): a for a in w.panes.menu.actions() if a.text()}
     assert {"Area di lavoro", "Riferimenti", "Layer", "Proxy US", "Multispettrale", "Termico", "GNSS", "Foto", "Sezioni",
-            "Console Python", "Log", "PyArchInit", "Pannello successivo", "Pannello precedente",
+            "Console Python", "Assistente", "Log", "PyArchInit", "Pannello successivo", "Pannello precedente",
             "Ripristina la disposizione dei pannelli"} <= set(menu)
     ms = w.panes.dock(w.ms_pane)
     assert ms.close()
@@ -226,9 +226,9 @@ def test_next_and_previous_pane(make_window, qapp):
     assert _front(w.panes.dock(w.layers_pane))
     w._show_pane(w.console)  # the focus in the console: the bottom group
     w.console.inp.setFocus()
-    w.panes.next_action.trigger()
+    w.panes.next_action.trigger()  # the assistant comes after the console
     _settle(qapp)
-    assert _front(w.panes.dock(w.log_pane)) and _front(w.panes.dock(w.layers_pane))
+    assert _front(w.panes.dock(w.assistant)) and _front(w.panes.dock(w.layers_pane))
 
 
 class _TerrainPane(QLabel):

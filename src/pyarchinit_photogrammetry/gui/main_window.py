@@ -583,7 +583,7 @@ class MainWindow(QMainWindow):
     def _build_docks(self) -> None:
         """The panes, each a dock of its own (see :mod:`.docks`): on the left Area di lavoro, Riferimenti
         and Layer (always there), Proxy US, Multispettrale, Termico and the panes of the plugins; at the
-        bottom Foto, Sezioni, Console Python and Log; on the right PyArchInit."""
+        bottom Foto, Sezioni, Console Python, Assistente and Log; on the right PyArchInit."""
         from .docks import GroupDock, Panes
 
         self.panes = Panes(self)
@@ -708,6 +708,10 @@ class MainWindow(QMainWindow):
         add(self.photos_panel, tr("Foto"), icon("photos"), name="pane_photos", area="bottom")
         add(self.sections_pane, tr("Sezioni"), icon("line"), name="pane_sections", area="bottom")
         add(self.console, tr("Console Python"), icon("console"), name="pane_console", area="bottom")
+        from .assistant_pane import AssistantPane
+
+        self.assistant = AssistantPane(self)  # the conversation with the model and the script editor
+        add(self.assistant, tr("Assistente"), icon("assistant"), name="pane_assistant", area="bottom")
         add(self.log_pane, "Log", icon("log"), name="pane_log", area="bottom")
         # until 1.3.3 the docks of the left and of the bottom tabs: now the pane in front of each side
         self.d_work, self.d_photos = GroupDock(self.left_tabs), GroupDock(self.bottom_tabs)
@@ -1173,6 +1177,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
+        am = m.addMenu(icon("assistant"), tr("Assistente"))
+        self._act(am, tr("Apri l'assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant),
+                  icon_name="assistant")
+        self._act(am, tr("Impostazioni dell'assistente..."), self.assistant_settings, icon_name="settings")
         ms_menu = m.addMenu(tr("Multispettrale"))
         self._act(ms_menu, tr("Aggiungi riprese multispettrali..."), self.ms_add,
                   tip=tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
@@ -1298,6 +1306,7 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Sezioni"), lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, tr("Console Python"), lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
+        self._act(m, tr("Assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant), icon_name="assistant")
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
@@ -2796,6 +2805,7 @@ class MainWindow(QMainWindow):
             self._live_previous.close()
             self._live_previous = None
         self.photos.stop()
+        self.assistant.shutdown()  # the question in progress stopped, its thread ended
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("state", self.panes.save())
@@ -4434,6 +4444,8 @@ class MainWindow(QMainWindow):
         self.a_redo.setEnabled(h.can_redo())
         self.a_undo.setText(tr("Annulla: {0}", h.undo_text()) if h.can_undo() else tr("Annulla", context="undo"))
         self.a_redo.setText(tr("Ripeti: {0}", h.redo_text()) if h.can_redo() else tr("Ripeti"))
+        if getattr(self, "assistant", None) is not None:
+            self.assistant.update_undo()
 
     def undo(self) -> None:
         if self.runner.busy:
@@ -13612,6 +13624,10 @@ class MainWindow(QMainWindow):
             IfcPreviewDialog(out, elements, self).exec()
 
         self.run_task("Esportazione IFC", job, done, refresh=False, save=False)
+
+    def assistant_settings(self) -> None:
+        """*Strumenti > Assistente > Impostazioni dell'assistente...*: the model that answers, its keys and models."""
+        self.assistant.open_settings()
 
     def run_script(self) -> None:
         """*Esegui script Python...*: the file chosen run in the worker (:meth:`run_script_source`), its output in

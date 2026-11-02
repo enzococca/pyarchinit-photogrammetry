@@ -212,6 +212,7 @@ thermal and satellite captures, plugins.
 | **Segment Anything 2.1** | units and stones drawn by SAM 2.1: [see below](#tools-segment-anything-21) |
 | **Export IFC (BIM)...** | the units or their proxies in an IFC file ([BIM and IFC](../bim.md)) |
 | **Run Python script...** | a script with the modules of the program ([API](../api.md)) |
+| **Assistant** | *Open the assistant* and *Assistant settings...*: the model that answers ([the assistant](assistant.md)) |
 | **Multispectral** · **Thermal** | multispectral and thermal captures: [see below](#tools-multispectral) |
 | **Satellite imagery** | satellite scenes on the DEM of the survey: [see below](#tools-satellite-imagery) |
 | **Network nodes...** | other computers working on the same project ([nodes](processing.md#network-nodes)) |
@@ -397,7 +398,7 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | Item | What it is for |
 | --- | --- |
 | **Panes** | every pane open or closed: [see below](#view-panes) |
-| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++) |
+| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++; also the *Assistant*) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
 | **Theme** | light or dark, remembered |
 | **Lingua / Language** | Italian or English, at the next start (*Restart now* opens the project again at once) |

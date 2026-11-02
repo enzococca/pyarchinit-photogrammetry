@@ -7,7 +7,7 @@ start they are in three groups:
 | --- | --- |
 | left | [Workspace](#workspace), [Reference](#reference), [Layer](#layer) - always there |
 | right | [PyArchInit](#pyarchinit), [US proxies](#us-proxies), [Multispectral and Thermal](multispectral.md), the panes of the plugins |
-| bottom | [Photos](#photos), [Sections](#sections), [Python console](#python-console), [Log](#log) |
+| bottom | [Photos](#photos), [Sections](#sections), [Python console](#python-console), [Assistant](#assistant), [Log](#log) |
 
 The tabs of a group are on top, each with the icon of its pane; the title bar under them names the pane in
 front.
@@ -212,7 +212,16 @@ How to draw them is in [Drawing and measures](drawing.md#sections).
 ![The Python console](../img/gui/pane-console.png)
 
 A Python console with the project at hand: `doc` (the project), `chunk` (the active chunk), `app`, `ppg` (the
-library), `np` and `window`. What it changes shows in the window. ++ctrl+shift+p++ brings it to the front.
+library), `np` and `window`. What it changes shows in the window. A pasted block of several lines runs at once. ++ctrl+shift+p++ brings it to the front.
+
+## Assistant
+
+![The Assistant pane](../img/gui/pane-assistant.png)
+
+On the left a conversation with a language model about the project and the program - a model on this
+computer, Claude or OpenAI - with the dot that says whether anything leaves the computer and *What is sent*;
+on the right a script editor: *Run* runs the script on the project in the background and *Undo the script*
+takes it all back in one step. Everything is in [The assistant](assistant.md).
 
 ## Log
 

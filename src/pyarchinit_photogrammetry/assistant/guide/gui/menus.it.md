@@ -212,6 +212,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **Segment Anything 2.1** | unità e pietre disegnate da SAM 2.1: [vedi sotto](#strumenti-segment-anything-21) |
 | **Esporta IFC (BIM)...** | le unità o i loro proxy in un file IFC ([BIM e IFC](../bim.md)) |
 | **Esegui script Python...** | uno script con i moduli del programma ([API](../api.md)) |
+| **Assistente** | *Apri l'assistente* e *Impostazioni dell'assistente...*: il modello che risponde ([l'assistente](assistant.md)) |
 | **Multispettrale** · **Termico** | le riprese multispettrali e termiche: [vedi sotto](#strumenti-multispettrale) |
 | **Immagini satellitari** | scene satellitari sul DEM del rilievo: [vedi sotto](#strumenti-immagini-satellitari) |
 | **Nodi di rete...** | altri computer che lavorano allo stesso progetto ([nodi](processing.md#nodi-di-rete)) |
@@ -397,7 +398,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | Voce | A cosa serve |
 | --- | --- |
 | **Pannelli** | ogni pannello aperto o chiuso: [vedi sotto](#vista-pannelli) |
-| **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++) |
+| **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++; anche l'*Assistente*) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
 | **Tema** | chiaro o scuro, ricordato |
 | **Lingua / Language** | italiano o inglese, al prossimo avvio (*Riavvia ora* riapre subito il progetto) |
