@@ -1292,7 +1292,7 @@ def _without_position(m: Marker) -> Marker:
 DUPLICATE_DROPPED_META = ("versions", "active_versions", "drawings", "proxies", "dense", "point_cloud_source",
                           "point_cloud_cleaning", "confidence", "model", "texture", "dem", "dem_edits", "precision",
                           "orthomosaic", "normal_map", "relief", "elevations", "calculator", "field_check", "stones",
-                          "pottery", "splat")
+                          "pottery", "splat", "tin")
 # the products of the multispectral and thermal captures in their meta (as core.removal._meta_part sees them):
 # dropped from a duplicate, which keeps the settings of the captures (bands, panel, registration, parameters)
 DUPLICATE_DROPPED_CAPTURES = {"multispectral": ("reflectance", "reflectance_bands", "indices", "zoning"),
