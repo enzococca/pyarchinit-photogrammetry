@@ -2329,7 +2329,7 @@ def assistant_eval(project: Path = typer.Argument(..., help="the .ppg project (t
                    model: str = typer.Option("", help="the model"),
                    base_url: str = typer.Option("", help="address of the server"),
                    cases: Optional[Path] = typer.Option(None, help="the evaluation set (default: "
-                                                                   "tests/assistant_eval/cases.json of a checkout)"),
+                                                                   "the set shipped with the program)"),
                    only: str = typer.Option("all", help="all, questions or scripts"),
                    lang: str = typer.Option("it", help="language of the questions: it or en"),
                    out: Optional[Path] = typer.Option(None, help="write the results to this JSON file"),

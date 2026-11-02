@@ -1626,7 +1626,7 @@ prints the answer; `--show-sent` also prints what was sent (with a local model n
 so), and `ppg assistant sent` prints the same for the last `ask` of the process. `models` lists the models of a local
 server, of Claude or of the OpenAI account. A local address is only ever one of this computer.
 
-`eval` asks the evaluation set (`tests/assistant_eval/cases.json`, written for the demo project of
+`eval` asks the evaluation set (`assistant/evaluation/cases.json` in the package, written for the demo project of
 `ppg demo FOLDER --process`): 8 questions, each in a fresh conversation, passed when the answer holds every pattern
 of the case; 6 script tasks, each script run on a copy of the project (never on the project) and then checked, the
 error sent back once for a second attempt. `--only questions|scripts`, `--out` writes the results as JSON and

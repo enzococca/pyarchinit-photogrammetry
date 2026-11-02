@@ -85,8 +85,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 # files the code reads at run time (tests/test_packaging.py checks that nothing is left out)
 # assistant/guide: the Markdown of docs/ for the assistant (assistant.knowledge --sync), in its folders
+# assistant/evaluation: the evaluation set of the assistant (ppg assistant eval)
 pyarchinit_photogrammetry = ["gui/resources/*", "gui/translations/*.json", "pyarchinit/*.sql",
-                             "assistant/guide/*.md", "assistant/guide/**/*.md"]
+                             "assistant/guide/*.md", "assistant/guide/**/*.md", "assistant/evaluation/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

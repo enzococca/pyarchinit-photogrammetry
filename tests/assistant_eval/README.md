@@ -1,6 +1,7 @@
 # The evaluation set of the assistant
 
-`cases.json` is the set `ppg assistant eval` asks a model, on the demo project
+`src/pyarchinit_photogrammetry/assistant/evaluation/cases.json` (package data, so the installed program and the
+application have it) is the set `ppg assistant eval` asks a model, on the demo project
 (`ppg demo FOLDER --process`, then `FOLDER/scavo.ppg`).
 
 * **questions** (8): each asked in a fresh conversation with the project open. It passes when every regular

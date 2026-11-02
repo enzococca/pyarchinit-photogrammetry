@@ -23,6 +23,9 @@ l'ortofoto, la nuvola densa, il modello, i prodotti termici e multispettrali. Ri
 
 Un server locale è sempre e solo un indirizzo di questo computer (`127.0.0.1`, `::1`, `localhost`): ogni altro
 indirizzo è rifiutato. Il programma non scarica mai modelli: li carichi tu nel server.
+Alcuni piccoli modelli locali scrivono come JSON nella risposta le chiamate agli strumenti del progetto invece di
+farle: il programma legge una chiamata così dal testo e la esegue come una vera, e *Cosa viene inviato* dice
+"chiamata letta dal testo".
 
 La casella in alto nel pannello sceglie il tipo (l'ultima voce apre le impostazioni); il pallino accanto è
 **verde "locale"** quando niente esce dal computer e **arancione "esterno"** quando le domande vanno a Claude o
@@ -102,9 +105,13 @@ ppg assistant eval CARTELLA/scavo.ppg --kind local --base-url http://127.0.0.1:8
 
 | Modello | Dove | Domande | Script (punteggio) |
 | --- | --- | --- | --- |
-| Qwen2.5-Coder-7B-Instruct Q4_K_M | locale, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 1/8 in italiano, 2/8 in inglese | 1/6 in italiano, 3/6 in inglese |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | locale, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 3/8 in italiano, 2/8 in inglese | 3/6 in italiano, 3/6 in inglese |
+| Qwen2.5-7B-Instruct Q4_K_M | locale, lo stesso | 2/8 in italiano, 0/8 in inglese | 1/6 in italiano, 0/6 in inglese |
 
-Le risposte di riferimento del set (`--kind reference`) superano 8/8 e 6/6: ogni controllo è raggiungibile. Il piccolo
-modello locale scrive come testo le chiamate agli strumenti del progetto invece di farle, quindi non può leggere il
-progetto: le sue risposte sul progetto non sono affidabili, e in italiano è "limitato per gli script". Claude e OpenAI
-non sono ancora stati valutati (nessuna chiave sul computer della valutazione).
+Le risposte di riferimento del set (`--kind reference`) superano 8/8 e 6/6: ogni controllo è raggiungibile.
+Qwen2.5-Coder scrive come testo le chiamate agli strumenti del progetto (il programma le legge, vedi sopra) e fa gli
+script più semplici - la regione, la mappa delle normali, il chunk di un'area - ma inventa funzioni per la
+classificazione e l'esportazione. Qwen2.5-7B-Instruct fa chiamate vere ma le ripete finché il contesto è pieno, ed è più
+lento: fra i due, Qwen2.5-Coder-7B è quello da caricare. Sono entrambi modelli piccoli: le loro risposte sul progetto
+vanno lette con attenzione. Claude e OpenAI non sono ancora stati valutati (nessuna chiave sul computer della
+valutazione).

@@ -5,7 +5,7 @@
    "question_it": "Qual è la risoluzione del DEM del chunk attivo e quanta superficie copre?",
    "question_en": "What is the resolution of the DEM of the active chunk and how much ground does it cover?",
    "must_contain": [
-    "\\d+([.,]\\d+)?\\s*(mm|cm|m)\\b",
+    "\\d+([.,]\\d+)?\\s*(mm|cm|m|millimetr[io]|centimetr[io]|metr[io]|millimet(re|er)s?|centimet(re|er)s?|met(re|er)s?)\\b",
     "cop(r|e)|cover|area|m²|m2|%"
    ],
    "tools_expected": [
@@ -34,7 +34,7 @@
    "question_en": "How many photos are aligned and what is the error on the ground control points (GCP)?",
    "must_contain": [
     "\\d+\\s*(foto|photo|camer|immagin|image)|(foto|photos|camere|cameras)\\D{0,40}\\d+",
-    "\\d+([.,]\\d+)?\\s*(mm|cm|m)\\b"
+    "\\d+([.,]\\d+)?\\s*(mm|cm|m|millimetr[io]|centimetr[io]|metr[io]|millimet(re|er)s?|centimet(re|er)s?|met(re|er)s?)\\b"
    ],
    "tools_expected": [
     "alignment_report"

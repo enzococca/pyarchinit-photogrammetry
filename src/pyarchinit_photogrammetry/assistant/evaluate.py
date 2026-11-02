@@ -1,6 +1,6 @@
 """The evaluation of the assistant: a fixed set of questions and script tasks on the demo project, asked to a model.
 
-The set (``tests/assistant_eval/cases.json`` of a source checkout, :data:`CASES`) has two parts:
+The set (``assistant/evaluation/cases.json``, package data: :data:`CASES`) has two parts:
 
 * ``questions``: asked one by one, each in a fresh conversation, with the project open; the answer passes when every
   regular expression of ``must_contain`` is found in it (case-insensitive). ``tools_expected`` are the fact tools a
@@ -10,7 +10,8 @@ The set (``tests/assistant_eval/cases.json`` of a source checkout, :data:`CASES`
   Python expression over ``doc``, ``chunk`` (the chunk active before the script), ``result`` (the
   :class:`.scripts.ScriptResult`), ``polygon``, ``Path`` and ``np`` - must be true. When the script fails or the check
   is false, the error goes back to the model once, as *Errore? Chiedi all'assistente* of the pane does, and the
-  corrected script runs on a fresh copy (attempt 2).
+  corrected script runs on a fresh copy (attempt 2). A script may run :data:`SCRIPT_TIMEOUT` seconds: a slower one is
+  stopped and counted as failed ("tempo scaduto").
 
 Every case also carries a reference answer (``example_it``/``example_en`` for a question, ``example`` for a script):
 :class:`CasesProvider` answers with them, which tests the runner without a model and, on the demo project, shows that
@@ -32,12 +33,14 @@ from pathlib import Path
 from typing import Any
 
 from ..core.progress import ProgressCallback, as_progress
-from .knowledge import REPO, default_index
+from .knowledge import PACKAGE, default_index
 from .providers import Message, Provider, Reply, ToolSpec
 from .session import ERROR_QUESTION, NOT_SENT, TOOL_LABEL, Assistant, extract_script
 
-CASES = REPO / "tests" / "assistant_eval" / "cases.json"
+CASES = PACKAGE / "evaluation" / "cases.json"  # package data: the installed program and the app have it too
 REFERENCE = "reference"  # the kind of CasesProvider: the reference answers of the set, not a model
+SCRIPT_TIMEOUT = 120.0  # seconds a script of the evaluation may run; then it is stopped and counted as failed
+TIMED_OUT = "tempo scaduto"
 LIMITED_UNDER = 2  # script tasks done: under this the model is "limited for scripts"
 KINDS = ("all", "questions", "scripts")
 
@@ -187,15 +190,47 @@ class _Window:
         raise AttributeError(f"window.{name} is not available in the evaluation (no window)")
 
 
-def _run_on_copy(script: str, case: dict, project: Path, folder: Path, n: int) -> tuple[bool, str, Any]:
-    """Runs ``script`` on a fresh copy; (check passed, detail, the script's result)."""
+def _run_limited(script: str, namespace: dict, name: str, timeout: float):
+    """``run_script`` in a thread of its own for at most ``timeout`` seconds: then the progress is cancelled (the
+    steps of the engine and ``cancel()`` stop on it) and, if the script still runs a little later, it is left behind
+    (a daemon thread on a copy that is thrown away). Returns the result, or None when the time ran out."""
+    import threading
+
+    from ..core.progress import Cancelled, Progress
+    from .scripts import run_script
+
+    progress = Progress()
+    box: dict = {}
+
+    def target():
+        try:
+            box["result"] = run_script(script, namespace, progress, name=name)
+        except Cancelled:
+            box["result"] = None
+        except BaseException as exc:  # noqa: BLE001 - reported as the script's failure
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, name=f"eval-{name}", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        progress.cancel()
+        thread.join(min(10.0, max(0.5, timeout / 4)))
+        return None
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _run_on_copy(script: str, case: dict, project: Path, folder: Path, n: int,
+                 timeout: float = SCRIPT_TIMEOUT) -> tuple[bool, str, Any]:
+    """Runs ``script`` on a fresh copy for at most ``timeout`` seconds; (check passed, detail, the script's result:
+    None when the time ran out)."""
     import numpy as np
 
     import pyarchinit_photogrammetry as ppg
 
     from ..app import app as application
-    from ..core.progress import Progress
-    from .scripts import run_script
 
     doc = _copy(project, folder, n)
     chunk = doc.chunk
@@ -205,9 +240,11 @@ def _run_on_copy(script: str, case: dict, project: Path, folder: Path, n: int) -
     before = application.document
     application.document = doc
     try:
-        result = run_script(script, namespace, Progress(), name=f"{case['id']}.py")
+        result = _run_limited(script, namespace, f"{case['id']}.py", timeout)
     finally:
         application.document = before
+    if result is None:
+        return False, f"{TIMED_OUT} ({timeout:g} s)", None
     if result.error:
         return False, result.traceback or result.error, result
     try:
@@ -238,7 +275,8 @@ def _question(assistant: Assistant, case: dict, lang: str) -> CaseResult:
     return CaseResult(case["id"], "question", not missing, 1, "; ".join(parts), elapsed, _sent_chars(turn))
 
 
-def _script(assistant: Assistant, case: dict, lang: str, project: Path, folder: Path, attempts: int) -> CaseResult:
+def _script(assistant: Assistant, case: dict, lang: str, project: Path, folder: Path, attempts: int,
+            timeout: float = SCRIPT_TIMEOUT) -> CaseResult:
     t0 = time.monotonic()
     sent = 0
     detail = ""
@@ -253,7 +291,7 @@ def _script(assistant: Assistant, case: dict, lang: str, project: Path, folder: 
             detail = "no script in the answer: " + _short(turn.text)
             return CaseResult(case["id"], "script", False, attempt, detail, time.monotonic() - t0, sent)
         try:
-            ok, detail, result = _run_on_copy(script, case, project, folder, attempt)
+            ok, detail, result = _run_on_copy(script, case, project, folder, attempt, timeout)
         except Exception as exc:  # noqa: BLE001 - the copy or the polygon failed: the case cannot run
             return CaseResult(case["id"], "script", False, attempt, f"not run: {exc}", time.monotonic() - t0, sent)
         if ok:
@@ -263,7 +301,10 @@ def _script(assistant: Assistant, case: dict, lang: str, project: Path, folder: 
             detail = result.error
         if attempt >= attempts:
             break
-        if result is not None and not result.error:  # it ran but did not do the task: its output is the hint
+        if result is None:  # too slow: said so
+            error = (f"The script was stopped after {timeout:g} seconds ({TIMED_OUT}): "
+                     "give a script that does the task faster.")
+        elif not result.error:  # it ran but did not do the task: its output is the hint
             error = "The script ran without errors but did not do what was asked."
             if result.output.strip():
                 error += "\n" + result.output.strip()[-2000:]
@@ -272,9 +313,11 @@ def _script(assistant: Assistant, case: dict, lang: str, project: Path, folder: 
 
 
 def run_eval(provider: Provider, project: Path, cases: Path = CASES, kinds: str = "all", attempts: int = 2,
-             progress: ProgressCallback | None = None, language: str = "it") -> dict:
+             progress: ProgressCallback | None = None, language: str = "it",
+             script_timeout: float = SCRIPT_TIMEOUT) -> dict:
     """Asks the set ``cases`` to ``provider`` on ``project`` (a .ppg, never changed: the scripts run on copies in a
-    temporary folder) in ``language``; ``kinds`` "all", "questions" or "scripts". The result::
+    temporary folder, each for at most ``script_timeout`` seconds: then it fails with "tempo scaduto") in
+    ``language``; ``kinds`` "all", "questions" or "scripts". The result::
 
         {"provider": label, "kind", "model", "language", "date", "elapsed",
          "questions": {"passed": n, "of": m, "results": [CaseResult as dict, ...]},
@@ -319,7 +362,7 @@ def run_eval(provider: Provider, project: Path, cases: Path = CASES, kinds: str 
             assistant = Assistant(provider, lambda: holder.get("doc"), index, language=lang)
             try:
                 holder["doc"] = Document.open(project)  # what the fact tools see while the model writes
-                s_results.append(_script(assistant, case, lang, project, folder, attempts))
+                s_results.append(_script(assistant, case, lang, project, folder, attempts, script_timeout))
             finally:
                 shutil.rmtree(folder, ignore_errors=True)
             done += 1

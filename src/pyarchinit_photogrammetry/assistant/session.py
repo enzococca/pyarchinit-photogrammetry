@@ -55,6 +55,7 @@ PROJECT_CHANGED = {"it": "Il progetto è cambiato: nuova conversazione", "en": "
 GUIDE_LABEL = {"it": "guida", "en": "guide"}
 TOOL_LABEL = {"it": "strumento", "en": "tool"}
 ERROR_LABEL = {"it": "errore", "en": "error"}
+FROM_TEXT = {"it": "chiamata letta dal testo", "en": "call read from the text"}
 
 _INSTRUCTIONS = {
     "it": (
@@ -345,6 +346,8 @@ class Assistant:
             if not isinstance(result, dict):
                 result = {"error": f"the tool {call.name} returned {type(result).__name__}, not an object"}
         label = f"{TOOL_LABEL[lang]}: {read_label(call.name, result, lang)}"
+        if call.from_text:
+            label += f" - {FROM_TEXT[lang]}"
         safe = self._filter.facts(result)
         content = json.dumps(safe, ensure_ascii=False, default=str)
         return Message("tool", content, tool_call_id=call.id, error="error" in result), label
@@ -395,6 +398,8 @@ class Assistant:
                     break
                 messages.append(Message("assistant", reply.text, tool_calls=[_as_written(c) for c in reply.tool_calls]))
                 for call in reply.tool_calls:
+                    if call.from_text:  # the model wrote the call in its text: said where what left is said
+                        turn.sent.append(self._mark(f"[{FROM_TEXT[lang]}: {call.name}]"))
                     message, label = self._run_call(call, document)
                     messages.append(message)
                     turn.sent.append(self._mark(message.content))

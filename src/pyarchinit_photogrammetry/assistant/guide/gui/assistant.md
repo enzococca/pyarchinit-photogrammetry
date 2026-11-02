@@ -23,6 +23,9 @@ a Python script, *Open in the editor* under it copies the script into the editor
 
 A local server is only ever an address of this computer (`127.0.0.1`, `::1`, `localhost`): any other address
 is refused. The program never downloads models: you load them in the server.
+Some small local models write the calls to the project's tools as JSON in their answer instead of making them: the
+program reads such a call from the text and runs it like a real one, and *What is sent* says "call read from the
+text".
 
 The combo at the top of the pane chooses the kind (its last entry opens the settings); the dot beside it is
 **green "local"** when nothing leaves the computer and **orange "external"** when the questions go to Claude
@@ -101,9 +104,12 @@ ppg assistant eval FOLDER/scavo.ppg --kind local --base-url http://127.0.0.1:808
 
 | Model | Where | Questions | Scripts (score) |
 | --- | --- | --- | --- |
-| Qwen2.5-Coder-7B-Instruct Q4_K_M | local, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 1/8 in Italian, 2/8 in English | 1/6 in Italian, 3/6 in English |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | local, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 3/8 in Italian, 2/8 in English | 3/6 in Italian, 3/6 in English |
+| Qwen2.5-7B-Instruct Q4_K_M | local, the same | 2/8 in Italian, 0/8 in English | 1/6 in Italian, 0/6 in English |
 
-The reference answers of the set (`--kind reference`) pass 8/8 and 6/6: every check can be met. The small local model
-writes the calls to the project's tools as text instead of making them, so it cannot read the project: its answers on
-the project are not to be trusted, and in Italian it is "limited for scripts". Claude and OpenAI were not evaluated
+The reference answers of the set (`--kind reference`) pass 8/8 and 6/6: every check can be met. Qwen2.5-Coder writes
+the calls to the project's tools as text (the program reads them, see above) and does the simpler scripts - the region,
+the normal map, the chunk of an area - but invents functions for the classification and the export. Qwen2.5-7B-Instruct
+makes real calls but repeats them until its context is full, and is slower: among these two, Qwen2.5-Coder-7B is the one
+to load. Both are small models: read their answers about the project with care. Claude and OpenAI were not evaluated
 yet (no key on the computer of the evaluation).

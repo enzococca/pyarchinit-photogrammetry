@@ -10,11 +10,13 @@ never leaves the computer, and a key never reaches another host.
 """
 from __future__ import annotations
 
+import ast
 import http.client
 import ipaddress
 import json
 import logging
 import queue
+import re
 import socket
 import threading
 import urllib.error
@@ -31,7 +33,7 @@ CLAUDE_CHOICES = ("claude-opus-5-5", "claude-opus-5")
 OPENAI_URL = "https://api.openai.com/v1"
 LOCAL_SERVERS = {"lmstudio": "http://127.0.0.1:1234/v1", "llama.cpp": "http://127.0.0.1:8080/v1",
                  "ollama": "http://127.0.0.1:11434/v1", "unsloth": "http://127.0.0.1:8000/v1"}
-MAX_TOKENS = 8192  # of one Claude answer
+MAX_TOKENS = 8192  # of one Claude answer, and of one answer of a local model (one that repeats itself never ends)
 STOPS = ("end", "tool_calls", "length", "refusal")
 CANCEL_POLL = 0.1  # seconds between two looks at cancel()
 
@@ -46,10 +48,12 @@ class ToolSpec:
 
 @dataclass
 class ToolCall:
-    """A call asked by the model. Arguments that are not a JSON object arrive as ``{"_invalid_json": raw}``."""
+    """A call asked by the model. Arguments that are not a JSON object arrive as ``{"_invalid_json": raw}``.
+    ``from_text``: the model wrote the call in its text instead of making it (:func:`text_tool_calls`)."""
     id: str
     name: str
     arguments: dict
+    from_text: bool = False
 
 
 @dataclass
@@ -319,8 +323,22 @@ class OpenAICompatible:
     def complete(self, messages: list[Message], tools: list[ToolSpec] | None = None,
                  on_text: Callable[[str], None] | None = None,
                  cancel: Callable[[], bool] | None = None) -> Reply:
+        """One answer. A local model that writes its tool calls as JSON in the text instead of making them (small
+        models do) gets them read from the text: the reply then has those calls, ``from_text`` set, and its text
+        without the JSON (:func:`text_tool_calls`)."""
+        reply = self._complete(messages, tools, on_text, cancel)
+        if self.kind == "local" and tools and not reply.tool_calls and reply.stop == "end" and not _cancelled(cancel):
+            calls, rest = text_tool_calls(reply.text)
+            if calls:
+                return Reply(rest, calls, "tool_calls", reply.usage)
+        return reply
+
+    def _complete(self, messages: list[Message], tools: list[ToolSpec] | None,
+                  on_text: Callable[[str], None] | None, cancel: Callable[[], bool] | None) -> Reply:
         sent = [m for m in messages if not (m.role == "user" and not m.content.strip())]
         body: dict = {"model": self.model, "messages": [self._message(m) for m in sent], "stream": True}
+        if self.kind == "local":  # a small model can repeat itself for ever: the answer is cut ("length")
+            body["max_tokens"] = MAX_TOKENS
         if tools:
             body["tools"] = [self._tool(t) for t in tools]
             body["tool_choice"] = "auto"
@@ -421,6 +439,94 @@ class OpenAICompatible:
 
     def check(self) -> str:
         return f"ok: {len(self.list_models())} modelli"
+
+
+# a JSON block written as text: fenced (```json, ```python, ``` ...) or inside <tool_call> tags, else any object in the text
+_FENCED = re.compile(r"(?:<tool_call>\s*)?^[ \t]*```[\w-]*[ \t]*\n(?P<body>.*?)^[ \t]*```[ \t]*$(?:\s*</tool_call>)?",
+                     re.MULTILINE | re.DOTALL)
+_TAGGED = re.compile(r"<tool_call>\s*(?P<body>.*?)\s*</tool_call>", re.DOTALL)
+_TOOL_NAME = re.compile(r"^[A-Za-z_][\w.\-]*$")
+
+
+def _as_call(value) -> tuple[str, dict] | None:
+    """(name, arguments) when ``value`` has the shape of a tool call: ``{"name": ..., "arguments": {...}}`` (also
+    "parameters", arguments as JSON text, or the OpenAI ``{"function": {...}}``); None for any other JSON."""
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("function"), dict) and "name" not in value:
+        value = value["function"]
+    name = value.get("name")
+    key = "arguments" if "arguments" in value else "parameters" if "parameters" in value else None
+    if not isinstance(name, str) or not _TOOL_NAME.match(name) or key is None:
+        return None
+    if set(value) - {"name", "arguments", "parameters", "type", "id"}:
+        return None
+    arguments = value[key]
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            return None
+    if arguments is None:
+        arguments = {}
+    return (name, arguments) if isinstance(arguments, dict) else None
+
+
+def _calls_in(body: str) -> list[tuple[str, dict]] | None:
+    """The calls of a JSON text (or a Python literal) that is only tool calls (one object, or a list of them); None
+    otherwise."""
+    try:
+        value = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        try:  # a block written as a Python literal (None, True, single quotes): small models do
+            value = ast.literal_eval(body.strip())
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return None
+    items = value if isinstance(value, list) else [value]
+    calls = [_as_call(v) for v in items]
+    return calls if items and all(c is not None for c in calls) else None
+
+
+def text_tool_calls(text: str) -> tuple[list[ToolCall], str]:
+    """The tool calls a model wrote as JSON in ``text`` - in a fenced block, inside ``<tool_call>`` tags, or bare -
+    and the text without them. Only JSON with the shape of a call counts (``name`` and ``arguments``): any other JSON,
+    and an answer that only shows a call inside other prose without a block of its own, stays text. The name is not
+    checked here: an unknown tool reaches the tools, which answer it as they answer a real call."""
+    text = text or ""
+    found: list[tuple[str, dict]] = []
+    spans: list[tuple[int, int]] = []
+    for pattern in (_FENCED, _TAGGED):
+        for m in pattern.finditer(text):
+            if any(a <= m.start() < b for a, b in spans):
+                continue
+            calls = _calls_in(m.group("body"))
+            if calls:
+                found += calls
+                spans.append(m.span())
+    if not found:  # bare: the whole answer (or its lines from the first "{" or "[") is the JSON of the calls
+        stripped = text.strip()
+        for start in (0, *(i + 1 for i, ch in enumerate(stripped) if ch == "\n")):
+            head = stripped[start:].lstrip()
+            if head[:1] not in ("{", "["):
+                continue
+            try:
+                value, end = json.JSONDecoder().raw_decode(head)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            items = value if isinstance(value, list) else [value]
+            calls = [_as_call(v) for v in items]
+            if items and all(c is not None for c in calls):
+                found = calls
+                offset = text.index(stripped) + start + (len(stripped[start:]) - len(head))
+                spans.append((offset, offset + end))
+                break
+    if not found:
+        return [], text
+    rest = text
+    for a, b in sorted(spans, reverse=True):
+        rest = rest[:a] + rest[b:]
+    calls = [ToolCall(f"text_{i}", name, arguments, from_text=True) for i, (name, arguments) in enumerate(found)]
+    return calls, rest.strip()
 
 
 def _arguments(raw: str) -> dict:

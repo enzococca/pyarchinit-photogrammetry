@@ -120,8 +120,8 @@ def test_the_evaluation_set_is_complete_and_its_examples_pass_their_own_checks()
 class _OpenAI:
     """A local OpenAI-compatible server on 127.0.0.1: two models, and every chat answered with ``answer``."""
 
-    def __init__(self, answer: str):
-        self.answer = answer
+    def __init__(self, answer):
+        self.answers = list(answer) if isinstance(answer, (list, tuple)) else [answer]
         self.posts: list[dict] = []
         fake = self
 
@@ -146,15 +146,16 @@ class _OpenAI:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n))
                 fake.posts.append(body)
+                answer = fake.answers[min(len(fake.posts), len(fake.answers)) - 1]  # in order, the last repeated
                 if not body.get("stream"):
-                    self._json({"choices": [{"message": {"role": "assistant", "content": fake.answer},
+                    self._json({"choices": [{"message": {"role": "assistant", "content": answer},
                                              "finish_reason": "stop"}]})
                     return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Connection", "close")
                 self.end_headers()
-                for chunk in ({"choices": [{"delta": {"content": fake.answer}, "finish_reason": None}]},
+                for chunk in ({"choices": [{"delta": {"content": answer}, "finish_reason": None}]},
                               {"choices": [{"delta": {}, "finish_reason": "stop"}]}):
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -230,3 +231,79 @@ def test_record_writes_the_score_setting(small, openai_server, tmp_path):
                                  "--record"])
     assert r.exit_code != 0
     assert evaluate.REFERENCE == "reference"
+
+
+# ---------------------------------------------------------------- tool calls a local model writes as text
+
+def _local_assistant(server, project, rounds=8):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.assistant.providers import OpenAICompatible
+    from pyarchinit_photogrammetry.assistant.session import Assistant
+
+    doc = ppg.Document.open(project)
+    return Assistant(OpenAICompatible(server.url, "qwen-test", kind="local"), lambda: doc, None, language="it",
+                     max_tool_rounds=rounds)
+
+
+def test_a_tool_call_written_as_json_text_runs_the_tool(small, openai_server):
+    project, _ = small
+    server = openai_server(['Controllo.\n\n```json\n{"name": "markers", "arguments": {}}\n```',
+                            "Il progetto non ha marker.\n\nHo letto: markers"])
+    turn = _local_assistant(server, project).ask("Quali marker ci sono?")
+    assert turn.error is None and turn.text == "Il progetto non ha marker.\n\nHo letto: markers"
+    assert len(server.posts) == 2
+    assert server.posts[0]["max_tokens"] > 0  # a local model that repeats itself is cut, never streams for ever
+    second = server.posts[1]["messages"]
+    call = next(m for m in second if m["role"] == "assistant" and m.get("tool_calls"))
+    assert call["tool_calls"][0]["function"]["name"] == "markers" and "```json" not in (call.get("content") or "")
+    tool = next(m for m in second if m["role"] == "tool")
+    assert tool["tool_call_id"] == call["tool_calls"][0]["id"] and "error" not in json.loads(tool["content"])
+    assert any(r.startswith("strumento: markers") and r.endswith("chiamata letta dal testo") for r in turn.read)
+    assert "[non inviato: modello locale] [chiamata letta dal testo: markers]" in turn.sent
+
+
+def test_an_unknown_tool_written_as_text_is_reported_to_the_model(small, openai_server):
+    project, _ = small
+    server = openai_server(['{"name": "export_units", "arguments": {"units": "tutte"}}',
+                            "Non posso esportare da qui."])
+    turn = _local_assistant(server, project).ask("Esporta le unità")
+    assert turn.text == "Non posso esportare da qui."
+    tool = next(m for m in server.posts[1]["messages"] if m["role"] == "tool")
+    assert "unknown tool export_units" in json.loads(tool["content"])["error"]
+
+
+def test_plain_json_in_an_answer_stays_text(small, openai_server):
+    from pyarchinit_photogrammetry.assistant.providers import text_tool_calls
+
+    project, _ = small
+    answer = 'Ecco i valori:\n\n```json\n{"risoluzione": 0.01, "unita": "m"}\n```'
+    server = openai_server(answer)
+    turn = _local_assistant(server, project).ask("Dammi la risoluzione in JSON")
+    assert turn.text == answer and len(server.posts) == 1
+    for text in ('{"name": "markers", "arguments": {}, "note": "x"}',  # another key: not a call
+                 '{"name": "Mario Rossi", "arguments": {}}',  # not a tool name
+                 'Usa {"name": "markers", "arguments": {}} nel testo.'):  # inside prose, no block of its own
+        assert text_tool_calls(text) == ([], text)
+    calls, _ = text_tool_calls('```python\n{"name": "markers", "arguments": {"chunk": None}}\n```')
+    assert [(c.name, c.arguments) for c in calls] == [("markers", {"chunk": None})]  # a Python literal
+    calls, rest = text_tool_calls('<tool_call>\n{"name": "dem_statistics", "arguments": "{\\"chunk\\": \\"Saggio 1\\"}"}\n</tool_call>')
+    assert [(c.name, c.arguments, c.from_text) for c in calls] == [("dem_statistics", {"chunk": "Saggio 1"}, True)]
+    assert rest == ""
+
+
+def test_text_tool_calls_are_bounded_by_the_tool_rounds(small, openai_server):
+    project, _ = small
+    server = openai_server('```json\n{"name": "markers", "arguments": {}}\n```')  # it never stops calling
+    turn = _local_assistant(server, project, rounds=2).ask("Quali marker?")
+    assert len(server.posts) == 3 and "tools" not in server.posts[-1]  # the last round without tools
+    assert turn.error is None
+
+
+def test_a_slow_script_is_stopped_and_counted_as_failed(small):
+    project, _ = small
+    cases = {"questions": [], "scripts": [{"id": "slow", "task_it": "Aspetta.", "task_en": "Wait.", "check": "True",
+                                           "example": "import time\ntime.sleep(3)"}]}
+    result = run_eval(CasesProvider(cases), project, cases, kinds="scripts", script_timeout=0.3)
+    slow = result["scripts"]["results"][0]
+    assert not slow["passed"] and slow["attempts"] == 2 and "tempo scaduto" in slow["detail"]
+    assert evaluate.SCRIPT_TIMEOUT == 120.0

@@ -1673,7 +1673,7 @@ la risposta; `--show-sent` stampa anche quello che è stato inviato (con un mode
 segnata così) e `ppg assistant sent` stampa lo stesso per l'ultimo `ask` del processo. `models` elenca i modelli di
 un server locale, di Claude o dell'account OpenAI. Un indirizzo locale è sempre e solo di questo computer.
 
-`eval` pone il set di valutazione (`tests/assistant_eval/cases.json`, scritto per il progetto dimostrativo di
+`eval` pone il set di valutazione (`assistant/evaluation/cases.json` nel pacchetto, scritto per il progetto dimostrativo di
 `ppg demo CARTELLA --process`): 8 domande, ognuna in una conversazione nuova, superate quando la risposta contiene
 tutti i modelli del caso; 6 compiti di script, ogni script eseguito su una copia del progetto (mai sul progetto) e poi
 controllato, con l'errore rimandato una volta per un secondo tentativo. `--only questions|scripts`, `--out` scrive i
