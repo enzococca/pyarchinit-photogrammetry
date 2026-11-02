@@ -36,6 +36,25 @@ def _densify(line: np.ndarray, step: float) -> np.ndarray:
     return np.asarray(out)
 
 
+def drawn_lines(chunk: Chunk, polygon, res: float | None = None) -> list[np.ndarray]:
+    """The break lines and soft lines drawn on the plan of ``chunk`` (:mod:`..archaeo.breaklines`) that reach the
+    area ``polygon`` and its ring of :data:`RING` known cells (``res``: the cell of the DEM, read when not given),
+    as (n, 3) arrays (NaN where a vertex has no height): those ``fill_area(lines="drawn")`` keeps."""
+    from shapely.geometry import LineString
+
+    from ..archaeo import breaklines as bl
+    from .crop import as_polygon
+
+    geom = as_polygon(polygon) if not hasattr(polygon, "geom_type") else polygon
+    if res is None:
+        import rasterio
+
+        with rasterio.open(chunk.dem_path) as src:
+            res = abs(src.transform.a)
+    reach = geom.buffer((RING + 1) * res)
+    return [ln for ln in bl.as_arrays(bl.records(chunk)) if LineString(ln[:, :2]).intersects(reach)]
+
+
 def new_heights(known: np.ndarray, target: np.ndarray, method: str, value: float | None = None,
                 power: float = 2.0, neighbours: int = 16) -> np.ndarray:
     """Heights at ``target`` (n, 2) from ``known`` (m, 3: x, y, z) by ``method`` (:data:`METHODS`)."""
@@ -117,14 +136,7 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     known = np.column_stack([x[ring], y[ring], z[ring]])
     breaklines = list(breaklines or [])
     if lines == "drawn":
-        from shapely.geometry import LineString
-
-        from ..archaeo import breaklines as bl
-
-        reach = geom.buffer((RING + 1) * res)
-        for ln in bl.as_arrays(bl.records(chunk)):
-            if LineString(ln[:, :2]).intersects(reach):
-                breaklines.append(ln)
+        breaklines += drawn_lines(chunk, geom, res)
     if breaklines:
         extra = []
         with rasterio.open(src_path) as src:

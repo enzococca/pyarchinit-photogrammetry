@@ -267,3 +267,57 @@ def test_cli_build_uses_the_drawn_lines(trench):
         assert ppg.Document.open(w.doc.path).chunk.meta["tin"]["n_constrained"] >= 2
     r = CliRunner().invoke(cli, ["tin", "build", str(w.doc.path), "--max-error", "0.01", "--no-drawn"])
     assert r.exit_code == 0 and "break lines drawn" not in r.output
+
+
+def test_tin_edges_never_take_the_clicks_nor_the_selection(trench, monkeypatch):
+    """Under a TIN of 50 000 edges a click, a query and a box selection find the unit; the TIN alone selected is not
+    deleted; *Cancella disegni* leaves the TIN on the plan."""
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    w, app, mw = trench
+    T.build_tin(w.chunk, source="dem", max_error=0.01)
+    w._redraw_overlays()
+    w._add_unit(UnitPolygon(box(X0 + 2.0, Y0 + 2.0, X0 + 4.0, Y0 + 4.0), us="5", area="1", tipo="US", sito="Saggio"))
+    v = w.ortho_view
+    rng = np.random.default_rng(1)
+    p = np.column_stack([X0 + 2.0 + 2.0 * rng.random(50000), Y0 + 2.0 + 2.0 * rng.random(50000)])
+    v.add_segments(np.stack([p, p + rng.normal(0, 0.1, p.shape)], 1), layer=mw.TIN_LAYER)
+    app.processEvents()
+    c = v.scene_pt(X0 + 3.0, Y0 + 3.0)
+    assert v.item_at(c).data(0) == "Unita' stratigrafiche"
+    assert v.feature_at(c)[0] == "Unita' stratigrafiche"
+    picked = v.items_in_rect(v.sceneRect())
+    assert picked and mw.TIN_LAYER not in {it.data(0) for it in picked}
+    v.select_items([f[0] for f in v.layers[mw.TIN_LAYER]["features"]])
+    w.setWindowModified(False)
+    assert w.delete_selected(confirm=False) == 0 and not w.isWindowModified()
+    assert v.layers[mw.TIN_LAYER]["features"]
+    w.clear_drawings()
+    assert v.layers[mw.TIN_LAYER]["features"] and not w.units
+
+
+def test_dem_edit_counts_the_lines_it_uses_and_never_twice(trench, monkeypatch):
+    from shapely.geometry import box
+
+    w, _app, mw = trench
+    rec = _draw(w, [(X0 + 2.0, Y0 + 4.05), (X0 + 4.0, Y0 + 4.05)])  # outside the area, within its ring of cells
+    area = box(X0 + 2.0, Y0 + 2.0, X0 + 4.0, Y0 + 4.0)
+    v = w.ortho_view
+    v.select_items([v.layers[mw.LINES_LAYER]["features"][0][0]])
+    asked, called = [], []
+
+    def ask(_parent, title, fields, intro=""):
+        asked.append({f.name: f.label for f in fields})
+        return {"method": "linear", "value": None, "breaklines": True, "drawn": True, "name": ""}
+
+    monkeypatch.setattr(mw.ParamDialog, "ask", ask)
+    monkeypatch.setattr(w.chunk, "edit_dem", lambda *a, **k: called.append((a, k)) or {})
+    monkeypatch.setattr(w, "run_task", lambda label, fn, *a, **k: fn(None))
+    w.edit_dem_area(area)
+    assert "(1)" in asked[0]["drawn"]  # the line just outside the area counts, as the engine takes it
+    (args, kwargs), = called
+    assert args[3] is None and kwargs["lines"] == "drawn"  # the selected break line goes once, as drawn
+    assert rec["kind"] == "breakline"

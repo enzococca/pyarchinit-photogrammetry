@@ -376,6 +376,8 @@ class _ZoomView(QGraphicsView):
         return pen
 
 
+NOT_PICKED = 2  # data key of a graphics item that clicks, queries and selections pass through (the edges of a TIN)
+
 # The style of the labels of a layer (``layer_settings[layer]["label_style"]``); None = the default of the
 # layer's kind: units in bold white 11 pt, lines and points in their own colour, the window's font.
 LABEL_STYLE_KEYS = ("font", "size", "bold", "italic", "color", "halo", "halo_color", "halo_width")
@@ -880,7 +882,8 @@ class RasterView(_ZoomView):
     def add_segments(self, segments, color: str = "#8d6e63", layer: str = "Segmenti", attrs: dict | None = None,
                      width: float = 1.0):
         """Many segments ((n, 2, 2) world XY: the edges of a TIN) as one feature of ``layer``, one path: drawn and
-        hidden at once, no geometry of their own for snapping, QGIS or the selection tools."""
+        hidden at once, below the drawings (over the raster), no geometry of their own for snapping or QGIS, never
+        picked by a click, a query or a box or lasso selection (:data:`NOT_PICKED`)."""
         seg = np.asarray(segments, float).reshape(-1, 2, 2)
         inv = self._inverse()
         cols = inv.a * seg[..., 0] + inv.b * seg[..., 1] + inv.c
@@ -890,6 +893,8 @@ class RasterView(_ZoomView):
             path.moveTo(c0, r0)
             path.lineTo(c1, r1)
         item = self.scene().addPath(path, self._pen(color, width))
+        item.setZValue(-0.5)  # the raster is at -2 and -1, the drawings at 0: the units stay on top
+        item.setData(NOT_PICKED, True)
         self._register(layer, "line", item, None, {"etichetta": "", **(attrs or {})})
         return item
 
@@ -1112,7 +1117,7 @@ class RasterView(_ZoomView):
         area = QRectF(scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r)
         for it in self.scene().items(area):
             layer = it.data(0)
-            if layer and it.isVisible():
+            if layer and it.isVisible() and not it.data(NOT_PICKED):
                 lay = self.layers.get(layer, {"features": []})
                 idx = next((i for i, f in enumerate(lay["features"]) if f[0] is it), -1)
                 attrs = dict(it.data(1) or {})
@@ -1320,7 +1325,7 @@ class RasterView(_ZoomView):
 
     def _feature_items(self, items) -> list:
         """Feature items (not labels, highlights or the raster) among graphics items, visible only."""
-        return [it for it in items if it.data(0) in self.layers and it.isVisible()]
+        return [it for it in items if it.data(0) in self.layers and it.isVisible() and not it.data(NOT_PICKED)]
 
     def item_at(self, scene_pos: QPointF, radius_px: float = 8.0):
         r = radius_px / max(self.transform().m11(), 1e-9)

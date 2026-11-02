@@ -3673,7 +3673,7 @@
   "{0}: {1} linee": "{0}: {1} lines",
   ", salvate in {0}": ", saved in {0}",
   "piano z = {0} x + {1} y + {2}": "plane z = {0} x + {1} y + {2}",
-  "Usa le linee di rottura disegnate che attraversano l'area ({0})": "Use the break lines drawn across the area ({0})",
-  "TIN  ({0} triangoli, {1} spigoli vincolati)": "TIN  ({0} triangles, {1} constrained edges)"
+  "TIN  ({0} triangoli, {1} spigoli vincolati)": "TIN  ({0} triangles, {1} constrained edges)",
+  "Usa le linee di rottura disegnate che toccano l'area o il suo bordo ({0})": "Use the break lines drawn that reach the area or its edge ({0})"
  }
 }

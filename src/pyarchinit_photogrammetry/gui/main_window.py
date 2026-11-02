@@ -6600,10 +6600,13 @@ class MainWindow(QMainWindow):
             return
         self.edit_dem_area(geom)
 
-    def _selected_lines(self) -> list:
-        """The lines selected in the raster view (world XY), e.g. as breaklines."""
+    def _selected_lines(self, skip=()) -> list:
+        """The lines selected in the raster view (world XY), e.g. as breaklines; those of the layers ``skip`` left
+        out."""
         out = []
         for layer, _i, attrs in self.ortho_view.selected_features():
+            if layer in skip:
+                continue
             g = attrs.get("_geom")
             if self.ortho_view.layers.get(layer, {}).get("kind") == "line" and g and len(g[1]) >= 2:
                 out.append(np.asarray(g[1], float)[:, :2])
@@ -6614,11 +6617,14 @@ class MainWindow(QMainWindow):
         if not self._need_chunk(product="dem"):
             return
         lines = self._selected_lines()
-        from shapely.geometry import LineString
+        from ..engine.dem_edit import drawn_lines
 
-        # the drawn break lines that cross the area (the engine takes also those that reach its ring of known cells)
-        drawn = [r for r in self.lines if r["kind"] in ("breakline", "soft")
-                 and LineString([c[:2] for c in r["coords"]]).intersects(geom)]
+        self._store_drawings()  # the engine reads the drawn lines from the chunk
+        try:
+            drawn = drawn_lines(self.chunk, geom)  # those the engine keeps: near the area and its ring of cells
+        except Exception as exc:  # noqa: BLE001 - an unreadable DEM is said by the edit itself
+            log.warning("Linee di rottura vicine all'area non lette: %s", exc)
+            drawn = []
         v = ParamDialog.ask(self, "Modifica DEM", [f for f in [
             Field("method", "Nuove quote", "plane",
                   choices=[("plane", "Piano che si adatta al terreno attorno"),
@@ -6629,7 +6635,7 @@ class MainWindow(QMainWindow):
             Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuità", len(lines)),
                   bool(lines))
             if lines else None,
-            Field("drawn", tr("Usa le linee di rottura disegnate che attraversano l'area ({0})", len(drawn)),
+            Field("drawn", tr("Usa le linee di rottura disegnate che toccano l'area o il suo bordo ({0})", len(drawn)),
                   bool(drawn))
             if drawn else None,
             Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
@@ -6638,10 +6644,11 @@ class MainWindow(QMainWindow):
                      "versioni per confrontarlo o tornare indietro.", _it(geom.area, 2)))
         if not v:
             return
-        breaklines = lines if v.get("breaklines") else None
-        chunk = self.chunk
-        self._store_drawings()  # the engine reads the drawn lines from the chunk
         which = "drawn" if v.get("drawn") else "selection"
+        if which == "drawn":  # a selected break line is among the drawn ones: not passed twice
+            lines = self._selected_lines(skip=(LINES_LAYER,))
+        breaklines = (lines or None) if v.get("breaklines") else None
+        chunk = self.chunk
         self.run_task("Modifica del DEM", lambda p: chunk.edit_dem(
             geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p,
             lines=which),
@@ -8075,6 +8082,7 @@ class MainWindow(QMainWindow):
         self.line_layers = {}
         self.ortho_view.clear_overlays()
         self._draw_sections()
+        self._draw_tin()  # a product, not a drawing: it stays
         self._dirty(True)
 
     # ---------------------------------------------------------------- drawings saved with the project
@@ -9348,7 +9356,7 @@ class MainWindow(QMainWindow):
         from PyArchInit leave the database only with *Salva modifiche in PyArchInit*."""
         from shapely.geometry import MultiPolygon
 
-        sel = self.ortho_view.selected_features()
+        sel = [f for f in self.ortho_view.selected_features() if f[0] != TIN_LAYER]  # the TIN: Rimuovi in the tree
         if not sel:
             return 0
         parts: dict[int, set[int]] = {}
@@ -9359,8 +9367,6 @@ class MainWindow(QMainWindow):
                 probe_gone.add(int(attrs["_probe"]))
             elif layer == LINES_LAYER and "_bline" in attrs:
                 lines_gone.add(int(attrs["_bline"]))
-            elif layer == TIN_LAYER:
-                continue  # the TIN is a product: Rimuovi in the Area di lavoro
             elif layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
             elif layer == STONES_LAYER:
