@@ -93,3 +93,7 @@ pyarchinit_photogrammetry = ["gui/resources/*", "gui/translations/*.json", "pyar
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: end-to-end tests that run the full photogrammetric pipeline"]
+# the temporary folders of passed tests are deleted as the run goes (the whole suite writes ~12 GB: a Windows
+# runner ran out of disk); the folders of failed tests stay for one run
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
