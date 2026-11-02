@@ -374,6 +374,19 @@ class _WindowProxy(GuiProxy):
     def mark_modified(self) -> None:
         """Nothing to do: the script's entry of Modifica > Annulla marks the project as modified."""
 
+    def __getattr__(self, name):
+        if name in _WINDOW_REFUSED:
+            raise RuntimeError(f"window.{name} is not available to a script: {_WINDOW_REFUSED[name]}")
+        return super().__getattr__(name)
+
+
+# what a script running in the worker may not reach through ``window``: it would wait on itself, or undo the project
+# from under its own entry of Modifica > Annulla
+_WINDOW_REFUSED = {"runner": "the script itself is what the runner runs",
+                   "history": "the script is undone as one step once it ends",
+                   "undo": "the script is undone as one step once it ends",
+                   "redo": "the script is undone as one step once it ends"}
+
 
 class _StatusBar(QStatusBar):
     """The status bar: its messages in the language of the interface (also those of the engine)."""

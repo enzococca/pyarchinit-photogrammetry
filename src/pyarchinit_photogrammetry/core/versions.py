@@ -59,6 +59,14 @@ def _move_file(src: Path, dst: Path) -> None:
         shutil.move(str(src), str(dst))
 
 
+def _clear(path: Path) -> None:
+    """Nothing at ``path``: a folder (the texture folder of version 0.5 and earlier), a file or a link removed."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def _move_any(src: Path, dst: Path) -> None:
     """A file or a folder moved to ``dst``, in the place of what is there."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -248,17 +256,15 @@ def _activate_files(chunk, product: str, entry: dict, copy: bool = False) -> Non
             dst = chunk.data_dir / Path(rel).name
         else:
             continue
-        if dst.is_dir():
-            shutil.rmtree(dst)
         if copy:
-            if dst.exists():
-                dst.unlink()
+            _clear(dst)
             clone(src, dst)
         elif src.is_dir():
-            if dst.exists():
-                dst.unlink()
+            _clear(dst)
             shutil.move(str(src), str(dst))
         else:
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
             _move_file(src, dst)  # over the file there, in one move
         if role == product:
             chunk._set_product(product, dst)

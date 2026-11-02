@@ -21,7 +21,7 @@ In the console and in **Run Python script...** these names are ready, bound to t
 | `app` | the application state (`ppg.app`): `app.document` is the open project, the same as `doc` |
 | `ppg` | the package, `import pyarchinit_photogrammetry as ppg` already done |
 | `np` | NumPy |
-| `window` | the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Run Python script...** the script runs in the background and `window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts written for the window run unchanged; the supported names are `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")` and `window.refresh()` (done without waiting), `window.selected_polygon()` (the selection when the script started) and `window.mark_modified()` (nothing to do: the script's entry of *Edit > Undo* marks the project) |
+| `window` | the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Run Python script...** the script runs in the background and `window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts written for the window run unchanged; the supported names are `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")` and `window.refresh()` (done without waiting), `window.selected_polygon()` (the selection when the script started) and `window.mark_modified()` (nothing to do: the script's entry of *Edit > Undo* marks the project); `window.runner`, `window.history`, `window.undo` and `window.redo` are refused (the script would wait on itself or undo the project under its own entry) |
 
 **Run Python script...** (from 1.7.0) adds these, since the script runs in the background, away from the window:
 
@@ -73,7 +73,8 @@ above (relief rasters, precision and coverage maps, multispectral and thermal ra
 folders), stay as the script left them; so do files outside the project's folder. A script that opens another
 project cannot be undone: the window shows the project it opened.
 
-Undo takes the script back only from the state it left: when a step that is not in *Edit > Undo* - a product built
+Undo takes the script back only from the state it left (numbers computed again within a millionth count as the
+same, so an edit made and undone in the window after the script does not stand in the way): when a step that is not in *Edit > Undo* - a product built
 from the *Workflow* menu, say - changed the project after the script, undoing it would take back half of it. The
 entry is then removed from the history instead, and the status bar says so.
 
@@ -147,6 +148,13 @@ and `window.selected_polygon()`, the public name of the selection of the 2D view
 script...* the same area is the name `polygon`) in the third one (`ppg duplicate-chunk` and `ppg photos disable` on the
 command line; in the window *Duplicate chunk...* on the right click of a chunk in the Workspace and *Disable the N
 selected photos* on the right click in the Photos pane).
+
+Two complete scripts for *Run Python script...* are in the `examples` folder of the repository:
+[`foto_area.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/foto_area.py) finds the photos that see the area selected in the 2D view and filters the Photos
+pane with them, disables the others (taken back by *Edit > Undo*), puts them back or writes their list as CSV;
+[`controllo_rilievo.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/controllo_rilievo.py) checks the active chunk - photos, markers, scale bars, GPS,
+products - and writes a report into the project's folder without changing the project. Their settings are at the top
+of each file; their texts are in Italian.
 
 ### The region on the plane of three markers
 

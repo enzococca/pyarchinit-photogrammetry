@@ -22,7 +22,7 @@ Nella console e in **Esegui script Python...** questi nomi sono già pronti, leg
 | `app` | lo stato dell'applicazione (`ppg.app`): `app.document` è il progetto aperto, lo stesso di `doc` |
 | `ppg` | il pacchetto, con `import pyarchinit_photogrammetry as ppg` già fatto |
 | `np` | NumPy |
-| `window` | la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Esegui script Python...** lo script gira in secondo piano e `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la risposta, così gli script scritti per la finestra funzionano senza cambiarli; i nomi supportati sono `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")` e `window.refresh()` (fatti senza aspettare), `window.selected_polygon()` (la selezione di quando lo script è partito) e `window.mark_modified()` (non serve: la voce dello script in *Modifica > Annulla* segna già il progetto come modificato) |
+| `window` | la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Esegui script Python...** lo script gira in secondo piano e `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la risposta, così gli script scritti per la finestra funzionano senza cambiarli; i nomi supportati sono `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")` e `window.refresh()` (fatti senza aspettare), `window.selected_polygon()` (la selezione di quando lo script è partito) e `window.mark_modified()` (non serve: la voce dello script in *Modifica > Annulla* segna già il progetto come modificato); `window.runner`, `window.history`, `window.undo` e `window.redo` sono rifiutati (lo script aspetterebbe se stesso o annullerebbe il progetto sotto la sua stessa voce) |
 
 **Esegui script Python...** (dalla 1.7.0) aggiunge questi nomi, perché lo script gira in secondo piano, lontano dalla
 finestra:
@@ -76,7 +76,8 @@ elencati sopra (raster del rilievo, mappe di precisione e di copertura, raster m
 cartelle di elaborazione), restano come li ha lasciati lo script; lo stesso vale per i file fuori dalla cartella del
 progetto. Uno script che apre un altro progetto non si può annullare: la finestra mostra il progetto aperto.
 
-Annulla riprende lo script solo dallo stato in cui l'ha lasciato: se dopo lo script il progetto è cambiato con un passo
+Annulla riprende lo script solo dallo stato in cui l'ha lasciato (i numeri ricalcolati entro un milionesimo contano come
+uguali, così una modifica fatta e annullata nella finestra dopo lo script non è d'ostacolo): se dopo lo script il progetto è cambiato con un passo
 che non è in *Modifica > Annulla* (un prodotto costruito dal menu *Flusso di lavoro*, per esempio), annullarlo
 riprenderebbe solo metà delle cose. In quel caso la voce viene tolta dalla cronologia e la barra di stato lo dice.
 
@@ -150,6 +151,13 @@ chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando
 Python...* la stessa area è il nome `polygon`) nel terzo (`ppg duplicate-chunk` e `ppg photos disable` dalla riga di
 comando; nella finestra *Duplica chunk...* nel clic destro di un chunk nell'Area di lavoro e *Disattiva le N foto
 selezionate* nel clic destro del pannello Foto).
+
+Due script completi per *Esegui script Python...* sono nella cartella `examples` del repository:
+[`foto_area.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/foto_area.py) trova le foto che inquadrano l'area selezionata nella vista 2D e filtra con quelle
+il pannello Foto, disattiva le altre (*Modifica > Annulla* le rimette), le riattiva o ne scrive l'elenco in CSV;
+[`controllo_rilievo.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/controllo_rilievo.py) controlla il chunk attivo - foto, marker, barre di scala, GPS,
+prodotti - e scrive un rapporto nella cartella del progetto senza cambiare il progetto. Le impostazioni sono in cima a
+ogni file.
 
 ### La regione sul piano di tre marker
 

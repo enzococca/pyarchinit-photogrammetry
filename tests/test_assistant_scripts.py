@@ -270,9 +270,7 @@ def test_keyboard_interrupt_frees_the_runner(window):
 def _foto_area(mode: str) -> str:
     from pathlib import Path
 
-    path = Path("/Users/Shared/ppg_scripts/foto_area.py")
-    if not path.exists():
-        pytest.skip("the user's script foto_area.py is not on this computer")
+    path = Path(__file__).resolve().parents[1] / "examples" / "foto_area.py"
     src = path.read_text(encoding="utf-8")
     assert 'MODO = "filtra"' in src
     return src.replace('MODO = "filtra"', f'MODO = "{mode}"', 1)
@@ -416,3 +414,38 @@ def test_console_catches_system_exit(window):
     w, app = window
     w.console.run_source("raise SystemExit(2)")
     assert "SystemExit" in w.console.out.toPlainText()
+
+
+def test_a_marker_edit_after_a_script_undone_keeps_the_script_undoable(window):
+    w, app = window
+    _run(w, app, "chunk.meta['n'] = 1")
+    ch = w.chunk
+    m = next(m for m in ch.markers if sum(p.measured for p in m.projections.values()) > 2)
+    gone = next(k for k, p in m.projections.items() if p.measured)
+    del m.projections[gone]
+    w._markers_edited(m)
+    assert w.history.undo_text() != "Script"
+    w.undo()  # the marker edit
+    assert w.history.undo_text() == "Script"
+    w.undo()  # the script, all the same
+    assert "n" not in w.chunk.meta and w.history.redo_text() == "Script"
+
+
+def test_router_without_a_console():
+    from pyarchinit_photogrammetry.assistant.scripts import _Router
+
+    r = _Router(None)
+    assert r.write("niente") == 6 and r.isatty() is False and r.encoding == "utf-8"
+    r.flush()
+    with pytest.raises(AttributeError):
+        r.buffer
+
+
+def test_window_refuses_what_would_wait_on_the_script(window):
+    w, app = window
+    r = _run(w, app, "window.runner.wait()")
+    assert r.error and "runner" in r.error and not w.runner.busy
+    r = _run(w, app, "window.history.undo()")
+    assert r.error and "history" in r.error
+    r = _run(w, app, "print(window.chunk.label, window.photos.visible_cameras() is not None)")
+    assert r.error is None and "True" in r.output

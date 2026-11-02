@@ -162,6 +162,16 @@ class _Router:
             stream.flush()
 
     def __getattr__(self, name):
+        if self.original is None:  # a windowed app has no console: what a stream says when there is none
+            defaults = {"encoding": "utf-8", "errors": "strict", "closed": False, "isatty": lambda: False,
+                        "writable": lambda: True, "readable": lambda: False, "seekable": lambda: False}
+            if name in defaults:
+                return defaults[name]
+            if name == "fileno":
+                def fileno():
+                    raise io.UnsupportedOperation("no console")
+                return fileno
+            raise AttributeError(name)
         return getattr(self.original, name)
 
 

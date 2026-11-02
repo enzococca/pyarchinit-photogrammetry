@@ -343,6 +343,39 @@ def snapshot_text(snapshot: dict) -> str:
     return json.dumps({str(k): v for k, v in snapshot.items()}, sort_keys=True, default=str)
 
 
+TOLERANCE = 1e-6  # numbers this close are the same when undo checks the project (a value computed again)
+
+
+def first_difference(a, b, path: str = "") -> str | None:
+    """Where two JSON-like values differ (None: they are the same): dicts by their keys whatever the order, lists
+    item by item, numbers within :data:`TOLERANCE` (NaN equal to NaN), strings and everything else exactly."""
+    import math
+
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a) != set(b):
+            return f"{path}: keys {sorted(map(str, set(a) ^ set(b)))[:5]}"
+        for k in a:
+            found = first_difference(a[k], b[k], f"{path}/{k}")
+            if found:
+                return found
+        return None
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return f"{path}: {len(a)} items, {len(b)}"
+        for i, (x, y) in enumerate(zip(a, b)):
+            found = first_difference(x, y, f"{path}/{i}")
+            if found:
+                return found
+        return None
+    numbers = (int, float)
+    if isinstance(a, numbers) and isinstance(b, numbers) and not isinstance(a, bool) and not isinstance(b, bool):
+        if (isinstance(a, float) and math.isnan(a)) or (isinstance(b, float) and math.isnan(b)):
+            return None if (isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b)) \
+                else f"{path}: {a!r} != {b!r}"
+        return None if abs(a - b) <= TOLERANCE else f"{path}: {a!r} != {b!r}"
+    return None if a == b and type(a) is type(b) else f"{path}: {a!r} != {b!r}"
+
+
 def chunk_keys(snapshot: dict) -> list:
     return list(snapshot.get("order") or [k for k in snapshot if k not in ("meta", "order")])
 
@@ -417,14 +450,19 @@ class ScriptAction:
         self.expected = self.state()
 
     # ------------------------------------------------------------------ helpers
-    def state(self) -> str:
-        """The project now, as a text: what undo and redo expect to find."""
+    def state(self) -> dict:
+        """The project now, as JSON data (the snapshot and the stamps of the products' files): what undo and redo
+        expect to find."""
         self.window._store_drawings()
-        return snapshot_text(snapshot_document(self.doc)) + json.dumps(product_stamps(self.doc), sort_keys=True)
+        return {"project": json.loads(snapshot_text(snapshot_document(self.doc))), "files": product_stamps(self.doc)}
 
     def _check(self) -> None:
-        if self.window.doc is not self.doc or self.state() != self.expected:
-            raise ScriptChanged("the project changed after the script")
+        if self.window.doc is not self.doc:
+            raise ScriptChanged("another project is open")
+        found = first_difference(self.expected, self.state())
+        if found:
+            log.info("Annulla dello script: il progetto è cambiato dopo (%s)", found)
+            raise ScriptChanged(f"the project changed after the script: {found}")
 
     def _chunk(self, key):
         return next((c for c in self.doc.chunks if c.key == key), None)
