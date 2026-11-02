@@ -819,3 +819,54 @@ def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
         pos = (tmp_path / file).read_bytes()
         assert code == 0, (label, message)
         assert pos == expected, f"{label}, under {name}: {epochs(pos)} epochs, 120 in the C locale ({message})"
+
+
+# ------------------------------------------------------------------------------------------- the TIN
+def _tin_triangles(t):
+    return {tuple(r) for r in np.sort(t.triangles, axis=1).tolist()}
+
+
+def test_tin_kernels_agree_with_the_fallbacks(monkeypatch, rng):
+    from pyarchinit_photogrammetry.engine import tin
+
+    assert _native.has("tin") and ppg_core.API >= 10
+    xy = rng.uniform(-20, 20, (3000, 2))
+    z = 100 + np.sin(xy[:, 0] / 3) + 0.05 * xy[:, 1] + 0.01 * rng.standard_normal(len(xy))
+    a, b = both(monkeypatch, lambda: tin.triangulate(xy))
+    assert not a.native and b.native
+    assert _tin_triangles(a) == _tin_triangles(b)  # no four points on a circle: one Delaunay triangulation
+    tri = b.triangles
+    a, b = both(monkeypatch, lambda: tin.rasterize(xy, z, tri, -20.013, 19.987, 0.0731, 560, 550))
+    assert a.dtype == b.dtype == np.float32
+    assert np.array_equal(np.isfinite(a), np.isfinite(b))
+    assert np.nanmax(np.abs(a.astype(float) - b)) < 1e-6 * 101
+    levels = np.arange(98.5, 101.6, 0.25)
+    (sa, ka), (sb, kb) = both(monkeypatch, lambda: tin.contour_segments(xy, z, tri, levels))
+    assert len(sa) > 1000 and np.array_equal(ka, kb) and np.array_equal(sa, sb)
+    for plane in (100.0, (0.01, -0.02, 99.5)):
+        a, b = both(monkeypatch, lambda: tin.prism_volume(xy, z, tri, plane))
+        assert np.allclose(a, b, rtol=1e-12, atol=1e-9) and a[0] > 0 and a[1] > 0
+
+
+def test_tin_on_a_grid_gives_the_same_raster(monkeypatch):
+    """Points of a grid: four on a circle in every square, the two triangulations may take other
+    diagonals, but on a plane the rasters agree."""
+    from pyarchinit_photogrammetry.engine import tin
+
+    gx, gy = np.meshgrid(np.arange(40.0), np.arange(30.0))
+    xy = np.column_stack([gx.ravel(), gy.ravel()]) * 0.5
+    z = 2 + 0.03 * xy[:, 0] - 0.02 * xy[:, 1]
+    a, b = both(monkeypatch, lambda: tin.rasterize(xy, z, tin.triangulate(xy).triangles, 0.0, 14.5, 0.0337, 580, 430))
+    ok = np.isfinite(a) & np.isfinite(b)
+    assert ok.mean() > 0.99 and np.abs(a[ok].astype(float) - b[ok]).max() < 1e-6
+
+
+def test_tin_constraints_only_with_the_native_core(monkeypatch):
+    from pyarchinit_photogrammetry.engine import tin
+
+    xy = np.array([[0, 0], [4, 0], [4, 4], [0, 4], [1, 2], [3, 2.1], [2, 0.5], [2, 3.5]], float)
+    cons = [[0, 2], [1, 3]]  # the two diagonals cross at (2, 2)
+    a, b = both(monkeypatch, lambda: tin.triangulate(xy, cons))
+    assert not a.native and len(a.new_xy) == 0
+    assert b.native and np.allclose(b.new_xy, [[2, 2]]) and len(b.constrained) == 4
+    assert {tuple(r) for r in b.new_on.tolist()} <= {(0, 2), (1, 3)}
