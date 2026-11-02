@@ -82,7 +82,7 @@ class PotteryDialog(QDialog):
         self.info.setWordWrap(True)
         top.addWidget(self.info, 2)
         lay.addLayout(top, 3)
-        self.caption = QLabel(tr("Forme simili in PyArchInit (prima le piu' simili)"))
+        self.caption = QLabel(tr("Forme simili in PyArchInit (prima le più simili)"))
         lay.addWidget(self.caption)
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels([tr(h) for h in HEADERS])

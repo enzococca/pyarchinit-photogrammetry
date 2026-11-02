@@ -684,7 +684,7 @@ class PhotosPane(QListWidget):
             text += tr("\nPrecisione della posizione X/Y/Z: {0} mm", _precision(meta['precision']))
         q = meta.get("quality")
         if q is not None:
-            text += decimal_comma(tr("\nQualita' dell'immagine {0:.2f}", q)) + (tr(" (sfocata)") if q < 0.5 else "")
+            text += decimal_comma(tr("\nQualità dell'immagine {0:.2f}", q)) + (tr(" (sfocata)") if q < 0.5 else "")
         return text + (f"\nMarker: {', '.join(f[2])}" if f else "")
 
     def update_flags(self) -> None:
@@ -806,7 +806,7 @@ class PhotosPanel(QWidget):
         self.b_prev = _tool("previous", tr("Precedente"), tr("Apri la foto precedente dell'elenco (Pagina su nella "
                                                              "foto)"))
         self.b_next = _tool("next", tr("Successiva"),
-                            tr("Apri la foto successiva dell'elenco (Pagina giu' nella foto)"))
+                            tr("Apri la foto successiva dell'elenco (Pagina giù nella foto)"))
         for w in (self.label, self.b_all, self.b_markers, self.b_prev, self.b_next):
             bar.addWidget(w)
         lay.addLayout(bar)
@@ -1110,17 +1110,17 @@ class ReferencePane(QWidget):
                                else tr("Crea barra di scala... (seleziona due marker)"))
         a_bar.setIcon(icon("scalebar"))
         a_photos = menu.addAction(icon("filter"), tr("Filtra le foto di {0}", ', '.join(names)) if names
-                                  else tr("Filtra le foto... (seleziona uno o piu' marker)"))
+                                  else tr("Filtra le foto... (seleziona uno o più marker)"))
         a_photos.setEnabled(bool(keys))
         a_refine = menu.addAction(icon("refine"), tr("Affina le bandierine blu di {0}", ', '.join(names)) if names
                                   else tr("Affina le bandierine blu di tutti i marker"))
         a_refine.setToolTip(tr("Cerca per correlazione, nelle foto, il punto di ogni posizione stimata"))
         menu.addSeparator()
         a_merge = menu.addAction(icon("merge"), tr("Unisci {0} in un marker", ', '.join(names)) if len(keys) >= 2
-                                 else tr("Unisci i marker... (selezionane due o piu')"))
+                                 else tr("Unisci i marker... (selezionane due o più)"))
         a_merge.setEnabled(len(keys) >= 2)
         a_remove = menu.addAction(icon("delete"), tr("Elimina {0}", ', '.join(names)) if names
-                                  else tr("Elimina marker... (seleziona uno o piu' marker)"))
+                                  else tr("Elimina marker... (seleziona uno o più marker)"))
         a_remove.setEnabled(bool(keys))
         a_move = menu.addAction(icon("marker"), tr("Sposta {0} nella vista 3D", names[0]) if len(keys) == 1
                                 else tr("Sposta nella vista 3D... (seleziona un marker)"))
@@ -1547,7 +1547,7 @@ class PyArchInitPane(QWidget):
         self.site_combo.setEditable(True)
         self.site_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.site_combo.setToolTip(tr("Lo scavo a cui appartengono le US e le quote disegnate in questo progetto "
-                                      "(un database PyArchInit puo' contenere piu' siti)"))
+                                      "(un database PyArchInit può contenere più siti)"))
         self.site_combo.activated.connect(lambda _i: self._site_edited())
         self.site_combo.lineEdit().editingFinished.connect(self._site_edited)
         site_row.addWidget(self.site_combo, 1)
@@ -1647,7 +1647,7 @@ class PyArchInitPane(QWidget):
             si = QTreeWidgetItem([str(name), str(s.get("comune") or "")])
             si.setIcon(0, icon("site"))
             self.tree.addTopLevelItem(si)
-            us_root = QTreeWidgetItem([tr("Unita' stratigrafiche"), ""])
+            us_root = QTreeWidgetItem([tr("Unità stratigrafiche"), ""])
             us_root.setIcon(0, icon("us"))
             si.addChild(us_root)
             try:
@@ -1757,7 +1757,7 @@ class LayersPane(QWidget):
         self.b_none = _tool("eraser", tr("Nessuno"), tr("Nascondi tutti i layer"))
         self.b_zoom = _tool("search", "Zoom", tr("Zoom sul layer o sull'elemento selezionato"))
         self.b_remove = _tool("clear", tr("Rimuovi"), tr("Rimuovi il layer selezionato dalla vista"))
-        self.b_us = _tool("us", tr("Scheda unità"), tr("Apri (o crea) la scheda PyArchInit dell'unita' selezionata"))
+        self.b_us = _tool("us", tr("Scheda unità"), tr("Apri (o crea) la scheda PyArchInit dell'unità selezionata"))
         self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
         self.b_labels = _tool("label", tr("Etichette"), tr("Mostra, nascondi o modifica le etichette"))
         from PySide6.QtWidgets import QMenu
@@ -2274,7 +2274,7 @@ def _label_style_dialog_class():
             self.bold.setTristate(True)
             self.bold.setCheckState(Qt.CheckState.PartiallyChecked if s["bold"] is None
                                     else Qt.CheckState.Checked if s["bold"] else Qt.CheckState.Unchecked)
-            self.bold.setToolTip(tr("A meta': come il tipo del layer (grassetto per le US)"))
+            self.bold.setToolTip(tr("A metà: come il tipo del layer (grassetto per le US)"))
             self.italic = QCheckBox(tr("Corsivo"))
             self.italic.setChecked(bool(s["italic"]))
             row = QHBoxLayout()

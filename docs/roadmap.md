@@ -251,7 +251,28 @@ on the public WorldView-3 datasets.
 
 ## Next
 
-Open points, in no fixed order:
+**1.7.0** - the assistant (explanations of the results, how to do things, Python scripts run with one click and
+undone as one step; a local model by default, Claude or OpenAI as alternatives, nothing private leaving the
+computer), three functions of the program (the region on three markers, the normal map on the orthomosaic's grid,
+a chunk duplicated with chosen photos) and a **TIN** in the native core: a constrained Delaunay surface from spot
+heights and break lines (edges, foot of slopes, walls), with its contour lines and volumes - the surface a
+surveyor expects next to the DEM grid.
+
+New plugins, in this order:
+
+1. **Landscape through time** (Landlab): erosion and deposition simulated on the DEM - how a tell wears down,
+   where colluvium gathers, scenarios of the ancient landscape tied to the phases of the timeline.
+2. **3D geological model** (LoopStructural, in the geoarchaeology plugin): implicit surfaces and volumes from the
+   contacts of the cores, the traces in the sections and the outlines of the units, with their uncertainty; cuts
+   and fills handled as the excavation records them, not as geological layers.
+3. **Parametric architectural elements** (CadQuery): columns by revolution, mouldings and cornices extruded along
+   a path, arches and vaults from a section cut on the model; STEP and IFC solids beside the photogrammetric mesh in
+   the HBIM model.
+4. **Electrical resistivity tomography** (pyGIMLi, in the geophysics plugin): inversion of the raw data of a
+   resistivity meter, pseudosections and resistivity sections placed in the survey, in the 3D view with the units
+   and the cores.
+
+Other open points, in no fixed order:
 
 * **GNSS, the next step**: the events of a receiver (the time marks a camera leaves in the observations of a
   receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid

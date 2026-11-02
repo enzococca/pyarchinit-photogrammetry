@@ -78,7 +78,7 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
 
     progress = as_progress(progress)
     _require()
-    progress(0.05, "IFC: progetto, unita' di misura e georeferenziazione")
+    progress(0.05, "IFC: progetto, unità di misura e georeferenziazione")
     import ifcopenshell
     import ifcopenshell.api.aggregate
     import ifcopenshell.api.context

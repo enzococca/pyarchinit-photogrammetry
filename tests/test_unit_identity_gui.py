@@ -19,6 +19,9 @@ def application():
     yield app
     for widget in app.topLevelWidgets():
         if widget.parentWidget() is None:
+            # a window left by an earlier module may be marked as modified: closing it would ask
+            # whether to save, a modal question nobody answers here (the CI waited for it 20 minutes)
+            widget.setWindowModified(False)
             widget.close()
             widget.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

@@ -3376,7 +3376,7 @@ def test_ppk_step_waits_for_a_running_step(ppk_window, monkeypatch):
     try:
         assert w.runner.busy
         w.gnss_ppk()
-        assert w.statusBar().currentMessage() == "Un'elaborazione e' gia' in corso"
+        assert w.statusBar().currentMessage() == "Un'elaborazione è già in corso"
     finally:
         w.runner.thread = None
 

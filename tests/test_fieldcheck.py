@@ -86,7 +86,7 @@ def test_interface_and_command_line(processed, tmp_path, monkeypatch):
     w.field_check()
     w.runner.wait()
     app.processEvents()
-    assert shown and "Copertura: tutta l'area" in shown[0] and "si puo' lasciare il sito" in shown[0]
+    assert shown and "Copertura: tutta l'area" in shown[0] and "si può lasciare il sito" in shown[0]
     assert w.ortho_view.kind == "coverage"
     w._show_coords(0.0, 0.0, 7.0)
     assert "7 foto" in w.coord_label.text()

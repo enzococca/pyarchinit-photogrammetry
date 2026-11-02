@@ -872,7 +872,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
         sub(0.2, f"{mc.label}: punti di legame")
         tie_parts, dense_parts, lost = _read_clouds(mc)
         if lost:
-            warnings.append(f"{mc.label}: {lost} punti di legame di componenti non piu' presenti nel progetto ignorati")
+            warnings.append(f"{mc.label}: {lost} punti di legame di componenti non più presenti nel progetto ignorati")
 
         def comp_key(cid):
             return cid if cid in mc.components else None
@@ -1001,7 +1001,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                 if key == "dem":
                     dem_source = f"esportato da Metashape ({path.name})"
         for p in empty_exports:
-            warnings.append(f"{mc.label}: {p.name} e' vuoto (0 byte): esportazione da Metashape non riuscita?")
+            warnings.append(f"{mc.label}: {p.name} è vuoto (0 byte): esportazione da Metashape non riuscita?")
         if "dem" not in ch.products:
             info = internal_dem(mc)
             if info is not None:

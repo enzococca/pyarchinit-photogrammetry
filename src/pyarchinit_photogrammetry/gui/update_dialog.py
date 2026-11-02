@@ -28,11 +28,11 @@ log = logging.getLogger(__name__)
 WORK_FOLDER = re.compile(r"(\.install-[a-z0-9-]+?-)[a-z0-9_]{8}(?![a-z0-9_-])")
 
 ERROR_TEXTS = {
-    "offline": "GitHub non e' raggiungibile: controlla la connessione a Internet.",
+    "offline": "GitHub non è raggiungibile: controlla la connessione a Internet.",
     "limit": "GitHub ha ricevuto troppe richieste da questa rete: riprova tra un'ora.",
-    "missing": "Non c'e' ancora nessuna versione pubblicata.",
-    "incomplete": "Il download si e' interrotto: riprova.",
-    "install": "Non e' stato possibile installare la nuova versione.",
+    "missing": "Non c'è ancora nessuna versione pubblicata.",
+    "incomplete": "Il download si è interrotto: riprova.",
+    "install": "Non è stato possibile installare la nuova versione.",
 }
 
 SOURCE_COMMAND = "git pull"
@@ -106,9 +106,9 @@ class UpdateDialog(QDialog):
         self.setWindowTitle(tr("Aggiornamento disponibile"))
         lay = QVBoxLayout(self)
         date = release.published[:10]
-        head = QLabel(tr("<b>E' disponibile PyArchInit Photogrammetry {0}</b>", release.version)
+        head = QLabel(tr("<b>È disponibile PyArchInit Photogrammetry {0}</b>", release.version)
                       + (tr(" (pubblicata il {0}/{1}/{2})", date[8:10], date[5:7], date[:4]) if len(date) == 10 else "")
-                      + tr("<br>Questa copia e' la versione {0}.", __version__))
+                      + tr("<br>Questa copia è la versione {0}.", __version__))
         lay.addWidget(head)
         notes = QTextBrowser()
         notes.setOpenExternalLinks(True)
@@ -137,7 +137,7 @@ class UpdateDialog(QDialog):
         self._button(row, "page", "Pagina della versione")
         row.addStretch(1)
         self._button(row, "skip", "Salta questa versione")
-        self._button(row, "later", "Piu' tardi")
+        self._button(row, "later", "Più tardi")
         lay.addLayout(row)
 
     def _button(self, row, action: str, text: str, default: bool = False) -> QPushButton:

@@ -265,7 +265,7 @@ class TaskRunner(QObject):
         """Run ``fn(progress)`` in the worker thread. ``quiet``: no modal progress window, only
         the status-bar indicator (for short background jobs such as database connections)."""
         if self.busy:
-            self.status.emit(tr("Un'elaborazione e' gia' in corso"))
+            self.status.emit(tr("Un'elaborazione è già in corso"))
             return False
         label = tr(label)
         self._label, self._on_done, self._on_error = label, on_done, on_error

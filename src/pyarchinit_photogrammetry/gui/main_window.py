@@ -327,7 +327,7 @@ class _StatusBar(QStatusBar):
         super().showMessage(translate(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
-             "area": "Area: tutte le unita' nel riquadro",
+             "area": "Area: tutte le unità nel riquadro",
              "stones": "Pietre: ogni pietra nel riquadro (disegno pietra per pietra)"}
 SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("base_plus", "Accurato (base+)"),
               ("large", "Molto accurato (large)")]
@@ -742,14 +742,14 @@ class MainWindow(QMainWindow):
                   tip=tr("Il rapporto di elaborazione da stampare: rilievo, calibrazione, accuratezza, parametri, "
                          "prodotti, multispettrale e termico quando ci sono"))
         self._act(exp, tr("Pacchetto QField (tablet in trincea)..."), self.export_qfield, processing=True,
-                  icon_name="export", tip=tr("Ortofoto, DEM, unita' e quote del chunk in una cartella per QField: si "
+                  icon_name="export", tip=tr("Ortofoto, DEM, unità e quote del chunk in una cartella per QField: si "
                                              "disegna sul tablet, poi File > Importa > Modifiche da QField"))
         exp.addSeparator()
         self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
         imp = m.addMenu(icon("open"), tr("Importa"))
         self._act(imp, tr("Scansioni laser (E57, PTX)..."), self.import_scans, processing=True, icon_name="scan",
-                  tip=tr("Una o piu' scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
+                  tip=tr("Una o più scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
                          "dalle foto"))
         self._act(imp, tr("Modello 3D (OBJ, PLY, GLB)..."), self.import_model, processing=True,
                   icon_name="model_textured",
@@ -763,7 +763,7 @@ class MainWindow(QMainWindow):
         self._act(imp, tr("Progetto WebODM / ODM (cartella o all.zip)..."), lambda: self.import_external("webodm"),
                   processing=True, icon_name="open")
         self._act(imp, tr("Modifiche da QField..."), self.import_qfield, icon_name="open",
-                  tip=tr("Le unita' e le quote disegnate o corrette sul tablet tornano nel chunk"))
+                  tip=tr("Le unità e le quote disegnate o corrette sul tablet tornano nel chunk"))
         self._act(imp, tr("Sessione Photo3D..."), lambda: self.import_external("photo3d"), processing=True,
                   icon_name="photos")
         self._act(m, tr("Genera report HTML..."), self.generate_report, processing=True, icon_name="report")
@@ -813,7 +813,7 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Importa barre di scala (CSV)..."), self.import_scalebars, icon_name="scalebar")
         self._act(m, tr("Ottimizza camere"), self.optimize_cameras, processing=True, icon_name="optimize")
         self._act(m, tr("Elaborazione batch..."), self.batch_process, processing=True, icon_name="batch",
-                  tip=tr("Passi in sequenza su piu' chunk, con salvataggio dopo ogni passo e ripresa se si interrompe"))
+                  tip=tr("Passi in sequenza su più chunk, con salvataggio dopo ogni passo e ripresa se si interrompe"))
         self._act(m, tr("Controllo prima di lasciare il sito"), self.field_check, processing=True,
                   icon_name="fieldcheck", tip=tr("Subito dopo l'allineamento: aree viste da meno di tre foto, foto non "
                                                  "allineate o sfocate, marker in troppo poche foto"))
@@ -871,7 +871,7 @@ class MainWindow(QMainWindow):
                   tip=tr("Le due foto selezionate nel pannello Foto, con i punti che le collegano"))
         self.a_residuals = QAction(icon("residuals"), tr("Residui dei punti di legame nella foto"), self,
                                    checkable=True)
-        self.a_residuals.setStatusTip(tr("Nella vista Foto: dove ogni punto di legame e' stato misurato e dove lo "
+        self.a_residuals.setStatusTip(tr("Nella vista Foto: dove ogni punto di legame è stato misurato e dove lo "
                                          "rimette il modello (frecce ingrandite 20 volte)"))
         self.a_residuals.toggled.connect(self._residuals_toggled)
         dm.addAction(self.a_residuals)
@@ -910,9 +910,9 @@ class MainWindow(QMainWindow):
         self.draw_group.triggered.connect(lambda _a: self._end_request(cancelled=True))
         self.draw_actions: dict[str, QAction] = {}
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
-                                ("polygon", "Disegna unita' stratigrafica", "polygon"),
-                                ("vertices", "Modifica i vertici delle unita'", "vertices"),
-                                ("reshape", "Rimodella un'unita' con una linea (come in QGIS)", "reshape"),
+                                ("polygon", "Disegna unità stratigrafica", "polygon"),
+                                ("vertices", "Modifica i vertici delle unità", "vertices"),
+                                ("reshape", "Rimodella un'unità con una linea (come in QGIS)", "reshape"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
@@ -935,7 +935,7 @@ class MainWindow(QMainWindow):
         dm.addAction(self.a_select_freehand)
         # drawing options: freehand units, snapping to vertices / segments of the visible layers
         self.a_freehand = QAction(icon("freehand"), tr("Mano libera"), self, checkable=True)
-        self.a_freehand.setToolTip(tr("Disegno a mano libera delle unita': tieni premuto, traccia e rilascia per "
+        self.a_freehand.setToolTip(tr("Disegno a mano libera delle unità: tieni premuto, traccia e rilascia per "
                                       "chiudere"))
         self.a_freehand.setChecked(self.settings.value("draw/freehand", "false") in ("true", True))
         self.a_freehand.toggled.connect(lambda _on: self._apply_draw_options())
@@ -996,14 +996,14 @@ class MainWindow(QMainWindow):
                   icon_name="line")
         self.draw_actions["line"].setMenu(self.section_menu)
         self.draw_actions["sam"].setToolTip(tr("Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un "
-                                               "oggetto o per tutte le unita' di un'area; dal menu anche tutta "
+                                               "oggetto o per tutte le unità di un'area; dal menu anche tutta "
                                                "l'ortofoto"))
         self.ortho_view.sam_tool = current_tool if current_tool in SAM_TOOLS else "tap"
         dm.addSeparator()
         self.a_sel_delete = self._act(dm, tr("Elimina selezionati"), lambda: self.delete_selected(), icon_name="delete")
-        self.a_sel_delete.setToolTip(tr("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)"))
+        self.a_sel_delete.setToolTip(tr("Elimina gli elementi selezionati (tasto Canc nella modalità Seleziona)"))
         self.a_sel_merge = self._act(dm, tr("Unisci selezionati"), lambda: self.merge_selected(), icon_name="merge")
-        self.a_sel_merge.setToolTip(tr("Unisce le unita' selezionate in un solo poligono, o linee contigue dello "
+        self.a_sel_merge.setToolTip(tr("Unisce le unità selezionate in un solo poligono, o linee contigue dello "
                                        "stesso layer"))
         for a in (self.a_sel_delete, self.a_sel_merge):
             a.setEnabled(False)
@@ -1024,7 +1024,7 @@ class MainWindow(QMainWindow):
                                   icon_name="volume")
         self._act(m, tr("Proponi US e rapporti (Extended Matrix)..."), self.propose_units, processing=True,
                   icon_name="timeline",
-                  tip=tr("Numero di US, tipo e misure per le unita' senza numero (SAM o disegnate) e i rapporti "
+                  tip=tr("Numero di US, tipo e misure per le unità senza numero (SAM o disegnate) e i rapporti "
                          "stratigrafici dei loro contatti, da controllare e scrivere nelle schede US"))
         self._act(m, tr("Fasi dello scavo (volumi e rapporti)..."), self.excavation_phases, processing=True,
                   icon_name="timeline",
@@ -1032,7 +1032,7 @@ class MainWindow(QMainWindow):
                          "per US, rapporti stratigrafici suggeriti dall'ordine in cui le US sono state scavate"))
         self._act(m, tr("Coregistra DEM..."), self.coregister_dem, processing=True, icon_name="dem",
                   tip=tr("Sposta il DEM del chunk sul DEM di un altro rilievo (un altro chunk o una versione) sul "
-                         "terreno che non e' cambiato: spostamento orizzontale, verticale e inclinazione, cosi' "
+                         "terreno che non è cambiato: spostamento orizzontale, verticale e inclinazione, così "
                          "volumi e differenze non hanno falso scavo sui pendii"))
         self._act(m, tr("Pendenza del DEM"), lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
                   tip=tr("Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)"))
@@ -1045,7 +1045,7 @@ class MainWindow(QMainWindow):
                          "con Misura area diventano confrontabili tra giorni e camere diversi"))
         self._act(m, tr("Visualizzazioni del rilievo..."), lambda: self.relief_visualisation(), processing=True,
                   icon_name="relief",
-                  tip=tr("Sky-view factor, openness, rilievo locale e multiscala, ombreggiatura da piu' direzioni: "
+                  tip=tr("Sky-view factor, openness, rilievo locale e multiscala, ombreggiatura da più direzioni: "
                          "muri, fossati e terrazzamenti appena accennati nel DEM"))
         self._act(m, tr("Calcolatore raster..."), lambda: self.raster_calculator(), processing=True,
                   icon_name="calculator",
@@ -1168,9 +1168,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Pubblica ortofoto / DEM / modello..."), self.pyarchinit_publish, processing=True,
                   icon_name="publish")
-        self._act(m, tr("Pubblica unita' e quote disegnate"), self.pyarchinit_publish_drawings, processing=True,
+        self._act(m, tr("Pubblica unità e quote disegnate"), self.pyarchinit_publish_drawings, processing=True,
                   icon_name="publish")
-        self._act(m, tr("Pubblica solo le unita' (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
+        self._act(m, tr("Pubblica solo le unità (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
                   processing=True, icon_name="publish")
         self._act(m, tr("Pubblica schede UT (ut_table)..."), self.pyarchinit_publish_ut, icon_name="publish")
         self._act(m, tr("Pubblica solo le quote (pyarchinit_quote)"), self.pyarchinit_publish_points, processing=True,
@@ -1322,8 +1322,8 @@ class MainWindow(QMainWindow):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
                 a.setToolTip(a.text().replace("...", ""))
             a.setIconText(tr(short))
-        self.draw_actions["polygon"].setToolTip(tr("Disegna unita' stratigrafica; dal menu: Mano libera"))
-        self.draw_actions["vertices"].setToolTip(tr("Modifica i vertici delle unita'; dal menu: Rimodella un'unita' "
+        self.draw_actions["polygon"].setToolTip(tr("Disegna unità stratigrafica; dal menu: Mano libera"))
+        self.draw_actions["vertices"].setToolTip(tr("Modifica i vertici delle unità; dal menu: Rimodella un'unità "
                                                     "con una linea (come in QGIS)"))
         for mode in ("pan", "select", "polygon", "vertices"):
             db.addAction(self.draw_actions[mode])
@@ -1360,7 +1360,7 @@ class MainWindow(QMainWindow):
         a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
         db.addAction(self.a_qgis_open)
         a = db.addAction(icon("publish"), tr("Pubblica"))
-        a.setToolTip(tr("Scrive in PyArchInit le unita' disegnate (pyunitastratigrafiche) e le quote "
+        a.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le quote "
                         "(pyarchinit_quote)"))
         a.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
         self._processing_actions.append(a)
@@ -1595,7 +1595,7 @@ class MainWindow(QMainWindow):
                 request[0](np.asarray(xy, float))
             except Exception as exc:
                 log.exception("the function of a drawing request failed")
-                self._warn(tr("Il disegno non e' stato accettato: {0}", str(exc)))
+                self._warn(tr("Il disegno non è stato accettato: {0}", str(exc)))
 
     def _end_request(self, cancelled: bool = False) -> None:
         """A pending request ends (another tool, another request, Esc): its ``on_cancelled``."""
@@ -2792,7 +2792,7 @@ class MainWindow(QMainWindow):
             Field("crs", "Sistema di riferimento delle scansioni (es. EPSG:32633; vuoto = locale)", "", kind="text"),
             Field("max_points", "Punti al massimo (0 = tutti)", 0, minimum=0, maximum=2_000_000_000)],
             intro="Le scansioni diventano la nuvola densa di un nuovo chunk, ognuna nella sua posizione registrata. "
-                  "Se sono nello stesso sistema di riferimento del rilievo fotogrammetrico sono gia' al loro posto; "
+                  "Se sono nello stesso sistema di riferimento del rilievo fotogrammetrico sono già al loro posto; "
                   "altrimenti Flusso di lavoro > Allinea chunk (metodo punti, senza scala) le porta sul chunk delle "
                   "foto. Poi Colori dalle foto le colora con le foto.")
         if not v:
@@ -2878,12 +2878,12 @@ class MainWindow(QMainWindow):
             self.log_pane.info(tr("Modello importato da {0}: {1} facce, {2} pagine di texture",
                                   Path(path).name, _it(report["faces"]), report["pages"]))
             if report.get("missing_textures"):
-                self.log_pane.warning(tr("Texture non trovate: {0}; il modello e' stato importato senza",
+                self.log_pane.warning(tr("Texture non trovate: {0}; il modello è stato importato senza",
                                          ", ".join(report["missing_textures"])))
             if report.get("distance"):
-                self._warn(tr("Il modello importato e' a {0} m dai dati del chunk: controlla il sistema di "
+                self._warn(tr("Il modello importato è a {0} m dai dati del chunk: controlla il sistema di "
                               "riferimento, lo spostamento, la scala e l'asse verticale del file. Il modello di "
-                              "prima e' tra le versioni (tasto destro sul modello nell'area di lavoro).",
+                              "prima è tra le versioni (tasto destro sul modello nell'area di lavoro).",
                               _it(report["distance"], 1)))
 
         self.run_task("Importa modello 3D", job, done)
@@ -2898,7 +2898,7 @@ class MainWindow(QMainWindow):
             return
         v = ParamDialog.ask(self, "Colori dalle foto", [
             Field("photos", "Foto del chunk", others[0].key, choices=[(c.key, c.label) for c in others])],
-            intro=tr("I punti di «{0}» prendono il colore della foto che li vede piu' di fronte e da piu' vicino, "
+            intro=tr("I punti di «{0}» prendono il colore della foto che li vede più di fronte e da più vicino, "
                      "tra quelle in cui non sono nascosti dal modello.", self.chunk.label))
         if not v:
             return
@@ -3240,8 +3240,8 @@ class MainWindow(QMainWindow):
                   choices=[("markers", "Marker con lo stesso nome (almeno 3)"),
                            ("cameras", "Foto in comune tra i chunk"),
                            ("points", "Punti (nuvole che si sovrappongono)")]),
-            Field("fix_scale", "Scala fissa (solo rototraslazione: chunk gia' in metri)", False)],
-            intro="Ogni chunk resta com'e' (foto, nuvole, mesh): cambia solo la sua trasformazione, che lo porta nel "
+            Field("fix_scale", "Scala fissa (solo rototraslazione: chunk già in metri)", False)],
+            intro="Ogni chunk resta com'è (foto, nuvole, mesh): cambia solo la sua trasformazione, che lo porta nel "
                   "sistema del chunk di riferimento. Con i punti la posizione iniziale viene da marker, "
                   "georeferenziazione o foto in comune, altrimenti dalla forma delle nuvole. DEM e ortofoto dei "
                   "chunk allineati vanno ricostruiti.")
@@ -3267,7 +3267,7 @@ class MainWindow(QMainWindow):
                              + (tr("; da ricostruire: {0}",
                                    ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
             if report.get("levelled_reference"):
-                lines.append(tr("Il chunk {0} e' stato prima messo in bolla (come per il DEM).", ref.label))
+                lines.append(tr("Il chunk {0} è stato prima messo in bolla (come per il DEM).", ref.label))
             text = tr("Allineati a {0} ({1}):\n",
                       ref.label, tr(dict(markers='marker', cameras='foto', points='punti')[v['method']])) \
                 + "\n".join(lines)
@@ -3284,7 +3284,7 @@ class MainWindow(QMainWindow):
         doc = self.doc
         choices = [(ch.key, ch.label) for ch in doc.chunks]
         v = ParamDialog.ask(self, "Unisci chunk", [
-            Field("chunks", "Chunk da unire (il primo da' il sistema di riferimento)",
+            Field("chunks", "Chunk da unire (il primo dà il sistema di riferimento)",
                   [ch.key for ch in doc.chunks if ch.enabled], choices=choices, kind="checklist"),
             Field("label", "Nome del nuovo chunk", "Chunk unito", kind="text"),
             Field("markers", "Unisci i marker con lo stesso nome", True),
@@ -3293,7 +3293,7 @@ class MainWindow(QMainWindow):
             Field("models", "Unisci le mesh", False),
             Field("activate", "Rendi attivo il nuovo chunk", True)],
             intro="I chunk devono essere nello stesso sistema: allineali prima (Allinea chunk) o georeferenziali. "
-                  "Il nuovo chunk ha tutte le foto (quelle presenti in piu' chunk una volta sola), i marker e le "
+                  "Il nuovo chunk ha tutte le foto (quelle presenti in più chunk una volta sola), i marker e le "
                   "nuvole; i chunk di partenza restano. DEM e ortofoto si ricostruiscono sul chunk unito.")
         if not v:
             return
@@ -3427,7 +3427,7 @@ class MainWindow(QMainWindow):
         (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is, with its
         message and traceback; nothing changes then."""
         if self.runner.busy:  # as the menu, which is off while a step runs
-            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            self.statusBar().showMessage(tr("Un'elaborazione è già in corso"), 8000)
             return
         if not self._need_chunk():
             return
@@ -3602,7 +3602,7 @@ class MainWindow(QMainWindow):
         from ..gnss import heights
 
         if self.runner.busy:
-            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            self.statusBar().showMessage(tr("Un'elaborazione è già in corso"), 8000)
             return
         if heights.geoid_available():
             self.statusBar().showMessage(tr("La griglia del geoide EGM2008 è già installata."), 8000)
@@ -3641,7 +3641,7 @@ class MainWindow(QMainWindow):
         the choice between downloading it first and the same system without heights of its own; then
         :meth:`_set_survey_crs`."""
         if self.runner.busy:
-            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            self.statusBar().showMessage(tr("Un'elaborazione è già in corso"), 8000)
             return
         if not self._need_chunk():
             return
@@ -3884,12 +3884,12 @@ class MainWindow(QMainWindow):
             return
         v = ParamDialog.ask(self, "Fotogrammi dal video", [
             Field("mode", "Scelta dei fotogrammi", "auto",
-                  choices=[("auto", "Automatica: quando la vista si e' spostata (il piu' nitido)"),
+                  choices=[("auto", "Automatica: quando la vista si è spostata (il più nitido)"),
                            ("every", "Uno ogni tot secondi")]),
             Field("overlap", "Sovrapposizione tra fotogrammi (%)", 70.0, minimum=30.0, maximum=95.0, decimals=0),
             Field("every", "Secondi tra due fotogrammi", 1.0, minimum=0.1, maximum=60.0, decimals=1),
             Field("max_frames", "Fotogrammi al massimo (0 = nessun limite)", 0, minimum=0, maximum=100000)],
-            intro=tr("{0}: i fotogrammi vanno nella cartella «{1}_fotogrammi» accanto al video. Se accanto c'e' il "
+            intro=tr("{0}: i fotogrammi vanno nella cartella «{1}_fotogrammi» accanto al video. Se accanto c'è il "
                      "file .SRT del drone DJI, ogni fotogramma prende la sua posizione GPS.",
                      Path(path).name, Path(path).stem))
         if not v:
@@ -3922,7 +3922,7 @@ class MainWindow(QMainWindow):
             Field("faces", "Facce", [k for k, _ in self.PANORAMA_FACES], choices=self.PANORAMA_FACES, kind="checklist",
                   tip="Togli la faccia «Sotto» se mostra solo il treppiede o chi tiene la camera"),
             Field("fov", "Ampiezza di ogni faccia (gradi)", 100.0, minimum=90.0, maximum=130.0, decimals=0,
-                  tip="Piu' di 90 gradi: le facce vicine si sovrappongono e i punti si collegano"),
+                  tip="Più di 90 gradi: le facce vicine si sovrappongono e i punti si collegano"),
             Field("size", "Lato delle facce in pixel (0 = la risoluzione della foto)", 0, minimum=0, maximum=20000)],
             intro="Ogni foto 360° diventa sei foto prospettiche, le facce di un cubo, nella cartella «facce_360» "
                   "accanto alle foto. Nell'allineamento le facce di una foto restano unite (stesso centro, rotazioni "
@@ -3947,7 +3947,7 @@ class MainWindow(QMainWindow):
     LENS_MODELS = [("OPENCV", "Normale (Brown: k1, k2, p1, p2)"),
                    ("OPENCV_FISHEYE", "Fisheye (Kannala-Brandt: k1-k4)"),
                    ("FULL_OPENCV", "Normale, distorsione forte (k1-k6, p1, p2)"),
-                   ("PINHOLE", "Senza distorsione (camera virtuale, foto gia' corrette)")]
+                   ("PINHOLE", "Senza distorsione (camera virtuale, foto già corrette)")]
 
     def lens_model(self, cams=None) -> None:
         """Photos menu > Modello dell'obiettivo: the camera model of the sensors of ``cams``."""
@@ -3964,8 +3964,8 @@ class MainWindow(QMainWindow):
         labels = ", ".join(self.chunk.sensors[k].label for k in sensors)
         v = ParamDialog.ask(self, "Modello dell'obiettivo", [
             Field("model", "Modello", current, choices=choices)],
-            intro=tr("Sensori: {0}. Il fisheye e' riconosciuto dai dati EXIF dell'obiettivo (o da una focale "
-                     "equivalente fino a 15 mm); se non lo e', sceglilo qui. Focale e punto principale restano, la "
+            intro=tr("Sensori: {0}. Il fisheye è riconosciuto dai dati EXIF dell'obiettivo (o da una focale "
+                     "equivalente fino a 15 mm); se non lo è, sceglilo qui. Focale e punto principale restano, la "
                      "distorsione riparte da zero: allinea di nuovo le foto.", labels))
         if not v or all(self.chunk.sensors[k].model == v["model"] for k in sensors):
             return
@@ -3983,8 +3983,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if len(cams) == 1:
             menu.addAction(icon("photos"), tr("Apri"), lambda: self.open_photo(cams[0]))
-        menu.addAction(icon("quality"), tr("Stima la qualita' delle immagini"), self.estimate_quality)
-        menu.addAction(tr("Disattiva le foto sfocate (qualita' sotto 0,5)"), self.disable_blurred)
+        menu.addAction(icon("quality"), tr("Stima la qualità delle immagini"), self.estimate_quality)
+        menu.addAction(tr("Disattiva le foto sfocate (qualità sotto 0,5)"), self.disable_blurred)
         menu.addAction(icon("lens"), tr("Modello dell'obiettivo..."), lambda: self.lens_model(cams))
         if len(cams) == 2:
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
@@ -4013,14 +4013,14 @@ class MainWindow(QMainWindow):
             low = sorted((v, k) for k, v in q.items() if v < THRESHOLD)
             self.photos.update_flags()
             self._dirty(True)
-            text = tr("Qualita' stimata per {0} foto.", len(q))
+            text = tr("Qualità stimata per {0} foto.", len(q))
             if low:
                 names = ", ".join(chunk.camera(k).label for _v, k in low[:12]) + (" ..." if len(low) > 12 else "")
                 text += tr(" {0} sfocate rispetto alle altre (sotto 0,5): {1}", len(low), names)
             self.log_pane.info(text)
             self.statusBar().showMessage(text[:200], 15000)
 
-        self.run_task("Qualita' delle immagini", lambda p: estimate_quality(chunk, progress=p), done, refresh=False)
+        self.run_task("Qualità delle immagini", lambda p: estimate_quality(chunk, progress=p), done, refresh=False)
 
     def disable_blurred(self) -> None:
         if not self._need_chunk():
@@ -4028,7 +4028,7 @@ class MainWindow(QMainWindow):
         from ..engine.quality import low_quality
 
         if not any(c.meta.get("quality") is not None for c in self.chunk.cameras):
-            self._warn("Stima prima la qualita' delle immagini (tasto destro nel pannello Foto).")
+            self._warn("Stima prima la qualità delle immagini (tasto destro nel pannello Foto).")
             return
         self.enable_photos(low_quality(self.chunk), False)
 
@@ -4192,7 +4192,7 @@ class MainWindow(QMainWindow):
         if state is not None:
             total = sum(len(batch.targets(self.doc, s["chunks"])) for s in state["steps"])
             r = choice(self, "question", "Elaborazione batch",
-                       tr("Un batch si e' interrotto dopo {0} {1} su {2} (iniziato il {3}). Riprenderlo da dove si "
+                       tr("Un batch si è interrotto dopo {0} {1} su {2} (iniziato il {3}). Riprenderlo da dove si "
                           "era fermato?",
                           len(state['done']), tr('passo') if len(state['done']) == 1 else tr('passi'), total,
                           state['started'][:16].replace('T', ' ')),
@@ -4248,9 +4248,9 @@ class MainWindow(QMainWindow):
             if rep.get("cells"):
                 pct = rep["weak_fraction"] * 100
                 lines.append(tr("Copertura: {0:.1f}% dell'area vista da meno di {1} foto ({2:.2f} m2); in media ogni "
-                                "punto e' in {3:.0f} foto.",
+                                "punto è in {3:.0f} foto.",
                                 pct, rep['min_photos'], rep['weak_area'], rep['median_photos'])
-                             if pct else tr("Copertura: tutta l'area e' vista da almeno {0} foto (in media {1:.0f}).",
+                             if pct else tr("Copertura: tutta l'area è vista da almeno {0} foto (in media {1:.0f}).",
                                             rep['min_photos'], rep['median_photos']))
             if rep["unaligned"]:
                 lines.append(tr("Foto non allineate ({0}): ", len(rep['unaligned'])) + ", ".join(rep["unaligned"][:15])
@@ -4262,7 +4262,7 @@ class MainWindow(QMainWindow):
             for m in rep["markers"]:
                 lines.append(f"Marker {m['label']}: {tr(words[m['status']])}")
             if not lines[1:] and not rep.get("weak_cells"):
-                lines.append("Nessun problema: si puo' lasciare il sito.")
+                lines.append("Nessun problema: si può lasciare il sito.")
             if rep.get("cells"):
                 self.show_coverage_map()
             self._info("Controllo prima di lasciare il sito", "\n".join(lines))
@@ -4279,7 +4279,7 @@ class MainWindow(QMainWindow):
         self._load_raster("coverage", path)
         self.show_view(self.ortho_view)
         self.statusBar().showMessage(tr("Copertura: foto che inquadrano ogni punto - rosso scuro nessuna, rosso una, "
-                                        "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o piu'"), 20000)
+                                        "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o più"), 20000)
 
     # ---------------------------------------------------------------- diagnostics of the alignment
     def match_graph(self) -> None:
@@ -4350,7 +4350,7 @@ class MainWindow(QMainWindow):
 
     def merge_markers(self, keys) -> None:
         if not self._need_chunk() or len(keys or []) < 2:
-            self._warn("Seleziona due marker o piu' in Riferimenti per unirli.")
+            self._warn("Seleziona due marker o più in Riferimenti per unirli.")
             return
         ch = self.chunk
         names = [ch.marker_by_key(k).label for k in keys]
@@ -4411,7 +4411,7 @@ class MainWindow(QMainWindow):
         self.show_view(self.ortho_view)
         lim = getattr(self.ortho_view, "diff_limit", 0.0)
         self.statusBar().showMessage(
-            tr("Precisione del DEM (deviazione standard delle quote): verde piccola, rosso {0:.1f} mm o piu'; sigma "
+            tr("Precisione del DEM (deviazione standard delle quote): verde piccola, rosso {0:.1f} mm o più; sigma "
                "Z sotto il cursore", lim * 1000), 20000)
 
     def refine_markers(self, keys=None) -> None:
@@ -4425,7 +4425,7 @@ class MainWindow(QMainWindow):
         markers = [ch.marker_by_key(k) for k in keys] if keys else list(ch.markers)
         if not any(p.measured for m in markers for p in m.projections.values()):
             self._warn("Misura prima il marker in almeno una foto (o rileva i marker codificati): le bandierine blu "
-                       "nelle altre foto partono da li'.")
+                       "nelle altre foto partono da lì.")
             return
 
         def done(report):
@@ -4498,7 +4498,7 @@ class MainWindow(QMainWindow):
             Field("mapper", "Metodo", "auto",
                   choices=[("auto", "Automatico"), ("global", "Globale (tutte le camere insieme)"),
                            ("incremental", "Incrementale (una foto alla volta)")],
-                  tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie per i rilievi da drone (foto "
+                  tip="Globale: molto più veloce con molte foto; automatico lo sceglie per i rilievi da drone (foto "
                       "con il GPS sparse sul sito) da 40 foto in su e torna all'incrementale se lascia fuori delle foto; "
                       "per oggetti e scene ravvicinate usa sempre l'incrementale"),
             Field("gpu", "GPU per l'abbinamento", str(self.settings.value("sfm/gpu", "auto")),
@@ -4591,9 +4591,9 @@ class MainWindow(QMainWindow):
             from ..engine.chunks import _is_scaled
 
             d = _it(ch.scale * float(np.linalg.norm(a.position - b.position)), 4)
-            now = (tr(" Ora {0} e {1} distano {2} m (in 3D: con un dislivello e' piu' della distanza in pianta "
+            now = (tr(" Ora {0} e {1} distano {2} m (in 3D: con un dislivello è più della distanza in pianta "
                       "misurata sull'ortofoto).", a.label, b.label, d) if _is_scaled(ch) else
-                   tr(" Ora {0} e {1} distano {2} unita' arbitrarie (il rilievo non e' ancora in scala).",
+                   tr(" Ora {0} e {1} distano {2} unità arbitrarie (il rilievo non è ancora in scala).",
                       a.label, b.label, d))
         else:
             missing = [m.label for m in (a, b) if m.position is None]
@@ -4602,7 +4602,7 @@ class MainWindow(QMainWindow):
         from ..core import crs as crs_mod
 
         georef = not crs_mod.is_local(ch.crs)
-        geo_text = (tr("\n\nIl chunk e' georeferenziato ({0}): la barra e' proposta come verifica, misura l'errore "
+        geo_text = (tr("\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore "
                        "della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di "
                        "controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo "
                        "viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).",
@@ -4614,11 +4614,11 @@ class MainWindow(QMainWindow):
             Field("distance", "Distanza (m)", 1.0, minimum=0.0001, maximum=100000, decimals=4,
                   tip="La distanza misurata tra i centri dei due target"),
             Field("accuracy", "Accuratezza (m)", 0.001, minimum=0.00001, maximum=10, decimals=5,
-                  tip="Pesa la barra quando ce ne sono piu' d'una"),
+                  tip="Pesa la barra quando ce ne sono più d'una"),
             Field("check", "Solo verifica (check): misura l'errore, non scala", georef),
             Field("update", "Aggiorna subito la scala", True)],
             intro=tr("Come in Metashape: la distanza nota tra due marker mette in scala il rilievo. Senza punti di "
-                     "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); piu' barre si "
+                     "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); più barre si "
                      "mediano e quelle di verifica misurano l'errore.") + now + geo_text)
         if not v:
             return
@@ -4709,7 +4709,7 @@ class MainWindow(QMainWindow):
             change = float(ch.scale) / before - 1 if before else 0.0
             stale = [n for k, n in (("dem", "DEM"), ("orthomosaic", "ortofoto")) if k in ch.products]
             if abs(change) > 1e-6 and stale:
-                text = (tr("La scala del rilievo e' cambiata del {0:+.3f} %: {1} sono ancora nella scala di prima, "
+                text = (tr("La scala del rilievo è cambiata del {0:+.3f} %: {1} sono ancora nella scala di prima, "
                            "ricostruiscili (Flusso di lavoro).", change * 100, ' e '.join(stale)))
                 self.log_pane.warning(text)
                 self.statusBar().showMessage(text, 20000)
@@ -4734,7 +4734,7 @@ class MainWindow(QMainWindow):
         world = ch.to_world(m.position[None])[0]
         self.log_pane.info(f"Marker {m.label} {tr(where)}: X {world[0]:.3f} Y {world[1]:.3f} Z {world[2]:.3f}; "
                            + (tr("stimato su {0} foto: nel pannello Foto (filtrato su {1}) doppio clic su una foto, "
-                                 "poi trascina la bandierina blu sul punto esatto o doppio clic se e' giusta",
+                                 "poi trascina la bandierina blu sul punto esatto o doppio clic se è giusta",
                                  seen, m.label)
                               if seen else tr("nessuna foto lo vede: resta dove l'hai messo")))
         self._markers_edited()
@@ -4810,17 +4810,17 @@ class MainWindow(QMainWindow):
                 ("plain", "usate con la loro accuratezza (motore proprio)"),
                 ("bias", "usate, con un bias per volo (motore proprio)")]),
             Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False)],
-            intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di "
+            intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o più punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
                      "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
                      "solo la rototraslazione). I check point ({0}) restano fuori e misurano il risultato.\n\nLe "
-                     "barre di scala (due o piu', oppure insieme ai GCP) entrano come in Metashape: i marker alle "
-                     "loro estremita' vengono fissati dove le barre hanno la loro lunghezza, spostati quanto "
+                     "barre di scala (due o più, oppure insieme ai GCP) entrano come in Metashape: i marker alle "
+                     "loro estremità vengono fissati dove le barre hanno la loro lunghezza, spostati quanto "
                      "permette la loro precisione nelle foto, e il blocco si piega verso di loro quanto le foto lo "
-                     "consentono. Una sola barra da' soltanto la scala. Le barre di check misurano il risultato.\n\n"
+                     "consentono. Una sola barra dà soltanto la scala. Le barre di check misurano il risultato.\n\n"
                      "Il motore proprio non fissa i GCP: li avvicina alle coordinate secondo la loro accuratezza, "
-                     "tiene le barre come distanze tra i marker, puo' usare le posizioni GNSS delle foto stimando "
-                     "un bias per volo (base RTK su un punto sbagliato, offset dell'antenna) e la velocita' di ogni "
+                     "tiene le barre come distanze tra i marker, può usare le posizioni GNSS delle foto stimando "
+                     "un bias per volo (base RTK su un punto sbagliato, offset dell'antenna) e la velocità di ogni "
                      "foto durante la lettura del sensore (rolling shutter dei droni). Su terreno piatto con sole "
                      "foto nadirali il bias verticale si confonde con la focale: servono GCP o foto oblique.",
                      len(checks)) + "\n\n" + tr(
@@ -4830,7 +4830,7 @@ class MainWindow(QMainWindow):
                 "posizioni non distinguono la focale dalla distanza dal suolo), con entrambi i motori. Senza vincoli "
                 "un blocco nadirale su terreno piatto si piega a cupola mentre l'errore di riproiezione resta lo "
                 "stesso: se l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo "
-                "scarto di prima e 30 cm in piu'), si rimette l'allineamento di prima - o piegava il blocco, o le "
+                "scarto di prima e 30 cm in più), si rimette l'allineamento di prima - o piegava il blocco, o le "
                 "posizioni non concordano con i punti di controllo; per tenerla, togli la spunta alle camere nel "
                 "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
@@ -4857,7 +4857,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(text, 15000)
                 self._warn(tr("Ottimizzazione annullata: le camere finivano a {0} dalle loro posizioni GNSS (prima "
                               "{1}). O l'ottimizzazione piegava il blocco, o le posizioni GNSS non concordano con i "
-                              "punti di controllo. E' stato rimesso l'allineamento di prima. Per tenere "
+                              "punti di controllo. È stato rimesso l'allineamento di prima. Per tenere "
                               "un'ottimizzazione che allontana le camere dalle loro posizioni, togli la spunta alle "
                               "camere nel pannello Riferimenti (tasto destro: Non usare i riferimenti di tutte le "
                               "camere) e ripetila.", _length(offsets["after"]), _length(offsets["before"])))
@@ -4887,7 +4887,7 @@ class MainWindow(QMainWindow):
                 text += tr("; blocco tenuto dalle posizioni GNSS di {0} foto ({1})", held["photos"],
                            self._gnss_states_text(held["states"]))
             elif held.get("termination") and not held.get("usable"):
-                text += tr("; la compensazione con le posizioni GNSS non e' riuscita ({0}): il blocco resta come "
+                text += tr("; la compensazione con le posizioni GNSS non è riuscita ({0}): il blocco resta come "
                            "l'ha lasciato l'allineamento", held["termination"])
             if rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
@@ -4905,18 +4905,18 @@ class MainWindow(QMainWindow):
         from ..engine import dense
 
         v = ParamDialog.ask(self, "Nuvola densa", [
-            Field("quality", "Qualita'", "medium", choices=QUALITY),
-            Field("filter_mode", "Filtro profondita'", "moderate",
+            Field("quality", "Qualità", "medium", choices=QUALITY),
+            Field("filter_mode", "Filtro profondità", "moderate",
                   choices=[("mild", "Lieve"), ("moderate", "Moderato"), ("aggressive", "Aggressivo")]),
             Field("backend", "Motore", "auto", choices=[("auto", "Automatico"), ("cpu", "CPU (integrato)")]
-                  + ([("patchmatch", "PatchMatch multi-vista (piu' preciso, piu' lento)")]
+                  + ([("patchmatch", "PatchMatch multi-vista (più preciso, più lento)")]
                      if dense.patchmatch_available() else [])
                   + [("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")],
                   tip=tr("Automatico: PatchMatch per i rilievi aerei (foto con il GPS sparse sul sito), lo stereo a "
-                         "coppie (CPU) per oggetti e scavi. PatchMatch: un piano per pixel confrontato con piu' foto "
-                         "insieme; da drone niente gradini a forma di curve di livello e bordi piu' coperti, circa 8 "
-                         "volte piu' lento")),
-            Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)]
+                         "coppie (CPU) per oggetti e scavi. PatchMatch: un piano per pixel confrontato con più foto "
+                         "insieme; da drone niente gradini a forma di curve di livello e bordi più coperti, circa 8 "
+                         "volte più lento")),
+            Field("only_depth", "Solo le mappe di profondità (per il modello fuso, senza nuvola densa)", False)]
             + self._version_fields("point_cloud"))
         if not v:
             return
@@ -4937,12 +4937,12 @@ class MainWindow(QMainWindow):
 
         def done(pc):
             if pc is None:
-                self.statusBar().showMessage(tr("Mappe di profondita' pronte: Modello > Dati sorgente «Mappe di "
-                                                "profondita'»"), 15000)
+                self.statusBar().showMessage(tr("Mappe di profondità pronte: Modello > Dati sorgente «Mappe di "
+                                                "profondità»"), 15000)
             else:
                 self._show_model("point_cloud")
 
-        self.run_task("Nuvola densa" if not v["only_depth"] else "Mappe di profondita'", job, done)
+        self.run_task("Nuvola densa" if not v["only_depth"] else "Mappe di profondità", job, done)
 
     def _photos_to_skip(self, step: str, all_photos: bool = False) -> bool | None:
         """Before a step that reads the photos (the aligned ones, or every enabled one with
@@ -4955,7 +4955,7 @@ class MainWindow(QMainWindow):
             if not bad:
                 return False
             names = "\n".join(Path(c.path).name for c in bad[:5]) + ("\n..." if len(bad) > 5 else "")
-            text = (tr("{0} foto su {1} non si possono leggere:\n{2}\n\nUn file vuoto (0 byte) di solito e' un file "
+            text = (tr("{0} foto su {1} non si possono leggere:\n{2}\n\nUn file vuoto (0 byte) di solito è un file "
                        "di Dropbox, iCloud o OneDrive tenuto «solo online»: rendi la cartella disponibile offline, "
                        "oppure collega le foto a un'altra copia (per esempio sul disco esterno).",
                        len(bad), len(cams), names))
@@ -5054,7 +5054,7 @@ class MainWindow(QMainWindow):
         def done(r):
             text = tr("Modello di Metashape reimportato: {0} facce", _it(r['faces'] or 0)) + \
                 (tr(", con la texture") if r["texture"] else tr(", senza texture")) + \
-                tr(" (il modello di prima e' tra le versioni)")
+                tr(" (il modello di prima è tra le versioni)")
             for w in r["warnings"]:
                 self.log_pane.warning(w)
             self.log_pane.info(text)
@@ -5072,8 +5072,8 @@ class MainWindow(QMainWindow):
         return folder.exists() and any(folder.iterdir())
 
     def _no_depth_maps(self) -> None:
-        self._warn("La confidenza si calcola dalle mappe di profondita': costruiscile con Flusso di lavoro > "
-                   "Costruisci nuvola densa (con «Solo le mappe di profondita'» la nuvola attuale non cambia).")
+        self._warn("La confidenza si calcola dalle mappe di profondità: costruiscile con Flusso di lavoro > "
+                   "Costruisci nuvola densa (con «Solo le mappe di profondità» la nuvola attuale non cambia).")
 
     def _model_confidence(self):
         from ..engine.confidence import read_model_confidence
@@ -5118,10 +5118,10 @@ class MainWindow(QMainWindow):
             return
         v = ParamDialog.ask(self, "Calcola la confidenza", [
             Field("what", "Calcola per", [k for k, _ in targets], choices=targets, kind="checklist"),
-            Field("tol", "Tolleranza di profondita' (% della distanza)", 1.0, minimum=0.1, maximum=10.0, decimals=1,
-                  tip="Una mappa conferma un punto se la sua superficie e' a meno di questa frazione della distanza "
+            Field("tol", "Tolleranza di profondità (% della distanza)", 1.0, minimum=0.1, maximum=10.0, decimals=1,
+                  tip="Una mappa conferma un punto se la sua superficie è a meno di questa frazione della distanza "
                       "dalla camera (1% come nella fusione delle mappe)")],
-            intro="La confidenza di un punto (o di un vertice del modello) e' il numero di mappe di profondita' che "
+            intro="La confidenza di un punto (o di un vertice del modello) è il numero di mappe di profondità che "
                   "lo confermano, come in Metashape: valori bassi indicano rumore, riflessi, bordi del rilievo o "
                   "superfici inventate per chiudere un buco. Si vede nella vista 3D (Colori > Confidenza) e si usa "
                   "per pulire la nuvola e il modello.")
@@ -5176,7 +5176,7 @@ class MainWindow(QMainWindow):
         fields = [
             Field("min_confidence", "Togli i punti con confidenza minore di (0 = no)", 3 if conf is not None else 0,
                   minimum=0, maximum=255,
-                  tip="Numero di mappe di profondita' che confermano il punto: 2-3 toglie il rumore piu' evidente"),
+                  tip="Numero di mappe di profondità che confermano il punto: 2-3 toglie il rumore più evidente"),
             Field("statistical", "Togli i punti isolati (filtro statistico)", True),
             Field("neighbors", "    vicini considerati", 16, minimum=4, maximum=200),
             Field("std_ratio", "    soglia (deviazioni standard)", 2.0, minimum=0.5, maximum=10.0, decimals=1),
@@ -5293,11 +5293,11 @@ class MainWindow(QMainWindow):
 
         n_faces = face_count(ch.product_path("model")) or 0
         v = ParamDialog.ask(self, "Pulisci il modello", [
-            Field("min_component", "Togli le parti staccate sotto il ...% della parte piu' grande (0 = no)", 1.0,
+            Field("min_component", "Togli le parti staccate sotto il ...% della parte più grande (0 = no)", 1.0,
                   minimum=0.0, maximum=100.0, decimals=2),
             Field("min_confidence", "Togli le facce con vertici di confidenza minore di (0 = no)",
                   1 if conf is not None else 0, minimum=0, maximum=255,
-                  tip="1 toglie le superfici che nessuna mappa di profondita' ha visto (buchi chiusi dal modello)"),
+                  tip="1 toglie le superfici che nessuna mappa di profondità ha visto (buchi chiusi dal modello)"),
             Field("max_edge", "Togli i triangoli stirati: lato oltre N volte la mediana (0 = no)", 0.0, minimum=0.0,
                   maximum=1000.0, decimals=1),
             Field("repair", "Ripara la topologia (facce degeneri e doppie)", True),
@@ -5308,7 +5308,7 @@ class MainWindow(QMainWindow):
             + self._version_fields("model"),
             intro=tr("Modello di {0} facce", _it(n_faces))
                   + (tr("; confidenza dei vertici calcolata.") if conf is not None else
-                     tr("; la confidenza dei vertici verra' calcolata dalle mappe di profondita' se usi quel filtro."))
+                     tr("; la confidenza dei vertici verrà calcolata dalle mappe di profondità se usi quel filtro."))
                   + tr(" La texture va ricostruita dopo la pulizia."))
         if not v:
             return
@@ -5459,7 +5459,7 @@ class MainWindow(QMainWindow):
     def crop_with_selection(self) -> None:
         geom = self._selected_polygon()
         if geom is None:
-            self._warn("Seleziona un poligono (strumento Seleziona: per esempio un'unita' stratigrafica) oppure "
+            self._warn("Seleziona un poligono (strumento Seleziona: per esempio un'unità stratigrafica) oppure "
                        "disegnalo con lo strumento Ritaglio.")
             return
         self.crop_products(geom)
@@ -5469,7 +5469,7 @@ class MainWindow(QMainWindow):
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
         if not geom.is_valid or geom.area <= 0:
-            self._warn("Il poligono di ritaglio non e' valido (i lati si incrociano o non ha area): ridisegnalo.")
+            self._warn("Il poligono di ritaglio non è valido (i lati si incrociano o non ha area): ridisegnalo.")
             return
         self.ortho_view.remove_layer(CROP_LAYER)
         self.ortho_view.add_polygon(np.asarray(geom.exterior.coords)[:-1], color="#00b0ff", fill_alpha=25,
@@ -5515,7 +5515,7 @@ class MainWindow(QMainWindow):
             Field("name", "Inizio del nome dei file", "ritaglio", kind="text"),
             Field("model_format", "Formato del modello", "ply",
                   choices=[("ply", "PLY (colori e confidenza)"), ("obj", "OBJ (con la texture)")],
-                  tip="PLY con coordinate in doppia precisione; OBJ con la texture se e' stata costruita"),
+                  tip="PLY con coordinate in doppia precisione; OBJ con la texture se è stata costruita"),
             Field("cloud_format", "Formato della nuvola", "las",
                   choices=[("las", "LAS (classi e confidenza)"), ("ply", "PLY")]),
             Field("use_z", "Limita anche le quote (modello e nuvola)", False),
@@ -5545,7 +5545,7 @@ class MainWindow(QMainWindow):
             targets = {k: folder / f"{stem}{ext[k]}" for k in v["what"]}
             existing = [t.name for t in targets.values() if t.exists()]
             if existing and choice(self, "question", "Ritaglia con un poligono",
-                                   tr("Nella cartella ci sono gia': {0}. Sovrascriverli?", ', '.join(existing)),
+                                   tr("Nella cartella ci sono già: {0}. Sovrascriverli?", ', '.join(existing)),
                                    ["Sovrascrivi"]) != 0:
                 return
 
@@ -5622,7 +5622,7 @@ class MainWindow(QMainWindow):
             return
         dense = self.chunk.meta.get("dense") or {}
         depth_maps = bool(dense) and dense.get("backend") != "openmvs" and (self.chunk.data_dir / "dense").exists()
-        sources = ([("depth_maps", "Mappe di profondita' (fusione, come Metashape)")] if depth_maps else []) + \
+        sources = ([("depth_maps", "Mappe di profondità (fusione, come Metashape)")] if depth_maps else []) + \
             [("point_cloud", "Nuvola densa"), ("tie_points", "Punti di legame")]
         src = "depth_maps" if depth_maps else ("point_cloud" if self.chunk.product_path("point_cloud") else "tie_points")
         v = ParamDialog.ask(self, "Modello 3D", [
@@ -5631,12 +5631,12 @@ class MainWindow(QMainWindow):
                   choices=[("arbitrary", "Arbitraria (3D)"), ("height_field", "Campo di altezze (2.5D, terreno)")]),
             Field("face_count", "Numero di facce", "medium",
                   choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
-            Field("voxel", "Voxel per le mappe di profondita' (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
+            Field("voxel", "Voxel per le mappe di profondità (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
                   decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
             + self._class_fields("Classi (solo dalla nuvola densa)") + self._version_fields("model"),
-            intro=(tr("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
-                      "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto.") if depth_maps else
-                   tr("Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe."))
+            intro=(tr("Con le mappe di profondità la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
+                      "senza passare dalla nuvola densa: più fedele e con i colori delle foto.") if depth_maps else
+                   tr("Costruisci le mappe di profondità (Nuvola densa) per avere anche la fusione delle mappe."))
             + self._class_hint("Dalla nuvola densa puoi togliere delle classi (vegetazione, attrezzi): la superficie "
                                "si richiude sopra quello che manca."))
         if v:
@@ -5665,12 +5665,12 @@ class MainWindow(QMainWindow):
             Field("size", "Dimensione texture", 8192 if faces > 1_000_000 else 4096,
                   choices=[(2048, "2048"), (4096, "4096"), (8192, "8192"), (16384, tr("16384 (4 pagine da 8192)")),
                            (32768, tr("32768 (16 pagine da 8192)"))],
-                  tip=tr("Oltre 8192 pixel la texture e' divisa in pagine, come in Metashape: ogni pagina resta "
+                  tip=tr("Oltre 8192 pixel la texture è divisa in pagine, come in Metashape: ogni pagina resta "
                          "leggibile dalle schede grafiche e dai visualizzatori")),
             Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
-                  tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)")],
+                  tip="Misurata la prima volta sui punti visti da più foto (Strumenti > Calibra i colori)")],
             intro=thousands_points(tr("Modello di {0:,} facce. ", faces))
-                  + tr("Ortofoto adattiva: la texture e' l'ortofoto del modello e le pareti ripide hanno spazi propri "
+                  + tr("Ortofoto adattiva: la texture è l'ortofoto del modello e le pareti ripide hanno spazi propri "
                        "(come in Metashape, per i rilievi dall'alto); generica: ogni faccia ha il suo spazio "
                        "nell'immagine (per oggetti 3D; su milioni di facce ognuna resta di pochi pixel). "
                        "Automatica sceglie l'ortofoto per i modelli grandi rivolti verso l'alto."))
@@ -5693,7 +5693,7 @@ class MainWindow(QMainWindow):
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
             Field("interpolate", "Interpola i vuoti", True)] + self._class_fields("Classi (solo dalla nuvola densa)")
             + self._version_fields("dem"),
-            intro=self._class_hint("Con la nuvola densa scegli le classi: solo Terreno da' il modello del terreno (DTM), "
+            intro=self._class_hint("Con la nuvola densa scegli le classi: solo Terreno dà il modello del terreno (DTM), "
                                    "senza vegetazione, persone o attrezzi; i vuoti che lasciano vengono interpolati. "
                                    "Curve di livello e volumi useranno questo DEM."))
         if v:
@@ -5720,19 +5720,19 @@ class MainWindow(QMainWindow):
                            ("average", "Media delle foto")],
                   tip="Mosaico: i dettagli dalla foto migliore, le differenze di luce sfumate lungo le cuciture"),
             Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
-                  tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)"),
+                  tip="Misurata la prima volta sui punti visti da più foto (Strumenti > Calibra i colori)"),
             Field("ghosting", "Togli persone e mezzi visti da poche foto", False,
-                  tip="Dove almeno tre foto vedono la cella si prende la migliore che concorda con le altre (piu' lento)"),
+                  tip="Dove almeno tre foto vedono la cella si prende la migliore che concorda con le altre (più lento)"),
             Field("fill_holes", "Riempi i piccoli buchi (fino a 100 pixel)", True,
                   tip="Celle che nessuna foto vede, riempite dai bordi; i buchi grandi restano trasparenti"),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
             Field("max_angle", "Angolo massimo di vista dalla verticale (gradi)", 70.0, minimum=10.0, maximum=90.0,
-                  decimals=0, tip="Dove tutte le foto guardano piu' di traverso la cella resta trasparente: viste "
+                  decimals=0, tip="Dove tutte le foto guardano più di traverso la cella resta trasparente: viste "
                                   "radenti (foto oblique ai bordi del rilievo) stirano la foto sulla superficie")]
             + ([Field("hide", "Classi da rendere trasparenti", [], choices=choices, kind="checklist")]
                if len(choices) > 1 else []) + self._version_fields("orthomosaic"),
             intro=self._class_hint("Le classi scelte (attrezzi, persone, vegetazione) diventano trasparenti dove sono "
-                                   "la superficie visibile. Su un DEM del solo terreno l'ortofoto e' quella classica."))
+                                   "la superficie visibile. Su un DEM del solo terreno l'ortofoto è quella classica."))
         if not v:
             return
         skip = self._photos_to_skip("Ortofoto")
@@ -5807,7 +5807,7 @@ class MainWindow(QMainWindow):
         fields = [Field(k, label, float(val), minimum=-1e9, maximum=1e9, decimals=3)
                   for k, label, val in (("cx", "Centro X", r.center[0]), ("cy", "Centro Y", r.center[1]),
                                         ("cz", "Centro Z", r.center[2]), ("sx", "Larghezza (m)", r.size[0]),
-                                        ("sy", "Profondita' (m)", r.size[1]), ("sz", "Altezza (m)", r.size[2]))]
+                                        ("sy", "Profondità (m)", r.size[1]), ("sz", "Altezza (m)", r.size[2]))]
         fields.append(Field("angle", "Rotazione attorno alla verticale (gradi)", angle, minimum=-360.0,
                             maximum=360.0, decimals=2))
         v = ParamDialog.ask(self, "Regione di ricostruzione", fields, intro="Coordinate del sistema del chunk.")
@@ -5822,7 +5822,7 @@ class MainWindow(QMainWindow):
         self.chunk.region = None
         self._dirty(True)
         self.model_view.refresh(reset=False)
-        self.statusBar().showMessage(tr("Nessuna regione: si ricostruisce tutto cio' che le foto vedono"), 8000)
+        self.statusBar().showMessage(tr("Nessuna regione: si ricostruisce tutto ciò che le foto vedono"), 8000)
 
     # ---------------------------------------------------------------- DEM editing
     def _dem_edit_drawn(self, xy) -> None:
@@ -5830,7 +5830,7 @@ class MainWindow(QMainWindow):
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
         if not geom.is_valid or geom.area <= 0:
-            self._warn("L'area non e' valida (i lati si incrociano o non ha area): ridisegnala.")
+            self._warn("L'area non è valida (i lati si incrociano o non ha area): ridisegnala.")
             return
         self.edit_dem_area(geom)
 
@@ -5896,7 +5896,7 @@ class MainWindow(QMainWindow):
 
         def done(r):
             if "plan" not in r:
-                self._warn("L'area e' fuori dal DEM.")
+                self._warn("L'area è fuori dal DEM.")
                 return
             lines = [tr("Area in pianta {0:.3f} m2, superficie {1:.3f} m2 (+{2:.1f}%)",
                         r['plan'], r['surface'], (r['surface'] / max(r['plan'], 1e-12) - 1) * 100),
@@ -5934,9 +5934,9 @@ class MainWindow(QMainWindow):
         v = ParamDialog.ask(self, "Pacchetto QField", [
             Field("resolution", "Pixel dell'ortofoto sul tablet (m)", 0.02, minimum=0.001, maximum=1.0, decimals=3),
             Field("project", "Progetto per QField (serve QGIS)", qgis is not None and bool(qgis.python))],
-            intro=tr("Una cartella con l'ortofoto (ridotta per il tablet), il DEM e un GeoPackage con le unita' e le "
+            intro=tr("Una cartella con l'ortofoto (ridotta per il tablet), il DEM e un GeoPackage con le unità e le "
                      "quote di questo chunk, da copiare sul tablet o su QFieldCloud. Al ritorno, File > Importa > "
-                     "Modifiche da QField riporta qui cio' che e' stato disegnato o corretto."))
+                     "Modifiche da QField riporta qui ciò che è stato disegnato o corretto."))
         if not v:
             return
         import uuid
@@ -5956,7 +5956,7 @@ class MainWindow(QMainWindow):
         def done(out):
             self._dirty(True)
             name = out["project"].name if out["project"] else qfield.GPKG
-            self._info("QField", tr("Pacchetto QField in {0}: {1} unita', {2} quote. Copia la cartella sul tablet (o "
+            self._info("QField", tr("Pacchetto QField in {0}: {1} unità, {2} quote. Copia la cartella sul tablet (o "
                                     "su QFieldCloud) e apri {3} con QField; al ritorno, File > Importa > Modifiche "
                                     "da QField.", out["folder"], out["units"], out["quote"], name))
 
@@ -5974,7 +5974,7 @@ class MainWindow(QMainWindow):
             if not folder:
                 return
         if not (Path(folder) / qfield.RECORD).exists():
-            self._warn(tr("{0} non e' un pacchetto QField di questo programma (manca {1}).", folder, qfield.RECORD))
+            self._warn(tr("{0} non è un pacchetto QField di questo programma (manca {1}).", folder, qfield.RECORD))
             return
         self._store_drawings()
         try:
@@ -5985,7 +5985,7 @@ class MainWindow(QMainWindow):
         self._reload_drawings()
         self._dirty(True)
         u, q = n["units"], n["quote"]
-        self._info("QField", tr("Dal tablet: unita' {0} nuove, {1} modificate, {2} eliminate; quote {3} nuove, {4} "
+        self._info("QField", tr("Dal tablet: unità {0} nuove, {1} modificate, {2} eliminate; quote {3} nuove, {4} "
                                 "modificate, {5} eliminate. Verso PyArchInit: Pubblica in PyArchInit per le nuove, "
                                 "Salva modifiche in PyArchInit per le altre.", u["added"], u["changed"], u["deleted"],
                                 q["added"], q["changed"], q["deleted"]))
@@ -6084,7 +6084,7 @@ class MainWindow(QMainWindow):
         v = ParamDialog.ask(self, "Visualizzazioni del rilievo", [
             Field("method", "Visualizzazione", method or "svf", choices=self.RELIEF_CHOICES),
             Field("radius", "Raggio di ricerca (m)", radius, minimum=res, maximum=relief.MAX_RADIUS_CELLS * res,
-                  decimals=3, tip="Fin dove cercare l'orizzonte e la media dei dintorni: un po' piu' della meta' "
+                  decimals=3, tip="Fin dove cercare l'orizzonte e la media dei dintorni: un po' più della metà "
                                   "degli elementi da vedere"),
             Field("directions", "Direzioni", 16, minimum=4, maximum=64),
             Field("min_size", "Rilievo multiscala: elementi da (m)", round(4 * res, 3), minimum=res, maximum=1e4,
@@ -6153,7 +6153,7 @@ class MainWindow(QMainWindow):
                            ("idw", "Media pesata con la distanza (IDW)"),
                            ("constant", "Quota costante")]),
             Field("value", "Quota costante (vuota: la mediana del bordo)", None, kind="optional_float"),
-            Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuita'", len(lines)),
+            Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuità", len(lines)),
                   bool(lines))
             if lines else None,
             Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
@@ -6206,9 +6206,9 @@ class MainWindow(QMainWindow):
                                                                    (False, "Dall'esterno (torre, colonna)")]))
         if kind != "view":
             fields += [
-                Field("front", "Profondita' davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
-                      tip="Cio' che sta piu' avanti (impalcature, una sezione davanti al muro) non copre la parete"),
-                Field("back", "Profondita' dietro (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3)]
+                Field("front", "Profondità davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
+                      tip="Ciò che sta più avanti (impalcature, una sezione davanti al muro) non copre la parete"),
+                Field("back", "Profondità dietro (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3)]
         return fields + [
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
             Field("blending", "Fusione", "mosaic",
@@ -6250,7 +6250,7 @@ class MainWindow(QMainWindow):
             if poly is not None:
                 choices.append((("cylinder", None), "Cilindro dal poligono selezionato (pozzo, torre)"))
             if not choices:
-                self._warn("Traccia una sezione lungo il muro (Disegno > Traccia sezione), oppure seleziona tre o piu' "
+                self._warn("Traccia una sezione lungo il muro (Disegno > Traccia sezione), oppure seleziona tre o più "
                            "marker sulla parete nel pannello Riferimenti, oppure seleziona un poligono attorno a un "
                            "pozzo o a una torre.")
                 return
@@ -6334,7 +6334,7 @@ class MainWindow(QMainWindow):
 
         ortho, relief = E.elevation_paths(self.chunk, entry)
         if not ortho.exists():
-            self._warn(tr("Il prospetto «{0}» non ha piu' i suoi file.", entry['name']))
+            self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry['name']))
             return
         self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
@@ -6451,7 +6451,7 @@ class MainWindow(QMainWindow):
             Field("folder", "Cartella delle foto dello sfondo", "", kind="dir"),
             Field("tolerance", "Tolleranza (livelli di colore)", 12.0, minimum=1.0, maximum=120.0, decimals=0)],
             intro="Foto dello sfondo senza l'oggetto, dalle stesse posizioni (con lo stesso nome delle foto, o una "
-                  "sola foto per tutte se la fotocamera e' fissa): l'oggetto e' cio' che cambia.")
+                  "sola foto per tutte se la fotocamera è fissa): l'oggetto è ciò che cambia.")
         if not v or not v["folder"]:
             return
         cams = self._mask_targets()
@@ -6518,7 +6518,7 @@ class MainWindow(QMainWindow):
 
         def done(info):
             gains = [sum(g) / 3 for g in info["gains"].values()]
-            text = tr("Correzione misurata su {0} osservazioni di punti visti da piu' foto.\n\nDifferenza di colore "
+            text = tr("Correzione misurata su {0} osservazioni di punti visti da più foto.\n\nDifferenza di colore "
                       "tra le foto: {1}% prima, {2}% dopo.\nEsposizione delle foto: da {3} a {4} volte la media.",
                       _it(info['observations']), _it(info['rms_before'] * 100, 1), _it(info['rms_after'] * 100, 1),
                       _it(min(gains), 2), _it(max(gains), 2))
@@ -6527,7 +6527,7 @@ class MainWindow(QMainWindow):
             corner = [100 * (1 - math.exp(sum(b))) for b in info["vignetting"].values()]  # at the corners (r = 1)
             if any(abs(c) >= 1 for c in corner):
                 text += tr("\nVignettatura agli angoli: ") + ", ".join(
-                    tr("{0:.0f}% piu' {1}", abs(c), tr('scuri') if c > 0 else tr('chiari')) for c in corner)
+                    tr("{0:.0f}% più {1}", abs(c), tr('scuri') if c > 0 else tr('chiari')) for c in corner)
             self._info("Colori delle foto", text + tr("\n\nOrtofoto e texture costruite da ora in poi la usano."))
 
         self.run_task("Calibrazione dei colori", lambda p: self.chunk.calibrate_colours(progress=p), done,
@@ -6543,7 +6543,7 @@ class MainWindow(QMainWindow):
             Field("markers", "Rileva target", True),
             Field("target_type", "Tipo di target", "aruco_4x4_50", choices=TARGET_TYPES),
             Field("align_quality", "Precisione allineamento", "high", choices=QUALITY[1:]),
-            Field("dense_quality", "Qualita' nuvola densa", "medium", choices=QUALITY),
+            Field("dense_quality", "Qualità nuvola densa", "medium", choices=QUALITY),
             Field("surface", "Superficie modello", "arbitrary",
                   choices=[("arbitrary", "Arbitraria (3D)"), ("height_field", "Campo di altezze (2.5D)")]),
             Field("texture", "Texture", True), Field("dem", "DEM", True), Field("ortho", "Ortofoto", True),
@@ -6732,8 +6732,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{camera.label}: " + (tr("bandierina blu = posizione stimata da confermare: trascinala sul punto esatto "
                                       "(o doppio "
-                                      "clic se e' gia' giusta), diventa verde; ") if flags else "")
-            + tr("tasto destro per posizionare un marker; Pagina giu'/su: foto successiva/precedente"), 20000)
+                                      "clic se è già giusta), diventa verde; ") if flags else "")
+            + tr("tasto destro per posizionare un marker; Pagina giù/su: foto successiva/precedente"), 20000)
         if self.a_residuals.isChecked():
             self._draw_residuals()
 
@@ -6767,7 +6767,7 @@ class MainWindow(QMainWindow):
         self._show_pane(self.bottom_tabs, self.photos_panel)
         self.statusBar().showMessage(
             tr("{0} foto con {1}: doppio clic per aprirle centrate sul marker; bandierina blu = da confermare "
-               "(trascinala sul punto esatto o doppio clic se e' giusta); Pagina giu'/su per passare alle altre",
+               "(trascinala sul punto esatto o doppio clic se è giusta); Pagina giù/su per passare alle altre",
                n, names), 20000)
 
     def filter_photos_with_markers(self) -> None:
@@ -6948,8 +6948,8 @@ class MainWindow(QMainWindow):
                 and (u.attributes or {}).get("gid") is None]
         numbered = self._without_us_form(site)
         if not todo and not numbered:
-            self._warn("Nessuna unita' senza numero di US o senza scheda in PyArchInit: segmenta l'ortofoto con SAM "
-                       "(Tutta l'ortofoto) o disegna le unita' prima.")
+            self._warn("Nessuna unità senza numero di US o senza scheda in PyArchInit: segmenta l'ortofoto con SAM "
+                       "(Tutta l'ortofoto) o disegna le unità prima.")
             return
         context = [i for i, u in enumerate(self.units) if u.tipo != "UT" and u.us and i not in numbered] if numbered or todo else []
         targets = todo + numbered
@@ -6962,10 +6962,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # the database does not answer: the project's numbers
                 log.warning("Numeri di US di PyArchInit non letti: %s", exc)
         areas = [u.area for u in self.units if u.area]
-        intro = tr("{0} unita' senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e "
+        intro = tr("{0} unità senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e "
                    "del progetto.", len(todo), self.chunk.label, site or tr("(nessun sito scelto)"))
         if numbered:
-            intro += " " + tr("{0} unita' disegnate con il loro numero non hanno ancora la scheda in PyArchInit: lo "
+            intro += " " + tr("{0} unità disegnate con il loro numero non hanno ancora la scheda in PyArchInit: lo "
                               "tengono, e con la scheda e i rapporti entrano nell'Extended Matrix.", len(numbered))
         v = ParamDialog.ask(self, "Proponi US e rapporti", [
             Field("first", "Primo numero di US", int(first), minimum=1, maximum=10 ** 6),
@@ -7038,7 +7038,7 @@ class MainWindow(QMainWindow):
             self._proposal_win.close()
         n = sum(1 for it in prop["units"] if it["key"] in chosen and not it.get("context"))
         if not write:
-            self.statusBar().showMessage(tr("{0} unita' numerate nel progetto", n), 10000)
+            self.statusBar().showMessage(tr("{0} unità numerate nel progetto", n), 10000)
             return
         pa, site, crs = self.pa, self.project_site(), self.chunk.crs
         units = [self.units[it["index"]] for it in prop["units"] if it["use"] and not it.get("context")]
@@ -7047,7 +7047,7 @@ class MainWindow(QMainWindow):
         def job(p):
             p(0.1, "Schede US")
             out = us_proposal.write_proposal(pa, prop, site)
-            p(0.7, "Unita' stratigrafiche")
+            p(0.7, "Unità stratigrafiche")
             return out, pa.publish_units(units, site, crs=crs) if units else []
 
         def done(r):
@@ -7060,7 +7060,7 @@ class MainWindow(QMainWindow):
             text = tr("Sito {0}: {1} schede US create, {2} rapporti aggiunti, {3} poligoni in pyunitastratigrafiche.",
                       site, len(out["created"]), out["relations"], len(gids))
             if out["existing"]:
-                text += "\n" + tr("Schede gia' presenti, lasciate come erano: {0}", ", ".join(out["existing"]))
+                text += "\n" + tr("Schede già presenti, lasciate come erano: {0}", ", ".join(out["existing"]))
             if out["created"]:
                 text += "\n\n" + tr("Per portarle nell'Extended Matrix di EMtools ed EMStudio esporta di nuovo "
                                      "l'em.json del sito da PyArchInit (Extended Matrix > Esporta sito in em.json).")
@@ -7122,7 +7122,7 @@ class MainWindow(QMainWindow):
         fields += [Field("tilt", "Correggi anche l'inclinazione", True),
                    Field("name", "Nome del DEM coregistrato (facoltativo)", "", kind="text")]
         v = ParamDialog.ask(self, "Coregistra DEM", fields, intro=tr(
-            "Il DEM del chunk {0} viene spostato sul DEM di riferimento dove il terreno non e' cambiato: "
+            "Il DEM del chunk {0} viene spostato sul DEM di riferimento dove il terreno non è cambiato: "
             "spostamento orizzontale (Nuth e Kääb), verticale e, se scelto, inclinazione. Le celle cambiate (lo "
             "scavo, i cumuli di terra) vengono riconosciute ed escluse da sole; i poligoni selezionati possono "
             "escluderle a priori. Il DEM com'era resta tra le versioni.", chunk.label))
@@ -7147,10 +7147,10 @@ class MainWindow(QMainWindow):
             east, north = _it(float(start[0]), 2), _it(float(start[1]), 2)
             if initial == "used":
                 self.log_pane.info(tr("Ricerca iniziale: i DEM erano spostati di {0} m verso est e {1} m verso nord; "
-                                      "l'adattamento e' partito da li'", east, north))
+                                      "l'adattamento è partito da lì", east, north))
             elif initial == "rejected":
                 self.log_pane.info(tr("Ricerca iniziale: lo spostamento trovato ({0} m verso est, {1} m verso nord) "
-                                      "non dava un accordo migliore e non e' stato usato", east, north))
+                                      "non dava un accordo migliore e non è stato usato", east, north))
             elif initial == "ambiguous":
                 self.log_pane.warning(tr("Ricerca iniziale ambigua (terreno periodico o uguale lungo una direzione): "
                                          "non usata"))
@@ -7162,7 +7162,7 @@ class MainWindow(QMainWindow):
                                          "o in pendenza da un solo lato): quella parte resta a zero, il dislivello la "
                                          "assorbe."))
             if not out.get("converged", True):
-                self.log_pane.warning(tr("Lo spostamento non si e' stabilizzato: tenuto lo stato piu' vicino (DEM "
+                self.log_pane.warning(tr("Lo spostamento non si è stabilizzato: tenuto lo stato più vicino (DEM "
                                          "troppo distanti o terreno diverso?). Controlla con Differenza con il DEM "
                                          "attivo."))
             self.statusBar().showMessage(tr("DEM attivo: {0}", out["name"]), 10000)
@@ -7194,7 +7194,7 @@ class MainWindow(QMainWindow):
             self._warn("Connetti prima PyArchInit (menu PyArchInit > Connetti).")
             return
         if choice(self, "question", "Rapporti stratigrafici",
-                  tr("Aggiungere {0} rapporti alle schede US di PyArchInit, in entrambe le direzioni? Quelli gia' "
+                  tr("Aggiungere {0} rapporti alle schede US di PyArchInit, in entrambe le direzioni? Quelli già "
                      "presenti non si ripetono.", len(relations)), ["Aggiungi"]) != 0:
             return
         pa, site = self.pa, self.project_site()
@@ -7214,7 +7214,7 @@ class MainWindow(QMainWindow):
         if code == i18n.current():
             return
         pick = choice(self, "question", "Lingua / Language", tr("La lingua cambia al prossimo avvio del programma."),
-                      [tr("Riavvia ora")], cancel=tr("Piu' tardi"))
+                      [tr("Riavvia ora")], cancel=tr("Più tardi"))
         if pick == 0:
             self._relaunch_on_close = True
             if not self.close():  # the project was not saved and the user stayed
@@ -7410,9 +7410,9 @@ class MainWindow(QMainWindow):
         if release is None:
             if manual:
                 self._open_update_window("program", lambda: self._info(
-                    "Aggiornamenti", tr("Questa e' l'ultima versione ({0}).", __version__)))
+                    "Aggiornamenti", tr("Questa è l'ultima versione ({0}).", __version__)))
             return
-        self.log_pane.info(tr("E' disponibile la versione {0} (questa e' la {1})", release.version, __version__))
+        self.log_pane.info(tr("È disponibile la versione {0} (questa è la {1})", release.version, __version__))
         self._open_update_window("program", lambda: self._offer_update(release))
 
     def _offer_update(self, release) -> None:
@@ -7421,7 +7421,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
         if dlg.action == "skip":
             self.settings.setValue("updates_skip", release.version)
-            self.log_pane.info(tr("La versione {0} non verra' piu' proposta all'avvio", release.version))
+            self.log_pane.info(tr("La versione {0} non verrà più proposta all'avvio", release.version))
         elif dlg.action == "page":
             QDesktopServices.openUrl(QUrl(release.url))
         elif dlg.action == "copy" and dlg.command:
@@ -7457,22 +7457,22 @@ class MainWindow(QMainWindow):
             if new is None:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(path if problem is not None else path.parent)))
                 if problem is not None:  # e.g. an application folder this user cannot write
-                    self._warn(tr("La versione {0} e' stata scaricata ma non installata: {1}.\n\nSi apre il disco: "
+                    self._warn(tr("La versione {0} è stata scaricata ma non installata: {1}.\n\nSi apre il disco: "
                                   "trascina l'applicazione nella cartella Applicazioni.", release.version, problem))
                 else:
                     self._info("Aggiornamento scaricato",
-                               tr("{0} e' nella cartella {1}.\n\nChiudi il programma, estrai lo zip e sostituisci la "
+                               tr("{0} è nella cartella {1}.\n\nChiudi il programma, estrai lo zip e sostituisci la "
                                   "cartella del programma con quella nuova.", path.name, path.parent))
                 return
             self._pending_update = new
             pick = choice(self, "question", "Aggiornamento pronto",
-                          tr("La versione {0} e' pronta. Il programma si chiude (chiedendo di salvare il progetto se "
-                             "e' cambiato) e si riapre aggiornato.", release.version),
+                          tr("La versione {0} è pronta. Il programma si chiude (chiedendo di salvare il progetto se "
+                             "è cambiato) e si riapre aggiornato.", release.version),
                           ["Riavvia ora", "Alla chiusura del programma"], cancel=None)
             if pick == 0:
                 self.close()
             else:
-                self.statusBar().showMessage(tr("La versione {0} verra' installata alla chiusura", release.version),
+                self.statusBar().showMessage(tr("La versione {0} verrà installata alla chiusura", release.version),
                                              10000)
 
         return self.runner.run("Download dell'aggiornamento", work, done, self._error)
@@ -7537,15 +7537,15 @@ class MainWindow(QMainWindow):
                             if self.ortho_view.selection_shape == "freehand" else
                             "Clic per selezionare, Maiusc/Cmd+clic per aggiungere o togliere, trascina per un riquadro; "
                             "dal menu Seleziona: mano libera e Identifica / raggruppa"),
-                 "polygon": ("Tieni premuto e traccia l'unita' a mano libera, rilascia per chiudere; tasto destro per annullare"
+                 "polygon": ("Tieni premuto e traccia l'unità a mano libera, rilascia per chiudere; tasto destro per annullare"
                              if self.ortho_view.freehand else
                              "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
-                 "vertices": "Clic su un'unita': trascina i vertici, trascina il punto a meta' di un lato per un vertice "
-                             "nuovo, Alt+clic o tasto destro su un vertice per toglierlo; Invio o un'altra unita' "
+                 "vertices": "Clic su un'unità: trascina i vertici, trascina il punto a metà di un lato per un vertice "
+                             "nuovo, Alt+clic o tasto destro su un vertice per toglierlo; Invio o un'altra unità "
                              "tengono il contorno, Esc lo rimette com'era",
-                 "reshape": "Clic per i vertici di una linea che attraversa due volte il contorno di un'unita', doppio "
+                 "reshape": "Clic per i vertici di una linea che attraversa due volte il contorno di un'unità, doppio "
                             "clic o Invio: la parte del contorno tra i due attraversamenti diventa la linea (fuori "
-                            "allarga, dentro taglia via la parte piu' piccola), come Rimodella elementi in QGIS",
+                            "allarga, dentro taglia via la parte più piccola), come Rimodella elementi in QGIS",
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "area": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere: area in pianta "
                          "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
@@ -7619,7 +7619,7 @@ class MainWindow(QMainWindow):
                     u.attributes["_layer"] = d["layer"]
                 units.append(u)
             except Exception as exc:  # a broken record must not stop the project from opening
-                log.warning("Unita' non letta dal progetto: %s", exc)
+                log.warning("Unità non letta dal progetto: %s", exc)
         quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
         points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
         return units, quote, points
@@ -7704,7 +7704,7 @@ class MainWindow(QMainWindow):
         d.pop("us", None)  # a new unit has a new number
         return d
 
-    def _ask_unit(self, refine: bool = False, title: str = "Unita' stratigrafica"):
+    def _ask_unit(self, refine: bool = False, title: str = "Unità stratigrafica"):
         """The unit dialog with the last values; returns (result, values)."""
         dlg = UnitDialog(self, self._us_choices(), sito=self.project_site(), defaults=self._unit_defaults(),
                          refine=refine, title=title)
@@ -7817,7 +7817,7 @@ class MainWindow(QMainWindow):
                 u.geometry = parts[0] if len(parts) == 1 else MultiPolygon(parts)
                 self._unit_outline_changed(u, tr("Rimodellata {0}", self._unit_name(u)))
                 return
-        self.statusBar().showMessage(tr("La linea deve attraversare due volte il contorno di un'unita' visibile"),
+        self.statusBar().showMessage(tr("La linea deve attraversare due volte il contorno di un'unità visibile"),
                                      10000)
 
     def _draw_unit(self, u, i: int, layer: str | None = None) -> None:
@@ -7928,7 +7928,7 @@ class MainWindow(QMainWindow):
 
     def _quota_clicked(self, x: float, y: float) -> None:
         """A spot height at the clicked point: elevation from the DEM, then the columns of
-        pyarchinit_quote (asked once; "non chiedere piu'" keeps the values for the next points)."""
+        pyarchinit_quote (asked once; "non chiedere più" keeps the values for the next points)."""
         z = self._dem_value(x, y)
         keep = getattr(self, "_quota_keep", None)
         if keep is not None:
@@ -8020,11 +8020,11 @@ class MainWindow(QMainWindow):
             Field("thickness", "Spessore della fetta (m)", 0.1, minimum=0.0001, maximum=10000.0, decimals=4),
             Field("step", "Passo tra le fette della serie (m)", 0.5, minimum=0.0001, maximum=10000.0, decimals=4),
             Field("cap", "Chiudi i solidi tagliati (la faccia del taglio piena, nel colore di ogni solido)", True,
-                  tip=tr("Per i solidi chiusi: unita' del modello geoarcheologico, proxy delle US, un vaso; le "
+                  tip=tr("Per i solidi chiusi: unità del modello geoarcheologico, proxy delle US, un vaso; le "
                          "superfici aperte (un terreno) restano aperte")),
             Field("result", "Risultato di una parte o di una fetta", "version",
                   choices=[("version", "Il modello del chunk (quello di prima resta tra le versioni)"),
-                           ("file", "Un file (il modello resta com'e')")]),
+                           ("file", "Un file (il modello resta com'è)")]),
             Field("out", "File (PLY o OBJ con la texture); per la serie: la cartella", str(stem) + ".ply",
                   kind="file_save", filter="PLY (*.ply);;OBJ (*.obj)")]
             + self._version_fields("model"),
@@ -8110,7 +8110,7 @@ class MainWindow(QMainWindow):
             return
         m = ch.marker_by_key(key)
         if any(p.measured for p in m.projections.values()):
-            self._warn(tr("{0} e' misurato nelle foto: la sua posizione viene da li'. Spostalo trascinando le "
+            self._warn(tr("{0} è misurato nelle foto: la sua posizione viene da lì. Spostalo trascinando le "
                           "bandierine verdi nelle foto, oppure togli le misure.", m.label))
             return
         kind = self.model_view.kind if self.model_view.kind in self.model_view.PICK_KINDS else None
@@ -8170,7 +8170,7 @@ class MainWindow(QMainWindow):
             return
         point = self._raster_point(x, y)
         if point is None:
-            self.statusBar().showMessage(tr("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)"), 8000)
+            self.statusBar().showMessage(tr("Qui non c'è superficie (fuori dal DEM e dalla nuvola)"), 8000)
             return
         self.add_marker_at(point, "sull'ortofoto" if self.ortho_view.kind == "ortho" else "sul DEM")
 
@@ -8253,7 +8253,7 @@ class MainWindow(QMainWindow):
             + ([Field("classes", "Classi", cur.get("classes") or codes, choices=choices, kind="checklist")]
                if len(codes) > 1 else []),
             intro="Valgono per le prossime sezioni. Togliendo delle classi (vegetazione, attrezzi) la sezione mostra "
-                  "solo cio' che resta: dal modello restano i tratti che poggiano su punti delle classi scelte.")
+                  "solo ciò che resta: dal modello restano i tratti che poggiano su punti delle classi scelte.")
         if not v:
             return
         classes = self._chosen_classes(v)
@@ -8283,7 +8283,7 @@ class MainWindow(QMainWindow):
             sec = sections.section(self.chunk, a, b, label=label, source=source,
                                    thickness=float(opts.get("thickness", 0.02)), classes=opts.get("classes"))
             if not sec.polylines:
-                raise RuntimeError("la sezione e' vuota: nessun dato delle classi scelte lungo la traccia")
+                raise RuntimeError("la sezione è vuota: nessun dato delle classi scelte lungo la traccia")
             out_dir.mkdir(parents=True, exist_ok=True)
             svg = sec.to_svg(out_dir / f"sezione_{n}.svg")
             dxf = sec.to_dxf(out_dir / f"sezione_{n}.dxf", world=False)
@@ -8474,7 +8474,7 @@ class MainWindow(QMainWindow):
             self._info("PyArchInit", tr("pyunitastratigrafiche: {0} poligoni aggiornati", n_upd)
                        + (tr(", {0} eliminati", n_del) if n_del else ""))
 
-        self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
+        self.run_task("Aggiornamento unità in PyArchInit", job, done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- selection: delete and merge
     def _selection_shape_changed(self, checked: bool) -> None:
@@ -8630,7 +8630,7 @@ class MainWindow(QMainWindow):
         layers = {layer for layer, _, _ in sel}
         if kinds == {"line"} and len(layers) == 1 and next(iter(layers)) in self.line_layers:
             return self._merge_lines(next(iter(layers)), sorted({i for _, i, _ in sel}))
-        self._warn("Si possono unire unita' (poligoni) tra loro, oppure linee contigue dello stesso layer "
+        self._warn("Si possono unire unità (poligoni) tra loro, oppure linee contigue dello stesso layer "
                    "(curve, piante a quota). Tracce di sezione e punti non si uniscono.")
         return False
 
@@ -8650,9 +8650,9 @@ class MainWindow(QMainWindow):
             choices = [(str(i), f"{self.units[i].tipo} {self.units[i].us or '?'} (area {self.units[i].area or '-'})"
                         + (tr(" - da PyArchInit") if (self.units[i].attributes or {}).get("gid") is not None else ""))
                        for i in order]
-            vals = ParamDialog.ask(self, "Unisci unita'", [
+            vals = ParamDialog.ask(self, "Unisci unità", [
                 Field("keep", "Numero, area e tipo di", choices[0][0], choices=choices)],
-                intro="Le unita' selezionate diventano un solo poligono. Scegli l'unita' di cui mantenere "
+                intro="Le unità selezionate diventano un solo poligono. Scegli l'unità di cui mantenere "
                       "numero, area e tipo: le altre vengono eliminate.")
             if not vals:
                 return False
@@ -8674,7 +8674,7 @@ class MainWindow(QMainWindow):
         self._update_pa_save_button()
         self._redraw_overlays()
         self._dirty(True)
-        self.log_pane.info(tr("Unite {0} unita' in {1} {2}: area {3:.3f} m2",
+        self.log_pane.info(tr("Unite {0} unità in {1} {2}: area {3:.3f} m2",
                               len(order), target.tipo, target.us or '?', target.geometry.area)
                            + (tr(", {0} parti separate", len(polys)) if len(polys) > 1 else ""))
         return True
@@ -8831,21 +8831,21 @@ class MainWindow(QMainWindow):
             return
         drawn = [u for u in self.units if u.us]
         sites = self.pa_pane.site_names() if self.pa is not None else []
-        choices = ([("drawn", tr("Unita' disegnate ({0})", len(drawn)))] if drawn else []) + \
+        choices = ([("drawn", tr("Unità disegnate ({0})", len(drawn)))] if drawn else []) + \
             [("pa:" + s, tr("Poligoni US da PyArchInit - {0}", s)) for s in sites]
         if not choices:
-            self._warn("Disegna delle unita' (con il numero di US) o connetti PyArchInit per usare i poligoni delle US.")
+            self._warn("Disegna delle unità (con il numero di US) o connetti PyArchInit per usare i poligoni delle US.")
             return
         v = ParamDialog.ask(self, "Proxy 3D delle US", [
-            Field("units", "Unita'", choices[0][0], choices=choices),
+            Field("units", "Unità", choices[0][0], choices=choices),
             Field("base", "Base del solido", "plane",
-                  choices=[("plane", "Piano a quota data"), ("dem", "DEM dopo la rimozione dell'unita'"),
-                           ("thickness", "Spessore costante"), ("min", "Quota minima dell'unita'")]),
+                  choices=[("plane", "Piano a quota data"), ("dem", "DEM dopo la rimozione dell'unità"),
+                           ("thickness", "Spessore costante"), ("min", "Quota minima dell'unità")]),
             Field("z", "Quota del piano (m)", 0.0, minimum=-10000, maximum=10000, decimals=3),
             Field("thickness", "Spessore (m)", 0.1, minimum=0.001, maximum=100, decimals=3),
             Field("dem", "DEM dopo la rimozione", "", kind="file_open", filter="GeoTIFF (*.tif *.tiff)")],
-            intro="Ogni US diventa un solido chiuso: la pianta e' il poligono dell'unita', la superficie superiore "
-                  "il DEM del progetto, quella inferiore la base scelta. Il volume e' quello del computo.")
+            intro="Ogni US diventa un solido chiuso: la pianta è il poligono dell'unità, la superficie superiore "
+                  "il DEM del progetto, quella inferiore la base scelta. Il volume è quello del computo.")
         if not v:
             return
         from ..archaeo.proxies import proxies_for_units, save_proxy
@@ -8853,7 +8853,7 @@ class MainWindow(QMainWindow):
         base = {"plane": v["z"], "dem": v["dem"] or None, "min": None, "thickness": None}[v["base"]]
         thickness = v["thickness"] if v["base"] == "thickness" else None
         if v["base"] == "dem" and not v["dem"]:
-            self._warn("Indica il DEM dopo la rimozione dell'unita'.")
+            self._warn("Indica il DEM dopo la rimozione dell'unità.")
             return
         site = v["units"][3:] if v["units"].startswith("pa:") else (sites[0] if sites else "")
 
@@ -10832,14 +10832,14 @@ class MainWindow(QMainWindow):
                   kind="file_save", filter="DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")],
             intro=tr("Quote del DEM da {0:.2f} a {1:.2f} m (dislivello {2:.2f} m): con {3:g} m sono circa {4} "
                      "livelli. Su un DSM da drone (vegetazione, zolle) una levigatura di 0,2-0,5 m toglie i piccoli "
-                     "anelli e da' curve piu' pulite.", lo, hi, hi - lo, suggested, int((hi - lo) / suggested)))
+                     "anelli e dà curve più pulite.", lo, hi, hi - lo, suggested, int((hi - lo) / suggested)))
         if not v:
             return
         levels = (hi - lo) / v["interval"]
         if levels > 300:
             r = message(self, "question", "Curve di livello",
-                        tr("Con equidistanza {0:g} m il DEM (dislivello {1:.1f} m) da' {2} livelli di curve: decine "
-                           "di migliaia di linee, lente da disegnare e da usare. Un'equidistanza di {3:g} m ne da' "
+                        tr("Con equidistanza {0:g} m il DEM (dislivello {1:.1f} m) dà {2} livelli di curve: decine "
+                           "di migliaia di linee, lente da disegnare e da usare. Un'equidistanza di {3:g} m ne dà "
                            "circa {4}.\n\nContinuare con {5:g} m?",
                            v['interval'], hi - lo, int(levels), suggested, int((hi - lo) / suggested), v['interval']),
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -10887,7 +10887,7 @@ class MainWindow(QMainWindow):
         polys = [u.geometry for u in self.units]
         v = ParamDialog.ask(self, "Volume", [
             Field("polygon", "Area di calcolo", "last" if polys else "all",
-                  choices=([("last", "Ultima unita' disegnata"), ("union", "Unione delle unita' disegnate")]
+                  choices=([("last", "Ultima unità disegnata"), ("union", "Unione delle unità disegnate")]
                            if polys else []) + [("all", "Tutto il DEM")]),
             Field("reference", "Superficie di riferimento", "plane",
                   choices=[("plane", "Piano alla quota del terreno originario"),
@@ -10983,7 +10983,7 @@ class MainWindow(QMainWindow):
             Field("out", "Disegno (SVG o DXF)", str(Path(start) / "profilo.svg"), kind="file_save",
                   filter="SVG (*.svg);;DXF (*.dxf)"),
             Field("scale", "Scala 1:", 1.0, minimum=0.1, maximum=100, decimals=2),
-            Field("units", "Unita' della mesh", "m", choices=[("m", "metri"), ("mm", "millimetri"),
+            Field("units", "Unità della mesh", "m", choices=[("m", "metri"), ("mm", "millimetri"),
                                                              ("cm", "centimetri")]),
             Field("axis", "Asse di rotazione", "auto", choices=[
                 ("auto", "stimato dalle normali"), ("up", "asse Z della mesh, orlo in alto (tornio)"),
@@ -11087,7 +11087,7 @@ class MainWindow(QMainWindow):
             Field("specific_form", "Parte", part, kind="combo_text", choices=values("11.5")),
             Field("specific_shape", "Forma specifica", "", kind="combo_text", choices=values("11.12")),
             Field("ware", "Classe", "", kind="combo_text", choices=values("11.6")),
-            Field("overwrite", "Sostituisci i valori gia' presenti nella scheda", False)],
+            Field("overwrite", "Sostituisci i valori già presenti nella scheda", False)],
             intro=tr("Sito {0}. Le misure vanno nella scheda in centimetri (diametri, altezza totale o conservata, "
                      "percentuale dell'orlo); il disegno nei media della scheda (PNG, con SVG e DXF accanto) insieme "
                      "al profilo per le ricerche. Area, US e i campi vuoti non cambiano una scheda esistente.", site))
@@ -11110,7 +11110,7 @@ class MainWindow(QMainWindow):
                 text += "\n\n" + tr("Diametro dell'orlo e percentuale conservata sono incerti (arco breve o "
                                      "irregolare): non scritti nella scheda, restano nel profilo salvato.")
             if out["kept"]:
-                text += "\n\n" + tr("Valori gia' presenti, lasciati come erano (misurati tra parentesi): {0}",
+                text += "\n\n" + tr("Valori già presenti, lasciati come erano (misurati tra parentesi): {0}",
                                      ", ".join(f"{k} {old} ({new})" for k, (old, new) in out["kept"].items()))
             self.log_pane.info(text.replace("\n\n", " "))
             self._info("PyArchInit", text)
@@ -11268,7 +11268,7 @@ class MainWindow(QMainWindow):
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
         if not geom.is_valid or geom.area <= 0:
-            self._warn("L'area non e' valida (i lati si incrociano o non ha area): ridisegnala.")
+            self._warn("L'area non è valida (i lati si incrociano o non ha area): ridisegnala.")
             return
         self._patch_area(geom)
 
@@ -11352,7 +11352,7 @@ class MainWindow(QMainWindow):
             self._warn("Costruisci prima l'ortofoto.")
             return
         if not P.changed_patches(ch):
-            self.statusBar().showMessage(tr("L'ortofoto e' gia' aggiornata con le patch"), 8000)
+            self.statusBar().showMessage(tr("L'ortofoto è già aggiornata con le patch"), 8000)
             return
         skip = self._photos_to_skip("Aggiorna l'ortofoto")
         if skip is None:
@@ -12174,7 +12174,7 @@ class MainWindow(QMainWindow):
             self._load_raster("diff", path)
             lim = getattr(self.ortho_view, "diff_limit", 0.0)
             self.show_view(self.ortho_view)
-            text = (tr("Differenza «{0}» - «{1}»: rosso dove l'attivo e' piu' alto, blu dove e' piu' basso (colori "
+            text = (tr("Differenza «{0}» - «{1}»: rosso dove l'attivo è più alto, blu dove è più basso (colori "
                        "pieni a +/-{2:.2f} m); dZ sotto il cursore", active, title, lim))
             if r1 and r2 and abs(r1 - r2) > 1e-6 * max(r1, r2):
                 text += (tr(". Attenzione: risoluzioni diverse ({0:.3g} e {1:.3g} m), i bordi ripidi risultano "
@@ -12260,7 +12260,7 @@ class MainWindow(QMainWindow):
                                                                for r in rows))
             TableDialog("Classi dalle US", ["US", "Classe", "Punti", "Area (m²)", "Quota min", "Quota media",
                                             "Quota max"], table, self,
-                        intro="La nuvola e' colorata per classi: ogni US ha la sua. Area = superficie del poligono in "
+                        intro="La nuvola è colorata per classi: ogni US ha la sua. Area = superficie del poligono in "
                               "pianta; quote dei punti della US.",
                         save=lambda path: units_table_csv(rows, path),
                         csv_name=str(Path(self._last_dir()) / "us_statistiche.csv")).exec()
@@ -12343,7 +12343,7 @@ class MainWindow(QMainWindow):
                            ("all", "Tutti i punti con una classe (sopra 1)")]),
             Field("method", "Metodo", "random_forest",
                   choices=[("random_forest", "Random forest (consigliato)"),
-                           ("gradient_boosting", "Gradient boosting (file piu' piccolo)")]),
+                           ("gradient_boosting", "Gradient boosting (file più piccolo)")]),
             Field("trees", "Alberi (o iterazioni)", 100, minimum=10, maximum=1000),
             Field("apply", "Poi classifica il resto della nuvola", True)],
             intro=tr("Il classificatore impara dai punti di cui conosci la classe: con il lazo (vista 3D) assegna la "
@@ -12486,7 +12486,7 @@ class MainWindow(QMainWindow):
         if sam_env.available():
             return True
         r = message(self, "question", "Segment Anything 2.1",
-                    "SAM 2.1 non e' ancora installato.\n\nL'applicazione puo' scaricare e installare ora PyTorch e "
+                    "SAM 2.1 non è ancora installato.\n\nL'applicazione può scaricare e installare ora PyTorch e "
                     "SAM 2.1 in un ambiente separato (circa 1-2 GB, alcuni minuti; serve la connessione). "
                     "I pesi del modello si scaricano al primo uso.\n\nInstallare adesso?",
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -12504,11 +12504,11 @@ class MainWindow(QMainWindow):
         if learned.available():
             return True
         if sam_env.is_installed():
-            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione puo' "
+            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione può "
                     "aggiungere kornia all'ambiente separato di SAM 2.1 (pochi MB). I pesi delle reti si scaricano al "
                     "primo uso (circa 50 MB).\n\nInstallare adesso?")
         else:
-            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione puo' "
+            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione può "
                     "scaricare e installare ora PyTorch e kornia in un ambiente separato, lo stesso di SAM 2.1 (circa "
                     "1-2 GB, alcuni minuti; serve la connessione). I pesi delle reti si scaricano al primo uso (circa "
                     "50 MB).\n\nInstallare adesso?")
@@ -12568,7 +12568,7 @@ class MainWindow(QMainWindow):
         return {"tap": tr("SAM, tocco: clic sull'oggetto. SAM guarda l'area visibile: avvicinati per i dettagli, "
                           "allontanati per gli oggetti grandi.") + edit,
                 "box": tr("SAM, riquadro: trascina un riquadro attorno all'oggetto.") + edit,
-                "area": tr("SAM, area: trascina un riquadro; SAM cerca tutte le unita' al suo interno.")}.get(
+                "area": tr("SAM, area: trascina un riquadro; SAM cerca tutte le unità al suo interno.")}.get(
             self.ortho_view.sam_tool, "")
 
     def _sam_cancel(self) -> None:
@@ -12609,7 +12609,7 @@ class MainWindow(QMainWindow):
         self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
         if self.ortho_view.sam_tool == "area":
             self._sam_cancel()
-            self._sam_auto((x0, y0, x1, y1), title="SAM - unita' nell'area")
+            self._sam_auto((x0, y0, x1, y1), title="SAM - unità nell'area")
             return
         view = self.ortho_view.visible_world_bounds()
         w, h = x1 - x0, y1 - y0
@@ -12662,7 +12662,7 @@ class MainWindow(QMainWindow):
         obj = self._sam_obj
         if obj is None or obj.get("geom") is None:
             return
-        r, v = self._ask_unit(refine=True, title="Unita' da SAM")
+        r, v = self._ask_unit(refine=True, title="Unità da SAM")
         if r == 1:
             self._sam_cancel()
             self._add_unit(self._make_unit(obj["geom"], v))
@@ -12686,9 +12686,9 @@ class MainWindow(QMainWindow):
         from ..archaeo.stones import find_stones
 
         v = ParamDialog.ask(self, "Pietre (SAM)", [
-            Field("min_size", "Pietra piu' piccola (m)", float(self.settings.value("stones/min", 0.05)), minimum=0.005,
+            Field("min_size", "Pietra più piccola (m)", float(self.settings.value("stones/min", 0.05)), minimum=0.005,
                   maximum=5.0, decimals=3),
-            Field("max_size", "Pietra piu' grande (m)", float(self.settings.value("stones/max", 0.8)), minimum=0.01,
+            Field("max_size", "Pietra più grande (m)", float(self.settings.value("stones/max", 0.8)), minimum=0.01,
                   maximum=20.0, decimals=3),
             Field("thoroughness", "Scansione", "alta", choices=[(k, k.capitalize()) for k in THOROUGHNESS])],
             intro=tr("SAM cerca ogni oggetto nel riquadro; restano quelli della misura di una pietra e di forma "
@@ -12758,7 +12758,7 @@ class MainWindow(QMainWindow):
         self.log_pane.info(tr("{0} pietre scritte in {1}", len(stones), out))
         self.statusBar().showMessage(tr("{0} pietre scritte in {1}", len(stones), out), 10000)
 
-    def _sam_auto(self, bounds=None, title: str = "SAM - unita' automatiche", **kw) -> None:
+    def _sam_auto(self, bounds=None, title: str = "SAM - unità automatiche", **kw) -> None:
         """Every unit SAM finds in ``bounds`` (None: the whole orthomosaic), added without US
         to the layer *Unita' da SAM* of the project's site."""
         from ..ai.sam import auto_units
@@ -12776,9 +12776,9 @@ class MainWindow(QMainWindow):
                     self.units.append(u)
                     self._draw_unit(u, len(self.units) - 1)
             self._dirty(True)
-            self.statusBar().showMessage(tr("{0} unita' candidate nel layer «Unita' da SAM»: assegna le US (pannello "
+            self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
                                             "Layer) prima di pubblicarle", len(units)), 20000)
-            self.log_pane.info(f"SAM: {len(units)} unita' candidate")
+            self.log_pane.info(f"SAM: {len(units)} unità candidate")
             self._show_pane(self.left_tabs, self.layers_pane)
 
         self.run_task(title, job, done, refresh=False, save=False)
@@ -12803,15 +12803,15 @@ class MainWindow(QMainWindow):
 
         v = ParamDialog.ask(self, "SAM - tutta l'ortofoto", [
             Field("resolution", "Risoluzione di lavoro (m/pixel)", round(suggested, 3), minimum=native, maximum=10.0,
-                  decimals=3, tip="Piu' fine = piu' dettagli e piu' tasselli (piu' tempo)"),
+                  decimals=3, tip="Più fine = più dettagli e più tasselli (più tempo)"),
             Field("thoroughness", "Scansione", "normale", choices=[(k, k.capitalize()) for k in THOROUGHNESS]),
-            Field("min_area", "Area minima di un'unita' (m2)", round(max(0.01, (12 * suggested) ** 2), 3),
+            Field("min_area", "Area minima di un'unità (m2)", round(max(0.01, (12 * suggested) ** 2), 3),
                   minimum=0.0001, maximum=10000.0, decimals=4),
-            Field("exclusive", "Unita' non sovrapposte (le piccole ritagliano le grandi)", True)],
+            Field("exclusive", "Unità non sovrapposte (le piccole ritagliano le grandi)", True)],
             intro=tr("L'ortofoto ({0:.0f} m di lato, pixel di {1:.1f} cm) viene esaminata a tasselli di 1024 pixel "
                      "che si sovrappongono: alla risoluzione proposta sono circa {2} tasselli. Con la GPU del Mac "
                      "(MPS) un tassello richiede circa 10 s in scansione normale, 40-90 s in alta o massima. Le "
-                     "unita' trovate vanno nel layer «Unita' da SAM», senza numero di US.",
+                     "unità trovate vanno nel layer «Unita' da SAM», senza numero di US.",
                      side, native * 100, tiles(suggested)))
         if not v:
             return
@@ -12845,16 +12845,16 @@ class MainWindow(QMainWindow):
         sites = self.pa_pane.site_names() if self.pa is not None else []
         choices = []
         if self.chunk.meta.get("proxies"):
-            choices.append(("proxies", tr("Proxy solidi delle US ({0}): volumi e quantita' per il computo",
+            choices.append(("proxies", tr("Proxy solidi delle US ({0}): volumi e quantità per il computo",
                                           len(self.chunk.meta['proxies']))))
         if drawn:
-            choices.append(("drawn", tr("Unita' disegnate in questo progetto ({0})", len(drawn))))
+            choices.append(("drawn", tr("Unità disegnate in questo progetto ({0})", len(drawn))))
         choices += [("pa:" + s, tr("Poligoni US da PyArchInit - {0}", s)) for s in sites]
         choices.append(("none", "Solo il modello del rilievo (un elemento)"))
         v = ParamDialog.ask(self, "Esporta IFC (BIM)", [
             Field("path", "File IFC", str(Path(self._last_dir()) / "rilievo.ifc"), kind="file_save",
                   filter="IFC (*.ifc)"),
-            Field("units", "Elementi per unita' stratigrafica", choices[0][0], choices=choices),
+            Field("units", "Elementi per unità stratigrafica", choices[0][0], choices=choices),
             Field("survey", "Includi anche il modello intero", True)],
             intro="Il modello viene tagliato in pianta con i poligoni delle US: ogni US diventa un IfcGeographicElement "
                   "con gli attributi della scheda (Pset_PyArchInit_US). Georeferenziazione con IfcMapConversion.")
@@ -12971,7 +12971,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 missing = []
             if missing:
-                self.log_pane.warning(tr("La scheda US di questo database e' ridotta: mancano {0} campi di "
+                self.log_pane.warning(tr("La scheda US di questo database è ridotta: mancano {0} campi di "
                                          "PyArchInit 5",
                                          len(missing)) + (tr(", tra cui i rapporti") if "rapporti" in missing else "")
                                       + tr(". PyArchInit > Aggiorna struttura del database li aggiunge."))
@@ -12995,7 +12995,7 @@ class MainWindow(QMainWindow):
             self._exc("Controllo della struttura del database non riuscito", exc)
             return
         if not missing:
-            self._info("PyArchInit", "La scheda US del database ha gia' tutti i campi di PyArchInit 5.")
+            self._info("PyArchInit", "La scheda US del database ha già tutti i campi di PyArchInit 5.")
             return
         sqlite = self.pa.db.sqlite_path is not None
         r = message(self, "question", "Aggiorna struttura del database",
@@ -13115,7 +13115,7 @@ class MainWindow(QMainWindow):
         later changes go through *Salva modifiche in PyArchInit*, nothing is written twice."""
         if not self._need_pa() or not self._need_chunk():
             return
-        site = self._ensure_site("Unita' e quote vengono scritte nel sito del progetto.")
+        site = self._ensure_site("Unità e quote vengono scritte nel sito del progetto.")
         if not site:
             return
         units, quote, no_us = self._publishable()
@@ -13124,14 +13124,14 @@ class MainWindow(QMainWindow):
         elif what == "quote":
             units = []
         if not units and not quote:
-            self._warn(tr("Niente da pubblicare: disegna (o segmenta con SAM) delle unita' con il numero di US, o "
+            self._warn(tr("Niente da pubblicare: disegna (o segmenta con SAM) delle unità con il numero di US, o "
                           "delle "
-                          "quote") + (tr(" ({0} unita' sono ancora senza US)", no_us) if no_us else "") + ".")
+                          "quote") + (tr(" ({0} unità sono ancora senza US)", no_us) if no_us else "") + ".")
             return
         crs = self.chunk.crs
 
         def job(p):
-            p(0.1, "Unita' stratigrafiche")
+            p(0.1, "Unità stratigrafiche")
             gu = self.pa.publish_units(units, site, crs=crs) if units else []
             p(0.6, "Quote")
             gq = self.pa.publish_quote(quote, site, crs=crs) if quote else []
@@ -13147,7 +13147,7 @@ class MainWindow(QMainWindow):
             self._dirty(True)
             self.pa_pane.refresh()
             self._info("PyArchInit", tr("Sito {0}: {1} poligoni scritti in pyunitastratigrafiche, {2} quote in "
-                                        "pyarchinit_quote.", site, len(gu), len(gq)) + (tr("\n{0} unita' senza numero "
+                                        "pyarchinit_quote.", site, len(gu), len(gq)) + (tr("\n{0} unità senza numero "
                                                                                            "di US non sono state "
                                                                                            "pubblicate.",
                                                     no_us)
@@ -13178,7 +13178,7 @@ class MainWindow(QMainWindow):
         try:
             polys = self.pa.us_polygons(site, crs=self.chunk.crs if self.chunk else None)
         except Exception as exc:
-            self._exc("Lettura delle unita' non riuscita", exc)
+            self._exc("Lettura delle unità non riuscita", exc)
             return
         have = {int(u.attributes["gid"]) for u in self.units if (u.attributes or {}).get("gid") is not None}
         polys = [u for u in polys if int(u.attributes.get("gid", -1)) not in have]  # already here

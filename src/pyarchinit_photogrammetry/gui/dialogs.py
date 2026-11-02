@@ -238,7 +238,7 @@ class GradualSelectionDialog(QDialog):
                    "peggiori vengono tolti dal modello e, se scegli, le camere vengono ottimizzate senza di loro.",
                    _it(n), metrics['images'], _it(metrics['mean_reprojection_error'], 3)))
         if metrics.get("synthetic"):
-            text += tr("\n\nAttenzione: questo modello e' stato scritto da pose importate (Metashape, WebODM o "
+            text += tr("\n\nAttenzione: questo modello è stato scritto da pose importate (Metashape, WebODM o "
                        "chunk uniti): gli errori di riproiezione sono quasi nulli e conta solo l'incertezza di "
                        "ricostruzione. Per una selezione completa allinea di nuovo le foto qui.")
         intro = QLabel(text)
@@ -356,7 +356,7 @@ class PublishDialog(QDialog):
         self.cb_ortho.setEnabled(chunk is not None and chunk.orthomosaic_path is not None)
         self.cb_dem.setEnabled(chunk is not None and chunk.dem_path is not None)
         self.cb_model.setEnabled(chunk is not None and chunk.product_path("model") is not None)
-        self.overwrite = QCheckBox(tr("Sovrascrivi se esiste gia'"))
+        self.overwrite = QCheckBox(tr("Sovrascrivi se esiste già"))
         prods = QHBoxLayout()
         for cb in (self.cb_ortho, self.cb_dem, self.cb_model):
             prods.addWidget(cb)
@@ -433,7 +433,7 @@ class UnitDialog(QDialog):
     REFINE = 2  # exec() result of the Correggi button
 
     def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, default_area: str = "1",
-                 sito: str = "", defaults: dict | None = None, refine: bool = False, title: str = "Unita' stratigrafica"):
+                 sito: str = "", defaults: dict | None = None, refine: bool = False, title: str = "Unità stratigrafica"):
         super().__init__(parent)
         self.setWindowTitle(title)
         d = dict(defaults or {})
@@ -466,7 +466,7 @@ class UnitDialog(QDialog):
         form.addRow("US esistente", self.combo)
         form.addRow("Area", self.area)
         form.addRow("US", self.us)
-        form.addRow("Tipo unita'", self.tipo)
+        form.addRow("Tipo unità", self.tipo)
         form.addRow("Indice stratigrafico", self.index)
         form.addRow("Tipo (tipo_us_s)", self.tipo_us)
         form.addRow("Disegnatore", self.disegnatore)
@@ -533,7 +533,7 @@ class SiteChoiceDialog(QDialog):
 class QuotaDialog(QDialog):
     """A spot height with the columns of PyArchInit's ``pyarchinit_quote``: area, US, unit
     type, elevation (read on the DEM, editable), unit of measure, draughtsman, date,
-    original survey. *Non chiedere piu'* keeps these values for the next points."""
+    original survey. *Non chiedere più* keeps these values for the next points."""
 
     def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, sito: str = "",
                  quota: float | None = None, defaults: dict | None = None):
@@ -563,14 +563,14 @@ class QuotaDialog(QDialog):
         self.disegnatore = QLineEdit(str(d.get("disegnatore") or ""))
         self.data = QLineEdit(str(d.get("data") or _today()))
         self.rilievo = QLineEdit(str(d.get("rilievo_originale") or "Fotogrammetria"))
-        self.keep = QCheckBox(tr("Non chiedere piu': usa questi valori per i prossimi punti"))
+        self.keep = QCheckBox(tr("Non chiedere più: usa questi valori per i prossimi punti"))
         self.combo.currentIndexChanged.connect(self._pick)
         form.addRow("US esistente", self.combo)
         form.addRow("Area", self.area)
         form.addRow("US", self.us)
-        form.addRow("Tipo unita'", self.tipo)
+        form.addRow("Tipo unità", self.tipo)
         form.addRow("Quota", self.quota)
-        form.addRow("Unita' di misura", self.misura)
+        form.addRow("Unità di misura", self.misura)
         form.addRow("Disegnatore", self.disegnatore)
         form.addRow("Data", self.data)
         form.addRow("Rilievo originale", self.rilievo)
@@ -713,7 +713,7 @@ class PatchDialog(QDialog):
                                c['label'], _it(100 * c['coverage']), _it(c['angle']))
                             + (tr("dalla verticale") if kind == "ortho" else tr("dalla perpendicolare alle facce"))
                             + f", {_it(100 * gsd, 2)} cm per pixel"
-                            + (tr("; il {0}% e' nascosto dal modello (chiome, muri)",
+                            + (tr("; il {0}% è nascosto dal modello (chiome, muri)",
                                   _it(100 * hidden)) if hidden > 0.05
                                else "")
                             + (tr("; l'ortofoto ora ne prende il {0}%", _it(100 * c['used'])) if c.get("used") else ""))
@@ -724,7 +724,7 @@ class PatchDialog(QDialog):
         for c in candidates:
             for surf, img in (c.get("previews") or {}).items():
                 self._icons[(c["label"], surf)] = QIcon(self._pix(img))
-        lay.addWidget(QLabel(tr("Foto che vedono l'area (le migliori prima; Maiusc o Cmd per sceglierne piu' d'una):")))
+        lay.addWidget(QLabel(tr("Foto che vedono l'area (le migliori prima; Maiusc o Cmd per sceglierne più d'una):")))
         lay.addWidget(self.list, 2)
         modes = QHBoxLayout()
         self.r_assign = QRadioButton(tr("Usa solo le foto scelte"))
@@ -901,23 +901,23 @@ def accept_dji_licence(parent) -> bool:
 
 
 _SUGGESTIONS = [
-    ("crashed in the worker process", "La ricostruzione e' stata eseguita in un processo separato che si e' interrotto. "
+    ("crashed in the worker process", "La ricostruzione è stata eseguita in un processo separato che si è interrotto. "
                                       "Il modello viene ricostruito con il metodo alternativo (campo di altezze); "
-                                      "con Open3D 0.19 o 0.21+ la Poisson e' piu' stabile."),
+                                      "con Open3D 0.19 o 0.21+ la Poisson è più stabile."),
     ("mod_spatialite", "Scrivere geometrie in un database SQLite di PyArchInit richiede mod_spatialite: "
                        "installalo (QGIS, Homebrew 'brew install libspatialite', MacPorts) oppure imposta "
                        "SPATIALITE_LIBRARY_PATH."),
     ("No module named 'torch'", "Segment Anything 2.1 richiede PyTorch: pip install \"pyarchinit-photogrammetry[sam]\"."),
     ("__thread_bss", "Le librerie compilate di questo ambiente Python (Anaconda) non si caricano su questa "
                      "versione di macOS: usa l'ambiente virtuale del progetto o l'applicazione pacchettizzata."),
-    ("not enough points", "Servono piu' punti: costruisci prima la nuvola densa o usa una qualita' piu' alta."),
-    ("photos cannot be read", "Alcune foto non si leggono: un file vuoto (0 byte) di solito e' un file di Dropbox, "
+    ("not enough points", "Servono più punti: costruisci prima la nuvola densa o usa una qualità più alta."),
+    ("photos cannot be read", "Alcune foto non si leggono: un file vuoto (0 byte) di solito è un file di Dropbox, "
                               "iCloud o OneDrive tenuto «solo online». Rendi la cartella disponibile offline, collega "
                               "le foto a un'altra copia (Flusso di lavoro > Ricollega foto) oppure conferma di procedere "
                               "senza quelle foto."),
     ("Allinea prima", "Esegui Flusso di lavoro > Allinea foto."),
     ("BITMAP_ERROR", "COLMAP non riesce a leggere le foto: controlla che siano JPEG/PNG/TIFF validi e riavvia "
-                     "l'interfaccia (la libreria JPEG di sistema e' stata caricata prima di pycolmap)."),
+                     "l'interfaccia (la libreria JPEG di sistema è stata caricata prima di pycolmap)."),
     ("No space left", "Spazio su disco esaurito: libera spazio nella cartella del progetto."),
     ("Permission denied", "Permessi insufficienti sulla cartella: scegli un'altra posizione per il progetto."),
 ]
@@ -1274,10 +1274,10 @@ US_FORM_PAGES = [
                      ("osservazioni", "Osservazioni*")]),
     ("Cronologia", [("periodo_iniziale", "Periodo iniziale"), ("fase_iniziale", "Fase iniziale"),
                     ("periodo_finale", "Periodo finale"), ("fase_finale", "Fase finale"), ("datazione", "Datazione"),
-                    ("elem_datanti", "Elementi datanti*"), ("affidabilita", "Affidabilita'")]),
+                    ("elem_datanti", "Elementi datanti*"), ("affidabilita", "Affidabilità")]),
     ("Dati di scavo", [("anno_scavo", "Anno di scavo"), ("data_schedatura", "Data schedatura"),
                        ("schedatore", "Schedatore"), ("direttore_us", "Direttore"), ("responsabile_us", "Responsabile"),
-                       ("metodo_di_scavo", "Metodo di scavo"), ("scavato", "Scavato"), ("attivita", "Attivita'"),
+                       ("metodo_di_scavo", "Metodo di scavo"), ("scavato", "Scavato"), ("attivita", "Attività"),
                        ("settore", "Settore"), ("saggio", "Saggio"), ("ambient", "Ambiente")]),
     ("Caratteri", [("formazione", "Formazione"), ("modo_formazione", "Modo di formazione"),
                    ("stato_di_conservazione", "Stato di conservazione"), ("colore", "Colore"),
@@ -1286,7 +1286,7 @@ US_FORM_PAGES = [
                         ("quota_min_rel", "Quota minima relativa"), ("quota_max_rel", "Quota massima relativa"),
                         ("lunghezza_max", "Lunghezza max"), ("larghezza_media", "Larghezza media"),
                         ("altezza_max", "Altezza max"), ("altezza_min", "Altezza min"),
-                        ("profondita_max", "Profondita' max"), ("profondita_min", "Profondita' min")]),
+                        ("profondita_max", "Profondità max"), ("profondita_min", "Profondità min")]),
 ]
 
 

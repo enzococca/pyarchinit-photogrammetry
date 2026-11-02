@@ -30,7 +30,7 @@ def bin_label(lo: int, hi: int) -> str:
         return "0 (nessuna mappa)"
     if lo == hi:
         return f"{lo} {'mappa' if lo == 1 else 'mappe'}"
-    return f"{lo} o piu' mappe" if hi >= 255 else f"{lo}-{hi} mappe"
+    return f"{lo} o più mappe" if hi >= 255 else f"{lo}-{hi} mappe"
 
 
 def histogram(confidence: np.ndarray) -> dict[int, int]:
@@ -167,7 +167,7 @@ def depth_map_support(chunk: Chunk, points: np.ndarray, tol: float = 0.01, progr
     counts = np.zeros(len(points), np.uint16)
     if not len(points):
         return counts.astype(np.uint8)
-    progress(0.02, f"Confidenza: {len(maps)} mappe di profondita'")
+    progress(0.02, f"Confidenza: {len(maps)} mappe di profondità")
     grid = _Grid(points)
     workers = workers or max(1, min(8, (os.cpu_count() or 2) - 1))
     with ThreadPoolExecutor(workers) as pool:

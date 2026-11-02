@@ -138,7 +138,7 @@ class PyArchInit(TopographicMixin):
         are ignored; ``rapporti`` may be a list of ``(relation, us, area, sito)``."""
         guard_stratigraphic_kind(unita_tipo)
         if self.us_record(sito, area, us, unita_tipo) is not None:
-            raise FileExistsError(f"{unita_tipo} {us} (area {area}) esiste gia' in {sito}")
+            raise FileExistsError(f"{unita_tipo} {us} (area {area}) esiste già in {sito}")
         self.ensure_site(sito)
         values = self._us_values({"sito": sito, "area": str(area), "us": str(us), "unita_tipo": unita_tipo, **fields},
                                  default_site=sito)

@@ -16,7 +16,7 @@ LABELS = {"detect_markers": "Rileva marker codificati", "import_reference": "Imp
           "align_photos": "Allinea le foto", "match_photos": "Cerca i punti (solo match)",
           "align_cameras": "Allinea le camere (dopo il match)", "update_transform": "Aggiorna la georeferenziazione",
           "optimize_cameras": "Ottimizza le camere", "field_check": "Controllo della copertura",
-          "build_depth_maps": "Mappe di profondita'", "build_point_cloud": "Nuvola densa",
+          "build_depth_maps": "Mappe di profondità", "build_point_cloud": "Nuvola densa",
           "build_model": "Modello 3D", "build_texture": "Texture", "build_dem": "DEM",
           "build_orthomosaic": "Ortofoto", "calibrate_colours": "Calibra i colori",
           "estimate_precision": "Stima la precisione", "export_point_cloud": "Esporta la nuvola densa",
@@ -57,14 +57,14 @@ def fields(op: str, params: dict) -> list[Field]:
     if op == "field_check":
         return [Field("min_photos", "Foto che servono per ogni punto", p["min_photos"], minimum=2, maximum=10)]
     if op == "build_depth_maps":
-        return [Field("quality", "Qualita'", p["quality"], choices=QUALITY),
+        return [Field("quality", "Qualità", p["quality"], choices=QUALITY),
                 Field("filter_mode", "Filtro", p["filter_mode"],
                       choices=[("mild", "Leggero"), ("moderate", "Moderato"), ("aggressive", "Forte"),
                                ("none", "Nessuno")]),
                 Field("skip_unreadable", "Salta le foto non leggibili", p["skip_unreadable"])]
     if op == "build_model":
         return [Field("source", "Dati", p["source"], choices=[("point_cloud", "Nuvola densa"),
-                                                              ("depth_maps", "Mappe di profondita'")]),
+                                                              ("depth_maps", "Mappe di profondità")]),
                 Field("surface", "Superficie", p["surface"], choices=[("arbitrary", "Arbitraria (3D)"),
                                                                       ("height_field", "Campo di altezze (2,5D)")]),
                 Field("face_count", "Facce", p["face_count"], choices=[("low", "Poche"), ("medium", "Medie"),
@@ -143,7 +143,7 @@ class BatchDialog(QDialog):
         self.b_add.setMenu(menu)
         buttons.addWidget(self.b_add)
         for text, slot in (("Modifica...", self.edit_step), ("Rimuovi", self.remove_step), ("Su", lambda: self.move(-1)),
-                           ("Giu'", lambda: self.move(1)), ("Carica...", self.load), ("Salva...", self.save)):
+                           ("Giù", lambda: self.move(1)), ("Carica...", self.load), ("Salva...", self.save)):
             b = QPushButton(text)
             b.clicked.connect(slot)
             buttons.addWidget(b)

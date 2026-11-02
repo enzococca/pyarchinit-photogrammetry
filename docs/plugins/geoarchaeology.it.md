@@ -6,7 +6,7 @@ fotogrammetrico: la colonna di ogni sondaggio, la superficie dove comincia ogni 
 volume di ogni unità, sezioni lungo qualsiasi linea e un modello 3D con un solido per unità. Tutto sta sul
 DEM e sull'ortofoto del progetto, nel suo sistema di riferimento.
 
-Questa pagina descrive la versione 0.1.3 del plugin, che richiede pyarchinit-photogrammetry 1.3.3 o
+Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 1.3.3 o
 successiva. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -37,6 +37,7 @@ successiva. Il README e il codice sono nel
 5. Guarda le superfici sopra l'ortofoto, disegna sezioni e colonne stratigrafiche, costruisci il modello
    3D e guardalo nella vista 3D.
 6. Esporta in GeoPackage, GeoTIFF, DXF, PLY/OBJ e CSV, oppure apri tutto in QGIS.
+7. Per fosse, fossati e riempimenti, o per un contatto visto in pochi sondaggi, costruisci il [modello implicito](#implicit).
 
 ## Che cosa fa
 
@@ -47,6 +48,7 @@ successiva. Il README e il codice sono nel
 | Spessori e volumi | lo spessore di ogni unità (isopache) e il suo volume | quanto sono profondi i depositi, volumi da scavare, crescita di un tell |
 | Sezioni | il terreno, i contatti e le unità lungo una linea, con i sondaggi vicini riportati, in scala | tavole per la relazione, verifica di una correlazione |
 | Modello 3D | un solido chiuso per unità, con il suo volume | QGIS 3D, Blender, MeshLab, didattica |
+| Modello implicito | su richiesta, con LoopStructural: tagli e riempimenti, sottosquadri, contatti rari, giaciture | una fossa o un fossato e il volume del riempimento, come intervallo |
 
 Serve ogni volta che pochi fori devono raccontare che cosa c'è sotto una superficie rilevata: una
 campagna di carotaggi su un tell, una griglia di trivellate in un campo prima dello scavo, le sezioni di
@@ -676,6 +678,248 @@ lavoro: il pannello segue il chunk attivo.
 * *Rimuovi*: nella scheda *Superfici* tutte le superfici e gli spessori (formano una pila sola); nella
   scheda *Sezioni* la sezione selezionata e i suoi disegni; nella scheda *Sondaggi* i sondaggi selezionati.
 
+## Il modello implicito { #implicit }
+
+Le superfici dei passi precedenti sono una quota per punto, z(x, y), fra i sondaggi. Così non si può disegnare quello che si scava:
+una fossa che taglia gli strati e poi viene riempita, un fossato con un fianco sottosquadro, un contatto visto in tre sondaggi che
+dovrebbe prendere la forma degli strati intorno, una giacitura misurata su una sezione. Il modello implicito descrive il terreno come
+campi scalari in 3D con [LoopStructural](https://github.com/Loop3D/LoopStructural), e queste cose ci stanno. Si costruisce su
+richiesta, accanto al kriging, che resta il metodo predefinito. È una novità della versione 0.2.0.
+
+!!! warning "Un'interpretazione dei dati, non una misura"
+    Lontano dai sondaggi il modello dice quello che i dati fanno supporre. Il pannello e le figure lo dicono, e un numero
+    del modello va riportato come numero di un modello.
+
+### Quando usarlo, e quando il kriging { #implicit-when }
+
+| I tuoi dati | Usa |
+|---|---|
+| Strati visti nella maggior parte dei sondaggi, uno sull'altro | **kriging**: buono come l'implicito o migliore, in pochi secondi |
+| Una fossa, un fossato, una trincea di spoliazione, con i riempimenti | **implicito** |
+| Un contatto visto in pochi sondaggi, che deve prendere la forma dagli strati intorno | **implicito** |
+| Una giacitura misurata su una sezione, contatti visti su una parete | **implicito**: il kriging non sa usarli |
+| Il volume di un deposito semplice da riportare | **kriging** |
+
+Dopo ogni costruzione gli errori leave-one-out dei due metodi sono mostrati affiancati. Questi vengono dalla dimostrazione qui sotto: 21
+sondaggi simulati sul DEM reale di Tell Sultan, 18 senza la fossa inventata. Il kriging lascia fuori un sondaggio alla volta e conta i sondaggi dove l'unità manca;
+il modello implicito lascia fuori 12 gruppi di sondaggi e conta quelli che vedono il contatto.
+
+| Contatto | Sondaggi che lo vedono | Senza fossa: kriging / implicito | Con la fossa: kriging / implicito |
+|---|---:|---:|---:|
+| US 2, segue il terreno | 16 | **0,03** / 0,10 m | **0,03** / 0,09 m |
+| US 3, raro | 5 | 0,94 / **0,31** m | 0,87 / **0,31** m |
+| US 4 | 12 | **1,33** / 1,61 m | **1,28** / 1,62 m |
+| US 5, naturale | 13 | **0,27** / 0,31 m | 0,35 / **0,31** m |
+
+Sugli strati semplici il kriging resta migliore; il modello implicito vince sul contatto raro. Con la fossa il kriging peggiora sul
+naturale perché tre sondaggi lo trovano più in basso e non sa perché. Il voto che ferma un'unità rara, più avanti in
+[Unità rare e volumi](#implicit-volumes), agisce sui solidi e non su questi errori, che sono uguali con e senza.
+
+### Installazione { #implicit-install }
+
+LoopStructural non viene con il plugin. *Installa LoopStructural* nella scheda *Implicito* (o
+`ppg plugin geoarchaeology implicit-install`) lo mette in un ambiente separato, circa 300 MB, nella cartella dei dati del plugin. Serve internet
+una volta e ci vogliono pochi minuti; `uv` viene scaricato se manca. Il programma non carica mai LoopStructural: ogni modello gira in un
+processo separato, e un errore o un annullamento lasciano il modello attuale com'è. Se LoopStructural è già installato nel Python del
+programma, il plugin usa quello; `PPG_GEOARCH_LOOP_ENV` mette l'ambiente altrove.
+
+### I passi { #implicit-steps }
+
+1. Importa i sondaggi e costruisci le superfici come sempre: il modello ne prende la griglia e le serie.
+2. Nel programma, disegna la US del taglio (o del riempimento) con il suo numero. Fallo prima: il contorno conta più di
+   qualsiasi altra cosa.
+3. Nella scheda *Implicito*, *Segna un riempimento...*: il riempimento, come nei log; il taglio, il suo numero di US o un nome; la forma del
+   fondo. Ripeti per ogni riempimento del taglio.
+4. *Contatti e giaciture da file...*, se li hai.
+5. *Costruisci...*: 2 minuti sulla dimostrazione, con 12 gruppi per il leave-one-out. Metti i gruppi a 0 per le prove.
+6. Il modello diventa il modello del chunk, con le superfici elencate come *Tetto di US n (implicito)* nella scheda *Superfici*. Un
+   *Modello 3D...* dal kriging fatto dopo lo sostituisce; le superfici implicite restano. Le sezioni usano le superfici implicite quando il
+   modello attivo è quello implicito.
+
+<figure markdown="span">
+  ![La scheda Implicito con la tabella dei tagli e l'ultimo risultato](../img/plugins/geoarchaeology/pane-implicit.png)
+  <figcaption>La scheda <em>Implicito</em>: dove gira LoopStructural, i pulsanti, i tagli con la forma del fondo, il testo
+  dell'ultima costruzione.</figcaption>
+</figure>
+
+| Campo di *Costruisci...* | Che cosa fa |
+|---|---|
+| *Cella* | vuota: quella delle superfici, resa più grande se servono più di 120.000 celle; può essere più piccola di quella delle superfici |
+| *Gruppi di sondaggi per la verifica leave-one-out* | al massimo 12; 0 per nessuna |
+| *Per unità* | `US 2=profondità, US 5=quota`; vuoto: come le superfici |
+| *Nella vista 3D, unità separate in verticale di* | come nel modello 3D |
+
+### Le serie { #implicit-series }
+
+Una *serie* è un campo scalare. Come per i [modi](#surfaces) del kriging, i contatti che seguono il terreno stanno insieme in una serie in
+profondità sotto il DEM, e ogni contatto per quota è una serie a sé. Nella dimostrazione: da US 1 a US 4 in profondità, il naturale US 5
+per quota. *Per unità* lo cambia.
+
+### Tagli e riempimenti { #implicit-cuts }
+
+Un taglio non ha materiale: nei log si vede il riempimento. Il taglio quindi non è uno strato né un campo: è un documento di scavo.
+
+* **La pianta** è la US disegnata per il taglio, o per i riempimenti. Senza disegno viene stimata, le celle più vicine ai sondaggi dentro che
+  a quelli fuori, con un avviso; nella dimostrazione ha dato 53-92 m³ per un riempimento di 76 m³.
+* **Il fondo** parte da dove il taglio si apre: `apertura - s(x, y) P(t)`. L'apertura è il terreno o, sotto una copertura, il tetto del primo riempimento che ogni sondaggio incontra,
+  qualunque esso sia, e la stessa superficie è il tetto del riempimento più recente: così una fossa sigillata conserva tutta la sua pianta e la copertura non le toglie spazio. `t` è la distanza dal bordo divisa per la mezza larghezza locale, `P` la forma scelta, `s` le
+  profondità misurate divise per P e distribuite sulla pianta, con ogni sondaggio che pesa `P²`. Nessun fondo scende oltre quanto implica un sondaggio lontano dal bordo: la sua profondità divisa per la forma in quel punto. Fra i sondaggi è un'ipotesi.
+* **Vicino al bordo** (`t` sotto 0,25) una misura dice quanto è ripida la parete, non quanto scende il centro: resta fuori da `s` quando un'altra sta più
+  all'interno. Se è più profonda della forma, il fondo scende verso di lei solo quanto permettono i sondaggi che contano, e la misura è rispettata nella sua cella: più profonda di tutti quelli, nel modello è una buca locale, e `rim_deeper` lo dice. Se è meno profonda non viene usata. Così il fondo
+  passa per ogni base misurata, tranne quelle accanto al bordo meno profonde della forma (`base_near_edge`).
+* **I riempimenti** hanno i tetti come profondità sotto il terreno, distribuite dai sondaggi che li hanno visti: seguono il terreno salvo
+  che i sondaggi dicano altro. Un riempimento più profondo resta sotto quello sopra. Uno strato può coprire la fossa, come l'humus
+  nella dimostrazione. **I riempimenti sono una pila, uno sull'altro**: riempimenti affiancati, linee di scarico, una lente vista in un sondaggio non sono modellati. Il volume di ciascuno di questi riempimenti è sbagliato e può esserlo anche quello del taglio; `fill_thinned` lo dice quando un sondaggio ha registrato il doppio di quello che ha il modello.
+* **Le fosse che tagliano fosse** si leggono dai log: ogni riempimento resta con il suo taglio, e la fossa che sta più in alto in un sondaggio che le attraversa entrambe è la più recente.
+* **Un sottosquadro** (una fossa a campana, un fossato con un fianco aggettante) ha bisogno di misure sulla parete: righe di tipo `wall` nel file
+  dei contatti. Solo un taglio così usa un campo di LoopStructural, e pochi punti lo cancellano: è stata provata solo una fossa a campana
+  con punti di parete tutto intorno.
+
+<figure markdown="span">
+  ![Sezione della fossa in scala vera, con i tre sondaggi](../img/plugins/geoarchaeology/implicit-section.jpg)
+  <figcaption>Sezione della fossa inventata in scala vera: taglia US 2 e arriva nel naturale, con i due riempimenti sotto l'humus e i
+  sondaggi P1, P2, P3 proiettati sulla linea. Il fondo passa per ogni loro base.</figcaption>
+</figure>
+
+### Il volume di un taglio è un intervallo { #implicit-range }
+
+Pochi sondaggi non dicono la forma di un fondo. Per questo il plugin calcola il riempimento per tutte e tre le forme, e la riga del taglio in
+`volumi.csv`, nel pannello e nel testo dà l'intervallo; la forma scelta dà il solido e quale valore dell'intervallo ha il modello, che può essere uno dei due estremi. **L'intervallo è del
+riempimento**: dal fondo al tetto del riempimento più recente, senza quello che lo copre. In `volumi.csv` il `volume_m3` della riga del taglio è vuoto, perché il volume sta nelle righe dei suoi riempimenti: la somma della colonna conta ogni fossa una volta.
+
+| Fossa inventata | Fondo piatto | A conca (scelta) | A V | Vero |
+|---|---:|---:|---:|---:|
+| Riempimento | 118,2 m³ | **97,2 m³** | 79,7 m³ | 76,4 m³ |
+
+Il volume vero qui si conosce perché la fossa è inventata, con un fondo fra la V e la conca del plugin. Sta il 4 % *sotto* l'intervallo, e la conca è
+il 27 % di troppo: tre sondaggi quasi in fila dicono poco. L'intervallo dice quanto conta la forma; non contiene sempre il vero.
+Lo restringono più sondaggi attraverso la fossa, con almeno uno vicino al centro.
+
+### Che cosa vuol dire il volume di un riempimento { #implicit-fill }
+
+È lo spazio fra il fondo ipotizzato e il tetto del riempimento, dentro la pianta disegnata, nelle celle della griglia. Qui la pianta ha 58 celle da
+1,14 m, 75,5 m² contro 76,2 m² disegnati. Non è una quantità misurata di materiale: va dato come intervallo, con il numero dei sondaggi. La pianta
+vale anche sotto una copertura: una fossa che si apre 1,5 m più in basso conserva tutta la sua pianta. Un
+fondo misurato solo accanto al bordo non dice nulla del centro (`floor_unmeasured`), e allora il volume è un'ipotesi, qualunque sia l'intervallo.
+
+<figure markdown="span">
+  ![Spessore dei riempimenti in pianta, modello implicito e kriging](../img/plugins/geoarchaeology/implicit-fill-thickness.jpg)
+  <figcaption>Lo spessore dei riempimenti. A sinistra il modello implicito resta dentro il contorno disegnato. A destra il kriging prende i tre
+  sondaggi per uno strato e lo stende su 1.800 m² con 2.004 m³, venti volte troppo.</figcaption>
+</figure>
+
+### Unità rare e volumi { #implicit-volumes }
+
+Un campo tiene uno spessore ovunque, quindi un'unità vista in pochi sondaggi si allargherebbe su tutto il sito. Il modello applica la regola del
+kriging: i sondaggi votano per l'unità per inverso della distanza, quelli che la attraversano senza trovarla contro, e dove prevalgono quelli senza l'unità non c'è, con un
+bordo verticale; uno spessore che il kriging distingue da zero resta. Un sondaggio dentro un taglio non vota contro quello che il taglio ha portato via.
+Dove un'unità non c'è, i suoi voxel passano allo strato più vicino sopra di lei nella sua serie che lì c'è, così il tetto dello strato sotto resta dove lo hanno messo i suoi sondaggi; senza uno strato sopra nella serie passano allo strato sotto. Riempimenti e interno dei tagli non danno e non prendono. Il riepilogo dice da quante celle un'unità è stata tolta. Non c'è un avviso: è il funzionamento normale del
+modello. Nella dimostrazione US 3, vista in 5 sondaggi su 21, copre 10.368 m² contro i 9.647 del kriging; senza questa regola ne copriva 59.600.
+
+`volumi.csv` ha `kriging_m3` e `same_cells_m3`: il volume di ciascun metodo sulle celle che hanno entrambi. Il kriging si ferma al margine intorno ai
+sondaggi, il modello implicito copre ogni cella con il DEM sulla sua griglia, quindi `volume_m3` copre di più; confronta `same_cells_m3` con `kriging_m3`, come fa il
+riepilogo. Sui 73.834 m² della dimostrazione (sondaggi simulati, fossa inventata):
+
+| Unità | Kriging | Implicito, stesse celle | Implicito, tutto (`volume_m3`) |
+|---|---:|---:|---:|
+| US 1 | 22.974 m³ | 21.981 m³ | 28.321 m³ |
+| US 2 | 75.705 m³ | 93.068 m³ | 117.294 m³ |
+| US 3, rara | 25.341 m³ | 20.466 m³ | 20.466 m³ |
+| US 4 | 181.703 m³ | 167.112 m³ | 167.133 m³ |
+| US 5, fino alla base del modello | 263.288 m³ | 268.208 m³ | 371.845 m³ |
+
+Tutto il deposito sopra il naturale differisce dell'1 % (305.723 contro 302.627 m³), le singole unità fino al 23 %: dove US 3 non c'è, il suo spazio passa a US 2, che è il
+23 % sopra il kriging, US 3 il 19 % sotto, US 4 l'8 % sotto. Fidati del volume del deposito prima che di quelli delle
+sue unità.
+
+**Leggi insieme i due numeri.** Dopo ogni costruzione il riepilogo dà il leave-one-out di un contatto e, per ogni unità, il modello contro i log ai suoi stessi sondaggi
+(`rmse`, massimo). Rispondono a due domande: quanto bene i dati dicono un contatto dove manca un sondaggio, e se il modello tiene i sondaggi che ha. Un leave-one-out basso da solo
+nasconde un modello che si è staccato dai log: in una prova con una lente spessa 1,2 m in 8 sondaggi su 25 il modello la aveva in media a 0,09 m, e il
+leave-one-out di quell'unità era 0,00 m. Nella dimostrazione:
+
+| Contatto | Sondaggi | Modello contro log: rmse / massimo |
+|---|---:|---:|
+| US 1 | 21 | 0,08 / 0,19 m |
+| US 7, US 8 | 3 | 0,01 / 0,02 m |
+| US 2 | 16 | 0,07 / 0,18 m |
+| US 3 | 5 | 0,17 / 0,34 m |
+| US 4 | 12 | **1,35 / 4,36 m** |
+| US 5 | 16 | 0,02 / 0,07 m |
+
+<figure markdown="span">
+  ![I solidi attorno alla fossa, tagliati lungo la sezione](../img/plugins/geoarchaeology/implicit-solids.jpg)
+  <figcaption>I solidi attorno alla fossa inventata, ritagliati e tagliati lungo la sezione, ogni unità chiusa sul taglio. Esagerazione verticale x3.</figcaption>
+</figure>
+
+### Altri dati { #implicit-data }
+
+*Contatti e giaciture da file...* legge tabelle CSV come si leggono i log: virgola, punto e virgola o tabulazione, punto o virgola
+decimale, nomi in italiano o in inglese. Un file nuovo di un tipo sostituisce il vecchio.
+
+**Contatti**: un punto dove comincia un'unità, visto su una sezione o in superficie.
+
+```text
+unita;x;y;quota;tipo
+US 3;588,20;741,50;286,15;
+US 9;591,00;713,00;285,10;parete
+```
+
+Il tipo è vuoto, oppure `wall` (`parete`, `muro`, `side`) per un punto della parete di un taglio. Un contatto di un taglio è un punto del suo fondo, e così una quota con la sua US. Una quota presa sul bordo di un taglio
+non è un punto del suo fondo: resta fuori, e `base_near_edge` dice quante sono.
+
+**Giaciture**: un'inclinazione misurata.
+
+```text
+unita;x;y;z;inclinazione;immersione
+US 5;560,00;700,00;285,50;4,0;220
+```
+
+Inclinazione in gradi dall'orizzontale (`dip`, `inclinazione`, `angolo`, `pendenza`), immersione in gradi da nord in senso orario
+(`dip_direction`, `immersione`, `azimut`). Una giacitura contro quello che dicono i sondaggi cede a loro, o viene lasciata fuori con un avviso; su un
+riempimento, o su un taglio senza pareti, non serve e viene lasciata fuori.
+
+**Le quote** del programma con il numero di una US sono contatti di quell'unità, senza file.
+
+Un contatto non viene rispettato esattamente: il campo è liscio, e su contatti e quote si appoggia. In una prova due punti 0,8 m sotto un contatto visto da 16 sondaggi
+lo hanno spostato solo di una frazione. Per cambiare la forma di un contatto servono più punti, o una giacitura.
+
+### Gli avvisi, e che cosa fare { #implicit-warnings }
+
+| Il testo dice | Vuol dire | Che cosa fare |
+|---|---|---|
+| *nessuno ha disegnato il contorno* | la pianta è stimata, il volume può essere sopra o sotto | disegna la US del taglio |
+| *tutti i sondaggi sono vicino al bordo* (`floor_unmeasured`) | la profondità del fondo non è stata misurata | un sondaggio vicino al centro; fino ad allora il volume è un'ipotesi |
+| *misure del fondo vicino al bordo non sono usate* (`base_near_edge`) | il bordo non dice quanto scende il centro; una quota sul bordo resta fuori | nulla per una quota sul bordo; per un sondaggio, controlla lui e il contorno |
+| *una misura accanto al bordo arriva a ... m, più di ogni misura lontana dal bordo* (`rim_deeper`) | quella profondità sta in un punto solo, una buca locale; il resto segue gli altri sondaggi | se è la parete, un sondaggio più all'interno; controlla il log |
+| *il fondo arriva a ... m, la misura più profonda è ... m* (`floor_past_measure`) | con tutte le misure sul bordo nulla ferma il fondo | un sondaggio vicino al centro |
+| *parti separate del contorno non hanno alcuna misura del fondo* (`plan_part_unmeasured`) | la loro profondità viene da sondaggi lontani | un sondaggio in ogni parte, o un taglio per ciascuna |
+| *nel sondaggio ... i log danno ... m, il modello ... m* (`fill_thinned`) | i riempimenti sono una pila, e questo ha perso il suo posto | leggi i volumi dei riempimenti come uno solo; dai i riempimenti affiancati come una sola unità |
+| *il modello passa lontano dai log dei suoi stessi sondaggi* (`logs_missed`) | rmse sopra 0,25 m o due voxel; il leave-one-out da solo non lo mostra | una serie per profondità o per quota per quell'unità, e non citare il suo volume da solo |
+| *una misura del fondo ... è fuori dal contorno* | vale come se fosse sul bordo | controlla la posizione del sondaggio, o il disegno |
+| *il contorno è largo solo ... m* | la cella è troppo grande per quella forma | costruisci con la cella indicata |
+| *il contorno disegnato misura ..., sulla griglia ne restano ...* | esce dalla griglia, o la cella è grande | una cella più piccola, o superfici con un margine più grande |
+| *i sondaggi ... finiscono dentro il riempimento* | il fondo è più in basso e il volume sottostimato | approfondisci un sondaggio, o dillo |
+| *riempimento ... senza tetto misurato* | non si sa fin dove arriva | un sondaggio che lo attraversa, un contatto |
+| *Voxel di ... m invece di ...* | al massimo 200 livelli; le unità sottili sono rese male | un `--floor` più vicino alla superficie, un intervallo di quote minore |
+| *il contatto esce dall'intervallo di quote* | in una parte della griglia non ha tetto | nulla, se quella parte è lontana da ciò che ti interessa |
+| *nessun sondaggio ha questo contatto insieme agli altri* | la sua distanza da loro è stimata | un sondaggio che lo veda con gli altri |
+| *i sondaggi non fanno un piano* | di traverso alla fila il contatto è in piano | un sondaggio fuori fila, o una giacitura |
+| *sondaggi hanno due unità nell'ordine opposto alla colonna* | l'ordine o i log sono sbagliati | *Ordine delle unità...*, i log |
+| *la giacitura ... contraddice il contatto* | avrebbe rovesciato il modello; lasciata fuori | controlla la direzione |
+
+### Limiti { #implicit-limits }
+
+* **Le strozzature non vengono segnalate.** Una strozzatura sotto il 5 % della pianta non dà avviso (1,2 m in un fossato di 6 m con celle da 1 m): guarda la pianta.
+* **Un contatto non viene rispettato esattamente**, come sopra: un campo liscio ci si appoggia. Nella dimostrazione il tetto di US 4 resta a 1,35 m dai suoi log (rmse), 4,36 m nel caso peggiore.
+* **I riempimenti sono una pila**: riempimenti affiancati e linee di scarico non sono modellati.
+* **Un bordo stimato è grossolano**, nei due sensi: +125 % e -54 % nelle prove.
+* **Un fondo misurato solo al bordo** (`floor_unmeasured`) non è una misura del centro: un sondaggio sul bordo di una conca ha dato meno di un terzo del volume.
+* **Un'unità rara finisce con un bordo verticale** a metà fra i sondaggi, come nel kriging, e gli strati intorno si dividono il suo spazio in modo diseguale, come sopra.
+* **La forma del fondo è ipotizzata.** Un fondo piatto viene arrotondato nel primo quarto della mezza larghezza: una parete davvero verticale sta fuori dall'intervallo, il 16 % sopra il
+  fondo piatto in una fossa di raggio 8. Un sondaggio al centro di una fossa così, con la conca scelta, dà il 40 % meno del vero: nulla dice che la parete è ripida.
+* **La griglia**: al massimo 120.000 celle e 200 livelli di base. Una fossa deve essere larga almeno diverse celle; qui 9 celle, voxel da 0,13 m.
+* **Non fatto**: faglie, pieghe, intrusioni, modifica a mano del modello, insiemi di modelli.
+
 ## Dalla riga di comando { #cli }
 
 Gli stessi passi con `ppg plugin geoarchaeology COSA PROGETTO ...`. Ogni comando lavora sul chunk attivo
@@ -697,6 +941,9 @@ ppg plugin geoarchaeology logs scavo.ppg S5 S4 S3 S2 S1 --out colonne_ns.pdf
 ppg plugin geoarchaeology model scavo.ppg --offset 600,800,0
 ppg plugin geoarchaeology model-chunk scavo.ppg --label "Unità da tagliare"
 ppg cut-model scavo.ppg --chunk "Unità da tagliare" --vertical 455,800,760,800 --keep both --out taglio.ply
+ppg plugin geoarchaeology implicit-install
+ppg plugin geoarchaeology implicit-data scavo.ppg --contacts contatti.csv --orientations giaciture.csv
+ppg plugin geoarchaeology implicit scavo.ppg --fill "US 7=US 9" --fill "US 8=US 9" --cut "US 9=bowl"
 ppg plugin geoarchaeology export scavo.ppg geoarcheologia.gpkg
 ppg plugin geoarchaeology export scavo.ppg naturale.tif --id top_4_US_5
 ppg plugin geoarchaeology remove scavo.ppg surfaces
@@ -713,8 +960,12 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `logs PROGETTO [CODICI...]` | i sondaggi (tutti se non se ne dà nessuno); `--out` un file `.svg`, `.png` o `.pdf`, altrimenti `logs/<sondaggio>` per un sondaggio e `logs/colonne_<sondaggi>` per un pannello; `--vertical` auto, elevation, depth; `--scale` |
 | `model PROGETTO` | `--cell` m; `--no-clip`; `--floor` quota; `--no-last` lascia fuori l'ultima unità; `--offset X,Y,Z` sottratto alle coordinate dell'OBJ (scritto nella sua intestazione e in `unita.obj.offset.txt`); `--explode` m, le unità separate in verticale in `unita_vista.ply`, il file della vista 3D |
 | `model-chunk PROGETTO` | le unità del modello come modello di un nuovo chunk del progetto, nel sistema di riferimento del chunk (rimesso lo spostamento dell'OBJ); `--label` l'etichetta del nuovo chunk (predefinita *Unità geoarcheologiche - <chunk>*, nella lingua dell'interfaccia, numerata se già presa); il chunk attivo resta lo stesso. `ppg cut-model PROGETTO --chunk ETICHETTA ...` lo taglia, ogni unità chiusa sul taglio nel suo colore |
+| `implicit PROGETTO` | il modello implicito; `--cut UNITÀ=FORMA` (flat, bowl, v), `--fill RIEMPIMENTO=TAGLIO`, entrambi ripetibili; `--cell` m; `--folds` (12 al massimo; 0 nessuno); `--series "US 2=depth,US 5=elevation"`; `--floor` quota; `--explode` m |
+| `implicit-data PROGETTO` | `--contacts` e `--orientations`, file CSV |
+| `implicit-status [PROGETTO]` | dove gira LoopStructural; con un progetto, l'ultimo modello implicito |
+| `implicit-install` | LoopStructural in un ambiente del plugin; `--force` anche se questo Python ce l'ha, o di nuovo |
 | `export PROGETTO OUT` | un GeoPackage con accanto i GeoTIFF e i volumi; con `--id` (un id mostrato da `list`, come `top_4_US_5` o `thickness_US_2`) una superficie in GeoTIFF |
-| `remove PROGETTO [COSA]` | `all` (predefinito) o `boreholes`: tutto quello del plugin nel chunk; `surfaces`, `sections`, `model`; il codice di un sondaggio o il nome di una sezione |
+| `remove PROGETTO [COSA]` | `all` (predefinito) o `boreholes`: tutto quello del plugin nel chunk; `surfaces`, `sections`, `model`, `implicit`; il codice di un sondaggio o il nome di una sezione |
 
 Le coordinate grandi (UTM) perdono precisione in alcuni programmi 3D: `--offset` con numeri tondi vicini
 al sito tiene piccole quelle dell'OBJ; i PLY conservano le coordinate vere.
@@ -812,7 +1063,7 @@ dimostrazione).
   dove forse c'è ancora: nessun altro sondaggio dice il contrario.
 * **Sondaggi radi.** Con sondaggi a 30-60 m l'uno dall'altro, i tetti delle unità dentro il tell della
   dimostrazione erano sbagliati di 1-2 m (il 95 % degli errori).
-* **Una pila di strati.** Unità affiancate, fosse e muri non vengono rappresentati come tali.
+* **Una pila di strati.** Unità affiancate, fosse e muri non vengono rappresentati come tali: per fosse e fossati c'è il [modello implicito](#implicit).
 * **Niente estrapolazione.** Le superfici si fermano al margine attorno ai sondaggi.
 * **Pochi sondaggi.** Sotto i cinque sondaggi (o il numero scelto) un contatto viene interpolato con
   l'inverso della distanza, senza incertezza.
@@ -844,6 +1095,7 @@ aprono con lui.
 * `model/<unità>.ply`, `model/unita.obj` con `unita.mtl`, `model/volumi.csv`: i solidi e i loro volumi;
   `volumi.csv` ha unità, descrizione, volume, area, spessore medio e massimo, tetto e base minimi e
   massimi, celle, ritagliata, fino al fondo, volume e area dove manca il DEM.
+* `implicit/top_<k>_<unità>.tif`: le superfici del modello implicito, float32, banda 1 la quota (m), banda 2 la varianza jackknife (m²), banda 3 implicito meno kriging (m); `implicit/data/` i file di contatti e giaciture. `model/` è allora quello del modello implicito, e `volumi.csv` ha anche `absent_cells`, `same_cells_m3`, `method`, `kriging_m3`, `range_min`, `range_max`.
 * `model/unita_vista.ply`: tutte le unità in un PLY solo per la vista 3D del programma, nel sistema
   interno del chunk (per un modello grande il programma ne scrive accanto una copia più leggera,
   `model_preview.ply`).

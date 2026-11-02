@@ -228,7 +228,7 @@ class ExternalSam2Segmenter:
 
         with self._lock:
             if self._proc.poll() is not None:
-                raise RuntimeError("il processo di SAM 2.1 si e' chiuso:\n" + "\n".join(self._stderr[-20:]))
+                raise RuntimeError("il processo di SAM 2.1 si è chiuso:\n" + "\n".join(self._stderr[-20:]))
             data = pickle.dumps(req, protocol=4)
             self._proc.stdin.write(struct.pack(">Q", len(data)) + data)
             self._proc.stdin.flush()
@@ -283,7 +283,7 @@ def make_segmenter(model: str = "small"):
         return ExternalSam2Segmenter(model, python=sys.executable)
     if mode == "external":
         return ExternalSam2Segmenter(model)
-    raise ImportError("SAM 2.1 non e' installato")
+    raise ImportError("SAM 2.1 non è installato")
 
 
 __all__ = ["available", "install", "is_installed", "env_dir", "env_python", "make_segmenter",

@@ -147,7 +147,7 @@ class PluginsDialog(QDialog):
         if info is None:
             return
         if info.source != "folder":
-            message(self, "info", tr("Plugin"), tr("{0} e' installato con pip: si toglie con pip uninstall {1}.",
+            message(self, "info", tr("Plugin"), tr("{0} è installato con pip: si toglie con pip uninstall {1}.",
                                                     info.title or info.name, info.distribution))
             return
         if choice(self, "question", tr("Plugin"), tr("Rimuovere il plugin {0}?", info.title or info.name),
