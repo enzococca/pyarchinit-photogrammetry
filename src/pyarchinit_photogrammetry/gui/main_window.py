@@ -5827,7 +5827,7 @@ class MainWindow(QMainWindow):
         selection is in its (u, v), not in the chunk's coordinates), said once."""
         if self._plan_only():
             return None
-        return self.selected_polygon()
+        return self._selected_polygon()  # the old name, which scripts and tests may replace: it reaches selected_polygon
 
     def _plan_only(self) -> bool:
         """Whether an elevation or a section is shown, for a tool that works on the plan: then it is refused, said."""
