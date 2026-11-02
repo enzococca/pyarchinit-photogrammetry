@@ -397,6 +397,13 @@ depth of its pressure sensor, and a trajectory computed with COLMAP as reference
 * A camera clock shifted on purpose by 7.3 seconds: the offset found is 7.33 seconds.
 * The DEM and the orthophoto, in metres, lie between 389.7 and 394.2 m below the surface.
 
+![The orthophoto and the DEM of AQUALOC sequence 6 computed by the program](../img/plugins/underwater/aqualoc-ortho-dem.jpg)
+
+*The orthophoto and the DEM of sequence 6 computed by the program, the DEM from the highest ground (red) to the
+lowest (blue). Figure published with the permission of the dataset's authors: M. Ferrera, V. Creuze, J. Moras,
+P. Trouvé-Peloux, AQUALOC: An Underwater Dataset for Visual-Inertial-Pressure Localization, The International Journal
+of Robotics Research, 2019; dataset page [lirmm.fr/aqualoc](https://www.lirmm.fr/aqualoc/).*
+
 
 **Sea-thru D3** (D. Akkaynak, T. Treibitz, CVPR 2019): 68 RAW photos of a coral head in the Red Sea, with a colour
 chart, and depth maps in metres made with Metashape. Developed with the white balance of
