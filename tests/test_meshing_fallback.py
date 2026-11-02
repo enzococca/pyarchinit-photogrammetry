@@ -48,3 +48,44 @@ def test_poisson_crash_falls_back_to_height_field(terrain_chunk, monkeypatch, ca
     assert any("height field" in r.getMessage() for r in caplog.records)
     assert any("crashed" in r.getMessage() for r in caplog.records)
     assert terrain_chunk.product_path("model").exists()
+
+
+def test_poisson_points_thinned_to_the_memory(terrain_chunk, monkeypatch):
+    """A cloud above the memory budget is thinned before the Poisson (13.6 M points at depth 12
+    filled 24.8 GB on a 24 GB Mac): the report says so and the mesh is still a surface."""
+    pytest.importorskip("open3d")
+    monkeypatch.delenv("PPG_POISSON_MAX_POINTS", raising=False)
+    monkeypatch.setattr(meshing, "poisson_point_budget", lambda: 1000)
+    mesh = meshing.build_model(terrain_chunk, face_count=2000)
+    report = terrain_chunk.meta["model"]
+    assert report["thinned_points"] == [len(terrain_chunk.point_cloud), 1000]
+    assert report["poisson_points"] == 1000
+    assert len(mesh.faces) > 0 and np.isfinite(mesh.vertices).all()
+    lo, hi = mesh.bounds
+    assert lo[0] < 0.2 and hi[0] > 1.8 and lo[1] < 0.2 and hi[1] > 1.8
+    monkeypatch.undo()
+    monkeypatch.setenv("PPG_POISSON_MAX_POINTS", "0")  # no thinning at all
+    meshing.build_model(terrain_chunk, face_count=2000)
+    report = terrain_chunk.meta["model"]
+    assert "thinned_points" not in report and report["poisson_points"] == len(terrain_chunk.point_cloud)
+
+
+def test_poisson_budget_from_the_memory_and_its_override(monkeypatch):
+    monkeypatch.delenv("PPG_POISSON_MAX_POINTS", raising=False)
+    monkeypatch.setattr(meshing, "physical_memory", lambda: 24 * 1000 ** 3)
+    assert meshing.poisson_point_budget() == 4_800_000
+    monkeypatch.setattr(meshing, "physical_memory", lambda: None)
+    assert meshing.poisson_point_budget() is None
+    monkeypatch.setenv("PPG_POISSON_MAX_POINTS", "0")
+    xyz = np.zeros((5000, 3))
+    assert meshing._thin_for_poisson(xyz, None)[2] is None  # 0: no thinning
+    monkeypatch.setenv("PPG_POISSON_MAX_POINTS", "1200")
+    normals = np.arange(15000, dtype=float).reshape(5000, 3)
+    xyz = normals * 2
+    thin_xyz, thin_n, thinned = meshing._thin_for_poisson(xyz, normals)
+    assert thinned == (5000, 1200) and len(thin_xyz) == 1200 and np.array_equal(thin_xyz, thin_n * 2)
+
+
+def test_physical_memory_is_known_here():
+    ram = meshing.physical_memory()
+    assert ram is None or ram > 1 << 28

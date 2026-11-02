@@ -7,11 +7,18 @@ PCA normals oriented by the dense normals. On several threads Open3D 0.19 often 
 ("Failed to close loop", segmentation faults); the reconstruction is then run again on
 one thread, which does not, then at a shallower depth, and only then the height field
 is used, so a mesh is always produced and the log says which path was taken.
+
+PoissonRecon needs about 1.3-1.8 KB per input point at depths 11-12: a cloud of 13.6 M points
+at depth 12 filled 24.8 GB on a 24 GB Mac and died after an hour. The points given to it are
+therefore thinned to a budget of the physical memory (:func:`poisson_point_budget`) and the
+depth is kept at 11 above 4 M points; the colours of the mesh still come from the whole cloud.
 """
 from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 
 import numpy as np
 
@@ -24,6 +31,10 @@ from .isolate import IsolatedCrash, run_isolated
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 FACE_RATIO = {"high": 1 / 5, "medium": 1 / 15, "low": 1 / 45}
+POISSON_MEMORY_SHARE = 0.4  # of the physical memory, for the Poisson process
+POISSON_BYTES_PER_POINT = 2000  # measured 1.3-1.8 KB per point at depths 11-12
+POISSON_DEEP_POINTS = 4_000_000  # above this, depth 12 (about twice the memory of 11) is not used
+POISSON_MAX_DEPTH_FOR_MANY = 11
 
 
 def up_vector_internal(chunk: Chunk) -> np.ndarray:
@@ -51,6 +62,56 @@ def _target_faces(n_points: int, face_count) -> int:
 
 def poisson_depth(target_faces: int) -> int:
     return int(np.clip(np.round(np.log2(max(target_faces, 1000)) / 2 + 2), 8, 12))
+
+
+def physical_memory() -> int | None:
+    """Bytes of physical memory, None when it cannot be told."""
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().total)
+    except Exception:  # noqa: BLE001 - not installed or not working here
+        pass
+    try:
+        pages, size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and size > 0:
+            return int(pages) * int(size)
+    except (AttributeError, OSError, ValueError):
+        pass
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                 timeout=5, close_fds=False)
+            return int(out.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def poisson_point_budget() -> int | None:
+    """Most points given to the Poisson reconstruction: ``PPG_POISSON_MAX_POINTS`` (0: no limit),
+    else 0.4 of the physical memory at 2000 bytes a point (24 GB: 4.8 M points); None: no limit
+    (the memory is unknown)."""
+    env = os.environ.get("PPG_POISSON_MAX_POINTS", "").strip()
+    if env:
+        value = int(float(env))
+        return value if value > 0 else None
+    ram = physical_memory()
+    if not ram:
+        return None
+    return max(100_000, int(POISSON_MEMORY_SHARE * ram / POISSON_BYTES_PER_POINT))
+
+
+def _thin_for_poisson(xyz: np.ndarray, normals: np.ndarray | None):
+    """``(xyz, normals, (from, to) or None)``: a random sample without replacement (seeded,
+    normals kept with their points) when the cloud exceeds :func:`poisson_point_budget`."""
+    budget = poisson_point_budget()
+    if budget is None or len(xyz) <= budget:
+        return xyz, normals, None
+    idx = np.sort(np.random.default_rng(0).choice(len(xyz), budget, replace=False))
+    log.info("Poisson on %d of %d points: the memory of this computer allows about %d", budget, len(xyz), budget)
+    return (np.ascontiguousarray(xyz[idx]), None if normals is None else np.ascontiguousarray(normals[idx]),
+            (int(len(xyz)), int(budget)))
 
 
 def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbitrary", face_count="medium",
@@ -81,6 +142,7 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
         raise RuntimeError(f"not enough points in {source}" + (" of the chosen classes" if classes is not None else "")
                            + " to build a mesh")
     target = _target_faces(len(pc), face_count)
+    report: dict = {}
     progress(0.0, f"Building {surface} mesh from {len(pc):,} points")
     up = up_vector_internal(chunk)
     if surface == "height_field":
@@ -88,7 +150,8 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     else:
         cams = np.array([c.center for c in chunk.aligned_cameras], dtype=np.float64)
         try:
-            mesh = _poisson(pc, target, progress.sub(0.0, 0.8), cam_centers=cams if len(cams) else None)
+            mesh = _poisson(pc, target, progress.sub(0.0, 0.8), cam_centers=cams if len(cams) else None,
+                            report=report)
         except PoissonFailed as exc:
             log.warning("%s; building a 2.5D height field instead", exc)
             progress(0.8, "Poisson failed, building a height field instead")
@@ -98,7 +161,7 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     if pc.rgb is not None and vertex_colors:
         _paint(mesh, pc.xyz, pc.rgb)
     chunk.meta["model"] = {"source": source, "surface": surface,
-                           "classes": None if classes is None else sorted({int(c) for c in classes})}
+                           "classes": None if classes is None else sorted({int(c) for c in classes}), **report}
     return _save_model(chunk, mesh, progress)
 
 
@@ -152,13 +215,16 @@ class PoissonFailed(RuntimeError):
     """Every Poisson attempt crashed or failed."""
 
 
-def _poisson(pc, target_faces: int, progress: Progress, cam_centers: np.ndarray | None = None):
+def _poisson(pc, target_faces: int, progress: Progress, cam_centers: np.ndarray | None = None,
+             report: dict | None = None):
     """Poisson surface in an isolated process.
 
     PoissonRecon in Open3D 0.19 fails non-deterministically on several threads (``Failed
     to close loop``, segmentation fault or a silent exit: 15 runs in 20 on the turntable
     demo, none of 20 on one thread): all cores first, then one thread at the same depth,
-    then one thread with a shallower octree, before giving up with :class:`PoissonFailed`."""
+    then one thread with a shallower octree, before giving up with :class:`PoissonFailed`.
+    The points are thinned to the memory of the computer first (:func:`_thin_for_poisson`;
+    ``report["thinned_points"]`` = (from, to)) and the depth kept at 11 above 4 M points."""
     import trimesh
 
     try:
@@ -171,7 +237,15 @@ def _poisson(pc, target_faces: int, progress: Progress, cam_centers: np.ndarray 
     normals = None
     if pc.normals is not None and np.abs(pc.normals).sum() > 0:
         normals = np.ascontiguousarray(pc.normals, dtype=np.float64)
+    xyz, normals, thinned = _thin_for_poisson(xyz, normals)
+    if thinned and report is not None:
+        report["thinned_points"] = list(thinned)
     depth = poisson_depth(target_faces)
+    if len(xyz) > POISSON_DEEP_POINTS and depth > POISSON_MAX_DEPTH_FOR_MANY:
+        log.info("Poisson depth %d -> %d on %d points (memory)", depth, POISSON_MAX_DEPTH_FOR_MANY, len(xyz))
+        depth = POISSON_MAX_DEPTH_FOR_MANY
+    if report is not None:
+        report["poisson_points"] = int(len(xyz))
     errors = []
     for attempt, (d, threads) in enumerate(((depth, -1), (depth, 1), (depth - 1, 1))):
         progress(0.2, f"Poisson reconstruction (depth {d})"
