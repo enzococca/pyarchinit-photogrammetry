@@ -6,7 +6,8 @@ and the edits made there brought back.
   metres per pixel: a drone orthomosaic would not fit a tablet), ``dem.tif`` for the hillshade and
   the heights, ``rilievo.gpkg`` with the editable layers ``unita`` (the units drawn on the chunk:
   sito, area, us, tipo and the columns of ``pyunitastratigrafiche``) and ``quote`` (spot heights
-  with the columns of ``pyarchinit_quote``), and ``<name>.qgs`` made with QGIS's Python (relative
+  with the columns of ``pyarchinit_quote``) and, to see on the tablet, ``linee`` (the break lines of the plan, their
+  ``kind``: not brought back), and ``<name>.qgs`` made with QGIS's Python (relative
   paths, styles, labels). Every feature carries ``ppg_id``; ``ppg_qfield.json`` keeps what was
   exported.
 * :func:`read_edits` / :func:`import_edits` - the GeoPackage back from the tablet compared with
@@ -124,6 +125,9 @@ for v in cfg["vectors"]:
             sym.setColor(fill)
             sym.symbolLayer(0).setStrokeColor(col)
             sym.symbolLayer(0).setStrokeWidth(0.6)
+        elif v["geometry"] == "LINESTRING":
+            sym.setColor(col)
+            sym.setWidth(0.8)
         else:
             sym.setColor(col)
             sym.setSize(3)
@@ -163,7 +167,7 @@ app.exitQgis()
 def export_package(chunk, folder: str | os.PathLike, resolution: float | None = 0.02, title: str | None = None,
                    project: bool = True, qgis=None, progress: Progress | None = None) -> dict:
     """The QField package of ``chunk`` in ``folder`` (see the module docstring). Returns
-    ``{"folder", "project" (or None), "units", "quote", "ortho", "dem"}``."""
+    ``{"folder", "project" (or None), "units", "quote", "lines", "ortho", "dem"}``."""
     from shapely import wkt
     from shapely.geometry import Point
 
@@ -188,7 +192,12 @@ def export_package(chunk, folder: str | os.PathLike, resolution: float | None = 
                      crs, identifier="Unita' stratigrafiche")
     quote = [(Point(float(q["x"]), float(q["y"])), {k: q.get(k) for k in QUOTE_COLUMNS}) for q in d["quote"]]
     gpkg.write_table(gp, "quote", "POINT", QUOTE_COLUMNS, quote, crs, identifier="Quote")
-    out = {"folder": folder, "project": None, "units": len(units), "quote": len(quote), "ortho": None, "dem": None}
+    from ..archaeo import breaklines
+
+    lines = [(breaklines._geometry(r, False), breaklines._row(r)) for r in d.get("lines") or [] if breaklines.valid(r)]
+    gpkg.write_table(gp, "linee", "LINESTRING", breaklines.COLUMNS, lines, crs, identifier="Linee di rottura")
+    out = {"folder": folder, "project": None, "units": len(units), "quote": len(quote), "lines": len(lines),
+           "ortho": None, "dem": None}
     rasters = []
     with tempfile.TemporaryDirectory(prefix="ppg-qfield-", dir=folder) as tmp:
         if chunk.orthomosaic_path is not None and chunk.orthomosaic_path.exists():
@@ -229,7 +238,9 @@ def _write_project(folder: Path, name: str, crs: str | None, rasters: list[dict]
     vectors = [{"name": "Unita' stratigrafiche", "path": str(folder / GPKG), "table": "unita", "geometry": "POLYGON",
                 "color": "#e6194b", "label": "etichetta", "value_maps": {"tipo": list(US_TYPES)}},
                {"name": "Quote", "path": str(folder / GPKG), "table": "quote", "geometry": "POINT",
-                "color": "#f59e0b", "label": "quota_q", "value_maps": {"unita_tipo_q": list(US_TYPES)}}]
+                "color": "#f59e0b", "label": "quota_q", "value_maps": {"unita_tipo_q": list(US_TYPES)}},
+               {"name": "Linee di rottura", "path": str(folder / GPKG), "table": "linee", "geometry": "LINESTRING",
+                "color": "#ff7f0e", "label": "etichetta", "value_maps": {}}]
     cfg = {"project": str(project), "crs": project_crs(crs),
            "title": title, "vectors": vectors, "rasters": rasters}
     with tempfile.TemporaryDirectory(prefix="ppg-qgis-") as tmp:

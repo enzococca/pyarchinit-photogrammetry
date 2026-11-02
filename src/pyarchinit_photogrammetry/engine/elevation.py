@@ -560,7 +560,8 @@ def world_of(entry: dict, u: float, v: float, d: float | None = None, chunk: Chu
 
 def frame_drawings(chunk: Chunk, eid: str) -> dict:
     """The drawings kept with the elevation ``eid`` (``chunk.meta["drawings"]["frames"][eid]``): ``units``,
-    ``quote``, ``points`` (records as the window stores them, in ``(u, v)``) and ``stones`` (``{eid: [WKT]}``)."""
+    ``quote``, ``points``, ``lines`` (records as the window stores them, in ``(u, v)``) and ``stones``
+    (``{eid: [WKT]}``)."""
     return dict(((chunk.meta.get("drawings") or {}).get("frames") or {}).get(eid) or {})
 
 
@@ -570,10 +571,12 @@ def _safe_stem(name: str) -> str:
 
 def _drawing_items(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
     """The drawings of ``entry`` as shapely geometries in ``(u, v)``: ``units`` [(geometry, record)], ``quote``
-    [(point, record)], ``points`` [(point, record)], ``stones`` [polygon] (those of this elevation), ``profile`` [line
-    arrays]. ``data``: the drawings (as :func:`frame_drawings` gives them) when not those the chunk keeps."""
+    [(point, record)], ``points`` [(point, record)], ``lines`` [(line, record)] (break lines,
+    :mod:`..archaeo.breaklines`), ``stones`` [polygon] (those of this elevation), ``profile`` [line arrays]. ``data``: the drawings (as :func:`frame_drawings` gives them) when not those the chunk keeps."""
     from shapely import wkt
-    from shapely.geometry import Point
+    from shapely.geometry import LineString, Point
+
+    from ..archaeo import breaklines
 
     data = frame_drawings(chunk, entry["id"]) if data is None else data
     units = []
@@ -591,7 +594,9 @@ def _drawing_items(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
             stones.append(wkt.loads(r))
         except Exception:  # noqa: BLE001
             continue
-    return {"units": units, "quote": quote, "points": points, "stones": stones,
+    lines = [(LineString([(float(c[0]), float(c[1])) for c in r["coords"]]), r) for r in data.get("lines") or []
+             if breaklines.valid(r)]
+    return {"units": units, "quote": quote, "points": points, "lines": lines, "stones": stones,
             "profile": read_profile(chunk, entry) if entry.get("kind") == "section" else []}
 
 
@@ -612,7 +617,8 @@ QUOTE_COLUMNS = {"quota_q": "REAL", "us_q": "TEXT", "area_q": "TEXT", "sito_q": 
 def world_tables(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
     """The drawings of the elevation ``entry`` placed on the survey, 3D in the CRS the elevation was made in:
     ``{name: (geometry type, {column: SQL type}, [(geometry with Z, values)])}`` for ``unita`` (MULTIPOLYGON, on the
-    plane), ``quote`` (POINT, the point of the surface), ``punti`` (POINT), ``pietre`` (POLYGON) and, for a section,
+    plane), ``quote`` (POINT, the point of the surface), ``punti`` (POINT), ``pietre`` (POLYGON), ``linee``
+    (LINESTRING, the break lines on the plane) and, for a section,
     ``profilo`` (LINESTRING) - written with Z by :func:`write_world_tables` (the GeoPackage of the export, the live
     GeoPackage of QGIS and RustGIS)."""
     from shapely.geometry import LineString, MultiPolygon, Point
@@ -637,10 +643,12 @@ def world_tables(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
         points.append((world, {"label": rec.get("label")}))
     stones = [(place(st), {"n": i + 1, "area_m2": round(st.area, 5)}) for i, st in enumerate(items["stones"])
               if st.geom_type == "Polygon"]
+    lines = [(place(ln), {"ppg_id": rec.get("id"), "kind": rec["kind"]}) for ln, rec in items["lines"]]
     out = {"unita": ("MULTIPOLYGON", dict(UNIT_COLUMNS), units),
            "quote": ("POINT", dict(QUOTE_COLUMNS), quote),
            "punti": ("POINT", {"label": "TEXT"}, points),
-           "pietre": ("POLYGON", {"n": "INTEGER", "area_m2": "REAL"}, stones)}
+           "pietre": ("POLYGON", {"n": "INTEGER", "area_m2": "REAL"}, stones),
+           "linee": ("LINESTRING", {"ppg_id": "TEXT", "kind": "TEXT"}, lines)}
     if entry.get("kind") == "section":
         out["profilo"] = ("LINESTRING", {"n": "INTEGER"},
                           [(place(LineString(line)), {"n": i + 1}) for i, line in enumerate(items["profile"])
@@ -684,7 +692,8 @@ def _write_drawings_dxf(items: dict, entry: dict, path: Path) -> Path:
     dxf = ezdxf.new("R2010")
     dxf.units = ezdxf.units.M
     msp = dxf.modelspace()
-    for name, colour in (("US", 3), ("USM", 1), ("QUOTE", 2), ("PIETRE", 7), ("PUNTI", 6), ("PROFILO", 1)):
+    for name, colour in (("US", 3), ("USM", 1), ("QUOTE", 2), ("PIETRE", 7), ("PUNTI", 6), ("PROFILO", 1),
+                         ("LINEE", 30)):
         dxf.layers.add(name, color=colour)
     height = max(0.02, 4 * float(entry.get("resolution") or 0.005))
     for geom, rec in items["units"]:
@@ -705,6 +714,11 @@ def _write_drawings_dxf(items: dict, entry: dict, path: Path) -> Path:
             msp.add_lwpolyline([tuple(map(float, q)) for q in ring], close=True, dxfattribs={"layer": "PIETRE"})
     for line in items["profile"]:
         msp.add_lwpolyline([tuple(map(float, q)) for q in line], dxfattribs={"layer": "PROFILO"})
+    from ..archaeo.breaklines import DXF_COLOURS
+
+    for ln, rec in items["lines"]:
+        msp.add_lwpolyline([tuple(map(float, q)) for q in ln.coords],
+                           dxfattribs={"layer": "LINEE", "color": DXF_COLOURS[rec["kind"]]})
     dxf.saveas(path)
     return path
 
@@ -775,6 +789,13 @@ def _write_drawings_svg(chunk: Chunk, items: dict, entry: dict, path: Path, scal
     out.append('<g id="PROFILO" fill="none" stroke="#ff2d2d" stroke-width="0.5">')
     out += [f'<path d="{path_of([line], close=False)}"/>' for line in items["profile"]]
     out.append("</g>")
+    from ..archaeo.breaklines import COLOURS
+
+    out.append('<g id="LINEE" fill="none" stroke-width="0.4">')
+    out += [f'<path d="{path_of([np.asarray(ln.coords)], close=False)}" stroke="{COLOURS[rec["kind"]]}"'
+            + (' stroke-dasharray="2 1"' if rec["kind"] == "soft" else "") + f' class="{rec["kind"]}"/>'
+            for ln, rec in items["lines"]]
+    out.append("</g>")
     out.append('<g id="PUNTI" fill="#ff5d8f" stroke="#000000" stroke-width="0.15">')
     for p, rec in items["points"]:
         x, y = xy(p.x, p.y)
@@ -831,6 +852,8 @@ def _write_drawings_png(chunk: Chunk, items: dict, entry: dict, path: Path, max_
             draw.line(px(ring), fill=(0, 0, 0), width=2)
     for line in items["profile"]:
         draw.line(px(line), fill=(255, 45, 45), width=3)
+    for ln, _rec in items["lines"]:
+        draw.line(px(np.asarray(ln.coords)), fill=(255, 127, 14), width=3)
     for p, _rec in items["quote"] + items["points"]:
         (x, y), = px([(p.x, p.y)])
         draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=(255, 209, 102), outline=(0, 0, 0))
@@ -920,6 +943,10 @@ def _write_drawings_gpkg(chunk: Chunk, items: dict, entry: dict, path: Path) -> 
         gpkg.replace_rows(con, "pietre", cols, [(s, {"n": i + 1, "area_m2": round(s.area, 5),
                                                      "geom_world": on_plane(s).wkt})
                                                 for i, s in enumerate(items["stones"]) if s.geom_type == "Polygon"], -1)
+        cols = gpkg.ensure_table(con, "linee", "LINESTRING", {"ppg_id": "TEXT", "kind": "TEXT", "geom_world": "TEXT"},
+                                 -1)
+        gpkg.replace_rows(con, "linee", cols, [(ln, {"ppg_id": rec.get("id"), "kind": rec["kind"],
+                                                     "geom_world": on_plane(ln).wkt}) for ln, rec in items["lines"]], -1)
         con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -934,8 +961,8 @@ def export_drawings(chunk: Chunk, entry: dict, folder, scale: int | None = None,
                     raster: bool = False) -> dict:
     """The drawings made on the elevation ``entry`` (:func:`frame_drawings`) into ``folder``:
 
-    * ``<stem>_disegni.dxf`` in ``(u, v)`` metres (layers ``US``, ``USM``, ``QUOTE``, ``PIETRE``, ``PUNTI`` and, for a
-      section, ``PROFILO``);
+    * ``<stem>_disegni.dxf`` in ``(u, v)`` metres (layers ``US``, ``USM``, ``QUOTE``, ``PIETRE``, ``PUNTI``, ``LINEE``
+      and, for a section, ``PROFILO``);
     * ``<stem>_disegni.svg`` at 1:``scale`` (default the most detailed standard scale that fits) over the orthophoto,
       and ``<stem>_disegni.png``, the same as a picture;
     * ``<stem>_disegni.gpkg``, the elevation unfolded (:func:`_write_drawings_gpkg`, ``(u, v)``, no CRS), with the

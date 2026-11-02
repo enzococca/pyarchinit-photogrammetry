@@ -176,6 +176,12 @@ class _Product(_Part):
                 meta[("active_versions", k)] = _get(chunk.meta, ("active_versions", k))
         if self.key in RELIEF and _get(chunk.meta, ("relief", self.key)) is not _MISSING:
             meta[("relief", self.key)] = _get(chunk.meta, ("relief", self.key))
+        if self.key == "tin":  # the TIN: its folder (tin.npz and tin.json) and how it was made
+            folder = (chunk.data_dir / products["tin"]).parent
+            if folder != chunk.data_dir and folder.is_dir():
+                files = [folder]
+            if _get(chunk.meta, ("tin",)) is not _MISSING:
+                meta[("tin",)] = chunk.meta["tin"]
         state = {"products": products, "meta": meta, "files": files}
         if self.key == "tie_points":
             state["poses"] = {c.key: c.transform for c in chunk.cameras if c.transform is not None}

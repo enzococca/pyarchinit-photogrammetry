@@ -64,11 +64,12 @@ LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
 }
 TWO_WAY_TABLES = ("unita", "quote", "sezioni")  # what is edited there in QGIS comes back
 # the drawings of every elevation and section of the chunk, placed on the survey in 3D (one-way): tables
-# ``prospetto_<elevation id>_<unita|quote|punti|pietre|profilo>`` (``engine.elevation.world_tables``)
+# ``prospetto_<elevation id>_<unita|quote|punti|pietre|profilo|linee>`` (``engine.elevation.world_tables``)
 ELEVATION_PREFIX = "prospetto_"
 ELEVATION_TABLES = {"unita": ("Unità", "POLYGON", "#1b7f3b"), "quote": ("Quote", "POINT", "#ffd166"),
                     "punti": ("Punti di misura", "POINT", "#ff5d8f"), "pietre": ("Pietre", "POLYGON", "#5b3a1e"),
-                    "profilo": ("Profilo", "LINESTRING", "#ff2d2d")}
+                    "profilo": ("Profilo", "LINESTRING", "#ff2d2d"),
+                    "linee": ("Linee di rottura", "LINESTRING", "#ff7f0e")}
 ID_FIELD = "ppg_id"  # the identity of a feature (a UUID)
 SIG_FIELD = "ppg_sig"  # the signature of what the program last wrote in the row
 PART_FIELD = "ppg_parte"  # "unita": the part (1, 2...) of a unit drawn as several polygons

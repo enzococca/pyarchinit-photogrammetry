@@ -808,15 +808,15 @@ class Chunk:
 
     def edit_dem(self, polygon, method: str = "plane", value: float | None = None, breaklines=None,
                  keep_version: bool = True, version_name: str | None = None,
-                 progress: ProgressCallback | None = None) -> dict:
+                 progress: ProgressCallback | None = None, lines: str = "selection") -> dict:
         """New heights for the DEM inside ``polygon`` from the ground around it: ``method``
         "plane", "constant" (``value``, default the median around), "idw" or "linear";
-        ``breaklines`` keep their heights. The DEM as it was is kept as a version first
-        (:mod:`engine.dem_edit`)."""
+        ``breaklines`` keep their heights; ``lines="drawn"``: also the break lines drawn on the plan
+        that reach the area. The DEM as it was is kept as a version first (:mod:`engine.dem_edit`)."""
         from ..engine import dem_edit
 
         return dem_edit.fill_area(self, polygon, method, value, breaklines, keep_version, version_name,
-                                  progress=as_progress(progress))
+                                  progress=as_progress(progress), lines=lines)
 
     def coregister_dem(self, reference, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
                        method: str = "auto", name: str | None = None, search: float | None = None,

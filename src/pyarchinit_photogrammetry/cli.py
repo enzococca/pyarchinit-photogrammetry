@@ -3454,6 +3454,9 @@ def tin_build(project: Path,
                                                                    "default twice the DEM's noise, or 2 cm)"),
               breaklines: Optional[Path] = typer.Option(None, help="GeoJSON of the break lines: LineStrings with "
                                                                    "property kind = breakline, soft or boundary"),
+              drawn: Optional[bool] = typer.Option(None, "--drawn/--no-drawn",
+                                                   help="the break lines drawn on the plan of the chunk (default: "
+                                                        "yes when no --breaklines file is given)"),
               boundary: Optional[list[str]] = typer.Option(None, help="the TIN stops at this polygon: WKT, GeoJSON "
                                                                       "or a GeoJSON file"),
               spots: bool = typer.Option(True, "--spots/--no-spots", help="the spot heights of the plan drawings "
@@ -3464,10 +3467,18 @@ def tin_build(project: Path,
     """Build the TIN of --chunk (default the active one) and keep it in the project."""
     from .engine import tin as tin_mod
 
+    from .archaeo import breaklines as bl
+
     doc, ch = _open(project, chunk)
     cls = [int(c) for c in classes.split(",") if c.strip()] if classes else None
+    lines = _breaklines_file(breaklines)
+    if drawn or (drawn is None and breaklines is None):
+        stored = bl.for_tin(bl.records(ch))
+        if stored:
+            typer.echo(f"{len(stored)} break lines drawn on the plan")
+        lines += stored
     try:
-        tin = tin_mod.build_tin(ch, source=source, max_error=max_error, breaklines=_breaklines_file(breaklines),
+        tin = tin_mod.build_tin(ch, source=source, max_error=max_error, breaklines=lines,
                                 boundary=_polygons(boundary), spots=spots, classes=cls, progress=print_progress)
     except (RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from None
