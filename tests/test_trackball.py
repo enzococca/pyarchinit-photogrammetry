@@ -264,8 +264,19 @@ def test_double_click_sets_the_pivot_on_the_surface(model_view, app):
     c.pivot_requested.emit(w / 2 + 20, h / 2 + 10)  # what a double click there sends
     pivot = mv.pivot()
     assert pivot is not None
+    from scipy.spatial import cKDTree
+
+    # on the floor of the trench: on the plane of the cloud's points around it, within 5 mm, and among them (the
+    # pick puts the pivot on the plane of the points along the line of sight, between them: the distance to the
+    # nearest point is the spacing of the cloud, which the fixture builds a little differently on every platform)
     xyz = chunk.to_world(chunk.point_cloud.xyz)
-    assert np.min(np.linalg.norm(xyz - pivot, axis=1)) < 0.005  # on the floor of the trench
+    tree = cKDTree(xyz)
+    nearest, _i = tree.query(pivot)
+    near = xyz[tree.query_ball_point(pivot, 0.03)]
+    assert nearest < 0.02 and len(near) >= 10, (nearest, len(near))
+    centre = near.mean(axis=0)
+    normal = np.linalg.svd(near - centre)[2][2]
+    assert abs(float((pivot - centre) @ normal)) < 0.005
     assert np.allclose(c.cam.basis(), R0) and np.allclose(c.cam.eye, eye0)  # the view did not move
     # picks and the frame of the view do not depend on the trackball
     _img, project = c.snapshot()
