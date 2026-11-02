@@ -103,13 +103,18 @@ A cornice, a moulding, a string course: a section carried along a path.
   the world through the elevation's frame, at the depth of its relief or, where the relief has no value, of the model's
   surface nearest the viewer: such a path keeps its heights, a raking cornice too); or straight **between two markers**.
 * **The section**: the model cut by the plane normal to the path at a station (by default the middle of the first
-  segment). On the line of the cut nearest the path's point the plugin finds the **wall face** (where the line runs
-  vertically) and keeps only the stretch that **stands out of it** by more than the mesh's resolution, the one at the
+  segment). On the line of the cut nearest the path's point the plugin finds the **wall face**: the deepest of
+  the vertical stretches (3 cm or more) the line comes from or goes to, preferring one seen both below and above the
+  moulding (a cornice's own fascia or fillet is not the wall; a parapet behind it is seen above only). With no such
+  stretch the deepest point of the line stands for it and the element says so ("no wall face in the stretch: projection
+  from the deepest point"). The plugin keeps only the stretch that **stands out of it** by more than the mesh's resolution, the one at the
   path's point: the moulding's own height, not the wall above and below. That stretch is closed by a back line *Depth
   into the wall* behind the face and simplified (Douglas-Peucker, in metres). The **projection** is measured from the
   wall face. By default the window is found from the cut (the moulding's extent and 10 cm around it, kept in the
   element); a window given in the dialog or with `--window` limits the search. It projects towards the photos, or the
-  side you choose. A free-standing member (a cut that closes on itself) is kept whole.
+  side you choose. A free-standing member (a cut that closes on itself) is kept whole and reported by its width and height,
+  with no projection. The **section area** given is the moulding's in front of the wall face; the solid's section adds
+  the slab behind it (`section_area_with_slab`).
 * **The solid**: the section swept along the path with **mitred corners**, as a carved cornice turns a corner; an
   extrusion when the path is straight.
 
@@ -223,7 +228,9 @@ volume of CadQuery's solid within 1 % (tested, raking mouldings included).
 The origin, the chunk's transform and its system are kept with the elements. When the chunk is georeferenced or moved
 to another system afterwards (references, *GNSS > System and heights*), the elements are in the old frame: the plugin
 refuses to export, show or edit them until **Rebuild** (in the pane, or `ppg plugin architecture rebuild`) makes them
-again, carrying their regions, paths, planes and points into the new frame and measuring them again on the model.
+again in place (same ids: a part made on the same axis as a column still is), carrying their regions, paths, planes and
+points into the new frame and measuring them again on the model. Parameters edited by hand (knot radii, type, thickness,
+depth, simplification) are carried too, and the element says "parameters edited by hand kept".
 
 ## Command line
 
@@ -271,11 +278,11 @@ the program's model from the true surface in the region: the error of the photog
 
 | Cornice (projection 0.18 m, height 0.25 m), dialog defaults | plugin | truth |
 |---|---|---|
-| projection from the wall face | 191.8 mm | 180.0 mm |
+| projection from the wall face | 191.1 mm | 180.0 mm |
 | height of the cornice | 272.2 mm | 250.0 mm |
-| area of the section in front of the wall | 335.2 cm² | 299.0 cm² (+12.1 %) |
-| fit (median / p90) | 1.8 / 5.7 mm | |
-| points on the wall face or behind it, left out | 695 | |
+| area of the section in front of the wall | 333.2 cm² | 299.0 cm² (+11.4 %) |
+| fit (median / p90) | 1.8 / 5.6 mm | |
+| points on the wall face or behind it, left out | 795 | |
 | model against truth (median / p90 / max) | 2.0 / 5.6 / 20.4 mm | |
 
 The cornice's section follows the model: its extra projection, height and area come from the top of the wall and the

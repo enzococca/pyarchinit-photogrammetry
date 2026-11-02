@@ -107,13 +107,18 @@ Una cornice, una modanatura, una cornice marcapiano: una sezione portata lungo u
   superficie del modello più vicina a chi guarda: un percorso così tiene le sue quote, anche una cornice inclinata);
   oppure dritto **fra due marker**.
 * **La sezione**: il modello tagliato dal piano normale al percorso in una stazione (di base il centro del primo
-  tratto). Sulla linea del taglio più vicina al punto del percorso il plugin trova la **faccia del muro** (dove la linea
-  corre verticale) e tiene solo il tratto che **ne sporge** più della risoluzione della mesh, quello al punto del
+  tratto). Sulla linea del taglio più vicina al punto del percorso il plugin trova la **faccia del muro**: il più
+  arretrato dei tratti verticali (di almeno 3 cm) da cui la linea viene o verso cui va, preferendo quello che si vede
+  sia sotto sia sopra la modanatura (la fascia o il listello della cornice stessa non sono il muro; un parapetto dietro
+  si vede solo sopra). Senza un tratto così vale il punto più arretrato della linea, e l'elemento lo dice («nessuna
+  faccia del muro nel tratto: sporgenza dal punto più arretrato»). Il plugin tiene solo il tratto che **ne sporge** più della risoluzione della mesh, quello al punto del
   percorso: l'altezza della modanatura, non il muro sopra e sotto. Il tratto si chiude con una linea di fondo
   *Profondità nel muro* dietro la faccia e si semplifica (Douglas-Peucker, in metri). La **sporgenza** si misura dalla
   faccia del muro. Di base la finestra si trova dal taglio (l'estensione della modanatura e 10 cm intorno, conservata
   nell'elemento); una finestra data nel dialogo o con `--window` limita la ricerca. Sporge verso le foto, o dal lato
-  che scegli. Un elemento isolato (un taglio che si richiude su se stesso) si tiene intero.
+  che scegli. Un elemento isolato (un taglio che si richiude su se stesso) si tiene intero e si descrive con larghezza e
+  altezza, senza sporgenza. L'**area della sezione** data è quella della modanatura davanti alla faccia del muro; la
+  sezione del solido aggiunge la lastra dietro (`section_area_with_slab`).
 * **Il solido**: la sezione portata lungo il percorso con gli **angoli a quartabuono**, come gira l'angolo una cornice
   scolpita; un'estrusione se il percorso è dritto.
 
@@ -228,8 +233,10 @@ solido di CadQuery entro l'1 % (provato, anche con le cornici inclinate).
 L'origine, la trasformazione e il sistema del chunk si conservano con gli elementi. Se poi il chunk viene
 georeferenziato o portato in un altro sistema (riferimenti, *GNSS > Sistema e quote*), gli elementi restano nel sistema
 vecchio: il plugin rifiuta di esportarli, mostrarli o modificarli finché **Ricostruisci** (nel pannello, o
-`ppg plugin architecture rebuild`) non li rifà, portando zone, percorsi, piani e punti nel sistema nuovo e misurandoli
-di nuovo sul modello.
+`ppg plugin architecture rebuild`) non li rifà al loro posto (stessi identificativi: una parte fatta sullo stesso asse
+di una colonna lo resta), portando zone, percorsi, piani e punti nel sistema nuovo e misurandoli di nuovo sul modello.
+Anche i parametri modificati a mano (raggi dei nodi, tipo, spessore, profondità, semplificazione) vengono portati, e
+l'elemento dice «parametri modificati a mano mantenuti».
 
 ## Riga di comando
 
@@ -277,11 +284,11 @@ modello del programma dalla superficie vera nella zona: l'errore della fotogramm
 
 | Cornice (sporgenza 0,18 m, altezza 0,25 m), valori predefiniti del dialogo | plugin | verità |
 |---|---|---|
-| sporgenza dalla faccia del muro | 191,8 mm | 180,0 mm |
+| sporgenza dalla faccia del muro | 191,1 mm | 180,0 mm |
 | altezza della cornice | 272,2 mm | 250,0 mm |
-| area della sezione davanti al muro | 335,2 cm² | 299,0 cm² (+12,1 %) |
-| scarto (mediana / p90) | 1,8 / 5,7 mm | |
-| punti sulla faccia del muro o dietro, esclusi | 695 | |
+| area della sezione davanti al muro | 333,2 cm² | 299,0 cm² (+11,4 %) |
+| scarto (mediana / p90) | 1,8 / 5,6 mm | |
+| punti sulla faccia del muro o dietro, esclusi | 795 | |
 | modello contro verità (mediana / p90 / max) | 2,0 / 5,6 / 20,4 mm | |
 
 La sezione della cornice segue il modello: sporgenza, altezza e area in più vengono dalla sommità del muro e della
