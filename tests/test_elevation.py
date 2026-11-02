@@ -51,6 +51,26 @@ def test_frames_map_cells_to_the_world_and_back(rng):
     assert pl.normal[1] > 0.99 and abs(pl.v_axis[2]) > 0.99
 
 
+def test_circle_of_a_tower_in_utm_keeps_its_radius():
+    """The circle fit on projected coordinates (a tower in UTM, millions of metres): before the
+    points were shifted to their mean the radius came out at 1,385 km."""
+    rng = np.random.default_rng(7)
+    angles = np.sort(rng.uniform(0, 2 * np.pi, 40))
+    radius, centre = 10.853, np.array([401234.567, 2634567.890])
+    local = radius * np.column_stack([np.cos(angles), np.sin(angles)]) + rng.normal(0, 0.001, (40, 2))
+    far = E.cylinder_from_circle(None, local + centre)
+    assert abs(far.radius - radius) < 0.002
+    assert np.linalg.norm(np.asarray(far.centre[:2]) - centre) < 0.002
+    near = E.cylinder_from_circle(None, local)
+    assert abs(near.radius - far.radius) < 1e-6
+    assert np.allclose(np.asarray(far.centre[:2]) - centre, near.centre[:2], atol=1e-6)
+    # three exact points on a short arc (a tower seen from one side): the raw fit missed by 75 mm
+    arc = radius * np.column_stack([np.cos([0.0, 0.15, 0.3]), np.sin([0.0, 0.15, 0.3])]) + centre
+    side = E.cylinder_from_circle(None, arc)
+    assert abs(side.radius - radius) < 0.002
+    assert np.linalg.norm(np.asarray(side.centre[:2]) - centre) < 0.002
+
+
 def test_elevation_of_a_trench_wall(processed, tmp_path):
     """The south face of the trench (y = 0.9 m, from 0.35 m below the ground to the ground) seen
     from inside the trench: the relief is about zero on the face, the orthophoto covers it."""
