@@ -30,6 +30,9 @@ code are in the [plugin repository](https://github.com/enzococca/pyarchinit-phot
 4. **Arch / vault...**: choose a section of the project and click inside the opening, or trace a vertical plane in plan.
 5. Read the **fit** in the table, show the solid in the 3D view, edit the parameters, export STEP, IFC or DXF.
 
+Regions and paths in plan are always drawn on the chunk's own orthophoto (or DEM): the plugin shows it again before
+asking, even when the view was showing an elevation.
+
 <figure markdown="span">
   ![The pane of the plugin](../img/plugins/architecture/pane.png)
   <figcaption>The pane with the three elements of the examples: the measures and the fit of each.</figcaption>
@@ -73,7 +76,12 @@ it. The part of the model inside the region and between the heights is the colum
   already made.
 
 *Edit parameters...* changes the radius of each knot, the number of knots or the choice *As measured*: the measured
-profile and the axis stay as they are, only the solid changes, and the fit is measured again.
+profile and the axis stay as they are, only the solid changes, and the fit is measured again. An edit that fails or is
+cancelled changes nothing: the element keeps its numbers and its files.
+
+The plugin warns (in the table, the summary and the IFC) when the profile has a **step**, a base or an abacus inside the
+region: make base, shaft and capital as separate elements. For a **shaft lying down** which end is the base is
+arbitrary: the radius at the base and at the top may be the other way round.
 
 <figure markdown="span">
   ![The profile of the column](../img/plugins/architecture/column-profile.png)
@@ -95,18 +103,24 @@ A cornice, a moulding, a string course: a section carried along a path.
   the world through the elevation's frame, at the depth of its relief or, where the relief has no value, of the model's
   surface nearest the viewer: such a path keeps its heights, a raking cornice too); or straight **between two markers**.
 * **The section**: the model cut by the plane normal to the path at a station (by default the middle of the first
-  segment), kept inside a **window** around the path's point (below, above, largest projection), the line nearest the
-  path, closed against the wall by a back line *Depth into the wall* behind it, simplified (Douglas-Peucker, in metres).
-  It projects towards the photos, or the side you choose.
+  segment). On the line of the cut nearest the path's point the plugin finds the **wall face** (where the line runs
+  vertically) and keeps only the stretch that **stands out of it** by more than the mesh's resolution, the one at the
+  path's point: the moulding's own height, not the wall above and below. That stretch is closed by a back line *Depth
+  into the wall* behind the face and simplified (Douglas-Peucker, in metres). The **projection** is measured from the
+  wall face. By default the window is found from the cut (the moulding's extent and 10 cm around it, kept in the
+  element); a window given in the dialog or with `--window` limits the search. It projects towards the photos, or the
+  side you choose. A free-standing member (a cut that closes on itself) is kept whole.
 * **The solid**: the section swept along the path with **mitred corners**, as a carved cornice turns a corner; an
   extrusion when the path is straight.
 
-*Edit parameters...* changes the simplification and the depth into the wall, from the cut kept in the element.
+*Edit parameters...* changes the simplification and the depth into the wall, from the line of the cut kept in the
+element.
 
 <figure markdown="span">
   ![The section of the cornice](../img/plugins/architecture/cornice-section.png)
-  <figcaption>The cornice of the examples: the section of the solid (blue) against the true one (red). The top is
-  higher because the program's model is: the top of the wall was seen only obliquely.</figcaption>
+  <figcaption>The cornice of the examples: the cut of the model (grey), the wall face found (green), the section of
+  the solid (blue, closed 10 cm into the wall) against the true one (red). The top is higher because the program's
+  model is: the top of the wall was seen only obliquely.</figcaption>
 </figure>
 
 ## The arch and the vault
@@ -121,10 +135,18 @@ A cornice, a moulding, a string course: a section carried along a path.
   axis-aligned **ellipse**, or **as measured**. The jambs below the springing line are part of the fit, as vertical
   lines. With *the best (fit)* the simplest type within 25 % of the best RMS wins: a circle before a pointed arch
   before an ellipse.
-* **Thickness**: the median distance of the extrados from the intrados, or given. **Depth**: the extent of the model
-  behind the ring along the plane's normal, or given. *Barrel vault* writes the same solid as a vault.
+* **Thickness**: the median distance of the extrados from the intrados, accepted only when the far crossings agree
+  (their spread under 20 % of the median, the median under half the span); otherwise the plugin asks for it, with the
+  reason. An arch whose ring is **flush with the wall** around it shows no extrados in a section: the far crossings are
+  the wall's sides and top, and the thickness must be given. **Depth**: the extent of the model behind the ring along
+  the plane's normal, or given. *Barrel vault* writes the same solid as a vault.
+* A **type asked for is enforced**: semicircular puts the centre on the springing line, segmental below it. The table,
+  the summary and the IFC give the RMS of the type chosen and of the others tried, e.g. "pointed (rms 1.3 mm; circle
+  45.8, ellipse 9.9)".
 
-The ring above the springing line is written with true arcs (three points each) in STEP and IFC.
+A semicircular, segmental or pointed ring is written with true arcs (three points each) in STEP and IFC. An elliptical
+or as-measured ring is a polyline of 96 points, and the extrados of an elliptical ring is the ellipse with both
+semi-axes grown by the thickness (not a curve at a constant distance).
 
 <figure markdown="span">
   ![The section of the arch](../img/plugins/architecture/arch-section.png)
@@ -137,8 +159,10 @@ The ring above the springing line is written with true arcs (three points each) 
 Every element carries its **fit**: the distance of the model's points from the solid, as the **median**, the **90th
 percentile** and the **maximum**, with the number of points. A median of a few millimetres says that the solid follows
 the model; a large maximum points at what the solid does not have (a chip, a cramp, a later patch). The points are those
-of the region of the element: for a column the part chosen, for an arch the ring and the depth, for a moulding the box
-of the solid without what lies behind its back line (the wall), whose count is given.
+of the region of the element: for a column the part chosen; for an arch the points within three mesh edges of the
+intrados or the extrados, not those on its two plane faces (which a ring flush with a wall shares with the wall), whose
+count is given; for a moulding the box of the solid without the points on the wall face or behind it (they lie on the
+solid by construction and would make the fit look better), whose count is given.
 
 The fit compares the solid with the **model**, not with the monument: a model is itself a few millimetres from the real
 surface, and the solid inherits that.
@@ -153,7 +177,7 @@ surface, and the solid inherits that.
 | | same axis as | the axis of a column already made |
 | Moulding | height | of a path traced on the plan |
 | | section at | metres from the start of the path |
-| | window below, above, largest projection | around the path's point, in metres |
+| | window below, above, largest projection | 0 = found from the cut (the moulding's extent and 10 cm); else the search is limited to it |
 | | projects towards | the photos, left or right of the path |
 | | depth into the wall | of the back line, 0.1 m |
 | | simplification | Douglas-Peucker tolerance, 2 mm |
@@ -164,13 +188,14 @@ surface, and the solid inherits that.
 
 ## Files and formats
 
-Everything of an element is in `<chunk data>/architecture/<id>/`: `solid/solid.step` (AP214), `solid/solid.stl`
-(tessellated at 0.5 mm), `model.ply` (what the 3D view shows) and `element.json` with everything: source, parameters,
+Everything of an element is in `<chunk data>/architecture/<id>/`: `solid/solid.step` (AP214, in metres),
+`solid/solid.stl` (tessellated at 0.5 mm; STL has no unit, its numbers are metres), `model.ply` (what the 3D view shows) and `element.json` with everything: source, parameters,
 measured profile, geometry, fit, solid, files. The chunk's model, transform and products are never changed.
 
 The coordinates of the STEP, STL and IFC are those of the chunk's system minus a round **origin** (kept per chunk, in
 `element.json`): all the elements of a chunk line up with each other and with the mesh, with small numbers. *Export
-STEP...* copies the files; *DXF...* writes the profile or the section at 1:1 in metres, on the layers SOLIDO,
+STEP...* copies the files, each with a `<name>.origin.json` beside it (the origin, the system, the units, the
+placement: world = STEP coordinates + origin); *DXF...* writes the profile or the section at 1:1 in metres, on the layers SOLIDO,
 MISURATO, ASSE and IMPOSTA.
 
 ### IFC
@@ -187,9 +212,18 @@ elements on request (`IfcGeographicElement`). The solids are **parametric**:
 | Arch, vault | `IfcBuildingElementProxy` ("Arch", "Vault") | `IfcExtrudedAreaSolid` of lines and `IfcArcIndex` |
 
 `Pset_PyArchInit_Element`: `Kind`, `Method`, `Name`, every parameter as `P_<name>` (metres, degrees), `Fit_median_m`,
-`Fit_p90_m`, `Fit_max_m`, `Fit_points`, `Source`, `Representation` and a note that the solid is an interpretation of
+`Fit_p90_m`, `Fit_max_m`, `Fit_points`, `Fit_candidates` (arches), `Warnings`, `Source`, `Representation`,
+`Frames` (which values are world coordinates and which are in the section plane; arches also carry `P_world_apex`
+and the world springing points, mouldings the world ends of the path) and a note that the solid is an interpretation of
 the measured model; `Qto_PyArchInit_Element` with the volume and the area. An IFC read back by IfcOpenShell gives the
 volume of CadQuery's solid within 1 % (tested, raking mouldings included).
+
+### When the chunk's system changes
+
+The origin, the chunk's transform and its system are kept with the elements. When the chunk is georeferenced or moved
+to another system afterwards (references, *GNSS > System and heights*), the elements are in the old frame: the plugin
+refuses to export, show or edit them until **Rebuild** (in the pane, or `ppg plugin architecture rebuild`) makes them
+again, carrying their regions, paths, planes and points into the new frame and measuring them again on the model.
 
 ## Command line
 
@@ -200,6 +234,8 @@ ppg plugin architecture moulding PROJECT.ppg --path "LINESTRING(x y, x y)" --hei
     --window -0.4,-0.03,0.02,0.3 --out-side -1
 ppg plugin architecture moulding PROJECT.ppg --elevation "South elevation" --path "LINESTRING(u v, u v)"
 ppg plugin architecture arch PROJECT.ppg --section "Section A" --pick 1.8,0.8 --type auto
+ppg plugin architecture arch PROJECT.ppg --points x1,y1,x2,y2 --pick 1.8,0.8 --thickness 0.25
+ppg plugin architecture rebuild PROJECT.ppg
 ppg plugin architecture list PROJECT.ppg
 ppg plugin architecture export PROJECT.ppg --out elements.ifc --mesh
 ppg plugin architecture export PROJECT.ppg --out arch.dxf --ids Arco
@@ -229,18 +265,22 @@ the program's model from the true surface in the region: the error of the photog
 | radius | 1608.6 mm | 1600.0 mm |
 | springing line | 1391.1 mm | 1400.0 mm |
 | thickness of the ring | 253.6 mm | 250.0 mm |
-| fit (median / p90) | 3.2 / 11.1 mm | |
+| fit on the curved faces (median / p90) | 2.0 / 10.8 mm | |
+| points on the two plane faces, left out | 7734 | |
 | model against truth (median / p90) | 2.2 / 8.2 mm | |
 
-| Cornice (projection 0.18 m) | plugin | truth |
+| Cornice (projection 0.18 m, height 0.25 m), dialog defaults | plugin | truth |
 |---|---|---|
-| projection | 190.9 mm | 180.0 mm |
-| area of the section in front of the wall | 329.9 cm² | 299.0 cm² (+10.3 %) |
-| fit (median / p90) | 1.7 / 5.1 mm | |
+| projection from the wall face | 191.8 mm | 180.0 mm |
+| height of the cornice | 272.2 mm | 250.0 mm |
+| area of the section in front of the wall | 335.2 cm² | 299.0 cm² (+12.1 %) |
+| fit (median / p90) | 1.8 / 5.7 mm | |
+| points on the wall face or behind it, left out | 695 | |
 | model against truth (median / p90 / max) | 2.0 / 5.6 / 20.4 mm | |
 
-The cornice's section follows the model: its extra projection and area come from the top of the wall and the cornice,
-which the program reconstructed up to 2 cm higher (it is seen only obliquely by the highest photos), not from the plugin.
+The cornice's section follows the model: its extra projection, height and area come from the top of the wall and the
+cornice, which the program reconstructed up to 2 cm higher (it is seen only obliquely by the highest photos), not from
+the plugin. With the dialog's defaults the window was found from the cut and the section is the cornice alone.
 
 ## Limits
 

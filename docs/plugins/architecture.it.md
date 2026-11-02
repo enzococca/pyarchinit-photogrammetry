@@ -31,6 +31,9 @@ README e il codice sono nel [repository dei plugin](https://github.com/enzococca
    verticale.
 5. Leggi lo **scarto** nella tabella, mostra il solido nella vista 3D, modifica i parametri, esporta STEP, IFC o DXF.
 
+Zone e percorsi in pianta si disegnano sempre sull'ortofoto (o sul DEM) del chunk: il plugin la rimostra prima di
+chiedere, anche quando la vista mostrava un prospetto.
+
 <figure markdown="span">
   ![Il pannello del plugin](../img/plugins/architecture/pane.png)
   <figcaption>Il pannello con i tre elementi degli esempi: le misure e lo scarto di ciascuno.</figcaption>
@@ -76,7 +79,12 @@ interno. La parte del modello dentro la zona e fra le due quote è la colonna, o
   già fatta.
 
 *Modifica parametri...* cambia il raggio di ogni nodo, il numero dei nodi o la scelta *Come misurato*: il profilo
-misurato e l'asse restano come sono, cambia solo il solido, e lo scarto si misura di nuovo.
+misurato e l'asse restano come sono, cambia solo il solido, e lo scarto si misura di nuovo. Una modifica che non riesce
+o viene annullata non cambia nulla: l'elemento tiene i suoi numeri e i suoi file.
+
+Il plugin avvisa (nella tabella, nel riassunto e nell'IFC) quando il profilo ha un **gradino**, una base o un abaco
+dentro la zona: base, fusto e capitello vanno fatti come elementi separati. Per un **fusto coricato** quale capo sia la
+base è arbitrario: raggio alla base e in cima possono risultare scambiati.
 
 <figure markdown="span">
   ![Il profilo della colonna](../img/plugins/architecture/column-profile.png)
@@ -99,18 +107,24 @@ Una cornice, una modanatura, una cornice marcapiano: una sezione portata lungo u
   superficie del modello più vicina a chi guarda: un percorso così tiene le sue quote, anche una cornice inclinata);
   oppure dritto **fra due marker**.
 * **La sezione**: il modello tagliato dal piano normale al percorso in una stazione (di base il centro del primo
-  tratto), tenuto in una **finestra** intorno al punto del percorso (sotto, sopra, sporgenza massima), la linea più
-  vicina al percorso, chiusa contro il muro da una linea di fondo *Profondità nel muro* dietro di essa, semplificata
-  (Douglas-Peucker, in metri). Sporge verso le foto, o dal lato che scegli.
+  tratto). Sulla linea del taglio più vicina al punto del percorso il plugin trova la **faccia del muro** (dove la linea
+  corre verticale) e tiene solo il tratto che **ne sporge** più della risoluzione della mesh, quello al punto del
+  percorso: l'altezza della modanatura, non il muro sopra e sotto. Il tratto si chiude con una linea di fondo
+  *Profondità nel muro* dietro la faccia e si semplifica (Douglas-Peucker, in metri). La **sporgenza** si misura dalla
+  faccia del muro. Di base la finestra si trova dal taglio (l'estensione della modanatura e 10 cm intorno, conservata
+  nell'elemento); una finestra data nel dialogo o con `--window` limita la ricerca. Sporge verso le foto, o dal lato
+  che scegli. Un elemento isolato (un taglio che si richiude su se stesso) si tiene intero.
 * **Il solido**: la sezione portata lungo il percorso con gli **angoli a quartabuono**, come gira l'angolo una cornice
   scolpita; un'estrusione se il percorso è dritto.
 
-*Modifica parametri...* cambia la semplificazione e la profondità nel muro, dal taglio conservato nell'elemento.
+*Modifica parametri...* cambia la semplificazione e la profondità nel muro, dalla linea del taglio conservata
+nell'elemento.
 
 <figure markdown="span">
   ![La sezione della cornice](../img/plugins/architecture/cornice-section.png)
-  <figcaption>La cornice degli esempi: la sezione del solido (blu) contro quella vera (rosso). La sommità è più alta
-  perché lo è il modello del programma: la cima del muro si vedeva solo di scorcio.</figcaption>
+  <figcaption>La cornice degli esempi: il taglio del modello (grigio), la faccia del muro trovata (verde), la sezione
+  del solido (blu, chiusa 10 cm dentro il muro) contro quella vera (rosso). La sommità è più alta perché lo è il modello
+  del programma: la cima del muro si vedeva solo di scorcio.</figcaption>
 </figure>
 
 ## L'arco e la volta
@@ -125,10 +139,18 @@ Una cornice, una modanatura, una cornice marcapiano: una sezione portata lungo u
   chiave), un'**ellisse** con gli assi orizzontale e verticale, o **come misurato**. Gli stipiti sotto la linea d'imposta
   fanno parte dell'adattamento, come linee verticali. Con *il migliore (scarto)* vince il tipo più semplice entro il 25 %
   dello scarto migliore: un cerchio prima di un arco acuto, prima di un'ellisse.
-* **Spessore**: la distanza mediana dell'estradosso dall'intradosso, o dato. **Profondità**: l'estensione del modello
-  dietro la ghiera lungo la normale del piano, o data. *Volta a botte* scrive lo stesso solido come volta.
+* **Spessore**: la distanza mediana dell'estradosso dall'intradosso, accettata solo quando gli attraversamenti più
+  lontani concordano (dispersione sotto il 20 % della mediana, mediana sotto metà della luce); altrimenti il plugin lo
+  chiede, con il motivo. Un arco la cui ghiera è **a filo del muro** intorno non mostra un estradosso in sezione: gli
+  attraversamenti lontani sono i fianchi e la sommità del muro, e lo spessore va dato. **Profondità**: l'estensione del
+  modello dietro la ghiera lungo la normale del piano, o data. *Volta a botte* scrive lo stesso solido come volta.
+* **Il tipo chiesto si rispetta**: a tutto sesto mette il centro sulla linea d'imposta, ribassato sotto di essa. La
+  tabella, il riassunto e l'IFC danno lo scarto quadratico del tipo scelto e degli altri provati, per esempio «a sesto
+  acuto (rms 1,3 mm; cerchio 45,8, ellisse 9,9)».
 
-La ghiera sopra la linea d'imposta si scrive con archi veri (tre punti ciascuno) in STEP e IFC.
+Una ghiera a tutto sesto, ribassata o a sesto acuto si scrive con archi veri (tre punti ciascuno) in STEP e IFC. Una
+ghiera ellittica o come misurata è una spezzata di 96 punti, e l'estradosso di una ghiera ellittica è l'ellisse con i
+due semiassi allungati dello spessore (non una curva a distanza costante).
 
 <figure markdown="span">
   ![La sezione dell'arco](../img/plugins/architecture/arch-section.png)
@@ -141,8 +163,10 @@ La ghiera sopra la linea d'imposta si scrive con archi veri (tre punti ciascuno)
 Ogni elemento porta il suo **scarto**: la distanza dei punti del modello dal solido, come **mediana**, **90° percentile**
 e **massimo**, con il numero dei punti. Una mediana di pochi millimetri dice che il solido segue il modello; un massimo
 grande indica quello che il solido non ha (una scheggiatura, una grappa, un rappezzo più tardo). I punti sono quelli
-della zona dell'elemento: per una colonna la parte scelta, per un arco la ghiera e la profondità, per una modanatura il
-riquadro del solido senza quello che sta dietro la sua linea di fondo (il muro), di cui si dà il numero.
+della zona dell'elemento: per una colonna la parte scelta; per un arco i punti entro tre lati della mesh
+dall'intradosso o dall'estradosso, non quelli sulle due facce piane (che una ghiera a filo del muro condivide con il
+muro), di cui si dà il numero; per una modanatura il riquadro del solido senza i punti sulla faccia del muro o dietro
+(stanno sul solido per costruzione e farebbero sembrare lo scarto migliore), di cui si dà il numero.
 
 Lo scarto confronta il solido con il **modello**, non con il monumento: un modello dista già di qualche millimetro
 dalla superficie vera, e il solido lo eredita.
@@ -157,7 +181,7 @@ dalla superficie vera, e il solido lo eredita.
 | | stesso asse di | l'asse di una colonna già fatta |
 | Modanatura | quota | di un percorso tracciato sulla pianta |
 | | sezione a | metri dall'inizio del percorso |
-| | finestra sotto, sopra, sporgenza massima | intorno al punto del percorso, in metri |
+| | finestra sotto, sopra, sporgenza massima | 0 = trovata dal taglio (l'estensione della modanatura e 10 cm); altrimenti limita la ricerca |
 | | sporge verso | le foto, a sinistra o a destra del percorso |
 | | profondità nel muro | della linea di fondo, 0,1 m |
 | | semplificazione | tolleranza di Douglas-Peucker, 2 mm |
@@ -168,14 +192,15 @@ dalla superficie vera, e il solido lo eredita.
 
 ## File e formati
 
-Tutto di un elemento sta in `<dati del chunk>/architecture/<id>/`: `solid/solid.step` (AP214), `solid/solid.stl`
-(tassellato a 0,5 mm), `model.ply` (quello che mostra la vista 3D) ed `element.json` con tutto: origine, parametri,
+Tutto di un elemento sta in `<dati del chunk>/architecture/<id>/`: `solid/solid.step` (AP214, in metri),
+`solid/solid.stl` (tassellato a 0,5 mm; l'STL non ha unità, i suoi numeri sono metri), `model.ply` (quello che mostra la vista 3D) ed `element.json` con tutto: origine, parametri,
 profilo misurato, geometria, scarto, solido, file. Il modello, la trasformazione e i prodotti del chunk non cambiano
 mai.
 
 Le coordinate di STEP, STL e IFC sono quelle del sistema del chunk meno un'**origine** tonda (una per chunk, in
 `element.json`): tutti gli elementi di un chunk combaciano fra loro e con la mesh, con numeri piccoli. *Esporta
-STEP...* copia i file; *DXF...* scrive il profilo o la sezione in scala 1:1 in metri, sui layer SOLIDO, MISURATO, ASSE
+STEP...* copia i file, ognuno con un `<nome>.origin.json` accanto (l'origine, il sistema, le unità, il posizionamento:
+mondo = coordinate dello STEP + origine); *DXF...* scrive il profilo o la sezione in scala 1:1 in metri, sui layer SOLIDO, MISURATO, ASSE
 e IMPOSTA.
 
 ### IFC
@@ -192,9 +217,19 @@ accanto agli elementi a richiesta (`IfcGeographicElement`). I solidi sono **para
 | Arco, volta | `IfcBuildingElementProxy` ("Arch", "Vault") | `IfcExtrudedAreaSolid` di linee e `IfcArcIndex` |
 
 `Pset_PyArchInit_Element`: `Kind`, `Method`, `Name`, ogni parametro come `P_<nome>` (metri, gradi), `Fit_median_m`,
-`Fit_p90_m`, `Fit_max_m`, `Fit_points`, `Source`, `Representation` e una nota che il solido è un'interpretazione del
+`Fit_p90_m`, `Fit_max_m`, `Fit_points`, `Fit_candidates` (archi), `Warnings`, `Source`, `Representation`,
+`Frames` (quali valori sono coordinate del mondo e quali stanno nel piano della sezione; gli archi portano anche
+`P_world_apex` e i punti d'imposta nel mondo, le modanature gli estremi del percorso) e una nota che il solido è un'interpretazione del
 modello misurato; `Qto_PyArchInit_Element` con volume e superficie. Un IFC riletto da IfcOpenShell dà il volume del
 solido di CadQuery entro l'1 % (provato, anche con le cornici inclinate).
+
+### Quando il sistema del chunk cambia
+
+L'origine, la trasformazione e il sistema del chunk si conservano con gli elementi. Se poi il chunk viene
+georeferenziato o portato in un altro sistema (riferimenti, *GNSS > Sistema e quote*), gli elementi restano nel sistema
+vecchio: il plugin rifiuta di esportarli, mostrarli o modificarli finché **Ricostruisci** (nel pannello, o
+`ppg plugin architecture rebuild`) non li rifà, portando zone, percorsi, piani e punti nel sistema nuovo e misurandoli
+di nuovo sul modello.
 
 ## Riga di comando
 
@@ -205,6 +240,8 @@ ppg plugin architecture moulding PROGETTO.ppg --path "LINESTRING(x y, x y)" --he
     --window -0.4,-0.03,0.02,0.3 --out-side -1
 ppg plugin architecture moulding PROGETTO.ppg --elevation "Prospetto sud" --path "LINESTRING(u v, u v)"
 ppg plugin architecture arch PROGETTO.ppg --section "Sezione A" --pick 1.8,0.8 --type auto
+ppg plugin architecture arch PROGETTO.ppg --points x1,y1,x2,y2 --pick 1.8,0.8 --thickness 0.25
+ppg plugin architecture rebuild PROGETTO.ppg
 ppg plugin architecture list PROGETTO.ppg
 ppg plugin architecture export PROGETTO.ppg --out elementi.ifc --mesh
 ppg plugin architecture export PROGETTO.ppg --out arco.dxf --ids Arco
@@ -234,18 +271,22 @@ modello del programma dalla superficie vera nella zona: l'errore della fotogramm
 | raggio | 1608,6 mm | 1600,0 mm |
 | linea d'imposta | 1391,1 mm | 1400,0 mm |
 | spessore della ghiera | 253,6 mm | 250,0 mm |
-| scarto (mediana / p90) | 3,2 / 11,1 mm | |
+| scarto sulle facce curve (mediana / p90) | 2,0 / 10,8 mm | |
+| punti sulle due facce piane, esclusi | 7734 | |
 | modello contro verità (mediana / p90) | 2,2 / 8,2 mm | |
 
-| Cornice (sporgenza 0,18 m) | plugin | verità |
+| Cornice (sporgenza 0,18 m, altezza 0,25 m), valori predefiniti del dialogo | plugin | verità |
 |---|---|---|
-| sporgenza | 190,9 mm | 180,0 mm |
-| area della sezione davanti al muro | 329,9 cm² | 299,0 cm² (+10,3 %) |
-| scarto (mediana / p90) | 1,7 / 5,1 mm | |
+| sporgenza dalla faccia del muro | 191,8 mm | 180,0 mm |
+| altezza della cornice | 272,2 mm | 250,0 mm |
+| area della sezione davanti al muro | 335,2 cm² | 299,0 cm² (+12,1 %) |
+| scarto (mediana / p90) | 1,8 / 5,7 mm | |
+| punti sulla faccia del muro o dietro, esclusi | 695 | |
 | modello contro verità (mediana / p90 / max) | 2,0 / 5,6 / 20,4 mm | |
 
-La sezione della cornice segue il modello: la sporgenza e l'area in più vengono dalla sommità del muro e della cornice,
-che il programma ha ricostruito fino a 2 cm più in alto (la vedono solo di scorcio le foto più alte), non dal plugin.
+La sezione della cornice segue il modello: sporgenza, altezza e area in più vengono dalla sommità del muro e della
+cornice, che il programma ha ricostruito fino a 2 cm più in alto (la vedono solo di scorcio le foto più alte), non dal
+plugin. Con i valori predefiniti del dialogo la finestra si è trovata dal taglio e la sezione è la sola cornice.
 
 ## Limiti
 
