@@ -778,6 +778,9 @@ fn tin_rasterize<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, z: PyRead
     if !(cell > 0.0) {
         return Err(PyValueError::new_err("cell must be positive"));
     }
+    if width.checked_mul(height).and_then(|n| n.checked_mul(4)).is_none() {
+        return Err(PyValueError::new_err(format!("a grid of {width} x {height} cells is too large")));
+    }
     let pts = xy_rows(&xy)?;
     let h = heights(&z, pts.len())?;
     let tri = triangle_rows(&triangles, pts.len())?;

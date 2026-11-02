@@ -40,6 +40,12 @@ pub struct Triangulated {
 /// vertex there; a constraint through a vertex is split at it.
 pub fn triangulate(xy: &[[f64; 2]], constraints: &[[usize; 2]]) -> Result<Triangulated, String> {
     let n = xy.len();
+    // first, before any comparison: a NaN is never equal to itself and would never be merged
+    for (i, p) in xy.iter().enumerate() {
+        if !p[0].is_finite() || !p[1].is_finite() {
+            return Err(format!("point {i} is not finite"));
+        }
+    }
     // the first point of each position: duplicates point to it
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
@@ -49,7 +55,10 @@ pub fn triangulate(xy: &[[f64; 2]], constraints: &[[usize; 2]]) -> Result<Triang
     let mut k = 0;
     while k < n {
         let mut j = k;
-        while j < n && xy[order[j]] == xy[order[k]] {
+        while j < n
+            && xy[order[j]][0].total_cmp(&xy[order[k]][0]).is_eq()
+            && xy[order[j]][1].total_cmp(&xy[order[k]][1]).is_eq()
+        {
             first[order[j]] = order[k];
             j += 1;
         }
@@ -57,9 +66,6 @@ pub fn triangulate(xy: &[[f64; 2]], constraints: &[[usize; 2]]) -> Result<Triang
     }
     let mut vertices = Vec::with_capacity(n);
     for (i, p) in xy.iter().enumerate() {
-        if !p[0].is_finite() || !p[1].is_finite() {
-            return Err(format!("point {i} is not finite"));
-        }
         if first[i] == i {
             vertices.push(Vertex { pos: Point2::new(p[0], p[1]), index: i, on: [NEW, NEW] });
         }
@@ -252,16 +258,23 @@ pub fn contours(xy: &[[f64; 2]], z: &[f64], triangles: &[[usize; 3]], levels: &[
 /// below it, and the area (plan) of the triangles. The difference is linear on each triangle, so
 /// the prism splits exactly where it crosses zero.
 pub fn volume(xy: &[[f64; 2]], z: &[f64], triangles: &[[usize; 3]], plane: [f64; 3]) -> (f64, f64, f64) {
-    triangles
-        .par_iter()
-        .map(|t| {
-            let (p, h) = corners(xy, z, t);
-            let area = 0.5 * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1])).abs();
-            let d = [0, 1, 2].map(|k| h[k] - (plane[0] * p[k][0] + plane[1] * p[k][1] + plane[2]));
-            let (above, below) = split_prism(area, d);
-            (above, below, area)
+    // sums of fixed blocks added in order: the same result to the last bit whatever the threads do
+    let parts: Vec<(f64, f64, f64)> = triangles
+        .par_chunks(8192)
+        .map(|block| {
+            let mut sum = (0.0, 0.0, 0.0);
+            for t in block {
+                let (p, h) = corners(xy, z, t);
+                let area = 0.5
+                    * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1])).abs();
+                let d = [0, 1, 2].map(|k| h[k] - (plane[0] * p[k][0] + plane[1] * p[k][1] + plane[2]));
+                let (above, below) = split_prism(area, d);
+                sum = (sum.0 + above, sum.1 + below, sum.2 + area);
+            }
+            sum
         })
-        .reduce(|| (0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
+        .collect();
+    parts.iter().fold((0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
 }
 
 /// The integral of max(d, 0) and of max(-d, 0) over a triangle of ``area`` where d is linear with
