@@ -120,8 +120,12 @@ def poisson_point_budget() -> int | None:
     (the memory is unknown)."""
     env = os.environ.get("PPG_POISSON_MAX_POINTS", "").strip()
     if env:
-        value = int(float(env))
-        return value if value > 0 else None
+        try:
+            value = int(float(env))
+        except ValueError:
+            log.warning("PPG_POISSON_MAX_POINTS=%r is not a number of points: ignored", env)
+        else:
+            return value if value > 0 else None
     ram = physical_memory()
     if not ram:
         return None
@@ -173,15 +177,18 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     up = up_vector_internal(chunk)
     if surface == "height_field":
         mesh = _height_field(pc.xyz, up)
+        report["surface_used"] = "height_field"
     else:
         cams = np.array([c.center for c in chunk.aligned_cameras], dtype=np.float64)
         try:
             mesh = _poisson(pc, target, progress.sub(0.0, 0.8), cam_centers=cams if len(cams) else None,
                             report=report)
+            report["surface_used"] = "poisson"
         except PoissonFailed as exc:
             log.warning("%s; building a 2.5D height field instead", exc)
             progress(0.8, "Poisson failed, building a height field instead")
-            mesh = _height_field(pc.xyz, up)
+            mesh = _height_field(pc.xyz, up)  # from the whole cloud: the Poisson figures do not apply
+            report = {"surface_used": "height_field"}
     if len(mesh.faces) > target * 1.2:
         mesh = _decimate(mesh, target)
     if pc.rgb is not None and vertex_colors:

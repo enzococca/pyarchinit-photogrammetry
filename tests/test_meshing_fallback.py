@@ -48,6 +48,9 @@ def test_poisson_crash_falls_back_to_height_field(terrain_chunk, monkeypatch, ca
     assert any("height field" in r.getMessage() for r in caplog.records)
     assert any("crashed" in r.getMessage() for r in caplog.records)
     assert terrain_chunk.product_path("model").exists()
+    report = terrain_chunk.meta["model"]  # the figures of the failed Poisson do not stay
+    assert report["surface_used"] == "height_field"
+    assert "poisson_points" not in report and "thinned_points" not in report
 
 
 def test_poisson_points_thinned_to_the_memory(terrain_chunk, monkeypatch):
@@ -58,6 +61,7 @@ def test_poisson_points_thinned_to_the_memory(terrain_chunk, monkeypatch):
     monkeypatch.setattr(meshing, "poisson_point_budget", lambda: 1000)
     mesh = meshing.build_model(terrain_chunk, face_count=2000)
     report = terrain_chunk.meta["model"]
+    assert report["surface_used"] == "poisson"
     assert report["thinned_points"] == [len(terrain_chunk.point_cloud), 1000]
     assert report["poisson_points"] == 1000
     assert len(mesh.faces) > 0 and np.isfinite(mesh.vertices).all()
@@ -115,3 +119,11 @@ def test_physical_memory_on_windows_from_kernel32(monkeypatch):
         assert calls == [64]  # dwLength = sizeof(MEMORYSTATUSEX)
     else:  # the real call
         assert meshing._windows_physical_memory() > 1 << 28
+
+
+def test_poisson_budget_ignores_a_malformed_override(monkeypatch, caplog):
+    monkeypatch.setattr(meshing, "physical_memory", lambda: 24 * 1000 ** 3)
+    monkeypatch.setenv("PPG_POISSON_MAX_POINTS", "abc")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        assert meshing.poisson_point_budget() == 4_800_000  # the budget of the memory
+    assert any("PPG_POISSON_MAX_POINTS" in r.getMessage() for r in caplog.records)
