@@ -959,6 +959,21 @@ class ReferencePane(QWidget):
         self.last_report: dict | None = None
 
     def set_chunk(self, chunk, report: dict | None = None) -> None:
+        """The tables of ``chunk``: emptied first, filled with new items, without repainting and without their
+        signals (itemChanged is how an edit by hand is read: nothing of it runs while they are filled)."""
+        tables = (self.table, self.cams, self.bars)
+        blocked = [t.blockSignals(True) for t in tables]
+        for t in tables:
+            t.setUpdatesEnabled(False)
+        try:
+            self._fill(chunk, report)
+        finally:
+            for t, was in zip(tables, blocked):
+                t.setUpdatesEnabled(True)
+                t.blockSignals(was)
+            self._filling = False
+
+    def _fill(self, chunk, report: dict | None = None) -> None:
         from ..markers import gcp
 
         self.chunk = chunk
