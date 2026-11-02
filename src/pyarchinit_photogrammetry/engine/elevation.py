@@ -261,10 +261,15 @@ def cylinder_from_circle(chunk: Chunk, points, inside: bool = True) -> Cylinder:
     q = np.asarray(points, np.float64)[:, :2]
     if len(q) < 3:
         raise ValueError("three points at least")
-    a = np.column_stack([2 * q, np.ones(len(q))])
-    sol = np.linalg.lstsq(a, (q ** 2).sum(axis=1), rcond=None)[0]
-    cx, cy = sol[0], sol[1]
-    r = float(np.sqrt(sol[2] + cx * cx + cy * cy))
+    # the algebraic fit on the points shifted to their mean: on raw projected coordinates (UTM,
+    # millions of metres) x^2 + y^2 swallows the radius in rounding (a tower of 10 m came out with
+    # a radius of 1,385 km); the radius does not change with the shift
+    mean = q.mean(axis=0)
+    d = q - mean
+    a = np.column_stack([2 * d, np.ones(len(d))])
+    sol = np.linalg.lstsq(a, (d ** 2).sum(axis=1), rcond=None)[0]
+    r = float(np.sqrt(sol[2] + sol[0] * sol[0] + sol[1] * sol[1]))
+    cx, cy = float(sol[0] + mean[0]), float(sol[1] + mean[1])
     return Cylinder([cx, cy, 0.0], [0.0, 0.0, 1.0], r, inside, [q[0, 0] - cx, q[0, 1] - cy, 0.0])
 
 
