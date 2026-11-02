@@ -1412,12 +1412,31 @@ class _HistoryLine(QLineEdit):
         elif text:
             self.insert(text.strip("\n"))
 
-    def keyPressEvent(self, ev: QKeyEvent) -> None:
-        from PySide6.QtGui import QKeySequence
+    def paste(self) -> None:
         from PySide6.QtWidgets import QApplication
 
+        self.insertFromMimeData(QApplication.clipboard().mimeData())
+
+    def contextMenuEvent(self, ev) -> None:
+        """The menu's Paste is wired to ``paste`` (Qt's own slot is not virtual)."""
+        from PySide6.QtGui import QKeySequence
+
+        menu = self.createStandardContextMenu()
+        for act in menu.actions():
+            if act.shortcut() == QKeySequence(QKeySequence.StandardKey.Paste):
+                try:
+                    act.triggered.disconnect()
+                except RuntimeError:
+                    pass
+                act.triggered.connect(self.paste)
+        menu.exec(ev.globalPos())
+        menu.deleteLater()
+
+    def keyPressEvent(self, ev: QKeyEvent) -> None:
+        from PySide6.QtGui import QKeySequence
+
         if ev.matches(QKeySequence.StandardKey.Paste):
-            self.insertFromMimeData(QApplication.clipboard().mimeData())
+            self.paste()
         elif ev.key() == Qt.Key.Key_Up and self.history:
             self.pos = max(0, self.pos - 1)
             self.setText(self.history[self.pos])

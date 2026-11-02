@@ -69,6 +69,11 @@ def test_console_runs_a_pasted_block(window, qapp):
     mime.setText("b = 2\nc = b * 3")
     c.inp.insertFromMimeData(mime)
     assert c.console.locals["c"] == 6
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.clipboard().setText("d = 5\ne = d + 1")
+    c.inp.paste()
+    assert c.console.locals["e"] == 6
 
 
 def test_console_and_photo_view(window, qapp):
