@@ -403,6 +403,13 @@ la profondità del suo sensore di pressione e una traiettoria calcolata con COLM
 * Un orologio della camera spostato apposta di 7,3 secondi: lo scarto trovato è 7,33 secondi.
 * DEM e ortofoto, in metri, stanno fra 389,7 e 394,2 m sotto la superficie.
 
+![L'ortofoto e il DEM della sequenza 6 di AQUALOC calcolati dal programma](../img/plugins/underwater/aqualoc-ortho-dem.jpg)
+
+*L'ortofoto e il DEM della sequenza 6 calcolati dal programma, il DEM dal fondo più alto (rosso) al più basso (blu).
+Figura pubblicata con il permesso degli autori del dataset: M. Ferrera, V. Creuze, J. Moras, P. Trouvé-Peloux,
+AQUALOC: An Underwater Dataset for Visual-Inertial-Pressure Localization, The International Journal of Robotics
+Research, 2019; pagina del dataset [lirmm.fr/aqualoc](https://www.lirmm.fr/aqualoc/).*
+
 
 **Sea-thru D3** (D. Akkaynak, T. Treibitz, CVPR 2019): 68 foto RAW di una formazione di corallo nel Mar Rosso, con
 una tabella dei colori, e mappe di profondità in metri fatte con Metashape. Sviluppate con il bilanciamento del
