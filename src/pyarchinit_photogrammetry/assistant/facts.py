@@ -79,6 +79,10 @@ TOOLS: list[ToolSpec] = [
     ToolSpec("model_info",
              "The 3D model (mesh) of a chunk: faces, vertices, texture pages and their size in pixels.",
              _chunk_schema()),
+    ToolSpec("tin_info",
+             "The TIN (triangulated irregular network) of a chunk: where it came from (dem, cloud or spots), vertices, "
+             "triangles, constrained edges (break lines kept), spot heights, the tolerance of the refinement and the "
+             "largest and 95th percentile difference from the DEM in metres, warnings.", _chunk_schema()),
     ToolSpec("guide_search",
              "Search the user guide of the program: the passages that best answer a question (how a step is done, "
              "what a dialog asks, what a product is). Returns their title, page and text.",
@@ -512,11 +516,26 @@ def scripting_api(document, arguments: dict, index: Index) -> dict:
     return _passages(_api_index(_index_for(arguments, index)).search(topic, k=max(1, min(20, k))))
 
 
+def tin_info(chunk, arguments: dict, index: Index) -> dict:
+    """What ``chunk.meta["tin"]`` says of the TIN (:mod:`..engine.tin`): counts and differences, no file, no height."""
+    meta = chunk.meta.get("tin") or {}
+    path = chunk.product_path("tin")
+    if not meta or path is None or not path.exists():
+        return {"none": "il chunk non ha un TIN (Strumenti > TIN...)"}
+    return {"source": meta.get("source"), "vertices": meta.get("n_vertices"), "triangles": meta.get("n_triangles"),
+            "constrained_edges": meta.get("n_constrained"), "spot_heights": meta.get("n_spots"),
+            "breaklines": meta.get("n_breaklines"), "tolerance_m": _num(meta.get("max_error")),
+            "refinement_rounds": meta.get("rounds"), "error_max_m": _num(meta.get("error_max")),
+            "error_p95_m": _num(meta.get("error_p95")), "dem_resolution_m": _num(meta.get("dem_resolution")),
+            "constraints_kept": bool(meta.get("native")), "warnings": list(meta.get("warnings") or []),
+            "made": meta.get("made")}
+
+
 # tools that take the chunk (resolved before the call) and tools that take the document
 _CHUNK_TOOLS: dict[str, Callable] = {
     "dem_statistics": dem_statistics, "orthomosaic_info": orthomosaic_info, "alignment_report": alignment_report,
     "markers": markers, "thermal_info": thermal_info, "multispectral_info": multispectral_info,
-    "point_cloud_info": point_cloud_info, "model_info": model_info,
+    "point_cloud_info": point_cloud_info, "model_info": model_info, "tin_info": tin_info,
 }
 _DOCUMENT_TOOLS: dict[str, Callable] = {"project_summary": project_summary, "guide_search": guide_search,
                                         "scripting_api": scripting_api}

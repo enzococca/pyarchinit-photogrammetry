@@ -23,7 +23,7 @@ def test_tool_specs_are_what_a_model_reads():
     names = F.tool_names()
     assert names == [t.name for t in F.TOOLS]
     assert {"project_summary", "dem_statistics", "orthomosaic_info", "alignment_report", "markers", "thermal_info",
-            "multispectral_info", "point_cloud_info", "model_info", "guide_search", "scripting_api"} <= set(names)
+            "multispectral_info", "point_cloud_info", "model_info", "tin_info", "guide_search", "scripting_api"} <= set(names)
     for t in F.TOOLS:
         assert t.description and t.parameters["type"] == "object"
         json.dumps(t.parameters)  # a JSON schema
@@ -153,6 +153,30 @@ def test_tools_on_an_empty_project():
         assert isinstance(out, dict) and "none" in out, (name, out)
     # a document without chunks
     assert "none" in _run("dem_statistics", Document())
+
+
+def test_tin_info_says_the_counts_and_never_a_height(tmp_path):
+    from pyarchinit_photogrammetry.engine import tin as T
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    doc = Document()
+    ch = doc.add_chunk("Saggio")
+    ch.crs = "EPSG:32633"
+    doc.save(tmp_path / "p.ppg")
+    assert _run("tin_info", doc) == {"none": "il chunk non ha un TIN (Strumenti > TIN...)"}
+    yy, xx = np.mgrid[0:100, 0:100]
+    z = (120.0 + 0.02 * xx + 0.3 * np.sin(yy / 8.0)).astype(np.float32)
+    ch._set_product("dem", write_geotiff(ch.data_dir / "dem.tif", z, (500000.0, 4500002.0), 0.02, ch.crs))
+    T.build_tin(ch, source="dem", max_error=0.01)
+    out = _run("tin_info", doc)
+    meta = ch.meta["tin"]
+    assert out["source"] == "dem" and out["vertices"] == meta["n_vertices"] > 3
+    assert out["triangles"] == meta["n_triangles"] and out["constrained_edges"] == 0
+    assert out["tolerance_m"] == pytest.approx(0.01) and out["error_max_m"] <= 0.0101
+    assert "file" not in out and not any(isinstance(v, float) and v > 100 for v in out.values())
+    f = Filter(doc)
+    assert set(f.facts(out)) == {f.outgoing(k) for k in out}  # nothing to take away
+    json.dumps(out)
 
 
 def test_unknown_tool_and_bad_chunk(processed):

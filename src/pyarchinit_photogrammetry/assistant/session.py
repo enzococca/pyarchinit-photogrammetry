@@ -188,6 +188,9 @@ def read_label(name: str, result: Any, lang: str = "it") -> str:
         if name == "point_cloud_info" and result.get("points") is not None:
             word = "punti" if lang == "it" else "points"
             return f"{name} ({_integer(result['points'], lang)} {word})"
+        if name == "tin_info" and result.get("triangles") is not None:
+            word = "triangoli" if lang == "it" else "triangles"
+            return f"{name} ({_integer(result['triangles'], lang)} {word})"
         if name == "model_info" and result.get("faces") is not None:
             word = "facce" if lang == "it" else "faces"
             return f"{name} ({_integer(result['faces'], lang)} {word})"
