@@ -21,7 +21,7 @@ In the console and in **Run Python script...** these names are ready, bound to t
 | `app` | the application state (`ppg.app`): `app.document` is the open project, the same as `doc` |
 | `ppg` | the package, `import pyarchinit_photogrammetry as ppg` already done |
 | `np` | NumPy |
-| `window` | in the console, the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`; in **Run Python script...** a stand-in that asks the window, after the script's own line: `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")`, `window.refresh()` |
+| `window` | the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Run Python script...** the script runs in the background and `window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts written for the window run unchanged; the supported names are `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")` and `window.refresh()` (done without waiting), `window.selected_polygon()` (the selection when the script started) and `window.mark_modified()` (nothing to do: the script's entry of *Edit > Undo* marks the project) |
 
 **Run Python script...** (from 1.7.0) adds these, since the script runs in the background, away from the window:
 
@@ -34,7 +34,9 @@ In the console and in **Run Python script...** these names are ready, bound to t
 
 What the script prints goes to the console and, line by line, to the details of the progress window. An error stops
 the script and its traceback goes to the console, after what it printed; `exit()` or `raise SystemExit(...)` ends the
-script, never the program. While a script runs, another step does not start (the status bar says so).
+script, never the program, and so does it in the console. A `KeyboardInterrupt` raised by the script stops it as
+*Cancel* does. While a script runs, another step does not start (the status bar says so). Only what the script itself
+prints is captured: what the window prints meanwhile goes where it always goes.
 
 With `ppg run` there is no window: only the project, through `ppg.app.document`.
 
@@ -55,16 +57,25 @@ It takes back:
 * every chunk as it was: cameras and their poses, sensors, markers, scale bars, the region, the settings and the
   drawings kept in the chunk, and the project's own settings (the active chunk among them);
 * the products the script built again - dense cloud, model and its texture, DEM, orthomosaic, tie points, normal
-  map: before the script writes one, the product as it was is kept (as a version for the first four), and undo makes
-  it the active one again, the very same files. The version made this way is listed among the versions while the
-  entry can be undone, and deleted when the entry leaves the history;
-* the chunks the script added (out of the project, with their folder) and those it removed (back in their place);
+  map and the alignment's COLMAP model: before the script writes one, the product as it was is kept (as a version for
+  the first four, as a copy for the others), and undo makes it the active one again, the very same files. The version
+  made this way is listed among the versions while the entry can be undone, and deleted when the entry leaves the
+  history - unless the project was saved after the script: then it stays, as the saved project lists it;
+* the versions the script made active or deleted: their files stay until the entry leaves the history;
+* the chunks the script added (out of the project, with their folder) and those it removed (back in their place, with
+  their folder);
 * the files the script wrote inside the project's folder (`<project>.ppg.files`), which did not exist before.
 
 It does not take back what the script did outside the project: records written to PyArchInit, the drawings sent to
 QGIS's live GeoPackage, files exported elsewhere. When the script made such calls, the window lists them after it
-("Not undoable: ..."). Nor does it bring back a kept version the script deleted, or files outside the project's folder
-it changed.
+("Not undoable: ..."). Files that were there before and that the script wrote over, other than the products listed
+above (relief rasters, precision and coverage maps, multispectral and thermal rasters, files of the processing
+folders), stay as the script left them; so do files outside the project's folder. A script that opens another
+project cannot be undone: the window shows the project it opened.
+
+Undo takes the script back only from the state it left: when a step that is not in *Edit > Undo* - a product built
+from the *Workflow* menu, say - changed the project after the script, undoing it would take back half of it. The
+entry is then removed from the history instead, and the status bar says so.
 
 ## The active chunk and its products
 

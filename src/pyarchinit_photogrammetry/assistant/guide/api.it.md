@@ -1097,7 +1097,8 @@ c'è, `action.drop()` quando la voce esce dalla cronologia. Uno script è un pas
 | `assistant.scripts.ExternalCalls()` | gestore di contesto: le chiamate di `EXTERNAL` (scritture in PyArchInit, `LiveLink.write`, `io.exports.export_*`) fatte come sempre ed elencate in `calls` |
 | `gui.undo.snapshot_document(doc)` | `{chiave del chunk: chunk.to_dict()}` con `"meta"` e `"order"` |
 | `gui.undo.files_under(folder)` | i file sotto una cartella, senza versioni, copie di Annulla e rimozioni |
-| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks)` | la voce di uno script: chunk e impostazioni del progetto dalle istantanee, i prodotti conservati come versioni scambiati con quelli dello script, file e chunk nuovi messi da parte e rimessi |
+| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks, kept_folders=None)` | la voce di uno script: chunk e impostazioni del progetto dalle istantanee, i prodotti conservati come versioni scambiati con quelli dello script, file e chunk nuovi messi da parte e rimessi, i chunk tolti (`core.removal.ChunkRemoval`, per chiave) rimessi e tolti di nuovo; solleva `ScriptChanged` (la voce esce dalla cronologia) se il progetto non è come lo script l'ha lasciato |
+| `gui.gui_thread.call(fn, *args)` / `GuiProxy(obj)` | da un altro thread: una chiamata fatta nel thread dell'interfaccia, aspettandone il risultato; un oggetto i cui attributi e metodi vanno lì (`window` in uno script) |
 | `versions.keep_during(chunk)` | finché si è dentro (`chunk.keep_versions`), ogni prodotto che i costruttori riscrivono viene prima conservato, una volta (`Chunk._before_product_write(name)`) |
 | `versions.set_aside(chunk, product, id)` / `versions.bring_back(chunk, product, entry)` | il prodotto attivo portato fuori dal progetto (non elencato) e rimesso |
 

@@ -6,7 +6,9 @@ the step - and ``cancel()`` added: ``cancel()`` raises :class:`~..core.progress.
 *Annulla* in the progress window and returns False otherwise, for long loops. What the script prints is captured
 and every line also goes to the progress (the details of the progress window). An error of the script does not
 propagate: it comes back in :class:`ScriptResult` with its traceback and the output printed before it; a script
-calling ``exit()`` / ``sys.exit()`` ends there and never quits the program. Only a cancellation propagates.
+calling ``exit()`` / ``sys.exit()`` ends there and never quits the program. Only a cancellation propagates (a
+``KeyboardInterrupt`` raised by the script is one). What the script's thread prints is captured; the other threads
+print where they did (:func:`capture`).
 
 Some calls change things outside the project that *Annulla lo script* cannot take back - the PyArchInit database,
 the live GeoPackage of QGIS, files exported elsewhere. :class:`ExternalCalls` wraps those callables (``EXTERNAL``)
@@ -18,6 +20,7 @@ import contextlib
 import functools
 import importlib
 import io
+import sys
 import threading
 import time
 import traceback
@@ -56,8 +59,10 @@ class ExternalCalls:
         self.calls: list[str] = []
         self._patched: list[tuple[object, str, object]] = []
         self._owner = False
+        self._thread = threading.get_ident()
 
     def __enter__(self) -> "ExternalCalls":
+        self._thread = threading.get_ident()
         if not ExternalCalls._active.acquire(blocking=False):
             return self
         self._owner = True
@@ -82,7 +87,8 @@ class ExternalCalls:
     def _wrap(self, function, text: str):
         @functools.wraps(function)
         def recorded(*args, **kwargs):
-            self.calls.append(text)
+            if threading.get_ident() == self._thread:  # the script's calls, not those of the window meanwhile
+                self.calls.append(text)
             return function(*args, **kwargs)
 
         return recorded
@@ -103,27 +109,92 @@ class _Lines(io.TextIOBase):
         self.progress = progress
         self.parts: list[str] = []
         self._line = ""
+        self._lock = threading.Lock()
 
     def writable(self) -> bool:
         return True
 
     def write(self, s: str) -> int:
-        self.parts.append(s)
-        self._line += s
-        while "\n" in self._line:
-            line, self._line = self._line.split("\n", 1)
-            if line.strip():
-                self.progress.message(line.rstrip())
+        with self._lock:
+            self.parts.append(s)
+            self._line += s
+            lines = []
+            while "\n" in self._line:
+                line, self._line = self._line.split("\n", 1)
+                if line.strip():
+                    lines.append(line.rstrip())
+        for line in lines:
+            self.progress.message(line)
         return len(s)
 
     def flush_line(self) -> None:
-        if self._line.strip():
+        with self._lock:
             line, self._line = self._line, ""
+        if line.strip():
             self.progress.message(line.rstrip())
 
     @property
     def text(self) -> str:
-        return "".join(self.parts)
+        with self._lock:
+            return "".join(self.parts)
+
+
+class _Router:
+    """``sys.stdout`` or ``sys.stderr`` that sends what a thread writes to the stream that thread captures
+    (:func:`capture`), and what any other thread writes to the stream there was before (``original``)."""
+
+    def __init__(self, original):
+        self.original = original
+        self.targets: dict[int, object] = {}
+
+    def _stream(self):
+        return self.targets.get(threading.get_ident(), self.original)
+
+    def write(self, s: str) -> int:
+        stream = self._stream()
+        if stream is None:  # no console (a windowed app): nowhere to write
+            return len(s)
+        return stream.write(s)
+
+    def flush(self) -> None:
+        stream = self._stream()
+        if stream is not None and hasattr(stream, "flush"):
+            stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+
+_routers_lock = threading.Lock()
+
+
+def _router(name: str) -> _Router:
+    with _routers_lock:
+        current = getattr(sys, name)
+        if not isinstance(current, _Router):
+            current = _Router(current)
+            setattr(sys, name, current)
+        return current
+
+
+@contextlib.contextmanager
+def capture(stream):
+    """While inside, what THIS thread prints (``sys.stdout`` and ``sys.stderr``) goes to ``stream``; the other
+    threads print where they did. ``sys.stdout`` itself is never swapped back and forth: a router stays in its place
+    and the capture of the thread is taken away in the end."""
+    ident = threading.get_ident()
+    routers = [_router("stdout"), _router("stderr")]
+    before = [r.targets.get(ident) for r in routers]
+    for r in routers:
+        r.targets[ident] = stream
+    try:
+        yield stream
+    finally:
+        for r, b in zip(routers, before):
+            if b is None:
+                r.targets.pop(ident, None)
+            else:
+                r.targets[ident] = b
 
 
 def _exit_error(exc: SystemExit) -> str | None:
@@ -155,12 +226,14 @@ def run_script(source: str, namespace: dict, progress: Progress, name: str = "sc
     error = trace = None
     t0 = time.monotonic()
     external = ExternalCalls()
-    with external, contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+    with external, capture(out):
         try:
             code = compile(source, name, "exec")
             exec(code, namespace)  # noqa: S102 - the user's own script, run on the user's click
-        except (Cancelled, KeyboardInterrupt):
+        except Cancelled:
             raise
+        except KeyboardInterrupt as exc:  # a script's Ctrl+C: stopped as with the Annulla button
+            raise Cancelled("cancelled") from exc
         except SystemExit as exc:  # exit() ends the script, never the program
             error = _exit_error(exc)
         except BaseException as exc:  # noqa: BLE001 - the script's error is its result
@@ -171,4 +244,4 @@ def run_script(source: str, namespace: dict, progress: Progress, name: str = "sc
     return ScriptResult(out.text, error, trace, list(external.calls), time.monotonic() - t0)
 
 
-__all__ = ["EXTERNAL", "ExternalCalls", "ScriptResult", "run_script"]
+__all__ = ["EXTERNAL", "ExternalCalls", "ScriptResult", "capture", "run_script"]

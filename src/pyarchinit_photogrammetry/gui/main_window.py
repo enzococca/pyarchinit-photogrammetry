@@ -39,9 +39,10 @@ from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, 
                      SectionsPane, WorkspaceTree)
 from .ppk_dialog import PpkDialog
 from .start_page import StartPage
-from .undo import UndoHistory
+from .undo import ScriptChanged, UndoHistory
 from .update_dialog import (PluginUpdateChecker, PluginUpdatesDialog, UpdateChecker, UpdateDialog, error_text,
                             told_keys, untold)
+from .gui_thread import GuiProxy
 from .worker import StatusProgress, TaskRunner
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -320,18 +321,25 @@ class _GuiCalls(QObject):
             log.exception("function run in the interface thread failed")
 
 
-class _WindowProxy:
-    """``window`` in a script that runs in the worker thread: what it asks of the window is done in the interface
-    thread, soon after (:meth:`MainWindow.call_in_gui`); nothing is returned. The window itself is never touched
-    from the worker."""
+class _WindowProxy(GuiProxy):
+    """``window`` in a script that runs in the worker thread (*Esegui script Python...*): every attribute of the
+    main window is there, read and called in the interface thread while the script waits (:mod:`.gui_thread`), so a
+    script written for the window runs unchanged and no widget is touched from the worker. These are the supported
+    names, done here without waiting: :meth:`show_raster`, :meth:`show_model`, :meth:`log`, :meth:`refresh`;
+    ``selected_polygon()`` is the selection when the script started, ``mark_modified()`` is already done by the
+    script's entry of Modifica > Annulla."""
 
-    def __init__(self, window):
-        self._window = window
+    def __init__(self, window, polygon=None):
+        super().__init__(window)
+        object.__setattr__(self, "_polygon", polygon)
+
+    def _window(self):
+        return object.__getattribute__(self, "_target")
 
     def show_raster(self, kind: str | None = None) -> None:
         """The orthophoto (``"ortho"``) or the DEM (``"dem"``) of the active chunk in the 2D view; None: the
         orthophoto when there is one."""
-        w = self._window
+        w = self._window()
 
         def show():
             ch = w.chunk
@@ -344,15 +352,27 @@ class _WindowProxy:
     def show_model(self, kind: str | None = None) -> None:
         """``kind`` of the active chunk in the 3D view ("model", "model_textured", "point_cloud", "tie_points",
         "cameras"); None: the best it has."""
-        self._window.call_in_gui(self._window._show_model, kind)
+        w = self._window()
+        w.call_in_gui(w._show_model, kind)
 
     def log(self, text) -> None:
         """A line in the Log pane."""
-        self._window.call_in_gui(self._window.log_pane.info, str(text))
+        w = self._window()
+        w.call_in_gui(w.log_pane.info, str(text))
 
     def refresh(self) -> None:
         """The window shows the project again."""
-        self._window.call_in_gui(self._window.refresh_all)
+        w = self._window()
+        w.call_in_gui(w.refresh_all)
+
+    def selected_polygon(self):
+        """The polygons selected in the 2D view when the script started, merged (None: none)."""
+        return object.__getattribute__(self, "_polygon")
+
+    _selected_polygon = selected_polygon
+
+    def mark_modified(self) -> None:
+        """Nothing to do: the script's entry of Modifica > Annulla marks the project as modified."""
 
 
 class _StatusBar(QStatusBar):
@@ -433,6 +453,7 @@ class MainWindow(QMainWindow):
         self.last_report: dict | None = None
         self._started = document is not None
         self._task_done = False  # a processing step just ended: its changes are not an edit
+        self._script_running = False  # a script runs: its changes are its own entry of Modifica > Annulla
         self.history: UndoHistory | None = None
         self._build_views()
         self._build_docks()
@@ -514,6 +535,9 @@ class MainWindow(QMainWindow):
         self.ortho_view.line_finished.connect(self._section_drawn)
         self._request = None  # the drawing lent by request_geometry: (on_finished, on_cancelled)
         self._gui_calls = _GuiCalls(self)
+        from . import gui_thread
+
+        gui_thread.install()  # a script in the worker reaches the window through it
         self.ortho_view.request_finished.connect(self._request_drawn)
         self.ortho_view.request_cancelled.connect(lambda: self._end_request(cancelled=True))
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
@@ -1581,7 +1605,7 @@ class MainWindow(QMainWindow):
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
-        if flag and self.history is not None and not self._task_done:
+        if flag and self.history is not None and not self._task_done and not self._script_running:
             self.history.record()
 
     def mark_modified(self) -> None:
@@ -4274,6 +4298,9 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.undo() if self.history is not None else None
+        except ScriptChanged:
+            self._script_changed()
+            return
         except Exception as exc:  # noqa: BLE001 - a removal that cannot come back (its place is taken)
             self._exc(tr("Annulla non riuscito"), exc)
             return
@@ -4286,6 +4313,9 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.redo() if self.history is not None else None
+        except ScriptChanged:
+            self._script_changed()
+            return
         except Exception as exc:  # noqa: BLE001
             self._exc(tr("Ripeti non riuscito"), exc)
             return
@@ -13117,8 +13147,8 @@ class MainWindow(QMainWindow):
     def _namespace_for_worker(self) -> dict:
         """The names a script run in the worker sees, built in the interface thread: ``doc``, ``chunk``, ``app``,
         ``ppg``, ``np``, ``polygon`` (the polygons selected in the 2D view, merged; None), ``cameras`` (the photos
-        selected in the Foto pane) and ``window`` (:class:`_WindowProxy`: what it asks is done in the interface
-        thread)."""
+        selected in the Foto pane) and ``window`` (:class:`_WindowProxy`: every attribute of the window, read and
+        called in the interface thread)."""
         import pyarchinit_photogrammetry as ppg
 
         try:
@@ -13130,7 +13160,7 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             cameras = []
         return {"doc": self.doc, "chunk": self.chunk, "app": application, "ppg": ppg, "np": np, "polygon": polygon,
-                "cameras": cameras, "window": _WindowProxy(self), "__name__": "__main__"}
+                "cameras": cameras, "window": _WindowProxy(self, polygon), "__name__": "__main__"}
 
     def run_script_source(self, source: str, label: str = "Script", on_done=None, path: str | None = None) -> bool:
         """Run the Python ``source`` on the project in the worker thread (``assistant.scripts.run_script``): the
@@ -13141,53 +13171,72 @@ class MainWindow(QMainWindow):
         GeoPackage, exports) are said afterwards. ``on_done(result)``: the :class:`ScriptResult`, also on error.
         Returns False when another step is running (said in the status bar)."""
         from ..assistant.scripts import ScriptResult, run_script
-        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document
+        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
 
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
             return False
         doc = self.doc
+        root = doc.files_dir
         self._store_drawings()  # the drawings of the window are in the snapshot
         namespace = self._namespace_for_worker()
         if path:
             namespace["__file__"] = path
         before = snapshot_document(doc)
-        files0 = files_under(doc.files_dir)
         chunks = list(doc.chunks)
         for ch in chunks:
             ch.keep_versions = True
             ch._kept_during = {}
+            ch._kept_folders = []
+        doc.script_removals = []
+        self._script_running = True
         name = path or label
 
         def job(progress):
+            files0 = files_under(root)  # walked here, in the worker: a large project takes a while
             try:
-                return run_script(source, namespace, progress, name=name)
+                result = run_script(source, namespace, progress, name=name)
             except Cancelled:
-                return ScriptResult("", tr("Script annullato"), None, [], 0.0)
+                result = ScriptResult("", tr("Script annullato"), None, [], 0.0)
+            except BaseException as exc:  # noqa: BLE001 - whatever happens, the script's entry is made
+                result = ScriptResult("", f"{type(exc).__name__}: {exc}", traceback.format_exc(), [], 0.0)
+            return result, files0, files_under(root)
 
-        def finish(result) -> None:
-            made = []
+        def settle():
+            made, kept_folders = [], []
             for ch in chunks:
                 ch.keep_versions = False
                 made += [(ch.key, product, vid) for product, vid in ch._kept_during.items() if vid]
-                ch._kept_during = {}
+                kept_folders += [(ch.key, product, vid) for product, vid in ch._kept_folders]
+                ch._kept_during, ch._kept_folders = {}, []
+            removals = doc.script_removals or []
+            doc.script_removals = None
+            self._script_running = False
+            return made, kept_folders, removals
+
+        def finish(outcome) -> None:
+            result, files0, files1 = outcome
+            made, kept_folders, removals = settle()
+            if self.doc is not doc:  # the script opened another project: shown, nothing to undo
+                log.warning("%s: the script opened another project, it cannot be undone", label)
+                self.set_document(self.doc)
+                if on_done is not None:
+                    on_done(result)
+                return
             after = snapshot_document(doc)
             keys0 = set(chunk_keys(before))
             new_chunks = [k for k in chunk_keys(after) if k not in keys0]
-            removed = {k: i for i, k in enumerate(chunk_keys(before)) if k not in set(chunk_keys(after))}
-            new_folders = [doc.files_dir / f"chunk_{k}" for k in new_chunks]
-            new_files = sorted(f for f in files_under(doc.files_dir) - files0
-                               if not any(f.is_relative_to(d) for d in new_folders))
-            try:
-                differs = before != after
-            except Exception:  # noqa: BLE001 - arrays inside: compared as changed
-                differs = True
-            changed = bool(made or new_files or new_chunks or removed or differs)
-            if changed and self.history is not None:
-                self.history.push(label, ScriptAction(self, before, after, made, new_files, new_chunks, removed),
-                                  document=True)
+            removed = {c.key: r for r in removals for c in r.chunks}
+            new_folders = [root / f"chunk_{k}" for k in new_chunks]
+            new_files = sorted(f for f in files1 - files0 if not any(f.is_relative_to(d) for d in new_folders))
+            changed = bool(made or kept_folders or new_files or new_chunks or removed) or \
+                snapshot_text(before) != snapshot_text(after)
             with self._history_paused():
                 self._after_script_step(modified=changed)
+            if changed and self.history is not None:
+                self._store_drawings()
+                self.history.push(label, ScriptAction(self, before, snapshot_document(doc), made, new_files, new_chunks,
+                                                      removed, kept_folders), document=True)
             if result.external:
                 calls = list(dict.fromkeys(result.external))
                 self._script_message(tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > "
@@ -13198,14 +13247,20 @@ class MainWindow(QMainWindow):
                 on_done(result)
 
         def failed(summary: str, details: str) -> None:
-            finish(ScriptResult("", summary, details, [], 0.0))
+            files = files_under(root)
+            finish((ScriptResult("", summary, details, [], 0.0), files, files))
 
         started = self.runner.run(label, job, finish, failed)
         if not started:
-            for ch in chunks:
-                ch.keep_versions = False
-                ch._kept_during = {}
+            settle()
         return started
+
+    def _script_changed(self) -> None:
+        """The entry of a script left the history: the project changed after it (said in the status bar)."""
+        text = tr("Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in "
+                  "Modifica > Annulla. La voce è stata tolta.")
+        self.log_pane.warning(text)
+        self.statusBar().showMessage(text, 12000)
 
     def _script_message(self, text: str) -> None:
         """A message after a script (non-native, as every message of the window)."""

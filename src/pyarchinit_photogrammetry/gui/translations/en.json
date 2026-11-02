@@ -2653,7 +2653,8 @@
   " (disattivata: le prossime elaborazioni la lasciano fuori)": " (disabled: the next steps leave it out)",
   "Le foto selezionate e l'area selezionata sono quelle del chunk attivo: rendi attivo prima questo chunk.": "The selected photos and the selected area belong to the active chunk: make this chunk the active one first.",
   "Un'elaborazione è in corso: lo script non parte": "A processing task is running: the script does not start",
-  "Script annullato": "Script cancelled"
+  "Script annullato": "Script cancelled",
+  "Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.": "The script can no longer be undone: the project changed after it, with a step that is not in Edit > Undo. The entry was removed."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

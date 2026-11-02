@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import code
-import contextlib
 import io
 import logging
 import os
@@ -1328,9 +1327,16 @@ class ConsolePane(QWidget):
     def run_source(self, src: str) -> bool:
         """Run one line (as typed); returns True when more input is needed."""
         self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
+        from ..assistant.scripts import capture
+
         stream = _Stream(self.write)
-        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-            more = self.console.push(src)
+        with capture(stream):  # only what this thread prints: a script running in the worker keeps its own
+            try:
+                more = self.console.push(src)
+            except SystemExit as exc:  # exit() in the console ends the command, never the program
+                self.console.resetbuffer()
+                self.write(f"SystemExit: {exc.code}\n" if exc.code not in (None, 0) else "SystemExit\n")
+                more = False
         return more
 
     def _run(self) -> None:

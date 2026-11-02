@@ -174,3 +174,24 @@ def test_script_entry_dropped(window):
     assert aside.exists()  # the script's DEM put aside, for Ripeti
     w.history.reset()
     assert not aside.exists() and len(versions.versions(w.chunk, "dem")) == kept
+
+
+def test_versions_of_a_saved_script_are_kept_and_missing_ones_pruned(window, caplog):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import versions
+
+    w, app = window
+    kept = len(versions.versions(w.chunk, "dem"))
+    assert w.run_script_source("chunk.build_dem(resolution=0.02)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    vid = w.history.entries[-1].action.versions[0][2]
+    w.doc.save()  # saved after the script: the saved project lists the version
+    w.history.reset()
+    assert len(versions.versions(w.chunk, "dem")) == kept + 1
+    assert versions.version_file(w.chunk, "dem", vid).exists()
+    shutil.rmtree(w.chunk.data_dir / "versions" / "dem" / vid)
+    with caplog.at_level("WARNING"):
+        again = ppg.Document.open(w.doc.path)
+    assert all(e["id"] != vid for e in versions.versions(again.chunk, "dem"))
+    assert any(vid in m for m in caplog.messages)

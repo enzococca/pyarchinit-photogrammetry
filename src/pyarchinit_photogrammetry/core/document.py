@@ -8,11 +8,14 @@ the session ends (see :mod:`.removal`).
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import tempfile
 from pathlib import Path
 
 from .chunk import Chunk
+
+log = logging.getLogger("pyarchinit_photogrammetry")
 
 FORMAT_VERSION = 1
 
@@ -22,6 +25,8 @@ class Document:
         self.chunks: list[Chunk] = []
         self.meta: dict = {}
         self.removals: list = []  # removals of this session that can still be undone (core.removal)
+        self.saves = 0  # how many times it was saved in this session
+        self.script_removals: list | None = None  # while a script runs: its chunk removals, to be undone
         self._path: Path | None = None
         self._tmp: tempfile.TemporaryDirectory | None = None
         if path is not None:
@@ -80,6 +85,13 @@ class Document:
     def remove_chunk(self, chunk: Chunk) -> None:
         """The chunk out of the project and its folder deleted at once (a chunk just made by a step that
         failed). The workspace removes chunks with :class:`removal.ChunkRemoval`, which can be undone."""
+        if self.script_removals is not None:  # a script runs: its folder set aside, Annulla brings it back
+            from .removal import ChunkRemoval
+
+            removal = ChunkRemoval(self, [chunk])
+            removal.apply()
+            self.script_removals.append(removal)
+            return
         self.chunks.remove(chunk)
         shutil.rmtree(self.files_dir / f"chunk_{chunk.key}", ignore_errors=True)
 
@@ -163,6 +175,7 @@ class Document:
         tmp.replace(self._path)
         for r in self.removals:  # what the file now says: the end of the session settles the files on it
             r.mark_saved()
+        self.saves += 1
         return self._path
 
     def _read(self) -> None:
@@ -171,6 +184,23 @@ class Document:
             raise ValueError(f"{self._path} is not a pyarchinit-photogrammetry project")
         self.meta = data.get("meta", {})
         self.chunks = [Chunk.from_dict(c, document=self) for c in data.get("chunks", [])]
+        self._drop_missing_versions()
+
+    def _drop_missing_versions(self) -> None:
+        """A kept version listed without its main file (an interrupted session) is not listed any more."""
+        files = self._path.with_name(self._path.name + ".files")
+        for c in self.chunks:
+            listed = (c.meta.get("versions") or {}) if isinstance(c.meta.get("versions"), dict) else {}
+            for product, entries in listed.items():
+                kept = []
+                for e in entries or []:
+                    main = (e.get("files") or {}).get(product)
+                    if main and not (files / f"chunk_{c.key}" / main).exists():
+                        log.warning("Versione %s di %s (%s) senza file: tolta dall'elenco", e.get("id"), product,
+                                    c.label)
+                        continue
+                    kept.append(e)
+                listed[product] = kept
 
     @classmethod
     def open(cls, path: str | Path) -> "Document":

@@ -218,3 +218,201 @@ def test_external_calls_are_said_after_the_script(window, monkeypatch):
     assert r.error is None and r.external == ["PyArchInit.publish_drawings(...)"]
     assert w.shown_messages and "Non annullabili" in w.shown_messages[-1]
     assert "PyArchInit.publish_drawings" in w.shown_messages[-1]
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_keyboard_interrupt_is_a_cancel():
+    from pyarchinit_photogrammetry.assistant.scripts import run_script
+
+    with pytest.raises(Cancelled):
+        run_script("print('x')\nraise KeyboardInterrupt", {}, Progress())
+
+
+def test_only_the_script_thread_is_captured():
+    import sys
+    import threading
+
+    from pyarchinit_photogrammetry.assistant.scripts import run_script
+
+    stop = threading.Event()
+    seen = []
+
+    def other():
+        while not stop.is_set():
+            print("ALTRO THREAD")
+            seen.append(1)
+            time.sleep(0.01)
+
+    stdout = sys.stdout
+    t = threading.Thread(target=other)
+    t.start()
+    try:
+        r = run_script("import time\nfor i in range(3):\n    print('mio', i)\n    time.sleep(0.05)", {}, Progress())
+    finally:
+        stop.set()
+        t.join()
+    assert seen and "ALTRO" not in r.output and r.output.count("mio") == 3
+    print("dopo")  # the stream of this thread is the one it was
+    assert sys.stdout is stdout or getattr(sys.stdout, "original", None) is stdout
+
+
+def test_keyboard_interrupt_frees_the_runner(window):
+    w, app = window
+    r = _run(w, app, "chunk.meta['k'] = 1\nraise KeyboardInterrupt")
+    assert r.error and not w.runner.busy and not w.chunk.keep_versions
+    assert w.history.undo_text() == "Script"
+    w.history.undo()
+    assert "k" not in w.chunk.meta
+
+
+def _foto_area(mode: str) -> str:
+    from pathlib import Path
+
+    path = Path("/Users/Shared/ppg_scripts/foto_area.py")
+    if not path.exists():
+        pytest.skip("the user's script foto_area.py is not on this computer")
+    src = path.read_text(encoding="utf-8")
+    assert 'MODO = "filtra"' in src
+    return src.replace('MODO = "filtra"', f'MODO = "{mode}"', 1)
+
+
+def _centre_area(w, half=0.6):
+    import rasterio
+    from shapely.geometry import box
+
+    with rasterio.open(w.chunk.orthomosaic_path) as o:
+        b = o.bounds
+    cx, cy = (b.left + b.right) / 2, (b.bottom + b.top) / 2
+    return box(cx - half, cy - half, cx + half, cy + half)
+
+
+def _corner_area(w, half=0.1):
+    import rasterio
+    from shapely.geometry import box
+
+    with rasterio.open(w.chunk.orthomosaic_path) as o:
+        b = o.bounds
+    x, y = b.left + 0.2 * (b.right - b.left), b.bottom + 0.2 * (b.top - b.bottom)
+    return box(x - half, y - half, x + half, y + half)
+
+
+def test_foto_area_runs_unchanged_through_the_window(window, monkeypatch):
+    import threading
+
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    w, app = window
+    area = _centre_area(w)
+    monkeypatch.setattr(w, "selected_polygon", lambda: area)
+    entries = len(w.history.entries)
+    r = _run(w, app, _foto_area("filtra"), label="foto_area.py")
+    assert r.error is None, r.traceback
+    assert "Il pannello Foto mostra" in r.output
+    shown = len(w.photos.visible_cameras())
+    assert 0 < shown <= len(w.chunk.cameras) and len(w.history.entries) == entries  # nothing of the project changed
+    # "disattiva": the confirmation asked in the interface thread, the photos disabled, Annulla puts them back
+    asked = []
+
+    def box(parent, *a, **k):
+        asked.append((threading.current_thread() is threading.main_thread(), parent is w))
+        return 0
+
+    monkeypatch.setattr(dialogs, "_choice_box", box)
+    enabled = {c.key: c.enabled for c in w.chunk.cameras}
+    monkeypatch.setattr(w, "selected_polygon", lambda: _corner_area(w))
+    r = _run(w, app, _foto_area("disattiva").replace("COPERTURA_MINIMA = 0.05", "COPERTURA_MINIMA = 0.99", 1),
+             label="foto_area.py")
+    assert r.error is None, r.traceback
+    assert asked == [(True, True)]
+    assert any(not c.enabled for c in w.chunk.cameras) and "foto_area" in w.chunk.meta
+    assert w.history.undo_text() == "foto_area.py"
+    w.history.undo()
+    assert {c.key: c.enabled for c in w.chunk.cameras} == enabled and "foto_area" not in w.chunk.meta
+
+
+def test_chunk_removed_by_a_script_comes_back_with_its_files(window):
+    w, app = window
+    doc = w.doc
+    _run(w, app, "c = doc.add_chunk('Altro')\n(c.data_dir / 'x.txt').write_text('dati')")
+    other = doc.chunks[-1]
+    folder = doc.files_dir / f"chunk_{other.key}"
+    assert (folder / "x.txt").exists()
+    r = _run(w, app, "doc.add_chunk('Nuovo')\ndoc.remove_chunk([c for c in doc.chunks if c.label == 'Altro'][0])")
+    assert r.error is None and not folder.exists() and [c.label for c in doc.chunks][-1] == "Nuovo"
+    w.history.undo()
+    assert [c.label for c in doc.chunks][-1] == "Altro" and (folder / "x.txt").read_text() == "dati"
+    w.history.redo()
+    assert "Altro" not in [c.label for c in doc.chunks] and not folder.exists()
+    w.history.undo()
+    assert (folder / "x.txt").exists()
+
+
+def test_a_script_changed_afterwards_is_not_half_undone(window):
+    w, app = window
+    _run(w, app, "chunk.meta['n'] = 1")
+    w.chunk.build_dem(resolution=0.025)  # a processing step after the script: not in the history
+    n = len(w.history.entries)
+    w.undo()
+    assert len(w.history.entries) == n - 1 and w.chunk.meta.get("n") == 1  # the entry went, nothing undone
+    assert w.chunk.meta["dem"]["resolution"] == 0.025
+    assert "script" in w.statusBar().currentMessage().lower()
+
+
+def test_versions_activated_or_deleted_by_a_script_come_back(window):
+    from pyarchinit_photogrammetry.core import versions
+
+    w, app = window
+    ch = w.chunk
+    ch.build_dem(resolution=0.03)
+    versions.keep_active(ch, "dem")
+    ch.build_dem(resolution=0.025)
+    w.history.rebase()
+    old = versions.versions(ch, "dem")[-1]["id"]
+    active = _digest(ch.dem_path)
+    r = _run(w, app, f"from pyarchinit_photogrammetry.core import versions\n"
+                     f"versions.activate(chunk, 'dem', {old!r})")
+    assert r.error is None and _digest(w.chunk.dem_path) != active
+    w.history.undo()
+    ch = w.chunk
+    assert _digest(ch.dem_path) == active and versions.version_file(ch, "dem", old).exists()
+    victim = versions.versions(ch, "dem")[0]["id"]
+    _run(w, app, f"from pyarchinit_photogrammetry.core import versions\nversions.delete(chunk, 'dem', {victim!r})")
+    assert all(e["id"] != victim for e in versions.versions(w.chunk, "dem"))
+    w.history.undo()
+    assert versions.version_file(w.chunk, "dem", victim).exists()
+
+
+def test_the_alignment_model_comes_back(window):
+    w, app = window
+    ch = w.chunk
+    rel = ch.products["reconstruction"]
+    files = sorted(p.name for p in ch.product_path("reconstruction").iterdir())
+    r = _run(w, app, "from pyarchinit_photogrammetry.engine import sfm\nsfm.write_reconstruction_from_chunk(chunk)\n"
+                     "import shutil\nshutil.rmtree(chunk.data_dir / " + repr(rel) + ", ignore_errors=True)")
+    assert r.error is None
+    w.history.undo()
+    ch = w.chunk
+    assert ch.products["reconstruction"] == rel
+    assert sorted(p.name for p in ch.product_path("reconstruction").iterdir()) == files
+
+
+def test_a_script_that_opens_another_project(window, tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app = window
+    other = ppg.Document()
+    other.add_chunk("Altro progetto")
+    other.save(tmp_path / "altro.ppg")
+    n = len(w.history.entries)
+    r = _run(w, app, f"app.open_document({str(tmp_path / 'altro.ppg')!r})")
+    assert r.error is None
+    assert w.doc.path == (tmp_path / "altro.ppg").resolve() and w.chunk.label == "Altro progetto"
+    assert len(w.history.entries) <= n
+
+
+def test_console_catches_system_exit(window):
+    w, app = window
+    w.console.run_source("raise SystemExit(2)")
+    assert "SystemExit" in w.console.out.toPlainText()

@@ -1064,7 +1064,8 @@ when it has one, `action.drop()` when the entry leaves the history. A script is 
 | `assistant.scripts.ExternalCalls()` | context manager: the calls of `EXTERNAL` (PyArchInit writes, `LiveLink.write`, `io.exports.export_*`) made as usual and listed in `calls` |
 | `gui.undo.snapshot_document(doc)` | `{chunk key: chunk.to_dict()}` with `"meta"` and `"order"` |
 | `gui.undo.files_under(folder)` | the files under a folder, without versions, undo copies and removals |
-| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks)` | the entry of a script: chunks and project meta from the snapshots, the products kept as versions swapped with the script's, new files and chunks moved aside and back |
+| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks, kept_folders=None)` | the entry of a script: chunks and project meta from the snapshots, the products kept as versions swapped with the script's, new files and chunks moved aside and back, the chunks it removed (`core.removal.ChunkRemoval`, by key) undone and redone; raises `ScriptChanged` (the entry leaves the history) when the project is not as the script left it |
+| `gui.gui_thread.call(fn, *args)` / `GuiProxy(obj)` | from another thread: a call made in the interface thread, waiting for its result; an object whose attributes and methods go there (`window` in a script) |
 | `versions.keep_during(chunk)` | while inside (`chunk.keep_versions`), every product the builders write again is kept first, once (`Chunk._before_product_write(name)`) |
 | `versions.set_aside(chunk, product, id)` / `versions.bring_back(chunk, product, entry)` | the active product moved out of the project (not listed) and back |
 

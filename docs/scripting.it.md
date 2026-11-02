@@ -22,7 +22,7 @@ Nella console e in **Esegui script Python...** questi nomi sono già pronti, leg
 | `app` | lo stato dell'applicazione (`ppg.app`): `app.document` è il progetto aperto, lo stesso di `doc` |
 | `ppg` | il pacchetto, con `import pyarchinit_photogrammetry as ppg` già fatto |
 | `np` | NumPy |
-| `window` | nella console, la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`; in **Esegui script Python...** un sostituto che chiede alla finestra, subito dopo la riga dello script: `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")`, `window.refresh()` |
+| `window` | la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Esegui script Python...** lo script gira in secondo piano e `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la risposta, così gli script scritti per la finestra funzionano senza cambiarli; i nomi supportati sono `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")` e `window.refresh()` (fatti senza aspettare), `window.selected_polygon()` (la selezione di quando lo script è partito) e `window.mark_modified()` (non serve: la voce dello script in *Modifica > Annulla* segna già il progetto come modificato) |
 
 **Esegui script Python...** (dalla 1.7.0) aggiunge questi nomi, perché lo script gira in secondo piano, lontano dalla
 finestra:
@@ -36,7 +36,9 @@ finestra:
 
 Ciò che lo script stampa va nella console e, riga per riga, nei dettagli della finestra di avanzamento. Un errore ferma
 lo script e il suo traceback va nella console, dopo ciò che aveva stampato; `exit()` o `raise SystemExit(...)` chiude lo
-script, mai il programma. Mentre uno script gira non parte un altro passo (lo dice la barra di stato).
+script, mai il programma, e lo stesso vale nella console. Un `KeyboardInterrupt` sollevato dallo script lo ferma come
+*Annulla*. Mentre uno script gira non parte un altro passo (lo dice la barra di stato). Viene raccolto solo ciò che
+stampa lo script: ciò che stampa la finestra nel frattempo va dove va sempre.
 
 Con `ppg run` non c'è la finestra: c'è solo il progetto, con `ppg.app.document`.
 
@@ -57,17 +59,26 @@ anche ciò che aveva fatto prima dell'errore. Riprende:
 * ogni chunk com'era: foto e loro pose, sensori, marker, barre di scala, regione, impostazioni e disegni tenuti nel
   chunk, e le impostazioni del progetto (tra cui il chunk attivo);
 * i prodotti che lo script ha ricostruito - nuvola densa, modello e texture, DEM, ortofoto, punti di legame, mappa
-  delle normali: prima che lo script ne scriva uno, il prodotto com'era viene conservato (come versione per i primi
-  quattro) e Annulla lo rende di nuovo quello attivo, con gli stessi file. La versione fatta così compare tra le
-  versioni finché la voce si può annullare, e viene cancellata quando la voce esce dalla cronologia;
+  delle normali e modello COLMAP dell'allineamento: prima che lo script ne scriva uno, il prodotto com'era viene
+  conservato (come versione per i primi quattro, come copia per gli altri) e Annulla lo rende di nuovo quello attivo,
+  con gli stessi file. La versione fatta così compare tra le versioni finché la voce si può annullare, e viene
+  cancellata quando la voce esce dalla cronologia, a meno che il progetto sia stato salvato dopo lo script: allora
+  resta, perché il progetto salvato la elenca;
+* le versioni che lo script ha reso attive o ha cancellato: i loro file restano finché la voce è nella cronologia;
 * i chunk che lo script ha aggiunto (fuori dal progetto, con la loro cartella) e quelli che ha tolto (di nuovo al loro
-  posto);
+  posto, con la loro cartella);
 * i file che lo script ha scritto nella cartella del progetto (`<progetto>.ppg.files`) e che prima non c'erano.
 
 Non riprende ciò che lo script ha fatto fuori dal progetto: schede scritte in PyArchInit, disegni mandati al
 GeoPackage dal vivo di QGIS, file esportati altrove. Quando lo script ha fatto chiamate del genere, la finestra le
-elenca alla fine ("Non annullabili: ..."). Non riporta nemmeno una versione conservata che lo script ha cancellato, né
-i file fuori dalla cartella del progetto che ha cambiato.
+elenca alla fine ("Non annullabili: ..."). I file che c'erano già e che lo script ha riscritto, a parte i prodotti
+elencati sopra (raster del rilievo, mappe di precisione e di copertura, raster multispettrali e termici, file delle
+cartelle di elaborazione), restano come li ha lasciati lo script; lo stesso vale per i file fuori dalla cartella del
+progetto. Uno script che apre un altro progetto non si può annullare: la finestra mostra il progetto aperto.
+
+Annulla riprende lo script solo dallo stato in cui l'ha lasciato: se dopo lo script il progetto è cambiato con un passo
+che non è in *Modifica > Annulla* (un prodotto costruito dal menu *Flusso di lavoro*, per esempio), annullarlo
+riprenderebbe solo metà delle cose. In quel caso la voce viene tolta dalla cronologia e la barra di stato lo dice.
 
 ## Il chunk attivo e i suoi prodotti
 

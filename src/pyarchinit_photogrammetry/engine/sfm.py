@@ -1437,6 +1437,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     info = chunk.meta["sfm"]
     root = info["image_root"]
     out = work / "mapper"
+    chunk._before_product_write("reconstruction")  # a script runs: the model as it was, for Annulla lo script
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     names = {int(k): v for k, v in info.get("names", {}).items()}
@@ -1627,6 +1628,7 @@ def repair_reconstruction(chunk: Chunk) -> int:
     rec = load_reconstruction(chunk)
     n = drop_missing_points(rec)
     if n:
+        chunk._before_product_write("reconstruction")
         rec.write(str(p))
         log.info("COLMAP model repaired: %d observations of missing points removed", n)
     return n
@@ -1692,6 +1694,7 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
     chunk.meta.setdefault("sfm", {})["image_root"] = str(root)
     chunk.meta["sfm"]["names"] = {str(k): v for k, v in names.items()}
     out = _sfm_dir(chunk) / "model"
+    chunk._before_product_write("reconstruction")
     shutil.rmtree(out, ignore_errors=True)
     txt = out.parent / "model_txt"
     shutil.rmtree(txt, ignore_errors=True)
@@ -2426,6 +2429,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85))
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
+    chunk._before_product_write("reconstruction")
     rec.write(str(chunk.product_path("reconstruction")))
     import_reconstruction(chunk, rec)
     for n, key in enumerate(ids["markers"]):  # the adjusted marker positions, not a new triangulation
@@ -2623,6 +2627,7 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)
     rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
+    chunk._before_product_write("reconstruction")
     rec.write(str(chunk.product_path("reconstruction")))
     import_reconstruction(chunk, rec)
     err = float(rec.compute_mean_reprojection_error())

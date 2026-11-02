@@ -49,6 +49,7 @@ class Chunk:
     # while a script runs (core.versions.keep_during): every product it writes again is kept first as a version
     keep_versions: bool = field(default=False, repr=False, compare=False)
     _kept_during: dict = field(default_factory=dict, repr=False, compare=False)  # product -> version id
+    _kept_folders: list = field(default_factory=list, repr=False, compare=False)  # (product, id) taken out of the list
 
     # ------------------------------------------------------------------ paths
     @property

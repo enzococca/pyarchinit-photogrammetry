@@ -322,6 +322,11 @@ class UndoHistory:
 SKIPPED_FOLDERS = {".script_undo", ".removed", "undo", "versions"}  # never "new files" of a script
 
 
+class ScriptChanged(RuntimeError):
+    """The project changed after the script outside its own entry (a step that is not in the history): undoing
+    it now would take back half of it. The entry leaves the history instead."""
+
+
 def snapshot_document(doc) -> dict:
     """The project as JSON-able data: ``{chunk key: chunk.to_dict()}`` (deep copies), ``"meta"`` the project's
     and ``"order"`` the keys of the chunks in their order."""
@@ -331,6 +336,11 @@ def snapshot_document(doc) -> dict:
     out["meta"] = copy.deepcopy(doc.meta)
     out["order"] = [c.key for c in doc.chunks]
     return out
+
+
+def snapshot_text(snapshot: dict) -> str:
+    """A snapshot as one text, to compare two of them (NaN equal to NaN, keys of any type)."""
+    return json.dumps({str(k): v for k, v in snapshot.items()}, sort_keys=True, default=str)
 
 
 def chunk_keys(snapshot: dict) -> list:
@@ -350,6 +360,20 @@ def files_under(folder) -> set[Path]:
     return out
 
 
+def product_stamps(doc) -> dict:
+    """Size and modification time of the file of every product of every chunk: a product written again shows."""
+    out = {}
+    for c in doc.chunks:
+        for name, rel in sorted(c.products.items()):
+            try:
+                st = (doc.files_dir / f"chunk_{c.key}" / rel).stat()
+            except OSError:
+                out[f"{c.key}/{name}"] = None
+            else:
+                out[f"{c.key}/{name}"] = [st.st_size, st.st_mtime_ns]
+    return out
+
+
 def _move(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     _remove(dst)
@@ -362,26 +386,46 @@ class ScriptAction:
 
     ``before``/``after``: :func:`snapshot_document` before and after the script - every chunk (cameras, markers,
     scale bars, products, meta) and the project's meta; ``versions``: ``(chunk key, product, version id)`` of
-    the products the script wrote again, kept first as versions (``core.versions.keep_during``): undo makes them
-    active again and puts the script's products aside, redo swaps them back; ``new_files``: files the script
-    wrote under the project's folder (not products, not versions): moved aside and back; ``new_chunks``: the
-    keys of the chunks it added (out of the project, their folder aside); ``removed_chunks``: ``{key: index}`` of
-    the chunks it removed (back in their place). What is put aside lives in ``<project files>/.script_undo``
-    while the entry can be redone. :meth:`drop` (the entry falls out of the history): the versions made are
-    deleted when the script's products are the active ones, what was put aside when they are not."""
+    the products the script wrote again, kept first (``core.versions.keep_during``): undo makes them active again
+    and puts the script's products aside, redo swaps them back; ``new_files``: files the script wrote under the
+    project's folder (not products, not versions): moved aside and back; ``new_chunks``: the keys of the chunks it
+    added (out of the project, their folder aside); ``removed_chunks``: ``{key: removal}`` of the chunks it
+    removed, each a ``core.removal.ChunkRemoval`` that set its folder aside (undone and redone with it).
+    ``kept_folders``: ``(chunk key, product, id)`` of versions the script activated or deleted, whose files stay
+    for the undo. What is put aside lives in ``<project files>/.script_undo`` while the entry can be redone.
+
+    Undo and redo first check that the project is as the script (or its undo) left it - ``state`` (a text of the
+    snapshot and the stamps of the products' files, :meth:`state`); when another step changed it meanwhile they
+    raise :class:`ScriptChanged` and the history drops the entry: never half an undo.
+
+    :meth:`drop` (the entry falls out of the history): the versions made are deleted when the script's products are
+    the active ones - unless the project was saved since (its file lists them) -, what was put aside when they are
+    not."""
 
     def __init__(self, window, before: dict, after: dict, versions: list[tuple[int, str, str]], new_files: list[Path],
-                 new_chunks: list[int], removed_chunks: dict):
+                 new_chunks: list[int], removed_chunks: dict, kept_folders: list | None = None):
         self.window, self.before, self.after = window, before, after
         self.versions = list(versions)
         self.new_files, self.new_chunks, self.removed_chunks = list(new_files), list(new_chunks), dict(removed_chunks)
+        self.kept_folders = list(kept_folders or [])
         self.doc = window.doc
         self.root = self.doc.files_dir
         self.hold = self.root / ".script_undo" / uuid.uuid4().hex[:12]
         self.held: dict = {}  # (key, product, vid) -> entry of the script's product put aside
         self.applied = True
+        self.saves = self.doc.saves
+        self.expected = self.state()
 
     # ------------------------------------------------------------------ helpers
+    def state(self) -> str:
+        """The project now, as a text: what undo and redo expect to find."""
+        self.window._store_drawings()
+        return snapshot_text(snapshot_document(self.doc)) + json.dumps(product_stamps(self.doc), sort_keys=True)
+
+    def _check(self) -> None:
+        if self.window.doc is not self.doc or self.state() != self.expected:
+            raise ScriptChanged("the project changed after the script")
+
     def _chunk(self, key):
         return next((c for c in self.doc.chunks if c.key == key), None)
 
@@ -404,9 +448,8 @@ class ScriptAction:
         from ..core.chunk import Chunk
 
         doc = self.doc
-        keys = chunk_keys(snap)
         chunks = []
-        for key in keys:
+        for key in chunk_keys(snap):
             ch = self._chunk(key)
             if ch is None:
                 ch = Chunk.from_dict(copy.deepcopy(snap[key]), doc)
@@ -431,10 +474,19 @@ class ScriptAction:
     def _rel(self, path: Path) -> Path:
         return Path(path).relative_to(self.root)
 
+    def _removals(self) -> list:
+        seen, out = set(), []
+        for r in self.removed_chunks.values():
+            if id(r) not in seen:
+                seen.add(id(r))
+                out.append(r)
+        return out
+
     # ------------------------------------------------------------------ undo / redo
     def undo(self) -> None:
         from ..core import versions as v
 
+        self._check()
         self.window._before_script_step()
         for path in self.new_files:
             path = Path(path)
@@ -444,6 +496,8 @@ class ScriptAction:
             folder = self.root / f"chunk_{key}"
             if folder.exists():
                 _move(folder, self.hold / "chunks" / folder.name)
+        for r in reversed(self._removals()):  # the chunks it removed, back with their folder
+            r.undo()
         for key, product, vid in reversed(self.versions):
             ch = self._chunk(key)
             if ch is None:
@@ -457,16 +511,17 @@ class ScriptAction:
         self._set_document(self.before)
         self.applied = False
         self.window._after_script_step()
+        self.expected = self.state()
 
     def redo(self) -> None:
         from ..core import versions as v
 
+        self._check()
         self.window._before_script_step()
         for key in self.new_chunks:
             folder = self.hold / "chunks" / f"chunk_{key}"
             if folder.exists():
                 _move(folder, self.root / folder.name)
-        self._set_document(self.after)
         for key, product, vid in self.versions:
             ch = self._chunk(key)
             if ch is None:
@@ -480,14 +535,18 @@ class ScriptAction:
             src = self.hold / "files" / self._rel(Path(path))
             if src.exists():
                 _move(src, Path(path))
+        for r in self._removals():
+            r.redo()
         self._set_document(self.after)
         self.applied = True
         self.window._after_script_step()
+        self.expected = self.state()
 
     def drop(self) -> None:
         from ..core import versions as v
 
-        if self.applied and self.window.doc is self.doc:  # the versions kept for the undo are not needed now
+        same = self.window.doc is self.doc
+        if self.applied and same and self.doc.saves == self.saves:  # the versions kept for the undo go
             for key, product, vid in self.versions:
                 ch = self._chunk(key)
                 if ch is None:
@@ -499,10 +558,16 @@ class ScriptAction:
                     shutil.rmtree(ch.data_dir / "versions" / product / vid, ignore_errors=True)
             if self.versions:
                 self.window.setWindowModified(True)
-        else:  # undone: the script's products put aside go
+        elif not self.applied:  # undone: the script's products put aside go
             for (key, product, _vid), held in self.held.items():
                 ch = self._chunk(key)
                 if ch is not None:
                     shutil.rmtree(ch.data_dir / "versions" / product / held["id"], ignore_errors=True)
             self.held.clear()
+        if self.applied and same and self.doc.saves == self.saves:
+            # versions the script activated or deleted: their files go now, when the list no longer names them
+            for key, product, vid in self.kept_folders:
+                ch = self._chunk(key)
+                if ch is not None and not any(e["id"] == vid for e in v.versions(ch, product)):
+                    shutil.rmtree(ch.data_dir / "versions" / product / vid, ignore_errors=True)
         shutil.rmtree(self.hold, ignore_errors=True)

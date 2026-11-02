@@ -662,7 +662,7 @@ def test_the_menu_of_a_chunk_that_is_not_the_active_one(window, monkeypatch, qap
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"label": "Rilievo 2b"}))
     w.choose = ["Rinomina..."]
     _right_click(w, _node(w.workspace, "chunk", "Rilievo 2"))
-    assert w.menus[-1] == ["Rendi attivo", "Rinomina...", "Disattiva", "Rimuovi chunk"]
+    assert w.menus[-1] == ["Rendi attivo", "Rinomina...", "Duplica chunk...", "Disattiva", "Rimuovi chunk"]
     assert rilievo.label == "Rilievo 2b" and w.chunk is scavo  # acts on it, the active chunk stays
     w.choose = ["Rimuovi chunk"]
     _right_click(w, _node(w.workspace, "chunk", "Rilievo 2b"))
