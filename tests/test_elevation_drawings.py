@@ -381,7 +381,16 @@ def test_measuring_point_and_marker_on_an_elevation_read_the_surface(with_elevat
     assert not w.probe_points
     assert (q["u"], q["v"]) == (pytest.approx(u), pytest.approx(v))
     assert (q["x"], q["y"], q["z_superficie"]) == (pytest.approx(p[0]), pytest.approx(p[1]), pytest.approx(p[2], abs=1e-3))
-    assert q.get("z") == pytest.approx(p[2], abs=0.05)  # the DEM of the plan at the world point: the ground there
+    # the DEM of the plan read at the world point of the surface (never at (u, v)): its cell there, which is the
+    # ground there within the relief of the DEM around that cell (a section cell may be on a steep edge)
+    import rasterio
+
+    with rasterio.open(ch.dem_path) as src:
+        row, col = src.index(p[0], p[1])
+        cells = src.read(1, window=((max(row - 1, 0), row + 2), (max(col - 1, 0), col + 2)), masked=True)
+        here = float(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
+    assert q.get("z") == pytest.approx(here, abs=1e-3)
+    assert q["z"] == pytest.approx(p[2], abs=0.05 + float(cells.max() - cells.min()))
     assert np.allclose(w._raster_point(u, v), ch.to_internal(p[None])[0])  # the marker tool: the same point
     w._store_drawings()
     out = E.export_drawings(ch, entry, tmp_path / "out")
