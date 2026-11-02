@@ -721,23 +721,32 @@ def test_metashape_local_frame_with_components(tmp_path):
 
 def test_metashape_dense_clouds_in_oc3_are_named_in_the_warnings(tmp_path):
     """Metashape 2 keeps dense clouds as ``.oc3`` (an undocumented format, not read): the import
-    says so and what to do instead of leaving the chunk without its cloud in silence."""
+    says so and what to do instead of leaving the chunk without its cloud in silence. The layout
+    is that of a real Metashape 2 project (a tower, three dense clouds): sibling ``<dense_cloud>``
+    elements in the frame, each ``dense_cloud.zip`` holding only a ``doc.xml`` that names the
+    ``dense_cloud.oc3`` lying beside the archive."""
     from pyarchinit_photogrammetry.integrations import metashape as ms
 
     psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
     frame_dir = psx.with_suffix(".files") / "0" / "0"
     with zipfile.ZipFile(frame_dir / "frame.zip") as z:
         xml = z.read("doc.xml").decode()
-    clouds = "".join(f'<point_cloud key="{k}" path="point_cloud.{k}/point_cloud.zip"/>' for k in (1, 2))
-    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"<point_clouds>{clouds}</point_clouds></frame>")})
-    for k in (1, 2):
-        _zip(frame_dir / f"point_cloud.{k}" / "point_cloud.zip", {
-            "doc.xml": '<point_cloud version="2.0.0"><points path="points0.oc3" count="23000000"/></point_cloud>',
-            "points0.oc3": b"\x00" * 64})
+    folders = ("dense_cloud", "dense_cloud.2", "dense_cloud.3")
+    clouds = "".join(f'<dense_cloud id="{i}" path="{f}/dense_cloud.zip"/>' for i, f in enumerate(folders))
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"{clouds}</frame>")})
+    for f in folders:
+        _zip(frame_dir / f / "dense_cloud.zip", {
+            "doc.xml": '<?xml version="1.0" encoding="UTF-8"?>\n<dense_cloud version="1.2.0"><tiles>'
+                       '<tile path="dense_cloud.oc3"><totalCount>69219109</totalCount>'
+                       '<validCount>21461552</validCount><pointCount class="0">21461552</pointCount>'
+                       '<hasPointColors>true</hasPointColors><hasPointNormals>true</hasPointNormals></tile>'
+                       '</tiles><params><dataType>uint8</dataType><bands><band label="Red"/><band label="Green"/>'
+                       '<band label="Blue"/></bands></params></dense_cloud>'})
+        (frame_dir / f / "dense_cloud.oc3").write_bytes(b"\x00" * 64)
     ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
     warnings = ch.meta["import"]["warnings"]
     oc3 = [w for w in warnings if ".oc3" in w]
-    assert len(oc3) == 1 and "2 nuvole di punti" in oc3[0]
+    assert len(oc3) == 1 and "3 nuvole di punti" in oc3[0]
     assert "PLY o LAS" in oc3[0] and "Costruisci nuvola densa" in oc3[0]
     assert len(ch.tie_points) == 1000 and len(ch.aligned_cameras) == 4  # the rest as before
     # the project without them: no such warning

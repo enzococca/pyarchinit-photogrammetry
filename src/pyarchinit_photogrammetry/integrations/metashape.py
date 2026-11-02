@@ -407,9 +407,11 @@ def _read_clouds(ch: MsChunk):
 
 
 def _cloud_format(path: Path) -> str | None:
-    """The format of a point cloud archive this importer does not read (``".oc3"``: the point
-    cloud of Metashape 2), None when it holds the PLY parts read by :func:`_cloud_parts` or
-    cannot be opened (a missing or damaged archive is not a question of format)."""
+    """The format of a point cloud archive this importer does not read, None when it holds the
+    PLY parts read by :func:`_cloud_parts` or cannot be opened (a missing or damaged archive is
+    not a question of format). Metashape 2 writes a dense cloud as ``dense_cloud.zip`` holding
+    only ``doc.xml`` (``<tiles><tile path="dense_cloud.oc3">``), the ``.oc3`` file beside the
+    archive: the formats are those of the files the ``doc.xml`` names, and of the members."""
     if not path.is_file():
         return None
     if not zipfile.is_zipfile(path):
@@ -417,11 +419,15 @@ def _cloud_format(path: Path) -> str | None:
     try:
         with zipfile.ZipFile(path) as z:
             names = [n for n in z.namelist() if not n.endswith("/")]
-    except (OSError, zipfile.BadZipFile):
+            doc = ET.fromstring(z.read("doc.xml")) if "doc.xml" in names else None
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
         return None
     if any(re.fullmatch(r"points\d*\.ply", Path(n).name) for n in names):
         return None
-    data = sorted({Path(n).suffix.lower() for n in names if Path(n).name != "doc.xml" and Path(n).suffix})
+    files = [n for n in names if Path(n).name != "doc.xml"]
+    if doc is not None:
+        files += [el.get("path") for el in doc.iter() if el.get("path")]
+    data = sorted({Path(n).suffix.lower() for n in files if Path(n).suffix and Path(n).suffix.lower() != ".ply"})
     return ", ".join(data) or None
 
 
