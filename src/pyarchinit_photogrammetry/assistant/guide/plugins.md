@@ -204,7 +204,8 @@ and v upwards (the height when v is vertical) - not the coordinates of the chunk
 that elevation, and `window.selected_polygon()` is the selection there. The plan's drawings stay in `window.units`,
 `window.quote` and `window.probe_points` whatever is shown; those of the elevation shown are in `window.frame_units`,
 `window.frame_quote` and `window.frame_points` (`window.drawings_frame` is its id, None on the plan).
-`engine.elevation.world_of(entry, u, v, None, chunk=chunk)` gives the world point of a position there.
+`engine.elevation.world_of(entry, u, v, None, chunk=chunk)` gives the world point of a position there. `show_frame`
+switches the view back to the plan: after it, the requests and `add_units` work in the coordinates of the chunk again.
 
 `progress(fraction, message)` reports 0-1 and raises `Cancelled` when the user cancels: call it
 often in long loops. Widgets are touched only in the callbacks of actions and in `done`, never in
