@@ -220,7 +220,7 @@ disegnano è in [Disegno e misure](drawing.md#sezioni).
 ![La console Python](../img/gui/pane-console.png)
 
 Una console Python con il progetto a portata di mano: `doc` (il progetto), `chunk` (il chunk attivo), `app`,
-`ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. ++ctrl+shift+p++ la porta davanti.
+`ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. Un blocco incollato di più righe viene eseguito subito. ++ctrl+shift+p++ la porta davanti.
 
 ## Log
 

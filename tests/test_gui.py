@@ -55,6 +55,22 @@ def test_window_shows_products(window, qapp):
         assert w.model_view.canvas.grab_array().std() > 10
 
 
+def test_console_runs_a_pasted_block(window, qapp):
+    from PySide6.QtCore import QMimeData
+
+    c = window.console
+    assert c.paste_runs_blocks
+    c.run_source("a = 1\nfor i in range(3):\n    a += i\nprint(a)")
+    assert c.out.toPlainText().rstrip().endswith("4")
+    assert c.console.locals["a"] == 4
+    assert c.run_source("for i in range(2):") is True
+    c.console.resetbuffer()
+    mime = QMimeData()
+    mime.setText("b = 2\nc = b * 3")
+    c.inp.insertFromMimeData(mime)
+    assert c.console.locals["c"] == 6
+
+
 def test_console_and_photo_view(window, qapp):
     w = window
     assert not w.console.run_source("n = len(chunk.aligned_cameras)")

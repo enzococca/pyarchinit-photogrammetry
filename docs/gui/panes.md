@@ -212,7 +212,7 @@ How to draw them is in [Drawing and measures](drawing.md#sections).
 ![The Python console](../img/gui/pane-console.png)
 
 A Python console with the project at hand: `doc` (the project), `chunk` (the active chunk), `app`, `ppg` (the
-library), `np` and `window`. What it changes shows in the window. ++ctrl+shift+p++ brings it to the front.
+library), `np` and `window`. What it changes shows in the window. A pasted block of several lines runs at once. ++ctrl+shift+p++ brings it to the front.
 
 ## Log
 

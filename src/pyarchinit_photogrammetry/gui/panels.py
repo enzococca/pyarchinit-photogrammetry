@@ -1296,6 +1296,7 @@ class ConsolePane(QWidget):
     """Python console bound to the open project: ``doc``, ``chunk``, ``app``, ``ppg``."""
 
     executed = Signal()
+    paste_runs_blocks = True
 
     def __init__(self, namespace_factory, parent=None):
         super().__init__(parent)
@@ -1311,6 +1312,7 @@ class ConsolePane(QWidget):
         self.inp.setFont(mono)
         self.inp.setPlaceholderText(">>>  chunk.build_dem(resolution=0.01)      (doc, chunk, app, ppg, np, window)")
         self.inp.returnPressed.connect(self._run)
+        self.inp.block_pasted.connect(self._run_block)
         lay.addWidget(self.out, 1)
         lay.addWidget(self.inp)
         self._factory = namespace_factory
@@ -1324,8 +1326,29 @@ class ConsolePane(QWidget):
         self.out.insertPlainText(s)
         self.out.moveCursor(QTextCursor.MoveOperation.End)
 
+    @staticmethod
+    def _is_block(src: str) -> bool:
+        """True for a source of several lines or several statements."""
+        import ast
+
+        multi = "\n" in src.strip("\n")
+        if not multi and ";" not in src:
+            return False
+        try:
+            return multi or len(ast.parse(src).body) > 1
+        except SyntaxError:
+            return multi
+
+    def _run_block(self, src: str) -> None:
+        self.inp.add_history(src)
+        self.run_source(src)
+        self.prompt = ">>> "
+        self.executed.emit()
+
     def run_source(self, src: str) -> bool:
-        """Run one line (as typed); returns True when more input is needed."""
+        """Run one line (as typed) or a block of lines; returns True when more input is needed."""
+        if not self.console.buffer and self._is_block(src):
+            return self._exec_block(src)
         self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
         from ..assistant.scripts import capture
 
@@ -1339,6 +1362,24 @@ class ConsolePane(QWidget):
                 more = False
         return more
 
+    def _exec_block(self, src: str) -> bool:
+        """Run a pasted block in ``exec`` mode in the console's namespace, echoed line by line."""
+        from ..assistant.scripts import capture
+
+        self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
+        lines = src.strip("\n").split("\n")
+        self.write("".join(f"{'>>> ' if i == 0 else '... '}{ln}\n" for i, ln in enumerate(lines)))
+        with capture(_Stream(self.write)):
+            try:
+                exec(compile(src, "<console>", "exec"), self.console.locals)
+            except SystemExit as exc:
+                self.write(f"SystemExit: {exc.code}\n" if exc.code not in (None, 0) else "SystemExit\n")
+            except SyntaxError:
+                self.console.showsyntaxerror()
+            except BaseException:
+                self.console.showtraceback()
+        return False
+
     def _run(self) -> None:
         src = self.inp.text()
         self.inp.add_history(src)
@@ -1350,6 +1391,8 @@ class ConsolePane(QWidget):
 
 
 class _HistoryLine(QLineEdit):
+    block_pasted = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.history: list[str] = []
@@ -1360,8 +1403,22 @@ class _HistoryLine(QLineEdit):
             self.history.append(s)
         self.pos = len(self.history)
 
+    def insertFromMimeData(self, mime) -> None:
+        """A paste with a newline is a block: it runs at once instead of losing its line breaks."""
+        text = mime.text() if mime is not None and mime.hasText() else ""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" in text.strip("\n"):
+            self.block_pasted.emit(text)
+        elif text:
+            self.insert(text.strip("\n"))
+
     def keyPressEvent(self, ev: QKeyEvent) -> None:
-        if ev.key() == Qt.Key.Key_Up and self.history:
+        from PySide6.QtGui import QKeySequence
+        from PySide6.QtWidgets import QApplication
+
+        if ev.matches(QKeySequence.StandardKey.Paste):
+            self.insertFromMimeData(QApplication.clipboard().mimeData())
+        elif ev.key() == Qt.Key.Key_Up and self.history:
             self.pos = max(0, self.pos - 1)
             self.setText(self.history[self.pos])
         elif ev.key() == Qt.Key.Key_Down and self.history:
