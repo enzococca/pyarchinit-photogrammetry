@@ -22,7 +22,13 @@ PRODUCTS = {"point_cloud": "Nuvola densa", "model": "Modello", "dem": "DEM", "or
 PARAMS = {"point_cloud": "dense", "model": "model", "dem": "dem", "orthomosaic": "orthomosaic"}  # chunk.meta keys
 FILES = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif", "orthomosaic": "orthomosaic.tif"}
 # written again by a script: kept as a copy for *Annulla lo script*, never listed among the versions
-COPIED = ("tie_points", "normal_map", "reconstruction")
+COPIED = ("tie_points", "normal_map", "reconstruction", "tin")
+# files beside the file of a product of COPIED that go with it (kept, set aside and brought back together)
+SIDECARS = {"tin": ("tin.json",)}
+
+
+def _sidecars(product: str, path: Path) -> list[Path]:
+    return [path.parent / name for name in SIDECARS.get(product, ())]
 
 
 _translator = None  # the interface's: tr(text, *args); None in scripts and the command line (Italian)
@@ -382,6 +388,9 @@ def before_write(chunk, name: str) -> None:
         return
     vid = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     clone(path, chunk.data_dir / "versions" / product / vid / path.name)
+    for side in _sidecars(product, path):
+        if side.exists():
+            clone(side, chunk.data_dir / "versions" / product / vid / side.name)
     kept[product] = vid
 
 
@@ -401,6 +410,9 @@ def set_aside(chunk, product: str, vid: str, origin: str | None = None) -> dict 
     dst = chunk.data_dir / "versions" / product / vid / src.name
     dst.parent.mkdir(parents=True)
     _move_any(src, dst)
+    for side in _sidecars(product, src):
+        if side.exists():
+            _move_any(side, dst.parent / side.name)
     chunk.products.pop(product, None)
     return {"id": vid, "files": {product: str(dst.relative_to(chunk.data_dir))}, "origin": rel}
 
@@ -414,6 +426,9 @@ def bring_back(chunk, product: str, entry: dict) -> None:
         src = chunk.data_dir / entry["files"][product]
         dst = chunk.data_dir / entry["origin"]
         _move_any(src, dst)
+        for side in _sidecars(product, src):
+            if side.exists():
+                _move_any(side, dst.parent / side.name)
         chunk._set_product(product, dst)
     shutil.rmtree(chunk.data_dir / "versions" / product / entry["id"], ignore_errors=True)
 
@@ -421,8 +436,9 @@ def bring_back(chunk, product: str, entry: dict) -> None:
 def copied_entry(chunk, product: str, vid: str, origin: str) -> dict:
     """The entry of the copy :func:`before_write` made of a product of :data:`COPIED`, ``origin`` its place."""
     folder = chunk.data_dir / "versions" / product / vid
-    name = next(iter(sorted(p.name for p in folder.iterdir())), Path(origin).name) if folder.exists() else \
-        Path(origin).name
+    sides = {Path(n).name for n in SIDECARS.get(product, ())}
+    names = sorted(p.name for p in folder.iterdir() if p.name not in sides) if folder.exists() else []
+    name = Path(origin).name if origin and Path(origin).name in names else next(iter(names), Path(origin).name)
     return {"id": vid, "files": {product: str((folder / name).relative_to(chunk.data_dir))}, "origin": origin}
 
 

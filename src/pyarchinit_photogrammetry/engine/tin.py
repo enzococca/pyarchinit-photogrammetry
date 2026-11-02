@@ -687,6 +687,7 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
         info.update(_dem_error(tin, dem, spot_xyz, lines))
     tin.info = info
     folder = chunk.data_dir / FOLDER
+    chunk._before_product_write("tin")  # a script that builds it again can be undone (core.versions.COPIED)
     path = tin.save(folder)
     chunk._set_product("tin", path)
     chunk.meta["tin"] = {"file": str(path.relative_to(chunk.data_dir)), "source": source, "made": tin.made,

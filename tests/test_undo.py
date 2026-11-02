@@ -176,6 +176,37 @@ def test_script_entry_dropped(window):
     assert not aside.exists() and len(versions.versions(w.chunk, "dem")) == kept
 
 
+def test_a_tin_built_again_by_a_script_is_undone(window):
+    """The TIN (tin.npz and tin.json) written again by a script: Annulla puts the old files and meta back, Ripeti the
+    new ones."""
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    w, app = window
+    ch = w.chunk
+    T.build_tin(ch, source="dem", max_error=0.05)
+    w.doc.save()
+    w.history.reset()
+    folder = ch.data_dir / "tin"
+    old = {p.name: p.read_bytes() for p in folder.iterdir()}
+    old_meta = dict(ch.meta["tin"])
+    assert set(old) == {"tin.npz", "tin.json"}
+    assert w.run_script_source("from pyarchinit_photogrammetry.engine import tin as T\n"
+                               "T.build_tin(chunk, source='dem', max_error=0.01)", "TIN nuovo")
+    w.runner.wait()
+    app.processEvents()
+    new = {p.name: p.read_bytes() for p in folder.iterdir()}
+    new_meta = dict(w.chunk.meta["tin"])
+    assert new != old and new_meta["n_vertices"] != old_meta["n_vertices"]
+    w.undo()
+    ch = w.chunk
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == old and ch.meta["tin"] == old_meta
+    assert T.chunk_tin(ch).n_vertices == old_meta["n_vertices"]
+    w.redo()
+    ch = w.chunk
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == new and ch.meta["tin"] == new_meta
+    assert T.chunk_tin(ch).n_vertices == new_meta["n_vertices"]
+
+
 def test_versions_of_a_saved_script_are_kept_and_missing_ones_pruned(window, caplog):
     import pyarchinit_photogrammetry as ppg
     from pyarchinit_photogrammetry.core import versions
