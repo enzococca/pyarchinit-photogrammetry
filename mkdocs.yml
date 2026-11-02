@@ -79,6 +79,8 @@ plugins:
             Underwater: Subacqueo
             Landscape through time: Paesaggio nel tempo
             Shipwreck: Relitto
+            Architectural elements: Elementi architettonici
+            Masonry: Murature
             Guide: Guida
             Desktop interface: Interfaccia
             Menus: Menu
@@ -160,6 +162,8 @@ nav:
       - Underwater: plugins/underwater.md
       - Landscape through time: plugins/landscape.md
       - Shipwreck: plugins/shipwreck.md
+      - Architectural elements: plugins/architecture.md
+      - Masonry: plugins/masonry.md
   - Guide:
       - Desktop interface:
           - gui/index.md

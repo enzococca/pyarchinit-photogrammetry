@@ -719,6 +719,75 @@ def test_metashape_local_frame_with_components(tmp_path):
     assert np.allclose(moved.transform[:3, :3] @ moved.transform[:3, :3].T, np.eye(3), atol=1e-9)
 
 
+def test_metashape_dense_clouds_in_oc3_are_named_in_the_warnings(tmp_path):
+    """Metashape 2 keeps dense clouds as ``.oc3`` (an undocumented format, not read): the import
+    says so and what to do instead of leaving the chunk without its cloud in silence. The layout
+    is that of a real Metashape 2 project (a tower, three dense clouds): sibling ``<dense_cloud>``
+    elements in the frame, each ``dense_cloud.zip`` holding only a ``doc.xml`` that names the
+    ``dense_cloud.oc3`` lying beside the archive."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    frame_dir = psx.with_suffix(".files") / "0" / "0"
+    with zipfile.ZipFile(frame_dir / "frame.zip") as z:
+        xml = z.read("doc.xml").decode()
+    folders = ("dense_cloud", "dense_cloud.2", "dense_cloud.3")
+    clouds = "".join(f'<dense_cloud id="{i}" path="{f}/dense_cloud.zip"/>' for i, f in enumerate(folders))
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"{clouds}</frame>")})
+    for f in folders:
+        _zip(frame_dir / f / "dense_cloud.zip", {
+            "doc.xml": '<?xml version="1.0" encoding="UTF-8"?>\n<dense_cloud version="1.2.0"><tiles>'
+                       '<tile path="dense_cloud.oc3"><totalCount>69219109</totalCount>'
+                       '<validCount>21461552</validCount><pointCount class="0">21461552</pointCount>'
+                       '<hasPointColors>true</hasPointColors><hasPointNormals>true</hasPointNormals></tile>'
+                       '</tiles><params><dataType>uint8</dataType><bands><band label="Red"/><band label="Green"/>'
+                       '<band label="Blue"/></bands></params></dense_cloud>'})
+        (frame_dir / f / "dense_cloud.oc3").write_bytes(b"\x00" * 64)
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    warnings = ch.meta["import"]["warnings"]
+    oc3 = [w for w in warnings if ".oc3" in w]
+    assert len(oc3) == 1 and "3 nuvole di punti" in oc3[0]
+    assert "PLY o LAS" in oc3[0] and "Costruisci nuvola densa" in oc3[0]
+    assert len(ch.tie_points) == 1000 and len(ch.aligned_cameras) == 4  # the rest as before
+    # the project without them: no such warning
+    psx2, _, _ = make_psx(tmp_path / "plain", n_grid=5)
+    plain = ms.import_psx(psx2, tmp_path / "out2" / "p.ppg", with_model=False).chunk
+    assert not [w for w in plain.meta["import"]["warnings"] if "nuvole di punti" in w or "nuvola di punti" in w]
+
+
+def test_metashape_first_readable_dense_cloud_after_an_oc3_one(tmp_path):
+    """The first dense cloud of the frame is ``.oc3``, the second PLY parts: the PLY one is
+    imported and the ``.oc3`` one named in the warnings."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    frame_dir = psx.with_suffix(".files") / "0" / "0"
+    with zipfile.ZipFile(frame_dir / "frame.zip") as z:
+        xml = z.read("doc.xml").decode()
+    clouds = ('<dense_cloud id="0" path="dense_cloud/dense_cloud.zip"/>'
+              '<dense_cloud id="1" path="dense_cloud.2/dense_cloud.zip"/>')
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"{clouds}</frame>")})
+    _zip(frame_dir / "dense_cloud" / "dense_cloud.zip", {
+        "doc.xml": '<dense_cloud version="1.2.0"><tiles><tile path="dense_cloud.oc3">'
+                   '<totalCount>500</totalCount></tile></tiles></dense_cloud>'})
+    (frame_dir / "dense_cloud" / "dense_cloud.oc3").write_bytes(b"\x00" * 64)
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    pts = np.zeros(300, dtype=fields)
+    rng = np.random.default_rng(1)
+    pts["x"], pts["y"] = rng.uniform(-50, 50, 300), rng.uniform(-50, 50, 300)
+    pts["red"] = 90
+    _zip(frame_dir / "dense_cloud.2" / "dense_cloud.zip", {
+        "doc.xml": '<dense_cloud version="1.2.0"><points component_id="0" path="points0.ply" count="300"/>'
+                   '</dense_cloud>',
+        "points0.ply": _ply_bytes(fields, pts)})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert len(ch.point_cloud) == 300 and ch.meta["point_cloud_source"] == "nuvola densa Metashape"
+    assert (ch.point_cloud.rgb[:, 0] == 90).all()
+    oc3 = [w for w in ch.meta["import"]["warnings"] if ".oc3" in w]
+    assert len(oc3) == 1 and "1 nuvola di punti" in oc3[0]
+    assert len(ch.tie_points) == 1000
+
+
 def test_metashape_transform_with_the_scale_alone():
     """A chunk in local coordinates scaled by scale bars: Metashape writes the scale alone, no
     rotation or translation; it was dropped and such projects came in many times too large."""
