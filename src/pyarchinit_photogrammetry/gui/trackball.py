@@ -184,10 +184,12 @@ class Trackball:
         self.canvas.set_cam(cam)
 
     def zoom(self, steps: float, x: float | None = None, y: float | None = None, dolly: bool = False) -> None:
-        """Zoom by ``steps`` notches toward the point under (x, y): camera and pivot move toward
-        the point of the cursor's line of sight at the pivot's depth, by the zoom factor, so the
-        pivot keeps its place on the screen. ``dolly``: the camera moves along its line of sight
-        and the pivot stays where it is."""
+        """Zoom by ``steps`` notches toward the cursor ("zoom to cursor"). With ``c`` the point of the
+        cursor's line of sight at the pivot's depth, the camera slides along that line toward ``c``
+        and the pivot toward ``c``, both by the zoom factor: the point under the cursor stays under
+        it and the pivot keeps its place on the screen (the brief's "the pivot slides along the
+        cursor's ray by the zoom factor" read this way). ``dolly``: the camera moves along its own
+        line of sight and the pivot stays where it is."""
         k = ZOOM_STEP ** steps
         cam = self.canvas.get_cam()
         p = self._pivot(cam)
@@ -272,7 +274,12 @@ class Trackball:
             a = geo["rings"][ring][0]
             ac = R @ a
             p0, p1 = v0 - (v0 @ ac) * ac, v1 - (v1 @ ac) * ac
-            if np.linalg.norm(p0) < 1e-9 or np.linalg.norm(p1) < 1e-9:
+            # near the projection of the axis the angle is undefined: wait for the cursor to leave it
+            # (the vectors are on the unit sphere: 0.05 = 5 % of the radius)
+            if np.linalg.norm(p1) < 0.05:  # the angle is measured again from the last good point
+                self._drag = (what, ring, x0, y0)
+                return True
+            if np.linalg.norm(p0) < 0.05:  # started on the axis: the next movement starts from here
                 return True
             angle = float(np.arctan2(np.cross(p0, p1) @ ac, p0 @ p1))
             self.turn(a, angle)

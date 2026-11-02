@@ -179,6 +179,8 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
     def top_view(self) -> None:
         self.cam.pitch = 89.5
         self.cam.yaw = -90.0
+        self.cam.target = self.sd.center.astype(float)
+        self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
 
@@ -446,6 +448,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
     a constant size on the screen before every render."""
 
     pivot_requested = Signal(float, float)
+    TB_ALPHA = {"back": 90, "outline": 150, "cross": 230}  # of 255, as the software canvas draws them
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -477,7 +480,25 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             self._tb_renderer.AddActor(actor)
         self._style = _trackball_style(self)
         self.plotter.iren.interactor.SetInteractorStyle(self._style)
+        # pyvista's own keys (Up/Down zoom, +/- point size, q closes, v, b, C...) would act beside the trackball's
+        self.plotter.iren.clear_key_event_callbacks()
+        # Shift+wheel: macOS turns the wheel sideways and QVTKRenderWindowInteractor reads only the vertical delta
+        self.plotter.interactor.installEventFilter(self)
         self.plotter.renderer.AddObserver("StartEvent", lambda *_a: self._update_trackball_actors())
+
+    def eventFilter(self, obj, ev) -> bool:
+        from PySide6.QtCore import QEvent
+
+        if (obj is self.plotter.interactor and ev.type() == QEvent.Type.Wheel
+                and ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            delta = ev.angleDelta()
+            steps = (delta.y() or delta.x()) / 120.0
+            if steps:
+                pos = ev.position()
+                self.trackball.zoom(steps, pos.x(), pos.y(), dolly=True)
+                self._mouse_seen()
+            return True
+        return super().eventFilter(obj, ev)
 
     # ----------------------------------------------------------- trackball
     def get_cam(self) -> OrbitCamera:
@@ -505,7 +526,9 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
 
         actors = {}
-        for name, rgb in {**RING_COLOURS, "outline": OUTLINE_COLOUR, "cross": (255, 255, 255)}.items():
+        colours = {**RING_COLOURS, **{f"{k}_back": v for k, v in RING_COLOURS.items()}, "outline": OUTLINE_COLOUR,
+                   "cross": (255, 255, 255)}
+        for name, rgb in colours.items():
             poly = vtkPolyData()
             poly.SetPoints(vtkPoints())
             poly.SetLines(vtkCellArray())
@@ -530,31 +553,35 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         self._tb_drawn = self._trackball_state()
         op = self.trackball.opacity()
         show = op > 0 and (self.sd.points is not None or self.sd.mesh_vertices is not None or bool(self.sd.cameras))
-        for actor, _poly in self._tb_actors.values():
+        for name, (actor, _poly) in self._tb_actors.items():
             actor.SetVisibility(show)
-            actor.GetProperty().SetOpacity(op)
+            actor.GetProperty().SetOpacity(op * self.TB_ALPHA.get(name.split("_")[-1], 220) / 255)
         if not show:
             return
         cam = self.get_cam()
         geo = self.trackball.geometry(cam)
         R, p, rw = cam.basis(), self.trackball.pivot, geo["world_radius"]
         t = np.linspace(0, 2 * np.pi, 96, endpoint=False)
-        loops = {name: ring[1] for name, ring in geo["rings"].items()}
-        loops["outline"] = p + rw * (np.outer(np.cos(t), R[0]) + np.outer(np.sin(t), R[1]))
+        n = len(t)
+        seg = np.arange(n)
+        shapes = {}  # actor -> (points, first vertex of each segment)
+        for name, (_a, flat, _xy, _ok, front) in geo["rings"].items():
+            shapes[name] = (flat, seg[front])  # the half on the viewer's side, then the dimmer one behind
+            shapes[f"{name}_back"] = (flat, seg[~front])
+        shapes["outline"] = (p + rw * (np.outer(np.cos(t), R[0]) + np.outer(np.sin(t), R[1])), seg)
         k = rw / geo["radius"] * 6  # six pixels
         cross = np.array([p - R[0] * k, p + R[0] * k, p - R[1] * k, p + R[1] * k])
         for name, (actor, poly) in self._tb_actors.items():
             if name == "cross":
                 pts, cells = cross, np.array([2, 0, 1, 2, 2, 3])
             else:
-                pts = loops[name]
-                n = len(pts)
-                cells = np.column_stack([np.full(n, 2), np.arange(n), (np.arange(n) + 1) % n]).ravel()
+                pts, first = shapes[name]
+                cells = np.column_stack([np.full(len(first), 2), first, (first + 1) % len(pts)]).ravel()
             poly.GetPoints().SetData(numpy_to_vtk(np.ascontiguousarray(pts, np.float64), deep=True))
             lines = poly.GetLines()
             lines.SetCells(len(cells) // 3, numpy_to_vtkIdTypeArray(cells.astype(np.int64), deep=True))
             poly.Modified()
-            actor.GetProperty().SetLineWidth(2.6 if name == self.trackball.hover else 1.5)
+            actor.GetProperty().SetLineWidth(2.6 if name.split("_")[0] == self.trackball.hover else 1.5)
 
     def set_point_size(self, px: float) -> None:
         self.point_size = float(px)
@@ -637,6 +664,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         c, up = self.sd.center, self.sd.up
         self.plotter.camera_position = [tuple(c + up * self.sd.extent * 1.2), tuple(c), (0, 1, 0)]
         self.plotter.reset_camera()
+        self.trackball.pivot = None  # back to the middle of the scene (the focal point)
         self.plotter.render()
 
     def grab_array(self) -> np.ndarray:
@@ -928,7 +956,7 @@ class ModelView(QWidget):
         self.b_trackball = QPushButton(_icon("trackball"), "Trackball")
         self.b_trackball.setToolTip(tr("La sfera di rotazione: trascina dentro per ruotare liberamente, su un anello "
                                        "per ruotare intorno al suo asse, fuori per girare intorno alla linea di "
-                                       "vista; tasto destro o centrale sposta, la rotella avvicina verso il "
+                                       "vista; tasto destro o centrale (o Maiusc+trascina) sposta, la rotella avvicina verso il "
                                        "cursore (Maiusc+rotella senza spostare il centro), doppio clic sceglie il "
                                        "centro di rotazione. Tasti: frecce ruotano di 15 gradi, Maiusc+frecce "
                                        "spostano, + e - avvicinano, Home vista iniziale, T dall'alto, F di fronte, "

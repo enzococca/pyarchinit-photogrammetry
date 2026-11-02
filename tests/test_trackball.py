@@ -311,7 +311,8 @@ def test_vtk_trackball(app, monkeypatch):
     c.set_trackball_mode("always")
     c._update_trackball_actors()  # what happens before every render
     actor, poly = c._tb_actors["up"]
-    assert actor.GetVisibility() and poly.GetNumberOfPoints() == 96 and poly.GetNumberOfLines() == 96
+    assert actor.GetVisibility() and poly.GetNumberOfPoints() == 96
+    assert poly.GetNumberOfLines() + c._tb_actors["up_back"][1].GetNumberOfLines() == 96  # front and back halves
     x, y, _z, _ok = cam.project(np.array([poly.GetPoint(i) for i in range(96)]), *c.view_size())
     r = np.hypot(x - pivot_before[0], y - pivot_before[1])
     assert r.max() == pytest.approx(0.4 * min(c.view_size()), rel=0.05)  # 40 % of the short side
@@ -338,4 +339,82 @@ def test_vtk_trackball(app, monkeypatch):
     assert c.get_cam().distance == pytest.approx(d * 0.88)
     event("LeftButtonPressEvent", 100, 100, repeat=1)
     assert len(got) == 1
+    c.close()
+
+
+def test_ring_drag_near_the_axis_does_not_jump(canvas):
+    """Seen from above the horizontal ring's axis points at the viewer: around its projection the
+    angle is undefined and the camera waits for the cursor to leave it."""
+    c = canvas
+    tb = c.trackball
+    c.top_view()
+    geo = tb.geometry()
+    cx, cy = geo["centre"]
+    xy = geo["rings"]["up"][2]
+    start = xy[int(np.argmax(xy[:, 1]))]
+    assert tb.hit(*start) == ("ring", "up")
+    tb.press(*start, "rotate")
+    tb.move(start[0] + 5, start[1])
+    R0 = c.cam.basis()
+    tb.move(cx + 1, cy + 1)  # onto the axis
+    assert np.allclose(c.cam.basis(), R0)
+    tb.move(cx - 1, cy + 2)  # around it, still within 5 % of the radius
+    assert np.allclose(c.cam.basis(), R0)
+    tb.release()
+
+
+def test_top_view_puts_the_pivot_back_in_the_middle(canvas):
+    c = canvas
+    c.trackball.set_pivot([1.0, 1.0, 0.0])
+    _drag(c, [(100, 100), (160, 120)], kind="pan")
+    c.top_view()
+    assert np.allclose(c.pivot(), c.sd.center)
+    assert np.allclose(_screen(c, c.pivot()), np.array(c.view_size()) / 2)
+
+
+def test_vtk_keys_and_wheel_are_the_trackball_s_only(app, monkeypatch):
+    """pyvista's own keys never act beside the trackball's, Shift+wheel sideways (macOS) dollies, and
+    the back half of the rings is a dimmer actor of its own."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry.gui import model_view as mvm
+
+    monkeypatch.setenv("PPG_RENDERER", "vtk")
+    if os.environ.get("PPG_TEST_VTK") != "1":
+        pytest.skip("VTK canvas: opt-in with PPG_TEST_VTK=1 (a QtInteractor without an OpenGL context may "
+                    "crash on some platforms)")
+    if not mvm._vtk_usable():
+        pytest.skip("VTK is not usable here")
+    c = mvm.VtkCanvas()
+    c.resize(400, 300)
+    c.show()
+    app.processEvents()
+    c.set_scene(_scene())
+    iren = c.plotter.iren.interactor
+    vcam = c.plotter.renderer.GetActiveCamera()
+    for sym in ("Up", "Down", "plus", "minus", "q", "v", "b", "C"):
+        angle, size = vcam.GetViewAngle(), c._cloud_actor.GetProperty().GetPointSize()
+        iren.SetKeySym(sym)
+        iren.InvokeEvent("KeyPressEvent")
+        assert vcam.GetViewAngle() == pytest.approx(angle), sym
+        assert c._cloud_actor.GetProperty().GetPointSize() == pytest.approx(size), sym
+    assert not getattr(c.plotter, "_closed", False)
+    d, p = c.get_cam().distance, c.pivot()
+    iren.SetKeySym("plus")
+    iren.InvokeEvent("KeyPressEvent")
+    assert c.get_cam().distance == pytest.approx(d * 0.88)  # the trackball's own zoom
+    d = c.get_cam().distance
+    ev = QWheelEvent(QPointF(50, 50), QPointF(50, 50), QPoint(0, 0), QPoint(120, 0), Qt.MouseButton.NoButton,
+                     Qt.KeyboardModifier.ShiftModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(c.plotter.interactor, ev)
+    assert c.get_cam().distance == pytest.approx(d * 0.88)
+    assert np.allclose(c.pivot(), p)  # a dolly: the pivot stays where it is
+    c.set_trackball_mode("always")
+    c._update_trackball_actors()
+    front, back = c._tb_actors["up"], c._tb_actors["up_back"]
+    assert front[1].GetNumberOfLines() + back[1].GetNumberOfLines() == 96
+    assert 0 < back[1].GetNumberOfLines() < 96
+    assert back[0].GetProperty().GetOpacity() < front[0].GetProperty().GetOpacity()
     c.close()
