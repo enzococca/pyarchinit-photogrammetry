@@ -719,6 +719,33 @@ def test_metashape_local_frame_with_components(tmp_path):
     assert np.allclose(moved.transform[:3, :3] @ moved.transform[:3, :3].T, np.eye(3), atol=1e-9)
 
 
+def test_metashape_dense_clouds_in_oc3_are_named_in_the_warnings(tmp_path):
+    """Metashape 2 keeps dense clouds as ``.oc3`` (an undocumented format, not read): the import
+    says so and what to do instead of leaving the chunk without its cloud in silence."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    frame_dir = psx.with_suffix(".files") / "0" / "0"
+    with zipfile.ZipFile(frame_dir / "frame.zip") as z:
+        xml = z.read("doc.xml").decode()
+    clouds = "".join(f'<point_cloud key="{k}" path="point_cloud.{k}/point_cloud.zip"/>' for k in (1, 2))
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"<point_clouds>{clouds}</point_clouds></frame>")})
+    for k in (1, 2):
+        _zip(frame_dir / f"point_cloud.{k}" / "point_cloud.zip", {
+            "doc.xml": '<point_cloud version="2.0.0"><points path="points0.oc3" count="23000000"/></point_cloud>',
+            "points0.oc3": b"\x00" * 64})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    warnings = ch.meta["import"]["warnings"]
+    oc3 = [w for w in warnings if ".oc3" in w]
+    assert len(oc3) == 1 and "2 nuvole di punti" in oc3[0]
+    assert "PLY o LAS" in oc3[0] and "Costruisci nuvola densa" in oc3[0]
+    assert len(ch.tie_points) == 1000 and len(ch.aligned_cameras) == 4  # the rest as before
+    # the project without them: no such warning
+    psx2, _, _ = make_psx(tmp_path / "plain", n_grid=5)
+    plain = ms.import_psx(psx2, tmp_path / "out2" / "p.ppg", with_model=False).chunk
+    assert not [w for w in plain.meta["import"]["warnings"] if "nuvole di punti" in w or "nuvola di punti" in w]
+
+
 def test_metashape_transform_with_the_scale_alone():
     """A chunk in local coordinates scaled by scale bars: Metashape writes the scale alone, no
     rotation or translation; it was dropped and such projects came in many times too large."""

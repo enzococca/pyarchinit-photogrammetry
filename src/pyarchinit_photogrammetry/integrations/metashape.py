@@ -97,6 +97,7 @@ class MsChunk:
     components: dict[int, np.ndarray] = field(default_factory=dict)  # alignment component -> world (4x4)
     scalebars: list[MsScaleBar] = field(default_factory=list)
     settings: dict[str, float] = field(default_factory=dict)  # reference settings (accuracy_markers, ...)
+    cloud_paths: list[str] = field(default_factory=list)  # every point cloud archive the frame lists
 
     def component_transform(self, cid: int | None) -> np.ndarray:
         """Frame of a camera or point part: its component's transform, else the chunk's."""
@@ -231,6 +232,10 @@ def read_psx(psx: str | os.PathLike) -> list[MsChunk]:
                     el = None if group is None else next((e for e in group if e.get("path")), None)
                 if el is not None and el.get("path"):
                     ch.frame_paths[tag] = el.get("path")
+            for tag in ("tie_points", "point_cloud", "dense_cloud"):  # all of them, also several in a group
+                for el in fdoc.findall(tag) + fdoc.findall(f"{tag}s/*"):
+                    if el.get("path") and el.get("path") not in ch.cloud_paths:
+                        ch.cloud_paths.append(el.get("path"))
         chunks.append(ch)
     return chunks
 
@@ -399,6 +404,45 @@ def _read_clouds(ch: MsChunk):
         elif not is_tie and dense is None:
             dense = parts
     return tie, dense, skipped
+
+
+def _cloud_format(path: Path) -> str | None:
+    """The format of a point cloud archive this importer does not read (``".oc3"``: the point
+    cloud of Metashape 2), None when it holds the PLY parts read by :func:`_cloud_parts` or
+    cannot be opened (a missing or damaged archive is not a question of format)."""
+    if not path.is_file():
+        return None
+    if not zipfile.is_zipfile(path):
+        return path.suffix.lower() or path.name
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = [n for n in z.namelist() if not n.endswith("/")]
+    except (OSError, zipfile.BadZipFile):
+        return None
+    if any(re.fullmatch(r"points\d*\.ply", Path(n).name) for n in names):
+        return None
+    data = sorted({Path(n).suffix.lower() for n in names if Path(n).name != "doc.xml" and Path(n).suffix})
+    return ", ".join(data) or None
+
+
+def _unread_clouds(ch: MsChunk) -> list[str]:
+    """Warnings for the point clouds of the frame stored in a format the import does not read
+    (Metashape 2 keeps the dense cloud as ``.oc3``, an undocumented format): the chunk would
+    otherwise come without its dense cloud and without a word on why."""
+    if ch.frame_dir is None:
+        return []
+    found: dict[str, int] = {}
+    for rel in ch.cloud_paths:
+        fmt = _cloud_format(ch.frame_dir / rel)
+        if fmt:
+            found[fmt] = found.get(fmt, 0) + 1
+    out = []
+    for fmt, n in found.items():
+        what = "1 nuvola di punti" if n == 1 else f"{n} nuvole di punti"
+        out.append(f"{ch.label}: {what} in formato {fmt} non importat{'a' if n == 1 else 'e'} (formato di "
+                   "Metashape non leggibile): esporta la nuvola da Metashape in PLY o LAS e importala, oppure "
+                   "usa Costruisci nuvola densa")
+    return out
 
 
 def _merge_parts(parts, convert, max_points: int | None = None):
@@ -873,6 +917,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
         tie_parts, dense_parts, lost = _read_clouds(mc)
         if lost:
             warnings.append(f"{mc.label}: {lost} punti di legame di componenti non più presenti nel progetto ignorati")
+        warnings += _unread_clouds(mc)
 
         def comp_key(cid):
             return cid if cid in mc.components else None
