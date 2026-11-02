@@ -206,6 +206,7 @@ aggiunge ai disegni di quel prospetto, e `window.selected_polygon()` è la selez
 in `window.units`, `window.quote` e `window.probe_points` qualunque cosa sia mostrata; quelli del prospetto mostrato
 sono in `window.frame_units`, `window.frame_quote` e `window.frame_points` (`window.drawings_frame` è il suo id, None
 sulla pianta). `engine.elevation.world_of(entry, u, v, None, chunk=chunk)` dà il punto nel mondo di una posizione lì.
+`show_frame` riporta la vista sulla pianta: dopo, le richieste e `add_units` lavorano di nuovo nelle coordinate del chunk.
 
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
