@@ -134,11 +134,11 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
         raise ValueError("the area does not cover any cell of the DEM")
     ring = ndimage.binary_dilation(inside, iterations=RING) & ~inside & valid
     known = np.column_stack([x[ring], y[ring], z[ring]])
+    extra: list[np.ndarray] = []
     breaklines = list(breaklines or [])
     if lines == "drawn":
         breaklines += drawn_lines(chunk, geom, res)
     if breaklines:
-        extra = []
         with rasterio.open(src_path) as src:
             for line in breaklines:
                 ln = np.asarray(line, np.float64)
@@ -155,6 +155,17 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     znew = new_heights(known, np.column_stack([x[inside], y[inside]]), method, value)
     z_out = z.copy()
     z_out[inside] = znew
+    # the cells a break line crosses take its heights: the interpolation alone does not hold them (on a grid of
+    # known cells the triangulation of the linear method is ambiguous, and Qhull resolves it differently from one
+    # platform to another; the plane, IDW and constant methods smooth them away)
+    for ln in extra:
+        fine = _densify(ln, res / 2)
+        cc = np.floor((fine[:, 0] - t.c) / t.a).astype(np.int64) - c0
+        rr = np.floor((fine[:, 1] - t.f) / t.e).astype(np.int64) - r0
+        ok = (rr >= 0) & (rr < z.shape[0]) & (cc >= 0) & (cc < z.shape[1])
+        rr, cc, zz = rr[ok], cc[ok], fine[ok, 2]
+        on = inside[rr, cc]
+        z_out[rr[on], cc[on]] = zz[on]
     kept = None
     chunk._before_product_write("dem")
     if keep_version:  # the DEM as it was stays among the versions, under its name
@@ -184,7 +195,7 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
             with rasterio.open(own, "r+") as dst:
                 dst.build_overviews(factors, Resampling.average)
     had = valid[inside]  # cells that had a height: how much they changed
-    dz = znew[had] - z[inside][had]
+    dz = z_out[inside][had] - z[inside][had]
     info = {"cells": int(inside.sum()), "method": method, "value": value,
             "dz_mean": float(np.mean(dz)) if len(dz) else 0.0, "dz_max": float(np.max(np.abs(dz))) if len(dz) else 0.0,
             "version": kept["id"] if kept else None, "lines": len(breaklines)}

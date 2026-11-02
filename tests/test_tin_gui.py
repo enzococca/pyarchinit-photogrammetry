@@ -205,7 +205,8 @@ def test_dem_edit_keeps_the_drawn_lines(trench):
 
     w, _app, _mw = trench
     ch = w.chunk
-    ridge = breaklines.new_record("breakline", [(X0 + 2.0, Y0 + 3.0, 101.0), (X0 + 4.0, Y0 + 3.0, 101.0)])
+    # on the centres of a row of cells (the DEM of the fixture has 2 cm cells from Y0 + 6): the cells it crosses
+    ridge = breaklines.new_record("breakline", [(X0 + 2.0, Y0 + 3.01, 101.0), (X0 + 4.0, Y0 + 3.01, 101.0)])
     ch.meta.setdefault("drawings", {})["lines"] = [ridge]
     area = box(X0 + 2.0, Y0 + 2.0, X0 + 4.0, Y0 + 4.0)
     plain = dem_edit.fill_area(ch, area, "linear", keep_version=False)
@@ -213,8 +214,10 @@ def test_dem_edit_keeps_the_drawn_lines(trench):
     info = dem_edit.fill_area(ch, area, "linear", keep_version=False, lines="drawn")
     assert info["lines"] == 1
     with rasterio.open(ch.dem_path) as src:
-        z = float(next(src.sample([(X0 + 3.0, Y0 + 3.0)]))[0])
-    assert z == pytest.approx(101.0, abs=0.05)  # on the ridge, not on the plane of the ground around
+        z = np.array([float(v[0]) for v in src.sample([(X0 + x, Y0 + 3.01) for x in (2.21, 2.71, 3.01, 3.51, 3.91)])])
+        off = float(next(src.sample([(X0 + 3.01, Y0 + 2.51)]))[0])
+    assert z == pytest.approx(101.0, abs=1e-4)  # the cells on the ridge have its height, whatever the triangulation
+    assert 99.9 < off < 101.0  # half a metre away: between the ridge and the ground around
 
 
 def test_old_project_without_lines_opens_unchanged(trench):
