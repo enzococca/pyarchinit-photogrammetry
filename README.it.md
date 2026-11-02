@@ -214,6 +214,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   *Strumenti > Plugin* o con `ppg plugins install` dal
   [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins); come scriverne
   uno: [plugins.md](docs/plugins.md).
+* **Assistente** (*Strumenti > Assistente*): domande sul progetto e sul programma con le risposte dalla guida e dal
+  progetto, script Python eseguiti con un clic e annullati in un solo passo; un modello locale di base, Claude o
+  OpenAI senza che niente di privato esca dal computer ([assistant.it.md](docs/gui/assistant.it.md)).
 * **Esportazioni per il web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
   (COPC), glTF binario con la texture, Cesium 3D Tiles del modello posizionato sul globo, pacchetti di
   scena I3S (`.slpk`) del modello con la texture per ArcGIS Pro, ArcGIS Online e CesiumJS, modelli

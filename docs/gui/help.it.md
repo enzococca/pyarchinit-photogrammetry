@@ -63,6 +63,31 @@ Quando c'è una versione più nuova una finestra mostra le sue note e propone:
 Dalla riga di comando `ppg update` dice se c'è una versione più nuova e `ppg update --download` scarica l'installatore del
 sistema.
 
+## Le chiavi dell'assistente e il portachiavi
+
+L'[assistente](assistant.md#impostazioni) ha bisogno di una chiave solo per Claude o OpenAI; un modello locale non
+ne ha bisogno. La chiave si legge prima dall'ambiente - `ANTHROPIC_API_KEY` per Claude, `OPENAI_API_KEY` per
+OpenAI - e altrimenti dal portachiavi del sistema, dove la mette *Salva nel portachiavi* nelle impostazioni
+dell'assistente e da dove la toglie *Dimentica*. Non viene mai scritta nelle impostazioni, nel progetto o nel log.
+
+| Sistema | Dove sta la chiave |
+| --- | --- |
+| macOS | l'applicazione *Accesso Portachiavi*, portachiavi login |
+| Windows | *Gestione credenziali*, credenziali di Windows |
+| Linux | il Secret Service del desktop (GNOME Keyring, KWallet) |
+
+La voce ha il servizio `pyarchinit-photogrammetry` e l'account `claude` o `openai`: si può guardare o cancellare
+anche lì. L'applicazione desktop contiene la libreria che parla con il portachiavi (keyring) e l'SDK di Claude;
+un'installazione con pip li prende con l'extra `assistant` (che è anche in `gui` e in `all`):
+
+```bash
+pip install "pyarchinit-photogrammetry[assistant]"
+```
+
+Senza un portachiavi - per esempio su un server Linux senza sessione desktop - *Salva nel portachiavi* dice che la
+chiave non può essere conservata: in quel caso si imposta la variabile d'ambiente prima di avviare il programma.
+Una chiave nell'ambiente vale più di quella nel portachiavi, e *Dimentica* non tocca l'ambiente.
+
 ## Note di robustezza
 
 * Le foto tenute "solo online" da Dropbox, iCloud o OneDrive sono file segnaposto vuoti: il passo della nuvola densa le

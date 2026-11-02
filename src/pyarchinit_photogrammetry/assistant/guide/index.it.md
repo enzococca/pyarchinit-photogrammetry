@@ -62,6 +62,8 @@ Python sullo stesso motore, che gira sulla CPU (anche Apple Silicon). Licenza GP
   pietre ed elementi con SAM.
 * **Scambio**: PyArchInit (SQLite/SpatiaLite e PostgreSQL/PostGIS), QGIS dal vivo, QField, IFC 4,
   scene I3S, COPC, 3D Tiles, glTF; importazione di progetti Metashape, WebODM e Photo3D.
+* **[Assistente](gui/assistant.md)**: domande sul progetto e sul programma, e script eseguiti con un clic e annullati
+  in un solo passo - un modello locale di base, Claude o OpenAI senza che niente di privato esca dal computer.
 
 ## Stato
 

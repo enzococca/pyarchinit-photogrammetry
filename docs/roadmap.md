@@ -251,12 +251,13 @@ on the public WorldView-3 datasets.
 
 ## Next
 
-**1.7.0** - the assistant (explanations of the results, how to do things, Python scripts run with one click and
-undone as one step; a local model by default, Claude or OpenAI as alternatives, nothing private leaving the
-computer), three functions of the program (the region on three markers, the normal map on the orthomosaic's grid,
-a chunk duplicated with chosen photos) and a **TIN** in the native core: a constrained Delaunay surface from spot
-heights and break lines (edges, foot of slopes, walls), with its contour lines and volumes - the surface a
-surveyor expects next to the DEM grid.
+**1.7.0** - done: the **assistant** (explanations of the results, how to do things, Python scripts run with one
+click and undone as one step; a local model by default, Claude or OpenAI as alternatives, nothing private leaving
+the computer; see [The assistant](gui/assistant.md), with the evaluation of the models) and three functions of the
+program (the region on three markers, the normal map on the orthomosaic's grid, a chunk duplicated with chosen
+photos). Still to come in 1.7.0: a **TIN** in the native core - a constrained Delaunay surface from spot heights
+and break lines (edges, foot of slopes, walls), with its contour lines and volumes, the surface a surveyor expects
+next to the DEM grid. **Flight plans**, as a plugin, stay planned.
 
 New plugins, in this order:
 

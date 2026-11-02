@@ -251,12 +251,13 @@ dataset pubblici WorldView-3.
 
 ## Prossimi passi
 
-**1.7.0** - l'assistente (spiegazioni dei risultati, come si fanno le cose, script Python eseguiti con un clic e
-annullati in un solo passo; un modello locale di base, Claude o OpenAI in alternativa, niente di privato che esca
-dal computer), tre funzioni del programma (la regione su tre marker, la mappa delle normali sulla griglia
-dell'ortofoto, un chunk duplicato con le foto scelte) e un **TIN** nel nucleo nativo: una superficie di Delaunay
-vincolata da quote e linee di rottura (cigli, piedi di scarpata, muri), con le sue curve di livello e i volumi - la
-superficie che il topografo si aspetta accanto alla griglia del DEM.
+**1.7.0** - fatto: l'**assistente** (spiegazioni dei risultati, come si fanno le cose, script Python eseguiti con un
+clic e annullati in un solo passo; un modello locale di base, Claude o OpenAI in alternativa, niente di privato che
+esca dal computer; vedi [L'assistente](gui/assistant.md), con la valutazione dei modelli) e tre funzioni del
+programma (la regione su tre marker, la mappa delle normali sulla griglia dell'ortofoto, un chunk duplicato con le
+foto scelte). Ancora da fare nella 1.7.0: un **TIN** nel nucleo nativo - una superficie di Delaunay vincolata da
+quote e linee di rottura (cigli, piedi di scarpata, muri), con le sue curve di livello e i volumi, la superficie che
+il topografo si aspetta accanto alla griglia del DEM. I **piani di volo**, come plugin, restano in programma.
 
 Plugin nuovi, in quest'ordine:
 

@@ -63,6 +63,31 @@ When a newer version exists a window shows its notes and offers:
 From the command line `ppg update` tells whether a newer version exists and `ppg update --download` fetches the
 installer of the system.
 
+## The keys of the assistant and the keychain
+
+The [assistant](assistant.md#settings) needs a key only for Claude or OpenAI; a local model needs none. A key is
+read from the environment first - `ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for OpenAI - and otherwise
+from the keychain of the system, where *Save in the keychain* in the settings of the assistant puts it and
+*Forget* removes it. It is never written in the settings, in the project or in the log.
+
+| System | Where the key is kept |
+| --- | --- |
+| macOS | the *Keychain Access* application, login keychain |
+| Windows | *Credential Manager*, Windows credentials |
+| Linux | the Secret Service of the desktop (GNOME Keyring, KWallet) |
+
+The entry has the service `pyarchinit-photogrammetry` and the account `claude` or `openai`: it can also be looked
+at or deleted there. The desktop application carries the library that talks to the keychain (keyring) and the
+Claude SDK; a pip installation gets them with the `assistant` extra (also in `gui` and `all`):
+
+```bash
+pip install "pyarchinit-photogrammetry[assistant]"
+```
+
+Without a keychain - a Linux server without a desktop session, for example - *Save in the keychain* says that the
+key cannot be kept: set the environment variable before starting the program instead. A key in the environment
+wins over the one in the keychain, and *Forget* does not touch the environment.
+
 ## Robustness notes
 
 * Photos kept "online only" by Dropbox, iCloud or OneDrive are empty placeholder files: the dense cloud step lists them

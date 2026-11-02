@@ -61,6 +61,8 @@ library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0
   profiles from a turntable, stones and features with SAM.
 * **Exchange**: PyArchInit (SQLite/SpatiaLite and PostgreSQL/PostGIS), QGIS live, QField, IFC 4,
   I3S scene layers, COPC, 3D Tiles, glTF; projects of Metashape, WebODM and Photo3D imported.
+* **[Assistant](gui/assistant.md)**: questions about the project and the program, and scripts for it run with one click
+  and undone in one step - a local model by default, Claude or OpenAI with nothing private leaving the computer.
 
 ## Status
 
