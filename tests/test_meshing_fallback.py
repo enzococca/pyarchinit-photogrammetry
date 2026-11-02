@@ -89,3 +89,29 @@ def test_poisson_budget_from_the_memory_and_its_override(monkeypatch):
 def test_physical_memory_is_known_here():
     ram = meshing.physical_memory()
     assert ram is None or ram > 1 << 28
+
+
+def test_physical_memory_on_windows_from_kernel32(monkeypatch):
+    """Windows has no ``sysconf`` and psutil is optional: ``GlobalMemoryStatusEx`` of kernel32
+    (here a stand-in that fills the structure as Windows does)."""
+    import ctypes
+    import sys
+    import types
+
+    calls = []
+
+    def status_ex(ref):
+        status = ref._obj
+        calls.append(status.dwLength)
+        status.ullTotalPhys = 32 * 1024 ** 3
+        return 1
+
+    if sys.platform != "win32":
+        fake = types.SimpleNamespace(kernel32=types.SimpleNamespace(GlobalMemoryStatusEx=status_ex))
+        monkeypatch.setattr(ctypes, "windll", fake, raising=False)
+        monkeypatch.setattr(meshing, "sys", types.SimpleNamespace(platform="win32"))
+        monkeypatch.setitem(sys.modules, "psutil", None)  # not installed
+        assert meshing.physical_memory() == 32 * 1024 ** 3
+        assert calls == [64]  # dwLength = sizeof(MEMORYSTATUSEX)
+    else:  # the real call
+        assert meshing._windows_physical_memory() > 1 << 28
