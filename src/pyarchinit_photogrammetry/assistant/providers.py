@@ -287,6 +287,7 @@ class OpenAICompatible:
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self._text_replies = 0  # replies whose calls were read from the text
 
     @property
     def label(self) -> str:
@@ -360,7 +361,8 @@ class OpenAICompatible:
         without the JSON (:func:`text_tool_calls`)."""
         reply = self._complete(messages, tools, on_text, cancel)
         if self.kind == "local" and tools and not reply.tool_calls and reply.stop == "end" and not _cancelled(cancel):
-            calls, rest = text_tool_calls(reply.text)
+            self._text_replies += 1  # ids unique over the conversation: text_<reply>_<i>
+            calls, rest = text_tool_calls(reply.text, prefix=f"text_{self._text_replies}")
             if calls:
                 return Reply(rest, calls, "tool_calls", reply.usage)
         return reply
@@ -486,6 +488,8 @@ def _as_call(value) -> tuple[str, dict] | None:
     if not isinstance(value, dict):
         return None
     if isinstance(value.get("function"), dict) and "name" not in value:
+        if set(value) - {"function", "type", "id"}:  # the OpenAI shape: nothing else around the function
+            return None
         value = value["function"]
     name = value.get("name")
     key = "arguments" if "arguments" in value else "parameters" if "parameters" in value else None
@@ -501,7 +505,13 @@ def _as_call(value) -> tuple[str, dict] | None:
             return None
     if arguments is None:
         arguments = {}
-    return (name, arguments) if isinstance(arguments, dict) else None
+    if not isinstance(arguments, dict):
+        return None
+    try:  # a Python literal may hold what JSON cannot (bytes, sets, tuples as keys): such a block is not a call
+        json.dumps(arguments)
+    except (TypeError, ValueError):
+        return None
+    return name, arguments
 
 
 def _calls_in(body: str) -> list[tuple[str, dict]] | None:
@@ -512,18 +522,24 @@ def _calls_in(body: str) -> list[tuple[str, dict]] | None:
     except (json.JSONDecodeError, ValueError):
         try:  # a block written as a Python literal (None, True, single quotes): small models do
             value = ast.literal_eval(body.strip())
-        except (ValueError, SyntaxError, MemoryError, RecursionError):
+        except Exception:  # noqa: BLE001 - not a literal, or one that cannot be built ({[1]: 2}): it stays text
             return None
     items = value if isinstance(value, list) else [value]
     calls = [_as_call(v) for v in items]
     return calls if items and all(c is not None for c in calls) else None
 
 
-def text_tool_calls(text: str) -> tuple[list[ToolCall], str]:
-    """The tool calls a model wrote as JSON in ``text`` - in a fenced block, inside ``<tool_call>`` tags, or bare -
-    and the text without them. Only JSON with the shape of a call counts (``name`` and ``arguments``): any other JSON,
-    and an answer that only shows a call inside other prose without a block of its own, stays text. The name is not
-    checked here: an unknown tool reaches the tools, which answer it as they answer a real call."""
+def text_tool_calls(text: str, prefix: str = "text") -> tuple[list[ToolCall], str]:
+    """The tool calls a model wrote as JSON in ``text`` and the text without them; their ids ``<prefix>_<i>``.
+
+    What counts as a call: a fenced block (```json, ```python, ``` ...) or a ``<tool_call>`` block whose whole content
+    is one call or a list of calls, or - when there is no such block - a line on its own from which the JSON of the
+    calls starts. A block or a line of its own counts EVEN INSIDE PROSE ("Controllo.\n```json {...}```\nHo letto:
+    ..."): a deliberate choice, small local models (Qwen2.5-Coder) write their calls exactly so. A call is JSON (or a
+    Python literal) with exactly the shape ``{"name": ..., "arguments": {...}}`` ("parameters" too, arguments as JSON
+    text, or the OpenAI ``{"function": {...}}``) whose arguments are JSON; any other JSON stays text, and so does a
+    call written in the middle of a sentence. The name is not checked here: an unknown tool reaches the tools, which
+    answer it as they answer a real call."""
     text = text or ""
     found: list[tuple[str, dict]] = []
     spans: list[tuple[int, int]] = []
@@ -557,7 +573,7 @@ def text_tool_calls(text: str) -> tuple[list[ToolCall], str]:
     rest = text
     for a, b in sorted(spans, reverse=True):
         rest = rest[:a] + rest[b:]
-    calls = [ToolCall(f"text_{i}", name, arguments, from_text=True) for i, (name, arguments) in enumerate(found)]
+    calls = [ToolCall(f"{prefix}_{i}", name, arguments, from_text=True) for i, (name, arguments) in enumerate(found)]
     return calls, rest.strip()
 
 

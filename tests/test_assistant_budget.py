@@ -63,7 +63,8 @@ def test_a_call_repeated_30_times_ends_with_an_answer(runs):
     fake = Fake(turns)
     turn = Assistant(fake, lambda: None, None, max_tool_rounds=8).ask("Quali marker?")
     assert turn.error is None and turn.text == "Il progetto ha 8 marker."
-    assert len(made) == 1 < 5  # one run, shared by the 30 calls of each round
+    assert len(made) == 1  # one run, shared by the 30 calls of each round
+    assert len(made) < 5
     assert len(fake.requests) <= 4  # the first round, two rounds of repeats, the answer
     last, tools = fake.requests[-1]
     assert tools is None and last[-1].role == "user" and last[-1].content == "hai già i risultati: rispondi"
@@ -186,3 +187,24 @@ def test_context_errors_of_the_servers_are_recognised():
     assert context_overflow(openai, "x") is not None
     assert context_overflow('{"error": "model not found"}', "x") is None
     assert issubclass(ContextOverflow, ProviderError)
+
+
+def test_a_context_error_teaches_the_budget_for_the_rest_of_the_conversation(runs):
+    state = {"round": 0}
+
+    def turns(messages, tools):
+        state["round"] += 1
+        if state["round"] == 1:
+            return Reply("", [ToolCall("c", "markers", {})], "tool_calls", {})
+        if state["round"] == 2:
+            raise ContextOverflow("x: the model is loaded with context length of 4096 tokens", 4096)
+        return _answer("Ecco.")
+
+    assistant = Assistant(Fake(turns), lambda: None, None)
+    assert assistant.context_chars == S.LOCAL_CONTEXT_CHARS
+    assert assistant.ask("Quali marker?").text == "Ecco."
+    assert assistant.context_chars == 3 * 4096  # LM Studio's 4096 tokens learnt at the first overflow
+    assistant.ask("E il DEM?")
+    assert assistant.context_chars == 3 * 4096  # kept for the rest of the conversation
+    assistant.new_conversation()
+    assert assistant.context_chars == S.LOCAL_CONTEXT_CHARS

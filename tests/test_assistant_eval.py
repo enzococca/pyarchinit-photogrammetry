@@ -294,6 +294,14 @@ def test_plain_json_in_an_answer_stays_text(small, openai_server):
         assert text_tool_calls(text) == ([], text)
     calls, _ = text_tool_calls('```python\n{"name": "markers", "arguments": {"chunk": None}}\n```')
     assert [(c.name, c.arguments) for c in calls] == [("markers", {"chunk": None})]  # a Python literal
+    for text in ('```python\n{[1]: 2}\n```',  # a literal that cannot be built: TypeError, never raised
+                 "```python\n{'name': 'markers', 'arguments': {'a': b'x'}}\n```",  # arguments that are not JSON
+                 "```python\n{'name': 'markers', 'arguments': {(1, 2): 3}}\n```",
+                 '```json\n{"function": {"name": "markers", "arguments": {}}, "note": "x"}\n```'):  # around a function
+        assert text_tool_calls(text) == ([], text), text
+    calls, _ = text_tool_calls('```json\n{"type": "function", "id": "a", "function": {"name": "markers", '
+                               '"arguments": {}}}\n```', prefix="text_3")
+    assert [(c.id, c.name) for c in calls] == [("text_3_0", "markers")]
     calls, rest = text_tool_calls('<tool_call>\n{"name": "dem_statistics", "arguments": "{\\"chunk\\": \\"Saggio 1\\"}"}\n</tool_call>')
     assert [(c.name, c.arguments, c.from_text) for c in calls] == [("dem_statistics", {"chunk": "Saggio 1"}, True)]
     assert rest == ""
@@ -305,6 +313,26 @@ def test_text_tool_calls_are_bounded_by_the_tool_rounds(small, openai_server):
     turn = _local_assistant(server, project, rounds=2).ask("Quali marker?")
     assert len(server.posts) == 3 and "tools" not in server.posts[-1]  # the last round without tools
     assert turn.error is None
+
+
+def test_ids_of_calls_read_from_the_text_are_unique_in_a_conversation(small, openai_server):
+    project, _ = small
+    server = openai_server(['```json\n{"name": "markers", "arguments": {}}\n```',
+                            '```json\n{"name": "project_summary", "arguments": {}}\n```', "Fatto."])
+    assert _local_assistant(server, project).ask("Tutto").text == "Fatto."
+    ids = [c["id"] for m in server.posts[-1]["messages"] if m["role"] == "assistant" for c in m.get("tool_calls", [])]
+    assert len(ids) == 2 and len(set(ids)) == 2
+
+
+def test_a_script_that_raises_cancelled_itself_is_not_a_timeout(small):
+    project, _ = small
+    cases = {"questions": [], "scripts": [{"id": "own", "task_it": "Fermati.", "task_en": "Stop.", "check": "True",
+                                           "example": "from pyarchinit_photogrammetry.core.progress import "
+                                                      "Cancelled\nraise Cancelled('mio')"}]}
+    result = run_eval(CasesProvider(cases), project, cases, kinds="scripts", attempts=1, script_timeout=30)
+    own = result["scripts"]["results"][0]
+    assert not own["passed"] and "Cancelled" in own["detail"] and "tempo scaduto" not in own["detail"]
+    assert own["elapsed"] < 20
 
 
 def test_a_slow_script_is_stopped_and_counted_as_failed(small):

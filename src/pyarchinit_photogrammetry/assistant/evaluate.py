@@ -205,8 +205,15 @@ def _run_limited(script: str, namespace: dict, name: str, timeout: float):
     def target():
         try:
             box["result"] = run_script(script, namespace, progress, name=name)
-        except Cancelled:
-            box["result"] = None
+        except Cancelled as exc:
+            if progress.cancel_requested:  # stopped by the limit
+                box["result"] = None
+            else:  # the script raised Cancelled by itself: its own failure, not the time
+                import traceback
+
+                from .scripts import ScriptResult
+
+                box["result"] = ScriptResult("", f"Cancelled: {exc}".rstrip(": "), traceback.format_exc())
         except BaseException as exc:  # noqa: BLE001 - reported as the script's failure
             box["error"] = exc
 

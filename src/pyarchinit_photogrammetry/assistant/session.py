@@ -67,6 +67,7 @@ TOKENS = {"it": " ({0} token)", "en": " ({0} tokens)"}
 TOOL_RESULT_CHARS = 4000  # of one tool result sent back to the model
 KEEP_TOOL_RESULTS = 12  # a local model gets the last ones in full, the older ones as OMITTED
 LOCAL_CONTEXT_CHARS = 80_000  # the default budget of a request to a local model
+CHARS_PER_TOKEN = 3  # after a context error naming N tokens the budget becomes 3 N characters
 REPEAT_ROUNDS = 2  # consecutive rounds of calls already made: the loop stops
 
 _INSTRUCTIONS = {
@@ -236,6 +237,7 @@ class Assistant:
         if context_chars is None and getattr(provider, "kind", "local") == "local":
             context_chars = LOCAL_CONTEXT_CHARS
         self.context_chars = int(context_chars) if context_chars else None
+        self._context_chars_given = self.context_chars  # a new conversation starts from it again
         self._document = document
         self.index = index
         self.language = _language(language)
@@ -288,6 +290,7 @@ class Assistant:
         """Forgets the history (the filter and its placeholders stay)."""
         self.history = []
         self._warned = False
+        self.context_chars = getattr(self, "_context_chars_given", self.context_chars)
 
     @property
     def sent_log(self) -> list[str]:
@@ -398,6 +401,9 @@ class Assistant:
             try:
                 return self.provider.complete(self._fit(messages), tools, on_text=stream, cancel=cancel)
             except ContextOverflow as exc:
+                if exc.tokens:  # the size the server named: the budget of the rest of the conversation
+                    budget = CHARS_PER_TOKEN * exc.tokens
+                    self.context_chars = min(self.context_chars or budget, budget)
                 omitted = OMITTED[self.language]
                 full = [i for i, m in enumerate(messages) if m.role == "tool" and m.content != omitted]
                 if state.get("retried") or not full:
