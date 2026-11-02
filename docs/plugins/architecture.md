@@ -180,6 +180,14 @@ the two reveals, on the chunk's orthophoto or DEM. The solid is the **void**, to
   the street) the plugin asks for the **wall thickness**: the other face is placed that far behind it. A thickness
   given always takes the place of the measured one (the inner face moves, the outer one stays). A thin wall on a
   coarse model (faces closer than three mesh edges) is said as such: give the thickness, or use a denser model.
+* **Rebates.** A reveal with a step (the seat of a frame) is split into its straight runs (simplified at three mesh
+  resolutions: a step smaller than that is not seen). The **clear width** is between the innermost runs (where a leaf
+  passes: the IFC's `OverallWidth`), the **overall width** between the outermost; the splay is that of each reveal's
+  longest run; each rebate is reported by its width and its depth from the outer face, with a warning, and the void's
+  plan keeps the steps.
+* **What is refused, and said.** Curved walls (a round tower, an apse: the face around the point more than 2 cm off a
+  straight line across the gap) are not supported in this version. An opening at the end of a wall, or beside a pier
+  shorter than 15 cm, is not read: 15 cm of wall face are needed on both sides.
 * **The outer face** is the one seen by more of the aligned photos that frame the opening (the model's points of each
   face near the opening projected into each photo, from the side the face looks to). When the photos do not tell
   them apart (no photos, or as many on both sides) the field *Outer face* decides: *auto* takes the face nearer the
@@ -424,8 +432,9 @@ the inner face.
   is the section normal to the path, not a vertical one.
 * **The environment** is about 900 MB, and the first run after its installation takes about a minute.
 * **Windows on ARM**: not available (no OpenCascade build).
-* **Openings**: the plan is the same at every height (a prism from the sill up); jambs that lean are reported (the
-  widths near the sill and the lintel), not modelled. In the IFC the wall around an opening is a stand-in.
+* **Openings**: no curved walls; 15 cm of wall face on both sides of an opening; a rebate smaller than three mesh
+  resolutions is not seen. The plan is the same at every height (a prism from the sill up); jambs that lean are
+  reported (the widths near the sill and the lintel), not modelled. In the IFC the wall around an opening is a stand-in.
 * It does not detect elements by itself, does not model the carving of a capital, nor cross or domical vaults, nor
   walls, and edits nothing in the 3D view. The solid is as good as the model it is fitted on: the fit says
   how far apart they are.

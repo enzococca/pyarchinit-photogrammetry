@@ -188,6 +188,14 @@ stipiti, sull'ortofoto o sul DEM del chunk. Il solido è il **vano**, da sottrar
   Uno spessore dato prende sempre il posto di quello misurato (si sposta la faccia interna, quella esterna resta). Un
   muro sottile su un modello rado (facce più vicine di tre lati della mesh) viene detto come tale: dai lo spessore, o
   usa un modello più fitto.
+* **Battute.** Uno stipite con un gradino (la sede di un infisso) si divide nei suoi tratti dritti (semplificati a tre
+  risoluzioni della mesh: un gradino più piccolo non si vede). La **luce netta** è fra i tratti più interni (dove
+  passa un'anta: l'`OverallWidth` dell'IFC), la **larghezza massima** fra i più esterni; la strombatura è quella del
+  tratto più lungo di ogni stipite; ogni battuta è riportata con la sua larghezza e la sua profondità dalla faccia
+  esterna, con un avviso, e la pianta del vano tiene i gradini.
+* **Cosa si rifiuta, dicendolo.** Pareti curve (una torre tonda, un'abside: la faccia intorno al punto più di 2 cm
+  fuori da una retta attraverso il vano) non sono supportate in questa versione. Un'apertura in fondo a un muro, o
+  accanto a un pilastro più corto di 15 cm, non si legge: servono 15 cm di faccia del muro da entrambe le parti.
 * **La faccia esterna** è quella vista da più foto allineate che inquadrano l'apertura (i punti del modello di ogni
   faccia vicino all'apertura proiettati in ogni foto, dal lato verso cui la faccia guarda). Quando le foto non le
   distinguono (nessuna foto, o tante da una parte quante dall'altra) decide il campo *Faccia esterna*: *auto* prende la
@@ -431,9 +439,10 @@ porta quell'errore alla faccia interna.
 * **Modanature inclinate.** Un percorso in pendenza o che gira è percorso da CadQuery con il suo sistema e scritto
   nell'IFC come una sezione portata con il riferimento verso l'alto: i due coincidono in volume ed estensione
   (provato), ma la sezione di una cornice molto inclinata è quella normale al percorso, non una verticale.
-* **Aperture**: la pianta è la stessa a ogni quota (un prisma dalla soglia in su); gli stipiti inclinati sono segnalati
-  (le larghezze vicino alla soglia e all'architrave), non modellati. Nell'IFC il muro intorno a un'apertura è
-  sostitutivo.
+* **Aperture**: niente pareti curve; 15 cm di faccia del muro da entrambe le parti di un'apertura; una battuta più
+  piccola di tre risoluzioni della mesh non si vede. La pianta è la stessa a ogni quota (un prisma dalla soglia in
+  su); gli stipiti inclinati sono segnalati (le larghezze vicino alla soglia e all'architrave), non modellati.
+  Nell'IFC il muro intorno a un'apertura è sostitutivo.
 * **L'ambiente** occupa circa 900 MB, e la prima elaborazione dopo l'installazione richiede circa un minuto.
 * **Windows ARM**: non disponibile (OpenCascade non ha una versione).
 * Non trova gli elementi da solo, non modella l'intaglio di un capitello, né volte a crociera o a cupola, né muri,
