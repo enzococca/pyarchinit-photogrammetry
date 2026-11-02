@@ -132,7 +132,12 @@ class Document:
         products, versions, drawings and proxies). A COLMAP model is written from the poses, so depth
         maps, dense cloud and the rest can be built again without aligning; the tie points are copied
         when every photo is kept. Products are never copied (``keep_products`` is reserved and must be
-        False). ``label``: default ``"<label> (copia)"``. ``chunk`` is not changed."""
+        False). The masks of the photos kept are copied, and so are the photos that live in the folder of
+        ``chunk`` (the reference copies of multispectral and thermal captures), the cameras pointed at the copies;
+        the settings of the captures stay, their products (reflectance, indices, zones, thermal orthomosaic,
+        anomalies) do not. Some of the photos need the tie points of ``chunk`` (ValueError without them).
+        ``label``: default ``"<label> (copia)"``, numbered (``"(copia 2)"``...) when taken
+        (:func:`engine.chunks.duplicate_label`). ``chunk`` is not changed."""
         from ..engine.chunks import duplicate_chunk
 
         return duplicate_chunk(self, chunk, cameras, label=label, keep_products=keep_products)

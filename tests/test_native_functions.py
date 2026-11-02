@@ -3,6 +3,7 @@ normal map on the grid of the orthomosaic."""
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -327,7 +328,8 @@ def test_duplicate_chunk_with_some_photos_rebuilds_depth_maps(processed, tmp_pat
         assert key not in dup.meta
     assert dup.product_path("reconstruction").exists()
     dup.build_depth_maps(quality="low")
-    assert len(depth_maps(dup)) == 6
+    names = dup.meta["sfm"]["names"]
+    assert sorted(e["name"] for e in depth_maps(dup)) == sorted(names[str(k)] for k in keys)
     assert _snapshot(ch) == before  # the source chunk untouched
     assert sorted(p.name for p in ch.data_dir.iterdir()) == files_before
     doc.save()
@@ -342,6 +344,8 @@ def test_duplicate_chunk_all_photos_keeps_tie_points(processed, tmp_path):
     ch.cameras[3].enabled = False
     dup = doc.duplicate_chunk(ch)
     assert dup.label == f"{ch.label} (copia)"
+    second = doc.duplicate_chunk(ch)  # the default names stay unique
+    assert second.label == f"{ch.label} (copia 2)"
     assert len(dup.cameras) == len(ch.cameras)
     assert [c.enabled for c in dup.cameras] == [c.enabled for c in ch.cameras]
     assert dup.product_path("tie_points").exists()
@@ -368,12 +372,19 @@ def test_set_cameras_enabled_and_builders_honour_it(processed, tmp_path):
     assert {c.key for c in ch.aligned_cameras} == six
     with pytest.raises(KeyError):
         ch.set_cameras_enabled(["nessuna foto"], False)
+    copy = _doc.duplicate_chunk(ch, [ch.camera(k) for k in sorted(six)[:3]])  # the source's keys, other objects
+    with pytest.raises(ValueError):
+        ch.set_cameras_enabled(copy.cameras[:1], False)
+    assert copy.set_cameras_enabled(copy.cameras[:1], False) == 1  # its own: fine
+    assert ch.camera(copy.cameras[0].key).enabled  # the source's photo with that key untouched
+    _doc.remove_chunk(copy)
     seen = []
     ch.build_orthomosaic(resolution=0.05, progress=lambda f, m: seen.append(m or ""))
     assert ch.meta["orthomosaic"]["photos"] == 6
     assert any("from 6 photos" in m for m in seen)
     ch.build_depth_maps(quality="low")
-    assert len(depth_maps(ch)) == 6
+    names = ch.meta["sfm"]["names"]
+    assert sorted(e["name"] for e in depth_maps(ch)) == sorted(names[str(k)] for k in six)  # the enabled ones
     assert ch.set_cameras_enabled(others, True) == 22 and len(ch.aligned_cameras) == 28
 
 
@@ -456,3 +467,55 @@ def test_cli_normal_map_bad_parameters(processed, tmp_path):
     doc.save()
     r = CliRunner().invoke(app, ["normal-map", str(doc.path)])
     assert r.exit_code == 2 and "orthomosaic" in r.output
+
+
+def test_duplicate_chunk_keeps_masks_and_its_own_capture_copies(processed, tmp_path):
+    """Masks are settings of the photos (copied for the photos kept); reference copies of multispectral or thermal
+    captures living in the source's folder are copied into the duplicate's folder and the cameras point there; the
+    settings of the captures stay, their products do not."""
+    import json
+
+    from pyarchinit_photogrammetry.engine.masks import mask_dir, mask_path
+
+    doc, ch = _copy(processed, tmp_path)
+    six = _six(ch)
+    masks = mask_dir(ch)
+    masks.mkdir(parents=True, exist_ok=True)
+    for c in (six[0], ch.camera("IMG_0000")):  # one kept, one left out
+        (masks / f"{c.key}.png").write_bytes(b"mask")
+    reference = ch.data_dir / "multispectral" / "reference"
+    reference.mkdir(parents=True)
+    for c in six[:2]:  # two photos as reference copies inside the chunk folder
+        target = reference / (c.label + ".jpg")
+        shutil.copy2(c.path, target)
+        c.path = str(target)
+    ch.meta["multispectral"] = {"reference": "Red", "bands": ["Red", "NIR"], "captures": 6, "panel": None,
+                                "registration": {"a": 1}, "reflectance": "multispectral/reflectance.tif",
+                                "reflectance_bands": ["Red", "NIR"], "indices": {"NDVI": {"file": "x.tif"}},
+                                "zoning": {"NDVI": {"raster": "z.tif"}}}
+    ch.meta["thermal"] = {"params": {"emissivity": 0.95}, "file": "multispectral/thermal.tif", "resolution": 0.03,
+                          "stats": {}, "anomaly": {"file": "a.tif"}, "decoded": 4, "registration": {}}
+    before = json.dumps(ch.to_dict(), sort_keys=True, default=str)
+    dup = doc.duplicate_chunk(ch, six)
+    assert json.dumps(ch.to_dict(), sort_keys=True, default=str) == before
+    assert mask_path(dup, dup.camera(six[0].key)) is not None
+    assert not (mask_dir(dup) / f"{ch.camera('IMG_0000').key}.png").exists()
+    for c in six[:2]:
+        new = dup.camera(c.key)
+        assert Path(new.path).parent == dup.data_dir / "multispectral" / "reference"
+        assert Path(new.path).exists() and Path(c.path).exists()
+    assert Path(dup.camera(six[2].key).path) == Path(six[2].path)  # a photo outside the chunk folder: as it is
+    ms, th = dup.meta["multispectral"], dup.meta["thermal"]
+    assert ms["bands"] == ["Red", "NIR"] and ms["registration"] == {"a": 1}
+    assert not {"reflectance", "reflectance_bands", "indices", "zoning"} & set(ms)
+    assert th["params"] == {"emissivity": 0.95} and not {"file", "resolution", "stats", "anomaly", "decoded"} & set(th)
+
+
+def test_duplicate_of_a_subset_needs_tie_points(processed, tmp_path):
+    doc, ch = _copy(processed, tmp_path)
+    ch.products.pop("tie_points")
+    ch._tie_points = None
+    n = len(doc.chunks)
+    with pytest.raises(ValueError, match="tie points"):
+        doc.duplicate_chunk(ch, _six(ch))
+    assert len(doc.chunks) == n

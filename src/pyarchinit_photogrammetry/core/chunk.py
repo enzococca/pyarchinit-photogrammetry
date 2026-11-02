@@ -145,12 +145,16 @@ class Chunk:
         """Enable or disable photos (objects of the chunk, keys or labels): a disabled photo stays in
         the chunk with its pose but alignment, depth maps, orthomosaic and texture leave it out from
         their next run. Returns how many photos changed; KeyError for a name that is not there
-        (nothing changed then)."""
+        (nothing changed then), ValueError for a Camera object of another chunk (a duplicate shares the keys
+        of its source: its photos are never taken for those of this chunk)."""
         targets = []
         for c in cameras:
-            cam = c if isinstance(c, Camera) and any(c is own for own in self.cameras) else self.camera(
-                c.key if isinstance(c, Camera) else c)
-            targets.append(cam)
+            if isinstance(c, Camera):
+                if not any(c is own for own in self.cameras):
+                    raise ValueError(f"the photo {c.label} is not a photo of the chunk {self.label}")
+                targets.append(c)
+            else:
+                targets.append(self.camera(c))
         changed = 0
         for cam in {id(c): c for c in targets}.values():
             if cam.enabled != bool(enabled):

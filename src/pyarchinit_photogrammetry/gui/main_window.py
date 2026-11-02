@@ -3344,6 +3344,10 @@ class MainWindow(QMainWindow):
         if answer is None:
             return
         area = None
+        if answer in (1, 2) and ch is not self.chunk:  # the pane and the 2D view show the active chunk
+            self._warn("Le foto selezionate e l'area selezionata sono quelle del chunk attivo: rendi attivo prima "
+                       "questo chunk.")
+            return
         if answer == 1 and not selected:
             self._warn("Seleziona prima le foto nel pannello Foto.")
             return
@@ -3352,10 +3356,9 @@ class MainWindow(QMainWindow):
             if area is None:
                 self._warn("Seleziona un poligono sull'ortofoto o sul DEM (strumento Seleziona).")
                 return
-            if ch is not self.chunk:
-                self._warn("L'area selezionata è quella del chunk attivo: rendi attivo prima questo chunk.")
-                return
-        default = tr("{0} (copia)", ch.label)
+        from ..engine.chunks import duplicate_label
+
+        default = duplicate_label(self.doc, ch)  # a name of the project's data: the same in every language
         v = ParamDialog.ask(self, "Duplica chunk", [Field("label", "Nome del nuovo chunk", default, kind="text")])
         if not v:
             return
@@ -4107,15 +4110,16 @@ class MainWindow(QMainWindow):
         keeps its pose, the next alignment and builds leave it out; its thumbnail shows it."""
         cams = list(cams)
         own = [c for c in cams if self.chunk is not None and any(c is k for k in self.chunk.cameras)]
-        if own:
-            self.chunk.set_cameras_enabled(own, enabled)
+        changed = self.chunk.set_cameras_enabled(own, enabled) if own else 0
         for c in cams:  # photos of another chunk: set directly
-            if not any(c is k for k in own):
+            if not any(c is k for k in own) and c.enabled != bool(enabled):
                 c.enabled = bool(enabled)
+                changed += 1
         self.photos.update_flags()
-        self._dirty(True)
+        if changed:
+            self._dirty(True)
         self.statusBar().showMessage(tr("{0} foto {1}: valgono dal prossimo allineamento o dalla prossima costruzione",
-                                        len(cams), tr('attivate') if enabled else tr('disattivate')), 10000)
+                                        changed, tr('attivate') if enabled else tr('disattivate')), 10000)
 
     def detect_markers(self) -> None:
         if not self._need_chunk():
@@ -5927,7 +5931,10 @@ class MainWindow(QMainWindow):
         if not v:
             return
         try:
-            self.chunk.region_from_markers(v["a"], v["b"], v["c"], float(v["thickness"]))
+            # the Marker objects: a key passed on would be read as a target code first, which for coded targets
+            # is often the key of another marker
+            by_key = {m.key: m for m in placed}
+            self.chunk.region_from_markers(by_key[v["a"]], by_key[v["b"]], by_key[v["c"]], float(v["thickness"]))
         except (KeyError, ValueError, RuntimeError) as exc:
             self._exc("Regione non impostata", exc)
             return

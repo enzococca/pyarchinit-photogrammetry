@@ -136,6 +136,9 @@ def test_window_duplicate_and_disable(win, qapp, monkeypatch):
         before[it.data(Qt.ItemDataRole.UserRole).key] = it.icon().pixmap(64, 64).toImage()
     _menu_action(w, monkeypatch, lambda: w._photos_menu(QPoint(0, 0)), mw.tr("Disattiva le {0} foto selezionate", 2))
     assert sorted(c.key for c in dup.cameras if not c.enabled) == two
+    assert w.statusBar().currentMessage().startswith("2 foto")
+    _menu_action(w, monkeypatch, lambda: w._photos_menu(QPoint(0, 0)), mw.tr("Disattiva le {0} foto selezionate", 2))
+    assert w.statusBar().currentMessage().startswith("0 foto")  # what actually changed
     assert len(dup.aligned_cameras) == 4
     for i in range(w.photos.count()):
         it = w.photos.item(i)
@@ -146,6 +149,12 @@ def test_window_duplicate_and_disable(win, qapp, monkeypatch):
     assert w.isWindowModified()
     _menu_action(w, monkeypatch, lambda: w._photos_menu(QPoint(0, 0)), mw.tr("Attiva le {0} foto selezionate", 2))
     assert all(c.enabled for c in dup.cameras)
+    # the source is not the active chunk: its "selected photos" are not those of the pane
+    warned = []
+    monkeypatch.setattr(w, "_warn", lambda text, *a, **k: warned.append(text))
+    w.duplicate_chunk(ch)
+    _wait(w, qapp)
+    assert len(w.doc.chunks) == 2 and warned and "rendi attivo" in warned[0]
 
 
 def test_window_duplicate_with_the_photos_of_the_selected_area(win, qapp, monkeypatch):
@@ -184,10 +193,17 @@ def test_window_region_on_markers_and_normal_map(win, qapp, monkeypatch):
             labels = [m.key for m in ms]
             break
     assert labels is not None
+    # coded targets: the code of a marker is the key of another one (keys 0..n and codes 0..49 collide), so a
+    # key resolved as a code would put the region on the plane of other markers
+    n = len(ch.markers)
+    for i, m in enumerate(ch.markers):
+        m.code = ch.markers[(i + 1) % n].key
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, parent, title, fields, intro="": {
         "a": labels[0], "b": labels[1], "c": labels[2], "thickness": 0.15}))
     w.region_from_markers()
     assert ch.region is not None and np.isclose(ch.region.size[2], 0.15)
+    normal = ch.region.rotation[:, 2]
+    assert np.all(np.abs((pts - ch.region.center) @ normal) < 1e-6)  # the plane of the three markers chosen
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, parent, title, fields, intro="": {
         "source": "dem"}))
     w.build_normal_map()

@@ -2630,7 +2630,6 @@
   "Le foto dell'area selezionata sull'ortofoto": "The photos of the area selected on the orthophoto",
   "Quali foto vanno nel nuovo chunk? Le foto tengono la loro posizione: mappe di profondità, nuvola densa e gli altri prodotti si costruiscono di nuovo sul nuovo chunk, senza allineare.": "Which photos go into the new chunk? The photos keep their position: depth maps, dense cloud and the other products are built again on the new chunk, without aligning.",
   "Seleziona prima le foto nel pannello Foto.": "Select the photos in the Photos pane first.",
-  "L'area selezionata è quella del chunk attivo: rendi attivo prima questo chunk.": "The selected area belongs to the active chunk: make this chunk the active one first.",
   "Foto che inquadrano l'area": "Photos framing the area",
   "Nessuna foto inquadra l'area selezionata.": "No photo frames the selected area.",
   "Regione sui marker...": "Region on markers...",
@@ -2651,7 +2650,8 @@
   "Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).": "Build the normal map first (Tools > Normal map).",
   "modello": "model",
   "Doppio clic per vederla: rosso est, verde nord, blu alto, sulla griglia dell'ortofoto": "Double click to see it: red east, green north, blue up, on the grid of the orthophoto",
-  " (disattivata: le prossime elaborazioni la lasciano fuori)": " (disabled: the next steps leave it out)"
+  " (disattivata: le prossime elaborazioni la lasciano fuori)": " (disabled: the next steps leave it out)",
+  "Le foto selezionate e l'area selezionata sono quelle del chunk attivo: rendi attivo prima questo chunk.": "The selected photos and the selected area belong to the active chunk: make this chunk the active one first."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3505,7 +3505,6 @@
   "• di «{0}»: {1}": "• of «{0}»: {1}",
   "• il chunk «{0}» ({1} foto) con i suoi prodotti": "• the chunk «{0}» ({1} photos) with its products",
   "Le {0} foto selezionate nel pannello Foto": "The {0} photos selected in the Photos pane",
-  "{0} (copia)": "{0} (copy)",
   "Nuovo chunk «{0}»": "New chunk «{0}»",
   "Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di profondità e gli altri prodotti.": "Created «{0}»: {1} photos of {2}, {3} markers. It is the active chunk: build the depth maps and the other products.",
   "Mappa delle normali dal {0}: rosso est, verde nord, blu alto": "Normal map from the {0}: red east, green north, blue up"
