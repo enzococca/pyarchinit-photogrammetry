@@ -755,6 +755,39 @@ def test_metashape_dense_clouds_in_oc3_are_named_in_the_warnings(tmp_path):
     assert not [w for w in plain.meta["import"]["warnings"] if "nuvole di punti" in w or "nuvola di punti" in w]
 
 
+def test_metashape_first_readable_dense_cloud_after_an_oc3_one(tmp_path):
+    """The first dense cloud of the frame is ``.oc3``, the second PLY parts: the PLY one is
+    imported and the ``.oc3`` one named in the warnings."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    frame_dir = psx.with_suffix(".files") / "0" / "0"
+    with zipfile.ZipFile(frame_dir / "frame.zip") as z:
+        xml = z.read("doc.xml").decode()
+    clouds = ('<dense_cloud id="0" path="dense_cloud/dense_cloud.zip"/>'
+              '<dense_cloud id="1" path="dense_cloud.2/dense_cloud.zip"/>')
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", f"{clouds}</frame>")})
+    _zip(frame_dir / "dense_cloud" / "dense_cloud.zip", {
+        "doc.xml": '<dense_cloud version="1.2.0"><tiles><tile path="dense_cloud.oc3">'
+                   '<totalCount>500</totalCount></tile></tiles></dense_cloud>'})
+    (frame_dir / "dense_cloud" / "dense_cloud.oc3").write_bytes(b"\x00" * 64)
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    pts = np.zeros(300, dtype=fields)
+    rng = np.random.default_rng(1)
+    pts["x"], pts["y"] = rng.uniform(-50, 50, 300), rng.uniform(-50, 50, 300)
+    pts["red"] = 90
+    _zip(frame_dir / "dense_cloud.2" / "dense_cloud.zip", {
+        "doc.xml": '<dense_cloud version="1.2.0"><points component_id="0" path="points0.ply" count="300"/>'
+                   '</dense_cloud>',
+        "points0.ply": _ply_bytes(fields, pts)})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert len(ch.point_cloud) == 300 and ch.meta["point_cloud_source"] == "nuvola densa Metashape"
+    assert (ch.point_cloud.rgb[:, 0] == 90).all()
+    oc3 = [w for w in ch.meta["import"]["warnings"] if ".oc3" in w]
+    assert len(oc3) == 1 and "1 nuvola di punti" in oc3[0]
+    assert len(ch.tie_points) == 1000
+
+
 def test_metashape_transform_with_the_scale_alone():
     """A chunk in local coordinates scaled by scale bars: Metashape writes the scale alone, no
     rotation or translation; it was dropped and such projects came in many times too large."""

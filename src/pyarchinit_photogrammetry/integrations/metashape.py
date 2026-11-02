@@ -381,12 +381,16 @@ def _read_clouds(ch: MsChunk):
     """``(tie point parts, dense cloud parts, skipped points)``, each a list of
     ``(component_id, xyz, rgb)`` in the component frames. Archives are told apart by their
     content, not by their name (``point_cloud`` holds the tie points in the files of
-    Metashape 1.x and 2.x; dense clouds stored as PLY parts are read when present)."""
+    Metashape 1.x and 2.x; dense clouds stored as PLY parts are read when present). Every
+    cloud the frame lists is tried in order, so the first READABLE dense cloud is taken even
+    when an earlier one is in a format the import does not read (``.oc3``)."""
     tie, dense, skipped = None, None, 0
     seen = set()
     valid = set(ch.components) or None
-    for tag in ("tie_points", "point_cloud", "dense_cloud"):
-        rel = ch.frame_paths.get(tag)
+    listed = [ch.frame_paths.get(tag) for tag in ("tie_points", "point_cloud", "dense_cloud")] + ch.cloud_paths
+    for rel in listed:
+        if tie is not None and dense is not None:
+            break
         if not rel or ch.frame_dir is None or rel in seen:
             continue
         seen.add(rel)
