@@ -83,3 +83,27 @@ A script only runs when you click *Run*: the assistant never runs anything by it
 The keys are kept only in the keychain of the system (*Save in the keychain*, *Forget*) or read from the
 environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`: never in the settings, the project or the
 logs.
+
+## The evaluation
+
+How well a model works with the program is measured on a fixed set of 8 questions and 6 script tasks on the demo
+project (`ppg demo FOLDER --process`): the questions about the project (DEM, orthophoto, alignment and control points,
+markers) and about the program (contour lines, IFC, confidence, holes in the DEM); the scripts the region on three
+markers, the normal map, a chunk with the photos of an area, the photos outside an area disabled, a DEM of the ground
+only, the ground points exported. Each script runs on a copy of the project and is checked; after an error the model
+gets one second try, as with *Error? Ask the assistant*. The score is the number of script tasks done.
+
+```bash
+ppg assistant eval FOLDER/scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out local.json --record
+```
+
+`--record` writes the score into the settings, where *Settings...* shows it as the last evaluation of the kind.
+
+| Model | Where | Questions | Scripts (score) |
+| --- | --- | --- | --- |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | local, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 1/8 in Italian, 2/8 in English | 1/6 in Italian, 3/6 in English |
+
+The reference answers of the set (`--kind reference`) pass 8/8 and 6/6: every check can be met. The small local model
+writes the calls to the project's tools as text instead of making them, so it cannot read the project: its answers on
+the project are not to be trusted, and in Italian it is "limited for scripts". Claude and OpenAI were not evaluated
+yet (no key on the computer of the evaluation).

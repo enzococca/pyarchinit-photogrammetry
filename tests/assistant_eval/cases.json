@@ -1,0 +1,172 @@
+{
+ "questions": [
+  {
+   "id": "dem_resolution_coverage",
+   "question_it": "Qual è la risoluzione del DEM del chunk attivo e quanta superficie copre?",
+   "question_en": "What is the resolution of the DEM of the active chunk and how much ground does it cover?",
+   "must_contain": [
+    "\\d+([.,]\\d+)?\\s*(mm|cm|m)\\b",
+    "cop(r|e)|cover|area|m²|m2|%"
+   ],
+   "tools_expected": [
+    "dem_statistics"
+   ],
+   "example_it": "Il DEM del chunk attivo ha celle di 0,9 cm e copre circa 9,8 m² (il 92% del riquadro).\n\nHo letto: strumento dem_statistics",
+   "example_en": "The DEM of the active chunk has 0.9 cm cells and covers about 9.8 m² (92% of its frame).\n\nI read: tool dem_statistics"
+  },
+  {
+   "id": "orthomosaic",
+   "question_it": "Com'è l'ortofoto del progetto: risoluzione e dimensioni in pixel?",
+   "question_en": "What is the orthomosaic of the project like: resolution and size in pixels?",
+   "must_contain": [
+    "\\d+([.,]\\d+)?\\s*(mm|cm)\\b|\\d+([.,]\\d+)?\\s*m\\s*/\\s*px",
+    "\\d+\\s*[x×]\\s*\\d+|pixel|px"
+   ],
+   "tools_expected": [
+    "orthomosaic_info"
+   ],
+   "example_it": "L'ortofoto ha pixel di 2,5 mm ed è di 1520 x 1310 pixel.\n\nHo letto: strumento orthomosaic_info",
+   "example_en": "The orthomosaic has 2.5 mm pixels and is 1520 x 1310 pixels.\n\nI read: tool orthomosaic_info"
+  },
+  {
+   "id": "alignment_gcp",
+   "question_it": "Quante foto sono allineate e qual è l'errore sui punti di controllo (GCP)?",
+   "question_en": "How many photos are aligned and what is the error on the ground control points (GCP)?",
+   "must_contain": [
+    "\\d+\\s*(foto|photo|camer|immagin|image)|(foto|photos|camere|cameras)\\D{0,40}\\d+",
+    "\\d+([.,]\\d+)?\\s*(mm|cm|m)\\b"
+   ],
+   "tools_expected": [
+    "alignment_report"
+   ],
+   "example_it": "Sono allineate 28 foto su 28; l'errore (RMSE) sui punti di controllo è di 1,2 mm.\n\nHo letto: strumento alignment_report",
+   "example_en": "28 photos out of 28 are aligned; the error (RMSE) on the control points is 1.2 mm.\n\nI read: tool alignment_report"
+  },
+  {
+   "id": "markers",
+   "question_it": "Quali marker ci sono nel progetto e quanti hanno coordinate di riferimento?",
+   "question_en": "Which markers are in the project and how many have reference coordinates?",
+   "must_contain": [
+    "target\\s*\\d",
+    "\\b8\\b|\\botto\\b|\\beight\\b"
+   ],
+   "tools_expected": [
+    "markers"
+   ],
+   "example_it": "Ci sono 8 marker, da target 0 a target 7, tutti con coordinate di riferimento.\n\nHo letto: strumento markers",
+   "example_en": "There are 8 markers, target 0 to target 7, all with reference coordinates.\n\nI read: tool markers"
+  },
+  {
+   "id": "contour_lines",
+   "question_it": "Come faccio le curve di livello dal DEM?",
+   "question_en": "How do I make contour lines from the DEM?",
+   "must_contain": [
+    "curv[ae] di livello|contour",
+    "equidistanz|interval|passo"
+   ],
+   "tools_expected": [],
+   "example_it": "Con il DEM mostrato nella vista 2D usa Strumenti > Curve di livello...: scegli l'equidistanza (il programma ne suggerisce una) e la levigatura; le curve vanno in un layer.\n\nHo letto: guida gui/archaeology.it.md",
+   "example_en": "With the DEM shown in the 2D view use Tools > Contour lines...: choose the interval (the program suggests one) and the smoothing; the lines go to a layer.\n\nI read: guide gui/archaeology.md"
+  },
+  {
+   "id": "ifc_export",
+   "question_it": "Come esporto in IFC le unità stratigrafiche?",
+   "question_en": "How do I export the stratigraphic units to IFC?",
+   "must_contain": [
+    "\\bIFC\\b",
+    "Esporta|Export|File\\s*>"
+   ],
+   "tools_expected": [],
+   "example_it": "Da File > Esporta > IFC: le unità diventano elementi IFC4 con il Pset_PyArchInit_US.\n\nHo letto: guida bim.it.md",
+   "example_en": "From File > Export > IFC: the units become IFC4 elements with the Pset_PyArchInit_US.\n\nI read: guide bim.md"
+  },
+  {
+   "id": "confidence_20",
+   "question_it": "Cosa significa una confidenza di 20 in un punto della nuvola densa?",
+   "question_en": "What does a confidence of 20 mean for a point of the dense cloud?",
+   "must_contain": [
+    "\\b20\\b",
+    "mapp[ae] di profondit|depth maps?"
+   ],
+   "tools_expected": [],
+   "example_it": "Una confidenza di 20 vuol dire che 20 mappe di profondità confermano il punto: è un punto affidabile.\n\nHo letto: guida api.it.md",
+   "example_en": "A confidence of 20 means that 20 depth maps confirm the point: it is a reliable point.\n\nI read: guide api.md"
+  },
+  {
+   "id": "dem_holes",
+   "question_it": "Perché il DEM può avere dei buchi?",
+   "question_en": "Why can the DEM have holes?",
+   "must_contain": [
+    "buch|hole|vuot|lacun",
+    "nuvola|cloud|punti|points|foto|photo"
+   ],
+   "tools_expected": [],
+   "example_it": "I buchi del DEM sono le celle senza punti della nuvola densa: zone viste da poche foto, ombre, acqua o superfici lisce.\n\nHo letto: guida gui/processing.it.md",
+   "example_en": "The holes of the DEM are cells without points of the dense cloud: areas seen by few photos, shadows, water or smooth surfaces.\n\nI read: guide gui/processing.md"
+  }
+ ],
+ "scripts": [
+  {
+   "id": "region_on_markers",
+   "task_it": "Scrivi uno script che imposta la regione di ricostruzione sul piano dei marker target 0, target 1 e target 2, con uno spessore di 20 cm.",
+   "task_en": "Write a script that sets the reconstruction region on the plane of the markers target 0, target 1 and target 2, 20 cm thick.",
+   "check": "chunk.region is not None and abs(min(float(s) for s in chunk.region.size) - 0.2) < 0.02",
+   "example": "region = chunk.region_from_markers(\"target 0\", \"target 1\", \"target 2\", thickness=0.20)\nprint(region.size)"
+  },
+  {
+   "id": "normal_map",
+   "task_it": "Scrivi uno script che crea la mappa delle normali sulla griglia dell'ortofoto.",
+   "task_en": "Write a script that builds the normal map on the grid of the orthomosaic.",
+   "check": "chunk.product_path('normal_map') is not None and chunk.product_path('normal_map').is_file()",
+   "example": "path = chunk.build_normal_map(source=\"auto\")\nprint(path)"
+  },
+  {
+   "id": "duplicate_area",
+   "task_it": "Scrivi uno script che crea un nuovo chunk con le sole foto che vedono l'area selezionata (`polygon`).",
+   "task_en": "Write a script that makes a new chunk with only the photos that see the selected area (`polygon`).",
+   "check": "len(doc.chunks) == 2 and 0 < len(doc.chunks[1].cameras) < len(chunk.cameras)",
+   "polygon": [
+    [
+     0,
+     0
+    ],
+    [
+     0.3,
+     0.3
+    ]
+   ],
+   "example": "from pyarchinit_photogrammetry.engine.patches import photos_for_area\n\nring = np.asarray(polygon.exterior.coords)\nrows = photos_for_area(chunk, ring, limit=100_000)\nkeys = {r[\"key\"] for r in rows if r.get(\"coverage\", 0) > 0}\nuseful = [c for c in chunk.cameras if c.key in keys]\nnew = doc.duplicate_chunk(chunk, cameras=useful, label=chunk.label + \" - area\")\nprint(new.label, len(new.cameras))"
+  },
+  {
+   "id": "disable_outside",
+   "task_it": "Scrivi uno script che disattiva le foto del chunk attivo che non vedono l'area selezionata (`polygon`).",
+   "task_en": "Write a script that disables the photos of the active chunk that do not see the selected area (`polygon`).",
+   "check": "len(doc.chunks) == 1 and 0 < sum(c.enabled for c in chunk.cameras) < len(chunk.cameras)",
+   "polygon": [
+    [
+     0,
+     0
+    ],
+    [
+     0.3,
+     0.3
+    ]
+   ],
+   "example": "from pyarchinit_photogrammetry.engine.patches import photos_for_area\n\nrows = photos_for_area(chunk, np.asarray(polygon.exterior.coords), limit=100_000)\nkeys = {r[\"key\"] for r in rows if r.get(\"coverage\", 0) > 0}\nn = chunk.set_cameras_enabled([c for c in chunk.cameras if c.key not in keys], False)\nprint(\"disabled\", n)"
+  },
+  {
+   "id": "dem_ground_only",
+   "task_it": "Scrivi uno script che classifica la nuvola densa e poi rifà il DEM con i soli punti del terreno (classe 2).",
+   "task_en": "Write a script that classifies the dense cloud and then builds the DEM again from the ground points only (class 2).",
+   "check": "(chunk.meta.get('dem') or {}).get('classes') == [2]",
+   "example": "from pyarchinit_photogrammetry.ai.classify import classify_chunk\n\nclassify_chunk(chunk)\npath = chunk.build_dem(classes=[2])\nprint(path)"
+  },
+  {
+   "id": "export_ground_points",
+   "task_it": "Scrivi uno script che esporta in LAS i soli punti del terreno (classe 2) della nuvola densa nel file classe2.las nella cartella del progetto; se la nuvola non è classificata, classificala prima.",
+   "task_en": "Write a script that exports the ground points only (class 2) of the dense cloud to LAS, the file classe2.las in the folder of the project; when the cloud is not classified, classify it first.",
+   "check": "(Path(doc.path).parent / 'classe2.las').is_file() and set(np.unique(__import__('laspy').read(str(Path(doc.path).parent / 'classe2.las')).classification).tolist()) == {2}",
+   "example": "from pathlib import Path\nfrom pyarchinit_photogrammetry.ai.classify import classify_chunk\n\nif 2 not in chunk.point_classes():\n    classify_chunk(chunk)\nout = chunk.export_point_cloud(Path(doc.path).parent / \"classe2.las\", classes=[2])\nprint(out)"
+  }
+ ]
+}

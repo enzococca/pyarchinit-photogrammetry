@@ -1611,6 +1611,36 @@ ppg report scavo.ppg --pdf rapporto.pdf --html rapporto.html --lang it --chunk "
 ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 ```
 
+## The assistant from the command line
+
+```bash
+ppg assistant models --kind local                      # every local server that answers, with its models
+ppg assistant models --kind local --base-url http://127.0.0.1:8080/v1
+ppg assistant ask scavo.ppg "Qual è la risoluzione del DEM?" --kind local --show-sent
+ppg assistant eval scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out local.json --record
+ppg assistant eval scavo.ppg --kind reference          # the reference answers of the set: every check can be met
+```
+
+`ask` asks one question about a project (`--kind local|claude|openai`, `--model`, `--base-url`, `--lang it|en`) and
+prints the answer; `--show-sent` also prints what was sent (with a local model nothing leaves: every entry is marked
+so), and `ppg assistant sent` prints the same for the last `ask` of the process. `models` lists the models of a local
+server, of Claude or of the OpenAI account. A local address is only ever one of this computer.
+
+`eval` asks the evaluation set (`tests/assistant_eval/cases.json`, written for the demo project of
+`ppg demo FOLDER --process`): 8 questions, each in a fresh conversation, passed when the answer holds every pattern
+of the case; 6 script tasks, each script run on a copy of the project (never on the project) and then checked, the
+error sent back once for a second attempt. `--only questions|scripts`, `--out` writes the results as JSON and
+`--record` keeps the score (the script tasks done) as the last evaluation of the kind, shown in the settings of the
+assistant ("limited for scripts" under 2).
+
+| Call | Description |
+| --- | --- |
+| `assistant.evaluate.run_eval(provider, project, cases=CASES, kinds="all", attempts=2, progress=None, language="it")` | the set asked to `provider`: `{"provider", "kind", "model", "language", "date", "elapsed", "questions": {"passed", "of", "results"}, "scripts": {"passed", "of", "first_try", "results"}, "score_scripts", "limited_for_scripts"}`; a result per case is a `CaseResult(id, kind, passed, attempts, detail, elapsed, sent_chars)` as a dict |
+| `assistant.evaluate.write_results(result, out)` | the result as JSON |
+| `assistant.evaluate.record_score(settings, kind, result)` | `score_scripts` under `assistant/score_<kind>` (only `local`, `claude`, `openai`) |
+| `assistant.evaluate.CasesProvider(cases, language="it")` | a provider answering with the reference answers of the set (no model) |
+| `assistant.evaluate.load_cases(path)` / `table(result)` | the set; the result as lines of text |
+
 ## Modules
 
 | Module | Main functions |

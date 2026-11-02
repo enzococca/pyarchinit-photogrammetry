@@ -83,3 +83,28 @@ Uno script parte solo quando premi *Esegui*: l'assistente non esegue mai niente 
 
 Le chiavi stanno solo nel portachiavi del sistema (*Salva nel portachiavi*, *Dimentica*) o si leggono dalle
 variabili d'ambiente `ANTHROPIC_API_KEY` e `OPENAI_API_KEY`: mai nelle impostazioni, nel progetto o nei log.
+
+## La valutazione
+
+Quanto un modello lavora bene con il programma si misura su un set fisso di 8 domande e 6 compiti di script sul
+progetto dimostrativo (`ppg demo CARTELLA --process`): le domande sul progetto (DEM, ortofoto, allineamento e punti di
+controllo, marker) e sul programma (curve di livello, IFC, confidenza, buchi nel DEM); gli script la regione su tre
+marker, la mappa delle normali, un chunk con le foto di un'area, le foto fuori da un'area disattivate, un DEM del solo
+terreno, i punti del terreno esportati. Ogni script gira su una copia del progetto e viene controllato; dopo un errore
+il modello ha un secondo tentativo, come con *Errore? Chiedi all'assistente*. Il punteggio è il numero di compiti di
+script riusciti.
+
+```bash
+ppg assistant eval CARTELLA/scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out locale.json --record
+```
+
+`--record` scrive il punteggio nelle impostazioni, dove *Impostazioni...* lo mostra come ultima valutazione del tipo.
+
+| Modello | Dove | Domande | Script (punteggio) |
+| --- | --- | --- | --- |
+| Qwen2.5-Coder-7B-Instruct Q4_K_M | locale, llama.cpp (`llama-server --jinja`), Apple M4 Pro | 1/8 in italiano, 2/8 in inglese | 1/6 in italiano, 3/6 in inglese |
+
+Le risposte di riferimento del set (`--kind reference`) superano 8/8 e 6/6: ogni controllo è raggiungibile. Il piccolo
+modello locale scrive come testo le chiamate agli strumenti del progetto invece di farle, quindi non può leggere il
+progetto: le sue risposte sul progetto non sono affidabili, e in italiano è "limitato per gli script". Claude e OpenAI
+non sono ancora stati valutati (nessuna chiave sul computer della valutazione).

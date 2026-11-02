@@ -30,6 +30,9 @@ app.add_typer(plugins_app, name="plugins")
 photos_app = typer.Typer(help="Enable or disable photos: a disabled photo keeps its pose, the next steps leave it out")
 app.add_typer(gnss_app, name="gnss")
 app.add_typer(photos_app, name="photos")
+assistant_app = typer.Typer(help="The assistant from the command line: a question about a project, the models of a "
+                                 "server or service, the evaluation of a model on the evaluation set")
+app.add_typer(assistant_app, name="assistant")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -2234,6 +2237,134 @@ def plugins_disable(name: str):
 
     Manager().set_enabled(name, False)
     typer.echo(f"{name} disabled")
+
+
+# ---------------------------------------------------------------- assistant
+
+KIND_HELP = "local (a server on this computer), claude or openai"
+_LAST_SENT: list[str] = []  # the sent log of the last `ask` of this process
+
+
+def _assistant_provider(kind: str, model: str, base_url: str):
+    from .assistant.providers import ProviderError, make_provider
+
+    try:
+        return make_provider(kind, model, base_url)
+    except ProviderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+
+@assistant_app.command("ask")
+def assistant_ask(project: Path = typer.Argument(..., help="the .ppg project the question is about"),
+                  question: str = typer.Argument(..., help="the question, in quotes"),
+                  kind: str = typer.Option("local", help=KIND_HELP),
+                  model: str = typer.Option("", help="the model (default: the first of a local server, "
+                                                     "claude-opus-5-5 for Claude)"),
+                  base_url: str = typer.Option("", help="address of the server, e.g. http://127.0.0.1:8080/v1 (a "
+                                                        "local one only on this computer; default: the usual ports)"),
+                  lang: str = typer.Option("it", help="language of the conversation: it or en"),
+                  show_sent: bool = typer.Option(False, "--show-sent", help="also print what was sent")):
+    """Ask the assistant one question about a project and print the answer (and what it read)."""
+    from .assistant.knowledge import default_index
+    from .assistant.session import Assistant
+
+    doc = Document.open(project)
+    provider = _assistant_provider(kind, model, base_url)
+    assistant = Assistant(provider, lambda: doc, default_index("it" if lang.startswith("it") else "en"),
+                          language=lang)
+    turn = assistant.ask(question)
+    _LAST_SENT[:] = assistant.sent_log
+    if turn.note:
+        typer.echo(turn.note)
+    if turn.text:
+        typer.echo(turn.text)
+    if show_sent:
+        typer.echo("\n--- sent ---\n" + "\n\n".join(_LAST_SENT))
+    if turn.error:
+        typer.echo(turn.error, err=True)
+        raise typer.Exit(1)
+
+
+@assistant_app.command("sent")
+def assistant_sent():
+    """What the last `ask` of this process sent, entry by entry (with a local model nothing left: marked so)."""
+    if not _LAST_SENT:
+        typer.echo("Nothing sent in this process: `ppg assistant ask --show-sent` prints it with the answer.")
+        return
+    typer.echo("\n\n".join(_LAST_SENT))
+
+
+@assistant_app.command("models")
+def assistant_models(kind: str = typer.Option("local", help=KIND_HELP),
+                     base_url: str = typer.Option("", help="address of the server (local: default the usual ports)")):
+    """The models of a local server (or of every local server that answers), of Claude or of the OpenAI account."""
+    from .assistant.providers import OpenAICompatible, ProviderError, probe_local
+
+    try:
+        if kind == "local" and not base_url:
+            found = probe_local()
+            if not found:
+                typer.echo("No local server answers (LM Studio, llama.cpp, Ollama, Unsloth).", err=True)
+                raise typer.Exit(1)
+            for name, url, models in found:
+                typer.echo(f"{name} {url}")
+                for m in models:
+                    typer.echo(f"  {m}")
+            return
+        if kind == "local":
+            models = OpenAICompatible(base_url, "", kind="local").list_models()
+        else:
+            models = _assistant_provider(kind, "", base_url).list_models()
+    except ProviderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for m in models:
+        typer.echo(m)
+
+
+@assistant_app.command("eval")
+def assistant_eval(project: Path = typer.Argument(..., help="the .ppg project (the demo: ppg demo FOLDER --process)"),
+                   kind: str = typer.Option("local", help=KIND_HELP + ", or reference (the answers of the set)"),
+                   model: str = typer.Option("", help="the model"),
+                   base_url: str = typer.Option("", help="address of the server"),
+                   cases: Optional[Path] = typer.Option(None, help="the evaluation set (default: "
+                                                                   "tests/assistant_eval/cases.json of a checkout)"),
+                   only: str = typer.Option("all", help="all, questions or scripts"),
+                   lang: str = typer.Option("it", help="language of the questions: it or en"),
+                   out: Optional[Path] = typer.Option(None, help="write the results to this JSON file"),
+                   record: bool = typer.Option(False, "--record", help="keep the score as the last evaluation of "
+                                                                       "this kind in the settings of the interface")):
+    """Evaluate a model: the questions and the script tasks of the set on a project (the scripts run on copies:
+    the project is never changed). Prints one line per case and the score."""
+    from .assistant import evaluate
+
+    path = cases or evaluate.CASES
+    if kind == evaluate.REFERENCE:
+        if record:
+            typer.echo("The reference answers of the set are not a model: nothing to record.", err=True)
+            raise typer.Exit(1)
+        provider = evaluate.CasesProvider(path, language=lang)
+    else:
+        provider = _assistant_provider(kind, model, base_url)
+    try:
+        result = evaluate.run_eval(provider, project, path, kinds=only, progress=print_progress, language=lang)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(evaluate.table(result))
+    if out is not None:
+        evaluate.write_results(result, out)
+        typer.echo(f"results written to {out}")
+    if record:
+        try:
+            from .gui import app_settings
+
+            score = evaluate.record_score(app_settings(), kind, result)
+        except (ImportError, ValueError) as exc:
+            typer.echo(f"not recorded: {exc}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"score {score:g} recorded for {kind}")
 
 
 @app.command("plugin", context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
