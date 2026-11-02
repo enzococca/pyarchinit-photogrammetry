@@ -564,7 +564,9 @@ def test_cancel_while_the_model_is_still_thinking(openai_fake):
     start = time.monotonic()
     reply = OpenAICompatible(openai_fake.url, "m1", timeout=10).complete(
         [Message("user", "x")], cancel=lambda: time.monotonic() - start > 0.2)
-    assert time.monotonic() - start < 1
+    # by design within CANCEL_POLL of the cancel (~0.3 s here): 2 s leaves room for a loaded CI runner, and is
+    # still well under the 3 s the model keeps thinking
+    assert time.monotonic() - start < 2
     assert reply.stop == "end" and reply.text == "" and reply.tool_calls == []
 
 

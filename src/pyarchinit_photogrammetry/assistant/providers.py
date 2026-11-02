@@ -171,32 +171,16 @@ def _cancelled(cancel: Callable[[], bool] | None) -> bool:
         return False
 
 
-class _Watch:
-    """A thread that looks at ``cancel()`` every CANCEL_POLL seconds and calls ``stop()`` once when it is true."""
+class _Cancelled(Exception):
+    """Raised inside a reply being read when ``cancel()`` became true."""
 
-    def __init__(self, cancel: Callable[[], bool] | None, stop: Callable[[], None]):
-        self.cancel, self.stop = cancel, stop
-        self.fired = False
-        self._done = threading.Event()
 
-    def __enter__(self) -> "_Watch":
-        if self.cancel is not None:
-            threading.Thread(target=self._run, name="assistant-cancel", daemon=True).start()
-        return self
+class _Whole(Exception):
+    """A server that answered with one JSON body instead of a stream: the body, out of the line reader."""
 
-    def _run(self):
-        while not self._done.wait(CANCEL_POLL):
-            if _cancelled(self.cancel):
-                self.fired = True
-                try:
-                    self.stop()
-                except Exception:
-                    log.debug("annullamento", exc_info=True)
-                return
-
-    def __exit__(self, *exc):
-        self._done.set()
-        return False
+    def __init__(self, body: bytes):
+        super().__init__("whole")
+        self.body = body
 
 
 class _Sockets:
@@ -376,24 +360,64 @@ class OpenAICompatible:
         if tools:
             body["tools"] = [self._tool(t) for t in tools]
             body["tool_choice"] = "auto"
+        # The request is read in a thread of its own and its lines handed over a queue: this thread looks at
+        # cancel() every CANCEL_POLL seconds whatever the socket does. Shutting the socket down from another thread
+        # does not wake a blocked recv() on Windows: waiting for it made a cancel last until the server answered.
         sockets, partial = _Sockets(), _Partial()
-        with _Watch(cancel, sockets.shutdown) as watch:
+        items: queue.Queue = queue.Queue()
+        stop = threading.Event()
+
+        def read():
             try:
                 response = self._open("/chat/completions", body, stream=True, sockets=sockets)
                 try:
                     if "json" in (response.headers.get("Content-Type") or ""):  # a server that does not stream
-                        return self._whole(json.loads(response.read()), on_text)
-                    return self._stream(response, on_text, cancel, partial)
+                        items.put(("whole", response.read()))
+                        return
+                    for raw in response:
+                        if stop.is_set():
+                            return
+                        items.put(("line", raw))
+                    items.put(("end", None))
                 finally:
                     response.close()
-            except ProviderError:
-                if watch.fired:
-                    return partial.reply()
-                raise
-            except (OSError, http.client.HTTPException, ValueError) as exc:
-                if watch.fired:
-                    return partial.reply()
-                raise self._broken(exc) from exc
+            except BaseException as exc:  # handed to the caller's thread
+                if not stop.is_set():
+                    items.put(("error", exc))
+
+        def lines():
+            while True:
+                try:
+                    kind, item = items.get(timeout=CANCEL_POLL)
+                except queue.Empty:
+                    kind, item = "wait", None
+                if kind in ("wait", "line", "error") and _cancelled(cancel):
+                    raise _Cancelled
+                if kind == "wait":
+                    continue
+                if kind == "error":
+                    raise item
+                if kind == "end":
+                    return
+                if kind == "whole":
+                    raise _Whole(item)
+                yield item
+
+        threading.Thread(target=read, name="assistant-openai", daemon=True).start()
+        try:
+            try:
+                return self._stream(lines(), on_text, cancel, partial)
+            except _Whole as whole:
+                return self._whole(json.loads(whole.body), on_text)
+        except _Cancelled:
+            return partial.reply()
+        except ProviderError:
+            raise
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise self._broken(exc) from exc
+        finally:
+            stop.set()
+            sockets.shutdown()  # the server sees the client gone; the reader thread ends on its own
 
     def _stream(self, response, on_text, cancel, partial: _Partial) -> Reply:
         calls: dict[int, dict] = {}
