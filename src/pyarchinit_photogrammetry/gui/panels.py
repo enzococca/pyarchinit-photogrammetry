@@ -1347,7 +1347,10 @@ class ConsolePane(QWidget):
 
     def run_source(self, src: str) -> bool:
         """Run one line (as typed) or a block of lines; returns True when more input is needed."""
-        if not self.console.buffer and self._is_block(src):
+        if self._is_block(src):
+            if self.console.buffer:
+                self.console.resetbuffer()
+                self.write(tr("Il blocco incollato sostituisce l'istruzione rimasta a metà") + "\n")
             return self._exec_block(src)
         self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
         from ..assistant.scripts import capture
@@ -1404,11 +1407,12 @@ class _HistoryLine(QLineEdit):
         self.pos = len(self.history)
 
     def insertFromMimeData(self, mime) -> None:
-        """A paste with a newline is a block: it runs at once instead of losing its line breaks."""
+        """A paste with a newline is a block: it runs at once (after the text already typed)."""
         text = mime.text() if mime is not None and mime.hasText() else ""
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         if "\n" in text.strip("\n"):
-            self.block_pasted.emit(text)
+            self.block_pasted.emit(self.text() + text if not self.text() else self.text() + "\n" + text)
+            self.clear()
         elif text:
             self.insert(text.strip("\n"))
 
@@ -1418,19 +1422,34 @@ class _HistoryLine(QLineEdit):
         self.insertFromMimeData(QApplication.clipboard().mimeData())
 
     def contextMenuEvent(self, ev) -> None:
-        """The menu's Paste is wired to ``paste`` (Qt's own slot is not virtual)."""
-        from PySide6.QtGui import QKeySequence
+        """Our own menu: Qt's Paste slot is not virtual, so the standard menu cannot be rewired."""
+        from PySide6.QtWidgets import QMenu
 
-        menu = self.createStandardContextMenu()
-        for act in menu.actions():
-            if act.shortcut() == QKeySequence(QKeySequence.StandardKey.Paste):
-                try:
-                    act.triggered.disconnect()
-                except RuntimeError:
-                    pass
-                act.triggered.connect(self.paste)
-        menu.exec(ev.globalPos())
+        menu = QMenu(self)
+        sel = self.hasSelectedText()
+        for item in (
+                (tr("Annulla", context="undo"), self.undo, self.isUndoAvailable()),
+                (tr("Ripeti"), self.redo, self.isRedoAvailable()),
+                None,
+                (tr("Taglia"), self.cut, sel),
+                (tr("Copia"), self.copy, sel),
+                (tr("Incolla"), self.paste, True),
+                (tr("Elimina"), self.del_, sel),
+                None,
+                (tr("Seleziona tutto"), self.selectAll, bool(self.text()))):
+            if item is None:
+                menu.addSeparator()
+                continue
+            label, slot, enabled = item
+            act = menu.addAction(label)
+            act.setEnabled(enabled)
+            act.triggered.connect(slot)
+        self.run_menu(menu, ev.globalPos())
         menu.deleteLater()
+
+    def run_menu(self, menu, pos) -> None:
+        """Shows the menu (a seam for tests)."""
+        menu.exec(pos)
 
     def keyPressEvent(self, ev: QKeyEvent) -> None:
         from PySide6.QtGui import QKeySequence
