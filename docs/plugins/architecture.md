@@ -2,15 +2,16 @@
 
 The *Architectural elements* plugin makes parametric elements from the photogrammetric model: a column by revolution, a
 moulding or a cornice swept along a path, an arch or a barrel vault from a section, the void of a door or a window
-through a wall. Each one is a solid with parameters (radius, height, span, rise, thickness, width, sill, lintel) written as STEP and as a parametric IFC solid beside the mesh, for an HBIM
-model; each one keeps the profile measured on the model and always says **how far the model is from the solid**, so
-that nobody takes the ideal for the real.
+through a wall. Each one is a solid with parameters (radius, height, span, rise, thickness, width, sill, lintel) written
+as STEP and as a parametric IFC solid beside the mesh, for an HBIM model; each one keeps the profile measured on the
+model and always says **how far the model is from the solid**, so that nobody takes the ideal for the real.
 
-This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later. The README and the
-code are in the [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/architecture).
+This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later. The README and
+the code are in the [plugin
+repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/architecture).
 
 <figure markdown="span">
-  ![A wall with a pointed archivolt, a cornice, a door and a window: the model in grey, the solids in colour](../img/plugins/architecture/wall-3d.jpg)
+  ![The wall of the examples: the model in grey, the solids in colour](../img/plugins/architecture/wall-3d.jpg)
   <figcaption>The model of a synthetic wall made by the program from 76 photos (grey) and the four solids fitted on it:
   the pointed archivolt (orange), the cornice along the top (blue), the void of the door (green) and that of the
   splayed window (pink).</figcaption>
@@ -18,9 +19,9 @@ code are in the [plugin repository](https://github.com/enzococca/pyarchinit-phot
 
 !!! note "The examples of this page"
     The figures and the numbers come from two **synthetic scenes** made for this guide: a column with entasis and a wall
-    with a pointed arch, a cornice, a door and a splayed window, textured, photographed by the program's renderer, then aligned, densified and
-    meshed by the program as real photos would be. The truth is known, so the guide can say how close the plugin came
-    to it. The script is `proof/make_proof.py` in the plugin's folder.
+    with a pointed arch, a cornice, a door and a splayed window, textured, photographed by the program's renderer, then
+    aligned, densified and meshed by the program as real photos would be. The truth is known, so the guide can say how
+    close the plugin came to it. The script is `proof/make_proof.py` in the plugin's folder.
 
 ## In short
 
@@ -106,18 +107,18 @@ A cornice, a moulding, a string course: a section carried along a path.
   the world through the elevation's frame, at the depth of its relief or, where the relief has no value, of the model's
   surface nearest the viewer: such a path keeps its heights, a raking cornice too); or straight **between two markers**.
 * **The section**: the model cut by the plane normal to the path at a station (by default the middle of the first
-  segment). On the line of the cut nearest the path's point the plugin finds the **wall face**: the deepest of
-  the vertical stretches (3 cm or more) the line comes from or goes to, preferring one seen both below and above the
+  segment). On the line of the cut nearest the path's point the plugin finds the **wall face**: the deepest of the
+  vertical stretches (3 cm or more) the line comes from or goes to, preferring one seen both below and above the
   moulding (a cornice's own fascia or fillet is not the wall; a parapet behind it is seen above only). With no such
   stretch the deepest point of the line stands for it and the element says so ("no wall face in the stretch: projection
-  from the deepest point"). The plugin keeps only the stretch that **stands out of it** by more than the mesh's resolution, the one at the
-  path's point: the moulding's own height, not the wall above and below. That stretch is closed by a back line *Depth
-  into the wall* behind the face and simplified (Douglas-Peucker, in metres). The **projection** is measured from the
-  wall face. By default the window is found from the cut (the moulding's extent and 10 cm around it, kept in the
-  element); a window given in the dialog or with `--window` limits the search. It projects towards the photos, or the
-  side you choose. A free-standing member (a cut that closes on itself) is kept whole and reported by its width and height,
-  with no projection. The **section area** given is the moulding's in front of the wall face; the solid's section adds
-  the slab behind it (`section_area_with_slab`).
+  from the deepest point"). The plugin keeps only the stretch that **stands out of it** by more than the mesh's
+  resolution, the one at the path's point: the moulding's own height, not the wall above and below. That stretch is
+  closed by a back line *Depth into the wall* behind the face and simplified (Douglas-Peucker, in metres). The
+  **projection** is measured from the wall face. By default the window is found from the cut (the moulding's extent and
+  10 cm around it, kept in the element); a window given in the dialog or with `--window` limits the search. It projects
+  towards the photos, or the side you choose. A free-standing member (a cut that closes on itself) is kept whole and
+  reported by its width and height, with no projection. The **section area** given is the moulding's in front of the
+  wall face; the solid's section adds the slab behind it (`section_area_with_slab`).
 * **The solid**: the section swept along the path with **mitred corners**, as a carved cornice turns a corner; an
   extrusion when the path is straight.
 
@@ -167,29 +168,42 @@ semi-axes grown by the thickness (not a curve at a constant distance).
 *Door / window...* (in the pane and in the *Plugins* menu) asks for a click **inside the opening on the plan**, between
 the two reveals, on the chunk's orthophoto or DEM. The solid is the **void**, to be subtracted from the wall.
 
-* **The height of the cut.** By default the plugin cuts the model horizontally at many heights and keeps those at which
-  the point is in a passage through the wall (the rays from it leave the wall on both sides, and between them meet a
-  reveal on the left and one on the right): the cut is in the middle of them. A height can be given instead.
-* **The plan.** On the cut, the two **reveals** are what the point sees on its left and on its right, each fitted by a
-  line (a splayed reveal stays splayed); the **wall faces** are the parts of the cut that turn away from the reveals at
-  their ends, one line through both sides. When only one face of the wall is on the model (a facade photographed from
-  the street) the plugin asks for the **wall thickness**: the other face is placed that far behind the one on the side
-  of the photos. A thickness given always takes the place of the measured one.
+* **The height of the cut.** By default (*automatic*) the plugin cuts the model horizontally at many heights and keeps
+  those at which the plan of an opening can be read around the point; the cut is in the middle of them. With
+  *automatic* off, the height given is used, whatever it is (0 m too).
+* **The wall faces first.** On the cut, the faces of the wall are the straight runs of the cut on which the point falls
+  in a **gap**, the run going on without a break on both sides of it: the nearer one is the near face, the far face is
+  the nearest run parallel to it. A room behind the door, a corridor, a building across the street are never taken:
+  their walls are beyond the far face, run across the point's projection or end before it.
+* **The reveals** are only the cut's points between the two faces that start at the ends of the gap, each fitted by a
+  line (a splayed reveal stays splayed). When only one face of the wall is on the model (a facade photographed from
+  the street) the plugin asks for the **wall thickness**: the other face is placed that far behind it. A thickness
+  given always takes the place of the measured one (the inner face moves, the outer one stays). A thin wall on a
+  coarse model (faces closer than three mesh edges) is said as such: give the thickness, or use a denser model.
+* **The outer face** is the one seen by more of the aligned photos that frame the opening (the model's points of each
+  face near the opening projected into each photo, from the side the face looks to). When the photos do not tell
+  them apart (no photos, or as many on both sides) the field *Outer face* decides: *auto* takes the face nearer the
+  click, or choose it. The summary says which rule was used.
 * **Sill and lintel.** From the vertical section across the wall through the point: the first line met downwards
   (the sill, the threshold or the floor) and upwards (the lintel), as the median of rays across the middle of the
-  wall's thickness. Either can be given.
+  wall's thickness: for a sloped sill, the height at half the thickness, with a warning giving its slope. Either can
+  be given.
 * **The top.** *Flat lintel*, or **an arch** already made (its section must be vertical and cross the wall over the
   opening): the plan is extruded up to the arch's springing line and the void under its intrados (true arcs for a
   semicircular, segmental or pointed arch) is added above it, across the whole thickness: one solid. The plugin warns
-  when the arch's span is not the opening's width.
-* **Kind.** *Opening only*, *door* or *window*: in the IFC the void is an `IfcOpeningElement`, and a door or a window is
-  written beside it as `IfcDoor` or `IfcWindow` with the same solid.
+  when the arch's span is not the opening's width, and when the model has a lintel under the springing line (the
+  arch's void would run into the masonry). The arch of an opening cannot be removed while the opening uses it; when
+  the arch is edited the opening is marked *to be rebuilt* (in the table and the summary; its exports are refused)
+  until **Rebuild** makes it again on the new arch.
+* **Kind.** *Opening only*, *door* or *window*: in the IFC the void is an `IfcOpeningElement` in a stand-in wall, and a
+  door or a window is written as `IfcDoor` or `IfcWindow` with the same solid, filling it.
 
 The element reports the **width** at the outer face and at the inner face and, from two more cuts, near the sill and
 near the lintel (the plugin warns when the jambs are not upright); the **height**, the **sill** and the **lintel** as
 world heights and above the ground of the chunk's DEM in front of the threshold (when there is a DEM); the **depth**
-of the reveals (the wall's thickness, measured or given); the **splay** of each reveal in degrees, positive when the
-reveal opens out towards the inner face (an embrasure); the area of the void on the outer face.
+of the reveals (the wall's thickness, measured or given); the **splay** of each reveal in degrees, against the normal
+of the outer face, positive when the opening widens towards the inner face (an embrasure); left and right are as seen
+from outside; the area of the void on the outer face.
 
 *Edit parameters...* changes the sill, the lintel (not with an arched top: that comes from the arch), the width at the
 outer face (both reveals moved by half the difference, their splay kept) and the wall thickness: what was measured stays
@@ -237,7 +251,8 @@ surface, and the solid inherits that.
 | | thickness, depth | 0 = measured |
 | | barrel vault | the same solid as a vault |
 | Door / window | kind | opening only, door, window |
-| | height of the cut | 0 = the middle of the opening |
+| | height of the cut | automatic (the middle of the opening), or a height (0 m too) |
+| | outer face | auto (the one the photos see; else the nearer to the click), the nearer, the other |
 | | top | flat lintel, or an arch of the chunk |
 | | wall thickness | 0 = measured (needed when only one face is on the model) |
 | | sill, lintel, width (edit) | world heights; the width at the outer face, symmetric |
@@ -245,16 +260,17 @@ surface, and the solid inherits that.
 ## Files and formats
 
 Everything of an element is in `<chunk data>/architecture/<id>/`: `solid/solid.step` (AP214, in metres),
-`solid/solid.stl` (tessellated at 0.5 mm; STL has no unit, its numbers are metres), `model.ply` (what the 3D view shows) and `element.json` with everything: source, parameters,
-measured profile, geometry, fit, solid, files. The chunk's model, transform and products are never changed.
+`solid/solid.stl` (tessellated at 0.5 mm; STL has no unit, its numbers are metres), `model.ply` (what the 3D view shows)
+and `element.json` with everything: source, parameters, measured profile, geometry, fit, solid, files. The chunk's
+model, transform and products are never changed.
 
 The coordinates of the STEP, STL and IFC are those of the chunk's system minus a round **origin** (kept per chunk, in
 `element.json`): all the elements of a chunk line up with each other and with the mesh, with small numbers. *Export
-STEP...* copies the files, each with a `<name>.origin.json` beside it (the origin, the system, the units, the
-placement: world = STEP coordinates + origin); *DXF...* writes the profile or the section at 1:1 in metres, on the layers SOLIDO,
-MISURATO, ASSE and IMPOSTA; for an opening, the plan (from the middle of the outer face: the reveals measured beside
-the ideal ones, the wall faces on FACCE) and, beside it, the elevation from outside with the sill (SOGLIA) and the
-lintel (ARCHITRAVE).
+STEP...* copies the files, each with a `<name>.origin.json` beside it (the origin, the system, the units, the placement:
+world = STEP coordinates + origin); *DXF...* writes the profile or the section at 1:1 in metres, on the layers SOLIDO,
+MISURATO, ASSE and IMPOSTA; for an opening, the plan (from the middle of the outer face: the reveals measured beside the
+ideal ones, the wall faces on FACCE) and, beside it, the elevation from outside with the sill (SOGLIA) and the lintel
+(ARCHITRAVE).
 
 ### IFC
 
@@ -268,26 +284,34 @@ elements on request (`IfcGeographicElement`). The solids are **parametric**:
 | Moulding, straight | `IfcMember` (USERDEFINED, "Moulding") | `IfcExtrudedAreaSolid` |
 | Moulding, along a path | `IfcMember` (USERDEFINED, "Moulding") | `IfcFixedReferenceSweptAreaSolid` on an `IfcIndexedPolyCurve` |
 | Arch, vault | `IfcBuildingElementProxy` ("Arch", "Vault") | `IfcExtrudedAreaSolid` of lines and `IfcArcIndex` |
-| Opening | `IfcOpeningElement` (OPENING) | `IfcExtrudedAreaSolid` of the plan (`IfcArbitraryClosedProfileDef`) from the sill up; with an arch, a second one of the void under the intrados |
-| Door, window | `IfcDoor` (DOOR), `IfcWindow` (WINDOW) beside the opening | the same solid; `OverallWidth`, `OverallHeight` |
+| Opening | `IfcOpeningElement` (OPENING), voiding the stand-in wall | `IfcExtrudedAreaSolid` of the plan (`IfcArbitraryClosedProfileDef`) from the sill up; with an arch, a second one of the void under the intrados |
+| Door, window | `IfcDoor` (DOOR), `IfcWindow` (WINDOW), filling the opening | the same solid; `OverallWidth`, `OverallHeight` |
+| Stand-in wall | `IfcWall` "Wall (measured stretch)" (in Italian "Muro (porzione misurata)") | `IfcExtrudedAreaSolid` of the wall around the opening |
 
 `Pset_PyArchInit_Element`: `Kind`, `Method`, `Name`, every parameter as `P_<name>` (metres, degrees), `Fit_median_m`,
 `Fit_p90_m`, `Fit_max_m`, `Fit_points`, `Fit_candidates` (arches), `Warnings`, `Source`, `Representation`,
 `Frames` (which values are world coordinates and which are in the section plane; arches also carry `P_world_apex`
 and the world springing points, mouldings the world ends of the path) and a note that the solid is an interpretation of
-the measured model (openings also `P_sill`, `P_lintel`, `P_reveal_depth`, `P_splay_left`, `P_splay_right`);
-`Qto_PyArchInit_Element` with the volume and the area. The opening is not related to a wall: the program has no wall
-element. An IFC read back by IfcOpenShell gives the
+the measured model (openings also `P_sill`, `P_lintel`, `P_reveal_depth`, `P_splay_left`, `P_splay_right` and
+`Host`); `Qto_PyArchInit_Element` with the volume and the area.
+
+IFC wants an opening in a wall (`IfcRelVoidsElement`), and its door or window in the opening (`IfcRelFillsElement`).
+The program has no wall element yet, so the plugin writes a **stand-in wall**: the stretch of wall measured around the
+opening (its thickness measured or given, half a metre beyond each reveal, from the ground of the DEM at the threshold,
+or half a metre under the sill, to half a metre over the lintel). Openings whose stretches overlap in the same wall
+share one. Its property set says it is a stand-in, not a surveyed wall: the masonry plugin will make the real one. The
+file passes `ifcopenshell.validate` (tested). An IFC read back by IfcOpenShell gives the
 volume of CadQuery's solid within 1 % (tested, raking mouldings included).
 
 ### When the chunk's system changes
 
-The origin, the chunk's transform and its system are kept with the elements. When the chunk is georeferenced or moved
-to another system afterwards (references, *GNSS > System and heights*), the elements are in the old frame: the plugin
+The origin, the chunk's transform and its system are kept with the elements. When the chunk is georeferenced or moved to
+another system afterwards (references, *GNSS > System and heights*), the elements are in the old frame: the plugin
 refuses to export, show or edit them until **Rebuild** (in the pane, or `ppg plugin architecture rebuild`) makes them
 again in place (same ids: a part made on the same axis as a column still is), carrying their regions, paths, planes and
 points into the new frame and measuring them again on the model. Parameters edited by hand (knot radii, type, thickness,
-depth, simplification; an opening's sill, lintel, width and wall thickness) are carried too, and the element says "parameters edited by hand kept".
+depth, simplification; an opening's sill, lintel, width and wall thickness) are carried too, and the element says
+"parameters edited by hand kept".
 
 ## Command line
 
@@ -300,6 +324,7 @@ ppg plugin architecture moulding PROJECT.ppg --elevation "South elevation" --pat
 ppg plugin architecture arch PROJECT.ppg --section "Section A" --pick 1.8,0.8 --type auto
 ppg plugin architecture arch PROJECT.ppg --points x1,y1,x2,y2 --pick 1.8,0.8 --thickness 0.25
 ppg plugin architecture opening PROJECT.ppg --at x,y --kind window --thickness 0.5 [--height H] [--top Arco] \
+    [--outer auto|near|far] \
     [--sill S] [--lintel L]
 ppg plugin architecture rebuild PROJECT.ppg
 ppg plugin architecture list PROJECT.ppg
@@ -355,33 +380,40 @@ middle of each opening; the height of the cut was found by the plugin.
 
 | Door (cut at 1.072 m) | plugin | truth |
 |---|---|---|
-| width at the outer face | 896.1 mm | 900.0 mm |
+| width at the outer face | 895.9 mm | 900.0 mm |
 | width at the inner face | 895.5 mm | 900.0 mm |
-| width near the sill / near the lintel | 895.6 / 899.4 mm | 900.0 mm |
-| splay left / right | 0.48° / -0.55° | 0° |
-| sill | 49.0 mm | 50.0 mm |
-| lintel | 2098.9 mm | 2100.0 mm |
-| volume of the void | 0.9181 m³ | 0.9225 m³ (-0.47 %) |
+| width near the sill / near the lintel | 895.2 / 898.6 mm | 900.0 mm |
+| splay left / right | -0.30° / 0.25° | 0° |
+| sill | 49.1 mm | 50.0 mm |
+| lintel | 2099.0 mm | 2100.0 mm |
+| volume of the void | 0.9180 m³ | 0.9225 m³ (-0.48 %) |
 | fit (median / p90) | 1.6 / 5.3 mm | |
-| points on the wall faces, left out | 8148 | |
+| points on the wall faces, left out | 8282 | |
 | model against truth (median / p90) | 2.0 / 6.1 mm | |
+| the model itself inside the true reveals, left / right, at the cut | 3.0 / 0.6 mm | 0 |
+| outer face | seen by 46 photos, the other by none | |
 
-| Window (cut at 1.500 m) | plugin | truth |
+| Window (cut at 1.498 m) | plugin | truth |
 |---|---|---|
-| width at the outer face | 794.0 mm | 800.0 mm |
-| width at the inner face | 969.5 mm | 976.3 mm |
-| width near the sill / near the lintel | 799.7 / 795.4 mm | 800.0 mm |
-| splay left / right | 9.91° / 9.99° | 10° |
-| sill | 998.7 mm | 1000.0 mm |
+| width at the outer face | 796.0 mm | 800.0 mm |
+| width at the inner face | 970.0 mm | 976.3 mm |
+| width near the sill / near the lintel | 800.6 / 796.3 mm | 800.0 mm |
+| splay left / right | 10.01° / 9.73° | 10° |
+| sill | 998.8 mm | 1000.0 mm |
 | lintel | 1997.3 mm | 2000.0 mm |
-| volume of the void | 0.4403 m³ | 0.4441 m³ (-0.86 %) |
-| fit (median / p90) | 2.0 / 11.2 mm | |
-| points on the wall faces, left out | 9317 | |
+| volume of the void | 0.4409 m³ | 0.4441 m³ (-0.72 %) |
+| fit (median / p90) | 1.7 / 11.0 mm | |
+| points on the wall faces, left out | 9274 | |
 | model against truth (median / p90) | 2.9 / 11.2 mm | |
+| the model itself inside the true reveals, left / right, at the cut | 3.6 / 1.1 mm | 0 |
+| outer face | seen by 55 photos, the other by none | |
 
-The window's reveals are seen at a grazing angle through an opening 0.8 m wide: at the height of the cut the program's
-model itself is about 4 mm narrower than the truth (3.3 mm on the left reveal, 1.0 mm on the right), and the solid
-follows the model. Near the sill, where the model is closer, the width is within 0.3 mm.
+The design asked for 5 mm. Every number of the door is within it, and so are the window's widths at the outer face, near
+the sill (0.6 mm) and near the lintel; the width at the inner face is 6.3 mm narrow. That is the model's own error, not
+the plugin's: the window's reveals are seen at a grazing angle through an opening 0.8 m wide, and at the height of the
+cut the program's model is itself 3.6 mm (left) and 1.1 mm (right) inside the true reveals (the last row, measured by
+the proof on the model: `results.json`); the solid follows the model, and a splay of 10 degrees carries that error to
+the inner face.
 
 ## Limits
 
@@ -393,7 +425,7 @@ follows the model. Near the sill, where the model is closer, the width is within
 * **The environment** is about 900 MB, and the first run after its installation takes about a minute.
 * **Windows on ARM**: not available (no OpenCascade build).
 * **Openings**: the plan is the same at every height (a prism from the sill up); jambs that lean are reported (the
-  widths near the sill and the lintel), not modelled. An opening is not related to a wall in the IFC.
+  widths near the sill and the lintel), not modelled. In the IFC the wall around an opening is a stand-in.
 * It does not detect elements by itself, does not model the carving of a capital, nor cross or domical vaults, nor
   walls, and edits nothing in the 3D view. The solid is as good as the model it is fitted on: the fit says
   how far apart they are.
