@@ -35,8 +35,7 @@ from ..core.progress import Progress, as_progress
 log = logging.getLogger(__name__)
 
 MAX_VERTICES = 2_000_000  # the greedy refinement and the thinning of the cloud stop there
-DEFAULT_TOLERANCE = 0.02  # m: the tolerance of the refinement when the DEM's noise cannot be measured
-MIN_TOLERANCE = 0.001  # m
+FLOOR_CELLS = 0.2  # the default tolerance is never below this part of the DEM's cell (5 cm -> 1 cm)
 NOT_CONSTRAINED = ("the native core (pyarchinit-photogrammetry-core 0.7, API 10) is not installed: the break lines "
                    "and the boundary are vertices of the TIN but not constraints, the triangles may cross them")
 KINDS = ("breakline", "soft", "boundary")
@@ -597,7 +596,7 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
     """Build the TIN of ``chunk`` and keep it (product ``tin``).
 
     ``source``: ``"dem"`` (greedy refinement of the DEM until every cell is within ``max_error``,
-    default twice the DEM's noise - the NMAD around a 3 x 3 median - or 2 cm; at most 2 M vertices),
+    default twice the DEM's noise - the NMAD around a 3 x 3 median - and at least a fifth of a cell; at most 2 M vertices),
     ``"cloud"`` (the ground of the dense cloud, class 2 when it has it or ``classes``, thinned to its
     point spacing) or ``"spots"`` (the spot heights and the break lines only). ``breaklines``: dicts
     ``{id, kind, coords}`` (kind ``breakline``: constraint edges, their heights from the line when it
@@ -657,8 +656,9 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
         xy, z, tri, con, spot_idx, info_dem = _refine_dem(b, dem, origin, max_error, bounds_local,
                                                           progress.sub(0.02, 0.9))
         info.update(info_dem)
-        if info_dem["tolerance"] == "default":
-            warnings.append(f"the noise of the DEM could not be measured: tolerance of {DEFAULT_TOLERANCE:g} m")
+        if info_dem.get("noise") == 0:
+            warnings.append(f"the noise of the DEM could not be measured: tolerance of {info_dem['max_error']:.4g} m "
+                            f"({FLOOR_CELLS:g} of a cell)")
         if info_dem["capped"]:
             warnings.append(f"the refinement stopped at {MAX_VERTICES:,} vertices before reaching the tolerance")
     else:
@@ -739,9 +739,11 @@ def _refine_dem(b: _Builder, dem: _Dem, origin, max_error, bounds_local, progres
     the DEM's holes and concave edges)."""
     if max_error is None:
         noise = dem.noise()
-        tol = max(MIN_TOLERANCE, 2 * noise) if noise > 0 else DEFAULT_TOLERANCE
-        tolerance = "noise" if noise > 0 else "default"
+        floor = FLOOR_CELLS * dem.res  # below a fifth of a cell the vertices would follow the gridding
+        tol = max(2 * noise, floor)
+        tolerance = "noise" if 2 * noise > floor else "floor"
     else:
+        noise = None
         tol = float(max_error)
         tolerance = "given"
     if tol <= 0:
@@ -817,7 +819,7 @@ def _refine_dem(b: _Builder, dem: _Dem, origin, max_error, bounds_local, progres
             br, bc = br[worst], bc[worst]
         chosen[br, bc] = True
     xy, z, tri, con, spot_idx = _compact(xy, z, tri, t.constrained, b.spot_mask(len(xy)))
-    info = {"max_error": tol, "tolerance": tolerance, "rounds": rounds, "dem_cells": n_measure, "capped": capped,
+    info = {"max_error": tol, "tolerance": tolerance, "noise": noise, "rounds": rounds, "dem_cells": n_measure, "capped": capped,
             "dem_factor": dem.factor}
     return xy, z, tri, con, spot_idx, info
 
@@ -963,7 +965,7 @@ def report(tin: Tin) -> str:
     lines = [f"TIN ({tin.source}): {tin.n_vertices} vertices, {tin.n_triangles} triangles, "
              f"{len(tin.constrained)} constrained edges, {len(tin.spots)} spot heights"]
     if "max_error" in i:
-        how = {"noise": "twice the noise of the DEM", "default": "default: the noise of the DEM not measured",
+        how = {"noise": "twice the noise of the DEM", "floor": f"{FLOOR_CELLS:g} of a cell of the DEM",
                "given": "given"}.get(i.get("tolerance"), "")
         lines.append(f"tolerance {i['max_error']:.4g} m ({how}), {i.get('rounds', 0)} rounds of refinement"
                      if how else f"tolerance {i['max_error']:.4g} m, {i.get('rounds', 0)} rounds of refinement")

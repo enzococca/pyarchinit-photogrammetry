@@ -197,11 +197,11 @@ def test_a_ring_survey_with_and_without_the_core(tmp_path, monkeypatch, core):
         pytest.skip("the native core with the TIN kernels (API 10)")
     monkeypatch.setenv("PPG_NATIVE", "1" if core == "native" else "0")
     res, n = 0.05, 400
-    dem = _ring_dem(n, res)
+    dem = _ring_dem(n, res, noise=0.01)
     _doc, ch = _chunk(tmp_path, dem=dem, res=res, origin=(X0, Y0 + n * res))
     tin = T.build_tin(ch, source="dem")
-    # the noise is measured on the ring, not in the empty middle: no fallback tolerance
-    assert tin.info["tolerance"] == "noise" and 0.002 < tin.info["max_error"] < 0.01
+    # the noise is measured on the ring, not in the empty middle (1 cm: above the floor of 1 cm)
+    assert tin.info["tolerance"] == "noise" and 0.01 < tin.info["max_error"] < 0.04
     assert not tin.info["warnings"] and tin.info["error_max"] <= tin.info["max_error"] + 1e-5
     T.tin_to_dem(ch)
     import rasterio
@@ -217,9 +217,26 @@ def test_the_fallback_tolerance_is_said(tmp_path):
     flat = np.full((60, 60), 3.0)  # no noise to measure
     _doc, ch = _chunk(tmp_path, dem=flat, res=0.1, origin=(X0, Y0 + 6.0))
     tin = T.build_tin(ch, source="dem")
-    assert tin.info["tolerance"] == "default" and tin.info["max_error"] == T.DEFAULT_TOLERANCE
+    assert tin.info["tolerance"] == "floor" and tin.info["max_error"] == pytest.approx(0.02)
     assert any("could not be measured" in w for w in tin.info["warnings"])
-    assert "noise of the DEM not measured" in T.report(tin)
+    assert "0.2 of a cell of the DEM" in T.report(tin)
+
+
+def test_the_default_tolerance_has_a_floor_of_a_fifth_of_a_cell(tmp_path):
+    """A quiet DEM at 5 cm with 1 mm of noise: twice the noise would be 2 mm, the vertices would
+    chase the noise; the tolerance is a fifth of a cell, 1 cm, with far fewer vertices. A given
+    max_error is never changed."""
+    res, n = 0.05, 200
+    x, y = _cells(n, n, res, (X0, Y0 + n * res))
+    dem = 20 + 0.3 * np.sin((x - X0) / 3) * np.cos((y - Y0) / 2)
+    dem += 0.001 * np.random.default_rng(3).standard_normal(dem.shape)
+    _doc, ch = _chunk(tmp_path, dem=dem, res=res, origin=(X0, Y0 + n * res))
+    floor = T.build_tin(ch, source="dem")
+    assert floor.info["tolerance"] == "floor" and floor.info["max_error"] == pytest.approx(0.01)
+    assert 0 < floor.info["noise"] < 0.005 and not floor.info["warnings"]
+    tight = T.build_tin(ch, source="dem", max_error=0.002)
+    assert tight.info["tolerance"] == "given" and tight.info["max_error"] == 0.002
+    assert floor.n_vertices < tight.n_vertices / 3
 
 def test_refinement_reaches_the_tolerance_with_few_vertices(tmp_path):
     res, n = 0.02, 300
@@ -238,9 +255,9 @@ def test_refinement_reaches_the_tolerance_with_few_vertices(tmp_path):
         out = src.read(1)
         assert (out[:38, :58] == src.nodata).all()
         assert (out[50:, 70:] != src.nodata).all()
-    # the default tolerance: twice the noise of the DEM, at least a millimetre
+    # the default tolerance: twice the noise of the DEM, at least a fifth of a cell
     default = T.build_tin(ch, source="dem")
-    assert default.info["max_error"] >= T.MIN_TOLERANCE
+    assert default.info["max_error"] >= T.FLOOR_CELLS * res
 
 
 def test_ground_of_the_dense_cloud(tmp_path, rng):
