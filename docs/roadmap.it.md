@@ -249,17 +249,41 @@ dataset pubblici WorldView-3.
   RustGIS: *Let your Agents Control RustGIS*), con lo stesso GeoPackage dal vivo del collegamento con QGIS. Le unità
   disegnate lì arrivano in PyArchInit dalla finestra. Vedi [Integrazioni](integrations.md#rustgis).
 
+## Fatto nella 1.7
+
+* **L'assistente** (1.7.0): spiegazioni dei risultati, come si fanno le cose, script Python eseguiti con un clic e
+  annullati in un solo passo; un modello locale di base, Claude o OpenAI in alternativa, niente di privato che esca
+  dal computer; `ppg assistant`. Vedi [L'assistente](gui/assistant.md), con la valutazione dei modelli.
+* **Funzioni nuove del programma** (1.7.0): la regione di ricostruzione sul piano di tre marker, la mappa delle
+  normali sulla griglia dell'ortofoto, un chunk duplicato con le foto scelte, foto attivate e disattivate.
+* **Una trackball nella vista 3D** (1.7.0), come in Metashape: una sfera con tre anelli intorno al centro di
+  rotazione (rotazione libera dentro, intorno a un asse su un anello, rollio fuori), spostamento, avvicinamento verso
+  il cursore, il centro di rotazione con un doppio clic, tasti; visibile quando il mouse è sulla vista, sempre o mai.
+  Vedi [Vista 3D e trackball](gui/view3d.md).
+* **TIN con linee di rottura** (1.7.0): una superficie di Delaunay vincolata nel nucleo nativo (nucleo 0.7, il crate
+  spade) dal DEM raffinato fino a una tolleranza, dal terreno della nuvola densa o dalle sole quote, con linee di
+  rottura, linee morbide e contorni disegnati sulla pianta; curve di livello esatte sui triangoli, volumi esatti, un
+  DEM dal TIN, esportazioni in DXF 3DFACE, PLY/OBJ, GeoPackage e LandXML; `ppg tin`. Vedi
+  [TIN e linee di rottura](tin.md).
+* **Disegni sui prospetti e sulle sezioni** (1.7.0): le US, le linee, le quote, i punti e le pietre disegnati su un
+  prospetto tenuti con lui nelle sue (u, v), esportati con lui sviluppati e in 3D sul rilievo, aperti in QGIS,
+  mandati a PyArchInit come suoi media. Vedi
+  [Disegni sui prospetti e sulle sezioni](gui/processing.md#disegni-sui-prospetti-e-sulle-sezioni).
+
 ## Prossimi passi
 
-**1.7.0** - fatto: l'**assistente** (spiegazioni dei risultati, come si fanno le cose, script Python eseguiti con un
-clic e annullati in un solo passo; un modello locale di base, Claude o OpenAI in alternativa, niente di privato che
-esca dal computer; vedi [L'assistente](gui/assistant.md), con la valutazione dei modelli) e tre funzioni del
-programma (la regione su tre marker, la mappa delle normali sulla griglia dell'ortofoto, un chunk duplicato con le
-foto scelte). Ancora da fare nella 1.7.0: un **TIN** nel nucleo nativo - una superficie di Delaunay vincolata da
-quote e linee di rottura (cigli, piedi di scarpata, muri), con le sue curve di livello e i volumi, la superficie che
-il topografo si aspetta accanto alla griglia del DEM. I **piani di volo**, come plugin, restano in programma.
+* **1.8.0 - Verifiche su dati veri**: le parti mai provate su dati veri - l'import da WebODM, una scena satellitare
+  propria, `ppg remote` su una macchina remota, i nodi di rete su due computer veri, un volo MicaSense intero fino
+  all'ortofoto di riflettanza.
+* **1.9.0 - Confronto fra rilievi**: le distanze fra le nuvole e i modelli di due date lungo la superficie (M3C2),
+  significative dove superano la precisione di entrambi i rilievi; mappe di cambiamento per muri, sezioni e versanti,
+  per il monitoraggio dei siti e dei restauri, nel rapporto PDF.
+* **1.10.0 - Pubblicare un rilievo sul web**: un sito statico di un rilievo - ortofoto e DEM, modello, nuvola, US con
+  i loro attributi, sezioni - costruito dalle esportazioni che ci sono già (COG, COPC, 3D Tiles), per qualsiasi
+  hosting o GitHub Pages.
+* I **piani di volo**, come plugin, restano in programma.
 
-Plugin nuovi, in quest'ordine:
+Plugin nuovi, in quest'ordine (i primi tre sono pubblicati: paesaggio, geoarcheologia 0.2.0 e architettura):
 
 1. **Il paesaggio nel tempo** (Landlab): erosione e deposito simulati sul DEM - come si consuma un tell, dove si
    raccolgono i colluvi, scenari del paesaggio antico legati alle fasi della timeline.
@@ -278,16 +302,9 @@ Altri punti aperti, senza un ordine fisso:
   osservazioni di un ricevitore proprio), i log di ArduPilot e PX4 per i droni costruiti da sé, i file grezzi dei
   ricevitori u-blox ed Emlid, i file `.DAT` di una base DJI D-RTK.
 
-* Parti mai provate su dati veri: import da WebODM, una scena satellitare propria, `ppg remote` su una
-  macchina remota, un volo MicaSense intero fino all'ortofoto di riflettanza.
 * SpatiaLite su Windows ARM64: aspetta un QGIS per ARM64 (la sua libreria è x64).
 * geoai: confronto fra due date coregistrate e differenze di quota dei loro DEM, dopo la verifica su un
   rilievo annotato reale.
-* **Disegni sui prospetti e sulle sezioni**: le US, le linee, le quote e i punti disegnati su un prospetto o su una
-  sezione tenuti con lui, nelle sue coordinate (u, v; v la quota sui piani verticali), non fra i disegni della
-  pianta; mostrati di nuovo quando il prospetto si riapre, esportati con lui (DXF, GeoPackage) e, per una
-  sezione, mandati a PyArchInit come disegno di sezione. Anche il disegno pietra per pietra dei prospetti tenuto
-  per prospetto (oggi va per nome del file, lo stesso per tutti i prospetti).
 * Idee non ancora decise: un plugin **topology** su topologicpy - i rapporti stratigrafici letti dalle facce
   che i proxy 3D delle US condividono (*copre* dai contatti orizzontali, *si appoggia a* da quelli
   verticali) verso l'Extended Matrix, i proxy che si sovrappongono divisi in celle pulite per i volumi, gli

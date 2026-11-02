@@ -223,6 +223,11 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   disabled.
 * **PyArchInit media**: the photos, drawings and models linked to a US shown in the PyArchInit pane.
 * **3D view tools**: sections and plan slices picked on the model or the cloud, markers moved in 3D.
+* **Trackball** in the 3D view, as in Metashape: a sphere with three rings around the centre of rotation, zoom toward
+  the cursor, the centre of rotation by double click ([view3d.md](docs/gui/view3d.md)).
+* **TIN with break lines** (*Tools > TIN...*): a constrained triangulation from the DEM, the ground of the cloud or the
+  spot heights, with break lines drawn on the plan; contour lines, exact volumes, a DEM from the TIN, DXF and LandXML
+  ([tin.md](docs/tin.md)).
 * **Laser scans**: E57 and PTX imported as point clouds, registered on the photogrammetric chunk and
   coloured from its photos.
 * **Plugins**: packages that add menu actions, commands and export formats, installed from

@@ -56,8 +56,8 @@ library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0
 * **Georeferencing**: ArUco/AprilTag targets found automatically, ground control and check points,
   scale bars, camera optimisation on the control, report with the errors.
 * **Archaeology**: sections and plans to scale (SVG/DXF), contour lines, cut and fill volumes,
-  relief visualisations (sky-view factor, openness, multi-hillshade), stratigraphic units and spot
-  heights drawn on the orthophoto, proposals of units and relationships, Munsell colours, pottery
+  relief visualisations (sky-view factor, openness, multi-hillshade), a [TIN with break lines](tin.md),
+  stratigraphic units and spot heights drawn on the orthophoto and on elevations, proposals of units and relationships, Munsell colours, pottery
   profiles from a turntable, stones and features with SAM.
 * **Exchange**: PyArchInit (SQLite/SpatiaLite and PostgreSQL/PostGIS), QGIS live, QField, IFC 4,
   I3S scene layers, COPC, 3D Tiles, glTF; projects of Metashape, WebODM and Photo3D imported.
@@ -66,6 +66,6 @@ library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0
 
 ## Status
 
-Version 1.0 - desktop application, command line and library. The source, the issues and the
+Version 1.7 - desktop application, command line and library. The source, the issues and the
 releases are on [GitHub](https://github.com/enzococca/pyarchinit-photogrammetry); the plan of the
 next versions is in the [roadmap](roadmap.md).

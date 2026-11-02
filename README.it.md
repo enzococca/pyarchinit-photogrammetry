@@ -208,6 +208,11 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Media di PyArchInit**: foto, disegni e modelli collegati a una US mostrati nel pannello PyArchInit.
 * **Strumenti nella vista 3D**: sezioni e piante a quota scelte sul modello o sulla nuvola, marker
   spostati nel 3D.
+* **Trackball** nella vista 3D, come in Metashape: una sfera con tre anelli intorno al centro di rotazione,
+  avvicinamento verso il cursore, il centro di rotazione con un doppio clic ([view3d.it.md](docs/gui/view3d.it.md)).
+* **TIN con linee di rottura** (*Strumenti > TIN...*): una triangolazione vincolata dal DEM, dal terreno della nuvola o
+  dalle quote, con le linee di rottura disegnate sulla pianta; curve di livello, volumi esatti, un DEM dal TIN, DXF e
+  LandXML ([tin.it.md](docs/tin.it.md)).
 * **Scansioni laser**: E57 e PTX importati come nuvole di punti, registrati sul chunk fotogrammetrico e
   colorati con le sue foto.
 * **Plugin**: pacchetti che aggiungono azioni ai menu, comandi ed esportazioni, installati da
