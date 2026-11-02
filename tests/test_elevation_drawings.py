@@ -498,7 +498,7 @@ def test_elevation_drawings_in_qgis_and_saved_media_refreshed(with_elevations, t
     w.open_elevation_in_qgis()
     w.runner.wait()
     assert built["crs"] == "" and Path(built["rasters"][0]["path"]).exists()
-    assert {x["table"] for x in built["vectors"]} == {"unita", "quote", "punti", "pietre"}
+    assert {x["table"] for x in built["vectors"]} == {"unita", "quote", "punti", "pietre", "linee"}
     assert all(x["path"].endswith("_disegni.gpkg") for x in built["vectors"])
     # an elevation removed and the project saved: its drawings go with it
     ch.meta["elevations"] = [e for e in ch.meta["elevations"] if e["id"] != sid]

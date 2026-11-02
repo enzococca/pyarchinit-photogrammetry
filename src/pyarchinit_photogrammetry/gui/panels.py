@@ -29,7 +29,7 @@ OTHER_PRODUCTS = {"depth_maps": "Mappe di profondità", "coverage": "Copertura d
                   "slrm": "Rilievo locale (SLRM)", "msrm": "Rilievo multiscala (MSRM)",
                   "multi_hillshade": "Ombreggiatura da 16 direzioni", "ms:reflectance": "Ortofoto di riflettanza",
                   "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche",
-                  "normal_map": "Mappa delle normali"}
+                  "normal_map": "Mappa delle normali", "tin": "TIN"}
 
 
 def product_name(key: str) -> str:
@@ -293,6 +293,16 @@ class WorkspaceTree(QTreeWidget):
                                         "attiva, confrontarla, rinominarla o eliminarla"))
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
+            tin = ch.product_path("tin")
+            if tin is not None and tin.exists():
+                info = ch.meta.get("tin") or {}
+                it = QTreeWidgetItem([tr("TIN  ({0} triangoli, {1} spigoli vincolati)",
+                                         number(info.get("n_triangles", 0)), number(info.get("n_constrained", 0)))])
+                it.setIcon(0, icon("tin"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "tin"))
+                it.setToolTip(0, tr("Doppio clic per vederlo nella vista 3D; tasto destro: curve di livello, volume, "
+                                    "DEM dal TIN, esporta, rimuovi"))
+                ci.addChild(it)
             for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord"),
                                    ("svf", "Sky-view factor", "SVF"), ("openness_pos", "Openness positiva", "gradi"),
                                    ("openness_neg", "Openness negativa", "gradi"),

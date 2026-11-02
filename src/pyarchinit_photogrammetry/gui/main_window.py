@@ -58,6 +58,9 @@ CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
 STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
 PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section cuts the model
+LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
+TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
+TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
 # the live link with RustGIS (io.rustgis_link): how often the window looks at RustGIS and how long it waits for it
 RUSTGIS_POLL_MS = 2000  # a look every 2 s while the link is on
 RUSTGIS_PULL_EVERY = 10.0  # seconds: a pull at least this often while RustGIS lists edits in the linked layers
@@ -105,6 +108,13 @@ def _compass(deg: float) -> str:
     points = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"] if i18n.current() == "it" else \
         ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
     return points[int((deg % 360) / 45 + 0.5) % 8]
+
+
+def _bl_label(kind: str) -> str:
+    """The Italian name of a kind of break line (archaeo.breaklines.KIND_LABELS), to translate with tr()."""
+    from ..archaeo.breaklines import KIND_LABELS
+
+    return KIND_LABELS.get(kind, kind)
 
 
 def _it(value: float, decimals: int = 0) -> str:
@@ -469,6 +479,9 @@ class MainWindow(QMainWindow):
         self.frame_quote: list[dict] = []
         self.frame_points: list[dict] = []
         self.frame_stones: dict[str, list] = {}  # {elevation id: outlines of its stones}
+        self.lines: list[dict] = []  # break lines of the plan (archaeo.breaklines records), x, y, z
+        self.frame_lines: list[dict] = []  # those of the elevation shown, in its (u, v)
+        self._tin_edges: tuple | None = None  # (file, mtime, edges (n, 2, 2)) of the TIN drawn on the plan
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
@@ -563,6 +576,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
+        self.ortho_view.breakline_finished.connect(self._breakline_drawn)
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -999,6 +1013,7 @@ class MainWindow(QMainWindow):
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("breakline", "Linea di rottura (per il TIN e la modifica del DEM)", "breakline"),
                                 ("probe", "Punto di misura: quota, temperatura, bande e indici nel punto", "probe"),
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
@@ -1012,6 +1027,22 @@ class MainWindow(QMainWindow):
             self.draw_group.addAction(a)
             dm.addAction(a)
             self.draw_actions[mode] = a
+        # the kind of the break lines drawn next: the menu of the button Linee (as in a CAD: the line type)
+        from ..archaeo import breaklines as _bl
+
+        self.breakline_menu = QMenu(tr("Tipo di linea di rottura"), self)
+        kinds = QActionGroup(self)
+        self.breakline_kind_actions: dict[str, QAction] = {}
+        current_kind = self.settings.value("draw/breakline_kind", "breakline")
+        self.breakline_kind = current_kind if current_kind in _bl.KINDS else "breakline"
+        for key in _bl.KINDS:
+            a = self.breakline_menu.addAction(tr(_bl.KIND_LABELS[key]))
+            a.setCheckable(True)
+            a.setChecked(key == self.breakline_kind)
+            a.triggered.connect(lambda _=False, k=key: self.set_breakline_kind(k))
+            kinds.addAction(a)
+            self.breakline_kind_actions[key] = a
+        dm.addMenu(self.breakline_menu)
         self.a_select_freehand = QAction(icon("freehand"), tr("Selezione a mano libera (lazo)"), self, checkable=True)
         self.a_select_freehand.setChecked(self.settings.value("draw/select_freehand", "false") in ("true", True))
         self.a_select_freehand.toggled.connect(self._selection_shape_changed)
@@ -1105,6 +1136,18 @@ class MainWindow(QMainWindow):
         self.a_contours = self._act(m, tr("Curve di livello..."), self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, tr("Volume scavo / riporto..."), self.compute_volume, processing=True,
                                   icon_name="volume")
+        self.a_tin = self._act(m, "TIN...", self.build_tin, processing=True, icon_name="tin",  # a word of every language
+                               tip=tr("Rete di triangoli dal DEM, dal terreno della nuvola o dalle sole quote, con le "
+                                      "linee di rottura disegnate come spigoli che i triangoli non attraversano"))
+        tm = m.addMenu(icon("tin"), tr("TIN e linee di rottura"))
+        tm.addAction(self.a_tin)
+        self._act(tm, tr("Curve di livello dal TIN..."), self.tin_contours, processing=True, icon_name="contours")
+        self._act(tm, tr("Volume dal TIN..."), self.tin_volume, processing=True, icon_name="volume")
+        self._act(tm, tr("DEM dal TIN"), self.tin_to_dem, processing=True, icon_name="dem")
+        self._act(tm, tr("Esporta TIN..."), self.export_tin, icon_name="export")
+        tm.addSeparator()
+        self._act(tm, tr("Disegna linee di rottura"), lambda: self.set_draw_mode("breakline"), icon_name="breakline")
+        self._act(tm, tr("Esporta le linee di rottura..."), self.export_breaklines, icon_name="export")
         self._act(m, tr("Proponi US e rapporti (Extended Matrix)..."), self.propose_units, processing=True,
                   icon_name="timeline",
                   tip=tr("Numero di US, tipo e misure per le unità senza numero (SAM o disegnate) e i rapporti "
@@ -1410,6 +1453,7 @@ class MainWindow(QMainWindow):
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
+                         (self.draw_actions["breakline"], "Linee"),
                          (self.draw_actions["probe"], "Punto"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
@@ -1440,9 +1484,12 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "probe", "marker", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "breakline", "probe", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
-        for mode in ("sam", "line"):
+        button = db.widgetForAction(self.draw_actions["breakline"])
+        if button is not None:  # the kind of the lines in the menu of the button
+            button.setMenu(self.breakline_menu)
+        for mode in ("sam", "line", "breakline"):
             button = db.widgetForAction(self.draw_actions[mode])
             if button is not None:
                 button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -1542,6 +1589,7 @@ class MainWindow(QMainWindow):
         self.stones = {}
         self.drawings_frame = None  # a new project opens on the plan
         self.frame_units, self.frame_quote, self.frame_points, self.frame_stones = [], [], [], {}
+        self.lines, self.frame_lines, self._tin_edges = [], [], None
         self._sam_obj = None
         self.classifier = None
         self.sections = []
@@ -1635,6 +1683,8 @@ class MainWindow(QMainWindow):
             for name, lines in self.line_layers.items():
                 for coords, color, label, attrs, width in lines:
                     self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_tin()
+            self._draw_lines()
             self._draw_patches()
             self._draw_markers_on_raster()
             self._draw_stones()
@@ -4270,6 +4320,7 @@ class MainWindow(QMainWindow):
                  "quote": {k: f[1] for k, f in frames.items() if f[1]},
                  "sections": [dict(x) for x in self.sections],
                  "probe": {k: f[2] for k, f in frames.items() if f[2]},
+                 "lines": self._undo_lines(),
                  "pa": {"deleted": sorted(self.pa_deleted), "geom": sorted(self.pa_geom_changed),
                         "pending": sorted(int(k) for k in self.pa_pending)}}
         if ch is not None:
@@ -4318,6 +4369,21 @@ class MainWindow(QMainWindow):
                             [dict(q) for q in data.get("points") or [] if "x" in q and "y" in q])
         return out
 
+    def _undo_lines(self) -> dict:
+        """The break lines of every frame of the active chunk ("" the plan, else the id of an elevation), as the
+        drawings of :meth:`_undo_frames`: the plan's and the elevation shown from the window, the others from the
+        chunk."""
+        out = {"": [dict(r) for r in self.lines]}
+        current = self.drawings_frame
+        if current is not None:
+            out[current] = [dict(r) for r in self.frame_lines]
+        ch = self.chunk
+        if ch is not None:
+            for eid, data in ((ch.meta.get("drawings") or {}).get("frames") or {}).items():
+                if eid != current:
+                    out[eid] = [dict(r) for r in data.get("lines") or []]
+        return {k: v for k, v in out.items() if v}
+
     def _undo_other_frames(self, state: dict) -> list[str]:
         """The drawings of the elevations not shown put back as ``state`` has them (an edit made on another elevation,
         undone from here): into the chunk. Returns the ids of those that changed."""
@@ -4327,7 +4393,7 @@ class MainWindow(QMainWindow):
         if ch is None:
             return []
         frames = (ch.meta.get("drawings") or {}).get("frames") or {}
-        keys = (set(frames) | {k for part in ("units", "quote", "probe") for k in (state.get(part) or {})}) \
+        keys = (set(frames) | {k for part in ("units", "quote", "probe", "lines") for k in (state.get(part) or {})}) \
             - {"", self.drawings_frame}
         changed = []
         for key in sorted(keys):
@@ -4339,7 +4405,8 @@ class MainWindow(QMainWindow):
                 quote = [dict(q) for q in (state["quote"] or {}).get(key) or []]
             if "probe" in state:
                 points = [dict(q) for q in (state["probe"] or {}).get(key) or []]
-            self._store_chunk_drawings(ch, units, quote, points, frame=key)
+            lines = [dict(r) for r in (state["lines"] or {}).get(key) or []] if "lines" in state else None
+            self._store_chunk_drawings(ch, units, quote, points, frame=key, lines=lines)
             after = ((ch.meta.get("drawings") or {}).get("frames") or {}).get(key)
             if json.dumps(after, sort_keys=True, default=str) != before:
                 changed.append(key)
@@ -4351,13 +4418,13 @@ class MainWindow(QMainWindow):
         if "labels" in parts:
             self.ortho_view.restore_layer_settings(state.get("labels") or {})
             self._store_drawings()
-            if not parts & {"units", "quote", "sections", "pa", "probe"}:
+            if not parts & {"units", "quote", "sections", "pa", "probe", "lines"}:
                 self._redraw_overlays()
-        if parts & {"units", "quote", "sections", "pa", "probe"}:
+        if parts & {"units", "quote", "sections", "pa", "probe", "lines"}:
             from ..archaeo.stratigraphy import UnitPolygon
 
             current = self.drawings_frame
-            if parts & {"units", "quote", "probe"}:
+            if parts & {"units", "quote", "probe", "lines"}:
                 for eid in self._undo_other_frames(state):  # an edit on an elevation not shown: said
                     entry = self._frame_entry(eid)
                     self.log_pane.info(tr("Modifica dei disegni del prospetto «{0}», che non è mostrato",
@@ -4369,8 +4436,12 @@ class MainWindow(QMainWindow):
                         self.frame_quote = [dict(q) for q in (state["quote"] or {}).get(current) or []]
                     if "probe" in state:
                         self.frame_points = [dict(q) for q in (state["probe"] or {}).get(current) or []]
+                    if "lines" in state:
+                        self.frame_lines = [dict(r) for r in (state["lines"] or {}).get(current) or []]
             if "probe" in state:
                 self.probe_points = [dict(q) for q in (state["probe"] or {}).get("") or []]
+            if "lines" in state:
+                self.lines = [dict(r) for r in (state["lines"] or {}).get("") or []]
             follow = []
             if "units" in state:
                 before = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
@@ -6543,6 +6614,11 @@ class MainWindow(QMainWindow):
         if not self._need_chunk(product="dem"):
             return
         lines = self._selected_lines()
+        from shapely.geometry import LineString
+
+        # the drawn break lines that cross the area (the engine takes also those that reach its ring of known cells)
+        drawn = [r for r in self.lines if r["kind"] in ("breakline", "soft")
+                 and LineString([c[:2] for c in r["coords"]]).intersects(geom)]
         v = ParamDialog.ask(self, "Modifica DEM", [f for f in [
             Field("method", "Nuove quote", "plane",
                   choices=[("plane", "Piano che si adatta al terreno attorno"),
@@ -6553,6 +6629,9 @@ class MainWindow(QMainWindow):
             Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuità", len(lines)),
                   bool(lines))
             if lines else None,
+            Field("drawn", tr("Usa le linee di rottura disegnate che attraversano l'area ({0})", len(drawn)),
+                  bool(drawn))
+            if drawn else None,
             Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
             intro=tr("{0} m2. Le quote dentro l'area vengono ricavate da quelle appena fuori (alberi, tende, "
                      "mezzi, cumuli e buchi spariscono da curve di livello e volumi). Il DEM com'era resta tra le "
@@ -6561,8 +6640,11 @@ class MainWindow(QMainWindow):
             return
         breaklines = lines if v.get("breaklines") else None
         chunk = self.chunk
+        self._store_drawings()  # the engine reads the drawn lines from the chunk
+        which = "drawn" if v.get("drawn") else "selection"
         self.run_task("Modifica del DEM", lambda p: chunk.edit_dem(
-            geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p),
+            geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p,
+            lines=which),
             lambda info: (self._show_raster("dem"), self.log_pane.info(
                 tr("DEM modificato: {0} celle, variazione media {1} cm, massima {2} cm", _it(info['cells']),
                    ("+" if info['dz_mean'] >= 0 else "") + _it(info['dz_mean'] * 100, 1),
@@ -6745,6 +6827,7 @@ class MainWindow(QMainWindow):
                 self._draw_quota(q, i)
             for i, q in enumerate(self.shown_points):
                 self._draw_probe_point(q, i)
+            self._draw_lines()
         self._draw_stones()
         self._draw_elevation_layers(entry)
         self.show_view(self.ortho_view)
@@ -7969,6 +8052,9 @@ class MainWindow(QMainWindow):
                          "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
+                 "breakline": tr("{0}: clic per i vertici, doppio clic o Invio per finire, Backspace toglie l'ultimo "
+                                 "vertice, Esc annulla; il tipo si sceglie dal menu del pulsante Linee",
+                                 tr(_bl_label(self.breakline_kind))),
                  "probe": "Clic su un punto: un punto di misura con coordinate, quota del DEM, temperatura, bande e "
                           "indici letti lì a piena risoluzione (layer Punti di misura, esportabile e in QGIS)",
                  "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "
@@ -7984,6 +8070,7 @@ class MainWindow(QMainWindow):
         self.shown_units = []
         self.shown_quote = []
         self.shown_points = []
+        self.shown_lines = []
         self._sam_cancel()
         self.line_layers = {}
         self.ortho_view.clear_overlays()
@@ -8004,7 +8091,7 @@ class MainWindow(QMainWindow):
         # Keep untouched projects unchanged, including snapshots used by Undo.
         if self.ortho_view.layer_settings or "layer_labels" in ch.meta:
             ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
-        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points)
+        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points, lines=self.lines)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
         if stones:
             ch.meta["stones"] = stones
@@ -8013,15 +8100,18 @@ class MainWindow(QMainWindow):
         if self.drawings_frame is not None:
             self._store_chunk_drawings(ch, self.frame_units, self.frame_quote, self.frame_points,
                                        frame=self.drawings_frame,
-                                       stones={k: [g.wkt for g in v] for k, v in self.frame_stones.items() if v})
+                                       stones={k: [g.wkt for g in v] for k, v in self.frame_stones.items() if v},
+                                       lines=self.frame_lines)
 
     @staticmethod
     def _store_chunk_drawings(ch, units: list, quote: list, points: list, frame: str | None = None,
-                              stones: dict | None = None) -> None:
+                              stones: dict | None = None, lines: list | None = None) -> None:
         """``units`` (those drawn here: not those loaded from PyArchInit), ``quote`` and the measuring ``points`` into
         ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active.
         ``frame``: the id of the elevation they were drawn on (None: the plan), with its ``stones`` (``{key: [WKT]}``;
-        None keeps those it has). The drawings of the other frames stay as they are."""
+        None keeps those it has). ``lines``: the break lines (:mod:`..archaeo.breaklines` records, key ``lines``,
+        only when there are some: a project without them is written as before); None keeps those it has. The drawings
+        of the other frames stay as they are."""
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in quote]
@@ -8029,16 +8119,18 @@ class MainWindow(QMainWindow):
         data = ch.meta.get("drawings") or {}
         frames = dict(data.get("frames") or {})
         if frame is None:
-            new = {"units": units, "quote": quote, **({"points": points} if points else {})} \
-                if units or quote or points else {}
+            lines = [dict(r) for r in (data.get("lines") or [] if lines is None else lines)]
+            new = {"units": units, "quote": quote, **({"points": points} if points else {}),
+                   **({"lines": lines} if lines else {})} if units or quote or points or lines else {}
         else:
             new = {k: v for k, v in data.items() if k != "frames"}
             if stones is None:
                 stones = (frames.get(frame) or {}).get("stones") or {}
             stones = {k: v for k, v in stones.items() if v}
-            if units or quote or points or stones:
+            lines = [dict(r) for r in ((frames.get(frame) or {}).get("lines") or [] if lines is None else lines)]
+            if units or quote or points or stones or lines:
                 frames[frame] = {"units": units, "quote": quote, **({"points": points} if points else {}),
-                                 **({"stones": stones} if stones else {})}
+                                 **({"stones": stones} if stones else {}), **({"lines": lines} if lines else {})}
             else:
                 frames.pop(frame, None)
         if frames:
@@ -8069,6 +8161,13 @@ class MainWindow(QMainWindow):
         quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
         points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
         return units, quote, points
+
+    @staticmethod
+    def _chunk_lines(ch, frame: str | None = None) -> list[dict]:
+        """The break lines ``ch`` keeps on the plan, or on the elevation ``frame`` (broken records left out)."""
+        from ..archaeo import breaklines
+
+        return breaklines.records(ch, frame)
 
     def _frame_stones(self, ch, frame: str | None) -> dict:
         """The stones of the plan (``chunk.meta["stones"]``, by the name of the raster) or of the elevation ``frame``
@@ -8124,9 +8223,11 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         if self.drawings_frame is None or ch is None:
             self.frame_units, self.frame_quote, self.frame_points, self.frame_stones = [], [], [], {}
+            self.frame_lines = []
             return
         self.frame_units, self.frame_quote, self.frame_points = self._chunk_drawings(ch, self.drawings_frame)
         self.frame_stones = self._frame_stones(ch, self.drawings_frame)
+        self.frame_lines = self._chunk_lines(ch, self.drawings_frame)
         self._ensure_ppg_ids()
 
     # the sets the drawing tools of the 2D view work on: the plan's, or those of the elevation shown
@@ -8222,6 +8323,7 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
         self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
+        self.lines = self._chunk_lines(ch)
         self.stones = self._frame_stones(ch, None)
         self._restore_frame()
         self._ensure_ppg_ids()
@@ -8793,6 +8895,130 @@ class MainWindow(QMainWindow):
         except Exception:
             return self.ortho_view.elevation(x, y)
 
+    def _dem_values(self, xy) -> list:
+        """Heights of the DEM at full resolution at the points ``xy`` ((n, 2) world), None where it has none."""
+        ch = self.chunk
+        if ch is None or not ch.dem_path:
+            return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
+        try:
+            import rasterio
+
+            with rasterio.open(ch.dem_path) as src:
+                vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
+                nodata = src.nodata
+            return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+        except Exception:
+            return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
+
+    # ---------------------------------------------------------------- break lines (archaeo.breaklines)
+    @property
+    def shown_lines(self) -> list:
+        return self.frame_lines if self.drawings_frame is not None else self.lines
+
+    @shown_lines.setter
+    def shown_lines(self, value: list) -> None:
+        if self.drawings_frame is not None:
+            self.frame_lines = value
+        else:
+            self.lines = value
+
+    def set_breakline_kind(self, kind: str) -> None:
+        """The kind of the break lines drawn next (breakline, soft, boundary); the tool is taken up."""
+        from ..archaeo.breaklines import KINDS
+
+        if kind not in KINDS:
+            return
+        self.breakline_kind = kind
+        self.settings.setValue("draw/breakline_kind", kind)
+        a = self.breakline_kind_actions.get(kind)
+        if a is not None and not a.isChecked():
+            a.setChecked(True)
+        if self.ortho_view.tr is not None:
+            self.set_draw_mode("breakline")
+
+    def _breakline_drawn(self, xy) -> None:
+        """A break line drawn with the tool: on the plan each vertex has the height of the DEM there (None outside
+        it), on an elevation its (u, v) only."""
+        from ..archaeo import breaklines
+
+        xy = np.asarray(xy, float)[:, :2]
+        if len(xy) < 2:
+            return
+        if self.drawings_frame is None:
+            zs = self._dem_values(xy)
+            coords = [(x, y, z) for (x, y), z in zip(xy.tolist(), zs)]
+        else:
+            coords = [(x, y, None) for x, y in xy.tolist()]
+        rec = breaklines.new_record(self.breakline_kind, coords)
+        self.shown_lines.append(rec)
+        self._draw_line_record(rec, len(self.shown_lines) - 1)
+        self._dirty(True)
+        missing = sum(c[2] is None for c in rec["coords"]) if self.drawings_frame is None else 0
+        length = float(np.sum(np.hypot(*np.diff(xy, axis=0).T)))
+        self.log_pane.info(tr("{0}: {1} vertici, lunghezza {2} m", tr(_bl_label(rec["kind"])), len(xy), _it(length, 3))
+                           + (tr(" ({0} vertici fuori dal DEM, senza quota)", missing) if missing else ""))
+
+    def _draw_line_record(self, rec: dict, i: int) -> None:
+        from ..archaeo import breaklines
+
+        if self.drawings_frame is None and not any(rec is x for x in self.lines):
+            return  # a line of the plan is not drawn on an elevation, nor the reverse
+        if self.drawings_frame is not None and not any(rec is x for x in self.frame_lines):
+            return
+        kind = rec["kind"]
+        zs = [z for z in breaklines.heights(rec) if z is not None]
+        attrs = {"kind": kind, "tipo": tr(_bl_label(kind)), ID_FIELD: rec.get("id"), "_bline": i}
+        if zs:
+            attrs["z_min"], attrs["z_max"] = round(min(zs), 3), round(max(zs), 3)
+        xy = np.array([[c[0], c[1]] for c in rec["coords"]], float)
+        self.ortho_view.add_line(xy, breaklines.COLOURS[kind], breaklines.label(rec), layer=LINES_LAYER, attrs=attrs,
+                                 width=2.0, dash=kind == "soft")
+
+    def _draw_lines(self) -> None:
+        for i, rec in enumerate(self.shown_lines):
+            self._draw_line_record(rec, i)
+
+    def _tin_segments(self):
+        """The edges of the TIN of the chunk (at most :data:`TIN_MAX_EDGES`, the constrained ones always), world XY,
+        read once per file."""
+        ch = self.chunk
+        path = ch.product_path("tin") if ch is not None else None
+        if path is None or not path.exists():
+            return None
+        stamp = (str(path), path.stat().st_mtime)
+        if self._tin_edges is not None and self._tin_edges[:2] == stamp:
+            return self._tin_edges[2]
+        from ..engine import tin as T
+
+        try:
+            t = T.Tin.load(path)
+        except Exception as exc:  # noqa: BLE001 - a TIN that cannot be read is not drawn
+            log.warning("TIN non letto: %s", exc)
+            return None
+        edges = T.triangle_edges(t.triangles)
+        if len(edges) > TIN_MAX_EDGES:
+            keep = np.random.default_rng(0).choice(len(edges), TIN_MAX_EDGES, replace=False)
+            edges = edges[np.sort(keep)]
+        xy = t.world_xy
+        segs = np.stack([xy[edges[:, 0]], xy[edges[:, 1]]], axis=1)
+        con = np.asarray(t.constrained, np.int64).reshape(-1, 2)
+        cons = np.stack([xy[con[:, 0]], xy[con[:, 1]]], axis=1) if len(con) else np.zeros((0, 2, 2))
+        self._tin_edges = (*stamp, (segs, cons))
+        return self._tin_edges[2]
+
+    def _draw_tin(self) -> None:
+        """The edges of the TIN on the plan (layer TIN): the constrained ones thicker."""
+        if self.drawings_frame is not None or self.ortho_view.tr is None:
+            return
+        found = self._tin_segments()
+        if found is None:
+            return
+        segs, cons = found
+        self.ortho_view.add_segments(segs, "#a1887f", layer=TIN_LAYER, attrs={"tin": "triangoli"}, width=0.8)
+        if len(cons):
+            self.ortho_view.add_segments(cons, "#ff7f0e", layer=TIN_LAYER, attrs={"tin": "spigoli vincolati"},
+                                         width=2.0)
+
     def _sections_dir(self) -> Path:
         return (self.doc.path.parent if self.doc.path else Path.home()) / "sezioni"
 
@@ -9127,10 +9353,14 @@ class MainWindow(QMainWindow):
             return 0
         parts: dict[int, set[int]] = {}
         sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
-        probe_gone = set()
+        probe_gone, lines_gone = set(), set()
         for layer, idx, attrs in sel:
             if layer == PROBE_LAYER and "_probe" in attrs:
                 probe_gone.add(int(attrs["_probe"]))
+            elif layer == LINES_LAYER and "_bline" in attrs:
+                lines_gone.add(int(attrs["_bline"]))
+            elif layer == TIN_LAYER:
+                continue  # the TIN is a product: Rimuovi in the Area di lavoro
             elif layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
             elif layer == STONES_LAYER:
@@ -9182,6 +9412,8 @@ class MainWindow(QMainWindow):
         self.shown_quote = [q for i, q in enumerate(self.shown_quote) if i not in quote_gone]
         if probe_gone:
             self.shown_points = [q for i, q in enumerate(self.shown_points) if i not in probe_gone]
+        if lines_gone:
+            self.shown_lines = [r for i, r in enumerate(self.shown_lines) if i not in lines_gone]
         if stones_gone and self.ortho_view.path is not None:
             key = self._stones_key()
             self.shown_stones[key] = [s for i, s in enumerate(self.shown_stones.get(key, [])) if i not in stones_gone]
@@ -9321,7 +9553,7 @@ class MainWindow(QMainWindow):
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
         modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
-                                            PROFILE_LAYER}
+                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -9347,8 +9579,10 @@ class MainWindow(QMainWindow):
             for name, lines in self.line_layers.items():
                 for coords, color, label, attrs, width in lines:
                     v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_tin()
             self._draw_patches()
             self._draw_markers_on_raster()
+        self._draw_lines()
         self._draw_stones()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
@@ -9693,7 +9927,7 @@ class MainWindow(QMainWindow):
                 return {t: link.path for t in LIVE_TABLES}
             view = self.ortho_view
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
-                      if name != "Marker"}  # the markers are the survey's control, not excavation drawings
+                      if name not in ("Marker", TIN_LAYER)}  # the markers: the survey's control; the TIN: a product
             files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
             self._export_elevation_tables(link)
             self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
@@ -11618,6 +11852,244 @@ class MainWindow(QMainWindow):
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
                       save=False)
 
+    # ---------------------------------------------------------------- TIN (engine.tin)
+    def _need_tin(self):
+        """The TIN of the active chunk, or None (said)."""
+        if not self._need_chunk():
+            return None
+        from ..engine import tin as T
+
+        try:
+            tin = T.chunk_tin(self.chunk)
+        except Exception as exc:  # noqa: BLE001 - a file that cannot be read
+            self._exc("TIN non leggibile", exc)
+            return None
+        if tin is None:
+            self._warn("Costruisci prima il TIN (Strumenti > TIN...).")
+        return tin
+
+    def build_tin(self) -> None:
+        """*Strumenti > TIN...*: the TIN of the active chunk from the DEM, the ground of the dense cloud or the spot
+        heights, with the break lines drawn on the plan and the spot heights; the polygon selected as its boundary."""
+        if not self._need_chunk() or self._plan_only():
+            return
+        from ..archaeo import breaklines
+        from ..engine import tin as T
+
+        ch = self.chunk
+        self._store_drawings()  # the spot heights of the window are those the TIN reads from the chunk
+        sources = []
+        if ch.dem_path:
+            sources.append(("dem", tr("DEM: triangoli raffinati fino alla tolleranza")))
+        if ch.product_path("point_cloud"):
+            sources.append(("cloud", tr("Terreno della nuvola densa")))
+        n_spots = len(T.chunk_spots(ch))
+        recs = [dict(r) for r in self.lines]
+        if n_spots or recs:
+            sources.append(("spots", tr("Solo quote puntuali e linee di rottura")))
+        if not sources:
+            self._warn("Il TIN ha bisogno del DEM, della nuvola densa o di quote puntuali e linee di rottura.")
+            return
+        selected = self.selected_polygon()
+        choices, codes = self._cloud_class_choices() if ch.product_path("point_cloud") else ([], [])
+        fields = [Field("source", tr("Punti del TIN"), sources[0][0], choices=sources),
+                  Field("max_error", tr("Tolleranza dal DEM (m; vuota: il doppio del rumore del DEM)"), None,
+                        kind="optional_float"),
+                  Field("lines", tr("Linee di rottura disegnate ({0})", len(recs)), bool(recs)),
+                  Field("spots", tr("Quote puntuali come vertici ({0})", n_spots), bool(n_spots))]
+        if selected is not None:
+            fields.append(Field("boundary", tr("Contorno: il poligono selezionato ({0} m2)", _it(selected.area, 2)),
+                                True))
+        if len(codes) > 1:
+            fields.append(Field("classes", tr("Classi del terreno (solo dalla nuvola)"),
+                                [2] if 2 in codes else codes, choices=choices, kind="checklist"))
+        v = ParamDialog.ask(self, "TIN", fields,
+                            intro=tr("Una rete di triangoli tra punti misurati: le linee di rottura diventano spigoli "
+                                     "che i triangoli non attraversano (il piede e la cresta di un muro, il bordo di "
+                                     "un taglio), le quote puntuali vertici con la loro quota misurata."))
+        if not v:
+            return
+        lines = breaklines.for_tin(recs) if v.get("lines") else None
+        boundary = selected if v.get("boundary") else None
+        classes = [int(c) for c in v["classes"]] if v.get("classes") and v["source"] == "cloud" else None
+        if v["source"] == "cloud" and "classes" in v and not v["classes"]:
+            self._warn("Scegli almeno una classe.")
+            return
+
+        def done(tin):
+            self._tin_edges = None
+            text = self._tin_report(tin)
+            for line in text.splitlines():
+                self.log_pane.info(line)
+            self.statusBar().showMessage(text.splitlines()[0], 15000)
+            if self.ortho_view.tr is not None and self.drawings_frame is None:
+                self._redraw_overlays()
+            self._info("TIN", text)
+
+        self.run_task("TIN", lambda p: T.build_tin(ch, source=v["source"], max_error=v.get("max_error"),
+                                                    breaklines=lines, boundary=boundary, spots=bool(v.get("spots")),
+                                                    classes=classes, progress=p), done)
+
+    def _tin_report(self, tin) -> str:
+        """What a build of the TIN gave, in the language of the interface: vertices, triangles, constrained edges,
+        the difference from the DEM, the warnings."""
+        from ..engine import tin as T
+
+        i = tin.info or {}
+        source = {"dem": tr("dal DEM"), "cloud": tr("dalla nuvola densa"), "spots": tr("dalle quote")}.get(
+            tin.source, tin.source)
+        out = [tr("TIN {0}: {1} vertici, {2} triangoli, {3} spigoli vincolati, {4} quote puntuali", source,
+                  _it(tin.n_vertices), _it(tin.n_triangles), _it(len(tin.constrained)), _it(len(tin.spots)))]
+        if "max_error" in i:
+            out.append(tr("Tolleranza {0} m, {1} giri di raffinamento", _it(i["max_error"], 4), i.get("rounds", 0)))
+        if "error_max" in i:
+            out.append(tr("Scarto dal DEM: massimo {0} m, il 95% entro {1} m", _it(i["error_max"], 4),
+                          _it(i["error_p95"], 4)))
+        for w in i.get("warnings") or []:
+            if w == T.NOT_CONSTRAINED:
+                out.append(tr("Attenzione: il nucleo nativo (pyarchinit-photogrammetry-core 0.7) non è installato: le "
+                              "linee di rottura e il contorno sono vertici del TIN ma non vincoli, i triangoli possono "
+                              "attraversarli"))
+            else:
+                out.append(tr("Attenzione: {0}", translate(w)))
+        return "\n".join(out)
+
+    def tin_contours(self) -> None:
+        """Contour lines of the TIN (exact on its triangles), as a layer of the plan and in a file."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..archaeo.terrain import CONTOUR_INTERVALS, export_contours
+        from ..engine import tin as T
+
+        relief = float(tin.z.max() - tin.z.min())
+        suggested = next((iv for iv in CONTOUR_INTERVALS if relief / iv <= 50), CONTOUR_INTERVALS[-1])
+        v = ParamDialog.ask(self, tr("Curve di livello dal TIN"), [
+            Field("interval", "Equidistanza (m)", suggested, minimum=0.001, maximum=100, decimals=3),
+            Field("index_every", "Curva direttrice ogni", 5, minimum=1, maximum=50),
+            Field("path", tr("Salva anche in un file (DXF, GeoPackage, GeoJSON; vuoto: solo nella vista)"), "",
+                  kind="file_save", filter="DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")],
+            intro=tr("Quote del TIN da {0} a {1} m: le curve sono esatte sui triangoli (le linee di rottura restano "
+                     "spigoli vivi).", _it(float(tin.z.min()), 2), _it(float(tin.z.max()), 2)))
+        if not v:
+            return
+        crs = self.chunk.crs
+
+        def job(p):
+            p(0.1, "Curve di livello dal TIN")
+            lines = T.contours(tin, float(v["interval"]), index_every=int(v["index_every"]))
+            if v.get("path"):
+                export_contours(lines, v["path"], crs=crs)
+            return lines
+
+        def done(lines):
+            if self.ortho_view.tr is None or self.drawings_frame is not None:
+                self._load_raster()
+            name = tr("Curve dal TIN ({0} m)", f"{v['interval']:g}")
+            self._draw_contours(name, lines)
+            self.show_view(self.ortho_view)
+            self.log_pane.info(tr("{0}: {1} linee", name, len(lines))
+                               + (tr(", salvate in {0}", v["path"]) if v.get("path") else ""))
+
+        self.run_task("Curve di livello dal TIN", job, done, refresh=False, save=False)
+
+    def tin_volume(self) -> None:
+        """Exact cut and fill of the TIN against a horizontal or a sloping plane, or the deposit above its lowest
+        vertex, shown as the volume of the DEM is."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..engine import tin as T
+
+        zmin = round(float(tin.z.min()), 3)
+        v = ParamDialog.ask(self, tr("Volume dal TIN"), [
+            Field("reference", "Superficie di riferimento", "min",
+                  choices=[("min", "Quota minima dell'area (deposito sopra il fondo)"),
+                           ("height", "Piano alla quota del terreno originario"),
+                           ("plane", tr("Piano inclinato z = a x + b y + c"))]),
+            Field("elevation", "Quota del piano (m)", zmin, minimum=-10000, maximum=10000, decimals=3),
+            Field("a", tr("a (pendenza lungo x)"), 0.0, minimum=-100, maximum=100, decimals=6),
+            Field("b", tr("b (pendenza lungo y)"), 0.0, minimum=-100, maximum=100, decimals=6),
+            Field("c", tr("c (m)"), zmin, minimum=-1e9, maximum=1e9, decimals=3)],
+            intro=tr("Volume esatto dei prismi sotto i triangoli del TIN, rispetto alla superficie scelta."))
+        if not v:
+            return
+        ref = {"min": None, "height": float(v["elevation"]),
+               "plane": (float(v["a"]), float(v["b"]), float(v["c"]))}[v["reference"]]
+
+        def done(r):
+            self._last_volume = r
+            if v["reference"] == "min":
+                what = tr("deposito sopra il fondo")
+            elif v["reference"] == "height":
+                what = tr("rispetto al ") + tr("piano a ") + f"{_it(v['elevation'], 3)} m"
+            else:
+                what = tr("rispetto al ") + tr("piano z = {0} x + {1} y + {2}", v["a"], v["b"], v["c"])
+            txt = (tr("Area {0:.3f} m2 ({1}): scavo (volume asportato) {2:.3f} m3, riporto {3:.3f} m3, netto {4:.3f} "
+                      "m3; quote attuali {5:.3f} / {6:.3f} m",
+                      r['area_m2'], what, r['cut_m3'], r['fill_m3'], r['net_m3'], r['quota_min'], r['quota_max']))
+            self._info(tr("Volume dal TIN"), txt)
+
+        self.run_task("Volume dal TIN", lambda p: T.volume(tin, ref), done, refresh=False, save=False)
+
+    def tin_to_dem(self) -> None:
+        """*DEM dal TIN*: the TIN rasterised as the active DEM; the DEM as it was stays among the versions."""
+        if self._need_tin() is None:
+            return
+        from ..engine import tin as T
+
+        ch = self.chunk
+
+        def done(path):
+            self._show_raster("dem")
+            self.log_pane.info(tr("DEM dal TIN: {0} ({1} m); il DEM di prima resta tra le versioni", path,
+                                  _it(ch.meta["dem"]["resolution"], 4)))
+
+        self.run_task("DEM dal TIN", lambda p: T.tin_to_dem(ch, progress=p), done)
+
+    def export_tin(self) -> None:
+        """*Esporta TIN...*: DXF (3DFACE, break lines, spot heights), PLY/OBJ, GeoPackage or LandXML."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..engine import tin as T
+
+        path, _f = QFileDialog.getSaveFileName(self, tr("Esporta TIN"), str(Path(self._last_dir()) / "tin.dxf"),
+                                               "DXF (*.dxf);;LandXML (*.xml);;GeoPackage (*.gpkg);;PLY (*.ply);;"
+                                               "OBJ (*.obj)")
+        if not path:
+            return
+        try:
+            out = T.export(tin, path, self.chunk.crs)
+        except Exception as exc:
+            self._exc("Esportazione del TIN non riuscita", exc)
+            return
+        self._info("TIN", tr("TIN ({0} vertici, {1} triangoli) esportato in {2}", _it(tin.n_vertices),
+                                 _it(tin.n_triangles), out))
+
+    def export_breaklines(self) -> None:
+        """*Esporta le linee di rottura...*: the break lines shown (of the plan, or of the elevation shown) into a
+        DXF (layer LINEE), a GeoPackage (table linee) or a GeoJSON."""
+        if not self._need_chunk():
+            return
+        from ..archaeo import breaklines
+
+        if not self.shown_lines:
+            self._warn("Nessuna linea di rottura: disegnale con lo strumento Linee.")
+            return
+        path, _f = QFileDialog.getSaveFileName(self, tr("Esporta le linee di rottura"),
+                                               str(Path(self._last_dir()) / "linee.dxf"),
+                                               "DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")
+        if not path:
+            return
+        crs = None if self.drawings_frame is not None or self.chunk.crs == "LOCAL" else self.chunk.crs
+        try:
+            out = breaklines.write_lines(self.shown_lines, path, crs)
+        except Exception as exc:
+            self._exc("Esportazione delle linee non riuscita", exc)
+            return
+        self._info(tr("Linee di rottura"), tr("{0} linee esportate in {1}", len(self.shown_lines), out))
+
     def plan_slice(self, z_default: float | None = None) -> None:
         if not self._need_chunk(product="model"):
             return
@@ -12422,6 +12894,11 @@ class MainWindow(QMainWindow):
                                on(lambda: self.keep_version_copy(payload)))
                 menu.addAction(icon("edit"), tr("Rinomina questa versione..."),
                                lambda: self.rename_version(payload, None, chunk=chunk))
+            if payload == "tin" and present:
+                menu.addAction(icon("contours"), tr("Curve di livello dal TIN..."), on(self.tin_contours))
+                menu.addAction(icon("volume"), tr("Volume dal TIN..."), on(self.tin_volume))
+                menu.addAction(icon("dem"), tr("DEM dal TIN"), on(self.tin_to_dem))
+                menu.addAction(icon("export"), tr("Esporta TIN..."), on(self.export_tin))
             if isinstance(payload, str) and payload.startswith("calc:") and present:
                 info = (chunk.meta.get("calculator") or {}).get(payload[5:]) or {}
                 menu.addAction(icon("calculator"), tr("Calcola di nuovo con un'altra formula..."),

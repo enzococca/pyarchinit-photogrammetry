@@ -406,10 +406,10 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
-                  "req_polygon", "req_line", "req_point", "reshape")
+                  "req_polygon", "req_line", "req_point", "reshape", "breakline")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
     REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
-    LINE_MODES = ("req_line", "reshape")  # click the vertices, double click or Enter to end
+    LINE_MODES = ("req_line", "reshape", "breakline")  # click the vertices, double click or Enter to end
     VERTEX_PX = 7.0  # vertex editing: how near (screen pixels) a press grabs a vertex or the middle of a side
     SAM_TOOLS = ("tap", "box", "area")
 
@@ -432,6 +432,7 @@ class RasterView(_ZoomView):
     request_cancelled = Signal()  # Esc during a request
     vertices_edited = Signal(str, object, object)  # layer, attributes of the unit part (the dict itself), outline (N,2)
     reshape_finished = Signal(object)  # (N,2) world XY: the line of a reshape
+    breakline_finished = Signal(object)  # (N,2) world XY: a break line drawn (its kind is the window's)
     raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
@@ -854,7 +855,7 @@ class RasterView(_ZoomView):
         return item
 
     def add_line(self, xy, color: str = "#ffd000", label: str = "", layer: str = "Linee", attrs: dict | None = None,
-                 width: float = 2.5):
+                 width: float = 2.5, dash: bool = False):
         xy = np.asarray(xy, float)[:, :2]
         inv = self._inverse()  # all the vertices at once: contour layers have hundreds of thousands
         cols = inv.a * xy[:, 0] + inv.b * xy[:, 1] + inv.c
@@ -862,7 +863,10 @@ class RasterView(_ZoomView):
         pts = [QPointF(c, r) for c, r in zip(cols.tolist(), rows.tolist())]
         path = QPainterPath()
         path.addPolygon(QPolygonF(pts))  # an open subpath
-        item = self.scene().addPath(path, self._pen(color, width))
+        pen = self._pen(color, width)
+        if dash:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        item = self.scene().addPath(path, pen)
         t = None
         if label:
             t = QGraphicsSimpleTextItem(label)
@@ -871,6 +875,22 @@ class RasterView(_ZoomView):
             t.setPos(pts[0])
             self.scene().addItem(t)
         self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {}), "_geom": ("LineString", xy.tolist())})
+        return item
+
+    def add_segments(self, segments, color: str = "#8d6e63", layer: str = "Segmenti", attrs: dict | None = None,
+                     width: float = 1.0):
+        """Many segments ((n, 2, 2) world XY: the edges of a TIN) as one feature of ``layer``, one path: drawn and
+        hidden at once, no geometry of their own for snapping, QGIS or the selection tools."""
+        seg = np.asarray(segments, float).reshape(-1, 2, 2)
+        inv = self._inverse()
+        cols = inv.a * seg[..., 0] + inv.b * seg[..., 1] + inv.c
+        rows = inv.d * seg[..., 0] + inv.e * seg[..., 1] + inv.f
+        path = QPainterPath()
+        for (c0, c1), (r0, r1) in zip(cols.tolist(), rows.tolist()):
+            path.moveTo(c0, r0)
+            path.lineTo(c1, r1)
+        item = self.scene().addPath(path, self._pen(color, width))
+        self._register(layer, "line", item, None, {"etichetta": "", **(attrs or {})})
         return item
 
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
@@ -1499,7 +1519,7 @@ class RasterView(_ZoomView):
             if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._vedit["current"] is not None:
                 self.remove_vertex(self._vedit["current"])
                 return
-        if self.mode in (*self.REQUEST_MODES, "reshape"):
+        if self.mode in (*self.REQUEST_MODES, "reshape", "breakline"):
             if ev.key() == Qt.Key.Key_Escape:
                 mode = self.mode
                 self.set_mode(mode)
@@ -1759,7 +1779,7 @@ class RasterView(_ZoomView):
     def _finish_request(self) -> None:
         """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1); a
         vertex clicked again on the same screen pixel (a slow double click) counts once."""
-        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2}[self.mode]
+        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2, "breakline": 2}[self.mode]
         # one screen pixel in world units: a relative tolerance would join vertices metres apart in UTM
         pixel = abs(self.tr.a) / max(self.transform().m11(), 1e-12) if self.tr is not None else 0.0
         xy = [p for i, p in enumerate(self._click_xy)
@@ -1768,7 +1788,8 @@ class RasterView(_ZoomView):
             return
         mode = self.mode
         self.set_mode(mode)
-        (self.reshape_finished if mode == "reshape" else self.request_finished).emit(np.array(xy, float))
+        {"reshape": self.reshape_finished, "breakline": self.breakline_finished}.get(
+            mode, self.request_finished).emit(np.array(xy, float))
 
     # ----------------------------------------------------------- vertex editing
     def editing_vertices(self) -> bool:

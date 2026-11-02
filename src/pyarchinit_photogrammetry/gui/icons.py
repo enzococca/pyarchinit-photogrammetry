@@ -40,7 +40,8 @@ ICONS = {
     # tools
     "print": ("mdi6.printer-outline", "grey"), "turntable": ("mdi6.rotate-3d-variant", "grey"),
     "pan": ("mdi6.cursor-move", "grey"), "polygon": ("mdi6.vector-polygon", "red"),
-    "line": ("mdi6.vector-line", "indigo"), "measure": ("mdi6.ruler", "teal"),
+    "line": ("mdi6.vector-line", "indigo"), "breakline": ("mdi6.vector-polyline", "orange"),
+    "tin": ("mdi6.triangle-outline", "brown"), "measure": ("mdi6.ruler", "teal"),
     "point": ("mdi6.map-marker-plus-outline", "green"), "eraser": ("mdi6.eraser", "grey"),
     "select": ("mdi6.select-drag", "indigo"), "delete": ("mdi6.delete-outline", "red"),
     "merge": ("mdi6.vector-union", "violet"), "freehand": ("mdi6.draw", "red"), "snap": ("mdi6.magnet", "violet"),

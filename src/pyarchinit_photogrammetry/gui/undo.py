@@ -35,7 +35,7 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 
 PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
               "markers": "Marker", "excluded": "Marker", "scalebars": "Barre di scala",
-              "patches": "Patch dell'ortofoto", "region": "Regione di ricostruzione"}
+              "patches": "Patch dell'ortofoto", "region": "Regione di ricostruzione", "lines": "Linee di rottura"}
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
                  "reconstruction": "Punti di legame", "model_textured": "Texture"}
 

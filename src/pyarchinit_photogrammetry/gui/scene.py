@@ -107,6 +107,9 @@ def available_views(chunk) -> list[str]:
         out.append("model_textured")
     if chunk.meta.get("proxies"):
         out.append("proxies")
+    tin = chunk.product_path("tin")
+    if tin is not None and tin.exists():
+        out.append("tin")
     return out
 
 
@@ -384,6 +387,17 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             n += len(m.vertices)
         if V:
             sd.mesh_vertices, sd.mesh_faces, sd.mesh_colors = np.vstack(V), np.vstack(F), np.vstack(C)
+    elif kind == "tin":  # the TIN (engine.tin) as a mesh coloured by height
+        from ..engine.tin import chunk_tin
+
+        tin = chunk_tin(chunk)
+        if tin is not None and tin.n_triangles:
+            faces = np.asarray(tin.triangles, np.int64)
+            if len(faces) > max_faces:
+                faces = faces[np.random.default_rng(0).choice(len(faces), max_faces, replace=False)]
+            sd.mesh_vertices = (tin.world_xyz - off).astype(np.float32)
+            sd.mesh_faces = faces
+            sd.mesh_colors = elevation_colors(np.asarray(tin.z, float))
     elif kind in ("model", "model_textured"):  # a texture too large to show: the coloured model
         mesh = display_model(chunk, max_faces, paths.get("model"))
         if mesh is not None:

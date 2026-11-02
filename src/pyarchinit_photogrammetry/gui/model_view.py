@@ -19,7 +19,8 @@ from .trackball import MODES as TRACKBALL_MODES
 from .trackball import OUTLINE_COLOUR, RING_COLOURS, SETTING as TRACKBALL_SETTING, Trackball
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
-               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US"}
+               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US",
+               "tin": "TIN"}
 
 
 def exaggeration_text(factor: float) -> str:
