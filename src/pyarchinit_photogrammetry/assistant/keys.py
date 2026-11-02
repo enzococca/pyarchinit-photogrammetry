@@ -52,7 +52,7 @@ def _keyring_get(service: str, user: str) -> str | None:
 def _keyring_set(service: str, user: str, key: str) -> None:
     backend = _backend()
     if backend is None:
-        raise KeyringUnavailable("nessun portachiavi disponibile su questo computer: la chiave non puo' essere "
+        raise KeyringUnavailable("nessun portachiavi disponibile su questo computer: la chiave non può essere "
                                  "conservata (usare la variabile d'ambiente)")
     try:
         backend.set_password(service, user, key)
@@ -81,7 +81,7 @@ def get_key(kind: str) -> str | None:
 def set_key(kind: str, key: str) -> None:
     """Keep ``key`` in the keyring; raises KeyringUnavailable when there is no backend."""
     if not keyring_available():
-        raise KeyringUnavailable("nessun portachiavi disponibile su questo computer: la chiave non puo' essere "
+        raise KeyringUnavailable("nessun portachiavi disponibile su questo computer: la chiave non può essere "
                                  "conservata (usare la variabile d'ambiente)")
     _keyring_set(SERVICE, kind, key.strip())
 

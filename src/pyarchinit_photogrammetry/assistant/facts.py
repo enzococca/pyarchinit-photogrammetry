@@ -214,7 +214,7 @@ def project_summary(document, arguments: dict, index: Index) -> dict:
     if not chunks:
         out["none"] = "il progetto non ha chunk"
     elif empty:
-        out["none"] = "il progetto e' vuoto: nessuna foto e nessun prodotto"
+        out["none"] = "il progetto è vuoto: nessuna foto e nessun prodotto"
     return out
 
 
