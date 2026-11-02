@@ -375,10 +375,13 @@ class Filter:
         chunks = list(getattr(doc, "chunks", []) or [])
         for ch in chunks:
             drawings = (getattr(ch, "meta", None) or {}).get("drawings") or {}
-            for rows in drawings.values():
-                if isinstance(rows, (list, tuple)):
-                    for rec in rows:
-                        self._add_record(rec)
+            frames = drawings.get("frames") if isinstance(drawings.get("frames"), dict) else {}
+            # the plan's drawings and those made on each elevation or section (``frames``)
+            for group in [drawings, *(f for f in frames.values() if isinstance(f, dict))]:
+                for rows in group.values():
+                    if isinstance(rows, (list, tuple)):
+                        for rec in rows:
+                            self._add_record(rec)
         for ch in chunks:
             self._add("chunk", getattr(ch, "label", None))
         path = getattr(doc, "path", None)

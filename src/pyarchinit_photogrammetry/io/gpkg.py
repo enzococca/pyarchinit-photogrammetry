@@ -45,13 +45,23 @@ def srs_of(crs: str | None) -> tuple[int, str, str]:
     return code, c.name, c.to_wkt("WKT1_GDAL")
 
 
-def blob(geom, srs_id: int) -> bytes:
-    """GeoPackage binary geometry: header (little endian, xy envelope) + 2D WKB."""
+def blob(geom, srs_id: int, z: bool = False) -> bytes:
+    """GeoPackage binary geometry: header (little endian, xy envelope) + 2D WKB; ``z``: xyz envelope + ISO WKB with Z
+    (PolygonZ, LineStringZ, PointZ: a drawing placed in 3D)."""
     import shapely
 
     minx, miny, maxx, maxy = geom.bounds
-    head = b"GP" + bytes([0, 0b00000011]) + struct.pack("<i", srs_id) + struct.pack("<4d", minx, maxx, miny, maxy)
-    return head + shapely.to_wkb(geom, byte_order=1, output_dimension=2)
+    if not z:
+        head = b"GP" + bytes([0, 0b00000011]) + struct.pack("<i", srs_id) + struct.pack("<4d", minx, maxx, miny, maxy)
+        return head + shapely.to_wkb(geom, byte_order=1, output_dimension=2)
+    import numpy as np
+
+    zs = shapely.get_coordinates(geom, include_z=True)[:, 2]
+    zs = zs[~np.isnan(zs)]
+    minz, maxz = (float(zs.min()), float(zs.max())) if len(zs) else (0.0, 0.0)
+    head = b"GP" + bytes([0, 0b00000101]) + struct.pack("<i", srs_id) + \
+        struct.pack("<6d", minx, maxx, miny, maxy, minz, maxz)
+    return head + shapely.to_wkb(geom, byte_order=1, output_dimension=3, flavor="iso")
 
 
 def is_geopackage(path: str | Path) -> bool:
@@ -104,7 +114,7 @@ def create(con: sqlite3.Connection, srs: tuple[int, str, str]) -> None:
 
 
 def ensure_table(con: sqlite3.Connection, table: str, geometry_type: str, columns: dict[str, str], srs_id: int,
-                 identifier: str | None = None, recreate: bool = False) -> list[str]:
+                 identifier: str | None = None, recreate: bool = False, z: bool = False) -> list[str]:
     """Create a feature table (``columns``: name -> SQL type) or add its missing columns;
     returns the attribute columns of the table, in order. ``recreate``, for a caller that writes the
     whole content of the table (:func:`write_table`, the live link with QGIS): a table in another
@@ -120,7 +130,8 @@ def ensure_table(con: sqlite3.Connection, table: str, geometry_type: str, column
                     f"geom {geometry_type}{cols})")
         con.execute("INSERT INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES (?, 'features', ?, ?)",
                     (table, identifier or table, srs_id))
-        con.execute("INSERT INTO gpkg_geometry_columns VALUES (?, 'geom', ?, ?, 0, 0)", (table, geometry_type, srs_id))
+        con.execute("INSERT INTO gpkg_geometry_columns VALUES (?, 'geom', ?, ?, ?, 0)",
+                    (table, geometry_type, srs_id, 1 if z else 0))
         have = ["fid", "geom", *columns]
     for c, t in columns.items():
         if c not in have:
@@ -142,15 +153,16 @@ def drop_table(con: sqlite3.Connection, table: str) -> None:
     con.execute(f"DROP TABLE IF EXISTS {quote(table)}")
 
 
-def replace_rows(con: sqlite3.Connection, table: str, columns: list[str], features, srs_id: int) -> int:
+def replace_rows(con: sqlite3.Connection, table: str, columns: list[str], features, srs_id: int,
+                 z: bool = False) -> int:
     """Replace the content of ``table`` with ``features`` (``(shapely geometry, {column:
     value})``, empty or missing geometries skipped) and update its extent; returns the
-    number of rows written. Call inside a transaction."""
+    number of rows written (``z``: the geometries with their Z). Call inside a transaction."""
     rows, bounds = [], []
     for geom, values in features:
         if geom is None or geom.is_empty:
             continue
-        rows.append([blob(geom, srs_id)] + [values.get(c) for c in columns])
+        rows.append([blob(geom, srs_id, z)] + [values.get(c) for c in columns])
         bounds.append(geom.bounds)
     con.execute(f"DELETE FROM {quote(table)}")
     names = "".join(f", {quote(c)}" for c in columns)

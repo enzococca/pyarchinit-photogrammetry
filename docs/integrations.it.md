@@ -86,6 +86,14 @@ in QGIS*. Il progetto è creato dal Python di QGIS stesso (`/Applications/QGIS*.
 nativi di QGIS. Le unità pubblicate in PyArchInit (`pyunitastratigrafiche`) sono visibili,
 naturalmente, anche nei layer PyArchInit di QGIS.
 
+### Disegni sui prospetti e sulle sezioni
+
+Il GeoPackage dal vivo contiene anche i disegni fatti sui prospetti e sulle sezioni, collocati sul rilievo in 3D
+(tabelle `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; PolygonZ, PointZ, LineStringZ nel sistema
+del chunk), aggiornati con quelli della pianta e in un solo senso. QGIS li mostra nella sua vista 3D, RustGIS nel
+gruppo "<chunk> - prospetti". *QGIS > Apri il prospetto in QGIS*, con un prospetto mostrato, apre un progetto del
+prospetto sviluppato: la sua ortofoto e i suoi disegni nei suoi metri (u, v), come una pianta della facciata.
+
 ## RustGIS
 
 [RustGIS](https://github.com/opengeos/RustGIS) è un GIS desktop che altri programmi dello stesso computer possono

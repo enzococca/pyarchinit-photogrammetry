@@ -150,7 +150,8 @@ chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando
 `window.selected_polygon()`, il nome pubblico della selezione della vista 2D (in uno script lanciato con *Esegui script
 Python...* la stessa area è il nome `polygon`) nel terzo (`ppg duplicate-chunk` e `ppg photos disable` dalla riga di
 comando; nella finestra *Duplica chunk...* nel clic destro di un chunk nell'Area di lavoro e *Disattiva le N foto
-selezionate* nel clic destro del pannello Foto).
+selezionate* nel clic destro del pannello Foto). Con un prospetto o una sezione mostrati nella vista 2D, la selezione è nei
+suoi metri (u, v) (vedi *Su un prospetto o una sezione* nella guida dei plugin).
 
 Due script completi per *Esegui script Python...* sono nella cartella `examples` del repository:
 [`foto_area.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/foto_area.py) trova le foto che inquadrano l'area selezionata nella vista 2D e filtra con quelle

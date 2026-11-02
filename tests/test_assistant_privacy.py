@@ -532,3 +532,16 @@ def test_is_wkt_takes_a_geometry_and_not_a_word_that_starts_like_one():
     f = Filter(None)
     assert f.facts({"source": "point_cloud", "title": "Curve di livello e volumi", "wkt": "POINT (1 2)"}) == {
         "source": "point_cloud", "title": "Curve di livello e volumi"}
+
+
+def test_names_in_the_drawings_of_the_elevations_leave_as_placeholders(tmp_path):
+    """A person, a place or a site named only in the drawings made on an elevation or a section (``frames``) is
+    replaced as those of the plan are."""
+    doc = make_document(tmp_path)
+    doc.chunks[0].meta["drawings"]["frames"] = {"ab12cd34": {"units": [
+        {"wkt": "POLYGON EMPTY", "sito": "Tell Sultan", "us": "5", "tipo": "USM",
+         "attributes": {"disegnatore": "Giulia Bianchi", "comune": "Ariano"}}], "quote": []}}
+    f = Filter(doc)
+    out = f.outgoing("Prospetto di Giulia Bianchi ad Ariano")
+    assert "Giulia" not in out and "Ariano" not in out
+    assert f.incoming(out) == "Prospetto di Giulia Bianchi ad Ariano"

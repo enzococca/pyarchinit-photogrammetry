@@ -85,6 +85,14 @@ Python (`/Applications/QGIS*.app`, `C:\Program Files\QGIS*`, `/usr/bin/qgis`, or
 so styles and labels are native QGIS ones. Units published to PyArchInit
 (`pyunitastratigrafiche`) are of course visible in the PyArchInit layers of QGIS too.
 
+### Drawings on elevations and sections
+
+The live GeoPackage also holds the drawings made on elevations and sections, placed on the survey in 3D (tables
+`prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; PolygonZ, PointZ, LineStringZ in the system of the
+chunk), refreshed with the plan's and one-way. QGIS shows them in its 3D view, RustGIS in the group
+"<chunk> - prospetti". *QGIS > Apri il prospetto in QGIS*, with an elevation shown, opens a project of the elevation
+unfolded: its orthophoto and its drawings in its own metres (u, v), like a plan of the façade.
+
 ## RustGIS
 
 [RustGIS](https://github.com/opengeos/RustGIS) is a desktop GIS that can be driven by other programs on the same

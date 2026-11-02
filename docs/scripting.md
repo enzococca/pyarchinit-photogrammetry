@@ -147,7 +147,8 @@ markers...* and *Tools > Normal map...* in the window), then `doc.duplicate_chun
 and `window.selected_polygon()`, the public name of the selection of the 2D view (in a script run with *Run Python
 script...* the same area is the name `polygon`) in the third one (`ppg duplicate-chunk` and `ppg photos disable` on the
 command line; in the window *Duplicate chunk...* on the right click of a chunk in the Workspace and *Disable the N
-selected photos* on the right click in the Photos pane).
+selected photos* on the right click in the Photos pane). With an elevation or a section shown in the 2D view, the selection is in
+its (u, v) metres (see *On an elevation or a section* in the plugins guide).
 
 Two complete scripts for *Run Python script...* are in the `examples` folder of the repository:
 [`foto_area.py`](https://github.com/enzococca/pyarchinit-photogrammetry/blob/main/examples/foto_area.py) finds the photos that see the area selected in the 2D view and filters the Photos

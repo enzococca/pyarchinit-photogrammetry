@@ -63,6 +63,12 @@ LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
     "quote": ("Quote (ppg)", "POINT"),  # the columns of pyarchinit_quote
 }
 TWO_WAY_TABLES = ("unita", "quote", "sezioni")  # what is edited there in QGIS comes back
+# the drawings of every elevation and section of the chunk, placed on the survey in 3D (one-way): tables
+# ``prospetto_<elevation id>_<unita|quote|punti|pietre|profilo>`` (``engine.elevation.world_tables``)
+ELEVATION_PREFIX = "prospetto_"
+ELEVATION_TABLES = {"unita": ("Unità", "POLYGON", "#1b7f3b"), "quote": ("Quote", "POINT", "#ffd166"),
+                    "punti": ("Punti di misura", "POINT", "#ff5d8f"), "pietre": ("Pietre", "POLYGON", "#5b3a1e"),
+                    "profilo": ("Profilo", "LINESTRING", "#ff2d2d")}
 ID_FIELD = "ppg_id"  # the identity of a feature (a UUID)
 SIG_FIELD = "ppg_sig"  # the signature of what the program last wrote in the row
 PART_FIELD = "ppg_parte"  # "unita": the part (1, 2...) of a unit drawn as several polygons
@@ -426,6 +432,51 @@ class LiveLink:
             for table, feats in todo.items():
                 self._signatures[table] = self._signature(feats)
         return {t: self.path for t in LIVE_TABLES}
+
+    def write_elevations(self, elevations: dict[str, tuple[str, dict]]) -> list[str]:
+        """The drawings of the elevations and sections of the chunk placed on the survey (``{elevation id: (crs,
+        engine.elevation.world_tables(...))}``) as the tables ``prospetto_<id>_<name>`` of the GeoPackage, 3D, each in
+        the system the elevation was made in; those of elevations no longer there go. One-way: what QGIS edits there
+        does not come back. Nothing is written when they did not change. Returns the tables written."""
+        from ..engine.elevation import write_world_tables
+        from . import gpkg
+
+        sig = hash(tuple((eid, crs, name, tuple((g.wkb, tuple(sorted((k, str(v)) for k, v in vals.items())))
+                                                  for g, vals in rows))
+                         for eid, (crs, tables) in sorted(elevations.items())
+                         for name, (_g, _c, rows) in sorted(tables.items())))
+        if not gpkg.is_geopackage(self.path) or (sig == self._signatures.get(ELEVATION_PREFIX)):
+            return []
+        con = self._connection()
+        written = []
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            for eid, (crs, tables) in elevations.items():
+                srs = gpkg.srs_of(crs)
+                gpkg.create(con, srs)
+                written += write_world_tables(con, tables, srs[0], prefix=f"{ELEVATION_PREFIX}{eid}_")
+            stale = [r[0] for r in con.execute("SELECT table_name FROM gpkg_contents WHERE table_name GLOB ?",
+                                               (ELEVATION_PREFIX + "*",)) if r[0] not in written]
+            for table in stale:
+                gpkg.drop_table(con, table)
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        self._signatures[ELEVATION_PREFIX] = sig
+        return written
+
+    def elevation_tables(self) -> list[tuple[str, str]]:
+        """``(table, geometry type)`` of the elevations' tables the GeoPackage holds (:meth:`write_elevations`)."""
+        from . import gpkg
+
+        if not gpkg.is_geopackage(self.path):
+            return []
+        con = self._connection()
+        return [(r[0], r[1]) for r in con.execute(
+            "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
+            "table_name", (ELEVATION_PREFIX + "*",))]
 
     def _wanted(self, table: str, feats: list, cols: list[str], types: dict) -> list[_Wanted]:
         import shapely
@@ -1026,6 +1077,6 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 
 
 __all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
-           "INFO_TABLE", "UnreadEdits",
+           "INFO_TABLE", "UnreadEdits", "ELEVATION_PREFIX", "ELEVATION_TABLES",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
            "TableChanges", "new_id", "stable_id", "row_signature"]

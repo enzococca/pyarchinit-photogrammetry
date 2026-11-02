@@ -197,6 +197,15 @@ the next start (`ppg plugin` lists its command at once).
 | `rasters(chunk=None)` | since 1.4.0: every raster of `chunk` (the active one) the calculator reads, with its name in the formulas: dicts `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; a formula on them: `engine.rastercalc.calculate(chunk, formula, name)` |
 | `add_units(polygons, tipo="US", attributes=None, chunk=None)` | since 1.5.0: stratigraphic units made by the plugin, as if drawn in the window - in the live QGIS link, numbered by *Proponi US e rapporti*, in the US forms of PyArchInit. `polygons`: shapely (Multi)Polygons or vertex lists `(N, 2)` in the coordinates of the chunk (an invalid outline is made valid, one with no area left out); `attributes`: one dict for all or one per polygon - `us`, `area`, `tipo`, `sito` and the columns of `pyunitastratigrafiche`, any other key an attribute of the unit; the site is the project's when not given. On the active chunk they are drawn and are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into `chunk.meta["drawings"]`. Only in the interface thread; returns how many were added |
 
+
+**On an elevation or a section.** While the 2D view shows an elevation or a section, what the window lends works in
+its frame: `request_polygon`, `request_line` and `request_point` give `(u, v)` - metres of the elevation, u along it
+and v upwards (the height when v is vertical) - not the coordinates of the chunk; `add_units` adds to the drawings of
+that elevation, and `window.selected_polygon()` is the selection there. The plan's drawings stay in `window.units`,
+`window.quote` and `window.probe_points` whatever is shown; those of the elevation shown are in `window.frame_units`,
+`window.frame_quote` and `window.frame_points` (`window.drawings_frame` is its id, None on the plan).
+`engine.elevation.world_of(entry, u, v, None, chunk=chunk)` gives the world point of a position there.
+
 `progress(fraction, message)` reports 0-1 and raises `Cancelled` when the user cancels: call it
 often in long loops. Widgets are touched only in the callbacks of actions and in `done`, never in
 the function given to `run` (it runs in another thread). `deactivate()` releases what `activate`

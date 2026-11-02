@@ -1439,10 +1439,15 @@ prospetto tiene `u`, `v` e ha `x`, `y`, `quota_q` = il suo punto nel mondo sulla
 | `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | il punto nel mondo (CRS del chunk) di `(u, v)` alla profondità `d`; `d` None: sulla superficie, dal rilievo (serve `chunk`; None dove il rilievo non ha valore) |
 | `relief_at(chunk, entry, u, v)` | la profondità della superficie in `(u, v)` |
 | `frame_drawings(chunk, id)` | i disegni tenuti con il prospetto `id` |
-| `export_drawings(chunk, entry, folder, scale=None, stem=None)` | `{"dxf", "svg", "gpkg"}`: DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, GeoPackage (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)` con una colonna `geom_world` in WKT nel CRS del chunk) |
-| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | il DXF e l'SVG registrati come media "Prospetto"/"Sezione" del sito (miniatura: l'ortofoto), id tenuti in `entry["media"]`: una seconda chiamata non registra nulla di nuovo |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"ortho"` con `raster`): DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, PNG, il GeoPackage sviluppato (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, senza CRS, con una colonna `geom_world` in WKT) e il GeoPackage in 3D sul rilievo |
+| `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | i disegni collocati sul rilievo in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` di una sezione), nel CRS del prospetto (`entry["crs"]`); scritti con la Z in un GeoPackage aperto |
+| `io.qgis_link.LiveLink.write_elevations({id: (crs, tabelle)})`, `elevation_tables()` | quelle tabelle nel GeoPackage dal vivo come `prospetto_<id>_<nome>` (in un solo senso), lette anche dal collegamento con RustGIS (`RustGisLink.refresh_elevations()`) |
+| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | il DXF e l'SVG registrati come media "Prospetto"/"Sezione" del sito (miniatura: `paths["png"]`), id tenuti in `entry["media"]`: una chiamata successiva riscrive file e anteprime con gli stessi id e collega le US aggiunte nel frattempo |
 
-Il collegamento dal vivo con QGIS e il pacchetto QField portano solo i disegni della pianta.
+La finestra tiene i disegni della pianta in `units`, `quote`, `probe_points` e `stones` qualunque cosa sia mostrata, e
+quelli del prospetto mostrato in `frame_units`, `frame_quote`, `frame_points` e `frame_stones`; gli strumenti di
+disegno, il ridisegno dei layer e Modifica > Annulla lavorano sugli insiemi mostrati (`shown_units`...). Il pacchetto
+QField porta solo i disegni della pianta; il collegamento dal vivo con QGIS aggiunge quelli dei prospetti in 3D.
 
 ## Maschere delle foto
 

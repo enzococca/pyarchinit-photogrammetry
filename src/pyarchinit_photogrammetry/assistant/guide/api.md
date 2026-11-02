@@ -1396,10 +1396,15 @@ elevation keeps `u`, `v` and has `x`, `y`, `quota_q` = its world point on the su
 | `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | the world point (chunk CRS) of `(u, v)` at the depth `d`; `d` None: on the surface, from the relief (needs `chunk`; None where the relief has no value) |
 | `relief_at(chunk, entry, u, v)` | the depth of the surface at `(u, v)` |
 | `frame_drawings(chunk, id)` | the drawings kept with the elevation `id` |
-| `export_drawings(chunk, entry, folder, scale=None, stem=None)` | `{"dxf", "svg", "gpkg"}`: DXF in `(u, v)` (layers US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG at 1:`scale` over the orthophoto, GeoPackage (table `frame` with the plane; `unita`, `quote`, `punti`, `pietre` in `(u, v)` with a `geom_world` WKT column in the chunk's CRS) |
-| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | the DXF and SVG registered as media "Prospetto"/"Sezione" of the site (thumbnail: the orthophoto), ids kept in `entry["media"]`: a second call registers nothing new |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"ortho"` with `raster`): DXF in `(u, v)` (layers US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG at 1:`scale` over the orthophoto, PNG, the GeoPackage unfolded (table `frame` with the plane; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, no CRS, with a `geom_world` WKT column) and the GeoPackage in 3D on the survey |
+| `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | the drawings placed on the survey in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` of a section), in the CRS of the elevation (`entry["crs"]`); written with Z into an open GeoPackage |
+| `io.qgis_link.LiveLink.write_elevations({id: (crs, tables)})`, `elevation_tables()` | those tables in the live GeoPackage as `prospetto_<id>_<name>` (one-way), also read by the RustGIS link (`RustGisLink.refresh_elevations()`) |
+| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | the DXF and SVG registered as media "Prospetto"/"Sezione" of the site (thumbnail: `paths["png"]`), ids kept in `entry["media"]`: a later call writes the files and previews again under the same ids and links the US added since |
 
-The QGIS live link and the QField package carry the plan drawings only.
+The window keeps the plan's drawings in `units`, `quote`, `probe_points` and `stones` whatever is shown, and those of
+the elevation shown in `frame_units`, `frame_quote`, `frame_points` and `frame_stones`; the drawing tools, the layer
+redraw and Modifica > Annulla work on the sets shown (`shown_units`...). The QField package carries the plan drawings
+only; the QGIS live link adds the elevations' drawings in 3D.
 
 ## Masks of the photos
 

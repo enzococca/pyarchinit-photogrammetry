@@ -2658,7 +2658,14 @@
   "Fuori dal rilievo del prospetto: quota non letta": "Outside the relief of the elevation: height not read",
   "Disegni del prospetto non esportati": "Drawings of the elevation not exported",
   "sezione": "section",
-  "prospetto": "elevation"
+  "prospetto": "elevation",
+  "Fuori dal rilievo del prospetto: niente da misurare": "Outside the relief of the elevation: nothing to measure",
+  "Le pietre trovate non sono state tenute: il chunk attivo è cambiato": "The stones found were not kept: the active chunk changed",
+  "la pianta": "the plan",
+  "Questo strumento lavora sulla pianta: con un prospetto o una sezione mostrati le coordinate sono quelle del prospetto. Apri l'ortofoto o il DEM.": "This tool works on the plan: with an elevation or a section shown the coordinates are those of the elevation. Open the orthophoto or the DEM.",
+  "Modifica dei disegni della pianta, che non è mostrata": "Change to the drawings of the plan, which is not shown",
+  "Apri il prospetto in QGIS": "Open the elevation in QGIS",
+  "Mostra prima un prospetto o una sezione (doppio clic nell'area di lavoro).": "Show an elevation or a section first (double click in the workspace)."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3516,8 +3523,11 @@
   "Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di profondità e gli altri prodotti.": "Created «{0}»: {1} photos of {2}, {3} markers. It is the active chunk: build the depth maps and the other products.",
   "Mappa delle normali dal {0}: rosso est, verde nord, blu alto": "Normal map from the {0}: red east, green north, blue up",
   "Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > Annulla non riporta indietro.\n\nNon annullabili: {0}": "The script also did things outside the project, which Edit > Undo does not take back.\n\nNot undoable: {0}",
-  " I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala e GeoPackage.": " The drawings made on the elevation in {0}_disegni: DXF, SVG at scale and GeoPackage.",
-  "Sito {0}, {1} «{2}»: {3} schede US nuove e {4} aggiornate, senza geometria in pianta (le unità sono disegnate sul {1}); {5} quote in pyarchinit_quote; {6} disegni registrati come media.": "Site {0}, {1} «{2}»: {3} new US forms and {4} updated, without a geometry in plan (the units are drawn on the {1}); {5} spot heights in pyarchinit_quote; {6} drawings registered as media.",
-  "\n{0} unità senza numero di US non sono state scritte.": "\n{0} units without a US number were not written."
+  "\n{0} unità senza numero di US non sono state scritte.": "\n{0} units without a US number were not written.",
+  "Sito {0}, {1} «{2}»: {3} schede US nuove e {4} aggiornate, senza geometria in pianta (le unità sono disegnate sul {1}); {5} quote in pyarchinit_quote; disegni come media: {6} nuovi, {7} aggiornati.": "Site {0}, {1} «{2}»: {3} new US forms and {4} updated, without a geometry in plan (the units are drawn on the {1}); {5} spot heights in pyarchinit_quote; drawings as media: {6} new, {7} updated.",
+  "Modifica dei disegni del prospetto «{0}», che non è mostrato": "Change to the drawings of the elevation «{0}», which is not shown",
+  "Le pietre trovate vanno all'immagine della ricerca ({0}), non a quella mostrata": "The stones found go to the image of the search ({0}), not to the one shown",
+  " I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala, PNG, GeoPackage nelle coordinate del prospetto e GeoPackage in 3D sul rilievo (_mondo).": " The drawings made on the elevation in {0}_disegni: DXF, SVG at scale, PNG, GeoPackage in the coordinates of the elevation and GeoPackage in 3D on the survey (_mondo).",
+  "Progetto QGIS del prospetto «{0}»: {1} (coordinate del prospetto, in metri)": "QGIS project of the elevation «{0}»: {1} (coordinates of the elevation, in metres)"
  }
 }

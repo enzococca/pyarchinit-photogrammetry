@@ -17,7 +17,7 @@ def reserved_units(window, units=None):
             reserved.append(row)
     pa = window.pa
     if pa is not None:
-        sites = {u.sito for u in (units or window.units) if u.sito}
+        sites = {u.sito for u in (units or window.shown_units) if u.sito}
         if window.project_site():
             sites.add(window.project_site())
         for site in sites:
@@ -28,13 +28,13 @@ def reserved_units(window, units=None):
 
 
 def identify(window):
-    if not window.units:
+    if not window.shown_units:
         window._warn(tr("Crea prima le unità dalle proposte SAM o disegnale sul canvas."))
         return
     selected = {int(a["_unit"]) for _, _, a in window.ortho_view.selected_features() if "_unit" in a}
     try:
         reserved = reserved_units(window)
-        changes = UnitIdentityDialog.ask(window.units, selected, parent=window, reserved=reserved,
+        changes = UnitIdentityDialog.ask(window.shown_units, selected, parent=window, reserved=reserved,
                                           defaults={"progetto": window.project_site() or
                                                     (window.doc.path.stem if window.doc and window.doc.path else "")})
         if changes is None:
@@ -50,10 +50,10 @@ def apply_to_window(window, changes):
     changes = list(changes)
     if not changes:
         return 0
-    before = [(window.units[c.index], (c.before.tipo, c.before.us, c.before.area), False) for c in changes]
-    count = apply_changes(window.units, changes)
+    before = [(window.shown_units[c.index], (c.before.tipo, c.before.us, c.before.area), False) for c in changes]
+    count = apply_changes(window.shown_units, changes)
     for change in changes:
-        u = window.units[change.index]
+        u = window.shown_units[change.index]
         gid = (u.attributes or {}).get("gid")
         if gid is not None:
             window.pa_pending[int(gid)] = u
@@ -81,7 +81,7 @@ def publish_ut_records(window):
     if not window._need_pa() or not window._need_chunk():
         return
     selected = {a["_unit"] for _, _, a in window.ortho_view.selected_features() if "_unit" in a}
-    units = [u for i, u in enumerate(window.units) if u.tipo == "UT" and (not selected or i in selected)]
+    units = [u for i, u in enumerate(window.shown_units) if u.tipo == "UT" and (not selected or i in selected)]
     if not units:
         window._warn(tr("Seleziona unità topografiche oppure crea prima delle UT."))
         return
@@ -138,7 +138,7 @@ def open_ut_form(window, unit):
     try:
         from ..archaeo.unit_identity import plan_units
 
-        changes = plan_units(window.units, [next(i for i, u in enumerate(window.units) if u is unit)],
+        changes = plan_units(window.shown_units, [next(i for i, u in enumerate(window.shown_units) if u is unit)],
                              number_mode="keep", progetto=values["progetto"], name_mode="same", name=values["ut_letterale"])
         # UT forms can be edited only under their existing identity here; use the bulk action for renumbering.
         if str(values["nr_ut"]) != str(unit.us or values["nr_ut"]):

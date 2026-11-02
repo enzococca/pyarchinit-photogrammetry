@@ -2,9 +2,11 @@
 exported with it and registered in PyArchInit as its media."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -118,20 +120,23 @@ def test_drawings_on_an_elevation_stay_with_it(with_elevations, tmp_path, gui):
     w._add_unit(_unit(u, v))
     w._quota_keep = {}  # the values of the last spot height: no dialog
     w._quota_clicked(u, v)  # the centre of a cell with a relief: the height is read there
-    assert len(w.units) == 1 and len(w.quote) == 1
-    q = dict(w.quote[0])
+    # the elevation's sets apart, the plan's untouched (they stay loaded whatever is shown)
+    assert len(w.frame_units) == 1 and len(w.frame_quote) == 1 and not w.units and not w.quote
+    q = dict(w.frame_quote[0])
     assert (q["u"], q["v"]) == (pytest.approx(u), pytest.approx(v))
-    wkt = w.units[0].geometry.wkt
+    wkt = w.frame_units[0].geometry.wkt
     w._load_raster()  # the plan: nothing drawn on the elevation is there
-    assert w.drawings_frame is None and not w.units and not w.quote
+    assert w.drawings_frame is None and not w.units and not w.quote and not w.frame_units
     w.show_elevation(entry)
-    assert [x.geometry.wkt for x in w.units] == [wkt]
-    assert (w.quote[0]["u"], w.quote[0]["v"]) == (q["u"], q["v"])
+    assert [x.geometry.wkt for x in w.frame_units] == [wkt]
+    assert (w.frame_quote[0]["u"], w.frame_quote[0]["v"]) == (q["u"], q["v"])
     # the plan gets its own drawing, the elevation does not see it
     w._load_raster()
     w._add_unit(_unit(ORIGIN[0] + 1.5, ORIGIN[1] + 1.5, us="9"))
     w.show_elevation(entry)
-    assert [x.us for x in w.units] == ["5"]
+    assert [x.us for x in w.frame_units] == ["5"] and [x.us for x in w.units] == ["9"]
+    drawn = {a.get("ppg_id") for _i, _l, a in w.ortho_view.layers["Unita' stratigrafiche"]["features"]}
+    assert drawn == {w.frame_units[0].attributes["ppg_id"]}  # only the elevation's on its view
     w.save_document()
     stored = ch.meta["drawings"]
     assert [x["us"] for x in stored["units"]] == ["9"]
@@ -141,8 +146,8 @@ def test_drawings_on_an_elevation_stay_with_it(with_elevations, tmp_path, gui):
     w2 = open_window(again)
     assert [x.us for x in w2.units] == ["9"]
     w2.show_elevation(_entry(again.chunk, sid))
-    assert [x.geometry.wkt for x in w2.units] == [wkt]
-    assert (w2.quote[0]["u"], w2.quote[0]["v"]) == (q["u"], q["v"])
+    assert [x.geometry.wkt for x in w2.frame_units] == [wkt]
+    assert (w2.frame_quote[0]["u"], w2.frame_quote[0]["v"]) == (q["u"], q["v"])
     app.processEvents()
 
 
@@ -160,7 +165,7 @@ def test_spot_height_on_an_elevation_has_the_world_height(with_elevations, tmp_p
     u, v = _surface_cell(ch, entry)
     w._quota_keep = {}
     w._quota_clicked(u, v)
-    (q,) = w.quote
+    (q,) = w.frame_quote
     p = E.world_of(entry, u, v, None, chunk=ch)
     assert q["quota_q"] == pytest.approx(p[2], abs=1e-3)
     assert (q["x"], q["y"]) == (pytest.approx(p[0], abs=1e-3), pytest.approx(p[1], abs=1e-3))
@@ -185,12 +190,12 @@ def test_stones_are_keyed_per_elevation(with_elevations, tmp_path, gui):
     ch = w.chunk
     a, b = _entry(ch, sid), _entry(ch, wid)
     w.show_elevation(a)
-    w.stones[w._stones_key()] = [box(0, 0, 0.1, 0.1), box(0.2, 0, 0.3, 0.1)]
+    w.shown_stones[w._stones_key()] = [box(0, 0, 0.1, 0.1), box(0.2, 0, 0.3, 0.1)]
     w.show_elevation(b)
-    assert not any(w.stones.values())
-    w.stones[w._stones_key()] = [box(1, 1, 1.2, 1.1)]
+    assert not any(w.shown_stones.values())
+    w.shown_stones[w._stones_key()] = [box(1, 1, 1.2, 1.1)]
     w.show_elevation(a)
-    assert [len(s) for s in w.stones.values()] == [2]
+    assert [len(s) for s in w.shown_stones.values()] == [2] and not w.stones
     w._load_raster()
     w._store_drawings()
     frames = ch.meta["drawings"]["frames"]
@@ -216,7 +221,7 @@ def test_elevation_export_carries_the_drawings(with_elevations, tmp_path, gui, m
     w._add_unit(usm)
     w._quota_keep = {}
     w._quota_clicked(u, v)
-    w.stones[w._stones_key()] = [box(u - 0.3, v - 0.1, u - 0.2, v)]
+    w.shown_stones[w._stones_key()] = [box(u - 0.3, v - 0.1, u - 0.2, v)]
     w._store_drawings()
     out = E.export_drawings(ch, entry, tmp_path / "out")
     layers = {e.dxf.layer for e in ezdxf.readfile(out["dxf"]).modelspace()}
@@ -310,10 +315,238 @@ def test_undo_on_an_elevation(with_elevations, tmp_path, gui):
     w._add_unit(_unit(u, v))
     assert len(w.history.entries) == n + 1
     w.undo()
-    assert not w.units and w.drawings_frame == sid
+    assert not w.frame_units and w.drawings_frame == sid and [x.us for x in w.units] == ["9"]
     w._load_raster()
     assert [x.us for x in w.units] == ["9"]
     w.redo()  # on the plan: the unit comes back on the elevation, the plan keeps its own
     assert [x.us for x in w.units] == ["9"]
+    assert [x["us"] for x in ch.meta["drawings"]["frames"][sid]["units"]] == ["5"]
     w.show_elevation(entry)
-    assert [x.us for x in w.units] == ["5"]
+    assert [x.us for x in w.frame_units] == ["5"]
+
+
+def test_the_plan_stays_loaded_while_an_elevation_is_shown(with_elevations, tmp_path, gui):
+    """Ruling T15-2: ``units``/``quote`` are the plan's whatever is shown - every plan feature (PyArchInit, proxies,
+    volume, IFC, US proposal...) reads them - and the elevation's sets are apart; the site follows in every frame; an
+    undo on an elevation keeps the plan's pending PyArchInit edits; a plugin's units go to the elevation shown."""
+    open_window, _app, _mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    plan, published = _unit(ORIGIN[0] + 1.5, ORIGIN[1] + 1.5, us="9"), _unit(ORIGIN[0] + 2.0, ORIGIN[1] + 1.5, us="8")
+    published.attributes["gid"] = 7
+    w._add_unit(plan)
+    w._add_unit(published)
+    w.pa_pending = {7: published}
+    w.show_elevation(_entry(ch, wid))  # another elevation keeps a unit of its own
+    w._add_unit(_unit(*_surface_cell(ch, _entry(ch, wid)), us="4"))
+    w.show_elevation(_entry(ch, sid))
+    u, v = _surface_cell(ch, _entry(ch, sid))
+    w._add_unit(_unit(u, v))
+    assert [x.us for x in w.units] == ["9", "8"] and [x.us for x in w.frame_units] == ["5"]
+    assert [x.us for x in w._publishable()[0]] == ["9"]  # the plan's, never the elevation's
+    # an undo touching the PyArchInit part, from the elevation: the plan's pending edits stay
+    state = json.loads(json.dumps(w._undo_state(), default=str))  # as the history keeps it
+    w._undo_apply({k: state[k] for k in ("units", "pa")}, {"units", "pa"}, [])
+    assert set(w.pa_pending) == {7} and [x.us for x in w.frame_units] == ["5"]
+    # the site of the project: the plan, the elevation shown and the other one
+    w.set_project_site("Altro")
+    assert [x.sito for x in w.units] == ["Altro", "Saggio"]  # the one from PyArchInit keeps its site
+    assert w.frame_units[0].sito == "Altro"
+    assert ch.meta["drawings"]["frames"][wid]["units"][0]["sito"] == "Altro"
+    # a plugin's units (Context.add_units) on the elevation shown, in its (u, v)
+    w.add_units([_unit(u + 0.3, v, us="6")], source="prova")
+    assert [x.us for x in w.frame_units] == ["5", "6"] and len(w.units) == 2
+    assert w.selected_polygon() is None  # nothing selected: the elevation's selection, empty
+    w.pa_pending = {}  # else closing asks whether to write them
+
+
+def test_measuring_point_and_marker_on_an_elevation_read_the_surface(with_elevations, tmp_path, gui):
+    """The measuring tool and the marker tool on an elevation read the world point of the surface (through its
+    relief), never the plan's products at (u, v); the export places the point there."""
+    import sqlite3
+
+    from shapely import wkt as swkt
+
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    p = E.world_of(entry, u, v, None, chunk=ch)
+    w._probe_clicked(u, v)
+    (q,) = w.frame_points
+    assert not w.probe_points
+    assert (q["u"], q["v"]) == (pytest.approx(u), pytest.approx(v))
+    assert (q["x"], q["y"], q["z_superficie"]) == (pytest.approx(p[0]), pytest.approx(p[1]), pytest.approx(p[2], abs=1e-3))
+    assert q.get("z") == pytest.approx(p[2], abs=0.05)  # the DEM of the plan at the world point: the ground there
+    assert np.allclose(w._raster_point(u, v), ch.to_internal(p[None])[0])  # the marker tool: the same point
+    w._store_drawings()
+    out = E.export_drawings(ch, entry, tmp_path / "out")
+    con = sqlite3.connect(out["gpkg"])
+    (world,), = con.execute("SELECT geom_world FROM punti").fetchall()
+    con.close()
+    assert np.allclose(np.asarray(swkt.loads(world).coords)[0], p, atol=1e-3)
+
+
+def test_plan_tools_are_refused_on_an_elevation(with_elevations, tmp_path, gui):
+    """A section trace, a crop, a patch or an area measured are plan tools: on an elevation they are refused, said in
+    the status bar, nothing done with (u, v) as plan coordinates."""
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    entry = _entry(w.chunk, sid)
+    w.show_elevation(entry)
+    sections = len(w.sections)
+    u, v = _surface_cell(w.chunk, entry)
+    w._section_drawn((u, v), (u + 0.5, v))
+    assert len(w.sections) == sections and "pianta" in w.statusBar().currentMessage()
+    asked = []
+    w.crop_products = lambda geom: asked.append(geom)
+    w._crop_drawn([(u, v), (u + 0.2, v), (u + 0.2, v + 0.2)])
+    w.measure_area = lambda geom: asked.append(geom)
+    w._area_drawn([(u, v), (u + 0.2, v), (u + 0.2, v + 0.2)])
+    assert asked == [] and w._plan_selection() is None
+
+
+def test_stones_found_after_a_switch_go_to_the_image_of_the_search(with_elevations, tmp_path, gui, monkeypatch):
+    """SAM's stones go to the image the search started on, whatever is shown when it ends, said in the log; the export
+    of an elevation carries only its own stones."""
+    from shapely.geometry import box
+
+    open_window, _app, mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    a, b = _entry(ch, sid), _entry(ch, wid)
+    w._load_raster()  # the plan: a search started on the orthophoto
+    monkeypatch.setattr(w, "_sam_available", lambda then=None: True)
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *x, **k: {
+        "min_size": 0.05, "max_size": 0.8, "thoroughness": "normale"}))
+    tasks = []
+    monkeypatch.setattr(w, "run_task", lambda name, job, done, **k: tasks.append(done))
+    found = [box(ORIGIN[0] + 1, ORIGIN[1] + 1, ORIGIN[0] + 1.1, ORIGIN[1] + 1.1)]
+    w.draw_stones()
+    key = w._stones_key()
+    w.show_elevation(b)  # the search ends while elevation B is shown
+    tasks.pop()(found)
+    assert not w.frame_stones.get(wid) and len(w.stones[key]) == 1
+    # a search on elevation A, ending on the plan: into A's frame in the chunk
+    w.show_elevation(a)
+    w.draw_stones()
+    w._load_raster()
+    tasks.pop()([box(0, 0, 0.1, 0.1)])
+    assert len(ch.meta["drawings"]["frames"][sid]["stones"][sid]) == 1
+    # B's export: none of the plan's stones
+    w._store_drawings()
+    stray = {"orthomosaic.tif": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}  # a key of another image in B's frame
+    ch.meta["drawings"]["frames"].setdefault(wid, {"units": [], "quote": []})["stones"] = stray
+    assert E._drawing_items(ch, b)["stones"] == []
+
+
+def test_elevation_drawings_in_qgis_and_saved_media_refreshed(with_elevations, tmp_path, gui, monkeypatch):
+    """Ruling T15-3: the export writes the elevation unfolded (u, v, no CRS, its orthophoto beside it) and in 3D on the
+    survey; the live GeoPackage of QGIS and RustGIS carries the world tables of every elevation with drawings; *Apri
+    il prospetto in QGIS* builds a project in the unfolded frame. Saving the elevation: removed elevations' drawings
+    go at saving."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.io import gpkg, qgis_link
+
+    open_window, _app, mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    w._add_unit(_unit(u, v))
+    w._store_drawings()
+    out = E.export_drawings(ch, entry, tmp_path / "out", raster=True)
+    assert out["ortho"].exists() and out["png"].exists()
+    con = sqlite3.connect(out["gpkg_world"])
+    rows = {r[0]: (r[1], r[2]) for r in con.execute("SELECT table_name, srs_id, z FROM gpkg_geometry_columns")}
+    (blob,), = con.execute("SELECT geom FROM unita").fetchall()
+    con.close()
+    assert rows["unita"] == (3004, 1) and rows["profilo"] == (3004, 1)  # a section: its profile too
+    world = gpkg.geometry(blob)
+    corner = E.world_of(entry, u - 0.05, v - 0.04, 0.0)
+    assert world.has_z and np.min(np.linalg.norm(np.asarray(world.geoms[0].exterior.coords) - corner, axis=1)) < 1e-3
+    # the live GeoPackage: the plan as it was, the elevation's tables added - written on the plan first, then again
+    # with the elevation shown (its sets in memory)
+    w._load_raster()
+    assert w._export_qgis_layers(force=True)
+    w.show_elevation(entry)
+    w._add_unit(_unit(u + 0.3, v, us="6"))
+    files = w._export_qgis_layers(force=True)
+    link = w._qgis_live_link()
+    con = sqlite3.connect(link.path)
+    assert con.execute(f"SELECT count(*) FROM prospetto_{sid}_unita").fetchone()[0] == 2
+    con.close()
+    tables = dict(link.elevation_tables())
+    assert files and f"prospetto_{sid}_unita" in tables and not any(wid in t for t in tables)
+    vectors = w._qgis_elevation_vectors(ch)
+    assert any(x["table"] == f"prospetto_{sid}_unita" and "Sezione A" in x["name"] for x in vectors)
+    # Apri il prospetto in QGIS: the unfolded frame, no reference system
+    built = {}
+    monkeypatch.setattr(qgis_link, "find_qgis", lambda: object())
+    monkeypatch.setattr(qgis_link, "build_project", lambda project, crs, files, rasters, **k: built.update(
+        project=project, crs=crs, rasters=rasters, vectors=k["extra_vectors"]) or {"vectors": [], "rasters": []})
+    monkeypatch.setattr(qgis_link, "open_in_qgis", lambda *a, **k: None)
+    w.open_elevation_in_qgis()
+    w.runner.wait()
+    assert built["crs"] == "" and Path(built["rasters"][0]["path"]).exists()
+    assert {x["table"] for x in built["vectors"]} == {"unita", "quote", "punti", "pietre"}
+    assert all(x["path"].endswith("_disegni.gpkg") for x in built["vectors"])
+    # an elevation removed and the project saved: its drawings go with it
+    ch.meta["elevations"] = [e for e in ch.meta["elevations"] if e["id"] != sid]
+    w._load_raster()
+    w.save_document()
+    assert sid not in ((ch.meta.get("drawings") or {}).get("frames") or {})
+
+
+def test_media_are_written_again_at_every_save(with_elevations, tmp_path, gui, pa_db, monkeypatch):
+    """*Salva in PyArchInit* of an elevation: the same media records every time, their files written again with the
+    drawings, the US added since linked to them; only the spot heights: no media."""
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    w.pa = PyArchInit.connect(media_root=tmp_path / "media")
+    monkeypatch.setattr(w, "_info", lambda *a, **k: None)
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    w._add_unit(_unit(u, v, us="7"))
+    w.pyarchinit_publish_drawings()
+    w.runner.wait()
+    ids = dict(entry["media"])
+    (dxf,), = [[r["filepath"] for r in w.pa.db.query("media_table", id_media=ids["dxf"])]]
+    before = Path(dxf).read_bytes()
+    w._add_unit(_unit(u + 0.3, v, us="11"))
+    w.pyarchinit_publish_drawings()
+    w.runner.wait()
+    assert entry["media"] == ids and Path(dxf).read_bytes() != before
+    us11 = w.pa.us_id("Saggio", "1", "11")
+    linked = {(r["entity_type"], int(r["id_entity"])) for r in w.pa.db.query("media_to_entity_table",
+                                                                              id_media=ids["dxf"])}
+    assert ("US", us11) in linked
+    w.pyarchinit_publish_points()
+    w.runner.wait()
+    assert entry["media"] == ids
+
+
+def test_a_survey_crs_change_keeps_the_elevations_system():
+    """The elevations stay in the system they were made in when the survey's changes: earlier ones get it written."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.gnss.heights import _drawn
+
+    chunk = SimpleNamespace(meta={"elevations": [{"id": "a"}, {"id": "b", "crs": "EPSG:32633"}]}, crs="EPSG:6875",
+                            products={})
+    values, _ = _drawn(chunk, None, None, "EPSG:3004")
+    assert [e["crs"] for e in values["elevations"]] == ["EPSG:3004", "EPSG:32633"]

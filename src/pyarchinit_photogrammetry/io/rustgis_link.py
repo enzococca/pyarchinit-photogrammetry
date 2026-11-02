@@ -1851,6 +1851,11 @@ class RustGisLink:
         self.crs = crs
         self.copies = Path(data_dir) / SCRATCH_DIR if data_dir is not None else self.scratch / "rasters"
         self.layers: dict[str, str] = {}  # table of the live GeoPackage -> the id of RustGIS's layer that holds it
+        # the drawings of the elevations (``prospetto_<id>_<name>``, 3D, one-way): table -> RustGIS's layer, loaded at
+        # the start and loaded again whenever the program wrote them again (:meth:`refresh_elevations`)
+        self.elevation_layers: dict[str, int] = {}
+        self._elevation_print: str | None = None
+        self._elevation_group = None
         # per table, (ppg_id, ppg_parte) -> (geometry, values) of the row as RustGIS last had it, after normalize():
         # compared only within TOLERANCE_M (matches_baseline)
         self.baseline: dict[str, dict[tuple, tuple]] = {}
@@ -2239,6 +2244,7 @@ class RustGisLink:
             group = self._command("group.add", {"name": self.chunk_label, "layers": members})
             self._group = group.get("group") if isinstance(group, dict) else None
             self._show(given)
+            self.refresh_elevations()  # the drawings of the elevations, in 3D on the survey
             self._clean_copies()
             self._remove_stale_tiles()
             self._status = _status_key(self._command("edit.status", {}))
@@ -2284,6 +2290,10 @@ class RustGisLink:
             raise RuntimeError("the link has not started: start() it first")
         self._still_linked()
         stamp = self._fingerprint()  # the file as it is before it is read: written later, it is sent later
+        try:
+            self.refresh_elevations()
+        except RustGisError as exc:  # the plan's drawings go all the same; the elevations at the next send
+            log.warning("RustGIS link: the drawings of the elevations were not given again: %s", exc)
         try:
             fields, skipped = self._linked()
             for _ in range(RETRIES):
@@ -2511,6 +2521,7 @@ class RustGisLink:
             if server is not None:
                 server.close()
             self.layers, self.baseline, self.drawn, self.rasters, self.extras = {}, {}, {}, [], {}
+            self.elevation_layers, self._elevation_print, self._elevation_group = {}, None, None
             self._group = self._status = self._pushed_at = self._seen = None
             self._owed, self._unsure, self._discard, self._digests = False, {}, {}, {}
             self.aside, self._partners, self._held, self.in_flight, self._waits = {}, {}, {}, {}, set()
@@ -2529,6 +2540,8 @@ class RustGisLink:
             return
         ids = [int(lid) for table, lid in self.layers.items() if self._ours(layers.get(lid), table)]
         ids += [int(r.layer) for r in self.rasters if r.layer and self._raster_ours(layers.get(r.layer), r)]
+        ids += [int(lid) for lid in self.elevation_layers.values()
+                if _same_file((layers.get(str(lid)) or {}).get("source"), self.live.path)]
         lines = [_line("layer.remove", {"layer": ids})] if ids else []
         group = next((g for g in groups if self._group is not None and g.get("id") == self._group), None)
         if group is not None and not set(group.get("layers") or []) - set(ids):
@@ -3145,6 +3158,58 @@ class RustGisLink:
                 self._command("layer.group", {"layer": lid, "group": self._group})
             except RustGisRefused as exc:
                 log.warning("RustGIS link, %s: the layer added again stays out of the chunk's group: %s", table, exc)
+
+    def _elevation_print_now(self) -> tuple[str, list[tuple[str, str]]]:
+        """A fingerprint of the elevations' tables of the live GeoPackage, and those tables with their titles."""
+        from .qgis_link import ELEVATION_PREFIX, ELEVATION_TABLES
+
+        if not gpkg.is_geopackage(self.live.path):
+            return "", []
+        con = _read_only(self.live.path)  # its own connection: the link runs in the window's worker thread too
+        try:
+            tables = [(r[0], r[1]) for r in con.execute(
+                "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
+                "table_name", (ELEVATION_PREFIX + "*",))]
+            if not tables:
+                return "", []
+            h = hashlib.sha1()
+            for table, _gtype in tables:
+                h.update(table.encode() + _digest(con, table).encode())
+        finally:
+            con.close()
+        titled = []
+        for table, _gtype in tables:
+            eid, _, kind = table[len(ELEVATION_PREFIX):].partition("_")
+            titled.append((table, f"{ELEVATION_TABLES.get(kind, (kind,))[0]} - prospetto {eid} (3D)"))
+        return h.hexdigest(), titled
+
+    def refresh_elevations(self) -> bool:
+        """The drawings of the elevations and sections (the tables ``prospetto_<id>_<name>`` of the live GeoPackage, 3D
+        on the survey) as layers of RustGIS, in a group "<chunk> - prospetti": loaded again, whole, when the program
+        wrote them again since (one-way: what is edited there does not come back). Returns whether RustGIS was asked."""
+        printed, tables = self._elevation_print_now()
+        if printed == (self._elevation_print or "") and (bool(tables) == bool(self.elevation_layers)):
+            return False
+        old = list(self.elevation_layers.values())
+        if old:
+            self._command("layer.remove", {"layer": [_ref(i) for i in old]})
+            self.elevation_layers = {}
+        if self._elevation_group is not None:  # the group of the layers just removed, empty now
+            try:
+                self._command("group.remove", {"group": self._elevation_group})
+            except RustGisRefused:  # removed there already
+                pass
+            self._elevation_group = None
+        added = {}
+        for table, title in tables:
+            added[table] = _added_layer(self._command("layer.addData", self._loading(table, title)))
+        self.elevation_layers = added
+        if added:
+            group = self._command("group.add", {"name": f"{self.chunk_label} - prospetti",
+                                                "layers": [_ref(i) for i in added.values()]})
+            self._elevation_group = group.get("group") if isinstance(group, dict) else None
+        self._elevation_print = printed
+        return True
 
     def _loading(self, table: str, title: str) -> dict:
         """``layer.addData``'s parameters for ``table`` of the live GeoPackage: loaded whole (``"stream": false``) -

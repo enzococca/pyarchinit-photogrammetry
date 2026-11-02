@@ -198,6 +198,15 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `rasters(chunk=None)` | dalla 1.4.0: tutti i raster di `chunk` (quello attivo) che il calcolatore legge, con il loro nome nelle formule: dizionari `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; una formula su di essi: `engine.rastercalc.calculate(chunk, formula, name)` |
 | `add_units(polygons, tipo="US", attributes=None, chunk=None)` | dalla 1.5.0: unità stratigrafiche fatte dal plugin, come se fossero disegnate nella finestra - nel collegamento dal vivo con QGIS, numerate da *Proponi US e rapporti*, nelle schede US di PyArchInit. `polygons`: (Multi)Polygon di shapely o liste di vertici `(N, 2)` nelle coordinate del chunk (un contorno non valido viene reso valido, uno senza area lasciato fuori); `attributes`: un dizionario per tutte o uno per poligono - `us`, `area`, `tipo`, `sito` e le colonne di `pyunitastratigrafiche`, ogni altra chiave un attributo dell'unità; il sito è quello del progetto quando non è dato. Sul chunk attivo vengono disegnate e sono una voce di *Modifica > Annulla*; su un altro chunk, e dalla riga di comando, vanno in `chunk.meta["drawings"]`. Solo nel thread dell'interfaccia; restituisce quante ne ha aggiunte |
 
+
+**Su un prospetto o una sezione.** Mentre la vista 2D mostra un prospetto o una sezione, ciò che la finestra presta
+lavora nel suo sistema: `request_polygon`, `request_line` e `request_point` danno `(u, v)` - metri del prospetto, u
+lungo il prospetto e v verso l'alto (la quota quando v è verticale) - e non le coordinate del chunk; `add_units`
+aggiunge ai disegni di quel prospetto, e `window.selected_polygon()` è la selezione lì. I disegni della pianta restano
+in `window.units`, `window.quote` e `window.probe_points` qualunque cosa sia mostrata; quelli del prospetto mostrato
+sono in `window.frame_units`, `window.frame_quote` e `window.frame_points` (`window.drawings_frame` è il suo id, None
+sulla pianta). `engine.elevation.world_of(entry, u, v, None, chunk=chunk)` dà il punto nel mondo di una posizione lì.
+
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
 nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia quello che `activate`

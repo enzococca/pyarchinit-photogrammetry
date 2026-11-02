@@ -343,20 +343,33 @@ come back with it, also when the project is opened again. *Modifica > Annulla* t
 where it was made.
 
 * A **spot height** clicked on an elevation takes the height of the surface there (the world Z of the point of the
-  model, read through the relief), and its position in plan; on the elevation it shows that height.
+  model, read through the relief), and its position in plan; on the elevation it shows that height. A **measuring
+  point** reads the products of the chunk at that same point of the surface, and a **marker** is placed there.
+* The tools that work on the plan - section trace, crop, patch, area measure, DEM editing, photos of an area, the
+  region, the colour chart - are refused while an elevation is shown, with a message in the status bar: open the
+  orthophoto or the DEM.
 * The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*). Stones drawn
   on elevations by versions before 1.7.0 were shared by all of them: they are left out when the project opens.
 * **Export** (right click on the elevation) writes, beside orthophoto, relief, plane and profile, its drawings:
   `<name>_disegni.dxf` in the metres of the elevation (layers US, USM, QUOTE, PIETRE, PUNTI and PROFILO for a
-  section), `<name>_disegni.svg` at scale over the orthophoto, and `<name>_disegni.gpkg` with the table `frame`
-  (the plane) and the drawings in (u, v), each with a column `geom_world`: the same drawing in the reference system
-  of the chunk (on the plane), so QGIS can place it.
+  section), `<name>_disegni.svg` at scale over the orthophoto, `<name>_disegni.png`, and two GeoPackages:
+  `<name>_disegni.gpkg`, the elevation **unfolded** - the drawings in (u, v), no reference system, with the table
+  `frame` (the plane) and a column `geom_world` -, which QGIS and RustGIS load over `<name>_ortofoto.tif` like a plan
+  of the façade; and `<name>_disegni_mondo.gpkg`, the drawings **in 3D on the survey** (PolygonZ, PointZ,
+  LineStringZ in the reference system of the chunk), which QGIS 3D and RustGIS place where they are.
+* **QGIS > Apri il prospetto in QGIS** (with an elevation shown) opens a QGIS project of the elevation unfolded:
+  its orthophoto and its drawings, in its metres.
 * **Salva in PyArchInit** with an elevation shown writes the US forms of its units (created or updated, the fields
   only: a drawing on an elevation has no geometry in plan, and the message says so), the spot heights in
   `pyarchinit_quote` at their position in plan, and registers its drawings (DXF and SVG) as media of the site,
-  "Prospetto" or "Sezione" in `documentazione_table`, linked to those US - once: a second save registers nothing new.
-* The **live link** with QGIS or RustGIS and the **QField** package carry the drawings of the plan only; those of an
-  elevation go through its GeoPackage.
+  "Prospetto" or "Sezione" in `documentazione_table`, linked to those US: always the same media, their files and
+  thumbnails written again at every save and the US added since linked to them.
+* The **live link** with QGIS or RustGIS carries, beside the drawings of the plan, those of every elevation with
+  drawings in 3D on the survey (tables `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; in RustGIS
+  in the group "<chunk> - prospetti"), one-way: what is edited there in those layers does not come back. The **QField**
+  package carries the plan only.
+* The drawings of the plan stay loaded whatever is shown: the features that work on the plan (proxies, volumes,
+  classes, IFC, US proposal, PyArchInit, timeline, report) always use the plan's drawings.
 
 ## Editing the DEM
 

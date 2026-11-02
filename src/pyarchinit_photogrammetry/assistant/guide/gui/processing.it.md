@@ -352,22 +352,34 @@ restano con lui e tornano con lui, anche quando il progetto viene riaperto. *Mod
 una modifica sul prospetto in cui è stata fatta.
 
 * Una **quota** cliccata su un prospetto prende la quota della superficie in quel punto (la Z del punto del
-  modello, letta attraverso il rilievo) e la sua posizione in pianta; sul prospetto mostra quella quota.
+  modello, letta attraverso il rilievo) e la sua posizione in pianta; sul prospetto mostra quella quota. Un **punto
+  di misura** legge i prodotti del chunk in quello stesso punto della superficie, e un **marker** vi viene messo.
+* Gli strumenti che lavorano sulla pianta - traccia di sezione, ritaglio, patch, misura area, modifica del DEM, foto
+  di un'area, regione, tavola dei colori - sono rifiutati mentre è mostrato un prospetto, con un messaggio nella
+  barra di stato: apri l'ortofoto o il DEM.
 * Le **pietre** trovate con SAM su un prospetto sono sue (ogni prospetto ha il suo layer *Pietre*). Le pietre
   disegnate sui prospetti dalle versioni precedenti alla 1.7.0 erano condivise da tutti: all'apertura del progetto
   vengono lasciate fuori.
 * **Esporta** (clic destro sul prospetto) scrive, oltre a ortofoto, rilievo, piano e profilo, i suoi disegni:
   `<nome>_disegni.dxf` nei metri del prospetto (layer US, USM, QUOTE, PIETRE, PUNTI e PROFILO per una sezione),
-  `<nome>_disegni.svg` in scala sopra l'ortofoto, e `<nome>_disegni.gpkg` con la tabella `frame` (il piano) e i
-  disegni in (u, v), ognuno con una colonna `geom_world`: lo stesso disegno nel sistema di riferimento del chunk
-  (sul piano), così QGIS può collocarlo.
+  `<nome>_disegni.svg` in scala sopra l'ortofoto, `<nome>_disegni.png`, e due GeoPackage: `<nome>_disegni.gpkg`, il
+  prospetto **sviluppato** - i disegni in (u, v), senza sistema di riferimento, con la tabella `frame` (il piano) e
+  una colonna `geom_world` -, che QGIS e RustGIS caricano sopra `<nome>_ortofoto.tif` come una pianta della
+  facciata; e `<nome>_disegni_mondo.gpkg`, i disegni **in 3D sul rilievo** (PolygonZ, PointZ, LineStringZ nel
+  sistema di riferimento del chunk), che QGIS 3D e RustGIS collocano dove sono.
+* **QGIS > Apri il prospetto in QGIS** (con un prospetto mostrato) apre un progetto QGIS del prospetto sviluppato:
+  la sua ortofoto e i suoi disegni, nei suoi metri.
 * **Salva in PyArchInit** con un prospetto mostrato scrive le schede US delle sue unità (create o aggiornate, solo
   i campi: un disegno su un prospetto non ha geometria in pianta, e il messaggio lo dice), le quote in
   `pyarchinit_quote` nella loro posizione in pianta, e registra i suoi disegni (DXF e SVG) come media del sito,
-  "Prospetto" o "Sezione" in `documentazione_table`, collegati a quelle US - una volta sola: un secondo
-  salvataggio non registra nulla di nuovo.
-* Il **collegamento dal vivo** con QGIS o RustGIS e il pacchetto **QField** portano solo i disegni della pianta;
-  quelli di un prospetto passano dal suo GeoPackage.
+  "Prospetto" o "Sezione" in `documentazione_table`, collegati a quelle US: sempre gli stessi media, i loro file e
+  le miniature riscritti a ogni salvataggio e le US aggiunte nel frattempo collegate.
+* Il **collegamento dal vivo** con QGIS o RustGIS porta, oltre ai disegni della pianta, quelli di ogni prospetto con
+  disegni, in 3D sul rilievo (tabelle `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; in RustGIS
+  nel gruppo "<chunk> - prospetti"), in un solo senso: ciò che si modifica lì in quei layer non torna. Il pacchetto
+  **QField** porta solo la pianta.
+* I disegni della pianta restano caricati qualunque cosa sia mostrata: le funzioni che lavorano sulla pianta
+  (proxy, volumi, classi, IFC, proposta di US, PyArchInit, fasi, rapporto) usano sempre i disegni della pianta.
 
 ## Modificare il DEM
 
