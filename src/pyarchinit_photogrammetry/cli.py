@@ -33,6 +33,9 @@ app.add_typer(photos_app, name="photos")
 assistant_app = typer.Typer(help="The assistant from the command line: a question about a project, the models of a "
                                  "server or service, the evaluation of a model on the evaluation set")
 app.add_typer(assistant_app, name="assistant")
+tin_app = typer.Typer(help="TIN (triangulated irregular network) of a chunk: from the DEM, the ground of the dense "
+                           "cloud or the spot heights, with break lines; DEM, contours, volumes and exports from it")
+app.add_typer(tin_app, name="tin")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -3416,6 +3419,139 @@ def gnss_positions(project: Path, file: Path,
     doc.save()
     typer.echo(f"{result['matched']} of {result['rows']} rows found their photo")
     _unmatched(result["unmatched"], "not in the chunk")
+
+
+# ------------------------------------------------------------------------------------------------ TIN
+def _breaklines_file(path: Optional[Path]) -> list[dict]:
+    """Break lines from a GeoJSON file: LineStrings (with z or not), property ``kind`` breakline (default),
+    soft or boundary (a Polygon is a boundary)."""
+    if path is None:
+        return []
+    from shapely.geometry import shape
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"{path}: not a GeoJSON file ({exc})") from None
+    feats = data["features"] if data.get("type") == "FeatureCollection" else [data]
+    out = []
+    for k, f in enumerate(feats):
+        geom = shape(f.get("geometry", f))
+        props = f.get("properties") or {}
+        kind = props.get("kind") or ("boundary" if geom.geom_type == "Polygon" else "breakline")
+        parts = getattr(geom, "geoms", [geom])
+        for j, g in enumerate(parts):
+            coords = list(g.exterior.coords) if g.geom_type == "Polygon" else list(g.coords)
+            out.append({"id": props.get("id", f"{k}.{j}"), "kind": kind, "coords": coords})
+    return out
+
+
+@tin_app.command("build")
+def tin_build(project: Path,
+              source: str = typer.Option("dem", help="dem (refinement of the DEM), cloud (ground of the dense "
+                                                     "cloud) or spots (spot heights and break lines only)"),
+              max_error: Optional[float] = typer.Option(None, help="dem: largest difference from the DEM (metres; "
+                                                                   "default twice the DEM's noise, or 2 cm)"),
+              breaklines: Optional[Path] = typer.Option(None, help="GeoJSON of the break lines: LineStrings with "
+                                                                   "property kind = breakline, soft or boundary"),
+              boundary: Optional[list[str]] = typer.Option(None, help="the TIN stops at this polygon: WKT, GeoJSON "
+                                                                      "or a GeoJSON file"),
+              spots: bool = typer.Option(True, "--spots/--no-spots", help="the spot heights of the plan drawings "
+                                                                          "as vertices"),
+              classes: Optional[str] = typer.Option(None, help="cloud: the classes of the ground (e.g. 2,8); "
+                                                               "default class 2 when the cloud has it"),
+              chunk: Optional[str] = None):
+    """Build the TIN of --chunk (default the active one) and keep it in the project."""
+    from .engine import tin as tin_mod
+
+    doc, ch = _open(project, chunk)
+    cls = [int(c) for c in classes.split(",") if c.strip()] if classes else None
+    try:
+        tin = tin_mod.build_tin(ch, source=source, max_error=max_error, breaklines=_breaklines_file(breaklines),
+                                boundary=_polygons(boundary), spots=spots, classes=cls, progress=print_progress)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    doc.save()
+    typer.echo(tin_mod.report(tin))
+
+
+@tin_app.command("dem")
+def tin_dem(project: Path,
+            resolution: Optional[float] = typer.Option(None, help="cell size (metres; default: the grid of the DEM)"),
+            name: Optional[str] = typer.Option(None, help="name of the DEM version (default: DEM dal TIN)"),
+            chunk: Optional[str] = None):
+    """The TIN rasterised as the active DEM; the DEM as it was stays among the versions."""
+    from .engine import tin as tin_mod
+
+    doc, ch = _open(project, chunk)
+    try:
+        path = tin_mod.tin_to_dem(ch, resolution=resolution, name=name, progress=print_progress)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    doc.save()
+    typer.echo(f"{ch.label}: DEM from the TIN -> {path} ({ch.meta['dem']['resolution']:.4g} m)")
+
+
+@tin_app.command("contours")
+def tin_contours(project: Path, out: Path = typer.Argument(..., help=".dxf, .gpkg or .geojson"),
+                 interval: Optional[float] = typer.Option(None, help="metres (default: about 50 levels)"),
+                 base: float = typer.Option(0.0, help="height of a level"),
+                 index_every: int = typer.Option(5, help="an index contour every N levels"),
+                 chunk: Optional[str] = None):
+    """Contour lines of the TIN (exact on the triangles) written to a file."""
+    from .archaeo.terrain import export_contours
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    try:
+        lines = tin_mod.tin_contours(ch, interval=interval, base=base, index_every=index_every)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    export_contours(lines, out, ch.crs)
+    typer.echo(f"{len(lines)} contour lines -> {out}")
+
+
+@tin_app.command("volume")
+def tin_volume(project: Path,
+               reference: Optional[float] = typer.Option(None, help="height of the surface before the work "
+                                                                    "(default: the lowest vertex as floor)"),
+               plane: Optional[str] = typer.Option(None, help="a,b,c: the plane z = a x + b y + c as reference"),
+               chunk: Optional[str] = None):
+    """Exact cut and fill of the TIN against a height or a plane."""
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    ref = reference
+    if plane:
+        try:
+            ref = tuple(float(v) for v in plane.split(","))
+        except ValueError:
+            raise typer.BadParameter("--plane: three numbers a,b,c") from None
+        if len(ref) != 3:
+            raise typer.BadParameter("--plane: three numbers a,b,c")
+    try:
+        v = tin_mod.tin_volume(ch, ref)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"area {v['area_m2']:.3f} m2, cut {v['cut_m3']:.4f} m3, fill {v['fill_m3']:.4f} m3, "
+               f"net {v['net_m3']:.4f} m3 (heights {v['quota_min']:.3f} to {v['quota_max']:.3f})")
+
+
+@tin_app.command("export")
+def tin_export(project: Path, out: Path = typer.Argument(..., help=".dxf, .ply, .obj, .gpkg or .xml (LandXML 1.2)"),
+               chunk: Optional[str] = None):
+    """Write the TIN: DXF (3DFACE and break lines), PLY/OBJ mesh, GeoPackage or LandXML."""
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    tin = tin_mod.chunk_tin(ch)
+    if tin is None:
+        raise typer.BadParameter("build the TIN first: ppg tin build")
+    try:
+        path = tin_mod.export(tin, out, ch.crs)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"TIN ({tin.n_vertices} vertices, {tin.n_triangles} triangles) -> {path}")
 
 
 def main():  # pragma: no cover - console entry point
