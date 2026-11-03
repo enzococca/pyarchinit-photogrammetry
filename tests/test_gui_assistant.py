@@ -660,7 +660,7 @@ def test_no_declines_and_stop_stops(window, fake_actions):
 
 
 def test_modify_changes_the_parameters_before_running(window, fake_actions, monkeypatch):
-    from pyarchinit_photogrammetry.gui import assistant_pane
+    from pyarchinit_photogrammetry.gui import assistant_actions
 
     w, app = window
     pane = w.assistant
@@ -671,7 +671,7 @@ def test_modify_changes_the_parameters_before_running(window, fake_actions, monk
         asked.append({f.name: f.default for f in fields})
         return {**asked[-1], "min_size": "0.2", "thoroughness": "massima"}
 
-    monkeypatch.setattr(assistant_pane.ParamDialog, "ask", staticmethod(edit))
+    monkeypatch.setattr(assistant_actions.ParamDialog, "ask", staticmethod(edit))
     pane.set_provider(FakeProvider([_calls("act_stones", {"min_size": 0.1}), text("Fatto.")]))
     pane.ask("disegna le pietre")
     _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
@@ -693,7 +693,9 @@ def test_quick_runs_showing_at_once_and_all_runs_everything(window, fake_actions
     pane.set_provider(fake)
     pane.ask("mostra il DEM")
     _wait(app, pane)
-    assert fake_actions == [("show", {"what": "dem"}, False)] and not pane.cards  # no card for a quick one
+    # no card for a quick one; it only changes the view: run at once in the interface, no step of the history
+    assert fake_actions == [("show", {"what": "dem"}, True)] and not pane.cards
+    assert not w.history.can_undo() and "Mostra" in pane.chat.toPlainText()
     assert _tool_result(fake) == {"ran": True, "shown": "dem"}
     pane.ask("disegna le pietre")
     _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")  # not quick: it waits
@@ -744,3 +746,102 @@ def test_a_failing_action_says_its_error_and_the_window_stays_usable(window, mon
     release.set()
     w.runner.wait()
     w.setWindowModified(False)
+
+
+def test_a_waiting_card_never_runs_on_another_project_or_chunk(window, fake_actions, processed, tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app = window
+    pane = w.assistant
+    _mode(pane, "ask")
+    fake = FakeProvider([_calls("act_stones", {}), text("Fatto!")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    card = pane.cards[-1]
+    assert "Saggio 1" in card.text()  # the chunk it will act on
+    ran = []
+    original = w.run_action
+    w.run_action = lambda *a, **k: ran.append(a) or original(*a, **k)
+    other = ppg.Document()
+    other.add_chunk("Altro")
+    other.save(tmp_path / "altro" / "altro.ppg")
+    w.set_document(other)  # another project opened: the card of the old one stops at once
+    _wait(app, pane)
+    assert card.state == "stopped" and "progetto cambiato" in card.text()
+    card.b_run.click()
+    app.processEvents()
+    assert not ran and not fake_actions and len(fake.calls) == 1
+    assert "progetto cambiato" in pane.chat.toPlainText()
+    w.setWindowModified(False)
+
+
+def test_a_card_does_not_run_when_the_active_chunk_changed(window, fake_actions):
+    w, app = window
+    pane = w.assistant
+    _mode(pane, "ask")
+    fake = FakeProvider([_calls("act_stones", {}), text("Fatto!")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    w.doc.chunk = w.doc.add_chunk("Saggio 2")  # another chunk active since the question
+    pane.cards[-1].b_run.click()
+    _wait(app, pane)
+    assert not fake_actions and pane.cards[-1].state == "stopped"
+    assert "chunk attivo cambiato" in pane.chat.toPlainText()
+    w.setWindowModified(False)
+
+
+def test_stop_while_an_action_runs(window, monkeypatch):
+    from pyarchinit_photogrammetry.assistant import actions
+
+    w, app = window
+    pane = w.assistant
+    started = threading.Event()
+
+    def slow(chunk, window, progress=None, **kw):
+        started.set()
+        while True:  # a step that honours the progress's cancel
+            if progress.cancel_requested:
+                from pyarchinit_photogrammetry.core.progress import Cancelled
+
+                raise Cancelled("stop")
+            time.sleep(0.02)
+
+    monkeypatch.setitem(actions.ACTIONS, "stones", (slow, *actions.ACTIONS["stones"][1:]))
+    _mode(pane, "all")
+    fake = FakeProvider([_calls("act_stones", {}), text("Fatto!")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: started.is_set())
+    card = pane.cards[-1]
+    assert card.state == "running"
+    pane.b_stop.click()
+    _wait(app, pane)
+    w.runner.wait()
+    app.processEvents()
+    assert card.state == "stopped" and not w.runner.busy and len(fake.calls) == 1
+    assert "fermata" in pane.chat.toPlainText()
+
+
+def test_a_card_that_stopped_says_when_the_action_finished_anyway(window):
+    from pyarchinit_photogrammetry.gui.assistant_actions import ActionCard
+
+    w, app = window
+    card = ActionCard("stones", {}, None, chunk_label="Saggio 1")
+    card.set_state("stopped")
+    card.finish({"ran": True, "stones": 3})
+    assert card.state == "stopped" and "completata comunque" in card.result_label.text()
+
+
+def test_modify_reads_the_fields_by_the_type_of_the_parameter():
+    from pyarchinit_photogrammetry.gui.assistant_actions import parse_value
+
+    assert parse_value("2024", {"type": "string"}) == "2024"  # a name stays a name
+    assert parse_value("0.2", {"type": "number"}) == 0.2 and parse_value("0,2", {"type": "number"}) == 0.2
+    assert parse_value("[1, 2, 3, 4]", {"type": ["array", "string"]}) == [1, 2, 3, 4]
+    assert parse_value("selection", {"type": ["array", "string"]}) == "selection"
+    assert parse_value("12", {"type": ["array", "string", "integer"]}) == 12
+    assert parse_value("true", {"type": "boolean"}) is True
+    assert parse_value("  ", {"type": "number"}) is None
+    assert parse_value('{"resolution": 0.02}', {"type": "object"}) == {"resolution": 0.02}

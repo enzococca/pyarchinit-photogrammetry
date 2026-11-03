@@ -47,14 +47,17 @@ Le stesse funzioni sono `ppg.actions` in uno script (vedi [Script](../scripting.
 * **Chiedi sempre**: ogni azione compare come una scheda nella conversazione e aspetta;
 * **Subito le rapide** (predefinito): mostrare, e filtrare o selezionare foto, partono subito (una riga nella chat dice
   cosa è stato fatto); pietre, ricostruzioni, unità, esportazioni, foto attivate o disattivate e script aspettano te;
-* **Esegui tutto**: ogni azione parte subito e la sua scheda dice cosa ha fatto.
+* **Esegui tutto**: ogni azione parte subito; le rapide lasciano solo una riga nella chat, le altre una scheda con
+  il risultato e *Annulla*.
 
 Una scheda dice il nome dell'azione e i suoi parametri a parole, con **Esegui**, **Modifica** (i parametri in un
 piccolo modulo; la scheda aspetta di nuovo *Esegui*) e **No**. Il modello riceve cosa è successo - fatto con i suoi
 dati, *No*, fermata o l'errore - e deve dirlo: non dice mai di aver fatto una cosa che non è partita. **Ferma** mentre
-una scheda aspetta o un'azione gira la ferma.
+una scheda aspetta o un'azione gira la ferma. Una scheda dice su quale chunk agisce: se prima di *Esegui* apri un
+altro progetto o rendi attivo un altro chunk, l'azione si ferma ("fermata: progetto cambiato") e il modello lo sa.
 
-**Annulla**: un'azione gira come uno script, in background con la finestra utilizzabile, e tutto ciò che cambia nel
+**Annulla**: mostrare e filtrare o selezionare foto cambiano solo la vista: partono subito e non sono un passo di
+*Modifica > Annulla*. Ogni altra azione gira come uno script, in background con la finestra utilizzabile, e tutto ciò che cambia nel
 progetto è UNA voce di *Modifica > Annulla* con il suo nome ("Assistente: Pietre (SAM)"), anche quando si ferma a metà;
 il pulsante **Annulla** della sua scheda è la stessa cosa, finché l'azione è l'ultimo passo. Le esportazioni e le altre
 operazioni fuori dal progetto sono dette nella scheda e non si annullano. Gira un passo alla volta: un'azione chiesta

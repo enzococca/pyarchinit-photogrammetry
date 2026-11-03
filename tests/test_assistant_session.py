@@ -543,3 +543,9 @@ def test_a_stopped_action_ends_the_turn_saying_so(doc):
     assert turn.cancelled and turn.text.startswith("Cerco le pietre.")
     assert "act_stones" in turn.text and "stopped" in turn.text and "Fatto" not in turn.text
     assert "tool: act_stones (stopped)" in turn.read
+
+
+def test_the_reason_of_a_stop_is_said(doc):
+    assistant, fake = make(doc, [calls(("act_stones", {})), text("Fatto!")], kind="local")
+    turn = assistant.ask("Disegna le pietre", act=lambda name, args: {"stopped": True, "reason": "progetto cambiato"})
+    assert turn.cancelled and turn.text.endswith(": progetto cambiato]") and len(fake.calls) == 1

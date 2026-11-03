@@ -1574,6 +1574,9 @@ class MainWindow(QMainWindow):
             # has changes the user chose not to save: what came from RustGIS would go with them, so it stays there
             self._rustgis_leave(unsaved_stay=True)
             self._settle_removals(shown)
+            pane = getattr(self, "assistant", None)
+            if pane is not None:  # an action of the assistant waiting or running for the project left: stopped
+                pane.project_changed()
         self._shown_doc = doc
         application.document = doc
         if doc.path is not None:  # what a session that crashed left aside, settled now
@@ -14458,7 +14461,7 @@ class MainWindow(QMainWindow):
 
     def _build_assistant_actions_menu(self, menu) -> None:
         """*Vista > Assistente > Azioni*: when the assistant's actions run (the setting ``assistant_actions``)."""
-        from .assistant_pane import ACTION_MODE_NAMES, ACTION_MODE_TIPS, ACTION_MODES, action_mode
+        from .assistant_actions import ACTION_MODE_NAMES, ACTION_MODE_TIPS, ACTION_MODES, action_mode
 
         group = QActionGroup(self)
         self.assistant_action_modes = {}
@@ -14478,7 +14481,7 @@ class MainWindow(QMainWindow):
         """When the assistant's actions run: "ask" (every one waits for *Esegui*), "quick" (showing and choosing
         photos at once) or "all"."""
         from . import app_settings
-        from .assistant_pane import ACTION_MODES, ACTION_SETTING
+        from .assistant_actions import ACTION_MODES, ACTION_SETTING
 
         if mode not in ACTION_MODES:
             raise ValueError(f"mode: one of {', '.join(ACTION_MODES)}")
@@ -14529,7 +14532,8 @@ class MainWindow(QMainWindow):
         (as the model gave them, the real names restored) on the active chunk, run in the worker as a script runs
         (:meth:`run_script_source`): what it changes is ONE entry of Modifica > Annulla named after it, the products
         it builds again kept first as versions, the window shown again after a build, photos switched on or off or a
-        script (showing, stones, units and exports draw or write through the window themselves). ``done(result)``
+        script (stones, units and exports draw or write through the window themselves). Showing, and filtering or
+        selecting photos, only change the view: they run here at once, without a step of the history. ``done(result)``
         in the interface thread: ``{"ran": True, ...the facts of the action}`` (plus
         ``"not_undoable"``: the calls outside the project), ``{"stopped": True}`` when *Ferma* stopped it,
         ``{"error": text}`` when it failed or could not start - another step is running (then ``done`` is called
@@ -14538,7 +14542,7 @@ class MainWindow(QMainWindow):
 
         from ..assistant import actions
         from ..assistant.scripts import ExternalCalls, ScriptResult
-        from .assistant_pane import ACTION_TITLES
+        from .assistant_actions import ACTION_TITLES
 
         if name not in actions.ACTIONS:
             done({"error": f"unknown action {name}"})
@@ -14548,6 +14552,17 @@ class MainWindow(QMainWindow):
             return False
         title = tr(ACTION_TITLES.get(name, name))
         label = tr("Assistente: {0}", title)
+        if name == "show" or (name == "select_photos" and actions.is_quick(name, args)):
+            # only the view changes (what is shown, the Photos pane filter or selection): here, at once, no step of
+            # the history - nothing of the project to snapshot, walk or undo
+            try:
+                value = actions.call(name, self.chunk, self, args, None)
+            except Exception as exc:  # noqa: BLE001 - said to the model, the window stays as it is
+                log.info("%s: %s", label, exc)
+                done({"error": f"{type(exc).__name__}: {exc}"})
+                return True
+            done({"ran": True, **(value if isinstance(value, dict) else {"value": value})})
+            return True
 
         def work(namespace, progress):
             t0 = _time.monotonic()
@@ -14571,7 +14586,7 @@ class MainWindow(QMainWindow):
 
         # what shows, draws or writes elsewhere leaves the views as they are (the stones drawn on the elevation shown
         # stay there); a product built again, photos switched on or off, a script: the window shown again
-        refresh = "changed" if name in ("build", "select_photos", "run_script") else "never"
+        refresh = "changed" if name in ("build", "select_photos", "run_script") else "never"  # photos: on or off
         started = self._script_step(label, work, finished, refresh=refresh, tell_external=False)
         if not started:
             done({"error": tr("Un'elaborazione è in corso: l'azione non parte")})

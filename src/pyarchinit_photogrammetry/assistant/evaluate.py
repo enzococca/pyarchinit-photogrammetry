@@ -108,6 +108,13 @@ def _lang(language: str) -> str:
     return "it" if (language or "it").lower().startswith("it") else "en"
 
 
+def _asks(text: str, question: str | None) -> bool:
+    """Whether the user message ``text`` is ``question``: its whole first line (the guide passages follow after a
+    blank line), never only its beginning - "Disegna le pietre sull'ortofoto." is not the case that goes on with
+    ", solo quelle più grandi di 10 cm"."""
+    return bool(question) and (text or "").split("\n", 1)[0].strip() == question.strip()
+
+
 class CasesProvider:
     """A provider that answers from the cases themselves: a question with its ``example_<lang>``, a script task with
     its ``example`` in a ```python block (also when asked about an error); anything else with "?". Local: nothing
@@ -123,13 +130,13 @@ class CasesProvider:
 
     def _answer_for(self, text: str) -> str | None:
         for case in self.cases.get("actions") or []:
-            if any(text.startswith(case.get(f"question_{lang}", "\0")) for lang in ("it", "en")):
+            if any(_asks(text, case.get(f"question_{lang}")) for lang in ("it", "en")):
                 return case.get(f"example_{self.language}") or case.get("example_it", "")
         for case in self.cases["questions"]:
-            if any(text.startswith(case.get(f"question_{lang}", "\0")) for lang in ("it", "en")):
+            if any(_asks(text, case.get(f"question_{lang}")) for lang in ("it", "en")):
                 return case.get(f"example_{self.language}") or case.get("example_it", "")
         for case in self.cases["scripts"]:
-            if any(text.startswith(case.get(f"task_{lang}", "\0")) for lang in ("it", "en")):
+            if any(_asks(text, case.get(f"task_{lang}")) for lang in ("it", "en")):
                 return f"```python\n{case.get('example', '')}\n```"
         return None
 
@@ -160,7 +167,7 @@ class CasesProvider:
         offered = {t.name for t in tools or []}
         for case in self.cases.get("actions") or []:
             if case.get("tool") in offered and \
-                    any(text.startswith(case.get(f"question_{lang}", "\0")) for lang in ("it", "en")):
+                    any(_asks(text, case.get(f"question_{lang}")) for lang in ("it", "en")):
                 return ToolCall(f"reference_{case['id']}", case["tool"], dict(case.get("example_args") or {}))
         return None
 

@@ -47,13 +47,17 @@ The same functions are `ppg.actions` in a script (see [Scripts](../scripting.md)
 * **Always ask**: every action appears as a card in the conversation and waits;
 * **Quick ones at once** (the default): showing, and filtering or selecting photos, run at once (a line in the chat
   says what ran); stones, builds, units, exports, photos switched on or off and scripts wait for you;
-* **Run everything**: every action runs at once and its card says what it did.
+* **Run everything**: every action runs at once; the quick ones leave only a line in the chat, the others a card
+  with the result and *Undo*.
 
 A card names the action and its parameters in words, with **Run**, **Edit** (the parameters in a small form; the card
 waits again for *Run*) and **No**. The model gets what happened - done with its facts, *No*, stopped or the error - and
 must say so: it never says it did something that did not run. **Stop** while a card waits or an action runs stops it.
+A card names the chunk it acts on: when another project is opened, or another chunk made active, before *Run*, the
+action is stopped ("stopped: project changed") and the model is told.
 
-**Undo**: an action runs like a script, in the background with the window usable, and everything it changes in the
+**Undo**: showing and filtering or selecting photos only change the view: they run at once and are not a step of
+*Edit > Undo*. Every other action runs like a script, in the background with the window usable, and everything it changes in the
 project is ONE entry of *Edit > Undo* named after it ("Assistant: Stones (SAM)"), also when it fails halfway; the
 **Undo** button of its card is the same, while the action is the last step. Exports and the other calls outside the
 project are said in the card and cannot be undone. Only one step runs at a time: an action asked while another step

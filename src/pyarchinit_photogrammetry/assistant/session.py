@@ -531,6 +531,7 @@ class Assistant:
         earlier = ""  # the text of the rounds that ended in tool calls
         reply: Reply | None = None
         stopped: str | None = None  # the action the user stopped
+        why = None  # the reason the window gave (the project changed...)
         try:
             while True:
                 with_tools = rounds < self.max_tool_rounds and repeats < REPEAT_ROUNDS
@@ -562,8 +563,9 @@ class Assistant:
                         message, label, result = self._run_call(call, document, act)
                         done[key] = message
                         turn.read.append(label)
-                        if result.get("stopped") is True and action_name(call.name) is not None:
-                            stopped = stopped or call.name
+                        if result.get("stopped") is True and action_name(call.name) is not None and not stopped:
+                            stopped = call.name
+                            why = result.get("reason")
                     messages.append(message)
                     turn.sent.append(self._mark(message.content))
                 repeats = 0 if new_call else repeats + 1
@@ -584,6 +586,8 @@ class Assistant:
         answer = reply.text or earlier
         if stopped is not None:
             line = ACTION_STOPPED[lang].format(stopped)
+            if why:
+                line = f"{line[:-1]}: {why}]"
             answer = f"{earlier}\n\n{line}" if earlier else line
         if reply.stop == "refusal":
             turn.error = REFUSED[lang]
