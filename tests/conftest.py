@@ -200,10 +200,16 @@ def _none_refcount(request):
     to it it never took drains its count until the interpreter aborts with ``none_dealloc``
     (the CI did so on 3.11, in whatever test the count ran out). The drop of each test is kept and
     the tests that drain the most are printed at the end, so the extension can be found."""
+    import gc
     import sys
 
-    before = sys.getrefcount(None)
+    if sys.version_info >= (3, 12):  # None is immortal: nothing to measure
+        yield
+        return
+    gc.collect()  # the count of the live objects only: garbage of earlier tests freed by a collection
+    before = sys.getrefcount(None)  # during this test would read as a drop
     yield
+    gc.collect()
     drop = before - sys.getrefcount(None)
     if drop > 0:
         _NONE_DROPS.append((drop, request.node.nodeid))
