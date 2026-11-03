@@ -386,12 +386,30 @@ def test_command_line_on_an_elevation(wall, plain_photos, monkeypatch):
     out = go("patch", project, "--elevation", eid, "--bbox", box_, "--photos", label)
     assert "patch p1" in out
     assert not np.array_equal(_read(path0), before)
-    assert go("patch", project, "--elevation", "Parete sud", "--list").startswith(f"p1: only {label} on the dem")
+    assert go("patch", project, "--elevation", "Parete sud", "--list").startswith(f"p1: only {label} on the relief")
     assert go("patch", project, "--list") == ""
     out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--photos", label, "--ground", code=1)
     assert "--ground" in out
     out = go("patch", project, "--elevation", "Nessuna", "--list", code=1)
     assert "Parete sud" in out and "Pozzo" in out
+    out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--photos", label, "--exclude",
+             "--texture")
+    assert "patch p2" in out and "--texture is ignored" in out and "texture:" not in out
+    assert go("patch", project, "--elevation", "Parete sud", "--list").splitlines()[1].startswith(
+        f"p2: all but {label} on the relief")
+    go("patch", project, "--elevation", "Parete sud", "--remove", "p2")
+    assert go("patch", project, "--elevation", "Parete sud", "--list").count("\n") == 1
+    go("patch", project, "--elevation", "Parete sud", "--remove", "nothing", code=1)
     go("patch", project, "--elevation", "Parete sud", "--remove", "all")
     assert go("patch", project, "--elevation", "Parete sud", "--list") == ""
     assert np.array_equal(_read(path0), before)
+
+
+def test_command_line_elevation_without_elevations(processed, tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, _ch, _ = processed
+    r = CliRunner().invoke(app, ["patch", str(doc.path), "--elevation", "x", "--list"])
+    assert r.exit_code == 1 and "none" in r.output

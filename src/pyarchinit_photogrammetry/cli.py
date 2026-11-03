@@ -1619,7 +1619,7 @@ def patch(project: Path,
     if list_patches:
         for p in P.patches(ch, frame=frame):
             how = "only" if p["mode"] == "assign" else "all but"
-            typer.echo(f"{p['id']}: {how} {', '.join(p['photos'])} on the {p.get('surface', 'dem')}, "
+            typer.echo(f"{p['id']}: {how} {', '.join(p['photos'])} on the {'relief' if frame else p.get('surface', 'dem')}, "
                        f"{len(p['polygon'])} vertices")
         return
     if remove:
