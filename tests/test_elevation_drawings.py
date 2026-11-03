@@ -97,6 +97,35 @@ def _surface_cell(ch, entry):
     return t.c + (cols[k] + 0.5) * t.a, t.f + (rows[k] + 0.5) * t.e
 
 
+def _surface_cell_on_the_dem(ch, entry):
+    """``(u, v, world point)`` of a cell of the elevation with a relief whose world point has a cell with a value in
+    the plan DEM (and the 3 x 3 cells around it), the nearest such to the middle: a section cell at the edge of the
+    survey can fall outside the DEM or on its empty cells, and the fixture is built a little differently on every
+    platform."""
+    import rasterio
+
+    with rasterio.open(E.elevation_paths(ch, entry)[1]) as src:
+        d = src.read(1)
+        t = src.transform
+    rows, cols = np.nonzero(np.isfinite(d))
+    order = np.argsort(np.abs(np.arange(len(rows)) - len(rows) // 2))  # from the middle outwards
+    with rasterio.open(ch.dem_path) as dem:
+        z = dem.read(1, masked=True)
+        for k in order[:5000]:
+            u, v = t.c + (cols[k] + 0.5) * t.a, t.f + (rows[k] + 0.5) * t.e
+            p = E.world_of(entry, u, v, None, chunk=ch)
+            if p is None:
+                continue
+            r, c = dem.index(p[0], p[1])
+            if not (1 <= r < dem.height - 1 and 1 <= c < dem.width - 1):
+                continue
+            block = z[r - 1:r + 2, c - 1:c + 2]
+            if np.ma.count_masked(block) or not np.isfinite(block.filled(np.nan)).all():
+                continue
+            return u, v, p
+    raise AssertionError("no cell of the section has a cell of the plan DEM under it")
+
+
 def _unit(u, v, us="5"):
     from shapely.geometry import box
 
@@ -374,8 +403,7 @@ def test_measuring_point_and_marker_on_an_elevation_read_the_surface(with_elevat
     ch = w.chunk
     entry = _entry(ch, sid)
     w.show_elevation(entry)
-    u, v = _surface_cell(ch, entry)
-    p = E.world_of(entry, u, v, None, chunk=ch)
+    u, v, p = _surface_cell_on_the_dem(ch, entry)
     w._probe_clicked(u, v)
     (q,) = w.frame_points
     assert not w.probe_points
@@ -387,8 +415,8 @@ def test_measuring_point_and_marker_on_an_elevation_read_the_surface(with_elevat
 
     with rasterio.open(ch.dem_path) as src:
         row, col = src.index(p[0], p[1])
-        cells = src.read(1, window=((max(row - 1, 0), row + 2), (max(col - 1, 0), col + 2)), masked=True)
-        here = float(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
+        cells = src.read(1, window=((row - 1, row + 2), (col - 1, col + 2)))  # inside the DEM, with values
+        here = float(cells[1, 1])
     assert q.get("z") == pytest.approx(here, abs=1e-3)
     assert q["z"] == pytest.approx(p[2], abs=0.05 + float(cells.max() - cells.min()))
     assert np.allclose(w._raster_point(u, v), ch.to_internal(p[None])[0])  # the marker tool: the same point
