@@ -219,3 +219,85 @@ def test_build_elevation_keeps_the_tilt(tower):
     assert np.ptp(crest[:, 1]) < 0.1
     assert np.ptp(E.frame_from_dict(E.cylinder_from_circle(ch, rings[15][::10, :2], inside=False).to_dict())
                   .coords(rings[-1])[:, 1]) > 0.4
+
+
+# ---------------------------------------------------------------- the scale on the wall
+A_OVAL, B_OVAL = 3.0, 2.4  # semi-axes of the oval tower (x, y)
+PERIMETER = np.pi * (3 * (A_OVAL + B_OVAL) - np.sqrt((3 * A_OVAL + B_OVAL) * (A_OVAL + 3 * B_OVAL)))
+
+
+def _ellipse(t):
+    return np.column_stack([A_OVAL * np.cos(t), B_OVAL * np.sin(t)])
+
+
+def _along_the_wall(step: float):
+    """Plan points of the oval every ``step`` metres measured along the wall."""
+    t = np.linspace(0, 2 * np.pi, 200001)
+    xy = _ellipse(t)
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    return _ellipse(np.interp(np.arange(0, s[-1] - step / 2, step), s, t))
+
+
+@pytest.fixture
+def oval(tower_base, tmp_path):
+    """A chunk whose model is an upright oval tower (ellipse 3 x 2.4 m, 3 m tall) and the cylinder of the circle
+    fitted to plan points around it."""
+    import pyarchinit_photogrammetry as ppg
+
+    d = tmp_path / "ovale"
+    d.mkdir()
+    shutil.copy2(tower_base, d / tower_base.name)
+    files = tower_base.parent / (tower_base.name + ".files")
+    shutil.copytree(files, d / files.name)
+    (d / "photos").symlink_to(tower_base.parent / "photos")
+    doc = ppg.Document.open(d / tower_base.name)
+    ch = doc.chunk
+    t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+    xy = _ellipse(t) + BASE[:2]
+    rings = np.stack([np.column_stack([xy, np.full(len(t), BASE[2] + z)]) for z in np.linspace(0, HEIGHT, 31)])
+    _write_tower(ch, rings)
+    circle = E.cylinder_from_circle(ch, xy[::20], inside=False)
+    return ch, circle
+
+
+def test_wall_scale_measures_along_the_wall(oval):
+    ch, circle = oval
+    cyl = E.build_elevation(ch, circle, resolution=0.05, depth=(-0.8, 0.8), max_angle=89.0)
+    wall = E.build_elevation(ch, circle, resolution=0.05, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    assert "scale" not in cyl and wall["scale"] == "wall"
+    w_cyl = cyl["bounds"][2] - cyl["bounds"][0]
+    w_wall = wall["bounds"][2] - wall["bounds"][0]
+    assert abs(w_cyl - 2 * np.pi * circle.radius) / (2 * np.pi * circle.radius) < 0.01
+    assert abs(w_wall - PERIMETER) / PERIMETER < 0.01, (w_wall, PERIMETER)
+    assert abs(E.wall_length(wall) - PERIMETER) / PERIMETER < 0.01
+    assert abs(wall["size"][0] * wall["resolution"] - w_wall) < 3 * wall["resolution"]  # the grid follows the wall
+    fc, fw = E.frame_from_dict(cyl["frame"]), E.frame_from_dict(wall["frame"])
+    assert fc.u_map is None and fw.u_map is not None and fw.u_map[0, 0] == -180.0
+    # the seam stays behind start: both developments begin at the same azimuth
+    assert abs(np.degrees(fc._turn(cyl["bounds"][0])) - np.degrees(fw._turn(wall["bounds"][0]))) < 2.0
+    assert abs(float(fw._u(0.0))) < 1e-9  # u = 0 at start, as without a map
+    # "stones" every 20 cm along the wall, at mid height: 20 cm on the wall-scaled development everywhere,
+    # 17-24 cm on the cylinder one
+    pts = np.column_stack([_along_the_wall(0.2) + BASE[:2], np.full(len(_along_the_wall(0.2)), BASE[2] + 1.5)])
+    for frame, lo, hi in ((fw, 0.19, 0.21), (fc, 0.17, 0.24)):
+        du = np.diff(frame.coords(pts)[:, 0])
+        du = du[np.abs(du) < 1.0]  # not across the seam
+        assert du.min() > lo and du.max() < hi, (du.min(), du.max())
+    du = np.diff(fc.coords(pts)[:, 0])
+    assert np.ptp(du[np.abs(du) < 1.0]) > 0.03
+
+
+def test_u_map_covers_a_full_turn_and_takes_scalars():
+    with pytest.raises(ValueError, match="full turn"):
+        E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=[[0, 0], [180, 9.0]])
+    cyl = E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=_oval_map(3.0, False))
+    p = cyl.point(0.0, 0.0, 0.0)
+    assert p.shape == (3,) and np.allclose(p - BASE, [3.0, 0, 0], atol=1e-9)
+    q = cyl.point(5.0, 1.0, 0.2)
+    assert q.shape == (3,) and np.allclose(cyl.coords(q[None])[0], [5.0, 1.0, 0.2], atol=1e-9)
+
+
+def test_wall_scale_only_on_a_cylinder(tower):
+    ch, _circle, _ = tower
+    with pytest.raises(ValueError, match="cylindrical"):
+        E.build_elevation(ch, E.Plane(BASE, [1, 0, 0], [0, 0, 1]), scale="wall")

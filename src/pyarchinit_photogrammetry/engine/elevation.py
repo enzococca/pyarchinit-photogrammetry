@@ -73,13 +73,15 @@ class Plane:
 
 
 def _interp(x, xp, fp) -> np.ndarray:
-    """Piecewise linear ``fp(xp)`` at ``x``, prolonged past both ends by the end segments."""
+    """Piecewise linear ``fp(xp)`` at ``x``, prolonged past both ends by the end segments (``x`` any shape,
+    a scalar too)."""
     x = np.asarray(x, np.float64)
-    y = np.interp(x, xp, fp)
-    lo, hi = x < xp[0], x > xp[-1]
-    y[lo] = fp[0] + (x[lo] - xp[0]) * (fp[1] - fp[0]) / (xp[1] - xp[0])
-    y[hi] = fp[-1] + (x[hi] - xp[-1]) * (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
-    return y
+    flat = np.atleast_1d(x).ravel()
+    y = np.interp(flat, xp, fp)
+    lo, hi = flat < xp[0], flat > xp[-1]
+    y[lo] = fp[0] + (flat[lo] - xp[0]) * (fp[1] - fp[0]) / (xp[1] - xp[0])
+    y[hi] = fp[-1] + (flat[hi] - xp[-1]) * (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+    return y.reshape(x.shape)
 
 
 @dataclass
@@ -90,8 +92,9 @@ class Cylinder:
 
     ``tilt``: how the axis was chosen (:func:`cylinder_axis` ``info``), None for the vertical.
     ``u_map``: ``[theta_deg, u]`` pairs, both strictly increasing - theta the turn from ``start`` in the
-    direction ``u`` grows - so that ``u`` is the arc on the wall instead of ``theta * radius``;
-    ``point`` and ``coords`` interpolate it linearly both ways (prolonged past its ends)."""
+    direction ``u`` grows, covering a full turn - so that ``u`` is the arc on the wall instead of ``theta *
+    radius``; ``point`` and ``coords`` interpolate it linearly both ways. A map from -180 degrees keeps the seam
+    of the development behind ``start``, where it is without a map."""
 
     centre: np.ndarray
     axis: np.ndarray
@@ -117,6 +120,8 @@ class Cylinder:
             m = np.asarray(self.u_map, np.float64).reshape(-1, 2)
             if len(m) < 2 or not (np.all(np.diff(m[:, 0]) > 0) and np.all(np.diff(m[:, 1]) > 0)):
                 raise ValueError("the u map needs two pairs at least, theta and u both strictly increasing")
+            if m[-1, 0] - m[0, 0] < 360.0 - 1e-9:
+                raise ValueError("the u map must cover a full turn (360 degrees)")
             self.u_map = m
 
     def _turn(self, u) -> np.ndarray:
@@ -386,7 +391,8 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
     chunk's region. ``crest``: the upward normal of the plane of the crest - the highest vertex of the model in
     each sector of 5 degrees within the radial band ``depth`` (default (-3, 3) m) of the circle, a plane fitted
     twice (outliers over 3 MAD out of the second fit); refused when the crest is not a plane (90 % of the sectors
-    within ``tolerance`` metres of it: ``residual_m``). ``points``: the direction of two world points (bottom,
+    within ``tolerance`` metres of it: ``residual_m``) - a single fallen sector is dropped as an outlier and the
+    crest accepted, a side collapsed (a quarter of the crest) is refused. ``points``: the direction of two world points (bottom,
     top), at least 1 m apart. For ``region`` the centre goes to the model's mid height within the band, for
     ``crest`` to the crest's mean height, for ``points`` to the points' mid height."""
     if method == "vertical":
@@ -474,7 +480,10 @@ class FrameSurface:
 
     def tile(self, r0: int, c0: int, th: int, tw: int) -> np.ndarray:
         u, v = self.cell_uv(r0, c0, th, tw)
-        u, v = u.ravel(), v.ravel()
+        return self.depth_at(u.ravel(), v.ravel()).reshape(th, tw)
+
+    def depth_at(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Depth ``d`` of the surface at frame points ``(u, v)`` (NaN where no surface in the band)."""
         start = self.frame.point(u, v, np.full(len(u), self.dmax))
         direction = -self.frame.view(u, v)
         start_int = start @ self._inv[:3, :3].T + self._inv[:3, 3]
@@ -484,7 +493,53 @@ class FrameSurface:
             t = self.raycaster.hit_distance(start_int, dir_int) * self.chunk.scale  # world units
         d = self.dmax - t
         d[~np.isfinite(t) | (d < self.dmin)] = np.nan
-        return d.reshape(th, tw)
+        return d
+
+
+WALL_COLUMN_DEG = 1.0
+
+
+def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
+    """The ``u_map`` of a cylinder that makes ``u`` the length along the wall: the mean depth of the surface in
+    every column of ``WALL_COLUMN_DEG`` (``samples`` heights within the surface's bounds; columns with no surface
+    take the mean of the nearest columns with one), the wall's radius ``r`` = R + d (R - d from inside), the
+    length of each column sqrt(r^2 + (dr/dtheta)^2) dtheta (the wall's trace, also where it is not square to the
+    radius), cumulated from -180 degrees (the seam behind ``start``) with ``u`` = 0 at ``start``."""
+    frame = surface.frame
+    if frame.kind != "cylinder":
+        raise ValueError("the scale on the wall is for cylindrical developments")
+    n = int(round(360.0 / WALL_COLUMN_DEG))
+    edges = np.linspace(-180.0, 180.0, n + 1)
+    mids = np.radians((edges[:-1] + edges[1:]) / 2)
+    _u0, v0, _u1, v1 = surface.bounds
+    vs = np.linspace(v0, v1, max(2, min(samples, int(np.ceil((v1 - v0) / surface.resolution)) + 1)))
+    uu = np.repeat(frame._u(mids), len(vs))
+    vv = np.tile(vs, n)
+    d = surface.depth_at(uu, vv).reshape(n, len(vs))
+    with np.errstate(all="ignore"):
+        mean = np.nanmean(np.where(np.isfinite(d), d, np.nan), axis=1)
+    ok = np.isfinite(mean)
+    if not ok.any():
+        raise ValueError("no surface on the cylinder: the scale on the wall needs the wall")
+    if not ok.all():  # the columns with no wall: from the nearest ones with it, all round
+        idx = np.flatnonzero(ok)
+        mean = np.interp(np.arange(n), np.concatenate([idx - n, idx, idx + n]), np.tile(mean[idx], 3))
+    r = np.maximum(frame.radius - mean if frame.inside else frame.radius + mean, 1e-3 * frame.radius)
+    step = np.radians(WALL_COLUMN_DEG)
+    dr = (np.roll(r, -1) - np.roll(r, 1)) / (2 * step)
+    length = np.hypot(r, dr) * step
+    u = np.concatenate([[0.0], np.cumsum(length)])
+    u -= np.interp(0.0, edges, u)  # u = 0 at start
+    return [[float(a), float(b)] for a, b in zip(edges, u)]
+
+
+def wall_length(entry: dict) -> float:
+    """The length of the wall all round (metres) of an elevation scaled on the wall (``entry["scale"]`` "wall"),
+    else the reference cylinder's circumference."""
+    frame = frame_from_dict(entry["frame"])
+    if getattr(frame, "u_map", None) is None:
+        return float(2 * np.pi * frame.radius) if frame.kind == "cylinder" else float("nan")
+    return float(frame.u_map[-1, 1] - frame.u_map[0, 1])
 
 
 # ---------------------------------------------------------------- products
@@ -586,14 +641,22 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
-                    bounds=None, kind: str = "elevation") -> dict:
+                    bounds=None, kind: str = "elevation", scale: str = "cylinder") -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
 
     ``bounds``: ``(u0, v0, u1, v1)`` of the part to build (default: the model in the depth band).
     ``kind`` ``section``: nothing in front of the plane is kept (the depth band starts at 0) and the
-    line where the plane cuts the model is saved as the profile (``profile.json``, a plane only)."""
+    line where the plane cuts the model is saved as the profile (``profile.json``, a plane only).
+
+    ``scale`` (a cylinder): ``cylinder`` - ``u`` the arc on the reference cylinder, as the frame says; ``wall`` -
+    ``u`` the length along the wall (:func:`wall_map` from a first pass on the relief, kept in the frame's
+    ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall"."""
+    if scale not in ("cylinder", "wall"):
+        raise ValueError(f"unknown scale {scale!r}: cylinder or wall")
+    if scale == "wall" and frame.kind != "cylinder":
+        raise ValueError("the scale on the wall is for cylindrical developments")
     if kind == "section":
         if frame.kind != "plane":
             raise ValueError("a section is made on a plane")
@@ -617,6 +680,12 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
+    if scale == "wall":
+        progress(0.02, "Length of the wall")
+        plain = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
+        umap = wall_map(FrameSurface(chunk, raycaster, plain, resolution, lock, depth, None))
+        frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt,
+                         u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
     tile = 512 if frame.kind == "plane" else max(32, min(512, int(0.15 * frame.radius / resolution)))
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, 8, workers, None, [], tile, lock,
@@ -670,6 +739,8 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
              "ghosting": bool(ghosting), "fill_holes": bool(fill_holes)}
     if getattr(frame, "tilt", None):
         entry["tilt"] = dict(frame.tilt)
+    if scale == "wall":
+        entry["scale"] = "wall"
     if kind == "section":
         progress(0.985, "Profile of the section")
         lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)
