@@ -1436,15 +1436,19 @@ height); `region` (the local Z of `chunk.meta["region"]`, ValueError without a r
 normal of the plane of the crest: the highest model vertex every 5 degrees within the radial band `depth`,
 default (-3, 3) m, a plane fitted twice without the points over 3 MAD; ValueError when the 90th percentile
 of the residuals is over `tolerance`); `points` (two world points, bottom and top, at least 1 m apart). The
-azimuth is where the top of the axis leans (0 = north, clockwise); the centre goes to `centre_z` so that the
-axis passes through the tower. With a tilted axis v is the distance along it. The tilt is written in the
+azimuth is where the top of the axis leans (0 = north, clockwise). A tilted axis passes through the tower's
+centre: the wall (the vertices within `depth` of the plan circle) seen along the axis, a circle fitted there
+(`info["fitted_radius"]`), the axis' point at `centre_z` in `info["centre"]` - v = 0 there (the crest's mean
+height, the points' midpoint, the model's mid height); `points` also gives `info["points_offset_m"]`, how far
+the points' line runs from that centre. With a tilted axis v is the distance along it. The tilt is written in the
 frame (`"tilt"`) and in the entry (`entry["tilt"]`).
 
 **The scale on the wall.** `Cylinder(..., u_map=[[theta_deg, u], ...])`: theta from `start` in the direction
 u grows, a full turn, both columns increasing; `point` and `coords` interpolate it both ways. Without it
-u = theta x radius. `build_elevation(scale="wall")` measures the mean depth of the wall in columns of 1
+u = theta x radius. `build_elevation(scale="wall")` measures the median depth of the wall in columns of 1
 degree, builds the map with the length of the wall's trace (from -180 degrees, u = 0 at `start`: the seam
-stays where it is without a map) and builds the development on it; `entry["scale"] = "wall"`. Entries
+stays where it is without a map) and builds the development on it; `entry["scale"] = "wall"`. With
+`scale="cylinder"` a frame's map is left out (the development is on the cylinder, as asked). Entries
 without `tilt` and `u_map` are vertical and on the cylinder, as before 1.7.1.
 
 ### Drawings on elevations and sections

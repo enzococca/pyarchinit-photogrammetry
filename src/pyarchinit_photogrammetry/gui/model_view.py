@@ -1334,7 +1334,9 @@ class ModelView(QWidget):
                 "cut_p2": "il secondo dei tre punti del piano", "cut_p3": "il terzo dei tre punti del piano",
                 "elev_p": "il primo punto del prospetto (l'asse orizzontale va dal primo al secondo)",
                 "elev_p2": "il secondo punto del prospetto", "elev_p3": "il terzo punto del prospetto",
-                "axis_p": "il punto in basso dell'asse della torre", "axis_p2": "il punto in alto dell'asse della torre"}.get(
+                "axis_p": "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, "
+                          "un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)",
+                "axis_p2": "il punto in alto della stessa linea, sulla stessa verticale della struttura"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
                                     tr(what)))
@@ -1342,10 +1344,13 @@ class ModelView(QWidget):
 
     def _pick_finished(self, pos) -> None:
         self.stack.setCurrentWidget(self.canvas)
+        purpose = getattr(self, "_purpose", "marker")
         if pos is None or self._project is None:
+            if purpose.startswith("axis_p"):  # Esc: the cylinder waiting for its axis is given up
+                self._cut_points = []
+                self.elevation_requested.emit("axis_cancel", None)
             return
         point = self.pick_point(pos[0], pos[1], self._project, self._ray)
-        purpose = getattr(self, "_purpose", "marker")
         if purpose == "photos":
             self.photos_point_requested.emit(point)
         elif purpose == "section":
@@ -1372,6 +1377,8 @@ class ModelView(QWidget):
                 self.elevation_requested.emit("points", points)
         elif purpose.startswith("axis_p"):
             if point is None:
+                self._cut_points = []
+                self.elevation_requested.emit("axis_cancel", None)
                 return
             points = getattr(self, "_cut_points", []) + [point]
             self._cut_points = points

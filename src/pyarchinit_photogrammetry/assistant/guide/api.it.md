@@ -1481,15 +1481,19 @@ quota); `region` (l'asse Z locale di `chunk.meta["region"]`, ValueError senza re
 verso l'alto del piano della cresta: il vertice più alto del modello ogni 5 gradi dentro la fascia radiale
 `depth`, predefinita (-3, 3) m, un piano adattato due volte senza i punti oltre 3 MAD; ValueError quando il
 90° percentile degli scarti supera `tolerance`); `points` (due punti mondo, in basso e in alto, distanti
-almeno 1 m). L'azimut è la direzione verso cui pende la sommità dell'asse (0 = nord, in senso orario); il
-centro va a `centre_z` così che l'asse passi per la torre. Con un asse inclinato v è la distanza lungo
-l'asse. L'inclinazione è scritta nel sistema (`"tilt"`) e nella voce (`entry["tilt"]`).
+almeno 1 m). L'azimut è la direzione verso cui pende la sommità dell'asse (0 = nord, in senso orario).
+Un asse inclinato passa per il centro della torre: il muro (i vertici entro `depth` dal cerchio in pianta)
+guardato lungo l'asse, un cerchio adattato lì (`info["fitted_radius"]`), il punto dell'asse a `centre_z` in
+`info["centre"]` - lì v = 0 (la quota media della cresta, il punto medio dei due punti, la quota media del
+modello); `points` dà anche `info["points_offset_m"]`, quanto la linea dei punti dista da quel centro. Con un
+asse inclinato v è la distanza lungo l'asse. L'inclinazione è scritta nel sistema (`"tilt"`) e nella voce (`entry["tilt"]`).
 
 **La scala sulla parete.** `Cylinder(..., u_map=[[theta_gradi, u], ...])`: theta da `start` nel verso in
 cui cresce u, un giro intero, entrambe le colonne crescenti; `point` e `coords` la interpolano nei due sensi.
-Senza, u = theta x raggio. `build_elevation(scale="wall")` misura la profondità media del muro in colonne di
+Senza, u = theta x raggio. `build_elevation(scale="wall")` misura la profondità mediana del muro in colonne di
 1 grado, costruisce la mappa con la lunghezza della traccia del muro (da -180 gradi, u = 0 su `start`: la
-cucitura resta dove sta senza mappa) e costruisce lo sviluppo su di essa; `entry["scale"] = "wall"`. Le voci
+cucitura resta dove sta senza mappa) e costruisce lo sviluppo su di essa; `entry["scale"] = "wall"`. Con
+`scale="cylinder"` la mappa di un sistema viene lasciata fuori (lo sviluppo è sul cilindro, come chiesto). Le voci
 senza `tilt` e `u_map` sono verticali e sul cilindro, come prima della 1.7.1.
 
 ### Disegni sui prospetti e sulle sezioni

@@ -313,9 +313,19 @@ viene da:
   alto del modello ogni 5 gradi, un piano adattato due volte lasciando fuori i punti lontani). Una cresta che non è
   un piano - un lato crollato - viene rifiutata con il suo scarto: in quel caso si usa l'asse della regione o due
   punti. Un solo tratto caduto viene lasciato fuori e non inclina l'asse.
-* **Due punti nella vista 3D**: dopo il dialogo si clicca il punto in basso e quello in alto dell'asse della torre.
+* **Due punti nella vista 3D**: dopo il dialogo si cliccano due punti di una stessa linea diritta della struttura
+  che corre lungo il suo asse e non è a scarpa (una colonna, un fusto, uno spigolo verticale), prima quello in basso.
+  Un clic cade sulla faccia del muro: due clic su una torre a scarpa danno la scarpa, non l'asse - per una torre a
+  scarpa si usa la cresta o la regione. La finestra avvisa quando la linea dei due punti passa a più di 30 cm dal
+  centro della torre.
 
-Con un asse inclinato **v è la distanza lungo l'asse**, non la quota, e i corsi e la cresta vengono diritti. Prima
+Qualunque sia il metodo, l'asse passa per il centro della torre: trovata la direzione, il muro viene guardato lungo
+l'asse e lì si adatta un cerchio, così un poligono disegnato al piede di una torre che pende non sposta l'asse dal
+centro più in alto.
+
+Con un asse inclinato **v è la distanza lungo l'asse**, non la quota, e i corsi e la cresta vengono diritti.
+**v = 0** è dove l'asse attraversa la quota media della cresta (*Dalla cresta della torre*), il punto medio dei due
+punti (*Due punti*) o la quota media del modello (*Della regione*). Prima
 di costruire, la finestra dice l'inclinazione e la direzione ("asse inclinato di 6,6° verso NE", la direzione verso
 cui pende la sommità); se non è l'asse della torre si annulla lì. L'inclinazione resta con il prospetto (il suo
 suggerimento nell'area di lavoro).
@@ -323,7 +333,8 @@ suggerimento nell'area di lavoro).
 **Scala sulla parete.** Di norma u è l'arco sul cilindro di riferimento (il cerchio adattato al poligono): dove il
 muro sta fuori dal cerchio lo sviluppo è più corto del muro, dove sta dentro è più lungo. Con *Scala sulla parete*
 u è la lunghezza misurata lungo il muro (una torre ovale, un pozzo irregolare): un primo passaggio misura dove sta
-il muro tutto intorno, poi lo sviluppo viene costruito su quella lunghezza.
+il muro tutto intorno (la mediana di ogni grado, così un pluviale o un albero davanti non conta), poi lo sviluppo
+viene costruito su quella lunghezza.
 
 <figure markdown="span">
   ![La vista 3D con il pulsante Prospetto](../img/gui/elevation-3d-view.png)

@@ -177,3 +177,41 @@ def test_the_tilt_in_the_workspace_tooltip(win):
         walk(tree.topLevelItem(i))
     tip = next(t for t in tips if "inclinato" in t)
     assert "6,6°" in tip and "NE" in tip and "parete" in tip
+
+
+def test_points_off_the_centre_are_warned_and_esc_gives_up(dialog, monkeypatch):
+    import pyarchinit_photogrammetry.gui.main_window  # noqa: F401
+    from pyarchinit_photogrammetry.engine import elevation as E
+
+    win, rec = dialog
+    monkeypatch.setattr(win.model_view, "start_pick", lambda purpose="marker": None)
+    real = E.cylinder_from_circle
+
+    def off_centre(ch, ring, inside=True, axis="vertical", axis_points=None, depth=None):
+        c = real(ch, ring, inside)
+        return E.Cylinder(c.centre, [0.05, 0.0, 1.0], c.radius, c.inside, c.start,
+                          tilt={**TILT, "method": "points", "residual_m": None, "points_offset_m": 1.2})
+
+    monkeypatch.setattr(E, "cylinder_from_circle", off_centre)
+    rec["answers"].update(axis="points")
+    rec["choice"] = None
+    world = np.array([ORIGIN + [2.0, 1.5, -0.5], ORIGIN + [2.1, 1.5, 1.5]])
+    win.build_elevation()
+    win.model_view.elevation_requested.emit("axis", list(win.chunk.to_internal(world)))
+    assert "non passano per il centro" in rec["choices"][-1] and "120 cm" in rec["choices"][-1]
+    assert not rec["builds"]
+    # Esc during the picks: the points that come later build nothing
+    win.build_elevation()
+    win.model_view.elevation_requested.emit("axis_cancel", None)
+    n = len(rec["choices"])
+    win.model_view.elevation_requested.emit("axis", list(win.chunk.to_internal(world)))
+    assert len(rec["choices"]) == n and not rec["builds"]
+
+
+def test_esc_in_the_3d_view_gives_up_the_axis(win):
+    got = []
+    win.model_view.elevation_requested.connect(lambda kind, data: got.append(kind))
+    win._axis_pending = {"v": {}, "ring": None, "chunk": win.chunk.key}
+    win.model_view._purpose = "axis_p2"
+    win.model_view._pick_finished(None)
+    assert got == ["axis_cancel"] and win._axis_pending is None

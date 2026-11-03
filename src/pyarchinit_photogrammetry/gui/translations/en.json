@@ -2799,9 +2799,9 @@
   "Scala sulla parete: u = lunghezza lungo il muro": "Scale on the wall: u = length along the wall",
   "Verticale (v = quota)": "Vertical (v = height)",
   "asse verticale": "vertical axis",
-  "il punto in alto dell'asse della torre": "the top point of the tower's axis",
-  "il punto in basso dell'asse della torre": "the bottom point of the tower's axis",
-  "u = lunghezza misurata lungo il muro (una torre ovale o un pozzo irregolare) invece dell'arco sul cilindro di riferimento": "u = the length measured along the wall (an oval tower, an irregular well) instead of the arc on the reference cylinder"
+  "u = lunghezza misurata lungo il muro (una torre ovale o un pozzo irregolare) invece dell'arco sul cilindro di riferimento": "u = the length measured along the wall (an oval tower, an irregular well) instead of the arc on the reference cylinder",
+  "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)": "the bottom point of a straight line of the structure parallel to its axis (a column, a shaft; not the batter of a tower: for that use the crest or the region)",
+  "il punto in alto della stessa linea, sulla stessa verticale della struttura": "the top point of the same line, on the same upright of the structure"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3707,6 +3707,7 @@
   "L'asse scelto non si può usare: {0}": "The chosen axis cannot be used: {0}",
   "Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, annulla e scegli un altro asse.": "The development will follow the {0} (crest residual: {1}). If it is not the tower's axis, cancel and choose another axis.",
   "Sviluppo cilindrico: {0}": "Cylindrical development: {0}",
-  "asse inclinato di {0}° verso {1}": "axis tilted {0}° towards {1}"
+  "asse inclinato di {0}° verso {1}": "axis tilted {0}° towards {1}",
+  "I due punti non passano per il centro della torre: la loro linea ne dista {0} cm. Un clic cade sulla faccia del muro: due punti su una torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa usa la cresta o la regione.": "The two points do not pass through the centre of the tower: their line runs {0} cm from it. A click lands on the face of the wall: two points on a battered tower give the batter, not the axis. For a battered tower use the crest or the region."
  }
 }

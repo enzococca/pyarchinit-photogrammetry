@@ -333,3 +333,51 @@ def test_cli_cylinder_axis_and_scale(tower):
     assert r.exit_code != 0 and "region" in r.output
     r = runner.invoke(app, ["elevation", str(path), "--trace", "1,2,3,4", "--scale", "wall"])
     assert r.exit_code != 0 and "--circle" in r.output
+
+
+# ---------------------------------------------------------------- the axis through the tower's own centre
+@pytest.mark.parametrize("method", ["crest", "region", "points"])
+def test_tilted_axis_passes_through_the_tower(tower, method):
+    """The plan circle picked at the base of the leaning tower: its centre is off the axis higher up; the axis
+    line goes through the centre of the wall seen along the axis, so the wall keeps its depth all round."""
+    from pyarchinit_photogrammetry.engine.region import Region, set_region
+
+    ch, _circle, rings = tower
+    a = np.radians(TILT)
+    set_region(ch, Region(BASE + [0, 0, 1.5], [7, 7, 4], [[np.cos(a), 0, np.sin(a)], [0, 1, 0],
+                                                          [-np.sin(a), 0, np.cos(a)]]))
+    ends = [BASE + 0.2 * AXIS, BASE + 2.8 * AXIS]  # two points on the axis itself (a shaft)
+    cyl = E.cylinder_from_circle(ch, rings[0][::10, :2], inside=False, axis=method, axis_points=ends)
+    d = np.stack([cyl.coords(ring)[:, 2] for ring in rings])
+    assert np.ptp(d, axis=1).max() < 0.05, np.ptp(d, axis=1).max()
+    # the plan circle lifted to the crest's height misses the axis: the depth swings round the wall
+    lifted = E.Cylinder([*cyl.tilt["centre"][:2], cyl.tilt["centre_z"]], cyl.axis, cyl.radius, False)
+    lifted.centre[:2] = E.cylinder_from_circle(ch, rings[0][::10, :2], inside=False).centre[:2]
+    assert np.ptp(np.stack([lifted.coords(r)[:, 2] for r in rings]), axis=1).max() > 0.1
+    assert abs(cyl.centre[2] - cyl.tilt["centre_z"]) < 1e-9  # v = 0 at centre_z
+    assert abs(cyl.tilt["fitted_radius"] - 2.8) < 0.25
+    if method == "points":
+        assert cyl.tilt["points_offset_m"] < 0.05
+
+
+def test_points_on_a_battered_face_are_flagged(tower):
+    ch, circle, rings = tower
+    _axis, info = E.cylinder_axis(ch, circle, "points", points=[rings[0][0], rings[-1][0]])
+    assert info["points_offset_m"] > 0.3  # the face of the wall, not the axis
+
+
+def test_axis_needs_a_plain_circle(tower):
+    ch, circle, _ = tower
+    with pytest.raises(ValueError, match="u map"):
+        E.cylinder_axis(ch, E.Cylinder(circle.centre, circle.axis, circle.radius, False, circle.start,
+                                        u_map=_oval_map(circle.radius, False)), "crest")
+
+
+def test_scale_of_the_entry_agrees_with_the_frame(oval):
+    """A frame that carries a u map built on the cylinder scale: the development is on the cylinder, as asked."""
+    ch, circle = oval
+    wall = E.build_elevation(ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    mapped = E.frame_from_dict(wall["frame"])
+    plain = E.build_elevation(ch, mapped, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0)
+    assert "scale" not in plain and "u_map" not in plain["frame"]
+    assert abs((plain["bounds"][2] - plain["bounds"][0]) - 2 * np.pi * circle.radius) < 0.02 * 2 * np.pi * circle.radius

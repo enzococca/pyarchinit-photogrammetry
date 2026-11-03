@@ -304,17 +304,27 @@ of the 3D view. The orthophoto and the relief of the model are built on a plane,
   the model every 5 degrees, a plane fitted twice leaving out the points far from it). A crest that is not a plane
   - a side collapsed - is refused with its residual: use the region's axis or two points then. A single fallen
   stretch is left out and does not tilt the axis.
-* **Two points in the 3D view**: after the dialog, click the bottom and the top of the tower's axis.
+* **Two points in the 3D view**: after the dialog, click two points of one straight line of the structure that
+  runs along its axis and is not battered (a column, a shaft, an upright edge), the bottom one first. A click lands
+  on the face of the wall: two clicks on a battered tower give the batter, not the axis - for a battered tower the
+  crest or the region is the way. The window warns when the line of the two points runs more than 30 cm from the
+  centre of the tower.
+
+Whatever the method, the axis passes through the centre of the tower: once its direction is known, the wall is seen
+along it and a circle is fitted there, so a polygon drawn at the foot of a leaning tower does not put the axis off
+centre higher up.
 
 With a tilted axis **v is the distance along the axis**, not the height, and the courses and the crest come out
-straight. Before building, the window says the tilt and its direction ("axis tilted 6.6° towards NE", the direction
+straight. **v = 0** is where the axis crosses the crest's mean height (*From the tower's crest*), the midpoint of the
+two points (*Two points*) or the model's mid height (*The region's*). Before building, the window says the tilt and its direction ("axis tilted 6.6° towards NE", the direction
 the top leans to); cancel there if it is not the tower's axis. The tilt stays with the elevation (its tooltip in the
 workspace).
 
 **Scale on the wall.** By default u is the arc on the reference cylinder (the circle fitted to the polygon): where
 the wall stands outside the circle the development is shorter than the wall, where it stands inside it is longer.
 With *Scale on the wall* u is the length measured along the wall (an oval tower, an irregular well): a first pass
-measures where the wall is all round, then the development is built on that length.
+measures where the wall is all round (the median of each degree, so a drainpipe or a tree in front of it does not
+count), then the development is built on that length.
 
 <figure markdown="span">
   ![The 3D view with the Elevation button](../img/gui/elevation-3d-view.png)

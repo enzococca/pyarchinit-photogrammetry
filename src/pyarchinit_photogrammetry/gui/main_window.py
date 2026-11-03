@@ -532,7 +532,8 @@ class MainWindow(QMainWindow):
         self.model_view.cut_requested.connect(self._cut_in_3d)
         self.model_view.elevation_requested.connect(
             lambda kind, data: self.build_elevation(view=data) if kind == "view" else
-            self.build_elevation(axis_points=data) if kind == "axis" else self.build_elevation(points=data))
+            self.build_elevation(axis_points=data) if kind == "axis" else
+            setattr(self, "_axis_pending", None) if kind == "axis_cancel" else self.build_elevation(points=data))
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
@@ -6783,7 +6784,7 @@ class MainWindow(QMainWindow):
         cams = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
         pending, self._axis_pending = getattr(self, "_axis_pending", None), None
         if axis_points is not None:
-            if pending is None:
+            if pending is None or pending.get("chunk") != ch.key:  # given up, or picked on another chunk
                 return
             v, kind = pending["v"], "cylinder"
         elif view is not None:
@@ -6881,7 +6882,7 @@ class MainWindow(QMainWindow):
                                       else poly.geoms[0].exterior.coords)
                 axis = v.get("axis") or "vertical"
                 if axis == "points" and axis_points is None:  # two clicks in the 3D view, then back here
-                    self._axis_pending = {"v": v, "ring": ring}
+                    self._axis_pending = {"v": v, "ring": ring, "chunk": ch.key}
                     kind3d = self.model_view.kind if self.model_view.kind in self.model_view.PICK_KINDS else None
                     self._show_model(kind3d or "model")
                     self.model_view.start_pick("axis_p")
@@ -6896,14 +6897,19 @@ class MainWindow(QMainWindow):
                     self._warn(tr("L'asse scelto non si può usare: {0}", str(exc)))
                     return
                 said = axis_text(frame.tilt)
-                if axis != "vertical" and choice(
-                        self, "question", tr("Asse dello sviluppo"),
-                        tr("Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, "
-                           "annulla e scegli un altro asse.", said,
-                           "-" if frame.tilt.get("residual_m") is None
-                           else _it(100 * frame.tilt["residual_m"], 1) + " cm"),
-                        [tr("Costruisci")]) is None:
-                    return
+                if axis != "vertical":
+                    text = tr("Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, "
+                              "annulla e scegli un altro asse.", said,
+                              "-" if frame.tilt.get("residual_m") is None
+                              else _it(100 * frame.tilt["residual_m"], 1) + " cm")
+                    off = frame.tilt.get("points_offset_m")
+                    if off is not None and off > 0.3:
+                        text += "\n\n" + tr("I due punti non passano per il centro della torre: la loro linea ne "
+                                             "dista {0} cm. Un clic cade sulla faccia del muro: due punti su una "
+                                             "torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa "
+                                             "usa la cresta o la regione.", _it(100 * off, 0))
+                    if choice(self, "question", tr("Asse dello sviluppo"), text, [tr("Costruisci")]) is None:
+                        return
                 self.statusBar().showMessage(tr("Sviluppo cilindrico: {0}", said), 15000)
                 name = v.get("name") or ("Sviluppo interno" if frame.inside else "Sviluppo esterno")
                 what = "elevation"

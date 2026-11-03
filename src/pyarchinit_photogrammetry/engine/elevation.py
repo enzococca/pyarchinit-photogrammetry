@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -329,7 +330,7 @@ def cylinder_from_circle(chunk: Chunk, points, inside: bool = True, axis: str = 
     if axis == "vertical":
         return circle
     direction, info = cylinder_axis(chunk, circle, axis, points=axis_points, depth=depth)
-    return Cylinder([cx, cy, info["centre_z"]], direction, r, inside, circle.start, tilt=info)
+    return Cylinder(info["centre"], direction, r, inside, circle.start, tilt=info)
 
 
 AXIS_METHODS = ("vertical", "region", "crest", "points")
@@ -341,6 +342,56 @@ def _axis_info(method: str, axis: np.ndarray, centre_z: float, residual=None) ->
     azimuth = float(np.degrees(np.arctan2(axis[0], axis[1])) % 360.0) if tilt > 1e-9 else 0.0
     return {"method": method, "tilt_deg": tilt, "azimuth_deg": azimuth,
             "residual_m": None if residual is None else float(residual), "centre_z": float(centre_z)}
+
+
+def _fit_circle(xy: np.ndarray):
+    """Centre and radius of the circle through 2D points: the algebraic fit on the points shifted to their mean,
+    then once more without the points whose radial residual is over 3 MAD."""
+    def fit(q):
+        mean = q.mean(axis=0)
+        d = q - mean
+        a = np.column_stack([2 * d, np.ones(len(d))])
+        sol = np.linalg.lstsq(a, (d ** 2).sum(axis=1), rcond=None)[0]
+        return sol[:2] + mean, float(np.sqrt(max(sol[2] + sol[0] ** 2 + sol[1] ** 2, 0.0)))
+
+    centre, r = fit(xy)
+    res = np.linalg.norm(xy - centre, axis=1) - r
+    dev = np.abs(res - np.median(res))
+    keep = dev <= 3 * max(1.4826 * np.median(dev), 1e-6)
+    if keep.sum() >= 3 and not keep.all():
+        centre, r = fit(xy[keep])
+    return centre, r
+
+
+def _axis_line(axis: np.ndarray, centre_z: float, band: np.ndarray, origin: np.ndarray):
+    """The point at height ``centre_z`` of the axis line (direction ``axis``) through the centre of the tower:
+    the circle fitted to ``band`` (world vertices of the wall) seen along the axis; and that circle's radius.
+    ``origin``: a point near the data, for the rounding (projected coordinates)."""
+    e1 = np.cross(axis, [0.0, 1.0, 0.0] if abs(axis[1]) < 0.9 else [1.0, 0.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(axis, e1)
+    q = band - origin
+    centre2, r = _fit_circle(np.column_stack([q @ e1, q @ e2]))
+    c0 = origin + centre2[0] * e1 + centre2[1] * e2  # on the line, in the plane through origin square to the axis
+    return c0 + (centre_z - c0[2]) / axis[2] * axis, r
+
+
+def _through_the_tower(info: dict, axis: np.ndarray, band: np.ndarray, circle: "Cylinder",
+                       fallback: np.ndarray | None = None) -> dict:
+    """``info`` with ``centre`` (the point of the axis line at ``centre_z``) and ``fitted_radius``: the line
+    through the centre of the circle fitted to the wall seen along the axis; with too little wall, through
+    ``fallback`` (a point of the line) or the plan circle's centre."""
+    z = info["centre_z"]
+    if len(band) >= 12:
+        origin = np.array([circle.centre[0], circle.centre[1], float(np.median(band[:, 2]))])
+        centre, r = _axis_line(axis, z, band, origin)
+        info["fitted_radius"] = float(r)
+    else:
+        base = fallback if fallback is not None else np.array([circle.centre[0], circle.centre[1], z])
+        centre = base + (z - base[2]) / axis[2] * axis
+        info["fitted_radius"] = None
+    info["centre"] = [float(c) for c in centre]
+    return info
 
 
 def _band_vertices(chunk: Chunk, circle: Cylinder, depth) -> np.ndarray:
@@ -394,9 +445,27 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
     within ``tolerance`` metres of it: ``residual_m``) - a single fallen sector is dropped as an outlier and the
     crest accepted, a side collapsed (a quarter of the crest) is refused. ``points``: the direction of two world points (bottom,
     top), at least 1 m apart. For ``region`` the centre goes to the model's mid height within the band, for
-    ``crest`` to the crest's mean height, for ``points`` to the points' mid height."""
+    ``crest`` to the crest's mean height, for ``points`` to the points' mid height: ``v`` = 0 there.
+
+    A tilted axis passes through the tower's own centre: once its direction is known, the wall (the model's
+    vertices within ``depth`` of the plan circle) is seen along it and a circle fitted there (``info["centre"]``,
+    the axis' point at ``centre_z``; ``info["fitted_radius"]``); the plan circle, picked at whatever height, would
+    put the axis off the centre of a leaning tower. ``points``: ``info["points_offset_m"]``, how far the line of
+    the two points runs from that centre (a click lands on the face: two clicks on a battered tower give the
+    batter, not the axis)."""
     if method == "vertical":
-        return np.array([0.0, 0.0, 1.0]), _axis_info("vertical", np.array([0.0, 0.0, 1.0]), 0.0)
+        info = _axis_info("vertical", np.array([0.0, 0.0, 1.0]), 0.0)
+        info["centre"] = [float(circle.centre[0]), float(circle.centre[1]), 0.0]
+        return np.array([0.0, 0.0, 1.0]), info
+    if circle.u_map is not None:
+        raise ValueError("the axis is found around a plain circle: give the cylinder without its u map")
+
+    def band_or_none():
+        try:
+            return _band_vertices(chunk, circle, depth)
+        except ValueError:
+            return np.zeros((0, 3))
+
     if method == "points":
         if points is None or len(points) != 2:
             raise ValueError("the axis by two points needs two points: the bottom and the top of the tower")
@@ -407,7 +476,11 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
         axis = _unit(p1 - p0)
         if axis[2] < 0:
             axis = -axis
-        return axis, _axis_info("points", axis, (p0[2] + p1[2]) / 2)
+        info = _through_the_tower(_axis_info("points", axis, (p0[2] + p1[2]) / 2), axis, band_or_none(), circle,
+                                  fallback=p0)
+        off = p0 - np.asarray(info["centre"])
+        info["points_offset_m"] = float(np.linalg.norm(off - (off @ axis) * axis))  # the points' line from the axis
+        return axis, info
     if method == "region":
         from .region import get_region
 
@@ -417,12 +490,9 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
         axis = _unit(region.rotation[:, 2])
         if axis[2] < 0:
             axis = -axis
-        try:
-            band = _band_vertices(chunk, circle, depth)
-        except ValueError:
-            band = np.zeros((0, 3))
+        band = band_or_none()
         mid = (band[:, 2].min() + band[:, 2].max()) / 2 if len(band) else region.center[2]
-        return axis, _axis_info("region", axis, mid)
+        return axis, _through_the_tower(_axis_info("region", axis, mid), axis, band, circle)
     if method == "crest":
         band = _band_vertices(chunk, circle, depth)
         crest = _crest_points(circle, band) if len(band) else band
@@ -434,7 +504,8 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
             raise ValueError(f"the crest of the tower is not a plane (residual {residual:.2f} m, over "
                              f"{tolerance:.2f} m): use the axis of the region or two points instead")
         axis = _unit([-coef[0], -coef[1], 1.0])
-        return axis, _axis_info("crest", axis, float(crest[:, 2].mean()), residual)
+        return axis, _through_the_tower(_axis_info("crest", axis, float(crest[:, 2].mean()), residual), axis,
+                                        band, circle)
     raise ValueError(f"unknown axis method {method!r}: one of {', '.join(AXIS_METHODS)}")
 
 
@@ -500,7 +571,7 @@ WALL_COLUMN_DEG = 1.0
 
 
 def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
-    """The ``u_map`` of a cylinder that makes ``u`` the length along the wall: the mean depth of the surface in
+    """The ``u_map`` of a cylinder that makes ``u`` the length along the wall: the median depth of the surface in
     every column of ``WALL_COLUMN_DEG`` (``samples`` heights within the surface's bounds; columns with no surface
     take the mean of the nearest columns with one), the wall's radius ``r`` = R + d (R - d from inside), the
     length of each column sqrt(r^2 + (dr/dtheta)^2) dtheta (the wall's trace, also where it is not square to the
@@ -516,15 +587,16 @@ def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     uu = np.repeat(frame._u(mids), len(vs))
     vv = np.tile(vs, n)
     d = surface.depth_at(uu, vv).reshape(n, len(vs))
-    with np.errstate(all="ignore"):
-        mean = np.nanmean(np.where(np.isfinite(d), d, np.nan), axis=1)
-    ok = np.isfinite(mean)
+    with warnings.catch_warnings():  # a column with no wall: "All-NaN slice", filled below
+        warnings.simplefilter("ignore", RuntimeWarning)
+        column = np.nanmedian(d, axis=1)  # the median: a drainpipe or a tree in front does not pull the column
+    ok = np.isfinite(column)
     if not ok.any():
         raise ValueError("no surface on the cylinder: the scale on the wall needs the wall")
     if not ok.all():  # the columns with no wall: from the nearest ones with it, all round
         idx = np.flatnonzero(ok)
-        mean = np.interp(np.arange(n), np.concatenate([idx - n, idx, idx + n]), np.tile(mean[idx], 3))
-    r = np.maximum(frame.radius - mean if frame.inside else frame.radius + mean, 1e-3 * frame.radius)
+        column = np.interp(np.arange(n), np.concatenate([idx - n, idx, idx + n]), np.tile(column[idx], 3))
+    r = np.maximum(frame.radius - column if frame.inside else frame.radius + column, 1e-3 * frame.radius)
     step = np.radians(WALL_COLUMN_DEG)
     dr = (np.roll(r, -1) - np.roll(r, 1)) / (2 * step)
     length = np.hypot(r, dr) * step
@@ -680,6 +752,8 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
+    if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
+        frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
     if scale == "wall":
         progress(0.02, "Length of the wall")
         plain = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
