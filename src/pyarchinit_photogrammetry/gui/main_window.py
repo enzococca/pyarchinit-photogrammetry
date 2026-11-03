@@ -14226,21 +14226,96 @@ class MainWindow(QMainWindow):
             seg = self._segmenter()
             return auto_units(self.chunk, seg, bounds=bounds, progress=p, **kw)
 
-        def done(units):
-            site = self.project_site() or None
-            with self.ortho_view.batch():
-                for u in units:
-                    u.sito = site
-                    u.attributes = {"_layer": "Unita' da SAM", "stratigraph_index_us": 1}
-                    self.shown_units.append(u)
-                    self._draw_unit(u, len(self.shown_units) - 1)
-            self._dirty(True)
-            self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
-                                            "Layer) prima di pubblicarle", len(units)), 20000)
-            self.log_pane.info(f"SAM: {len(units)} unità candidate")
-            self._show_pane(self.left_tabs, self.layers_pane)
+        self.run_task(title, job, self.add_sam_units, refresh=False, save=False)
 
-        self.run_task(title, job, done, refresh=False, save=False)
+    def add_sam_units(self, units) -> int:
+        """Units SAM found, added as candidates (no US yet) to the layer *Unita' da SAM* of the image shown, with the
+        project's site; what their ``attributes`` have (``tipo_us_s``...) stays. Returns how many."""
+        site = self.project_site() or None
+        units = list(units)
+        with self.ortho_view.batch():
+            for u in units:
+                u.sito = site
+                u.attributes = {**(u.attributes or {}), "_layer": "Unita' da SAM", "stratigraph_index_us": 1}
+                self.shown_units.append(u)
+                self._draw_unit(u, len(self.shown_units) - 1)
+        self._store_drawings()  # in the chunk too: a script that adds them is undone as one step
+        self._dirty(True)
+        self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
+                                        "Layer) prima di pubblicarle", len(units)), 20000)
+        self.log_pane.info(f"SAM: {len(units)} unità candidate")
+        self._show_pane(self.left_tabs, self.layers_pane)
+        return len(units)
+
+    def set_stones(self, key: str, polygons, bounds=None) -> int:
+        """The stones ``polygons`` (shapely, in the raster's coordinates) of the image ``key`` - the file name of a
+        raster of the plan, or the id of an elevation - kept as *Pietre (SAM)* keeps them (layer «Pietre» of that
+        image) and drawn when it is shown. ``bounds``: the box searched: the stones there before are replaced, those
+        outside it kept; None: all of them replaced. Returns how many stones that image has now."""
+        from shapely.geometry import box
+
+        ch = self.chunk
+        if ch is None:
+            raise ValueError("nessun chunk attivo")
+        area = box(*bounds) if bounds is not None else None
+        found = list(polygons)
+
+        def merged(old):
+            return [s for s in old if area is not None and not s.intersects(area)] + found
+
+        frames = {e.get("id") for e in ch.meta.get("elevations") or []}
+        frame = key if key in frames else None
+        if frame is None or frame == self.drawings_frame:
+            store = self.stones if frame is None else self.frame_stones
+            store[key] = merged(store.get(key, []))
+            total = len(store[key])
+        else:  # an elevation not shown: its stones in the chunk
+            stones = self._frame_stones(ch, frame)
+            stones[key] = merged(stones.get(key, []))
+            total = len(stones[key])
+            self._store_chunk_drawings(ch, *self._chunk_drawings(ch, frame), frame=frame,
+                                       stones={k: [g.wkt for g in rows] for k, rows in stones.items()})
+        self._store_drawings()  # in the chunk too: a script that finds them is undone as one step
+        self._draw_stones()
+        self._dirty(True)
+        self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
+        return total
+
+    def shown_raster(self) -> dict:
+        """What the 2D view shows: ``path`` of the raster (None: nothing), ``kind`` ("ortho", "dem"...), ``frame``
+        (the id of the elevation shown, None on the plan), ``version`` ((product, id) of a kept version shown)."""
+        rv = self._raster_version
+        version = rv if isinstance(rv, tuple) and len(rv) == 2 and rv[0] != "elevation" else None
+        return {"path": self.ortho_view.path, "kind": self.ortho_view.kind, "frame": self.drawings_frame,
+                "version": version}
+
+    def show_raster_path(self, path, kind: str = "ortho") -> None:
+        """A GeoTIFF of the active chunk (a raster of the calculator) in the 2D view: ``kind`` "ortho" for an image,
+        "dem" for one band on the colours of the heights."""
+        self._load_raster(kind, Path(path))
+        self.show_view(self.ortho_view)
+
+    def select_photo_keys(self, keys) -> int:
+        """The photos with these camera keys selected in the Photos pane, the others not; returns how many."""
+        keys = set(keys)
+        pane = self.photos
+        pane.clearSelection()
+        n, first = 0, None
+        for i in range(pane.count()):
+            it = pane.item(i)
+            if getattr(it.data(Qt.ItemDataRole.UserRole), "key", None) in keys:
+                it.setSelected(True)
+                n += 1
+                first = first or it
+        if first is not None:
+            pane.scrollToItem(first)
+        self._show_pane(self.bottom_tabs, self.photos_panel)
+        return n
+
+    def ask_save_path(self, title: str, name: str, filter_: str) -> str:
+        """The file the user picks to save ``title`` (``name`` proposed in the last folder used); "" when cancelled."""
+        path, _ = QFileDialog.getSaveFileName(self, tr(title), str(Path(self._last_dir()) / name), filter_)
+        return path or ""
 
     def sam_whole_orthomosaic(self) -> None:
         """Automatic SAM on the whole orthomosaic, scanned in tiles at a resolution the user picks."""
