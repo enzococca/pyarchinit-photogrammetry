@@ -36,7 +36,7 @@ from .icons import app_icon, icon
 from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
-                     SectionsPane, WorkspaceTree)
+                     SectionsPane, WorkspaceTree, axis_text)
 from .ppk_dialog import PpkDialog
 from .start_page import StartPage
 from .undo import ScriptChanged, UndoHistory
@@ -531,7 +531,8 @@ class MainWindow(QMainWindow):
         self.model_view.slice_requested.connect(self._slice_in_3d)
         self.model_view.cut_requested.connect(self._cut_in_3d)
         self.model_view.elevation_requested.connect(
-            lambda kind, data: self.build_elevation(view=data) if kind == "view" else self.build_elevation(points=data))
+            lambda kind, data: self.build_elevation(view=data) if kind == "view" else
+            self.build_elevation(axis_points=data) if kind == "axis" else self.build_elevation(points=data))
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
@@ -6736,8 +6737,23 @@ class MainWindow(QMainWindow):
                 Field("vert_to", tr("Marker: asse verticale verso"), None,
                       choices=[(None, tr("perpendicolare all'orizzontale, verso l'alto"))] + labels)]
         if kind == "cylinder":
+            from ..engine.region import get_region
+
             fields.append(Field("inside", "Visto", True, choices=[(True, "Dall'interno (pozzo, abside)"),
                                                                    (False, "Dall'esterno (torre, colonna)")]))
+            axes = [("vertical", tr("Verticale (v = quota)"))]
+            if self.chunk is not None and get_region(self.chunk) is not None:
+                axes.append(("region", tr("Della regione (asse Z della regione)")))
+            axes += [("crest", tr("Dalla cresta della torre (normale al piano della cresta)")),
+                     ("points", tr("Due punti nella vista 3D (in basso e in alto)"))]
+            fields += [
+                Field("axis", tr("Asse"), "vertical", choices=axes,
+                      tip=tr("Con un asse inclinato, come quello di una torre che pende, i corsi e la cresta vengono "
+                             "diritti; v è la distanza lungo l'asse, non più la quota. L'inclinazione viene mostrata "
+                             "prima di costruire.")),
+                Field("wall_scale", tr("Scala sulla parete"), False,
+                      tip=tr("u = lunghezza misurata lungo il muro (una torre ovale o un pozzo irregolare) invece "
+                             "dell'arco sul cilindro di riferimento"))]
         if kind != "view":
             fields += [
                 Field("front", "Profondità davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
@@ -6750,19 +6766,27 @@ class MainWindow(QMainWindow):
             Field("colour", "Correzione colore", True),
             Field("name", "Nome", "", kind="text")]
 
-    def build_elevation(self, section: dict | None = None, view: dict | None = None, points=None) -> None:
+    def build_elevation(self, section: dict | None = None, view: dict | None = None, points=None,
+                        axis_points=None) -> None:
         """Workflow > Prospetto: on the trace of a section, on the plane of the selected markers (the
         axes chosen among them), on the cylinder of the selected polygon (a well, a tower), on the
         plane of the 3D view as it looks now (``view``, from :meth:`ModelView.view_frame`) or on the
         plane of three points clicked in the 3D view (``points``, internal frame). An elevation or a
-        section (what stands in front of the plane taken away, the profile of the cut drawn)."""
+        section (what stands in front of the plane taken away, the profile of the cut drawn). A cylinder
+        takes its axis from the dialog; with "two points" the dialog's answers wait for two clicks in the 3D
+        view, which come back here as ``axis_points`` (internal frame)."""
         if not self._need_chunk(aligned=True, product="model"):
             return
         from ..engine import elevation as E
 
         ch = self.chunk
         cams = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
-        if view is not None:
+        pending, self._axis_pending = getattr(self, "_axis_pending", None), None
+        if axis_points is not None:
+            if pending is None:
+                return
+            v, kind = pending["v"], "cylinder"
+        elif view is not None:
             v = ParamDialog.ask(self, tr("Ortofoto da questa vista"), self._elevation_fields("view"),
                                 intro=tr("Ortofoto e rilievo del modello sul piano perpendicolare alla vista, con "
                                          "l'alto dello schermo in alto e la destra a destra."))
@@ -6849,9 +6873,38 @@ class MainWindow(QMainWindow):
                 frame = E.plane_from_markers(list(placed.values()), a, b, c, d, toward=cams.mean(axis=0))
                 name = v.get("name") or ("Sezione sui marker" if what == "section" else "Prospetto sui marker")
             else:
-                poly = self._plan_selection()
-                ring = np.asarray(poly.exterior.coords if hasattr(poly, "exterior") else poly.geoms[0].exterior.coords)
-                frame = E.cylinder_from_circle(ch, ring, inside=bool(v.get("inside", True)))
+                if axis_points is not None:
+                    ring = pending["ring"]
+                else:
+                    poly = self._plan_selection()
+                    ring = np.asarray(poly.exterior.coords if hasattr(poly, "exterior")
+                                      else poly.geoms[0].exterior.coords)
+                axis = v.get("axis") or "vertical"
+                if axis == "points" and axis_points is None:  # two clicks in the 3D view, then back here
+                    self._axis_pending = {"v": v, "ring": ring}
+                    kind3d = self.model_view.kind if self.model_view.kind in self.model_view.PICK_KINDS else None
+                    self._show_model(kind3d or "model")
+                    self.model_view.start_pick("axis_p")
+                    return
+                world_axis = None if axis_points is None else ch.to_world(np.asarray(axis_points, float))
+                band = (-float(v.get("back", 0.5)), float(v.get("front", 0.5)))
+                try:
+                    frame = E.cylinder_from_circle(ch, ring, inside=bool(v.get("inside", True)), axis=axis,
+                                                   axis_points=world_axis,
+                                                   depth=(min(band[0], -3.0), max(band[1], 3.0)))
+                except ValueError as exc:
+                    self._warn(tr("L'asse scelto non si può usare: {0}", str(exc)))
+                    return
+                said = axis_text(frame.tilt)
+                if axis != "vertical" and choice(
+                        self, "question", tr("Asse dello sviluppo"),
+                        tr("Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, "
+                           "annulla e scegli un altro asse.", said,
+                           "-" if frame.tilt.get("residual_m") is None
+                           else _it(100 * frame.tilt["residual_m"], 1) + " cm"),
+                        [tr("Costruisci")]) is None:
+                    return
+                self.statusBar().showMessage(tr("Sviluppo cilindrico: {0}", said), 15000)
                 name = v.get("name") or ("Sviluppo interno" if frame.inside else "Sviluppo esterno")
                 what = "elevation"
         except Exception as exc:
@@ -6859,9 +6912,11 @@ class MainWindow(QMainWindow):
             return
         # the view: the whole model as the view sees it (a section: all that lies behind the plane)
         depth = None if kind == "view" else (-float(v.get("back", 0.5)), float(v.get("front", 0.5)))
+        scale = "wall" if frame.kind == "cylinder" and v.get("wall_scale") else "cylinder"
         self.run_task("Prospetto", lambda p: E.build_elevation(
             ch, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
-            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what), self.show_elevation, refresh=False)
+            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what, scale=scale), self.show_elevation,
+            refresh=False)
 
     def show_elevation(self, entry: dict) -> None:
         from ..engine import elevation as E

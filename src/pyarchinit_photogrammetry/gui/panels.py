@@ -128,6 +128,21 @@ REMOVABLE = {"chunk", "product", "version", "elevation", "camera", "cameras", "m
              "scalebars"}
 
 
+COMPASS = {"it": ["N", "NE", "E", "SE", "S", "SO", "O", "NO"], "en": ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]}
+
+
+def axis_text(tilt: dict | None) -> str:
+    """The axis of a cylindrical development as the interface says it: "asse verticale" or "asse inclinato di
+    6,6° verso NE" (``tilt``: the ``info`` of :func:`engine.elevation.cylinder_axis`)."""
+    from .i18n import current
+
+    if not tilt or float(tilt.get("tilt_deg") or 0.0) < 0.05:
+        return tr("asse verticale")
+    points = COMPASS["en" if current() == "en" else "it"]
+    where = points[int((float(tilt.get("azimuth_deg") or 0.0) % 360.0) / 45.0 + 0.5) % 8]
+    return tr("asse inclinato di {0}° verso {1}", number(float(tilt["tilt_deg"]), 1), where)
+
+
 class WorkspaceTree(QTreeWidget):
     """Document > chunks > photos / markers / scale bars / products, and the products of the plugins
     (:meth:`plugins.api.Context.add_tree_items`) under them, as Metashape's Workspace: a double click
@@ -347,7 +362,12 @@ class WorkspaceTree(QTreeWidget):
                     it = QTreeWidgetItem([f"{e['name']}  ({w} x {h} px, {e.get('resolution', 0) * 100:.2f} cm/px)"])
                     it.setIcon(0, icon("elevation"))
                     it.setData(0, Qt.ItemDataRole.UserRole, ("elevation", ch, e))
-                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: esporta, elimina"))
+                    tip = tr("Doppio clic per vederlo; tasto destro: esporta, elimina")
+                    if e.get("tilt"):
+                        tip += "\n" + axis_text(e["tilt"])
+                    if e.get("scale") == "wall":
+                        tip += "\n" + tr("Scala sulla parete: u = lunghezza lungo il muro")
+                    it.setToolTip(0, tip)
                     el.addChild(it)
                 el.setExpanded(True)
             ms = (ch.meta or {}).get("multispectral") or {}

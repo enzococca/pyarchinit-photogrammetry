@@ -218,6 +218,18 @@ def elevation_cmd(project: Path,
                   centre: Optional[str] = typer.Option(None, help="with --facing: the point X,Y,Z the plane goes "
                                                        "through"),
                   up: str = typer.Option("0,0,1", help="with --facing: the up of the view"),
+                  circle: Optional[str] = typer.Option(None, help="a cylindrical development around the circle "
+                                                       "fitted to plan points X1,Y1,X2,Y2,X3,Y3[,...] (a well, a "
+                                                       "tower)"),
+                  inside: bool = typer.Option(True, "--inside/--outside", help="with --circle: seen from the axis "
+                                              "(a well) or from outside (a tower)"),
+                  axis: str = typer.Option("vertical", help="with --circle: the axis - vertical (v = the height), "
+                                           "region (the Z of the chunk's region), crest (normal to the plane of "
+                                           "the tower's crest), points (--axis-points)"),
+                  axis_points: Optional[str] = typer.Option(None, help="with --axis points: X,Y,Z,X,Y,Z of the "
+                                                            "bottom and the top of the axis (chunk CRS)"),
+                  scale: str = typer.Option("cylinder", help="with --circle: cylinder (u = the arc on the "
+                                            "cylinder) or wall (u = the length along the wall)"),
                   section: bool = typer.Option(False, help="a section: what stands in front of the plane is taken "
                                                "away and the line of the cut saved as the profile"),
                   front: float = typer.Option(0.5, help="metres kept in front of the plane (not for a section)"),
@@ -225,8 +237,9 @@ def elevation_cmd(project: Path,
                   resolution: Optional[float] = typer.Option(None, help="metres per pixel (default: the GSD)"),
                   name: Optional[str] = None, chunk: Optional[str] = None):
     """Orthophoto and relief of the model on a plane - an elevation or a section: on a trace, on the
-    plane of markers with the axes chosen, or on the plane of a view. With --facing the whole model
-    is kept (a section: all behind the plane)."""
+    plane of markers with the axes chosen, or on the plane of a view - or on a cylinder (--circle: a
+    well, a tower; its axis vertical, the region's, the crest's or through two points; scaled on the
+    cylinder or on the wall). With --facing the whole model is kept (a section: all behind the plane)."""
     import numpy as np
 
     from .engine import elevation as E
@@ -237,11 +250,37 @@ def elevation_cmd(project: Path,
             raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
         return np.asarray(values)
 
-    if sum(v is not None for v in (trace, markers, facing)) != 1:
-        raise typer.BadParameter("give one plane: --trace, --markers or --facing")
+    if sum(v is not None for v in (trace, markers, facing, circle)) != 1:
+        raise typer.BadParameter("give one surface: --trace, --markers, --facing or --circle")
+    if circle is None and (axis != "vertical" or axis_points is not None or scale != "cylinder"):
+        raise typer.BadParameter("--axis, --axis-points and --scale are for a cylinder: give --circle")
+    if axis not in E.AXIS_METHODS:
+        raise typer.BadParameter(f"--axis: one of {', '.join(E.AXIS_METHODS)}")
+    if scale not in ("cylinder", "wall"):
+        raise typer.BadParameter("--scale: cylinder or wall")
+    if circle is not None and section:
+        raise typer.BadParameter("a section is made on a plane, not on --circle")
     doc, ch = _open(project, chunk)
     depth = (-back, front)
-    if trace is not None:
+    if circle is not None:
+        xy = [float(v) for v in circle.replace(";", ",").split(",")]
+        if len(xy) < 6 or len(xy) % 2:
+            raise typer.BadParameter("--circle: three or more X,Y points, separated by commas")
+        ends = numbers(axis_points, 6, "--axis-points").reshape(2, 3) if axis_points else None
+        if axis == "points" and ends is None:
+            raise typer.BadParameter("--axis points needs --axis-points X,Y,Z,X,Y,Z")
+        try:
+            frame = E.cylinder_from_circle(ch, np.asarray(xy).reshape(-1, 2), inside=inside, axis=axis,
+                                           axis_points=ends, depth=(min(-back, -3.0), max(front, 3.0)))
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1)
+        if frame.tilt:
+            t = frame.tilt
+            typer.echo(f"axis {t['method']}: inclined {t['tilt_deg']:.2f} degrees towards azimuth "
+                       f"{t['azimuth_deg']:.1f}" + (f", crest residual {t['residual_m'] * 100:.1f} cm"
+                                                    if t.get("residual_m") is not None else ""))
+    elif trace is not None:
         v = numbers(trace, 4, "--trace")
         frame = E.plane_from_line(ch, v[:2], v[2:], numbers(side, 2, "--side") if side else None)
     elif markers is not None:
@@ -267,12 +306,14 @@ def elevation_cmd(project: Path,
                                   numbers(up, 3, "--up"))
         depth = None
     entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
-                              progress=print_progress)
+                              progress=print_progress, scale=scale)
     doc.save()
     ortho, relief = E.elevation_paths(ch, entry)
     w, h = entry["size"]
     typer.echo(f"{entry['name']}: {w} x {h} px at {entry['resolution']:.4g} m/px"
                + ("; v = height" if entry.get("v_is_height") else "")
+               + (f"; scaled on the wall, {E.wall_length(entry):.3f} m all round" if entry.get("scale") == "wall"
+                  else "")
                + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else ""))
     typer.echo(f"{ortho}\n{relief}")
 

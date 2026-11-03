@@ -301,3 +301,35 @@ def test_wall_scale_only_on_a_cylinder(tower):
     ch, _circle, _ = tower
     with pytest.raises(ValueError, match="cylindrical"):
         E.build_elevation(ch, E.Plane(BASE, [1, 0, 0], [0, 0, 1]), scale="wall")
+
+
+# ---------------------------------------------------------------- the command line
+def test_cli_cylinder_axis_and_scale(tower):
+    import pyarchinit_photogrammetry as ppg
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    ch, _circle, rings = tower
+    ch.document.save()
+    path = ch.document.path
+    circle = ",".join(f"{x},{y}" for x, y in rings[15][::10, :2])
+    runner = CliRunner()
+    common = ["elevation", str(path), "--circle", circle, "--outside", "--resolution", "0.1", "--back", "0.6",
+              "--front", "0.6"]
+    r = runner.invoke(app, common + ["--axis", "crest", "--scale", "wall"])
+    assert r.exit_code == 0, r.output
+    assert "inclined" in r.output or "tilt" in r.output
+    entry = ppg.Document.open(path).chunk.meta["elevations"][-1]
+    assert entry["tilt"]["method"] == "crest" and abs(entry["tilt"]["tilt_deg"] - TILT) < 0.3
+    assert entry["scale"] == "wall" and entry["frame"]["inside"] is False
+    bottom, top = BASE, BASE + HEIGHT * AXIS
+    r = runner.invoke(app, common + ["--axis", "points", "--axis-points", ",".join(str(v) for v in [*bottom, *top])])
+    assert r.exit_code == 0, r.output
+    entry = ppg.Document.open(path).chunk.meta["elevations"][-1]
+    assert entry["tilt"]["method"] == "points" and "scale" not in entry
+    assert _angle(entry["frame"]["axis"], AXIS) < 1e-6
+    r = runner.invoke(app, common + ["--axis", "region"])  # no region: the engine's refusal, nothing built
+    assert r.exit_code != 0 and "region" in r.output
+    r = runner.invoke(app, ["elevation", str(path), "--trace", "1,2,3,4", "--scale", "wall"])
+    assert r.exit_code != 0 and "--circle" in r.output
