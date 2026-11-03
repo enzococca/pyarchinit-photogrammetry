@@ -67,7 +67,13 @@ jobs:
             echo "::error::notarization: ${status:-failed}"; exit 1
           fi
           xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
+          # the validation looks the ticket up at Apple: the runner's network drops now and then (1.7.0: "The
+          # network connection was lost", exit 68, right after a successful staple), so it is tried three times
+          for attempt in 1 2 3; do
+            xcrun stapler validate "$DMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::the stapled ticket could not be validated"; exit 68; }
+            sleep 30
+          done
           spctl -a -t open --context context:primary-signature -v "$DMG"
       - name: Into the release
         run: |
