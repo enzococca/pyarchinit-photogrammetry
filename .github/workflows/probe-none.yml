@@ -1,0 +1,26 @@
+# Temporary: which call drains the reference count of None on Python 3.11 (tests/probe_none.py).
+name: probe-none
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["assistant"]
+    paths: ["tests/probe_none.py", ".github/workflows/probe-none.yml"]
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-mod-spatialite libegl1 libgl1 libgomp1
+      - name: The program
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Probe
+        run: python -X faulthandler tests/probe_none.py
