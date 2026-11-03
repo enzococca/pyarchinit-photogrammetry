@@ -25,9 +25,12 @@ In the console and in **Run Python script...** these names are ready, bound to t
 
 ### What `window` does
 
-In the console `window` is the window itself. In **Run Python script...** the script runs in the background and
-`window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts
-written for the window run unchanged. What a script does with it:
+A script run with **Run Python script...** or with *Run* in the editor of the *Assistant* pane runs in the background:
+its `window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so
+scripts written for the window run unchanged, and it adds the helpers below. In the **Python console** `window` is the
+main window itself: `window.show_raster`, `window.show_model`, `window.log` and `window.refresh` are not there (an
+`AttributeError`); use `window.refresh_all()` to show the project again and the Workspace or the menus to show a
+product; the other calls of the list work there too. What a script does with it:
 
 * `window.show_raster("ortho")` or `window.show_raster("dem")`: the orthophoto or the DEM of the active chunk in the 2D
   view; `window.show_model("model")` (also `"model_textured"`, `"point_cloud"`, `"tie_points"`, `"cameras"`): the 3D view;
@@ -269,7 +272,8 @@ if BY == "area":                                      # the photos that see the 
         raise SystemExit("Select a polygon on the 2D view first.")
     if area.geom_type == "MultiPolygon":
         area = max(area.geoms, key=lambda g: g.area)
-    rows = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000)
+    # with an elevation or a section shown the polygon is in its (u, v) metres: its id goes as frame
+    rows = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000, frame=window.drawings_frame)
     keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
     window.photos.set_filter(keys, "Photos of the area")
 elif BY == "markers":                                 # the photos where these markers are

@@ -87,6 +87,7 @@ def test_snapshot_of_the_demo_project(demo_doc, monkeypatch):
     monkeypatch.setattr(mesh_ply, "read_mesh", never)
     snap = I.snapshot(demo_doc)
     assert snap["project"] == "Rilievo Nord" and snap["site"] == "Tell Sultan" and snap["active"] == "Volo 28/08"
+    assert snap["active_key"] == 0
     first, second = snap["chunks"]
     assert first["label"] == "Volo 28/08" and first["key"] == 0 and first["enabled"] is True
     assert first["photos"] == 5 and first["aligned"] == 4
@@ -116,7 +117,6 @@ def test_snapshot_with_the_window(processed, tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
-    from shapely.geometry import box
 
     import pyarchinit_photogrammetry as ppg
     from pyarchinit_photogrammetry.gui import main_window as mw
@@ -134,13 +134,18 @@ def test_snapshot_with_the_window(processed, tmp_path):
         w._show_raster("ortho")
         cams = w.chunk.cameras
         w.photos.set_filter({c.key for c in cams[:3]}, "tre foto")
-        w.selected_cameras = lambda: cams[:2]
-        w.selected_polygon = lambda: box(0.0, 0.0, 2.0, 1.5)
+        # the real readers: nothing selected, then two photos selected in the Photos pane
+        snap = I.snapshot(w.doc, w)
+        assert snap["selection"] == {"polygon_m2": None, "photos_selected": 0, "photos_filtered": 3}
+        shown = [w.photos.item(i) for i in range(w.photos.count()) if not w.photos.item(i).isHidden()]
+        for item in shown[:2]:
+            item.setSelected(True)
+        assert len(w.selected_cameras()) == 2 and w.selected_polygon() is None
         snap = I.snapshot(w.doc, w)
         assert snap["active"] == "Saggio 1"
         assert snap["view"]["kind"] == "ortho" and snap["view"]["raster"] == "orthomosaic"
         assert snap["view"]["version"] is None and snap["view"]["elevation"] is None  # never named: no version
-        assert snap["selection"] == {"polygon_m2": 3.0, "photos_selected": 2, "photos_filtered": 3}
+        assert snap["selection"] == {"polygon_m2": None, "photos_selected": 2, "photos_filtered": 3}
         # an elevation shown: its name in the view
         w.chunk.meta["elevations"] = [{"id": "e9", "name": "Sezione A", "kind": "plane"}]
         w.drawings_frame = "e9"
@@ -148,7 +153,7 @@ def test_snapshot_with_the_window(processed, tmp_path):
         snap = I.snapshot(w.doc, w)
         assert snap["view"]["elevation"] == "Sezione A"
         block = I.text(snap, "it")
-        assert "Sezione A" in block and "3 foto" in block and "Saggio 1" in block
+        assert "Sezione A" in block and "3 foto" in block and "2 foto selezionate" in block and "Saggio 1" in block
         leaves = [str(x) for x in _walk(snap)]
         assert not any(_a_path(x) for x in leaves), leaves
         # the interface thread only
@@ -191,7 +196,7 @@ def test_snapshot_with_the_window(processed, tmp_path):
 def _raises(fn) -> bool:
     try:
         fn()
-    except AssertionError:
+    except RuntimeError:
         return True
     return False
 
@@ -229,13 +234,37 @@ def test_text_stays_short_and_cuts(lang, more):
     assert more not in I.text(small, lang) and "Settore 01" in I.text(small, lang)
 
 
-def test_the_snapshot_of_forty_chunks_is_cheap(tmp_path):
+def test_the_snapshot_of_forty_chunks_is_cheap(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.engine import rastercalc
+
     doc = Document(tmp_path / "grande.ppg")
     for i in range(40):
         ch = doc.add_chunk(f"Settore {i}")
         ch.meta["drawings"] = {"units": [{"id": 1}]}
-    block = I.text(I.snapshot(doc), "en")
+        ch.meta["elevations"] = ["not an entry", {"id": "e", "name": "Nord", "kind": "plane"}]
+    doc.chunk = doc.chunks[5]
+    calls = []
+    real = rastercalc.rasters
+    monkeypatch.setattr(rastercalc, "rasters", lambda chunk: calls.append(chunk) or real(chunk))
+    snap = I.snapshot(doc)
+    assert calls == [doc.chunks[5]]  # the rasters of the active chunk only, read once
+    assert all(c["rasters"] == [] for c in snap["chunks"]) and snap["active_key"] == 5
+    assert snap["chunks"][0]["elevations"] == [{"id": "e", "name": "Nord", "kind": "plane"}]
+    block = I.text(snap, "en")
     assert len(block) <= 1500 and "Settore 0" in block
+    assert block.splitlines()[2].startswith("- «Settore 5» (key 5)")  # the active chunk, by its key
+
+
+def test_the_active_chunk_is_found_by_its_key_and_an_unknown_raster_is_neutral(tmp_path):
+    from pathlib import Path
+
+    snap = _synthetic(3)
+    for c in snap["chunks"]:
+        c["label"] = "Settore"  # three chunks with the same label
+    snap["active"], snap["active_key"] = "Settore", 2
+    lines = I.text(snap, "it").splitlines()
+    assert lines[2].startswith("- «Settore» (key 2)")
+    assert I._raster_name([], Path(tmp_path / "Tell Sultan scavo 2026.tif")) == "raster"
 
 
 def test_the_prompt_carries_the_block_and_the_filter_neutralises_names(demo_doc):
@@ -306,6 +335,14 @@ def test_the_overview_and_the_examples_cover_the_window(lang):
                  "window.log"):
         assert name in overview, name
     assert len(overview) <= S.OVERVIEW_CHARS
+    if lang == "it":  # who has the helpers: the editor of the Assistant and Run Python script, not the console
+        assert "con *Esegui* nell'editor del pannello *Assistente*" in overview
+        assert "Nella\n**console Python** `window` è la finestra principale stessa" in overview
+        assert "`window.refresh` non ci sono" in overview and "window.refresh_all()" in overview
+    else:
+        assert "with *Run* in the editor of the *Assistant* pane" in overview
+        assert "In the **Python console** `window` is the\nmain window itself" in overview
+        assert "`window.refresh` are not there" in overview and "window.refresh_all()" in overview
     from pyarchinit_photogrammetry.assistant import facts as F
 
     index = default_index(lang)

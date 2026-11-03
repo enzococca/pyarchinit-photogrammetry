@@ -26,9 +26,12 @@ Nella console e in **Esegui script Python...** questi nomi sono già pronti, leg
 
 ### Che cosa fa `window`
 
-Nella console `window` è la finestra stessa. In **Esegui script Python...** lo script gira in secondo piano e `window`
-passa ogni attributo e metodo della finestra al thread della finestra, aspettando la risposta, così gli script scritti
-per la finestra funzionano senza cambiarli. Che cosa ci fa uno script:
+Uno script lanciato con **Esegui script Python...** o con *Esegui* nell'editor del pannello *Assistente* gira in
+secondo piano: il suo `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la
+risposta, così gli script scritti per la finestra funzionano senza cambiarli, e aggiunge gli aiuti qui sotto. Nella
+**console Python** `window` è la finestra principale stessa: `window.show_raster`, `window.show_model`, `window.log` e
+`window.refresh` non ci sono (un `AttributeError`); usa `window.refresh_all()` per mostrare di nuovo il progetto e l'Area
+di lavoro o i menu per mostrare un prodotto; le altre chiamate dell'elenco funzionano anche lì. Che cosa ci fa uno script:
 
 * `window.show_raster("ortho")` o `window.show_raster("dem")`: l'ortofoto o il DEM del chunk attivo nella vista 2D;
   `window.show_model("model")` (anche `"model_textured"`, `"point_cloud"`, `"tie_points"`, `"cameras"`): la vista 3D;
@@ -273,7 +276,8 @@ if PER == "area":                                     # le foto che inquadrano i
         raise SystemExit("Seleziona prima un poligono nella vista 2D.")
     if area.geom_type == "MultiPolygon":
         area = max(area.geoms, key=lambda g: g.area)
-    righe = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000)
+    # con un prospetto o una sezione mostrati il poligono è nei suoi metri (u, v): il suo id va come frame
+    righe = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000, frame=window.drawings_frame)
     chiavi = {r["key"] for r in righe if r.get("coverage", 0) > 0}
     window.photos.set_filter(chiavi, "Foto dell'area")
 elif PER == "marker":                                 # le foto dove sono questi marker

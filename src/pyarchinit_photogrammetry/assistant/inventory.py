@@ -7,6 +7,9 @@ the raster calculator, the drawings' counts, the elevations - and, given the win
 model. The window is read in the interface thread only: the pane takes the snapshot before it hands the question to
 its thread.
 
+The rasters of the calculator (an ``os.walk`` of the chunk folder and the header of each GeoTIFF) are read for the
+active chunk only: the other chunks carry an empty ``rasters`` list.
+
 The snapshot holds strings and numbers only, no path and no coordinate, so that :func:`filtered` (the privacy
 :class:`~.privacy.Filter` of the external models) can turn its names into placeholders. :func:`text` writes it as the
 short block ``## Il progetto adesso`` / ``## The project now`` of the system prompt.
@@ -51,24 +54,30 @@ _WORDS = {
 def snapshot(document, window=None) -> dict | None:
     """What ``document`` holds and, with ``window`` (the main window), what it shows; None without a project.
 
-    With a window it must be called in the interface thread (asserted): its widgets are read."""
+    ``active`` is the label of the active chunk and ``active_key`` its key. ``rasters`` (the names of the raster
+    calculator) is filled for the active chunk only, an empty list for the others. With a window it must be called in
+    the interface thread (a RuntimeError otherwise): its widgets are read."""
     if window is not None:
         from ..gui.gui_thread import in_gui_thread
 
-        assert in_gui_thread(), "inventory.snapshot reads the window: call it in the interface thread"
+        if not in_gui_thread():
+            raise RuntimeError("inventory.snapshot reads the window: call it in the interface thread")
     if document is None:
         return None
     active = _safe(lambda: document.chunk, None)
     path = getattr(document, "path", None)
+    catalog = _catalog(active) if active is not None else []  # read once, for the active chunk only
     chunks = []
     for chunk in list(getattr(document, "chunks", []) or []):
-        live = _window_drawings(window) if window is not None and chunk is active else None
-        chunks.append(_chunk(chunk, live))
+        mine = chunk is active
+        live = _window_drawings(window) if window is not None and mine else None
+        chunks.append(_chunk(chunk, live, [r.name for r in catalog] if mine else []))
     return {"project": path.stem if path is not None else None,
             "site": (getattr(document, "meta", None) or {}).get("sito") or None,
             "active": active.label if active is not None else None,
+            "active_key": active.key if active is not None else None,
             "chunks": chunks,
-            "view": _view(window, active),
+            "view": _view(window, active, catalog),
             "selection": _selection(window)}
 
 
@@ -100,11 +109,15 @@ def _products(chunk) -> dict:
     return out
 
 
-def _rasters(chunk) -> list:
-    """The names of the rasters of the raster calculator (their headers only)."""
+def _catalog(chunk) -> list:
+    """The rasters of the raster calculator of ``chunk`` (their headers only)."""
     from ..engine import rastercalc
 
-    return [r.name for r in _safe(lambda: rastercalc.rasters(chunk), [])]
+    return list(_safe(lambda: rastercalc.rasters(chunk), []) or [])
+
+
+def _elevations(chunk) -> list[dict]:
+    return [e for e in chunk.meta.get("elevations") or [] if isinstance(e, dict)]
 
 
 def _drawings(chunk) -> dict:
@@ -127,18 +140,18 @@ def _window_drawings(window) -> dict | None:
     return _safe(read, None)
 
 
-def _chunk(chunk, live: dict | None = None) -> dict:
+def _chunk(chunk, live: dict | None = None, rasters: list | None = None) -> dict:
     cameras = list(chunk.cameras)
     return {"label": chunk.label, "key": chunk.key, "photos": len(cameras),
             "enabled": bool(chunk.enabled), "aligned": sum(1 for c in cameras if c.aligned),
             "products": _safe(lambda: _products(chunk), {}),
-            "rasters": _rasters(chunk),
+            "rasters": list(rasters or []),
             "drawings": live if live is not None else _safe(lambda: _drawings(chunk), {}),
             "elevations": [{"id": str(e.get("id")), "name": str(e.get("name") or e.get("id")),
-                            "kind": e.get("kind")} for e in chunk.meta.get("elevations") or [] if isinstance(e, dict)]}
+                            "kind": e.get("kind")} for e in _elevations(chunk)]}
 
 
-def _view(window, chunk) -> dict:
+def _view(window, chunk, catalog: list) -> dict:
     view = {"kind": None, "raster": None, "version": None, "elevation": None, "model": None}
     if window is None:
         return view
@@ -152,13 +165,13 @@ def _view(window, chunk) -> dict:
     if frame is None and isinstance(shown, tuple) and shown and shown[0] == "elevation":
         frame = shown[1]
     if frame is not None:  # an elevation or a section: its name, not a raster of the plan
-        entry = next((e for e in chunk.meta.get("elevations") or [] if e.get("id") == frame), None)
+        entry = next((e for e in _elevations(chunk) if e.get("id") == frame), None)
         view["elevation"] = str(entry.get("name") or frame) if entry else str(frame)
         return view
     path = ov.path
     if path is None:
         return view
-    view["raster"] = _raster_name(chunk, Path(path))
+    view["raster"] = _raster_name(catalog, Path(path))
     if isinstance(shown, tuple) and len(shown) == 2:  # a kept version shown
         from ..core import versions
 
@@ -173,18 +186,17 @@ def _view(window, chunk) -> dict:
     return view
 
 
-def _raster_name(chunk, path: Path) -> str:
-    """The name of the raster calculator of the file shown; else its file name without folders nor extension."""
-    from ..engine import rastercalc
-
+def _raster_name(catalog: list, path: Path) -> str:
+    """The name of the raster calculator of the file shown; else the neutral ``"raster"`` (a file name the user
+    chose would leave the computer as typed)."""
     try:
         wanted = path.resolve()
-        for r in rastercalc.rasters(chunk):
+        for r in catalog:
             if Path(r.path).resolve() == wanted:
                 return r.name
     except Exception:  # noqa: BLE001
         log.debug("raster mostrato", exc_info=True)
-    return path.stem
+    return "raster"
 
 
 def _selection(window) -> dict:
@@ -290,7 +302,10 @@ def text(snap: dict, lang: str, limit: int = LIMIT) -> str:
     else:
         first.append(w["none_active"])
     head.append(", ".join(first) + ".")
-    active = next((c for c in chunks if c.get("label") == snap.get("active")), None)
+    key = snap.get("active_key")
+    active = next((c for c in chunks if c.get("key") == key), None) if key is not None else None
+    if active is None and key is None:  # a snapshot without the key: by the label
+        active = next((c for c in chunks if c.get("label") == snap.get("active")), None)
     if active is not None:
         head.append(f"- {_chunk_line(active, lang, full=True)}")
     view = snap.get("view") or {}
