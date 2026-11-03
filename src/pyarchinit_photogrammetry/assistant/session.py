@@ -64,8 +64,8 @@ OMITTED = {"it": "(risultato omesso)", "en": "(result omitted)"}
 TOO_LONG = {"it": "La conversazione supera il contesto del modello{tokens}: inizia una nuova conversazione",
             "en": "The conversation exceeds the context of the model{tokens}: start a new conversation"}
 TOKENS = {"it": " ({0} token)", "en": " ({0} tokens)"}
-ACTION_STOPPED = {"it": "[azione fermata: {0} non è andata fino in fondo]",
-                  "en": "[action stopped: {0} did not run to the end]"}
+ACTION_STOPPED = {"it": "[azione fermata: «{0}» non è andata fino in fondo]",
+                  "en": "[action stopped: «{0}» did not run to the end]"}
 STOP_REASONS = {"it": {"project_changed": "progetto cambiato", "chunk_changed": "chunk attivo cambiato"},
                 "en": {"project_changed": "the project changed", "chunk_changed": "the active chunk changed"}}
 ACTION_LABELS = {"it": {"ran": "eseguita", "declined": "rifiutata", "stopped": "fermata"},
@@ -74,6 +74,11 @@ ACTION_LABELS = {"it": {"ran": "eseguita", "declined": "rifiutata", "stopped": "
 TOOL_RESULT_CHARS = 4000  # of one tool result sent back to the model
 KEEP_TOOL_RESULTS = 12  # a local model gets the last ones in full, the older ones as OMITTED
 LOCAL_CONTEXT_CHARS = 80_000  # the default budget of a request to a local model
+ACTIONS_ROOM = 8000  # characters the context must leave free beyond the prompt for the actions to be offered
+ACTIONS_OFF = {"it": "Azioni spente: il contesto di questo modello ({0} caratteri) non lascia gli {1} caratteri "
+                     "liberi che servono oltre alle istruzioni",
+               "en": "Actions off: the context of this model ({0} characters) does not leave the {1} free characters "
+                     "they need beyond the instructions"}
 CHARS_PER_TOKEN = 3  # after a context error naming N tokens the budget becomes 3 N characters
 REPEAT_ROUNDS = 2  # consecutive rounds of calls already made: the loop stops
 
@@ -90,9 +95,10 @@ _INSTRUCTIONS = {
         "- Il blocco \"## Il progetto adesso\" dice cosa contiene il progetto aperto e cosa mostra la finestra. Gli "
         "script sono per QUESTO progetto: `chunk` è il chunk attivo nominato lì, un altro chunk si prende col suo "
         "nome con `doc.chunk_by_label(\"nome\")`; usa i nomi di prodotti, raster e versioni che elenca.\n"
-        "- Il raster su cui lavorare è quello mostrato nella vista 2D, a meno che la domanda ne nomini un altro.\n"
-        "- Se un prodotto c'è in più versioni o in più chunk e la domanda non dice quale, fai UNA domanda breve "
-        "prima di scrivere lo script o di agire.\n"
+        "- Se la vista 2D mostra un raster del tipo chiesto (un'ortofoto, un DEM, un prospetto...), lavora su quello "
+        "senza chiedere, anche se altri chunk ne hanno uno, a meno che la domanda ne nomini un altro. Fai UNA "
+        "domanda breve, che nomina i chunk o le versioni, solo quando non è mostrato niente di adatto (nessun "
+        "raster, o uno di un altro tipo) e il prodotto c'è in più chunk o versioni.\n"
         "- Quando l'utente chiede di fare una cosa, falla con uno strumento che agisce se ce n'è uno; dai uno script "
         "quando chiede uno script.\n"
         "- Alla fine della risposta, in una sola riga che inizia con \"Ho letto:\", elenca gli strumenti usati e le "
@@ -109,9 +115,10 @@ _INSTRUCTIONS = {
         "- The block \"## The project now\" says what the open project holds and what the window shows. Scripts are "
         "for THIS project: `chunk` is the active chunk named there, another chunk is taken by its label with "
         "`doc.chunk_by_label(\"label\")`; use the names of the products, rasters and versions it lists.\n"
-        "- The raster to work on is the one shown in the 2D view, unless the question names another.\n"
-        "- When a product exists in several versions or in several chunks and the question does not say which, ask "
-        "ONE short question before writing the script or acting.\n"
+        "- When the 2D view shows a raster of the kind asked (an orthophoto, a DEM, an elevation...), work on it "
+        "without asking, even if other chunks have one, unless the question names another. Ask ONE short question, "
+        "naming the chunks or versions, only when nothing suitable is shown (no raster, or one of another kind) and "
+        "the product exists in several chunks or versions.\n"
         "- When the user asks to do something, do it with a tool that acts when there is one; give a script when "
         "they ask for a script.\n"
         "- At the end of the answer, in one line starting with \"I read:\", list the tools used and the guide pages "
@@ -131,14 +138,16 @@ _ACTIONS_RULE = {
            "all'utente prima di eseguirli. Uno per richiesta. La loro risposta dice cosa è successo: \"ran\": "
            "true = fatto (riferisci i fatti che dà); \"declined\": true = l'utente ha detto no: di' che non è stato "
            "fatto; \"stopped\": true = fermato dall'utente; \"error\" = non riuscito: di' perché. Non dire mai di "
-           "aver fatto una cosa che uno strumento act_ non ha riportato come \"ran\". Se il bersaglio non è "
-           "chiaro, fai una domanda invece di agire."),
+           "aver fatto una cosa che uno strumento act_ non ha riportato come \"ran\". Il raster mostrato è il "
+           "bersaglio; se non è mostrato niente di adatto e il bersaglio non è chiaro, fai una domanda invece di "
+           "agire."),
     "en": ("- The tools whose name starts with act_ act on the open project (showing, choosing photos, stones, "
            "building a product again, units by SAM, exporting, running a script); the program may ask the user "
            "before running them. One per request. Their answer says what happened: \"ran\": true = done (report "
            "the facts it gives); \"declined\": true = the user said no: say it was not done; \"stopped\": true = "
            "stopped by the user; \"error\" = it failed: say why. Never say you did something an act_ tool did not "
-           "report as \"ran\". When the target is not clear, ask a question instead of acting."),
+           "report as \"ran\". The raster shown is the target; when nothing suitable is shown and the target is not "
+           "clear, ask a question instead of acting."),
 }
 _HEADINGS = {"it": ("## Script", "## Strumenti"), "en": ("## Scripts", "## Tools")}
 
@@ -519,6 +528,13 @@ class Assistant:
         self.history.append(Turn("user", question))
         self.history.append(turn)
         actions = act is not None
+        if actions and self.context_chars:  # the actions' rule and tools need room the model's context may not have
+            needed = len(self.system_prompt(block, True)) + len(composed) + \
+                sum(len(t.description) + len(json.dumps(t.parameters)) for t in TOOLS)
+            if self.context_chars - needed < ACTIONS_ROOM:
+                actions, act = False, None
+                off = ACTIONS_OFF[lang].format(_integer(self.context_chars, lang), _integer(ACTIONS_ROOM, lang))
+                turn.note = f"{turn.note} · {off}" if turn.note else off
         offered = _tools(actions)
         messages = self._messages(block, actions)[:-1] + [Message("user", composed)]
 
@@ -587,7 +603,9 @@ class Assistant:
         turn.cancelled = _cancelled(cancel) or stopped is not None
         answer = reply.text or earlier
         if stopped is not None:
-            line = ACTION_STOPPED[lang].format(stopped)
+            from .actions import TITLES
+
+            line = ACTION_STOPPED[lang].format(TITLES[lang].get(action_name(stopped) or "", stopped))
             if why:
                 line = f"{line[:-1]}: {STOP_REASONS[lang].get(str(why), str(why))}]"
             answer = f"{earlier}\n\n{line}" if earlier else line

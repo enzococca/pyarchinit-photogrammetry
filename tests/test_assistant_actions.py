@@ -302,9 +302,9 @@ def test_stones_in_the_window_and_from_a_script(wall, tmp_path, monkeypatch):
         assert len(w.history.entries) == entries + 1
         w.history.undo()
         assert not w.stones.get("orthomosaic.tif") and "stones" not in w.chunk.meta
-        w._show_raster("dem")
-        with pytest.raises(ValueError, match="ortofoto o un prospetto"):
-            actions.stones(w.chunk, w)
+        w._show_raster("dem")  # a DEM shown: the stones go on the chunk's orthophoto, and the result says so
+        r = actions.stones(w.chunk, w)
+        assert r["raster"] == "orthomosaic" and "DEM" in r["note"] and len(w.stones["orthomosaic.tif"]) == n
     finally:
         _close(w, app)
 
@@ -442,3 +442,67 @@ def test_call_passes_the_tool_arguments_to_the_action(monkeypatch):
         actions.call("show", "C", "W", {"what": "dem", "colore": "rosso"})
     with pytest.raises(ValueError, match="sconosciuta"):
         actions.call("vola", "C", "W", {})
+
+
+def test_stones_with_a_dem_shown_fall_back_to_the_orthomosaic(wall):
+    from pyarchinit_photogrammetry.assistant import actions
+
+    doc, ch, n = wall
+
+    class Window:  # a window that shows the DEM
+        chunk, sam = ch, None
+        stored = {}
+
+        def __init__(self):
+            self.doc = doc
+
+        def shown_raster(self):
+            return {"path": ch.product_path("dem"), "kind": "dem", "frame": None, "version": None}
+
+        def set_stones(self, key, found, bounds=None):
+            self.stored[key] = found
+            return len(found)
+
+    w = Window()
+    r = actions.stones(ch, w, min_size=0.1, max_size=0.6)
+    assert r["raster"] == "orthomosaic" and r["stones"] == n and "DEM" in r["note"]
+    assert list(w.stored) == ["orthomosaic.tif"]
+    ch.products.pop("orthomosaic")  # no orthomosaic: refused as before
+    with pytest.raises(ValueError, match="ortofoto o un prospetto"):
+        actions.stones(ch, w)
+
+
+def test_export_without_path_asks_and_a_cancel_is_declined(wall):
+    from pyarchinit_photogrammetry.assistant import actions
+
+    _doc, ch, _n = wall
+
+    class Window:
+        chunk, asked = ch, []
+
+        def ask_save_path(self, title, name, filter_):
+            self.asked.append(name)
+            return ""
+
+    w = Window()
+    assert actions.export(ch, w, "orthomosaic", "tif") == {"declined": True, "what": "orthomosaic", "format": "tif",
+                                                           "chunk": "Muro"}
+    assert w.asked == ["orthomosaic.tif"]
+    assert "path" in actions.script_only("export")
+
+
+def test_paths_are_cut_to_their_names_but_urls_stay():
+    from pyarchinit_photogrammetry.assistant.actions import _no_paths, _of_type
+
+    assert _no_paths('File "/Users/enzo/My Docs/scavo.py", line 3') == 'File "scavo.py", line 3'
+    assert _no_paths("see https://example.com/a/b.html") == "see https://example.com/a/b.html"
+    assert _no_paths(r"C:\Users\x\f.tif failed") == "f.tif failed"
+    assert _of_type(np.int64(3), "integer") and _of_type(np.float32(0.5), "number")
+    assert _of_type(np.zeros(4), "array") and not _of_type(True, "integer")
+
+
+def test_quick_showing_is_only_on_the_active_chunk():
+    from pyarchinit_photogrammetry.assistant.actions import is_quick
+
+    assert is_quick("show", {"what": "dem"}, "A") and is_quick("show", {"chunk_label": "A"}, "A")
+    assert not is_quick("show", {"chunk_label": "B"}, "A")

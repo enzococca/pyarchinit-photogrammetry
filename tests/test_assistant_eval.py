@@ -130,7 +130,9 @@ def test_the_evaluation_set_is_complete_and_its_examples_pass_their_own_checks()
             assert case["tool"] in facts.tool_names(acts=True)
             assert evaluate._contains(case["example_args"], case["args_contain"]), case["id"]
     ambiguous = actions["ambiguous_orthophoto"]
-    assert ambiguous.get("tool") is None and ambiguous["setup"] == "two_orthophotos"
+    assert ambiguous.get("tool") is None and ambiguous["setup"] == "two_orthophotos" and not ambiguous.get("shown")
+    shown = actions["shown_orthophoto"]
+    assert shown["tool"] == "act_stones" and shown["setup"] == "two_orthophotos" and shown["shown"] == "ortho"
     assert any("quale" in p and "which" in p for p in ambiguous["must_contain"])
 
 
@@ -400,6 +402,7 @@ def test_the_action_cases_pass_with_the_reference_answers_on_the_demo(processed)
     by_id = {r["id"]: r for r in talks["results"]}
     assert not by_id["action_stones"]["passed"] and "act_stones" in by_id["action_stones"]["detail"]
     assert by_id["ambiguous_orthophoto"]["passed"]  # a question and no action: what the case wants
+    assert not by_id["shown_orthophoto"]["passed"]  # an orthophoto shown: asking is wrong
 
     class _Rushes(CasesProvider):
         """Draws the stones on the ambiguous question instead of asking."""
@@ -413,8 +416,9 @@ def test_the_action_cases_pass_with_the_reference_answers_on_the_demo(processed)
             return super().complete(messages, tools, on_text, cancel)
 
     rushes = run_eval(_Rushes(), doc.path, kinds="actions")["actions"]
-    ambiguous = next(r for r in rushes["results"] if r["id"] == "ambiguous_orthophoto")
-    assert not ambiguous["passed"] and "act_stones" in ambiguous["detail"]
+    by_id = {r["id"]: r for r in rushes["results"]}
+    assert not by_id["ambiguous_orthophoto"]["passed"] and "act_stones" in by_id["ambiguous_orthophoto"]["detail"]
+    assert by_id["shown_orthophoto"]["passed"]  # the orthophoto shown: acting at once is right
 
 
 def test_the_command_line_ask_says_it_does_not_act():

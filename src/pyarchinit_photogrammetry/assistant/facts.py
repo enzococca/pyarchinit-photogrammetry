@@ -114,6 +114,8 @@ def _action_parameters(schema: dict) -> dict:
     product (they are passed through to the builder as they are)."""
     props = {}
     for key, p in (schema.get("properties") or {}).items():
+        if p.get("script_only"):  # a script's parameter (export's path): not the model's to give
+            continue
         q = {k: p[k] for k in ("type", "enum", "default", "items") if k in p}
         description = str(p.get("description_en") or "")
         if "per_product" in p:
@@ -607,6 +609,9 @@ def run_tool(name: str, arguments: dict | None, document, index: Index | None,
         if action is not None:
             if act is None:
                 return {"error": "actions need the window"}
+            from .actions import script_only
+
+            arguments = {k: v for k, v in arguments.items() if k not in script_only(action)}  # never from the model
             result = act(action, arguments)
             return result if isinstance(result, dict) else \
                 {"error": f"the action {action} answered {type(result).__name__}, not an object"}

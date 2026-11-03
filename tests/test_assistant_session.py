@@ -541,7 +541,7 @@ def test_a_stopped_action_ends_the_turn_saying_so(doc):
     assert len(fake.calls) == 1  # no other round: the model is not asked to go on
     assert asked == ["stones"]  # after a stop the next action of the same reply is not asked for
     assert turn.cancelled and turn.text.startswith("Cerco le pietre.")
-    assert "act_stones" in turn.text and "stopped" in turn.text and "Fatto" not in turn.text
+    assert "«Stones (SAM)»" in turn.text and "stopped" in turn.text and "Fatto" not in turn.text
     assert "tool: act_stones (stopped)" in turn.read
 
 
@@ -553,3 +553,25 @@ def test_the_reason_of_a_stop_is_said(doc):
     assistant, _ = make(doc, [calls(("act_stones", {})), text("Done!")], kind="local", language="en")
     turn = assistant.ask("Draw the stones", act=lambda name, args: {"stopped": True, "reason": "chunk_changed"})
     assert turn.text.endswith(": the active chunk changed]")  # the code said in the conversation's language
+
+
+
+def test_actions_need_room_in_the_context_and_export_has_no_path(doc):
+    tools = {t.name: t for t in F.TOOLS}
+    assert "path" not in tools["act_export"].parameters["properties"]  # the save dialog always asks where
+    seen = []
+    F.run_tool("act_export", {"what": "dem", "format": "tif", "path": "/etc/x.tif"}, doc, None,
+               act=lambda n, a: seen.append(a) or {"ran": True})
+    assert seen == [{"what": "dem", "format": "tif"}]  # a path the model sends anyway never arrives
+    assistant, fake = make(doc, [text("ok")], kind="local", context_chars=12_000)
+    turn = assistant.ask("Ciao", act=lambda name, args: {"ran": True})
+    assert not any(t.name.startswith("act_") for t in fake.calls[0][1])
+    assert "Azioni spente" in turn.note
+    assistant, fake = make(doc, [text("ok")], kind="local", context_chars=200_000)
+    turn = assistant.ask("Ciao", act=lambda name, args: {"ran": True})
+    assert any(t.name.startswith("act_") for t in fake.calls[0][1]) and not turn.note
+
+
+def test_the_raster_shown_is_the_target(doc):
+    prompt = make(doc, [text("ok")])[0].system_prompt(actions=True)
+    assert "senza chiedere" in prompt and "niente di adatto" in prompt

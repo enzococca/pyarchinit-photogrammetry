@@ -273,6 +273,19 @@
    "example_en": "The orthophoto is exported as a GeoTIFF.\n\nI read: tool act_export"
   },
   {
+   "id": "shown_orthophoto",
+   "kind": "action",
+   "setup": "two_orthophotos",
+   "shown": "ortho",
+   "question_it": "Trova le pietre sull'ortofoto.",
+   "question_en": "Find the stones on the orthophoto.",
+   "tool": "act_stones",
+   "args_contain": {},
+   "example_args": {},
+   "example_it": "Ho disegnato le pietre sull'ortofoto mostrata, nel layer «Pietre».\n\nHo letto: strumento act_stones",
+   "example_en": "The stones are drawn on the orthophoto shown, in the layer «Pietre».\n\nI read: tool act_stones"
+  },
+  {
    "id": "ambiguous_orthophoto",
    "kind": "action",
    "setup": "two_orthophotos",

@@ -619,7 +619,7 @@ def test_a_card_waits_for_run_and_the_action_is_undone_in_one_step(window, fake_
     _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
     card = pane.cards[-1]
     assert not fake_actions and pane.busy  # nothing ran: the card waits
-    assert "Pietra più piccola" in card.text() and "0,1" in card.text()
+    assert "Pietra più piccola" in card.text() and "0,1" in card.text() and "Area: tutto il raster" in card.text()
     card.b_run.click()
     _wait(app, pane)
     assert fake_actions == [("stones", {"min_size": 0.1}, False)]  # in the task runner, not in the interface
@@ -869,16 +869,103 @@ def test_the_assistants_own_steps_do_not_stop_the_next_action(window, monkeypatc
 
     monkeypatch.setitem(actions.ACTIONS, "show", (show, *actions.ACTIONS["show"][1:]))
     monkeypatch.setitem(actions.ACTIONS, "stones", (stones, *actions.ACTIONS["stones"][1:]))
-    _mode(pane, "quick")
+    _mode(pane, "quick")  # showing another chunk waits for Esegui, then the stones wait for theirs
     two = Reply("", [ToolCall("c0", "act_show", {"what": "ortho", "chunk_label": "Saggio 2"}),
                      ToolCall("c1", "act_stones", {})], "tool_calls", {})
     fake = FakeProvider([two, text("Fatto su Saggio 2.")])
     pane.set_provider(fake)
     pane.ask("quella di Saggio 2: disegna le pietre")
     _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    assert pane.cards[-1].name == "show"
+    pane.cards[-1].b_run.click()
+    _until(app, lambda: pane.cards and pane.cards[-1].name == "stones" and pane.cards[-1].state == "waiting")
     assert w.chunk.label == "Saggio 2" and "Saggio 2" in pane.cards[-1].text()
     pane.cards[-1].b_run.click()
     _wait(app, pane)
     assert seen == ["Saggio 2"] and pane.cards[-1].state == "done"
     assert "Fatto su Saggio 2." in pane.chat.toPlainText()
     w.setWindowModified(False)
+
+
+
+def test_all_still_asks_for_scripts_and_exports_and_quick_for_another_chunk(window, monkeypatch):
+    from pyarchinit_photogrammetry.assistant import actions
+
+    w, app = window
+    pane = w.assistant
+    seen = []
+
+    def build(chunk, window, product, progress=None, **kw):
+        seen.append(product)
+        return {"product": product}
+
+    monkeypatch.setitem(actions.ACTIONS, "build", (build, *actions.ACTIONS["build"][1:]))
+    _mode(pane, "all")
+    pane.set_provider(FakeProvider([_calls("act_build", {"product": "relief"}), text("Fatto."),
+                                    _calls("act_run_script", {"source": "print(1)"}), text("Non eseguito.")]))
+    pane.ask("il rilievo")
+    _wait(app, pane)
+    assert seen == ["relief"]  # at once
+    pane.ask("esegui questo")
+    _until(app, lambda: pane.cards and pane.cards[-1].name == "run_script" and pane.cards[-1].state == "waiting")
+    pane.cards[-1].b_no.click()
+    _wait(app, pane)
+    # quick: showing another chunk makes it active (its undo history starts afresh): a card says so
+    w.doc.add_chunk("Saggio 2")
+    _mode(pane, "quick")
+    pane.set_provider(FakeProvider([_calls("act_show", {"what": "dem", "chunk_label": "Saggio 2"}), text("ok")]))
+    pane.ask("il DEM di Saggio 2")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    assert "Chunk: Saggio 2" in pane.cards[-1].text() and "cronologia" in pane.cards[-1].text()
+    pane.cards[-1].b_no.click()
+    _wait(app, pane)
+    w.setWindowModified(False)
+
+
+def test_an_export_of_the_model_goes_through_the_save_dialog(window, monkeypatch):
+    w, app = window
+    pane = w.assistant
+    asked = []
+    monkeypatch.setattr(w, "ask_save_path", lambda title, name, filter_: asked.append(name) or "")
+    fake = FakeProvider([_calls("act_export", {"what": "orthomosaic", "format": "tif", "path": "/tmp/fuori.tif"}),
+                         text("Annullato.")])
+    pane.set_provider(fake)
+    pane.ask("esporta l'ortofoto")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    assert "fuori" not in pane.cards[-1].text()
+    pane.cards[-1].b_run.click()
+    _wait(app, pane)
+    assert asked == ["orthomosaic.tif"] and _tool_result(fake) == {"declined": True}
+    assert pane.cards[-1].state == "declined"
+
+
+def test_a_chunk_switched_by_the_user_during_an_action_stops_the_next(window, monkeypatch):
+    from pyarchinit_photogrammetry.assistant import actions
+    from pyarchinit_photogrammetry.assistant.providers import ToolCall
+
+    w, app = window
+    pane = w.assistant
+    other = w.doc.add_chunk("Saggio 2")
+    shown = []
+
+    def stones(chunk, window, progress=None, **kw):
+        w.doc.chunk = other  # the user makes another chunk active while it runs
+        return {"stones": 1}
+
+    monkeypatch.setitem(actions.ACTIONS, "stones", (stones, *actions.ACTIONS["stones"][1:]))
+    monkeypatch.setitem(actions.ACTIONS, "show",
+                        (lambda chunk, window, what="ortho", **kw: shown.append(what) or {"shown": what},
+                         *actions.ACTIONS["show"][1:]))
+    _mode(pane, "all")
+    two = Reply("", [ToolCall("c0", "act_stones", {}), ToolCall("c1", "act_show", {"what": "dem"})], "tool_calls", {})
+    pane.set_provider(FakeProvider([two, text("ok")]))
+    pane.ask("pietre e poi il DEM")
+    _wait(app, pane)
+    assert not shown and "chunk attivo cambiato" in pane.chat.toPlainText()
+    w.setWindowModified(False)
+
+
+def test_result_lines_name_the_facts_in_words():
+    from pyarchinit_photogrammetry.gui.assistant_actions import result_line
+
+    assert result_line("stones", {"ran": True, "stones": 3, "layer": "Pietre"}) == "pietre: 3; layer: Pietre"

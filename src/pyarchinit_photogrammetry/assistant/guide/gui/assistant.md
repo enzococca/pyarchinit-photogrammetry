@@ -22,9 +22,10 @@ the raster calculator by name, how many units, spot heights, stones, lines and e
 chunk, what the 2D view shows (the orthophoto, the DEM, a raster of the calculator, a version, an elevation), what the
 3D view shows, the selection (a polygon and its area, how many photos are selected) and the photo filter. Only names,
 kinds and counts: never a path, a coordinate or the pixels of a raster. With it the model writes scripts for *this*
-project - `chunk` is the active chunk it names, another chunk is `doc.chunk_by_label("...")` - and works on the raster
-shown unless you name another. When a product exists in several chunks or versions and the question does not say
-which, it asks one question ("which orthophoto: that of Area nord or that of Area sud?").
+project - `chunk` is the active chunk it names, another chunk is `doc.chunk_by_label("...")`. When the 2D view shows a
+raster of the kind you ask about (an orthophoto, a DEM, an elevation...), it works on that one without asking, even if
+other chunks have one, unless you name another. It asks one question only when nothing suitable is shown and the
+product exists in several chunks or versions ("which orthophoto: that of Area nord or that of Area sud?").
 
 ## Actions
 
@@ -34,10 +35,10 @@ When you ask the assistant to *do* something, it does it with an action instead 
 | --- | --- |
 | Show | the orthophoto, the DEM, the model, the cloud, an elevation or a raster of the calculator (also a kept version or another chunk) |
 | Choose the photos | by area (the selected polygon), by markers, by name, all or none; then filters or selects them in the Photos pane, or switches them on or off |
-| Stones (SAM) | the stone finder on the orthophoto, an elevation or a raster of the calculator (the one shown unless named; a DEM is refused), stones drawn in the layer «Pietre» |
+| Stones (SAM) | the stone finder on the orthophoto, an elevation or a raster of the calculator (the one shown unless named; with a DEM shown, the chunk's orthophoto, and the result says so), stones drawn in the layer «Pietre» |
 | Build again | the DEM, orthophoto, dense cloud, model, texture, relief, normal map, TIN or contour lines with the parameters you give; the product before is kept as a version |
 | Units (SAM) | the units SAM finds in an area of the raster shown, as candidates in the layer «Unita' da SAM» |
-| Export | a product or the drawings to a file (the window asks where) |
+| Export | a product or the drawings to a file: the window always asks where (and before overwriting a file); a cancelled dialog is a *No* |
 | Script | a script the model writes, run as *Run* in the editor runs it |
 
 The same functions are `ppg.actions` in a script (see [Scripts](../scripting.md)).
@@ -45,10 +46,12 @@ The same functions are `ppg.actions` in a script (see [Scripts](../scripting.md)
 **When they run** - *View > Assistant > Actions*:
 
 * **Always ask**: every action appears as a card in the conversation and waits;
-* **Quick ones at once** (the default): showing, and filtering or selecting photos, run at once (a line in the chat
-  says what ran); stones, builds, units, exports, photos switched on or off and scripts wait for you;
-* **Run everything**: every action runs at once; the quick ones leave only a line in the chat, the others a card
-  with the result and *Undo*.
+* **Quick ones at once** (the default): showing on the active chunk, and filtering or selecting photos, run at once
+  (a line in the chat says what ran); stones, builds, units, exports, photos switched on or off, scripts and showing
+  another chunk wait for you - showing another chunk makes it the active one, which starts its undo history afresh;
+* **Run everything (scripts and exports ask)**: every action runs at once except the model's scripts and the exports,
+  which still wait for *Run*; the quick ones leave only a line in the chat, the others a card with the result and
+  *Undo*. What a script does outside the project is not undone.
 
 A card names the action and its parameters in words, with **Run**, **Edit** (the parameters in a small form; the card
 waits again for *Run*) and **No**. The model gets what happened - done with its facts, *No*, stopped or the error - and
@@ -64,6 +67,8 @@ project are said in the card and cannot be undone. Only one step runs at a time:
 runs is refused and the model is told.
 
 `ppg assistant ask` on the command line has no window: there the assistant only reads, the actions are not offered.
+The actions also need room in the model's context: at least 8 000 characters free beyond the instructions and the
+project's block. With a smaller context (a local model with a short window) they are off, and the answer says so.
 
 ## The three kinds of model
 
@@ -153,8 +158,9 @@ only, the ground points exported. Each script runs on a copy of the project and 
 gets one second try, as with *Error? Ask the assistant*. The score is the number of script tasks done. The set also
 has requests to act (show the DEM, stones bigger than 10 cm, the DEM again at 2 cm, photos switched off by name, the
 photos of the selected area, the orthophoto exported): each passes when the model calls the right action with those
-parameters - the calls are recorded, nothing runs - and one ambiguous request (two chunks each with an orthophoto,
-"draw the stones on the orthophoto") passes when the model asks which one and acts on none (`--only actions`).
+parameters - the calls are recorded, nothing runs. Two chunks each with an orthophoto: with one of them shown, "find
+the stones on the orthophoto" passes when the model draws them at once; with nothing shown, "draw the stones on the
+orthophoto" passes when it asks which one and acts on none (`--only actions`).
 
 ```bash
 ppg assistant eval FOLDER/scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out local.json --record

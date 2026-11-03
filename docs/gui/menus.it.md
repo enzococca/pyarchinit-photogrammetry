@@ -401,7 +401,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | --- | --- |
 | **Pannelli** | ogni pannello aperto o chiuso: [vedi sotto](#vista-pannelli) |
 | **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++) |
-| **Assistente** | *Apri l'assistente*; **Azioni**: *Chiedi sempre*, *Subito le rapide* (predefinito), *Esegui tutto* - quando partono le azioni dell'assistente ([Azioni](assistant.md#azioni)) |
+| **Assistente** | *Apri l'assistente*; **Azioni**: *Chiedi sempre*, *Subito le rapide* (predefinito), *Esegui tutto (script ed esportazioni chiedono)* - quando partono le azioni dell'assistente ([Azioni](assistant.md#azioni)) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
 | **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
 | **Tema** | chiaro o scuro, ricordato |

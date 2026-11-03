@@ -18,7 +18,9 @@ The set (``assistant/evaluation/cases.json``, package data: :data:`CASES`) has t
   ``args_contain`` (the ``params`` of a build are looked into too; numbers compared to 1e-6, texts without case); a
   case without ``tool`` passes when no action was called and the answer matches every ``must_contain`` - the
   ambiguous request, whose right answer is ONE question. ``setup`` prepares a copy of the project first:
-  "two_orthophotos" = the chunk renamed "Area nord" and a second chunk "Area sud" with a copy of its orthophoto.
+  "two_orthophotos" = the chunk renamed "Area nord" and a second chunk "Area sud" with a copy of its orthophoto;
+  ``shown`` ("ortho", "dem") is what the 2D view shows in the inventory (nothing otherwise): with two orthophotos
+  and one shown the model works on the one shown, with none shown it asks which.
 
 Every case also carries a reference answer (``example_it``/``example_en`` for a question and for an action - after
 the call ``example_args`` of its ``tool`` -, ``example`` for a script):
@@ -240,16 +242,21 @@ class _Window:
     (``mark_modified``, ``selected_polygon``); for the actions :meth:`inventory` (the project's snapshot, no view)
     and :meth:`act`, which records the call in ``calls`` and runs nothing; anything else is an error naming it."""
 
-    def __init__(self, polygon, document=None):
+    def __init__(self, polygon, document=None, shown: str | None = None):
         self._polygon = polygon
         self._document = document
+        self._shown = shown
         self.calls: list[tuple[str, dict]] = []
 
     def inventory(self) -> dict | None:
-        """What the pane would send: the snapshot of the project (no window here: nothing shown, nothing selected)."""
+        """What the pane would send: the snapshot of the project (no window here: nothing selected), with the 2D view
+        showing ``shown`` of the active chunk ("ortho" or "dem") when the case says so, else nothing."""
         from . import inventory
 
-        return inventory.snapshot(self._document)
+        snap = inventory.snapshot(self._document)
+        if snap is not None and self._shown in ("ortho", "dem"):
+            snap["view"].update(kind=self._shown, raster="orthomosaic" if self._shown == "ortho" else "dem")
+        return snap
 
     def act(self, name: str, args: dict) -> dict:
         """The action recorded, not run: the model is told it ran (the evaluation looks at the call only)."""
@@ -510,7 +517,7 @@ def run_eval(provider: Provider, project: Path, cases: Path = CASES, kinds: str 
             folder.mkdir()
             try:
                 doc_a = _setup(case, project, folder)
-                window = _Window(None, doc_a)
+                window = _Window(None, doc_a, shown=case.get("shown"))
                 assistant = Assistant(provider, lambda d=doc_a: d, index, language=lang)
                 a_results.append(_action(assistant, case, lang, window))
             except Exception as exc:  # noqa: BLE001 - a case that cannot be prepared fails, the others go on

@@ -567,8 +567,9 @@ class AssistantPane(QWidget):
             return
         doc_ref, key, label = self._asked_on or self._where()
         mode = self.action_mode()
-        quick = _actions.is_quick(name, args)
-        at_once = mode == "all" or (mode == "quick" and quick)
+        quick = _actions.is_quick(name, args, label)
+        # under "all" too the model's own code and files written outside the project wait for Esegui
+        at_once = (mode == "all" and name not in _actions.ASK_ALWAYS) or (mode == "quick" and quick)
         action = {"future": future, "card": None, "running": False, "name": name, "args": args,
                   "doc": doc_ref, "chunk": key}
         if not (at_once and quick):  # a quick action that runs at once leaves only a line in the chat
@@ -664,8 +665,9 @@ class AssistantPane(QWidget):
                 else None
             if card is not None and card in self.cards:
                 card.finish(result, made)
-            if result.get("ran") and not future.done():
-                # the assistant's own step (a chunk it made active): the next action of this question starts from here
+            if result.get("ran") and not future.done() and name == "show" and action["args"].get("chunk_label"):
+                # the assistant's own step (a chunk it made active): the next action of this question starts from
+                # there; any other change of chunk - the user's, also during a long build - still stops it
                 self._asked_on = self._where()
             if not future.done():  # stopped meanwhile: the question already ended saying so
                 title = tr(ACTION_TITLES.get(name, name))

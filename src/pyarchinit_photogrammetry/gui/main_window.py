@@ -14575,10 +14575,16 @@ class MainWindow(QMainWindow):
                 done({"stopped": True})
             elif result.error:
                 done({"error": result.error})
+            elif isinstance(result.value, dict) and result.value.get("declined"):  # the save dialog cancelled
+                done({"declined": True})
             elif isinstance(result.value, dict) and result.value.get("error"):  # a script of the model that failed
-                done({k: v for k, v in result.value.items() if v not in (None, [], "")})
+                value = {k: v for k, v in result.value.items() if k != "external" and v not in (None, [], "")}
+                if result.external:
+                    value["not_undoable"] = list(dict.fromkeys(result.external))
+                done(value)
             else:
                 value = result.value if isinstance(result.value, dict) else {"value": result.value}
+                value = {k: v for k, v in value.items() if k != "external"}  # a script's calls: the recorder's below
                 out = {"ran": True, **value}
                 if result.external:
                     out["not_undoable"] = list(dict.fromkeys(result.external))

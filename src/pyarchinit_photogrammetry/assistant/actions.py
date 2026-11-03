@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import numbers
 import re
 from pathlib import Path
+
+import numpy as np
 
 from ..core.progress import as_progress
 
@@ -259,12 +262,28 @@ def _image(chunk, window, raster: str | None) -> dict:
 
 
 def _image_with_colours(chunk, window, raster, what: str) -> dict:
-    """:func:`_image`, refused when it is a DEM or has fewer than three bands."""
+    """:func:`_image`, refused when it is a DEM or has fewer than three bands. With no raster named and a DEM (or a
+    one-band raster) shown on the plan, the chunk's orthomosaic instead, with a ``note`` saying so."""
     target = _image(chunk, window, raster)
-    if target["kind"] == "dem" or _bands(target["path"]) < 3:
+    flat = target["kind"] == "dem" or _bands(target["path"]) < 3
+    if flat and raster is None and target["frame"] is None:
+        ortho = chunk.product_path("orthomosaic")
+        if ortho is not None and Path(ortho).exists():
+            return {"path": Path(ortho), "frame": None, "kind": "ortho", "name": _raster_name(chunk, Path(ortho)),
+                    "note": f"«{target['name']}» mostrato è un DEM o un raster a una banda: usata l'ortofoto del "
+                            f"chunk"}
+    if flat:
         raise ValueError(f"«{target['name']}» è un DEM o un raster a una banda: {what} lavora su un'ortofoto o un "
                          f"prospetto")
     return target
+
+
+def _plan_box_on_elevation(bounds, target: dict) -> None:
+    """A box given in numbers is in plan coordinates: on an elevation (its own (u, v)) only "selection" is right."""
+    if target.get("frame") is not None and bounds is not None and not isinstance(bounds, str) \
+            and not hasattr(bounds, "bounds"):
+        raise ValueError("su un prospetto l'area è il poligono selezionato (\"selection\"), non un riquadro in "
+                         "coordinate della pianta")
 
 
 @contextlib.contextmanager
@@ -519,6 +538,7 @@ def stones(chunk, window, raster: str | None = None, bounds=None, min_size: floa
         raise ValueError("serve 0 < min_size < max_size (metri)")
     chunk = _chunk(chunk, window)
     target = _image_with_colours(chunk, window, raster, "lo strumento delle pietre")
+    _plan_box_on_elevation(bounds, target)
     box_ = _box(bounds, window)
     progress = as_progress(progress)
     with _segmenter(chunk, window) as seg:
@@ -529,7 +549,8 @@ def stones(chunk, window, raster: str | None = None, bounds=None, min_size: floa
         total = window.set_stones(key, found, box_)
     else:
         total = _store_stones(chunk, key, target["frame"], found, box_)
-    return {"stones": len(found), "total": total, "layer": STONES_LAYER, "raster": target["name"],
+    return {**({"note": target["note"]} if target.get("note") else {}),
+            "stones": len(found), "total": total, "layer": STONES_LAYER, "raster": target["name"],
             "chunk": chunk.label}
 
 
@@ -568,6 +589,7 @@ def segment(chunk, window, bounds=None, prompt: str | None = None, thoroughness:
     _thoroughness(thoroughness)
     chunk = _chunk(chunk, window)
     target = _image_with_colours(chunk, window, None, "la segmentazione")
+    _plan_box_on_elevation(bounds, target)
     if bounds is None and _active(chunk, window):
         polygon = window.selected_polygon()
         box_ = tuple(float(v) for v in polygon.bounds) if polygon is not None and not polygon.is_empty else None
@@ -590,7 +612,10 @@ def segment(chunk, window, bounds=None, prompt: str | None = None, thoroughness:
         n = window.add_sam_units(units)
     else:
         n = _store_units(chunk, target["frame"], units)
-    return {"units": n, "layer": SAM_LAYER, "raster": target["name"], "chunk": chunk.label}
+    out = {"units": n, "layer": SAM_LAYER, "raster": target["name"], "chunk": chunk.label}
+    if target.get("note"):
+        out["note"] = target["note"]
+    return out
 
 
 def _store_units(chunk, frame: str | None, units: list) -> int:
@@ -663,7 +688,8 @@ _TYPE_NAMES = {"number": "un numero", "integer": "un intero", "boolean": "true o
                "array": "una lista"}
 
 
-_PYTHON_TYPES = {"number": (int, float), "integer": int, "string": str, "array": (list, tuple)}
+_PYTHON_TYPES = {"number": numbers.Real, "integer": numbers.Integral, "string": str,
+                 "array": (list, tuple, np.ndarray)}
 
 
 def _of_type(value, kind: str) -> bool:
@@ -778,7 +804,9 @@ def _contours(chunk, window, progress, interval=None, index_every: int = 5, smoo
 def export(chunk, window, what: str, format: str, path=None, progress=None) -> dict:  # noqa: A002 - the tool's word
     """``what`` of the chunk (:data:`EXPORTS`: "orthomosaic", "dem", "model", "point_cloud", "units", "stones",
     "report", "ifc", "tables") written as ``format`` in ``path``; without ``path`` the window asks where (a save
-    dialog), and headless ``path`` is required. Returns the file name and its size."""
+    dialog: a cancelled one answers ``{"declined": True, ...}``), and headless ``path`` is required. Returns the file
+    name and its size. The assistant's tool has no ``path``: it always goes through the save dialog, which asks
+    before overwriting a file."""
     if what not in EXPORTS:
         raise ValueError(f"esportazione «{what}»: {', '.join(EXPORTS)}")
     fmt = str(format or "").strip().lower().lstrip(".")
@@ -793,7 +821,7 @@ def export(chunk, window, what: str, format: str, path=None, progress=None) -> d
             raise ValueError("senza la finestra serve il percorso del file (path) in cui esportare")
         path = window.ask_save_path("Esporta", f"{what}{ext}", f"{fmt.upper()} (*{ext})")
         if not path:
-            return {"what": what, "format": fmt, "cancelled": True, "chunk": chunk.label}
+            return {"declined": True, "what": what, "format": fmt, "chunk": chunk.label}  # the user cancelled
     p = Path(path)
     if p.suffix == "":
         p = p.with_suffix(ext)
@@ -889,16 +917,20 @@ def run_script(chunk, window, source: str, progress=None) -> dict:
             "external": list(dict.fromkeys(result.external)), "seconds": round(result.elapsed, 2)}
 
 
-_PATH = re.compile(r"""(?<![\w.])(?:[A-Za-z]:)?(?:[\\/][^\s"'<>\\/]+)*[\\/]([^\s"'<>\\/]+)""")
+# a quoted absolute path (spaces allowed inside the quotes) and a bare one; never a URL ("https://host/a")
+_QUOTED_PATH = re.compile(r"""(["'])(?:[A-Za-z]:)?(?:[\\/][^"'\n\\/]+)*[\\/]([^"'\n\\/]+)\1""")
+_PATH = re.compile(r"""(?<![\w.:/\\])(?:[A-Za-z]:)?(?:[\\/][^\s"'<>\\/]+)*[\\/]([^\s"'<>\\/]+)""")
 
 
 def _no_paths(text: str | None) -> str | None:
     """``text`` with every absolute path reduced to its file name (what reaches the model never says where)."""
-    return None if text is None else _PATH.sub(r"\1", text)
+    if text is None:
+        return None
+    return _PATH.sub(r"\1", _QUOTED_PATH.sub(r"\1\2\1", text))
 
 
 # ------------------------------------------------------------------ the registry for the tools
-def _prop(kind: str | list, it: str, en: str, enum=None, default=None, items: str | None = None) -> dict:
+def _prop(kind: str | list, it: str, en: str, enum=None, default=None, items: str | list | None = None) -> dict:
     out = {"type": list(kind) if isinstance(kind, (list, tuple)) else kind, "description_it": it,
            "description_en": en}
     if enum is not None:
@@ -906,17 +938,19 @@ def _prop(kind: str | list, it: str, en: str, enum=None, default=None, items: st
     if default is not None:
         out["default"] = default
     if items is not None:
-        out["items"] = {"type": items}
+        out["items"] = {"type": list(items) if isinstance(items, (list, tuple)) else items}
     return out
 
 
 _CHUNK_LABEL = _prop("string", "Il chunk (per nome); vuoto: quello attivo",
                      "The chunk (by label); empty: the active one")
 _BOUNDS = _prop(["array", "string"],
-                "Riquadro [xmin, ymin, xmax, ymax] nelle coordinate del raster, o il testo \"selection\": il poligono "
-                "selezionato nella vista 2D",
-                "Box [xmin, ymin, xmax, ymax] in the raster's coordinates, or the text \"selection\": the polygon "
-                "selected in the 2D view", items="number")
+                "Riquadro [xmin, ymin, xmax, ymax] nelle coordinate della pianta (il sistema del chunk), anche "
+                "quando è mostrato un prospetto, o il testo \"selection\": il poligono selezionato nella vista 2D "
+                "(pietre e unità su un prospetto: solo \"selection\")",
+                "Box [xmin, ymin, xmax, ymax] in PLAN coordinates (the chunk's system), also when an elevation is "
+                "shown, or the text \"selection\": the polygon selected in the 2D view (stones and units on an "
+                "elevation: \"selection\" only)", items="number")
 _THOROUGH = ["normale", "alta", "massima"]
 
 ACTIONS: dict[str, tuple] = {
@@ -946,7 +980,7 @@ ACTIONS: dict[str, tuple] = {
                           "markers": _prop(["array", "string", "integer"],
                                            "I marker: una lista di nomi, chiavi o codici, o uno solo",
                                            "The markers: a list of labels, keys or codes, or one of them",
-                                           items="string"),
+                                           items=["string", "integer"]),
                           "pattern": _prop("string", "Schema dei nomi (es. DJI_01*)", "Pattern of the names "
                                            "(e.g. DJI_01*)"),
                           "enabled": _prop("boolean", "Solo le foto attive (true) o disattivate (false)",
@@ -989,8 +1023,9 @@ ACTIONS: dict[str, tuple] = {
                    "format": _prop("string", "Formato (" + "; ".join(f"{k}: {', '.join(v)}" for k, v in EXPORTS.items())
                                    + ")", "Format (" + "; ".join(f"{k}: {', '.join(v)}" for k, v in EXPORTS.items())
                                    + ")", sorted({f for v in EXPORTS.values() for f in v})),
-                   "path": _prop("string", "Il file; vuoto: lo chiede la finestra",
-                                 "The file; empty: the window asks")}}),
+                   # from a script only: the assistant's tool goes through the save dialog (it asks about overwriting)
+                   "path": {**_prop("string", "Il file; vuoto: lo chiede la finestra",
+                                    "The file; empty: the window asks"), "script_only": True}}}),
     "run_script": (run_script, False,
                    "Esegue uno script Python sul progetto, come Esegui nell'editor",
                    "Runs a Python script on the project, as Run in the editor does",
@@ -1027,14 +1062,34 @@ def call(name: str, chunk, window, args: dict | None, progress=None) -> dict:
     return function(chunk, window, **kwargs)
 
 
-def is_quick(name: str, params: dict | None = None) -> bool:
+# the name of each action, for the user (the cards, Modifica > Annulla, the answer when one is stopped)
+TITLES = {"it": {"show": "Mostra", "select_photos": "Scegli le foto", "stones": "Pietre (SAM)",
+                 "build": "Ricostruisci", "segment": "Unità (SAM)", "export": "Esporta", "run_script": "Script"},
+          "en": {"show": "Show", "select_photos": "Choose the photos", "stones": "Stones (SAM)",
+                 "build": "Build again", "segment": "Units (SAM)", "export": "Export", "run_script": "Script"}}
+# what asks before running even under "Esegui tutto": the model's own code, and files written outside the project
+ASK_ALWAYS = ("run_script", "export")
+
+
+def is_quick(name: str, params: dict | None = None, active_label: str | None = None) -> bool:
     """Whether the action ``name`` with ``params`` runs at once under *Subito le rapide*: showing, and selecting
-    photos to filter or select them (not to switch them on or off)."""
+    photos to filter or select them (not to switch them on or off). Showing another chunk than the active one
+    (``active_label``) is not quick: it makes that chunk the active one, which starts its undo history afresh."""
+    if name == "show":
+        other = (params or {}).get("chunk_label")
+        return not other or other == active_label
     if name == "select_photos":
         return (params or {}).get("then", "filter") in ("filter", "select")
     entry = ACTIONS.get(name)
     return bool(entry and entry[1])
 
 
-__all__ = ["ACTIONS", "BUILD_PARAMS", "EXPORTS", "PRODUCTS", "build", "call", "export", "is_quick", "run_script",
-           "segment", "select_photos", "show", "stones"]
+def script_only(name: str) -> set:
+    """The parameters of the action ``name`` a script may give but the assistant's tool does not offer."""
+    entry = ACTIONS.get(name)
+    props = (entry[4].get("properties") or {}) if entry else {}
+    return {k for k, p in props.items() if isinstance(p, dict) and p.get("script_only")}
+
+
+__all__ = ["ACTIONS", "ASK_ALWAYS", "BUILD_PARAMS", "EXPORTS", "PRODUCTS", "TITLES", "build", "call", "export",
+           "is_quick", "run_script", "script_only", "segment", "select_photos", "show", "stones"]

@@ -9,6 +9,7 @@ from concurrent.futures import Future, InvalidStateError
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from ..assistant import actions as _actions
+from ..assistant.session import STOP_REASONS as _STOP_REASONS
 from .dialogs import Field, ParamDialog
 from .i18n import NO_TRANSLATE, current, decimal_comma, tr
 from .icons import icon
@@ -16,19 +17,32 @@ from .icons import icon
 ACTION_SETTING = "assistant_actions"  # "ask" | "quick" | "all"
 ACTION_MODES = ("ask", "quick", "all")
 ACTION_DEFAULT = "quick"
-ACTION_MODE_NAMES = {"ask": "Chiedi sempre", "quick": "Subito le rapide", "all": "Esegui tutto"}
+ACTION_MODE_NAMES = {"ask": "Chiedi sempre", "quick": "Subito le rapide",
+                     "all": "Esegui tutto (script ed esportazioni chiedono)"}
 ACTION_MODE_TIPS = {
     "ask": "Ogni azione dell'assistente aspetta Esegui",
     "quick": "Mostrare e filtrare o selezionare foto subito; pietre, ricostruzioni, SAM, esportazioni, foto attivate "
-             "o disattivate e script aspettano Esegui",
-    "all": "Ogni azione parte subito: la scheda dice cosa ha fatto e la annulla"}
-# the name of each action in the cards and in Modifica > Annulla ("Assistente: Pietre (SAM)")
-ACTION_TITLES = {"show": "Mostra", "select_photos": "Scegli le foto", "stones": "Pietre (SAM)",
-                 "build": "Ricostruisci", "segment": "Unità (SAM)", "export": "Esporta", "run_script": "Script"}
+             "o disattivate, un altro chunk e script aspettano Esegui",
+    "all": "Ogni azione parte subito tranne gli script e le esportazioni, che chiedono Esegui; ciò che uno script fa "
+           "fuori dal progetto non si annulla"}
+# the name of each action in the cards and in Modifica > Annulla ("Assistente: Pietre (SAM)"): the engine's table
+ACTION_TITLES = _actions.TITLES["it"]
 MAX_CARDS = 4  # cards kept under the conversation (the oldest go)
 # why an action was stopped: the code goes to the session (which says it in the conversation's language), the text
-# to the card and the chat
-STOP_REASONS = {"project_changed": "progetto cambiato", "chunk_changed": "chunk attivo cambiato"}
+# (translated by the interface) to the card and the chat - the one table of the session
+STOP_REASONS = _STOP_REASONS["it"]
+# the facts an action answers, as the card and the chat name them
+RESULT_LABELS = {"stones": "pietre", "total": "in tutto", "layer": "layer", "raster": "raster", "chunk": "chunk",
+                 "units": "unità", "file": "file", "bytes": "byte", "what": "cosa", "format": "formato",
+                 "shown": "mostrato", "version": "versione", "elevation": "prospetto", "photos": "foto",
+                 "labels": "nomi", "by": "scelte per", "then": "poi", "changed": "cambiate", "product": "prodotto",
+                 "version_kept": "versione conservata", "resolution": "risoluzione", "width": "larghezza",
+                 "height": "altezza", "bands": "bande", "points": "punti", "vertices": "vertici", "faces": "facce",
+                 "texture": "texture", "pages": "pagine", "method": "metodo", "triangles": "triangoli",
+                 "source": "da", "lines": "linee", "interval": "equidistanza", "note": "nota", "output": "uscita",
+                 "seconds": "secondi"}
+# the area of the actions that work on a raster, when no box is given
+WHOLE_AREA = {"stones": "tutto il raster", "segment": "il poligono selezionato, altrimenti tutto il raster"}
 
 
 def action_mode(settings=None) -> str:
@@ -147,7 +161,13 @@ class ActionCard(QFrame):
         words = describe_action(self.name, self.args)
         chunk = self.args.get("chunk_label") or self.chunk_label  # the chunk the arguments name, else the active one
         lines = [tr("Chunk: {0}", chunk)] if chunk else []
-        lines += [f"{label}: {value}" for label, value in words] if words else [tr("con i valori predefiniti")]
+        lines += [f"{label}: {value}" for label, value in words]
+        if self.name in WHOLE_AREA and not self.args.get("bounds"):
+            lines.append(tr("Area: {0}", tr(WHOLE_AREA[self.name])))
+        if self.name == "show" and self.args.get("chunk_label") and self.args["chunk_label"] != self.chunk_label:
+            lines.append(tr("Mostrare un altro chunk lo rende attivo e ne fa ripartire la cronologia di Annulla"))
+        if not words and len(lines) <= 1:
+            lines.append(tr("con i valori predefiniti"))
         self.params.setText("\n".join(lines))
         waiting = self.state == "waiting"
         for b in (self.b_run, self.b_edit, self.b_no):
@@ -173,7 +193,8 @@ class ActionCard(QFrame):
         else:
             self.result_label.setText(line)
             self.result_label.show()
-            self.set_state("done" if result.get("ran") else "stopped" if result.get("stopped") else "failed")
+            self.set_state("done" if result.get("ran") else "stopped" if result.get("stopped") else
+                           "declined" if result.get("declined") else "failed")
         self.b_undo.setEnabled(entry is not None)
 
 
@@ -246,8 +267,8 @@ def result_line(name: str, result: dict) -> str:
         return tr("Non eseguita")
     if "error" in result:
         return tr("Errore: {0}", result["error"])
-    facts = {k: v for k, v in result.items() if k not in ("ran", "not_undoable")}
-    line = "; ".join(f"{k}: {_value_text(v)}" for k, v in facts.items()) or tr("fatto")
+    facts = {k: v for k, v in result.items() if k not in ("ran", "not_undoable") and v not in (None, [], "")}
+    line = "; ".join(f"{tr(RESULT_LABELS.get(k, k))}: {_value_text(v)}" for k, v in facts.items()) or tr("fatto")
     if result.get("not_undoable"):
         line += " - " + tr("non annullabili: {0}", ", ".join(result["not_undoable"]))
     return line
