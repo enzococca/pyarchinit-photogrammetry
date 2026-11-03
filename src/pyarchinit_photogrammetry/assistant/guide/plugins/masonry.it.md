@@ -82,6 +82,11 @@ sopra funzionano gli strumenti del programma: pietre, disegno delle US, QGIS, es
   con la risoluzione che ci sta (`--force` da riga di comando la costruisce lo stesso).
 - **Torre poligonale**: il contorno della sezione a una quota viene semplificato in un poligono. Ogni lato più lungo
   del minimo (0,5 m di base) diventa una faccia sul suo piano, vista da fuori.
+- **Prospetto esistente** (plugin 0.1.1): un prospetto già fatto dal programma con il pulsante *Prospetto* o con
+  `ppg elevation` (su un piano o un cilindro, anche sviluppato sull'asse della torre) diventa una faccia così com'è:
+  non si ricostruisce niente, le sue patch, i suoi disegni e la sua risoluzione restano quelli del programma. Da
+  riga di comando `ppg plugin masonry face PROGETTO MURO --existing "nome o id"`. Le sezioni e i prospetti senza
+  ortofoto vengono rifiutati; un prospetto può essere faccia di un solo muro.
 
 Una faccia tiene solo la superficie dentro la sua **fascia di profondità** (di base 0,5 m davanti al piano e 0,3 m
 dietro). Quello che sta più avanti, come un ponteggio o un testimone lasciato davanti al muro, resta fuori. Se la

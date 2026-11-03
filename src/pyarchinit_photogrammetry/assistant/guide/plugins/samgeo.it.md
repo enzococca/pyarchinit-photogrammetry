@@ -116,8 +116,16 @@ stacca o si chiude e si riapre da *Vista > Pannelli* o da *Plugin > Samgeo > Pan
   trascina un riquadro, oppure clic sui vertici e doppio clic), *La parte visibile nella vista 2D*;
 * **Confidenza minima** (0,30): più alta, proposte meno numerose e più sicure;
 * **Area minima** e **Area massima** in m² (vuote: nessun limite);
-* **Risoluzione**: automatica - quella del raster, ma non più fine di 1 cm/px, che basta per le
-  pietre - o più grossolana, per meno tasselli e una ricerca più veloce;
+* **Risoluzione**: automatica - quella del raster, ma non più fine di 1 cm/px, buona per oggetti da
+  30 cm in su - o più grossolana, per meno tasselli e una ricerca più veloce;
+* **Dimensione degli oggetti** (plugin 0.4.0): quanto sono grandi le cose cercate; la risoluzione
+  automatica la segue perché i modelli le vedano di qualche decina di pixel (pietre di 15 cm:
+  0,5 cm/px). I modelli guardano il tassello di 1024 px ridotto a 800 px (Grounding DINO) o 1008 px
+  (SAM 3): a 1 cm/px una pietra di 15 cm per loro è alta 12 px, e quasi tutte sfuggono;
+* **Sopra il suolo (DEM)** (plugin 0.4.0): con il DEM del chunk, ogni proposta viene tagliata alla parte
+  che sta almeno a quest'altezza sopra il suolo locale, e le proposte che non stanno in piedi vanno
+  via. Per muri e strutture in rilievo: i modelli vedono un muro dall'alto con una confidenza di
+  0,05-0,2, le pietre intorno altrettanto, ed è il rilievo che lo delinea. 15 cm è un buon inizio;
 * **Modelli**: *Normali* (Grounding DINO base, SAM 2.1 small), *Veloci* (tiny, tiny), *Precisi* (base,
   large);
 * *Trova*;
@@ -173,6 +181,8 @@ ppg plugin samgeo install                                   # PyTorch e i modell
 ppg plugin samgeo segment scavo.ppg pietre                  # tutta l'ortofoto
 ppg plugin samgeo segment scavo.ppg "roof tile" --area 2480000,4500000,2480004,4500003 --units
 ppg plugin samgeo segment scavo.ppg muri --resolution 0.02 --min-area 0.5 --models precise --json
+ppg plugin samgeo segment scavo.ppg pietre --size 0.15                  # pietre di 15 cm: cercate a 0,5 cm/px
+ppg plugin samgeo segment scavo.ppg muri --relief 0.15                  # quello che sta 15 cm sopra il suolo (DEM)
 ppg plugin samgeo list scavo.ppg
 ppg plugin samgeo export scavo.ppg samgeo.gpkg --run pietre
 ppg plugin samgeo remove scavo.ppg pietre
@@ -191,18 +201,31 @@ quello che trova.
 3. Un oggetto tagliato dal bordo di un tassello viene unito alla sua altra parte del tassello vicino; due
    riquadri sullo stesso oggetto lasciano una sola proposta; con più di un tassello, un riquadro grande
    quanto un tassello intero viene scartato (Grounding DINO risponde spesso "tutta l'immagine" accanto
-   agli oggetti). Poi i filtri di punteggio e di area e, con un poligono, solo quello che vi cade dentro.
+   agli oggetti). Gli oggetti che stanno dentro uno più grande sono o le sue parti (la faccia di una
+   pietra nella pietra, le due metà di un muro: vanno via, resta l'oggetto) o gli oggetti attorno ai
+   quali è stato disegnato un riquadro (due o più con del terreno in mezzo, o uno che ne copre meno di
+   un quinto: va via il gruppo). Due proposte non si sovrappongono mai: la migliore tiene il bordo che
+   due maschere hanno in comune. Poi i filtri di punteggio e di area e, con un poligono, solo quello
+   che vi cade dentro.
+4. Con *Sopra il suolo* il DEM del chunk taglia ogni proposta a quello che sta sopra il suolo locale (il
+   DEM aperto su 3 m) e scarta quello che non sta in piedi almeno su un quinto della sua area; la
+   colonna `relief_m` del GeoPackage è l'altezza mediana di quello che è rimasto.
 
 ## Leggere i risultati { #results }
 
 * **Proposte, non un disegno.** I modelli trovano gran parte degli oggetti che riconoscono e ne perdono
   altri - soprattutto i piccoli, di pochi pixel; alcune proposte sono sbagliate. Controllale prima di
   farne US.
-* **Il punteggio** è la confidenza di Grounding DINO nel riquadro: su immagini aeree i valori tipici
-  sono 0,3-0,5. Alzare la confidenza minima lascia proposte meno numerose e più sicure; abbassarla ne
-  trova di più, e più errori.
-* **La risoluzione** conta: un oggetto dovrebbe misurare almeno una decina di pixel. Per pietre di
-  10-20 cm, 1 cm/px.
+* **Il punteggio** è la confidenza di Grounding DINO nel riquadro (di SAM 3 nella maschera): su immagini
+  aeree i valori tipici sono 0,3-0,5. Alzare la confidenza minima lascia proposte meno numerose e più
+  sicure; abbassarla ne trova di più, e più errori. I muri visti dall'alto hanno 0,05-0,2, e altrettanto
+  il terreno intorno: abbassare la confidenza per trovarli copre l'area di proposte; li trova il rilievo.
+* **La risoluzione** conta: un oggetto dovrebbe misurare qualche decina di pixel nel tassello che i
+  modelli guardano, cioè il tassello di 1024 px ridotto a 800 (Grounding DINO) o 1008 (SAM 3). Indica la
+  dimensione degli oggetti e la risoluzione la segue: pietre di 15 cm a 0,5 cm/px, non a 1 cm/px. Dopo
+  una ricerca il log dice quando le proposte erano piccole o i modelli poco sicuri, e cosa cambiare.
+* **Le pietre una per una** sono compito dello strumento Pietre del programma (*Pietre* nella barra del
+  disegno: SAM su ogni oggetto della vista, senza testo); Samgeo trova le cose per nome.
 * **Oggetti, non terreni.** I modelli trovano oggetti - pietre, mattoni, tegole, alberi, persone,
   attrezzi - molto meglio del contrasto tra due terreni: quello sarà compito del plugin geoai, che
   impara dai tuoi disegni.
