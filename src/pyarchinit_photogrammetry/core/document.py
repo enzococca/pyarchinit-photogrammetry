@@ -69,6 +69,14 @@ class Document:
         else:
             self.meta["active_chunk"] = chunk.key
 
+    def chunk_by_label(self, label: str) -> Chunk:
+        """The chunk named ``label`` (the first one when two share it); a KeyError naming the labels when none is."""
+        for c in self.chunks:
+            if c.label == label:
+                return c
+        labels = ", ".join(repr(c.label) for c in self.chunks) or "none"
+        raise KeyError(f"no chunk {label!r}: the chunks of the project are {labels}")
+
     def add_chunk(self, label: str | None = None) -> Chunk:
         """A new chunk at the end. Its key is never that of a chunk removed in this session (it can
         come back with Modifica > Annulla) nor that of a folder already full in the files folder."""

@@ -4,7 +4,17 @@ computer one click away; on the right a script editor whose scripts run in the w
 
 The model answers in a thread of its own (:class:`AssistantWorker`): the pane, and the window, stay usable while it
 thinks, a question can be stopped, and a failed one is said in the conversation. Widgets are only touched in the
-interface thread: the worker talks through signals."""
+interface thread: the worker talks through signals.
+
+Actions: the session is given :meth:`AssistantPane.act`. When the model calls an action tool, ``act`` runs in the
+assistant's thread: it hands the call to the interface thread (a queued signal carrying a
+:class:`concurrent.futures.Future`) and waits on the future. In the interface thread :meth:`AssistantPane._on_action`
+decides by the setting ``assistant_actions`` (*Vista > Assistente > Azioni*: "ask" every action waits for *Esegui*,
+"quick" - the default - showing and choosing photos to filter or select them run at once, "all" everything runs at
+once) whether an :class:`ActionCard` waits for *Esegui* / *Modifica* / *No*, and runs the action through
+:meth:`MainWindow.run_action` (one entry of Modifica > Annulla, *Annulla* on the card). The future gets
+``{"ran": True, ...}``, ``{"declined": True}``, ``{"stopped": True}`` (*Ferma*, which also stops a running action) or
+``{"error": ...}``. The arguments arrive with the real names already restored by the session."""
 from __future__ import annotations
 
 import html
@@ -13,17 +23,22 @@ import textwrap
 import threading
 import time
 import weakref
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor, QTextDocument, QTextDocumentFragment
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
+                               QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTableWidget,
+                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
-from ..assistant import privacy
+from ..assistant import actions as _actions
+from ..assistant import inventory, privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
+from .assistant_actions import (ACTION_TITLES, MAX_CARDS, ActionCard, STOP_REASONS, action_mode, edit_args,
+                                resolve_future, result_line)
 from .assistant_settings import (KIND_NAMES, KINDS, context_chars_of, keep_thread, park, release_thread,
                                  same_provider, saved_kind, saved_model)
 from .i18n import current, tr
@@ -57,10 +72,14 @@ class AssistantWorker(QObject):
     def __init__(self):
         super().__init__()
         self.assistant: Assistant | None = None
+        self.act = None  # the pane's way to carry out an action (AssistantPane.act), given to every question
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     def arm(self) -> None:
         """Before a question is sent (from the interface thread): a Ferma pressed after this stops it, even before
@@ -97,13 +116,15 @@ class AssistantWorker(QObject):
         except RuntimeError:  # parked (the window went away while the model hung): nobody listens any more
             log.debug("assistente: risposta di un thread parcheggiato", exc_info=True)
 
-    @Slot(str)
-    def ask(self, question: str) -> None:
-        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set))
+    @Slot(str, object)
+    def ask(self, question: str, inventory=None) -> None:
+        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set, inventory=inventory,
+                                  act=self.act))
 
-    @Slot(str, str)
-    def ask_error(self, script: str, error: str) -> None:
-        self._run(lambda a: a.ask_about_error(script, error, on_text=self.text.emit, cancel=self._cancel.is_set))
+    @Slot(str, str, object)
+    def ask_error(self, script: str, error: str, inventory=None) -> None:
+        self._run(lambda a: a.ask_about_error(script, error, on_text=self.text.emit, cancel=self._cancel.is_set,
+                                              inventory=inventory, act=self.act))
 
     @Slot(int)
     def resolve(self, request: int) -> None:
@@ -141,9 +162,10 @@ class _Editor(QPlainTextEdit):
 class AssistantPane(QWidget):
     """The pane of the window (bottom area, beside the Python console)."""
 
-    _ask = Signal(str)
-    _ask_error = Signal(str, str)
+    _ask = Signal(str, object)  # the question and the inventory of the project (taken here, in the interface)
+    _ask_error = Signal(str, str, object)
     _resolve = Signal(int)
+    _act_request = Signal(str, object, object)  # an action from the assistant's thread: name, arguments, Future
 
     def __init__(self, window):
         super().__init__()
@@ -164,8 +186,13 @@ class AssistantPane(QWidget):
         self._skip_note = False
         self._doc_ref = None  # the project the conversation on screen is about
         self._asking = None  # the assistant the question in progress was asked of
+        self.cards: list[ActionCard] = []
+        self._action: dict | None = None  # the action of the question in progress: future, card, running
+        self._action_lines: list[str] = []  # what the actions of the question in progress did, for the chat
+        self._asked_on: tuple | None = None  # (project, chunk key, chunk label) of the question in progress
         self._build()
         self._show_kind(saved_kind(self._settings()), None)
+        self._act_request.connect(self._on_action, Qt.ConnectionType.QueuedConnection)
 
     # ------------------------------------------------------------------ building
     def _build(self) -> None:
@@ -200,6 +227,11 @@ class AssistantPane(QWidget):
         self.chat.setOpenLinks(False)
         self.chat.anchorClicked.connect(self._link)
         ll.addWidget(self.chat, 1)
+        self.cards_area = QWidget()  # the cards of the actions, under the conversation
+        self.cards_layout = QVBoxLayout(self.cards_area)
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_area.hide()
+        ll.addWidget(self.cards_area)
         self.warning = QLabel(tr(privacy.WARNING))
         self.warning.setWordWrap(True)
         self.warning.setStyleSheet(f"color: {COLOURS['orange']};")
@@ -381,6 +413,7 @@ class AssistantPane(QWidget):
             return
         self._thread = QThread()
         self._worker = AssistantWorker()
+        self._worker.act = self.act
         self._worker.moveToThread(self._thread)
         self._ask.connect(self._worker.ask)
         self._ask_error.connect(self._worker.ask_error)
@@ -455,6 +488,7 @@ class AssistantPane(QWidget):
             self._clear_chat(tr("Il progetto è cambiato: nuova conversazione"))
             self._skip_note = True
         self._doc_ref = _weak(doc)
+        self._asked_on = self._where()  # the project and the active chunk the actions of this question are for
         self._started = True
         self._asking = self.assistant
         if self.assistant.external and not self._warned:
@@ -466,18 +500,203 @@ class AssistantPane(QWidget):
         self._stream_at = self._end().position()
         self._worker.assistant = self.assistant
         self._worker.arm()
+        snap = self._inventory(doc)  # the window is read here, never from the assistant's thread
         if mode == "ask":
-            self._ask.emit(args[0])
+            self._ask.emit(args[0], snap)
         else:
-            self._ask_error.emit(args[0], args[1])
+            self._ask_error.emit(args[0], args[1], snap)
+
+    def _inventory(self, doc):
+        """What the project holds and the window shows now (:func:`..assistant.inventory.snapshot`); None when it
+        cannot be read: the question goes without it."""
+        try:
+            return inventory.snapshot(doc, self._main)
+        except Exception:  # noqa: BLE001 - the question is never stopped by its inventory
+            log.warning("assistente: inventario del progetto", exc_info=True)
+            return None
 
     def stop(self) -> None:
+        """*Ferma*: the question stopped; an action waiting for *Esegui* answers ``stopped``, a running one is
+        stopped too (the task runner's cancel) and its answer is ``stopped`` at once."""
+        self._stop_action()
         if self._worker is not None:
             self._worker.cancel()
         if self._waiting is not None:  # still looking for the model: nothing asked
             self._waiting = None
             self._request += 1
             self._set_busy(False)
+
+    # ------------------------------------------------------------------ actions
+    def action_mode(self) -> str:
+        """*Vista > Assistente > Azioni*: "ask", "quick" (default) or "all"."""
+        return action_mode(self._settings())
+
+    def act(self, name: str, args: dict) -> dict:
+        """The action ``name`` with ``args`` (real names), asked by the model: called in the assistant's thread, it
+        hands the call to the interface thread and waits for the answer (``{"ran": True, ...}``,
+        ``{"declined": True}``, ``{"stopped": True}`` or ``{"error": ...}``). The question stopped while it waits
+        (the window closing) answers ``stopped``."""
+        if threading.current_thread() is threading.main_thread():  # never wait on the thread that answers
+            return {"error": "actions are asked from the assistant's thread"}
+        worker = self._worker
+        if worker is not None and worker.cancelled():  # Ferma already pressed: nothing more is asked
+            return {"stopped": True}
+        future: Future = Future()
+        self._act_request.emit(name, dict(args or {}), future)
+        while True:
+            try:
+                return future.result(timeout=0.1)
+            except FutureTimeout:
+                if worker is not None and worker.cancelled():
+                    try:
+                        return future.result(timeout=0.5)  # Ferma answers in the interface thread
+                    except FutureTimeout:
+                        future.cancel()
+                        return {"stopped": True}
+
+    def _where(self) -> tuple:
+        """The project and the key of the active chunk the question was asked on (what its inventory said)."""
+        doc = self._main.doc
+        chunk = getattr(doc, "chunk", None) if doc is not None else None
+        return _weak(doc), (chunk.key if chunk is not None else None), (chunk.label if chunk is not None else None)
+
+    @Slot(str, object, object)
+    def _on_action(self, name: str, args: dict, future: Future) -> None:
+        """In the interface thread: the card, or the action at once, as the setting says."""
+        if future.done():
+            return
+        doc_ref, key, label = self._asked_on or self._where()
+        mode = self.action_mode()
+        quick = _actions.is_quick(name, args, label)
+        # under "all" too the model's own code and files written outside the project wait for Esegui
+        at_once = (mode == "all" and name not in _actions.ASK_ALWAYS) or (mode == "quick" and quick)
+        action = {"future": future, "card": None, "running": False, "name": name, "args": args,
+                  "doc": doc_ref, "chunk": key}
+        if not (at_once and quick):  # a quick action that runs at once leaves only a line in the chat
+            action["card"] = self._add_card(name, args, future, label)
+        self._action = action
+        if at_once:
+            self._execute(action)
+
+    def _add_card(self, name: str, args: dict, future: Future, chunk_label: str | None) -> ActionCard:
+        card = ActionCard(name, args, self.cards_area, chunk_label=chunk_label)
+        card.b_run.clicked.connect(lambda: self._card_run(card, future))
+        card.b_no.clicked.connect(lambda: self._card_no(card, future))
+        card.b_edit.clicked.connect(lambda: self._card_edit(card))
+        card.b_undo.clicked.connect(lambda: self._card_undo(card))
+        self.cards.append(card)
+        self.cards_layout.addWidget(card)
+        while len(self.cards) > MAX_CARDS:
+            old = self.cards.pop(0)
+            old.setParent(None)
+            old.deleteLater()
+        self.cards_area.show()
+        return card
+
+    def _card_run(self, card: ActionCard, future: Future) -> None:
+        action = self._action
+        if card.state != "waiting" or future.done() or action is None or action["future"] is not future:
+            return
+        action["args"] = dict(card.args)
+        self._execute(action)
+
+    def _card_no(self, card: ActionCard, future: Future) -> None:
+        if card.state != "waiting":
+            return
+        card.set_state("declined")
+        self._action_lines.append(f"{card.heading()}: {tr('non eseguita')}")
+        if self._action is not None and self._action["future"] is future:
+            self._action = None
+        resolve_future(future, {"declined": True})
+
+    def _card_edit(self, card: ActionCard) -> None:
+        """*Modifica*: the parameters of the action in a form; the card waits again for *Esegui*."""
+        if card.state != "waiting":
+            return
+        args = edit_args(self, card.name, card.args, card.heading())
+        if args is not None:
+            card.args = args
+            card.refresh()
+
+    def _card_undo(self, card: ActionCard) -> None:
+        """*Annulla* on a card: the window's undo, while the action's entry is the last one."""
+        h = getattr(self._main, "history", None)
+        if card.entry is None or _top(h) is not card.entry:
+            self._main.statusBar().showMessage(tr("L'azione non è più l'ultimo passo: usa Modifica > Annulla"), 8000)
+            card.b_undo.setEnabled(False)
+            return
+        self._main.undo()
+        if _top(h) is not card.entry:  # undone (an undo that failed leaves it the last one)
+            card.b_undo.setEnabled(False)
+            card.result_label.setText(card.result_label.text() + " - " + tr("annullata"))
+
+    def _moved(self, action: dict) -> str | None:
+        """Why ``action`` must not run any more (a code of :data:`STOP_REASONS`): the project or the active chunk
+        is not the one it was asked on - or the one an action of the same question left active."""
+        doc = self._main.doc
+        if action["doc"]() is not doc:
+            return "project_changed"
+        chunk = getattr(doc, "chunk", None)
+        if (chunk.key if chunk is not None else None) != action["chunk"]:
+            return "chunk_changed"
+        return None
+
+    def _execute(self, action: dict) -> None:
+        """The action through :meth:`MainWindow.run_action`; its answer resolves the future. Refused - answered
+        ``stopped`` with the reason - when the project or the active chunk changed since the question."""
+        from .undo import ScriptAction
+
+        future, card, name = action["future"], action["card"], action["name"]
+        why = self._moved(action)
+        if why is not None:
+            self._stop_action(why)
+            return
+        action["running"] = True
+        if card is not None:
+            card.set_state("running")
+        h = getattr(self._main, "history", None)
+        top0 = _top(h)
+
+        def done(result: dict) -> None:
+            if self._action is action:
+                self._action = None
+            entry = _top(h)
+            made = entry if entry is not top0 and entry is not None and isinstance(entry.action, ScriptAction) \
+                else None
+            if card is not None and card in self.cards:
+                card.finish(result, made)
+            if result.get("ran") and not future.done() and name == "show" and action["args"].get("chunk_label"):
+                # the assistant's own step (a chunk it made active): the next action of this question starts from
+                # there; any other change of chunk - the user's, also during a long build - still stops it
+                self._asked_on = self._where()
+            if not future.done():  # stopped meanwhile: the question already ended saying so
+                title = tr(ACTION_TITLES.get(name, name))
+                self._action_lines.append(f"{tr('Azione: {0}', title)}: {result_line(name, result)}")
+            resolve_future(future, result)
+
+        self._main.run_action(name, action["args"], done)
+
+    def _stop_action(self, why: str | None = None) -> None:
+        """The pending or running action stopped (``why``: a code of :data:`STOP_REASONS`, said on the card and in
+        the chat in the interface's language; the model gets the code, the session says it in its own)."""
+        action, self._action = self._action, None
+        if action is None:
+            return
+        card = action["card"]
+        if action["running"]:
+            self._main.runner.cancel()
+        if card is not None and card in self.cards and card.state in ("waiting", "running"):
+            card.set_state("stopped", why)
+        title = tr(ACTION_TITLES.get(action["name"], action["name"]))
+        if not action["future"].done():
+            stopped = tr("fermata") if why is None else tr("fermata: {0}", tr(STOP_REASONS.get(why, why)))
+            self._action_lines.append(f"{tr('Azione: {0}', title)}: {stopped}")
+        resolve_future(action["future"], {"stopped": True, "reason": why} if why else {"stopped": True})
+
+    def project_changed(self) -> None:
+        """The window shows another project: an action of the old one waiting or running is stopped (the model is
+        told the project changed); the conversation itself ends at the next question."""
+        self._stop_action("project_changed")
 
     def _end(self) -> QTextCursor:
         cursor = self.chat.textCursor()
@@ -522,6 +741,7 @@ class AssistantPane(QWidget):
         skip_note, self._skip_note = self._skip_note, False
         if turn.note and not skip_note:
             self._paragraph(f"<p><i>{html.escape(turn.note)}</i></p>")
+        self._write_action_lines()
         if turn.text:
             markdown = QTextDocument()
             # no HTML: a model writing <US12> or <percorso> in its prose is shown as written
@@ -550,8 +770,15 @@ class AssistantPane(QWidget):
             self._set_busy(False)
             return
         self._drop_stream()
+        self._write_action_lines()
         self._error_line(text)
         self._set_busy(False)
+
+    def _write_action_lines(self) -> None:
+        """What the actions of the question did, in the chat (written once the streamed text is gone)."""
+        lines, self._action_lines = self._action_lines, []
+        for line in lines:
+            self._paragraph(f"<p><i>{html.escape(line)}</i></p>")
 
     def _link(self, url: QUrl) -> None:
         if url.scheme() == "script":
@@ -569,6 +796,13 @@ class AssistantPane(QWidget):
 
     def _clear_chat(self, line: str = "") -> None:
         """The chat emptied (and what belongs to it), with ``line`` saying why."""
+        self._stop_action()  # an action of the old conversation waiting for Esegui: stopped
+        for card in self.cards:
+            card.setParent(None)
+            card.deleteLater()
+        self.cards = []
+        self._action_lines = []
+        self.cards_area.hide()
         self.chat.clear()
         self.scripts = []
         self._stream_at = None
@@ -637,6 +871,13 @@ class AssistantPane(QWidget):
             target = target.with_name(target.name + ".py")
         target.write_text(self.editor.toPlainText(), encoding="utf-8")
         self.output.appendPlainText(tr("Salvato in {0}", target))
+
+
+def _top(history):
+    """The last entry of Modifica > Annulla that can be undone, None when there is none."""
+    if history is None or not history.can_undo():
+        return None
+    return history.entries[history.index - 1]
 
 
 def _weak(obj):

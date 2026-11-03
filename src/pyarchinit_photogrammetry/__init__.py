@@ -49,5 +49,15 @@ try:
 except Exception:  # pragma: no cover - no folder of the program (no home, no PROJ data): only PROJ's own grids
     pass
 
+
+def __getattr__(name: str):
+    """``ppg.actions`` (:mod:`.assistant.actions`) imported the first time it is used: the package stays light."""
+    if name == "actions":
+        from .assistant import actions
+
+        return actions
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = ["app", "Document", "Chunk", "Camera", "Sensor", "Marker", "Projection", "Reference", "ScaleBar",
            "PointCloud", "ASPRS_CLASSES", "ARCHAEO_CLASSES", "Progress", "Cancelled", "print_progress", "__version__"]

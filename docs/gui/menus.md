@@ -400,7 +400,8 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | Item | What it is for |
 | --- | --- |
 | **Panes** | every pane open or closed: [see below](#view-panes) |
-| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++; also the *Assistant*) |
+| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++) |
+| **Assistant** | *Open the assistant*; **Actions**: *Always ask*, *Quick ones at once* (default), *Run everything (scripts and exports ask)* - when the assistant's actions run ([Actions](assistant.md#actions)) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
 | **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
 | **Theme** | light or dark, remembered |

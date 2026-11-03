@@ -1351,7 +1351,10 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Sezioni"), lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, tr("Console Python"), lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
-        self._act(m, tr("Assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant), icon_name="assistant")
+        vam = m.addMenu(icon("assistant"), tr("Assistente"))
+        self._act(vam, tr("Apri l'assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant),
+                  icon_name="assistant")
+        self._build_assistant_actions_menu(vam.addMenu(tr("Azioni")))
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
@@ -1571,6 +1574,9 @@ class MainWindow(QMainWindow):
             # has changes the user chose not to save: what came from RustGIS would go with them, so it stays there
             self._rustgis_leave(unsaved_stay=True)
             self._settle_removals(shown)
+            pane = getattr(self, "assistant", None)
+            if pane is not None:  # an action of the assistant waiting or running for the project left: stopped
+                pane.project_changed()
         self._shown_doc = doc
         application.document = doc
         if doc.path is not None:  # what a session that crashed left aside, settled now
@@ -14149,29 +14155,14 @@ class MainWindow(QMainWindow):
                                thoroughness=v["thoroughness"], progress=p)
 
         def done(found):
-            from shapely.geometry import box
-
             if chunk is not self.chunk:  # another chunk is active now: its stones are not these
                 self.log_pane.warning(tr("Le pietre trovate non sono state tenute: il chunk attivo è cambiato"))
                 return
-            area = box(*bounds) if bounds is not None else None
-            if frame is None or frame == self.drawings_frame:  # the image of the search: the plan, or shown
-                store = self.stones if frame is None else self.frame_stones
-                kept = [s for s in store.get(key, []) if area is not None and not s.intersects(area)]
-                store[key] = kept + found
-            else:  # an elevation no longer shown: its stones in the chunk
-                stones = self._frame_stones(chunk, frame)
-                kept = [s for s in stones.get(key, []) if area is not None and not s.intersects(area)]
-                stones[key] = kept + found
-                self._store_chunk_drawings(chunk, *self._chunk_drawings(chunk, frame), frame=frame,
-                                           stones={k: [g.wkt for g in rows] for k, rows in stones.items()})
             if frame != self.drawings_frame:
                 entry = self._frame_entry(frame) if frame is not None else None
                 self.log_pane.info(tr("Le pietre trovate vanno all'immagine della ricerca ({0}), non a quella mostrata",
                                       entry["name"] if entry else (tr("la pianta") if frame is None else frame)))
-            self._draw_stones()
-            self._dirty(True)
-            self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
+            self.set_stones(key, found, bounds)
 
         self.run_task("SAM - pietre", job, done, refresh=False, save=False)
 
@@ -14226,21 +14217,96 @@ class MainWindow(QMainWindow):
             seg = self._segmenter()
             return auto_units(self.chunk, seg, bounds=bounds, progress=p, **kw)
 
-        def done(units):
-            site = self.project_site() or None
-            with self.ortho_view.batch():
-                for u in units:
-                    u.sito = site
-                    u.attributes = {"_layer": "Unita' da SAM", "stratigraph_index_us": 1}
-                    self.shown_units.append(u)
-                    self._draw_unit(u, len(self.shown_units) - 1)
-            self._dirty(True)
-            self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
-                                            "Layer) prima di pubblicarle", len(units)), 20000)
-            self.log_pane.info(f"SAM: {len(units)} unità candidate")
-            self._show_pane(self.left_tabs, self.layers_pane)
+        self.run_task(title, job, self.add_sam_units, refresh=False, save=False)
 
-        self.run_task(title, job, done, refresh=False, save=False)
+    def add_sam_units(self, units) -> int:
+        """Units SAM found, added as candidates (no US yet) to the layer *Unita' da SAM* of the image shown, with the
+        project's site; what their ``attributes`` have (``tipo_us_s``...) stays. Returns how many."""
+        site = self.project_site() or None
+        units = list(units)
+        with self.ortho_view.batch():
+            for u in units:
+                u.sito = site
+                u.attributes = {**(u.attributes or {}), "_layer": "Unita' da SAM", "stratigraph_index_us": 1}
+                self.shown_units.append(u)
+                self._draw_unit(u, len(self.shown_units) - 1)
+        self._store_drawings()  # in the chunk too: a script that adds them is undone as one step
+        self._dirty(True)
+        self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
+                                        "Layer) prima di pubblicarle", len(units)), 20000)
+        self.log_pane.info(f"SAM: {len(units)} unità candidate")
+        self._show_pane(self.left_tabs, self.layers_pane)
+        return len(units)
+
+    def set_stones(self, key: str, polygons, bounds=None) -> int:
+        """The stones ``polygons`` (shapely, in the raster's coordinates) of the image ``key`` - the file name of a
+        raster of the plan, or the id of an elevation - kept as *Pietre (SAM)* keeps them (layer «Pietre» of that
+        image) and drawn when it is shown. ``bounds``: the box searched: the stones there before are replaced, those
+        outside it kept; None: all of them replaced. Returns how many stones that image has now."""
+        from shapely.geometry import box
+
+        ch = self.chunk
+        if ch is None:
+            raise ValueError("nessun chunk attivo")
+        area = box(*bounds) if bounds is not None else None
+        found = list(polygons)
+
+        def merged(old):
+            return [s for s in old if area is not None and not s.intersects(area)] + found
+
+        frames = {e.get("id") for e in ch.meta.get("elevations") or []}
+        frame = key if key in frames else None
+        if frame is None or frame == self.drawings_frame:
+            store = self.stones if frame is None else self.frame_stones
+            store[key] = merged(store.get(key, []))
+            total = len(store[key])
+        else:  # an elevation not shown: its stones in the chunk
+            stones = self._frame_stones(ch, frame)
+            stones[key] = merged(stones.get(key, []))
+            total = len(stones[key])
+            self._store_chunk_drawings(ch, *self._chunk_drawings(ch, frame), frame=frame,
+                                       stones={k: [g.wkt for g in rows] for k, rows in stones.items()})
+        self._store_drawings()  # in the chunk too: a script that finds them is undone as one step
+        self._draw_stones()
+        self._dirty(True)
+        self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
+        return total
+
+    def shown_raster(self) -> dict:
+        """What the 2D view shows: ``path`` of the raster (None: nothing), ``kind`` ("ortho", "dem"...), ``frame``
+        (the id of the elevation shown, None on the plan), ``version`` ((product, id) of a kept version shown)."""
+        rv = self._raster_version
+        version = rv if isinstance(rv, tuple) and len(rv) == 2 and rv[0] != "elevation" else None
+        return {"path": self.ortho_view.path, "kind": self.ortho_view.kind, "frame": self.drawings_frame,
+                "version": version}
+
+    def show_raster_path(self, path, kind: str = "ortho") -> None:
+        """A GeoTIFF of the active chunk (a raster of the calculator) in the 2D view: ``kind`` "ortho" for an image,
+        "dem" for one band on the colours of the heights."""
+        self._load_raster(kind, Path(path))
+        self.show_view(self.ortho_view)
+
+    def select_photo_keys(self, keys) -> int:
+        """The photos with these camera keys selected in the Photos pane, the others not; returns how many."""
+        keys = set(keys)
+        pane = self.photos
+        pane.clearSelection()
+        n, first = 0, None
+        for i in range(pane.count()):
+            it = pane.item(i)
+            if getattr(it.data(Qt.ItemDataRole.UserRole), "key", None) in keys:
+                it.setSelected(True)
+                n += 1
+                first = first or it
+        if first is not None:
+            pane.scrollToItem(first)
+        self._show_pane(self.bottom_tabs, self.photos_panel)
+        return n
+
+    def ask_save_path(self, title: str, name: str, filter_: str) -> str:
+        """The file the user picks to save ``title`` (``name`` proposed in the last folder used); "" when cancelled."""
+        path, _ = QFileDialog.getSaveFileName(self, tr(title), str(Path(self._last_dir()) / name), filter_)
+        return path or ""
 
     def sam_whole_orthomosaic(self) -> None:
         """Automatic SAM on the whole orthomosaic, scanned in tiles at a resolution the user picks."""
@@ -14393,6 +14459,39 @@ class MainWindow(QMainWindow):
 
         self.run_script_source(src, Path(path).name, on_done=done, path=path)
 
+    def _build_assistant_actions_menu(self, menu) -> None:
+        """*Vista > Assistente > Azioni*: when the assistant's actions run (the setting ``assistant_actions``)."""
+        from .assistant_actions import ACTION_MODE_NAMES, ACTION_MODE_TIPS, ACTION_MODES, action_mode
+
+        group = QActionGroup(self)
+        self.assistant_action_modes = {}
+        mode_now = action_mode()
+        for mode in ACTION_MODES:
+            a = QAction(tr(ACTION_MODE_NAMES[mode]), self, checkable=True)
+            a.setToolTip(tr(ACTION_MODE_TIPS[mode]))
+            a.setStatusTip(tr(ACTION_MODE_TIPS[mode]))
+            a.setChecked(mode == mode_now)
+            a.triggered.connect(lambda _=False, md=mode: self.set_assistant_actions(md))
+            group.addAction(a)
+            menu.addAction(a)
+            self.assistant_action_modes[mode] = a
+        menu.setToolTipsVisible(True)
+
+    def set_assistant_actions(self, mode: str) -> None:
+        """When the assistant's actions run: "ask" (every one waits for *Esegui*), "quick" (showing and choosing
+        photos at once) or "all"."""
+        from . import app_settings
+        from .assistant_actions import ACTION_MODES, ACTION_SETTING
+
+        if mode not in ACTION_MODES:
+            raise ValueError(f"mode: one of {', '.join(ACTION_MODES)}")
+        s = app_settings()
+        s.setValue(ACTION_SETTING, mode)
+        s.sync()
+        a = getattr(self, "assistant_action_modes", {}).get(mode)
+        if a is not None and not a.isChecked():
+            a.setChecked(True)
+
     def _namespace_for_worker(self) -> dict:
         """The names a script run in the worker sees, built in the interface thread: ``doc``, ``chunk``, ``app``,
         ``ppg``, ``np``, ``polygon`` (the polygons selected in the 2D view, merged; None), ``cameras`` (the photos
@@ -14419,12 +14518,96 @@ class MainWindow(QMainWindow):
         > Annulla, also when it fails halfway. The calls it makes that cannot be undone (PyArchInit, QGIS's live
         GeoPackage, exports) are said afterwards. ``on_done(result)``: the :class:`ScriptResult`, also on error.
         Returns False when another step is running (said in the status bar)."""
-        from ..assistant.scripts import ScriptResult, run_script
-        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
+        from ..assistant.scripts import run_script
 
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
             return False
+        name = path or label
+        return self._script_step(label, lambda namespace, progress: run_script(source, namespace, progress, name=name),
+                                 on_done, path=path)
+
+    def run_action(self, name: str, args: dict, done) -> bool:
+        """The action ``name`` of the assistant (:data:`..assistant.actions.ACTIONS`) with the arguments ``args``
+        (as the model gave them, the real names restored) on the active chunk, run in the worker as a script runs
+        (:meth:`run_script_source`): what it changes is ONE entry of Modifica > Annulla named after it, the products
+        it builds again kept first as versions, the window shown again after a build, photos switched on or off or a
+        script (stones, units and exports draw or write through the window themselves). Showing, and filtering or
+        selecting photos, only change the view: they run here at once, without a step of the history. ``done(result)``
+        in the interface thread: ``{"ran": True, ...the facts of the action}`` (plus
+        ``"not_undoable"``: the calls outside the project), ``{"stopped": True}`` when *Ferma* stopped it,
+        ``{"error": text}`` when it failed or could not start - another step is running (then ``done`` is called
+        at once and False returned)."""
+        import time as _time
+
+        from ..assistant import actions
+        from ..assistant.scripts import ExternalCalls, ScriptResult
+        from .assistant_actions import ACTION_TITLES
+
+        if name not in actions.ACTIONS:
+            done({"error": f"unknown action {name}"})
+            return False
+        if self.runner.busy:
+            done({"error": tr("Un'elaborazione è in corso: l'azione non parte")})
+            return False
+        title = tr(ACTION_TITLES.get(name, name))
+        label = tr("Assistente: {0}", title)
+        if name == "show" or (name == "select_photos" and actions.is_quick(name, args)):
+            # only the view changes (what is shown, the Photos pane filter or selection): here, at once, no step of
+            # the history - nothing of the project to snapshot, walk or undo
+            try:
+                value = actions.call(name, self.chunk, self, args, None)
+            except Exception as exc:  # noqa: BLE001 - said to the model, the window stays as it is
+                log.info("%s: %s", label, exc)
+                done({"error": f"{type(exc).__name__}: {exc}"})
+                return True
+            done({"ran": True, **(value if isinstance(value, dict) else {"value": value})})
+            return True
+
+        def work(namespace, progress):
+            t0 = _time.monotonic()
+            with ExternalCalls() as external:
+                value = actions.call(name, namespace["chunk"], namespace["window"], args, progress)
+            return ScriptResult("", None, None, list(external.calls), _time.monotonic() - t0, value=value)
+
+        def finished(result) -> None:
+            if result.value == {"stopped": True} or result.error == tr("Script annullato"):
+                done({"stopped": True})
+            elif result.error:
+                done({"error": result.error})
+            elif isinstance(result.value, dict) and result.value.get("declined"):  # the save dialog cancelled
+                done({"declined": True})
+            elif isinstance(result.value, dict) and result.value.get("error"):  # a script of the model that failed
+                value = {k: v for k, v in result.value.items() if k != "external" and v not in (None, [], "")}
+                if result.external:
+                    value["not_undoable"] = list(dict.fromkeys(result.external))
+                done(value)
+            else:
+                value = result.value if isinstance(result.value, dict) else {"value": result.value}
+                value = {k: v for k, v in value.items() if k != "external"}  # a script's calls: the recorder's below
+                out = {"ran": True, **value}
+                if result.external:
+                    out["not_undoable"] = list(dict.fromkeys(result.external))
+                done(out)
+
+        # what shows, draws or writes elsewhere leaves the views as they are (the stones drawn on the elevation shown
+        # stay there); a product built again, photos switched on or off, a script: the window shown again
+        refresh = "changed" if name in ("build", "select_photos", "run_script") else "never"  # photos: on or off
+        started = self._script_step(label, work, finished, refresh=refresh, tell_external=False)
+        if not started:
+            done({"error": tr("Un'elaborazione è in corso: l'azione non parte")})
+        return started
+
+    def _script_step(self, label: str, work, on_done=None, path: str | None = None, refresh: str = "always",
+                     tell_external: bool = True) -> bool:
+        """``work(namespace, progress) -> ScriptResult`` in the worker with the bookkeeping of a script: the
+        snapshot before, the products kept as versions, ONE :class:`ScriptAction` ``label`` after (also when it
+        fails halfway), the window shown again (``refresh``: "always" - a script -, "changed" - only when the project
+        changed - or "never"), the calls outside the project said (``tell_external``: in a message; else in the Log
+        only). ``on_done(result)`` in the interface thread."""
+        from ..assistant.scripts import ScriptResult
+        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
+
         doc = self.doc
         root = doc.files_dir
         self._store_drawings()  # the drawings of the window are in the snapshot
@@ -14439,12 +14622,11 @@ class MainWindow(QMainWindow):
             ch._kept_folders = []
         doc.script_removals = []
         self._script_running = True
-        name = path or label
 
         def job(progress):
             files0 = files_under(root)  # walked here, in the worker: a large project takes a while
             try:
-                result = run_script(source, namespace, progress, name=name)
+                result = work(namespace, progress)
             except Cancelled:
                 result = ScriptResult("", tr("Script annullato"), None, [], 0.0)
             except BaseException as exc:  # noqa: BLE001 - whatever happens, the script's entry is made
@@ -14481,15 +14663,22 @@ class MainWindow(QMainWindow):
             changed = bool(made or kept_folders or new_files or new_chunks or removed) or \
                 snapshot_text(before) != snapshot_text(after)
             with self._history_paused():
-                self._after_script_step(modified=changed)
+                if refresh == "always" or (refresh == "changed" and changed):
+                    self._after_script_step(modified=changed)
+                elif changed:
+                    self.setWindowModified(True)
             if changed and self.history is not None:
                 self._store_drawings()
                 self.history.push(label, ScriptAction(self, before, snapshot_document(doc), made, new_files, new_chunks,
                                                       removed, kept_folders), document=True)
             if result.external:
                 calls = list(dict.fromkeys(result.external))
-                self._script_message(tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > "
-                                        "Annulla non riporta indietro.\n\nNon annullabili: {0}", ", ".join(calls)))
+                text = tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > Annulla non riporta "
+                          "indietro.\n\nNon annullabili: {0}", ", ".join(calls))
+                if tell_external:
+                    self._script_message(text)
+                else:
+                    self.log_pane.warning(text)
             if result.error:
                 self.log_pane.warning(tr("{0}: {1}", label, result.error))
             if on_done is not None:

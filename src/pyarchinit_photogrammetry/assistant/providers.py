@@ -40,10 +40,12 @@ CANCEL_POLL = 0.1  # seconds between two looks at cancel()
 
 @dataclass
 class ToolSpec:
-    """A tool the model may call: ``parameters`` is a JSON schema of type object."""
+    """A tool the model may call: ``parameters`` is a JSON schema of type object; ``acts``: the tool changes the
+    project or the window (an action of :mod:`.actions`), offered only when the session has a window to act in."""
     name: str
     description: str
     parameters: dict
+    acts: bool = False
 
 
 @dataclass

@@ -37,11 +37,15 @@ EXTERNAL = [("pyarchinit_photogrammetry.pyarchinit.bridge", "PyArchInit",
 
 @dataclass
 class ScriptResult:
+    """What a script did: its printed ``output``, its ``error`` and ``traceback`` (None when it ended well), the
+    ``external`` calls it made, the seconds it took; ``value``: what an action of the assistant returned (the
+    window runs actions as scripts, :meth:`MainWindow.run_action`)."""
     output: str
     error: str | None = None
     traceback: str | None = None
     external: list[str] = field(default_factory=list)
     elapsed: float = 0.0
+    value: object = None
 
 
 def _matches(name: str, names) -> bool:

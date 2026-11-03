@@ -22,7 +22,33 @@ Nella console e in **Esegui script Python...** questi nomi sono già pronti, leg
 | `app` | lo stato dell'applicazione (`ppg.app`): `app.document` è il progetto aperto, lo stesso di `doc` |
 | `ppg` | il pacchetto, con `import pyarchinit_photogrammetry as ppg` già fatto |
 | `np` | NumPy |
-| `window` | la finestra principale: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Esegui script Python...** lo script gira in secondo piano e `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la risposta, così gli script scritti per la finestra funzionano senza cambiarli; i nomi supportati sono `window.show_raster("dem")`, `window.show_model("model")`, `window.log("testo")` e `window.refresh()` (fatti senza aspettare), `window.selected_polygon()` (la selezione di quando lo script è partito) e `window.mark_modified()` (non serve: la voce dello script in *Modifica > Annulla* segna già il progetto come modificato); `window.runner`, `window.history`, `window.undo` e `window.redo` sono rifiutati (lo script aspetterebbe se stesso o annullerebbe il progetto sotto la sua stessa voce) |
+| `window` | la finestra principale: che cosa fa in uno script è in [Che cosa fa `window`](#che-cosa-fa-window) qui sotto |
+
+### Che cosa fa `window`
+
+Uno script lanciato con **Esegui script Python...** o con *Esegui* nell'editor del pannello *Assistente* gira in
+secondo piano: il suo `window` passa ogni attributo e metodo della finestra al thread della finestra, aspettando la
+risposta, così gli script scritti per la finestra funzionano senza cambiarli, e aggiunge gli aiuti qui sotto. Nella
+**console Python** `window` è la finestra principale stessa: `window.show_raster`, `window.show_model`, `window.log` e
+`window.refresh` non ci sono (un `AttributeError`); usa `window.refresh_all()` per mostrare di nuovo il progetto e l'Area
+di lavoro o i menu per mostrare un prodotto; le altre chiamate dell'elenco funzionano anche lì. Che cosa ci fa uno script:
+
+* `window.show_raster("ortho")` o `window.show_raster("dem")`: l'ortofoto o il DEM del chunk attivo nella vista 2D;
+  `window.show_model("model")` (anche `"model_textured"`, `"point_cloud"`, `"tie_points"`, `"cameras"`): la vista 3D;
+* `window.photos.set_filter(chiavi, "titolo")`: solo le foto con queste chiavi nel pannello *Foto*
+  (`window.photos.set_filter(None)`: di nuovo tutte); `window.filter_photos_by_markers(chiavi_dei_marker)`: le foto
+  dove sono questi marker;
+* `window.selected_cameras()`: le foto selezionate nel pannello *Foto*; `window.enable_photos(foto, False)`: le
+  disattiva (`True`: di nuovo attive), come il clic destro nel pannello;
+* `window.selected_polygon()`: i poligoni selezionati nella vista 2D, uniti, oppure `None`;
+* `window.log("testo")`: una riga nel pannello *Log*; `window.refresh()`: la finestra mostra di nuovo il progetto;
+  `window.mark_modified()`: il progetto ha modifiche da salvare.
+
+In **Esegui script Python...** `show_raster`, `show_model`, `log` e `refresh` sono fatti senza aspettare,
+`selected_polygon()` è la selezione di quando lo script è partito (i nomi `polygon` e `cameras` qui sotto contengono
+lo stesso), `mark_modified()` non serve (la voce dello script in *Modifica > Annulla* segna già il progetto come
+modificato), e `window.runner`, `window.history`, `window.undo` e `window.redo` sono rifiutati (lo script aspetterebbe
+se stesso o annullerebbe il progetto sotto la sua stessa voce).
 
 **Esegui script Python...** (dalla 1.7.0) aggiunge questi nomi, perché lo script gira in secondo piano, lontano dalla
 finestra:
@@ -143,7 +169,8 @@ finestra le stesse chiamate stanno nel menu *Flusso di lavoro*.
 
 ## Esempi
 
-I tre script qui sotto sono scritti per la console Python, dove `window` è la finestra stessa. Usano le funzioni che
+I primi tre script qui sotto sono scritti per la console Python, dove `window` è la finestra stessa, gli ultimi tre
+per **Esegui script Python...** (quello delle pietre usa anche `polygon` e `progress`). I primi tre usano le funzioni che
 il programma ha dalla 1.7.0: `chunk.region_from_markers(...)` e `chunk.build_normal_map(...)` (i primi due esempi, una
 chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando, *Strumenti > Regione sui marker...* e
 *Strumenti > Mappa delle normali...* nella finestra), poi `doc.duplicate_chunk(...)`, `chunk.set_cameras_enabled(...)` e
@@ -233,3 +260,72 @@ else:
 Con le foto disattivate, `chunk.build_orthomosaic(...)` usa solo le altre; per riattivarle,
 `chunk.set_cameras_enabled(chunk.cameras, True)`. Il chunk nuovo porta le foto con le loro pose e i marker che
 vedono, così mappe di profondità e passi successivi possono girare su di esso.
+
+### Foto per area, per marker o per nome
+
+Le foto su cui lavorare, scelte in tre modi; il pannello *Foto* le mostra (un filtro: nel progetto non cambia nulla) e,
+se vuoi, le altre vengono disattivate, così i passi successivi usano solo queste (*Modifica > Annulla* lo riprende).
+
+```python
+from pyarchinit_photogrammetry.engine.patches import photos_for_area
+
+PER = "area"                                          # "area", "marker" o "nome"
+if PER == "area":                                     # le foto che inquadrano il poligono selezionato nella vista 2D
+    area = window.selected_polygon()
+    if area is None:
+        raise SystemExit("Seleziona prima un poligono nella vista 2D.")
+    if area.geom_type == "MultiPolygon":
+        area = max(area.geoms, key=lambda g: g.area)
+    # con un prospetto o una sezione mostrati il poligono è nei suoi metri (u, v): il suo id va come frame
+    righe = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000, frame=window.drawings_frame)
+    chiavi = {r["key"] for r in righe if r.get("coverage", 0) > 0}
+    window.photos.set_filter(chiavi, "Foto dell'area")
+elif PER == "marker":                                 # le foto dove sono questi marker
+    marker = [chunk.marker("target 1"), chunk.marker("target 2")]
+    window.filter_photos_by_markers([m.key for m in marker])
+    chiavi = {c.key for c in window.photos.visible_cameras()}
+else:                                                 # per il nome del file
+    chiavi = {c.key for c in chunk.cameras if c.label.startswith("DJI_01")}
+    window.photos.set_filter(chiavi, "DJI_01...")
+print(len(chiavi), "foto su", len(chunk.cameras))
+
+DISATTIVA_LE_ALTRE = False
+if DISATTIVA_LE_ALTRE:
+    n = chunk.set_cameras_enabled([c for c in chunk.cameras if c.key not in chiavi], False)
+    print("Disattivate:", n)
+```
+
+`window.photos.set_filter(None)` mostra di nuovo tutte le foto; `chunk.set_cameras_enabled(chunk.cameras, True)` le
+riattiva tutte. Un chunk diverso da quello attivo: `doc.chunk_by_label("il suo nome")`.
+
+### Pietre su un raster
+
+Dalla 1.7.1 la ricerca delle pietre del programma (*Disegna pietre* della vista 2D, SAM) si lancia da uno script, senza
+il suo dialogo: `ppg.actions.stones(chunk, window, raster=None, bounds=None, min_size=0.05, max_size=1.0,
+thoroughness="alta", progress=None)`. `raster` è un nome del calcolatore raster (`"orthomosaic"`, una versione tenuta,
+un indice...: il raster mostrato nella vista 2D quando è `None`; un DEM è rifiutato, e ne viene detto il motivo); `bounds`
+è il riquadro `(xmin, ymin, xmax, ymax)` nelle coordinate del chunk in cui cercare (`None`: tutto il raster);
+`min_size` e `max_size` sono i diametri della pietra più piccola e della più grande, in metri; `thoroughness` è
+`"normale"`, `"alta"` o `"massima"`. Le pietre sono tenute come le tiene lo strumento (layer *Pietre* di quel raster),
+disegnate nella vista 2D, una voce di *Modifica > Annulla*; la funzione restituisce un dizionario che dice che cosa ha
+fatto.
+
+```python
+bounds = polygon.bounds if polygon is not None else None   # solo l'area selezionata, se c'è
+esito = ppg.actions.stones(chunk, window, raster="orthomosaic", bounds=bounds, min_size=0.05, max_size=0.6,
+                           thoroughness="alta", progress=progress)
+print(esito)
+```
+
+### Un prodotto rifatto e mostrato
+
+Il DEM dei soli punti del suolo, l'ortofoto su di esso, poi l'ortofoto mostrata nella vista 2D. I prodotti com'erano
+restano come versioni (*Modifica > Annulla* li rende di nuovo attivi).
+
+```python
+chunk.build_dem(resolution=0.02, source="point_cloud", interpolate=True, classes=[2])
+chunk.build_orthomosaic(resolution=0.01, surface="dem", blending="mosaic")
+window.show_raster("ortho")
+```
+
+Su un altro chunk: `doc.chunk_by_label("il suo nome").build_dem(...)`; `window.show_raster` mostra il chunk attivo.

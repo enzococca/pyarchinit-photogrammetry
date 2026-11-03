@@ -21,7 +21,8 @@ def _run(name, doc, **arguments):
 
 def test_tool_specs_are_what_a_model_reads():
     names = F.tool_names()
-    assert names == [t.name for t in F.TOOLS]
+    assert names == [t.name for t in F.TOOLS if not t.acts]  # what reads; the actions only with the window
+    assert F.tool_names(acts=True) == [t.name for t in F.TOOLS]
     assert {"project_summary", "dem_statistics", "orthomosaic_info", "alignment_report", "markers", "thermal_info",
             "multispectral_info", "point_cloud_info", "model_info", "tin_info", "guide_search", "scripting_api"} <= set(names)
     for t in F.TOOLS:

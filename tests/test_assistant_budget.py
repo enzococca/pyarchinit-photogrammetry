@@ -40,7 +40,7 @@ def runs(monkeypatch):
     made: list[tuple[str, dict]] = []
     size = {"n": 50}
 
-    def run_tool(name, arguments, document, index):
+    def run_tool(name, arguments, document, index, act=None):
         made.append((name, dict(arguments)))
         return {"name": name, "args": arguments, "data": "x" * size["n"]}
 
