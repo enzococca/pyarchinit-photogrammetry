@@ -202,7 +202,8 @@ def test_patch_tool_on_an_elevation(win, qapp, monkeypatch):
     from PySide6.QtTest import QTest
     from shapely import contains_xy
     from shapely.geometry import Polygon
-    from test_elevation_patches import ORIGIN, _plain, _prepare, _surface_cell
+    from elevation_helpers import ORIGIN, plain, prepare, surface_cell
+    from shapely.geometry import box
 
     from pyarchinit_photogrammetry.engine import elevation as E
     from pyarchinit_photogrammetry.engine import patches as P
@@ -211,8 +212,8 @@ def test_patch_tool_on_an_elevation(win, qapp, monkeypatch):
     w = win
     v = w.ortho_view
     ch = w.chunk
-    _plain(monkeypatch)
-    _prepare(ch)
+    plain(monkeypatch)
+    prepare(ch)
     entry = E.build_elevation(ch, E.plane_from_line(ch, ORIGIN[:2] + [1.05, 0.9], ORIGIN[:2] + [2.95, 0.9],
                                                     side=ORIGIN[:2] + [2.0, 1.5]),
                               resolution=0.01, depth=(-0.08, 0.08), max_angle=89.0, name="Parete sud")
@@ -234,7 +235,7 @@ def test_patch_tool_on_an_elevation(win, qapp, monkeypatch):
     assert w.drawings_frame == eid and v.mode == "patch" and w.draw_actions["patch"].isChecked()
     v.fit()
     qapp.processEvents()
-    u, vv = _surface_cell(ch, entry)
+    u, vv = surface_cell(ch, entry)
 
     def vp(x, y):
         return v.mapFromScene(v.scene_pt(x, y))
@@ -287,3 +288,45 @@ def test_patch_tool_on_an_elevation(win, qapp, monkeypatch):
     assert P.patches(ch, frame=eid) == [] and P.patches(ch) == [] and P.changed_patches(ch, frame=eid) == []
     assert np.array_equal(_read(path)[0], before) and np.array_equal(_read(ch.orthomosaic_path)[0], plan_before)
     assert w.drawings_frame == eid and not v.features(mw.PATCH_LAYER)
+    # a polygon selected on the elevation (through the window's selection hook): its photos are looked for there
+    monkeypatch.setattr(w, "_selected_polygon", lambda: box(u - 0.15, vv - 0.1, u + 0.15, vv + 0.1))
+    seen = len(_Choose.seen)
+    w.patch_with_selection()
+    w.runner.wait()  # the photos of the area
+    qapp.processEvents()
+    w.runner.wait()  # the patch
+    qapp.processEvents()
+    assert len(_Choose.seen) == seen + 1 and _Choose.seen[-1].candidates
+    assert [p["id"] for p in P.patches(ch, frame=eid)] == ["p1"] and P.patches(ch) == [] and w.drawings_frame == eid
+
+
+def test_undo_of_plan_and_elevation_patches_is_one_task(win, monkeypatch):
+    """An undo entry that changes the patches of the orthomosaic and of an elevation redraws both in ONE task: the
+    runner takes one at a time and would refuse a second."""
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import patches as P
+
+    w, ch = win, win.chunk
+    ch.meta.setdefault("elevations", []).append({"id": "e1", "name": "Parete"})
+    monkeypatch.setattr(E, "elevation_paths", lambda chunk, entry: (ch.orthomosaic_path, ch.orthomosaic_path))
+    monkeypatch.setattr(P, "changed_patches", lambda chunk, frame=None: [{"id": "p1"}])
+    done = []
+    monkeypatch.setattr(ch, "update_orthomosaic", lambda **k: done.append("plan"))
+    monkeypatch.setattr(ch, "update_elevation", lambda eid, **k: done.append(eid))
+    tasks = []
+
+    def run_task(name, job, on_done, **k):
+        tasks.append(name)
+        from pyarchinit_photogrammetry.core.progress import Progress
+
+        job(Progress())
+
+    monkeypatch.setattr(w, "run_task", run_task)
+    patch = {"id": "p1", "polygon": [[0, 0], [1, 0], [1, 1]], "photos": ["a"], "mode": "assign", "surface": "dem"}
+    w._undo_patches({"patches": [], "frame_patches": {"e1": [patch]}})
+    assert len(tasks) == 1 and done == ["plan", "e1"]
+    assert ch.meta["elevations"][-1]["patches"] == [patch]
+    w._undo_patches({"frame_patches": {}})  # no patches: none written into an entry that has none
+    ch.meta["elevations"].append({"id": "e2", "name": "Altra"})
+    w._undo_patches({"frame_patches": {}})
+    assert "patches" not in ch.meta["elevations"][-1]

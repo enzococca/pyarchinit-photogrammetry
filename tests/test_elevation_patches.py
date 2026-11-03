@@ -13,25 +13,12 @@ from shapely.geometry import box
 from pyarchinit_photogrammetry.engine import elevation as E
 from pyarchinit_photogrammetry.engine import patches as P
 
-ORIGIN = np.array([2480000.0, 4500000.0, 100.0])  # the synthetic trench (testing.synthetic.make_scene)
-
-
-def _colour_of(key: int) -> tuple[int, int, int]:
-    """A colour (BGR) of its own for every photo (the rule of tests/test_patches.py)."""
-    rng = np.random.default_rng(1000 + int(key))
-    return tuple(int(v) for v in rng.integers(30, 226, 3))
-
-
-def _fake_photo(cam, flags=None):
-    s = cam._chunk_sensor
-    return np.full((s.height, s.width, 3), _colour_of(cam.key), np.uint8)
-
-
-def _plain(monkeypatch):
-    from pyarchinit_photogrammetry.engine import ortho, visibility
-
-    monkeypatch.setattr(ortho, "read_photo", _fake_photo)
-    monkeypatch.setattr(visibility, "read_photo", _fake_photo)
+from elevation_helpers import ORIGIN
+from elevation_helpers import colour_of as _colour_of
+from elevation_helpers import fake_photo as _fake_photo
+from elevation_helpers import plain as _plain
+from elevation_helpers import prepare as _prepare
+from elevation_helpers import surface_cell as _surface_cell
 
 
 @pytest.fixture
@@ -39,11 +26,6 @@ def plain_photos(monkeypatch):
     """Every photo read by the engines is a plain colour of its own."""
     _plain(monkeypatch)
     return _fake_photo
-
-
-def _prepare(ch):
-    for cam in ch.cameras:
-        cam._chunk_sensor = ch.sensor(cam)
 
 
 @pytest.fixture(scope="module")
@@ -121,16 +103,6 @@ def _cells(ch, entry, poly, shape, margin: float = 0.015):
     inside = contains_xy(poly.buffer(-margin), u, v) & np.isfinite(relief)
     outside = ~contains_xy(poly.buffer(margin), u, v)
     return inside, outside
-
-
-def _surface_cell(ch, entry):
-    """(u, v) of a cell of the elevation where its relief has a value, near the middle."""
-    with rasterio.open(E.elevation_paths(ch, entry)[1]) as src:
-        d = src.read(1)
-        t = src.transform
-    rows, cols = np.nonzero(np.isfinite(d))
-    k = len(rows) // 2
-    return t.c + (cols[k] + 0.5) * t.a, t.f + (rows[k] + 0.5) * t.e
 
 
 def plain_colour(ch, label):
