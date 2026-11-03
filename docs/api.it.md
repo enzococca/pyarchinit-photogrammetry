@@ -569,6 +569,11 @@ sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci 
 | `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | porta `chunks` (oggetti Chunk, chiavi o etichette; predefinito: gli altri chunk abilitati) nel sistema mondo e nel CRS di `reference`; restituisce un rapporto |
 | `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | nuovo chunk (etichetta predefinita `Merged chunk`) nel sistema del primo chunk; quelli di partenza restano |
 | `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | riga di comando (riferimento predefinito: il chunk attivo) |
+| `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | nuovo chunk (etichetta predefinita `<etichetta> (copia)`, poi `(copia 2)`... se già usata: `engine.chunks.duplicate_label`) con le foto `cameras` di `chunk` (tutte con None) e le loro pose e il loro stato attivo, i marker con le proiezioni su quelle foto, le barre di scala, trasformazione, CRS e impostazioni; un modello COLMAP scritto dalle pose, così le mappe di profondità girano senza allineare; le maschere delle foto tenute e le foto che stanno nella cartella del chunk (copie di riferimento delle riprese multispettrali e termiche) copiate, le camere puntate sulle copie; le impostazioni delle riprese restano, i loro prodotti no; i punti di legame copiati quando si tengono tutte le foto (una parte delle foto ne ha bisogno: ValueError senza); i prodotti mai copiati (`keep_products` è riservato); `chunk` non cambia; CLI `ppg duplicate-chunk` |
+| `chunk.set_cameras_enabled(cameras, enabled)` | attiva o disattiva foto (oggetti del chunk, chiavi o etichette; KeyError per un nome che non c'è, ValueError per una Camera di un altro chunk, per esempio di un duplicato, che ne condivide le chiavi): una foto disattivata tiene la sua posa, allineamento, mappe di profondità, ortofoto e texture la lasciano fuori; restituisce quante sono cambiate; CLI `ppg photos enable\|disable` |
+| `engine.chunks.cameras_in_area(chunk, polygon)` | le foto la cui immagine inquadra la superficie dentro `polygon` (coordinate del chunk) |
+| `ppg duplicate-chunk project.ppg [--chunk C] [--photos nomi.txt \| --area WKT] [--label L]` | riga di comando: tutte le foto, quelle elencate in un file di testo (una per riga) o quelle che inquadrano un poligono (WKT, GeoJSON o un file GeoJSON) |
+| `ppg photos enable\|disable project.ppg NOMI... [--chunk C]` | riga di comando: foto per etichetta (o chiave) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | riga di comando (predefinito: tutti i chunk abilitati) |
 
 Metodi di `align_chunks`:
@@ -676,6 +681,7 @@ versioni conservate stanno in `versions/<prodotto>/<id>/` dentro la cartella del
 | --- | --- |
 | `versions.keep_active(chunk, product, move=False)` | mette la versione attiva tra quelle conservate; restituisce la voce |
 | `versions.restore(chunk, product, entry)` | annulla un `keep_active(move=True)` (una costruzione fallita) |
+| `versions.keep_during(chunk)` | contesto: i prodotti riscritti al suo interno vengono prima conservati (uno script, per *Modifica > Annulla*) |
 | `versions.set_active_name(chunk, product, name)` | dà un nome alla versione attiva (predefinito `DEM del 16/10 11:20 (classi 2)`) |
 | `versions.active_info(chunk, product)` | nome e data della versione attiva |
 | `versions.versions(chunk, product)` | le versioni conservate |
@@ -1081,6 +1087,21 @@ chunk (`gui.undo.clone`: `clonefile` su macOS, altrimenti una copia) in `<dati c
 modifica); `reset()` per un altro progetto o chunk (copie eliminate). La finestra registra a ogni
 cambiamento del progetto, `run_task(..., undo=True)` per le modifiche fatte in background.
 
+Un passo che si annulla da sé entra con `push(text, action, document=True)`: `action.undo()`, `action.redo()` e, se
+c'è, `action.drop()` quando la voce esce dalla cronologia. Uno script è un passo di questo tipo:
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `MainWindow.run_script_source(source, label="Script", on_done=None)` | esegue `source` nel worker (`assistant.scripts.run_script`), con i nomi preparati nel thread dell'interfaccia; alla fine - anche con un errore - una sola voce `label` di *Modifica > Annulla*; `on_done(result)`; `False` se un altro passo è in corso |
+| `assistant.scripts.run_script(source, namespace, progress, name="script")` | lo esegue con `progress` e `cancel` tra i nomi; restituisce `ScriptResult(output, error, traceback, external, elapsed)`; solo `Cancelled` si propaga, `SystemExit` chiude lo script |
+| `assistant.scripts.ExternalCalls()` | gestore di contesto: le chiamate di `EXTERNAL` (scritture in PyArchInit, `LiveLink.write`, `io.exports.export_*`) fatte come sempre ed elencate in `calls` |
+| `gui.undo.snapshot_document(doc)` | `{chiave del chunk: chunk.to_dict()}` con `"meta"` e `"order"` |
+| `gui.undo.files_under(folder)` | i file sotto una cartella, senza versioni, copie di Annulla e rimozioni |
+| `gui.undo.ScriptAction(window, before, after, versions, new_files, new_chunks, removed_chunks, kept_folders=None)` | la voce di uno script: chunk e impostazioni del progetto dalle istantanee, i prodotti conservati come versioni scambiati con quelli dello script, file e chunk nuovi messi da parte e rimessi, i chunk tolti (`core.removal.ChunkRemoval`, per chiave) rimessi e tolti di nuovo; solleva `ScriptChanged` (la voce esce dalla cronologia) se il progetto non è come lo script l'ha lasciato |
+| `gui.gui_thread.call(fn, *args)` / `GuiProxy(obj)` | da un altro thread: una chiamata fatta nel thread dell'interfaccia, aspettandone il risultato; un oggetto i cui attributi e metodi vanno lì (`window` in uno script) |
+| `versions.keep_during(chunk)` | finché si è dentro (`chunk.keep_versions`), ogni prodotto che i costruttori riscrivono viene prima conservato, una volta (`Chunk._before_product_write(name)`) |
+| `versions.set_aside(chunk, product, id)` / `versions.bring_back(chunk, product, entry)` | il prodotto attivo portato fuori dal progetto (non elencato) e rimesso |
+
 ## Elaborazione batch
 
 | Chiamata | Descrizione |
@@ -1165,6 +1186,8 @@ PyArchInit non ha una colonna apposita).
 | `chunk.region = None` | nessuna regione |
 | `chunk.reset_region(source="tie_points", margin=0.05, angle_deg=0)` | attorno al 98 % centrale dei punti di legame (o della nuvola densa), girata attorno alla verticale |
 | `engine.region.region_from_box(chunk, (xmin, ymin, xmax, ymax), zmin=None, zmax=None)` | sopra un rettangolo in pianta, le quote dai punti al suo interno |
+| `chunk.region_from_markers(a, b, c, thickness, extent="region")` | una scatola sottile sul piano di tre marker (etichetta, chiave o codice del target): gli assi del piano e la sua normale verso le foto, `thickness` lungo la normale centrato sul piano; l'estensione nel piano dalla regione che c'era (`"region"`) o dai punti di legame (`"tie_points"`); CLI `ppg region-markers` |
+| `engine.region.region_from_markers(chunk, a, b, c, thickness, extent="region", margin=0.05)` | lo stesso come funzione del modulo; `margin` allarga l'estensione presa dai punti di legame |
 | `Region.contains(world)` | quali punti mondo stanno dentro la scatola |
 | `Region.corners()` | gli 8 spigoli della scatola |
 | `Region.footprint()` | l'estensione della scatola in pianta |
@@ -1175,6 +1198,39 @@ PyArchInit non ha una colonna apposita).
 **`chunk.region = engine.region.Region(...)`**: le mappe di profondità (CPU e, dopo, quelle di COLMAP)
 non hanno profondità fuori di essa, la nuvola densa e la mesh vengono tagliate su di essa (una
 superficie Poisson non si gonfia più oltre l'oggetto), così DEM e ortofoto coprono solo quella.
+
+**`chunk.region_from_markers(a, b, c, thickness)`**: il piano è quello di
+`engine.elevation.plane_from_markers` (`u` da `a` verso `b`, `v` perpendicolare nel piano, la normale
+rivolta verso la media delle camere allineate). Con `extent="region"` e una regione, gli spigoli di
+quella regione vengono proiettati sul piano e la scatola nuova ne prende l'estensione (una scatola
+proiettata su un piano inclinato cresce al più della sua altezza); senza regione, o con
+`extent="tie_points"`, i percentili 1-99 dei punti di legame nel piano, allargati di `margin`. I
+marker devono avere una posizione (foto allineate, o messi a mano); tre marker su una linea, o un
+`thickness` non maggiore di 0, danno `ValueError`. Un marker dato come numero viene cercato prima come
+codice del target, poi come chiave (`markers.gcp.resolve_marker`): con i target, indicare le chiavi
+come etichette o codici.
+
+## Mappa delle normali
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `chunk.build_normal_map(source="auto")` | la mappa delle normali sulla griglia dell'ortofoto (stessi larghezza, altezza, trasformazione e CRS): un GeoTIFF RGBA uint8, R verso est, G verso nord, B verso l'alto (`(n + 1) / 2 * 255`), A 255 dove c'è una superficie sotto un pixel opaco; il prodotto `normal_map` (`normal_map.tif`); CLI `ppg normal-map` |
+| `engine.normalmap.normal_map_on_grid(chunk, source="auto", path=None)` | lo stesso come funzione del modulo, in `path` (allora non è un prodotto del chunk) |
+
+**`chunk.build_normal_map(source)`**: `"dem"` ricampiona il DEM sulla griglia (bilineare) e prende le
+pendenze con il kernel di Horn; `"model"` lancia un raggio verticale verso il basso sul centro di ogni
+cella (`RaycastingScene` di Open3D, tasselli di 1024 x 1024 raggi) e prende la normale della faccia
+che incontra, ogni normale rivolta verso l'alto; `"auto"` è `"model"` quando il chunk ha un modello
+che Open3D riesce a caricare e leggere e che copre qualche cella della griglia, altrimenti `"dem"`. Un
+modello chiesto per nome che non copre nessuna cella dà una mappa tutta trasparente (con un avviso nel
+registro); un DEM che non ne copre nessuna è un errore. `chunk.meta["normal_map"]["source"]` dice quale è
+stato usato. A vale 255 dove l'ortofoto è opaca (la sua banda alfa, o la sua maschera: nodata, una
+maschera interna) e c'è una normale; R, G e B valgono 0 dove A è 0. La griglia viene calcolata e
+scritta a blocchi di righe (`engine.normalmap.NORMAL_BLOCK_ROWS`), quindi un'ortofoto grande richiede
+solo la memoria di un blocco. Un chunk locale (senza CRS) dà una mappa delle normali senza CRS, come
+la sua ortofoto; un'ortofoto in gradi viene rifiutata. È la mappa delle normali della superficie in pianta (come quella di Metashape), per illuminare
+un disegno da un altro lato o mettere il rilievo sotto un disegno in QGIS; la mappa delle normali in
+spazio tangente di un modello leggero è `engine.normalmap.light_model`.
 
 ## Modifica del DEM
 
@@ -1190,6 +1246,54 @@ dell'anello, IDW fuori di essa), `idw`, `constant` (`value`, predefinito la medi
 DEM com'era viene prima conservato come versione; un DEM di un altro programma viene modificato come
 copia nella cartella del chunk; overview aggiornate nella finestra; `chunk.meta["dem_edits"]` elenca
 le modifiche.
+
+## TIN e linee di rottura
+
+Il TIN di un chunk ([TIN e linee di rottura](tin.md)) è il prodotto `tin`: `tin/tin.npz` + `tin.json` nella cartella
+del chunk, in coordinate locali (mondo = locale + `origin`, un numero tondo di chilometri), `chunk.meta["tin"]`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.tin.build_tin(chunk, source="dem", max_error=None, breaklines=None, boundary=None, spots=True, classes=None)` | costruisce e conserva il TIN; restituisce un `Tin`; CLI `ppg tin build` |
+| `engine.tin.chunk_tin(chunk)` | il TIN conservato dal chunk, o None |
+| `engine.tin.tin_to_dem(chunk, resolution=None, name=None)` | il TIN rasterizzato come DEM attivo (il DEM di prima resta come versione, "DEM dal TIN"); CLI `ppg tin dem` |
+| `engine.tin.contours(tin, interval, base=0.0, index_every=5)` | curve di livello, esatte sui triangoli: `[{"elevation", "index", "coords"}]` |
+| `engine.tin.tin_contours(chunk, interval=None)` | lo stesso sul TIN del chunk (equidistanza predefinita: circa 50 livelli); CLI `ppg tin contours` |
+| `engine.tin.volume(tin, reference=None)` | scavo e riporto esatti rispetto a una quota o a un piano `(a, b, c)`; CLI `ppg tin volume` |
+| `engine.tin.tin_volume(chunk, reference=None)` | lo stesso sul TIN del chunk |
+| `engine.tin.export(tin, path, crs=None)` | `.dxf`, `.ply`, `.obj`, `.gpkg`, `.xml`/`.landxml`; CLI `ppg tin export` |
+| `engine.tin.report(tin)` | il TIN in poche righe |
+| `engine.tin.read_landxml(path)` | vertici e triangoli di una superficie LandXML |
+| `engine.tin.triangulate(xy, constraints=None)` | la sola triangolazione di Delaunay vincolata (`Triangulation`) |
+| `archaeo.breaklines.records(chunk, frame=None)` | le linee disegnate sulla pianta, o sul prospetto `frame` |
+| `archaeo.breaklines.new_record(kind, coords, attributes=None)` | il record di una linea (`breakline`, `soft`, `boundary`) |
+| `archaeo.breaklines.for_tin(recs)` | i record come `breaklines` di `build_tin` |
+| `archaeo.breaklines.as_arrays(recs)` | i record come array (n, 3) per `chunk.edit_dem(breaklines=...)` |
+| `archaeo.breaklines.write_lines(recs, path, crs=None)` | `.dxf`, `.gpkg` o `.geojson` |
+
+**`build_tin(...)`**: `source` `"dem"` raffina il DEM finché ogni cella è entro `max_error` (predefinito il doppio
+del rumore del DEM, l'NMAD attorno a una mediana 3 x 3, e almeno `FLOOR_CELLS` = un quinto di cella; al massimo
+`MAX_VERTICES` = 2 M); `"cloud"` prende il terreno della nuvola densa (classe 2, o `classes`) diradato alla sua
+spaziatura; `"spots"` solo le quote puntuali e le linee di rottura. `breaklines` sono dizionari `{id, kind, coords}`:
+`breakline` spigoli vincolati (quote dalla linea, o dal DEM ai vertici che non ne hanno), `soft` solo i vertici,
+`boundary` un vincolo chiuso fuori dal quale non resta alcun triangolo; `boundary` (un poligono shapely, mondo) fa lo
+stesso; `spots` mette le quote puntuali del chunk come vertici con la loro quota. I vincoli che si incrociano sono
+spezzati in un vertice nuovo.
+
+**`Tin`**: `origin`, `xy`, `z`, `triangles` (antiorari), `constrained` (coppie di vertici), `spots`, `source`,
+`info` (tolleranza, giri, `error_max`, `error_p95`, `warnings`); `world_xy`, `world_xyz`, `n_vertices`,
+`n_triangles`, `save(folder)`, `Tin.load(path)`.
+
+**`volume(tin, reference)`**: le chiavi di `archaeo.terrain.volume` (`area_m2`, `cut_m3`, `fill_m3`, `net_m3`,
+`above_m3`, `below_m3`, `quota_min`, `quota_max`); con un riferimento lo scavo è il TIN sotto di esso, il riporto
+quello sopra; con None il vertice più basso fa da fondo e `cut_m3` è il deposito sopra di esso.
+
+**Senza il nucleo nativo** (`pyarchinit-photogrammetry-core` >= 0.7, API 10, il crate spade) `triangulate` usa la
+triangolazione di Delaunay di SciPy: i vincoli sono ignorati (`Triangulation.native` False) e `info["warnings"]`
+contiene `engine.tin.NOT_CONSTRAINED`; rasterizzazione, curve e volumi usano le stesse formule in NumPy.
+
+`chunk.edit_dem(..., lines="drawn")` conserva anche le quote delle linee di rottura disegnate sulla pianta che
+raggiungono l'area.
 
 ## Calcolatore raster
 
@@ -1369,6 +1473,29 @@ delle foto, fusione, correzione del colore) e scrive i file in `<dati chunk>/ele
 (sistema nei tag e in `frame.json`). `bounds=(u0, v0, u1, v1)` costruisce solo quella parte (quello che
 mostra una vista); senza, la parte del modello dentro la fascia di profondità. La voce dice `kind`,
 `bounds`, `v_is_height` e, per una sezione, il file `profile`. Riga di comando: `ppg elevation`.
+
+### Disegni sui prospetti e sulle sezioni
+
+La finestra tiene ciò che si disegna su un prospetto o una sezione nel suo sistema:
+`chunk.meta["drawings"]["frames"][<id del prospetto>] = {"units", "quote", "points", "stones"}`, in metri `(u, v)`;
+i disegni della pianta restano in cima a `chunk.meta["drawings"]` (i progetti senza `frames` si leggono come prima).
+`MainWindow.drawings_frame` è None sulla pianta, l'id del prospetto quando ne è mostrato uno. Una quota su un
+prospetto tiene `u`, `v` e ha `x`, `y`, `quota_q` = il suo punto nel mondo sulla superficie.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | il punto nel mondo (CRS del chunk) di `(u, v)` alla profondità `d`; `d` None: sulla superficie, dal rilievo (serve `chunk`; None dove il rilievo non ha valore) |
+| `relief_at(chunk, entry, u, v)` | la profondità della superficie in `(u, v)` |
+| `frame_drawings(chunk, id)` | i disegni tenuti con il prospetto `id` |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"ortho"` con `raster`): DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, PNG, il GeoPackage sviluppato (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, senza CRS, con una colonna `geom_world` in WKT) e il GeoPackage in 3D sul rilievo |
+| `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | i disegni collocati sul rilievo in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` di una sezione), nel CRS del prospetto (`entry["crs"]`); scritti con la Z in un GeoPackage aperto |
+| `io.qgis_link.LiveLink.write_elevations({id: (crs, tabelle)})`, `elevation_tables()` | quelle tabelle nel GeoPackage dal vivo come `prospetto_<id>_<nome>` (in un solo senso), lette anche dal collegamento con RustGIS (`RustGisLink.refresh_elevations()`) |
+| `PyArchInit.register_elevation_media(chunk, entry, paths, sito=None, link_us=None)` | il DXF e l'SVG registrati come media "Prospetto"/"Sezione" del sito (miniatura: `paths["png"]`), id tenuti in `entry["media"]`: una chiamata successiva riscrive file e anteprime con gli stessi id e collega le US aggiunte nel frattempo |
+
+La finestra tiene i disegni della pianta in `units`, `quote`, `probe_points` e `stones` qualunque cosa sia mostrata, e
+quelli del prospetto mostrato in `frame_units`, `frame_quote`, `frame_points` e `frame_stones`; gli strumenti di
+disegno, il ridisegno dei layer e Modifica > Annulla lavorano sugli insiemi mostrati (`shown_units`...). Il pacchetto
+QField porta solo i disegni della pianta; il collegamento dal vivo con QGIS aggiunge quelli dei prospetti in 3D.
 
 ## Maschere delle foto
 
@@ -1579,16 +1706,48 @@ ppg report scavo.ppg --pdf rapporto.pdf --html rapporto.html --lang it --chunk "
 ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 ```
 
+## L'assistente dalla riga di comando
+
+```bash
+ppg assistant models --kind local                      # tutti i server locali che rispondono, con i loro modelli
+ppg assistant models --kind local --base-url http://127.0.0.1:8080/v1
+ppg assistant ask scavo.ppg "Qual è la risoluzione del DEM?" --kind local --show-sent
+ppg assistant eval scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out locale.json --record
+ppg assistant eval scavo.ppg --kind reference          # le risposte di riferimento del set: ogni controllo è raggiungibile
+```
+
+`ask` fa una domanda su un progetto (`--kind local|claude|openai`, `--model`, `--base-url`, `--lang it|en`) e stampa
+la risposta; `--show-sent` stampa anche quello che è stato inviato (con un modello locale non esce nulla: ogni voce è
+segnata così) e `ppg assistant sent` stampa lo stesso per l'ultimo `ask` del processo. `models` elenca i modelli di
+un server locale, di Claude o dell'account OpenAI. Un indirizzo locale è sempre e solo di questo computer.
+
+`eval` pone il set di valutazione (`assistant/evaluation/cases.json` nel pacchetto, scritto per il progetto dimostrativo di
+`ppg demo CARTELLA --process`): 8 domande, ognuna in una conversazione nuova, superate quando la risposta contiene
+tutti i modelli del caso; 6 compiti di script, ogni script eseguito su una copia del progetto (mai sul progetto) e poi
+controllato, con l'errore rimandato una volta per un secondo tentativo. `--only questions|scripts`, `--out` scrive i
+risultati in JSON e `--record` conserva il punteggio (i compiti di script riusciti) come ultima valutazione del tipo,
+mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `assistant.evaluate.run_eval(provider, project, cases=CASES, kinds="all", attempts=2, progress=None, language="it")` | il set posto a `provider`: `{"provider", "kind", "model", "language", "date", "elapsed", "questions": {"passed", "of", "results"}, "scripts": {"passed", "of", "first_try", "results"}, "score_scripts", "limited_for_scripts"}`; un risultato per caso è un `CaseResult(id, kind, passed, attempts, detail, elapsed, sent_chars)` come dizionario |
+| `assistant.evaluate.write_results(result, out)` | il risultato in JSON |
+| `assistant.evaluate.record_score(settings, kind, result)` | `score_scripts` in `assistant/score_<kind>` (solo `local`, `claude`, `openai`) |
+| `assistant.evaluate.CasesProvider(cases, language="it")` | un fornitore che risponde con le risposte di riferimento del set (nessun modello) |
+| `assistant.evaluate.load_cases(path)` / `table(result)` | il set; il risultato come righe di testo |
+
 ## Moduli
 
 | Modulo | Funzioni principali |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
-| `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `engine.tin` | `build_tin`, `chunk_tin`, `tin_to_dem`, `contours`, `tin_contours`, `volume`, `tin_volume`, `export`, `read_landxml`, `report`, `triangulate`, `rasterize`, `contour_segments`, `prism_volume`, `Tin` |
+| `archaeo.breaklines` | `records`, `new_record`, `for_tin`, `as_arrays`, `write_lines`, `KINDS` |
 | `archaeo.coreg` | `coregister` (ricerca iniziale sulle pendenze per spostamenti di metri, poi spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (GlobalId IFC dal `node_uuid` di una scheda US), `read_ifc_elements` |
@@ -1614,6 +1773,9 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | `ppg.demo.create_demo(folder, process=False)` | foto di una trincea sintetica + GCP, progetto, mesh di ceramica, database PyArchInit (`DemoData`) |
 | `pyarchinit_photogrammetry.gui.main(argv)` | avvia l'interfaccia desktop (`ppg-gui`) |
 | `ppg.core.progress.Progress` | callback di avanzamento con intervalli `sub()`; `cancel()` ferma ogni sotto-passo |
+| `window.model_view.pivot()` | il centro di rotazione della vista 3D (coordinate mondo del chunk), o None |
+| `window.model_view.set_pivot(point, recentre=False)` | un nuovo centro di rotazione; la vista si sposta solo con `recentre` ([Vista 3D e trackball](gui/view3d.md)) |
+| `window.model_view.set_trackball_mode(mode)` | quando si disegna la trackball: `"auto"`, `"always"`, `"never"` |
 
 
 ## Aggiunte nella 0.3

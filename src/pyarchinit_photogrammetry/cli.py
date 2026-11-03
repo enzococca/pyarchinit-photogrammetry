@@ -27,7 +27,15 @@ gnss_app = typer.Typer(help="GNSS positions of the photos: their quality per fli
 app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
+photos_app = typer.Typer(help="Enable or disable photos: a disabled photo keeps its pose, the next steps leave it out")
 app.add_typer(gnss_app, name="gnss")
+app.add_typer(photos_app, name="photos")
+assistant_app = typer.Typer(help="The assistant from the command line: a question about a project, the models of a "
+                                 "server or service, the evaluation of a model on the evaluation set")
+app.add_typer(assistant_app, name="assistant")
+tin_app = typer.Typer(help="TIN (triangulated irregular network) of a chunk: from the DEM, the ground of the dense "
+                           "cloud or the spot heights, with break lines; DEM, contours, volumes and exports from it")
+app.add_typer(tin_app, name="tin")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -267,6 +275,115 @@ def elevation_cmd(project: Path,
                + ("; v = height" if entry.get("v_is_height") else "")
                + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else ""))
     typer.echo(f"{ortho}\n{relief}")
+
+
+@app.command("region-markers")
+def region_markers_cmd(project: Path,
+                       a: str = typer.Argument(..., help="first marker (label, key or target code): u from A to B"),
+                       b: str = typer.Argument(..., help="second marker"),
+                       c: str = typer.Argument(..., help="third marker"),
+                       thickness: float = typer.Option(..., help="metres of region along the normal of the "
+                                                       "plane, centred on it"),
+                       extent: str = typer.Option("region", help="size in the plane: 'region' (the region there "
+                                                  "was, else the tie points) or 'tie_points'"),
+                       chunk: Optional[str] = None):
+    """The reconstruction region as a thin box on the plane of three markers (an object, a wall):
+    the axes of the plane and its normal towards the photos."""
+    if extent not in ("region", "tie_points"):
+        raise typer.BadParameter("--extent: region or tie_points")
+    doc, ch = _open(project, chunk)
+    try:
+        region = ch.region_from_markers(a, b, c, thickness, extent)
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    doc.save()
+    typer.echo("region on the plane of %s, %s, %s: %.3f x %.3f x %.3f m, centre %.3f %.3f %.3f"
+               % (a, b, c, *region.size, *region.center))
+
+
+@app.command("normal-map")
+def normal_map_cmd(project: Path,
+                   source: str = typer.Option("auto", help="model, dem or auto (the model when there is one)"),
+                   chunk: Optional[str] = None):
+    """The normal map on the grid of the orthomosaic (same pixels, same coordinates): an RGBA
+    GeoTIFF, red east, green north, blue up; the product normal_map of the chunk."""
+    if source not in ("auto", "dem", "model"):
+        raise typer.BadParameter("--source: auto, dem or model")
+    doc, ch = _open(project, chunk)
+    try:
+        path = ch.build_normal_map(source, progress=print_progress)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    doc.save()
+    typer.echo(f"normal map from the {ch.meta.get('normal_map', {}).get('source', source)}: {path}")
+
+
+@app.command("duplicate-chunk")
+def duplicate_chunk_cmd(project: Path, chunk: Optional[str] = None,
+                        photos: Optional[Path] = typer.Option(None, help="text file with the names of the photos "
+                                                              "to keep, one a line"),
+                        area: Optional[str] = typer.Option(None, help="polygon (WKT, GeoJSON or a GeoJSON file) in "
+                                                           "the coordinates of the chunk: the photos framing it"),
+                        label: Optional[str] = typer.Option(None, help="name of the new chunk (default: "
+                                                            "'<name> (copia)')")):
+    """A copy of the chunk with all its photos or some of them, with their poses: depth maps, dense
+    cloud and the rest can be built on it again without aligning. Products are not copied."""
+    from .engine.chunks import cameras_in_area
+
+    if photos is not None and area is not None:
+        raise typer.BadParameter("give --photos or --area, not both")
+    doc, ch = _open(project, chunk)
+    cams = None
+    if photos is not None:
+        names = [n.strip() for n in photos.read_text(encoding="utf-8").splitlines() if n.strip()]
+        try:
+            cams = [ch.camera(n) for n in _photo_names(ch, names)]
+        except KeyError as exc:
+            raise typer.BadParameter(f"no photo {exc.args[0]!r} in the chunk {ch.label}") from exc
+    elif area is not None:
+        polygon = _polygons([area])
+        try:
+            cams = cameras_in_area(ch, polygon)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if not cams:
+            raise typer.BadParameter("no photo frames the area")
+    try:
+        dup = doc.duplicate_chunk(ch, cams, label=label)
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    doc.save()
+    typer.echo(f"chunk {dup.label}: {len(dup.cameras)} photos of {len(ch.cameras)}, {len(dup.markers)} markers")
+
+
+def _photo_names(ch, names: list[str]) -> list:
+    """Names of photos of the command line: a label, else a key when it is a number."""
+    labels = {c.label for c in ch.cameras}
+    return [n if n in labels or not n.isdigit() else int(n) for n in names]
+
+
+def _photos_enabled(project: Path, names: list[str], chunk: Optional[str], enabled: bool) -> None:
+    doc, ch = _open(project, chunk)
+    try:
+        n = ch.set_cameras_enabled(_photo_names(ch, names), enabled)
+    except KeyError as exc:
+        raise typer.BadParameter(f"no photo {exc.args[0]!r} in the chunk {ch.label}") from exc
+    doc.save()
+    typer.echo(f"{n} photos {'enabled' if enabled else 'disabled'} in {ch.label}")
+
+
+@photos_app.command("enable")
+def photos_enable(project: Path, names: list[str] = typer.Argument(..., help="photo names (or keys)"),
+                  chunk: Optional[str] = None):
+    """Enable photos: the next alignment and builds use them."""
+    _photos_enabled(project, names, chunk, True)
+
+
+@photos_app.command("disable")
+def photos_disable(project: Path, names: list[str] = typer.Argument(..., help="photo names (or keys)"),
+                   chunk: Optional[str] = None):
+    """Disable photos: they keep their pose, the next alignment and builds leave them out."""
+    _photos_enabled(project, names, chunk, False)
 
 
 @app.command("colour-scan")
@@ -2125,6 +2242,134 @@ def plugins_disable(name: str):
     typer.echo(f"{name} disabled")
 
 
+# ---------------------------------------------------------------- assistant
+
+KIND_HELP = "local (a server on this computer), claude or openai"
+_LAST_SENT: list[str] = []  # the sent log of the last `ask` of this process
+
+
+def _assistant_provider(kind: str, model: str, base_url: str):
+    from .assistant.providers import ProviderError, make_provider
+
+    try:
+        return make_provider(kind, model, base_url)
+    except ProviderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+
+@assistant_app.command("ask")
+def assistant_ask(project: Path = typer.Argument(..., help="the .ppg project the question is about"),
+                  question: str = typer.Argument(..., help="the question, in quotes"),
+                  kind: str = typer.Option("local", help=KIND_HELP),
+                  model: str = typer.Option("", help="the model (default: the first of a local server, "
+                                                     "claude-opus-5-5 for Claude)"),
+                  base_url: str = typer.Option("", help="address of the server, e.g. http://127.0.0.1:8080/v1 (a "
+                                                        "local one only on this computer; default: the usual ports)"),
+                  lang: str = typer.Option("it", help="language of the conversation: it or en"),
+                  show_sent: bool = typer.Option(False, "--show-sent", help="also print what was sent")):
+    """Ask the assistant one question about a project and print the answer (and what it read)."""
+    from .assistant.knowledge import default_index
+    from .assistant.session import Assistant
+
+    doc = Document.open(project)
+    provider = _assistant_provider(kind, model, base_url)
+    assistant = Assistant(provider, lambda: doc, default_index("it" if lang.startswith("it") else "en"),
+                          language=lang)
+    turn = assistant.ask(question)
+    _LAST_SENT[:] = assistant.sent_log
+    if turn.note:
+        typer.echo(turn.note)
+    if turn.text:
+        typer.echo(turn.text)
+    if show_sent:
+        typer.echo("\n--- sent ---\n" + "\n\n".join(_LAST_SENT))
+    if turn.error:
+        typer.echo(turn.error, err=True)
+        raise typer.Exit(1)
+
+
+@assistant_app.command("sent")
+def assistant_sent():
+    """What the last `ask` of this process sent, entry by entry (with a local model nothing left: marked so)."""
+    if not _LAST_SENT:
+        typer.echo("Nothing sent in this process: `ppg assistant ask --show-sent` prints it with the answer.")
+        return
+    typer.echo("\n\n".join(_LAST_SENT))
+
+
+@assistant_app.command("models")
+def assistant_models(kind: str = typer.Option("local", help=KIND_HELP),
+                     base_url: str = typer.Option("", help="address of the server (local: default the usual ports)")):
+    """The models of a local server (or of every local server that answers), of Claude or of the OpenAI account."""
+    from .assistant.providers import OpenAICompatible, ProviderError, probe_local
+
+    try:
+        if kind == "local" and not base_url:
+            found = probe_local()
+            if not found:
+                typer.echo("No local server answers (LM Studio, llama.cpp, Ollama, Unsloth).", err=True)
+                raise typer.Exit(1)
+            for name, url, models in found:
+                typer.echo(f"{name} {url}")
+                for m in models:
+                    typer.echo(f"  {m}")
+            return
+        if kind == "local":
+            models = OpenAICompatible(base_url, "", kind="local").list_models()
+        else:
+            models = _assistant_provider(kind, "", base_url).list_models()
+    except ProviderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for m in models:
+        typer.echo(m)
+
+
+@assistant_app.command("eval")
+def assistant_eval(project: Path = typer.Argument(..., help="the .ppg project (the demo: ppg demo FOLDER --process)"),
+                   kind: str = typer.Option("local", help=KIND_HELP + ", or reference (the answers of the set)"),
+                   model: str = typer.Option("", help="the model"),
+                   base_url: str = typer.Option("", help="address of the server"),
+                   cases: Optional[Path] = typer.Option(None, help="the evaluation set (default: "
+                                                                   "the set shipped with the program)"),
+                   only: str = typer.Option("all", help="all, questions or scripts"),
+                   lang: str = typer.Option("it", help="language of the questions: it or en"),
+                   out: Optional[Path] = typer.Option(None, help="write the results to this JSON file"),
+                   record: bool = typer.Option(False, "--record", help="keep the score as the last evaluation of "
+                                                                       "this kind in the settings of the interface")):
+    """Evaluate a model: the questions and the script tasks of the set on a project (the scripts run on copies:
+    the project is never changed). Prints one line per case and the score."""
+    from .assistant import evaluate
+
+    path = cases or evaluate.CASES
+    if kind == evaluate.REFERENCE:
+        if record:
+            typer.echo("The reference answers of the set are not a model: nothing to record.", err=True)
+            raise typer.Exit(1)
+        provider = evaluate.CasesProvider(path, language=lang)
+    else:
+        provider = _assistant_provider(kind, model, base_url)
+    try:
+        result = evaluate.run_eval(provider, project, path, kinds=only, progress=print_progress, language=lang)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(evaluate.table(result))
+    if out is not None:
+        evaluate.write_results(result, out)
+        typer.echo(f"results written to {out}")
+    if record:
+        try:
+            from .gui import app_settings
+
+            score = evaluate.record_score(app_settings(), kind, result)
+        except (ImportError, ValueError) as exc:
+            typer.echo(f"not recorded: {exc}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"score {score:g} recorded for {kind}")
+
+
 @app.command("plugin", context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
                                          "help_option_names": []})
 def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None, help="command of a plugin")):
@@ -3174,6 +3419,150 @@ def gnss_positions(project: Path, file: Path,
     doc.save()
     typer.echo(f"{result['matched']} of {result['rows']} rows found their photo")
     _unmatched(result["unmatched"], "not in the chunk")
+
+
+# ------------------------------------------------------------------------------------------------ TIN
+def _breaklines_file(path: Optional[Path]) -> list[dict]:
+    """Break lines from a GeoJSON file: LineStrings (with z or not), property ``kind`` breakline (default),
+    soft or boundary (a Polygon is a boundary)."""
+    if path is None:
+        return []
+    from shapely.geometry import shape
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"{path}: not a GeoJSON file ({exc})") from None
+    feats = data["features"] if data.get("type") == "FeatureCollection" else [data]
+    out = []
+    for k, f in enumerate(feats):
+        geom = shape(f.get("geometry", f))
+        props = f.get("properties") or {}
+        kind = props.get("kind") or ("boundary" if geom.geom_type == "Polygon" else "breakline")
+        parts = getattr(geom, "geoms", [geom])
+        for j, g in enumerate(parts):
+            coords = list(g.exterior.coords) if g.geom_type == "Polygon" else list(g.coords)
+            out.append({"id": props.get("id", f"{k}.{j}"), "kind": kind, "coords": coords})
+    return out
+
+
+@tin_app.command("build")
+def tin_build(project: Path,
+              source: str = typer.Option("dem", help="dem (refinement of the DEM), cloud (ground of the dense "
+                                                     "cloud) or spots (spot heights and break lines only)"),
+              max_error: Optional[float] = typer.Option(None, help="dem: largest difference from the DEM (metres; "
+                                                                   "default twice the DEM's noise, or 2 cm)"),
+              breaklines: Optional[Path] = typer.Option(None, help="GeoJSON of the break lines: LineStrings with "
+                                                                   "property kind = breakline, soft or boundary"),
+              drawn: Optional[bool] = typer.Option(None, "--drawn/--no-drawn",
+                                                   help="the break lines drawn on the plan of the chunk (default: "
+                                                        "yes when no --breaklines file is given)"),
+              boundary: Optional[list[str]] = typer.Option(None, help="the TIN stops at this polygon: WKT, GeoJSON "
+                                                                      "or a GeoJSON file"),
+              spots: bool = typer.Option(True, "--spots/--no-spots", help="the spot heights of the plan drawings "
+                                                                          "as vertices"),
+              classes: Optional[str] = typer.Option(None, help="cloud: the classes of the ground (e.g. 2,8); "
+                                                               "default class 2 when the cloud has it"),
+              chunk: Optional[str] = None):
+    """Build the TIN of --chunk (default the active one) and keep it in the project."""
+    from .engine import tin as tin_mod
+
+    from .archaeo import breaklines as bl
+
+    doc, ch = _open(project, chunk)
+    cls = [int(c) for c in classes.split(",") if c.strip()] if classes else None
+    lines = _breaklines_file(breaklines)
+    if drawn or (drawn is None and breaklines is None):
+        stored = bl.for_tin(bl.records(ch))
+        if stored:
+            typer.echo(f"{len(stored)} break lines drawn on the plan")
+        lines += stored
+    try:
+        tin = tin_mod.build_tin(ch, source=source, max_error=max_error, breaklines=lines,
+                                boundary=_polygons(boundary), spots=spots, classes=cls, progress=print_progress)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    doc.save()
+    typer.echo(tin_mod.report(tin))
+
+
+@tin_app.command("dem")
+def tin_dem(project: Path,
+            resolution: Optional[float] = typer.Option(None, help="cell size (metres; default: the grid of the DEM)"),
+            name: Optional[str] = typer.Option(None, help="name of the DEM version (default: DEM dal TIN)"),
+            chunk: Optional[str] = None):
+    """The TIN rasterised as the active DEM; the DEM as it was stays among the versions."""
+    from .engine import tin as tin_mod
+
+    doc, ch = _open(project, chunk)
+    try:
+        path = tin_mod.tin_to_dem(ch, resolution=resolution, name=name, progress=print_progress)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    doc.save()
+    typer.echo(f"{ch.label}: DEM from the TIN -> {path} ({ch.meta['dem']['resolution']:.4g} m)")
+
+
+@tin_app.command("contours")
+def tin_contours(project: Path, out: Path = typer.Argument(..., help=".dxf, .gpkg or .geojson"),
+                 interval: Optional[float] = typer.Option(None, help="metres (default: about 50 levels)"),
+                 base: float = typer.Option(0.0, help="height of a level"),
+                 index_every: int = typer.Option(5, help="an index contour every N levels"),
+                 chunk: Optional[str] = None):
+    """Contour lines of the TIN (exact on the triangles) written to a file."""
+    from .archaeo.terrain import export_contours
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    try:
+        lines = tin_mod.tin_contours(ch, interval=interval, base=base, index_every=index_every)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    export_contours(lines, out, ch.crs)
+    typer.echo(f"{len(lines)} contour lines -> {out}")
+
+
+@tin_app.command("volume")
+def tin_volume(project: Path,
+               reference: Optional[float] = typer.Option(None, help="height of the surface before the work "
+                                                                    "(default: the lowest vertex as floor)"),
+               plane: Optional[str] = typer.Option(None, help="a,b,c: the plane z = a x + b y + c as reference"),
+               chunk: Optional[str] = None):
+    """Exact cut and fill of the TIN against a height or a plane."""
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    ref = reference
+    if plane:
+        try:
+            ref = tuple(float(v) for v in plane.split(","))
+        except ValueError:
+            raise typer.BadParameter("--plane: three numbers a,b,c") from None
+        if len(ref) != 3:
+            raise typer.BadParameter("--plane: three numbers a,b,c")
+    try:
+        v = tin_mod.tin_volume(ch, ref)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"area {v['area_m2']:.3f} m2, cut {v['cut_m3']:.4f} m3, fill {v['fill_m3']:.4f} m3, "
+               f"net {v['net_m3']:.4f} m3 (heights {v['quota_min']:.3f} to {v['quota_max']:.3f})")
+
+
+@tin_app.command("export")
+def tin_export(project: Path, out: Path = typer.Argument(..., help=".dxf, .ply, .obj, .gpkg or .xml (LandXML 1.2)"),
+               chunk: Optional[str] = None):
+    """Write the TIN: DXF (3DFACE and break lines), PLY/OBJ mesh, GeoPackage or LandXML."""
+    from .engine import tin as tin_mod
+
+    _doc, ch = _open(project, chunk)
+    tin = tin_mod.chunk_tin(ch)
+    if tin is None:
+        raise typer.BadParameter("build the TIN first: ppg tin build")
+    try:
+        path = tin_mod.export(tin, out, ch.crs)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"TIN ({tin.n_vertices} vertices, {tin.n_triangles} triangles) -> {path}")
 
 
 def main():  # pragma: no cover - console entry point

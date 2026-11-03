@@ -7,7 +7,7 @@ avvio sono in tre gruppi:
 | --- | --- |
 | a sinistra | [Area di lavoro](#area-di-lavoro), [Riferimenti](#riferimenti), [Layer](#layer) - sempre presenti |
 | a destra | [PyArchInit](#pyarchinit), [Proxy US](#proxy-us), [Multispettrale e Termico](multispectral.md), i pannelli dei plugin |
-| in basso | [Foto](#foto), [Sezioni](#sezioni), [Console Python](#console-python), [Log](#log) |
+| in basso | [Foto](#foto), [Sezioni](#sezioni), [Console Python](#console-python), [Assistente](#assistente), [Log](#log) |
 
 Le schede di un gruppo sono in alto, ognuna con l'icona del suo pannello; la barra del titolo sotto di esse
 dice quale pannello è davanti.
@@ -70,7 +70,7 @@ tiene i pulsanti che non ci stanno):
 
 | Su... | Comandi |
 | --- | --- |
-| un chunk | *Rendi attivo*, *Rinomina...*, *Attiva* o *Disattiva*, *Rimuovi chunk* |
+| un chunk | *Rendi attivo*, *Rinomina...*, *Duplica chunk...* (tutte le sue foto, quelle selezionate nel pannello Foto o quelle che inquadrano il poligono selezionato sull'ortofoto: un nuovo chunk con le loro pose, dove mappe di profondità e il resto si costruiscono di nuovo senza allineare), *Attiva* o *Disattiva*, *Rimuovi chunk* |
 | nuvola densa, modello, DEM, ortofoto | *Mostra*, *Conserva una copia come versione*, *Rinomina questa versione...*, *Rimuovi* |
 | una versione conservata | *Mostra*, *Rendi attiva*, *Differenza con il DEM attivo*, *Esporta...*, *Rinomina...*, *Rimuovi* |
 | una foto | *Apri*, *Attiva* o *Disattiva*, *Rimuovi la foto* |
@@ -195,7 +195,8 @@ un'area - con *Mostra tutte* e *Precedente* / *Successiva*. I filtri vengono da:
 * un nuovo marker, che filtra le foto su di sé.
 
 Il clic destro sulle miniature misura anche la **qualità delle immagini** (la nitidezza di ogni foto confrontata
-con le più nitide; *sfocata* sotto 0,5), disattiva le foto sfocate, attiva o disattiva quelle selezionate,
+con le più nitide; *sfocata* sotto 0,5), disattiva le foto sfocate, attiva o disattiva quelle selezionate (una foto disattivata tiene la sua posa, la sua
+miniatura è velata di grigio con un distintivo grigio e le elaborazioni successive la lasciano fuori),
 imposta le loro maschere e il loro modello di obiettivo (vedi [Foto e marker](photos-markers.md)).
 
 ## Sezioni
@@ -219,7 +220,16 @@ disegnano è in [Disegno e misure](drawing.md#sezioni).
 ![La console Python](../img/gui/pane-console.png)
 
 Una console Python con il progetto a portata di mano: `doc` (il progetto), `chunk` (il chunk attivo), `app`,
-`ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. ++ctrl+shift+p++ la porta davanti.
+`ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. Un blocco incollato di più righe viene eseguito subito. ++ctrl+shift+p++ la porta davanti.
+
+## Assistente
+
+![Il pannello Assistente](../img/gui/pane-assistant.it.png)
+
+A sinistra una conversazione con un modello linguistico sul progetto e sul programma - un modello su questo
+computer, Claude o OpenAI - con il pallino che dice se qualcosa esce dal computer e *Cosa viene inviato*;
+a destra un editor di script: *Esegui* fa girare lo script sul progetto in background e *Annulla lo script*
+riporta tutto indietro in un passo. Tutto è in [L'assistente](assistant.md).
 
 ## Log
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import code
-import contextlib
 import io
 import logging
 import os
@@ -29,7 +28,8 @@ OTHER_PRODUCTS = {"depth_maps": "Mappe di profondità", "coverage": "Copertura d
                   "svf": "Sky-view factor", "openness_pos": "Openness positiva", "openness_neg": "Openness negativa",
                   "slrm": "Rilievo locale (SLRM)", "msrm": "Rilievo multiscala (MSRM)",
                   "multi_hillshade": "Ombreggiatura da 16 direzioni", "ms:reflectance": "Ortofoto di riflettanza",
-                  "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche"}
+                  "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche",
+                  "normal_map": "Mappa delle normali", "tin": "TIN"}
 
 
 def product_name(key: str) -> str:
@@ -293,6 +293,16 @@ class WorkspaceTree(QTreeWidget):
                                         "attiva, confrontarla, rinominarla o eliminarla"))
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
+            tin = ch.product_path("tin")
+            if tin is not None and tin.exists():
+                info = ch.meta.get("tin") or {}
+                it = QTreeWidgetItem([tr("TIN  ({0} triangoli, {1} spigoli vincolati)",
+                                         number(info.get("n_triangles", 0)), number(info.get("n_constrained", 0)))])
+                it.setIcon(0, icon("tin"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "tin"))
+                it.setToolTip(0, tr("Doppio clic per vederlo nella vista 3D; tasto destro: curve di livello, volume, "
+                                    "DEM dal TIN, esporta, rimuovi"))
+                ci.addChild(it)
             for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord"),
                                    ("svf", "Sky-view factor", "SVF"), ("openness_pos", "Openness positiva", "gradi"),
                                    ("openness_neg", "Openness negativa", "gradi"),
@@ -311,6 +321,14 @@ class WorkspaceTree(QTreeWidget):
                 it.setIcon(0, icon("fieldcheck"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "coverage"))
                 it.setToolTip(0, tr("Doppio clic per vederla: quante foto inquadrano ogni punto (rosso: meno di tre)"))
+                ci.addChild(it)
+            normals = ch.product_path("normal_map")
+            if normals is not None and normals.exists():
+                it = QTreeWidgetItem([tr("Mappa delle normali")])
+                it.setIcon(0, icon("relief"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "normal_map"))
+                it.setToolTip(0, tr("Doppio clic per vederla: rosso est, verde nord, blu alto, sulla griglia "
+                                    "dell'ortofoto"))
                 ci.addChild(it)
             prec = ch.product_path("dem_precision")
             if prec is not None and prec.exists():
@@ -635,13 +653,16 @@ class PhotosPane(QListWidget):
         return pm
 
     @staticmethod
-    def _icon(pm: QPixmap, aligned: bool, flags: tuple = (0, 0)) -> QIcon:
+    def _icon(pm: QPixmap, aligned: bool, flags: tuple = (0, 0), enabled: bool = True) -> QIcon:
         """The thumbnail with the aligned badge and, at the bottom, the markers on the photo:
-        green = measured, blue = estimated and to be confirmed (as Metashape's flags)."""
+        green = measured, blue = estimated and to be confirmed (as Metashape's flags). A disabled
+        photo: the thumbnail veiled in grey and a grey badge with a bar."""
         out = QPixmap(pm)
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        col = QColor(PALETTE["green"] if aligned else PALETTE["red"])
+        if not enabled:
+            p.fillRect(out.rect(), QColor(128, 128, 128, 150))
+        col = QColor("#7a7a7a" if not enabled else PALETTE["green"] if aligned else PALETTE["red"])
         p.setBrush(QBrush(col))
         p.setPen(QColor("white"))
         p.drawEllipse(5, 5, 18, 18)
@@ -649,7 +670,7 @@ class PhotosPane(QListWidget):
         f.setBold(True)
         f.setPointSize(11)
         p.setFont(f)
-        p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "✓" if aligned else "✕")
+        p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "–" if not enabled else "✓" if aligned else "✕")
         x = 5
         for count, colour in ((flags[0], "#30a050"), (flags[1], "#2f7fd8")):
             if count:
@@ -676,7 +697,7 @@ class PhotosPane(QListWidget):
         f = self._flags.get(getattr(cam, "key", None))
         text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
         if not getattr(cam, "enabled", True):
-            text += " (disattivata)"
+            text += tr(" (disattivata: le prossime elaborazioni la lasciano fuori)")
         meta = getattr(cam, "meta", None) or {}
         if meta.get("panorama"):
             text += tr("\nFaccia «{0}» della foto 360° {1}", meta.get('face'), meta['panorama'])
@@ -695,7 +716,8 @@ class PhotosPane(QListWidget):
             cam = it.data(Qt.ItemDataRole.UserRole)
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
-            it.setIcon(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]))
+            it.setIcon(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2],
+                                  getattr(cam, "enabled", True)))
             it.setToolTip(self._tooltip(cam))
 
     def set_filter(self, keys=None, title: str = "", focus=None) -> int:
@@ -741,7 +763,8 @@ class PhotosPane(QListWidget):
         for cam in chunk.cameras:
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
-            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]),
+            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2],
+                                            getattr(cam, "enabled", True)),
                                  cam.label)
             it.setData(Qt.ItemDataRole.UserRole, cam)
             it.setToolTip(self._tooltip(cam))
@@ -767,7 +790,8 @@ class PhotosPane(QListWidget):
         self._cache[path] = pm
         for it in self._items.get(path, []):
             cam = it.data(Qt.ItemDataRole.UserRole)
-            it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2]))
+            it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2],
+                                  getattr(cam, "enabled", True)))
             if img.isNull():
                 it.setToolTip(tr("{0}\nfoto non leggibile (file vuoto o mancante)", cam.path))
         self._done += 1
@@ -935,6 +959,21 @@ class ReferencePane(QWidget):
         self.last_report: dict | None = None
 
     def set_chunk(self, chunk, report: dict | None = None) -> None:
+        """The tables of ``chunk``: emptied first, filled with new items, without repainting and without their
+        signals (itemChanged is how an edit by hand is read: nothing of it runs while they are filled)."""
+        tables = (self.table, self.cams, self.bars)
+        blocked = [t.blockSignals(True) for t in tables]
+        for t in tables:
+            t.setUpdatesEnabled(False)
+        try:
+            self._fill(chunk, report)
+        finally:
+            for t, was in zip(tables, blocked):
+                t.setUpdatesEnabled(True)
+                t.blockSignals(was)
+            self._filling = False
+
+    def _fill(self, chunk, report: dict | None = None) -> None:
         from ..markers import gcp
 
         self.chunk = chunk
@@ -1282,6 +1321,7 @@ class ConsolePane(QWidget):
     """Python console bound to the open project: ``doc``, ``chunk``, ``app``, ``ppg``."""
 
     executed = Signal()
+    paste_runs_blocks = True
 
     def __init__(self, namespace_factory, parent=None):
         super().__init__(parent)
@@ -1297,6 +1337,7 @@ class ConsolePane(QWidget):
         self.inp.setFont(mono)
         self.inp.setPlaceholderText(">>>  chunk.build_dem(resolution=0.01)      (doc, chunk, app, ppg, np, window)")
         self.inp.returnPressed.connect(self._run)
+        self.inp.block_pasted.connect(self._run_block)
         lay.addWidget(self.out, 1)
         lay.addWidget(self.inp)
         self._factory = namespace_factory
@@ -1310,13 +1351,62 @@ class ConsolePane(QWidget):
         self.out.insertPlainText(s)
         self.out.moveCursor(QTextCursor.MoveOperation.End)
 
+    @staticmethod
+    def _is_block(src: str) -> bool:
+        """True for a source of several lines or several statements."""
+        import ast
+
+        multi = "\n" in src.strip("\n")
+        if not multi and ";" not in src:
+            return False
+        try:
+            return multi or len(ast.parse(src).body) > 1
+        except SyntaxError:
+            return multi
+
+    def _run_block(self, src: str) -> None:
+        self.inp.add_history(src)
+        self.run_source(src)
+        self.prompt = ">>> "
+        self.executed.emit()
+
     def run_source(self, src: str) -> bool:
-        """Run one line (as typed); returns True when more input is needed."""
+        """Run one line (as typed) or a block of lines; returns True when more input is needed."""
+        if self._is_block(src):
+            if self.console.buffer:
+                self.console.resetbuffer()
+                self.write(tr("Il blocco incollato sostituisce l'istruzione rimasta a metà") + "\n")
+            return self._exec_block(src)
         self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
+        from ..assistant.scripts import capture
+
         stream = _Stream(self.write)
-        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-            more = self.console.push(src)
+        with capture(stream):  # only what this thread prints: a script running in the worker keeps its own
+            try:
+                more = self.console.push(src)
+            except SystemExit as exc:  # exit() in the console ends the command, never the program
+                self.console.resetbuffer()
+                self.write(f"SystemExit: {exc.code}\n" if exc.code not in (None, 0) else "SystemExit\n")
+                more = False
         return more
+
+    def _exec_block(self, src: str) -> bool:
+        """Run a pasted block in ``exec`` mode in the console's namespace, echoed line by line."""
+        from ..assistant.scripts import capture
+
+        self.console.locals.update({k: v for k, v in self._factory().items() if k in ("doc", "chunk", "app", "ppg")})
+        lines = src.strip("\n").split("\n")
+        self.write("".join(f"{'>>> ' if i == 0 else '... '}{ln}\n" for i, ln in enumerate(lines)))
+        with capture(_Stream(self.write)):
+            try:
+                exec(compile(src, "<console>", "exec"), self.console.locals)
+            except SystemExit as exc:
+                self.write(f"SystemExit: {exc.code}\n" if exc.code not in (None, 0) else "SystemExit\n")
+            except SyntaxError:
+                self.console.showsyntaxerror()
+            except BaseException:
+                self.console.showtraceback()
+        return False
 
     def _run(self) -> None:
         src = self.inp.text()
@@ -1329,6 +1419,8 @@ class ConsolePane(QWidget):
 
 
 class _HistoryLine(QLineEdit):
+    block_pasted = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.history: list[str] = []
@@ -1339,8 +1431,57 @@ class _HistoryLine(QLineEdit):
             self.history.append(s)
         self.pos = len(self.history)
 
+    def insertFromMimeData(self, mime) -> None:
+        """A paste with a newline is a block: it runs at once (after the text already typed)."""
+        text = mime.text() if mime is not None and mime.hasText() else ""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" in text.strip("\n"):
+            self.block_pasted.emit(self.text() + text if not self.text() else self.text() + "\n" + text)
+            self.clear()
+        elif text:
+            self.insert(text.strip("\n"))
+
+    def paste(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        self.insertFromMimeData(QApplication.clipboard().mimeData())
+
+    def contextMenuEvent(self, ev) -> None:
+        """Our own menu: Qt's Paste slot is not virtual, so the standard menu cannot be rewired."""
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        sel = self.hasSelectedText()
+        for item in (
+                (tr("Annulla", context="undo"), self.undo, self.isUndoAvailable()),
+                (tr("Ripeti"), self.redo, self.isRedoAvailable()),
+                None,
+                (tr("Taglia"), self.cut, sel),
+                (tr("Copia"), self.copy, sel),
+                (tr("Incolla"), self.paste, True),
+                (tr("Elimina"), self.del_, sel),
+                None,
+                (tr("Seleziona tutto"), self.selectAll, bool(self.text()))):
+            if item is None:
+                menu.addSeparator()
+                continue
+            label, slot, enabled = item
+            act = menu.addAction(label)
+            act.setEnabled(enabled)
+            act.triggered.connect(slot)
+        self.run_menu(menu, ev.globalPos())
+        menu.deleteLater()
+
+    def run_menu(self, menu, pos) -> None:
+        """Shows the menu (a seam for tests)."""
+        menu.exec(pos)
+
     def keyPressEvent(self, ev: QKeyEvent) -> None:
-        if ev.key() == Qt.Key.Key_Up and self.history:
+        from PySide6.QtGui import QKeySequence
+
+        if ev.matches(QKeySequence.StandardKey.Paste):
+            self.paste()
+        elif ev.key() == Qt.Key.Key_Up and self.history:
             self.pos = max(0, self.pos - 1)
             self.setText(self.history[self.pos])
         elif ev.key() == Qt.Key.Key_Down and self.history:

@@ -57,14 +57,16 @@ Python sullo stesso motore, che gira sulla CPU (anche Apple Silicon). Licenza GP
 * **Georeferenziazione**: target ArUco/AprilTag trovati da soli, punti di controllo e di verifica,
   barre di scala, ottimizzazione delle camere sui punti di controllo, rapporto con gli errori.
 * **Archeologia**: sezioni e piante in scala (SVG/DXF), curve di livello, volumi di scavo e riporto,
-  visualizzazioni del rilievo (sky-view factor, openness, multi-hillshade), US e quote disegnate
-  sull'ortofoto, proposte di US e rapporti, colori Munsell, profili ceramici dal piatto rotante,
+  visualizzazioni del rilievo (sky-view factor, openness, multi-hillshade), un [TIN con linee di
+  rottura](tin.md), US e quote disegnate sull'ortofoto e sui prospetti, proposte di US e rapporti, colori Munsell, profili ceramici dal piatto rotante,
   pietre ed elementi con SAM.
 * **Scambio**: PyArchInit (SQLite/SpatiaLite e PostgreSQL/PostGIS), QGIS dal vivo, QField, IFC 4,
   scene I3S, COPC, 3D Tiles, glTF; importazione di progetti Metashape, WebODM e Photo3D.
+* **[Assistente](gui/assistant.md)**: domande sul progetto e sul programma, e script eseguiti con un clic e annullati
+  in un solo passo - un modello locale di base, Claude o OpenAI senza che niente di privato esca dal computer.
 
 ## Stato
 
-Versione 1.0: applicazione desktop, riga di comando e libreria. Sorgenti, segnalazioni e versioni
+Versione 1.7: applicazione desktop, riga di comando e libreria. Sorgenti, segnalazioni e versioni
 sono su [GitHub](https://github.com/enzococca/pyarchinit-photogrammetry); il piano delle prossime
-versioni è nella [roadmap](roadmap.md) (in inglese).
+versioni è nella [roadmap](roadmap.md).

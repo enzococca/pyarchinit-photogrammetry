@@ -39,9 +39,10 @@ from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, 
                      SectionsPane, WorkspaceTree)
 from .ppk_dialog import PpkDialog
 from .start_page import StartPage
-from .undo import UndoHistory
+from .undo import ScriptChanged, UndoHistory
 from .update_dialog import (PluginUpdateChecker, PluginUpdatesDialog, UpdateChecker, UpdateDialog, error_text,
                             told_keys, untold)
+from .gui_thread import GuiProxy
 from .worker import StatusProgress, TaskRunner
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -57,6 +58,9 @@ CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
 STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
 PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section cuts the model
+LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
+TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
+TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
 # the live link with RustGIS (io.rustgis_link): how often the window looks at RustGIS and how long it waits for it
 RUSTGIS_POLL_MS = 2000  # a look every 2 s while the link is on
 RUSTGIS_PULL_EVERY = 10.0  # seconds: a pull at least this often while RustGIS lists edits in the linked layers
@@ -104,6 +108,13 @@ def _compass(deg: float) -> str:
     points = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"] if i18n.current() == "it" else \
         ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
     return points[int((deg % 360) / 45 + 0.5) % 8]
+
+
+def _bl_label(kind: str) -> str:
+    """The Italian name of a kind of break line (archaeo.breaklines.KIND_LABELS), to translate with tr()."""
+    from ..archaeo.breaklines import KIND_LABELS
+
+    return KIND_LABELS.get(kind, kind)
 
 
 def _it(value: float, decimals: int = 0) -> str:
@@ -320,6 +331,73 @@ class _GuiCalls(QObject):
             log.exception("function run in the interface thread failed")
 
 
+class _WindowProxy(GuiProxy):
+    """``window`` in a script that runs in the worker thread (*Esegui script Python...*): every attribute of the
+    main window is there, read and called in the interface thread while the script waits (:mod:`.gui_thread`), so a
+    script written for the window runs unchanged and no widget is touched from the worker. These are the supported
+    names, done here without waiting: :meth:`show_raster`, :meth:`show_model`, :meth:`log`, :meth:`refresh`;
+    ``selected_polygon()`` is the selection when the script started, ``mark_modified()`` is already done by the
+    script's entry of Modifica > Annulla."""
+
+    def __init__(self, window, polygon=None):
+        super().__init__(window)
+        object.__setattr__(self, "_polygon", polygon)
+
+    def _window(self):
+        return object.__getattribute__(self, "_target")
+
+    def show_raster(self, kind: str | None = None) -> None:
+        """The orthophoto (``"ortho"``) or the DEM (``"dem"``) of the active chunk in the 2D view; None: the
+        orthophoto when there is one."""
+        w = self._window()
+
+        def show():
+            ch = w.chunk
+            if ch is None:
+                return
+            w._show_raster(kind or ("ortho" if ch.orthomosaic_path is not None else "dem"))
+
+        w.call_in_gui(show)
+
+    def show_model(self, kind: str | None = None) -> None:
+        """``kind`` of the active chunk in the 3D view ("model", "model_textured", "point_cloud", "tie_points",
+        "cameras"); None: the best it has."""
+        w = self._window()
+        w.call_in_gui(w._show_model, kind)
+
+    def log(self, text) -> None:
+        """A line in the Log pane."""
+        w = self._window()
+        w.call_in_gui(w.log_pane.info, str(text))
+
+    def refresh(self) -> None:
+        """The window shows the project again."""
+        w = self._window()
+        w.call_in_gui(w.refresh_all)
+
+    def selected_polygon(self):
+        """The polygons selected in the 2D view when the script started, merged (None: none)."""
+        return object.__getattribute__(self, "_polygon")
+
+    _selected_polygon = selected_polygon
+
+    def mark_modified(self) -> None:
+        """Nothing to do: the script's entry of Modifica > Annulla marks the project as modified."""
+
+    def __getattr__(self, name):
+        if name in _WINDOW_REFUSED:
+            raise RuntimeError(f"window.{name} is not available to a script: {_WINDOW_REFUSED[name]}")
+        return super().__getattr__(name)
+
+
+# what a script running in the worker may not reach through ``window``: it would wait on itself, or undo the project
+# from under its own entry of Modifica > Annulla
+_WINDOW_REFUSED = {"runner": "the script itself is what the runner runs",
+                   "history": "the script is undone as one step once it ends",
+                   "undo": "the script is undone as one step once it ends",
+                   "redo": "the script is undone as one step once it ends"}
+
+
 class _StatusBar(QStatusBar):
     """The status bar: its messages in the language of the interface (also those of the engine)."""
 
@@ -394,10 +472,21 @@ class MainWindow(QMainWindow):
         self.probe_points: list[dict] = []  # measuring points: x, y and the values of the products (engine.probe)
         self._probe_obj = None  # the products of the chunk open for the readout under the mouse
         self.stones: dict[str, list] = {}  # name of the raster -> outlines of its stones (polygons)
+        # units, quote, probe_points and stones above are the PLAN's, whatever raster is shown; an elevation or a
+        # section shown has its own sets, in its (u, v): the drawing tools work on the sets shown (shown_units...)
+        self.drawings_frame: str | None = None  # None = the plan; else the id of the elevation shown
+        self.frame_units: list = []
+        self.frame_quote: list[dict] = []
+        self.frame_points: list[dict] = []
+        self.frame_stones: dict[str, list] = {}  # {elevation id: outlines of its stones}
+        self.lines: list[dict] = []  # break lines of the plan (archaeo.breaklines records), x, y, z
+        self.frame_lines: list[dict] = []  # those of the elevation shown, in its (u, v)
+        self._tin_edges: tuple | None = None  # (file, mtime, edges (n, 2, 2)) of the TIN drawn on the plan
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
         self._task_done = False  # a processing step just ended: its changes are not an edit
+        self._script_running = False  # a script runs: its changes are its own entry of Modifica > Annulla
         self.history: UndoHistory | None = None
         self._build_views()
         self._build_docks()
@@ -479,11 +568,15 @@ class MainWindow(QMainWindow):
         self.ortho_view.line_finished.connect(self._section_drawn)
         self._request = None  # the drawing lent by request_geometry: (on_finished, on_cancelled)
         self._gui_calls = _GuiCalls(self)
+        from . import gui_thread
+
+        gui_thread.install()  # a script in the worker reaches the window through it
         self.ortho_view.request_finished.connect(self._request_drawn)
         self.ortho_view.request_cancelled.connect(lambda: self._end_request(cancelled=True))
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
+        self.ortho_view.breakline_finished.connect(self._breakline_drawn)
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -504,7 +597,7 @@ class MainWindow(QMainWindow):
     def _build_docks(self) -> None:
         """The panes, each a dock of its own (see :mod:`.docks`): on the left Area di lavoro, Riferimenti
         and Layer (always there), Proxy US, Multispettrale, Termico and the panes of the plugins; at the
-        bottom Foto, Sezioni, Console Python and Log; on the right PyArchInit."""
+        bottom Foto, Sezioni, Console Python, Assistente and Log; on the right PyArchInit."""
         from .docks import GroupDock, Panes
 
         self.panes = Panes(self)
@@ -629,6 +722,10 @@ class MainWindow(QMainWindow):
         add(self.photos_panel, tr("Foto"), icon("photos"), name="pane_photos", area="bottom")
         add(self.sections_pane, tr("Sezioni"), icon("line"), name="pane_sections", area="bottom")
         add(self.console, tr("Console Python"), icon("console"), name="pane_console", area="bottom")
+        from .assistant_pane import AssistantPane
+
+        self.assistant = AssistantPane(self)  # the conversation with the model and the script editor
+        add(self.assistant, tr("Assistente"), icon("assistant"), name="pane_assistant", area="bottom")
         add(self.log_pane, "Log", icon("log"), name="pane_log", area="bottom")
         # until 1.3.3 the docks of the left and of the bottom tabs: now the pane in front of each side
         self.d_work, self.d_photos = GroupDock(self.left_tabs), GroupDock(self.bottom_tabs)
@@ -916,6 +1013,7 @@ class MainWindow(QMainWindow):
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("breakline", "Linea di rottura (per il TIN e la modifica del DEM)", "breakline"),
                                 ("probe", "Punto di misura: quota, temperatura, bande e indici nel punto", "probe"),
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
@@ -929,6 +1027,22 @@ class MainWindow(QMainWindow):
             self.draw_group.addAction(a)
             dm.addAction(a)
             self.draw_actions[mode] = a
+        # the kind of the break lines drawn next: the menu of the button Linee (as in a CAD: the line type)
+        from ..archaeo import breaklines as _bl
+
+        self.breakline_menu = QMenu(tr("Tipo di linea di rottura"), self)
+        kinds = QActionGroup(self)
+        self.breakline_kind_actions: dict[str, QAction] = {}
+        current_kind = self.settings.value("draw/breakline_kind", "breakline")
+        self.breakline_kind = current_kind if current_kind in _bl.KINDS else "breakline"
+        for key in _bl.KINDS:
+            a = self.breakline_menu.addAction(tr(_bl.KIND_LABELS[key]))
+            a.setCheckable(True)
+            a.setChecked(key == self.breakline_kind)
+            a.triggered.connect(lambda _=False, k=key: self.set_breakline_kind(k))
+            kinds.addAction(a)
+            self.breakline_kind_actions[key] = a
+        dm.addMenu(self.breakline_menu)
         self.a_select_freehand = QAction(icon("freehand"), tr("Selezione a mano libera (lazo)"), self, checkable=True)
         self.a_select_freehand.setChecked(self.settings.value("draw/select_freehand", "false") in ("true", True))
         self.a_select_freehand.toggled.connect(self._selection_shape_changed)
@@ -1022,6 +1136,18 @@ class MainWindow(QMainWindow):
         self.a_contours = self._act(m, tr("Curve di livello..."), self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, tr("Volume scavo / riporto..."), self.compute_volume, processing=True,
                                   icon_name="volume")
+        self.a_tin = self._act(m, "TIN...", self.build_tin, processing=True, icon_name="tin",  # a word of every language
+                               tip=tr("Rete di triangoli dal DEM, dal terreno della nuvola o dalle sole quote, con le "
+                                      "linee di rottura disegnate come spigoli che i triangoli non attraversano"))
+        tm = m.addMenu(icon("tin"), tr("TIN e linee di rottura"))
+        tm.addAction(self.a_tin)
+        self._act(tm, tr("Curve di livello dal TIN..."), self.tin_contours, processing=True, icon_name="contours")
+        self._act(tm, tr("Volume dal TIN..."), self.tin_volume, processing=True, icon_name="volume")
+        self._act(tm, tr("DEM dal TIN"), self.tin_to_dem, processing=True, icon_name="dem")
+        self._act(tm, tr("Esporta TIN..."), self.export_tin, icon_name="export")
+        tm.addSeparator()
+        self._act(tm, tr("Disegna linee di rottura"), lambda: self.set_draw_mode("breakline"), icon_name="breakline")
+        self._act(tm, tr("Esporta le linee di rottura..."), self.export_breaklines, icon_name="export")
         self._act(m, tr("Proponi US e rapporti (Extended Matrix)..."), self.propose_units, processing=True,
                   icon_name="timeline",
                   tip=tr("Numero di US, tipo e misure per le unità senza numero (SAM o disegnate) e i rapporti "
@@ -1050,6 +1176,12 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Calcolatore raster..."), lambda: self.raster_calculator(), processing=True,
                   icon_name="calculator",
                   tip=tr("Formule sui raster del progetto, anche quelli dei plugin, come nel calcolatore raster di QGIS"))
+        self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
+                  tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
+                         "nuvola densa e modello restano dentro il suo spessore"))
+        self._act(m, tr("Mappa delle normali..."), self.build_normal_map, processing=True, icon_name="relief",
+                  tip=tr("Le normali della superficie sulla griglia dell'ortofoto (stessi pixel, stesse coordinate): "
+                         "rosso est, verde nord, blu alto"))
         self._act(m, tr("Opzioni delle sezioni..."), self.section_options, icon_name="line")
         self.a_slice = self._act(m, tr("Pianta a quota (slice orizzontale)..."), self.plan_slice, processing=True,
                                  icon_name="slice")
@@ -1088,6 +1220,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
+        am = m.addMenu(icon("assistant"), tr("Assistente"))
+        self._act(am, tr("Apri l'assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant),
+                  icon_name="assistant")
+        self._act(am, tr("Impostazioni dell'assistente..."), self.assistant_settings, icon_name="settings")
         ms_menu = m.addMenu(tr("Multispettrale"))
         self._act(ms_menu, tr("Aggiungi riprese multispettrali..."), self.ms_add,
                   tip=tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
@@ -1187,6 +1323,7 @@ class MainWindow(QMainWindow):
         self.a_qgis_live.setChecked(False)
         self.a_qgis_live.toggled.connect(self._qgis_live_toggled)
         m.addAction(self.a_qgis_live)
+        self._act(m, tr("Apri il prospetto in QGIS"), self.open_elevation_in_qgis, icon_name="view_ortho")
         self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
         m.addSeparator()  # RustGIS, the same drawings both ways through the same GeoPackage
@@ -1212,11 +1349,15 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Sezioni"), lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, tr("Console Python"), lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
+        self._act(m, tr("Assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant), icon_name="assistant")
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
         self._act(m, tr("Ortofoto / DEM"), lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
         self._act(m, tr("Foto"), lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
+        for a in self.model_view.trackball_actions.values():
+            tbmenu.addAction(a)
         m.addSeparator()
         tmenu = m.addMenu(icon("theme"), tr("Tema"))
         tgroup = QActionGroup(self)
@@ -1307,16 +1448,17 @@ class MainWindow(QMainWindow):
         lab.setObjectName("pageSubtitle")
         db.addWidget(lab)
         # short texts in the bar (menus keep the full names, tooltips show them)
-        for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
+        for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "US"),
                          (self.draw_actions["vertices"], "Vertici"), (self.draw_actions["reshape"], "Rimodella"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
+                         (self.draw_actions["breakline"], "Linee"),
                          (self.draw_actions["probe"], "Punto"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
                          (self.a_sel_delete, "Elimina"),
-                         (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
+                         (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella"),
                          (self.a_contours, "Curve"), (self.a_volume, "Volume"), (self.a_slice, "Pianta a quota"),
                          (self.a_qgis_open, "QGIS")):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
@@ -1342,9 +1484,12 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "probe", "marker", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "breakline", "probe", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
-        for mode in ("sam", "line"):
+        button = db.widgetForAction(self.draw_actions["breakline"])
+        if button is not None:  # the kind of the lines in the menu of the button
+            button.setMenu(self.breakline_menu)
+        for mode in ("sam", "line", "breakline"):
             button = db.widgetForAction(self.draw_actions[mode])
             if button is not None:
                 button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -1442,6 +1587,9 @@ class MainWindow(QMainWindow):
         self.probe_points = []
         self._probe_reset()
         self.stones = {}
+        self.drawings_frame = None  # a new project opens on the plan
+        self.frame_units, self.frame_quote, self.frame_points, self.frame_stones = [], [], [], {}
+        self.lines, self.frame_lines, self._tin_edges = [], [], None
         self._sam_obj = None
         self.classifier = None
         self.sections = []
@@ -1514,6 +1662,7 @@ class MainWindow(QMainWindow):
         that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
         reflectance orthomosaic) with the drawings on top."""
         self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
+        self._set_drawings_frame(None)  # a raster of the plan: the drawings of the plan
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
         if path is None:
@@ -1534,13 +1683,15 @@ class MainWindow(QMainWindow):
             for name, lines in self.line_layers.items():
                 for coords, color, label, attrs, width in lines:
                     self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_tin()
+            self._draw_lines()
             self._draw_patches()
             self._draw_markers_on_raster()
             self._draw_stones()
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
-        if flag and self.history is not None and not self._task_done:
+        if flag and self.history is not None and not self._task_done and not self._script_running:
             self.history.record()
 
     def mark_modified(self) -> None:
@@ -1636,6 +1787,20 @@ class MainWindow(QMainWindow):
         for q in self.quote:
             if q.get("gid") is None:
                 q["sito_q"] = sito
+        for u in self.frame_units:  # and those of the elevation shown, and of the others the chunk keeps
+            u.sito = sito or None
+        for q in self.frame_quote:
+            if q.get("gid") is None:
+                q["sito_q"] = sito
+        frames = ((self.chunk.meta.get("drawings") or {}).get("frames") or {}) if self.chunk is not None else {}
+        for eid, data in frames.items():
+            if eid == self.drawings_frame:
+                continue
+            for d in data.get("units") or []:
+                d["sito"] = sito or None
+            for q in data.get("quote") or []:
+                if q.get("gid") is None:
+                    q["sito_q"] = sito
         self.pa_pane.set_project_site(sito)
         self._update_title()
         self._dirty(True)
@@ -2588,15 +2753,34 @@ class MainWindow(QMainWindow):
             if not path:
                 return False
             self._store_drawings()
+            self._prune_frames()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
             self._store_drawings()
+            self._prune_frames()
             self.doc.save()
         self._dirty(False)
         self.refresh_all()
         self.statusBar().showMessage(tr("Salvato {0}", self.doc.path), 5000)
         return True
+
+    def _prune_frames(self) -> None:
+        """The drawings of elevations no longer in their chunk out of it, at saving: a removal saved is for good."""
+        for ch in self.doc.chunks:
+            drawings = ch.meta.get("drawings") or {}
+            frames = drawings.get("frames")
+            if not frames:
+                continue
+            ids = {e.get("id") for e in ch.meta.get("elevations") or []}
+            kept = {k: v for k, v in frames.items() if k in ids}
+            if len(kept) != len(frames):
+                if kept:
+                    drawings["frames"] = kept
+                else:
+                    drawings.pop("frames")
+                    if not drawings:
+                        ch.meta.pop("drawings", None)
 
     def _confirm_discard(self) -> bool:
         if not self.isWindowModified():
@@ -2674,6 +2858,7 @@ class MainWindow(QMainWindow):
             self._live_previous.close()
             self._live_previous = None
         self.photos.stop()
+        self.assistant.shutdown()  # the question in progress stopped, its thread ended
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("state", self.panes.save())
@@ -3317,6 +3502,69 @@ class MainWindow(QMainWindow):
                       lambda p: doc.merge_chunks(sources, label=v["label"].strip() or None, merge_markers=v["markers"],
                                                  merge_tie_points=v["tie_points"], merge_point_clouds=v["clouds"],
                                                  merge_models=v["models"], progress=p), done)
+
+    def duplicate_chunk(self, chunk=None) -> None:
+        """*Duplica chunk...* (menu of a chunk in the Area di lavoro): a new chunk with all the photos of
+        ``chunk`` (default the active one), the photos selected in the Photos pane or those framing the
+        polygon selected on the orthophoto, with their poses (:meth:`Document.duplicate_chunk`); it becomes
+        the active chunk. Products are not copied: depth maps and the rest are built again on it."""
+        ch = chunk if chunk is not None else self.chunk
+        if ch is None:
+            self._warn("Nessun chunk attivo.")
+            return
+        selected = self.selected_cameras() if ch is self.chunk else []
+        options = [tr("Tutte le foto ({0})", len(ch.cameras)),
+                   tr("Le {0} foto selezionate nel pannello Foto", len(selected)),
+                   tr("Le foto dell'area selezionata sull'ortofoto")]
+        answer = choice(self, "question", tr("Duplica chunk"),
+                        tr("Quali foto vanno nel nuovo chunk? Le foto tengono la loro posizione: mappe di profondità, "
+                           "nuvola densa e gli altri prodotti si costruiscono di nuovo sul nuovo chunk, senza "
+                           "allineare."), options)
+        if answer is None:
+            return
+        area = None
+        if answer in (1, 2) and ch is not self.chunk:  # the pane and the 2D view show the active chunk
+            self._warn("Le foto selezionate e l'area selezionata sono quelle del chunk attivo: rendi attivo prima "
+                       "questo chunk.")
+            return
+        if answer == 1 and not selected:
+            self._warn("Seleziona prima le foto nel pannello Foto.")
+            return
+        if answer == 2:
+            area = self._plan_selection()
+            if area is None:
+                self._warn("Seleziona un poligono sull'ortofoto o sul DEM (strumento Seleziona).")
+                return
+        from ..engine.chunks import duplicate_label
+
+        default = duplicate_label(self.doc, ch)  # a name of the project's data: the same in every language
+        v = ParamDialog.ask(self, "Duplica chunk", [Field("label", "Nome del nuovo chunk", default, kind="text")])
+        if not v:
+            return
+        label = (v.get("label") or "").strip() or default
+        doc = self.doc
+        cams = None if answer == 0 else list(selected) if answer == 1 else None
+
+        def make(progress):
+            from ..engine.chunks import cameras_in_area
+
+            chosen = cams
+            if area is not None:
+                progress(0.0, tr("Foto che inquadrano l'area"))
+                chosen = cameras_in_area(ch, area)
+                if not chosen:
+                    raise RuntimeError(tr("Nessuna foto inquadra l'area selezionata."))
+            progress(0.3, tr("Nuovo chunk «{0}»", label))
+            return doc.duplicate_chunk(ch, chosen, label=label)
+
+        def done(dup):
+            self._activate_chunk(dup)
+            self._dirty(True)
+            self.log_pane.info(tr("Creato «{0}»: {1} foto di {2}, {3} marker. È il chunk attivo: costruisci le mappe di "
+                                  "profondità e gli altri prodotti.", dup.label, len(dup.cameras), len(ch.cameras),
+                                  len(dup.markers)))
+
+        self.run_task("Duplica chunk", make, done)
 
     def add_photos(self, folder: bool = False) -> None:
         if not self._need_chunk():
@@ -4032,13 +4280,25 @@ class MainWindow(QMainWindow):
             return
         self.enable_photos(low_quality(self.chunk), False)
 
+    def selected_cameras(self) -> list:
+        """The photos selected in the Photos pane (cameras of the active chunk)."""
+        return self.photos.selected_cameras()
+
     def enable_photos(self, cams, enabled: bool) -> None:
-        for c in cams:
-            c.enabled = bool(enabled)
+        """Enable or disable photos of the active chunk (:meth:`Chunk.set_cameras_enabled`): a disabled photo
+        keeps its pose, the next alignment and builds leave it out; its thumbnail shows it."""
+        cams = list(cams)
+        own = [c for c in cams if self.chunk is not None and any(c is k for k in self.chunk.cameras)]
+        changed = self.chunk.set_cameras_enabled(own, enabled) if own else 0
+        for c in cams:  # photos of another chunk: set directly
+            if not any(c is k for k in own) and c.enabled != bool(enabled):
+                c.enabled = bool(enabled)
+                changed += 1
         self.photos.update_flags()
-        self._dirty(True)
+        if changed:
+            self._dirty(True)
         self.statusBar().showMessage(tr("{0} foto {1}: valgono dal prossimo allineamento o dalla prossima costruzione",
-                                        len(cams), tr('attivate') if enabled else tr('disattivate')), 10000)
+                                        changed, tr('attivate') if enabled else tr('disattivate')), 10000)
 
     def detect_markers(self) -> None:
         if not self._need_chunk():
@@ -4053,11 +4313,14 @@ class MainWindow(QMainWindow):
     def _undo_state(self) -> dict:
         """What Modifica > Annulla takes back, as JSON-able parts (see ``gui.undo``)."""
         ch = self.chunk
+        frames = self._undo_frames()
         state = {"chunk": None if ch is None else ch.key,
                  "labels": self.ortho_view.layer_settings,
-                 "units": [{**u.to_dict(), "attributes": dict(u.attributes or {})} for u in self.units],
-                 "quote": [dict(q) for q in self.quote], "sections": [dict(x) for x in self.sections],
-                 "probe": [dict(q) for q in self.probe_points],
+                 "units": {k: f[0] for k, f in frames.items() if f[0]},
+                 "quote": {k: f[1] for k, f in frames.items() if f[1]},
+                 "sections": [dict(x) for x in self.sections],
+                 "probe": {k: f[2] for k, f in frames.items() if f[2]},
+                 "lines": self._undo_lines(),
                  "pa": {"deleted": sorted(self.pa_deleted), "geom": sorted(self.pa_geom_changed),
                         "pending": sorted(int(k) for k in self.pa_pending)}}
         if ch is not None:
@@ -4066,23 +4329,127 @@ class MainWindow(QMainWindow):
                          patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"))
         return state
 
+    @staticmethod
+    def _undo_units(units) -> list:
+        """Units as the snapshots of Modifica > Annulla keep them: those drawn first, then those of PyArchInit."""
+        drawn = [u for u in units if not MainWindow._is_pa_unit(u)]
+        return [{**u.to_dict(), "attributes": dict(u.attributes or {})}
+                for u in drawn + [u for u in units if MainWindow._is_pa_unit(u)]]
+
+    @staticmethod
+    def _undo_stored_units(records: list) -> list:
+        """Units kept in ``chunk.meta`` as the snapshots keep them (:meth:`_undo_units`), without reading their
+        geometry: the record of :meth:`_store_chunk_drawings` with its layer among the attributes."""
+        out = []
+        for d in records or []:
+            attrs = dict(d.get("attributes") or {})
+            if d.get("layer"):
+                attrs["_layer"] = d["layer"]
+            out.append({"wkt": d.get("wkt"), "sito": d.get("sito"), "area": d.get("area"), "us": d.get("us"),
+                        "tipo": d.get("tipo") or "US", "attributes": attrs})
+        return out
+
+    def _undo_frames(self) -> dict:
+        """The drawings of every frame of the active chunk - "" the plan, else the id of an elevation -, as
+        ``(units, quote, points)`` JSON-able: the plan's and the elevation shown from the window, the others as the
+        chunk keeps them (not parsed: this runs at every edit). Showing another elevation changes none of them, so it
+        is not an edit."""
+        ch = self.chunk
+        out = {"": (self._undo_units(self.units), [dict(q) for q in self.quote], [dict(q) for q in self.probe_points])}
+        current = self.drawings_frame
+        if current is not None:
+            out[current] = (self._undo_units(self.frame_units), [dict(q) for q in self.frame_quote],
+                            [dict(q) for q in self.frame_points])
+        if ch is None:
+            return out
+        for eid, data in ((ch.meta.get("drawings") or {}).get("frames") or {}).items():
+            if eid != current:
+                out[eid] = (self._undo_stored_units(data.get("units")),
+                            [dict(q) for q in data.get("quote") or [] if "x" in q and "y" in q],
+                            [dict(q) for q in data.get("points") or [] if "x" in q and "y" in q])
+        return out
+
+    def _undo_lines(self) -> dict:
+        """The break lines of every frame of the active chunk ("" the plan, else the id of an elevation), as the
+        drawings of :meth:`_undo_frames`: the plan's and the elevation shown from the window, the others from the
+        chunk."""
+        out = {"": [dict(r) for r in self.lines]}
+        current = self.drawings_frame
+        if current is not None:
+            out[current] = [dict(r) for r in self.frame_lines]
+        ch = self.chunk
+        if ch is not None:
+            for eid, data in ((ch.meta.get("drawings") or {}).get("frames") or {}).items():
+                if eid != current:
+                    out[eid] = [dict(r) for r in data.get("lines") or []]
+        return {k: v for k, v in out.items() if v}
+
+    def _undo_other_frames(self, state: dict) -> list[str]:
+        """The drawings of the elevations not shown put back as ``state`` has them (an edit made on another elevation,
+        undone from here): into the chunk. Returns the ids of those that changed."""
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        ch = self.chunk
+        if ch is None:
+            return []
+        frames = (ch.meta.get("drawings") or {}).get("frames") or {}
+        keys = (set(frames) | {k for part in ("units", "quote", "probe", "lines") for k in (state.get(part) or {})}) \
+            - {"", self.drawings_frame}
+        changed = []
+        for key in sorted(keys):
+            before = json.dumps(frames.get(key), sort_keys=True, default=str)
+            units, quote, points = self._chunk_drawings(ch, key)
+            if "units" in state:
+                units = [UnitPolygon.from_dict(d) for d in (state["units"] or {}).get(key) or []]
+            if "quote" in state:
+                quote = [dict(q) for q in (state["quote"] or {}).get(key) or []]
+            if "probe" in state:
+                points = [dict(q) for q in (state["probe"] or {}).get(key) or []]
+            lines = [dict(r) for r in (state["lines"] or {}).get(key) or []] if "lines" in state else None
+            self._store_chunk_drawings(ch, units, quote, points, frame=key, lines=lines)
+            after = ((ch.meta.get("drawings") or {}).get("frames") or {}).get(key)
+            if json.dumps(after, sort_keys=True, default=str) != before:
+                changed.append(key)
+        return changed
+
     def _undo_apply(self, state: dict, parts: set, products: list) -> None:
         """Put back the ``parts`` of a snapshot (and show the ``products`` whose files came back)."""
         ch = self.chunk
         if "labels" in parts:
             self.ortho_view.restore_layer_settings(state.get("labels") or {})
             self._store_drawings()
-            if not parts & {"units", "quote", "sections", "pa", "probe"}:
+            if not parts & {"units", "quote", "sections", "pa", "probe", "lines"}:
                 self._redraw_overlays()
-        if parts & {"units", "quote", "sections", "pa", "probe"}:
+        if parts & {"units", "quote", "sections", "pa", "probe", "lines"}:
             from ..archaeo.stratigraphy import UnitPolygon
 
+            current = self.drawings_frame
+            if parts & {"units", "quote", "probe", "lines"}:
+                for eid in self._undo_other_frames(state):  # an edit on an elevation not shown: said
+                    entry = self._frame_entry(eid)
+                    self.log_pane.info(tr("Modifica dei disegni del prospetto «{0}», che non è mostrato",
+                                          entry["name"] if entry else eid))
+                if current is not None:
+                    if "units" in state:
+                        self.frame_units = [UnitPolygon.from_dict(d) for d in (state["units"] or {}).get(current) or []]
+                    if "quote" in state:
+                        self.frame_quote = [dict(q) for q in (state["quote"] or {}).get(current) or []]
+                    if "probe" in state:
+                        self.frame_points = [dict(q) for q in (state["probe"] or {}).get(current) or []]
+                    if "lines" in state:
+                        self.frame_lines = [dict(r) for r in (state["lines"] or {}).get(current) or []]
             if "probe" in state:
-                self.probe_points = [dict(q) for q in state["probe"] or []]
+                self.probe_points = [dict(q) for q in (state["probe"] or {}).get("") or []]
+            if "lines" in state:
+                self.lines = [dict(r) for r in (state["lines"] or {}).get("") or []]
             follow = []
             if "units" in state:
                 before = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
-                self.units = [UnitPolygon.from_dict(d) for d in state["units"] or []]
+                plan = [UnitPolygon.from_dict(d) for d in (state["units"] or {}).get("") or []]
+                if current is not None and json.dumps(self._undo_units(self.units), sort_keys=True, default=str) != \
+                        json.dumps((state["units"] or {}).get("") or [], sort_keys=True, default=str):
+                    self.log_pane.info(tr("Modifica dei disegni della pianta, che non è mostrata"))
+                self.units = plan
                 for u in self.units:  # a polygon back as it was: its proxy too
                     b = before.get((u.attributes or {}).get(ID_FIELD))
                     if b is None:
@@ -4091,7 +4458,7 @@ class MainWindow(QMainWindow):
                     if moved or (b.tipo, b.us, b.area) != (u.tipo, u.us, u.area):
                         follow.append((u, (b.tipo, b.us, b.area), moved))
             if "quote" in state:
-                self.quote = [dict(q) for q in state["quote"] or []]
+                self.quote = [dict(q) for q in (state["quote"] or {}).get("") or []]
             if "sections" in state:
                 traces = {s.get(ID_FIELD): s for s in self.sections if s.get(ID_FIELD)}
                 self.sections = [dict(x) for x in state["sections"] or []]
@@ -4151,6 +4518,8 @@ class MainWindow(QMainWindow):
         self.a_redo.setEnabled(h.can_redo())
         self.a_undo.setText(tr("Annulla: {0}", h.undo_text()) if h.can_undo() else tr("Annulla", context="undo"))
         self.a_redo.setText(tr("Ripeti: {0}", h.redo_text()) if h.can_redo() else tr("Ripeti"))
+        if getattr(self, "assistant", None) is not None:
+            self.assistant.update_undo()
 
     def undo(self) -> None:
         if self.runner.busy:
@@ -4158,6 +4527,9 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.undo() if self.history is not None else None
+        except ScriptChanged:
+            self._script_changed()
+            return
         except Exception as exc:  # noqa: BLE001 - a removal that cannot come back (its place is taken)
             self._exc(tr("Annulla non riuscito"), exc)
             return
@@ -4170,6 +4542,9 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.redo() if self.history is not None else None
+        except ScriptChanged:
+            self._script_changed()
+            return
         except Exception as exc:  # noqa: BLE001
             self._exc(tr("Ripeti non riuscito"), exc)
             return
@@ -4745,8 +5120,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("Marker {0}: nessuna foto lo vede", m.label), 10000)
 
     def _draw_markers_on_raster(self) -> None:
-        """The markers with a position as a layer of the orthophoto/DEM view."""
+        """The markers with a position as a layer of the orthophoto/DEM view (on an elevation, those on its plane)."""
         view = self.ortho_view
+        entry = self._frame_entry()
+        if entry is not None:
+            self._draw_elevation_layers(entry)
+            return
         view.remove_layer("Marker")
         ch = self.chunk
         if ch is None or view.tr is None:
@@ -5440,7 +5819,28 @@ class MainWindow(QMainWindow):
         self.set_draw_mode("crop")
 
     def _selected_polygon(self):
-        """The polygons selected in the orthophoto view, merged (a unit, a section of a layer)."""
+        """The old name of :meth:`selected_polygon`, kept for scripts and plugins."""
+        return self.selected_polygon()
+
+    def _plan_selection(self):
+        """:meth:`selected_polygon` for the tools that work on the plan: None while an elevation is shown (its
+        selection is in its (u, v), not in the chunk's coordinates), said once."""
+        if self._plan_only():
+            return None
+        return self._selected_polygon()  # the old name, which scripts and tests may replace: it reaches selected_polygon
+
+    def _plan_only(self) -> bool:
+        """Whether an elevation or a section is shown, for a tool that works on the plan: then it is refused, said."""
+        if self.drawings_frame is None:
+            return False
+        self.statusBar().showMessage(tr("Questo strumento lavora sulla pianta: con un prospetto o una sezione mostrati "
+                                        "le coordinate sono quelle del prospetto. Apri l'ortofoto o il DEM."), 15000)
+        return True
+
+    def selected_polygon(self):
+        """The polygons selected in the orthophoto view, merged (a unit, a section of a layer); None
+        when no polygon is selected. Coordinates of the active chunk (a shapely geometry) - while an elevation or a
+        section is shown, its (u, v) metres and its own units."""
         from shapely.geometry import Polygon
         from shapely.ops import unary_union
 
@@ -5449,15 +5849,15 @@ class MainWindow(QMainWindow):
             if self.ortho_view.layers.get(layer, {}).get("kind") != "polygon":
                 continue
             u = attrs.get("_unit")
-            if isinstance(u, int) and 0 <= u < len(self.units) and getattr(self.units[u], "geometry", None) is not None:
-                polys.append(self.units[u].geometry)
+            if isinstance(u, int) and 0 <= u < len(self.shown_units) and getattr(self.shown_units[u], "geometry", None) is not None:
+                polys.append(self.shown_units[u].geometry)
             elif attrs.get("_geom") and attrs["_geom"][0] == "Polygon" and len(attrs["_geom"][1]) >= 3:
                 polys.append(Polygon(attrs["_geom"][1]))
         polys = [g for g in polys if g is not None and not g.is_empty]
         return unary_union(polys) if polys else None
 
     def crop_with_selection(self) -> None:
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono (strumento Seleziona: per esempio un'unità stratigrafica) oppure "
                        "disegnalo con lo strumento Ritaglio.")
@@ -5465,6 +5865,8 @@ class MainWindow(QMainWindow):
         self.crop_products(geom)
 
     def _crop_drawn(self, xy) -> None:
+        if self._plan_only():
+            return
         from shapely.geometry import Polygon
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
@@ -5782,7 +6184,7 @@ class MainWindow(QMainWindow):
     def region_from_selection(self) -> None:
         if not self._need_chunk(aligned=True):
             return
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono sull'ortofoto o sul DEM (strumento Seleziona).")
             return
@@ -5824,8 +6226,70 @@ class MainWindow(QMainWindow):
         self.model_view.refresh(reset=False)
         self.statusBar().showMessage(tr("Nessuna regione: si ricostruisce tutto ciò che le foto vedono"), 8000)
 
+    def region_from_markers(self) -> None:
+        """*Strumenti > Regione sui marker...*: a thin region on the plane of three markers (a wall, an
+        object), its thickness along the normal (:meth:`Chunk.region_from_markers`)."""
+        if not self._need_chunk(aligned=True):
+            return
+        placed = [m for m in self.chunk.markers if m.position is not None]
+        if len(placed) < 3:
+            self._warn("Servono tre marker con una posizione (collocati su almeno due foto o sulla superficie).")
+            return
+        choices = [(m.key, m.label) for m in placed]
+        v = ParamDialog.ask(self, "Regione sui marker", [
+            Field("a", "Marker A (l'asse u va da A verso B)", placed[0].key, choices=choices),
+            Field("b", "Marker B", placed[1].key, choices=choices),
+            Field("c", "Marker C (fuori dalla linea A-B)", placed[2].key, choices=choices),
+            Field("thickness", "Spessore lungo la normale (m)", 0.2, minimum=0.001, maximum=1e6, decimals=3)],
+            intro="Una scatola sottile sul piano dei tre marker, centrata sul piano: depth map, nuvola densa e "
+                  "modello costruiti da ora in poi ne restano dentro. L'estensione nel piano è quella della "
+                  "regione di prima, altrimenti quella dei punti di legame.")
+        if not v:
+            return
+        try:
+            # the Marker objects: a key passed on would be read as a target code first, which for coded targets
+            # is often the key of another marker
+            by_key = {m.key: m for m in placed}
+            self.chunk.region_from_markers(by_key[v["a"]], by_key[v["b"]], by_key[v["c"]], float(v["thickness"]))
+        except (KeyError, ValueError, RuntimeError) as exc:
+            self._exc("Regione non impostata", exc)
+            return
+        self._region_changed("Regione sul piano dei marker")
+
+    def build_normal_map(self) -> None:
+        """*Strumenti > Mappa delle normali...*: the normal map on the grid of the orthophoto, from the model
+        or the DEM (:meth:`Chunk.build_normal_map`), shown in the 2D view when done."""
+        if not self._need_chunk(product="orthomosaic"):
+            return
+        ch = self.chunk
+        v = ParamDialog.ask(self, "Mappa delle normali", [
+            Field("source", "Superficie", "auto",
+                  choices=[("auto", "Automatica (il modello se c'è, altrimenti il DEM)"), ("model", "Modello"),
+                           ("dem", "DEM")])],
+            intro="Un GeoTIFF RGBA sulla stessa griglia dell'ortofoto: rosso est, verde nord, blu alto. Per il "
+                  "rilievo dei muri e il ri-illuminamento in altri programmi.")
+        if not v:
+            return
+        self.run_task("Mappa delle normali", lambda p: ch.build_normal_map(v["source"], progress=p),
+                      lambda _path: self.show_normal_map())
+
+    def show_normal_map(self) -> None:
+        """The normal map of the active chunk in the 2D view, as an image on the orthophoto's grid."""
+        ch = self.chunk
+        path = ch.product_path("normal_map") if ch is not None else None
+        if path is None or not path.exists():
+            self._warn("Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).")
+            return
+        self._load_raster("ortho", path)
+        self.show_view(self.ortho_view)
+        source = (ch.meta.get("normal_map") or {}).get("source")
+        self.statusBar().showMessage(tr("Mappa delle normali dal {0}: rosso est, verde nord, blu alto",
+                                        tr("modello") if source == "model" else tr("DEM")), 15000)
+
     # ---------------------------------------------------------------- DEM editing
     def _dem_edit_drawn(self, xy) -> None:
+        if self._plan_only():
+            return
         from shapely.geometry import Polygon
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
@@ -5858,12 +6322,14 @@ class MainWindow(QMainWindow):
         return out
 
     def _area_drawn(self, xy) -> None:
+        if self._plan_only():
+            return
         from shapely.geometry import Polygon
 
         self.measure_area(Polygon(xy).buffer(0))
 
     def _area_selected(self) -> None:
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono, oppure disegna l'area con lo strumento Misura area.")
             return
@@ -6002,6 +6468,8 @@ class MainWindow(QMainWindow):
                                         "oppure clic per i vertici e doppio clic per chiudere"), 30000)
 
     def _chart_drawn(self, xy) -> None:
+        if self._plan_only():
+            return
         from datetime import datetime
 
         from ..ai.sam import read_orthomosaic
@@ -6126,16 +6594,19 @@ class MainWindow(QMainWindow):
             20000)
 
     def _dem_edit_selected(self) -> None:
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono, oppure disegna l'area con lo strumento Modifica DEM.")
             return
         self.edit_dem_area(geom)
 
-    def _selected_lines(self) -> list:
-        """The lines selected in the raster view (world XY), e.g. as breaklines."""
+    def _selected_lines(self, skip=()) -> list:
+        """The lines selected in the raster view (world XY), e.g. as breaklines; those of the layers ``skip`` left
+        out."""
         out = []
         for layer, _i, attrs in self.ortho_view.selected_features():
+            if layer in skip:
+                continue
             g = attrs.get("_geom")
             if self.ortho_view.layers.get(layer, {}).get("kind") == "line" and g and len(g[1]) >= 2:
                 out.append(np.asarray(g[1], float)[:, :2])
@@ -6146,6 +6617,14 @@ class MainWindow(QMainWindow):
         if not self._need_chunk(product="dem"):
             return
         lines = self._selected_lines()
+        from ..engine.dem_edit import drawn_lines
+
+        self._store_drawings()  # the engine reads the drawn lines from the chunk
+        try:
+            drawn = drawn_lines(self.chunk, geom)  # those the engine keeps: near the area and its ring of cells
+        except Exception as exc:  # noqa: BLE001 - an unreadable DEM is said by the edit itself
+            log.warning("Linee di rottura vicine all'area non lette: %s", exc)
+            drawn = []
         v = ParamDialog.ask(self, "Modifica DEM", [f for f in [
             Field("method", "Nuove quote", "plane",
                   choices=[("plane", "Piano che si adatta al terreno attorno"),
@@ -6156,16 +6635,23 @@ class MainWindow(QMainWindow):
             Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuità", len(lines)),
                   bool(lines))
             if lines else None,
+            Field("drawn", tr("Usa le linee di rottura disegnate che toccano l'area o il suo bordo ({0})", len(drawn)),
+                  bool(drawn))
+            if drawn else None,
             Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
             intro=tr("{0} m2. Le quote dentro l'area vengono ricavate da quelle appena fuori (alberi, tende, "
                      "mezzi, cumuli e buchi spariscono da curve di livello e volumi). Il DEM com'era resta tra le "
                      "versioni per confrontarlo o tornare indietro.", _it(geom.area, 2)))
         if not v:
             return
-        breaklines = lines if v.get("breaklines") else None
+        which = "drawn" if v.get("drawn") else "selection"
+        if which == "drawn":  # a selected break line is among the drawn ones: not passed twice
+            lines = self._selected_lines(skip=(LINES_LAYER,))
+        breaklines = (lines or None) if v.get("breaklines") else None
         chunk = self.chunk
         self.run_task("Modifica del DEM", lambda p: chunk.edit_dem(
-            geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p),
+            geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p,
+            lines=which),
             lambda info: (self._show_raster("dem"), self.log_pane.info(
                 tr("DEM modificato: {0} celle, variazione media {1} cm, massima {2} cm", _it(info['cells']),
                    ("+" if info['dz_mean'] >= 0 else "") + _it(info['dz_mean'] * 100, 1),
@@ -6240,7 +6726,7 @@ class MainWindow(QMainWindow):
             kind = "points"
         elif section is None:
             markers = self.reference.selected_markers()
-            poly = self._selected_polygon()
+            poly = self._plan_selection()
             choices = []
             if self.sections:
                 choices += [(("section", i), tr("Traccia della sezione {0}", s['label'])) for i,
@@ -6315,7 +6801,7 @@ class MainWindow(QMainWindow):
                 frame = E.plane_from_markers(list(placed.values()), a, b, c, d, toward=cams.mean(axis=0))
                 name = v.get("name") or ("Sezione sui marker" if what == "section" else "Prospetto sui marker")
             else:
-                poly = self._selected_polygon()
+                poly = self._plan_selection()
                 ring = np.asarray(poly.exterior.coords if hasattr(poly, "exterior") else poly.geoms[0].exterior.coords)
                 frame = E.cylinder_from_circle(ch, ring, inside=bool(v.get("inside", True)))
                 name = v.get("name") or ("Sviluppo interno" if frame.inside else "Sviluppo esterno")
@@ -6336,10 +6822,19 @@ class MainWindow(QMainWindow):
         if not ortho.exists():
             self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry['name']))
             return
+        self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
         if relief.exists():
             self.ortho_view.set_dem(relief)
+        with self.ortho_view.batch():
+            for i, u in enumerate(self.shown_units):
+                self._draw_unit(u, i)
+            for i, q in enumerate(self.shown_quote):
+                self._draw_quota(q, i)
+            for i, q in enumerate(self.shown_points):
+                self._draw_probe_point(q, i)
+            self._draw_lines()
         self._draw_stones()
         self._draw_elevation_layers(entry)
         self.show_view(self.ortho_view)
@@ -6383,12 +6878,23 @@ class MainWindow(QMainWindow):
         frame = ortho.parent / "frame.json"
         if frame.exists():
             shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
-        from ..engine.elevation import write_profile_dxf
+        from ..engine.elevation import export_drawings, frame_drawings, write_profile_dxf
 
+        if self.drawings_frame == entry["id"]:
+            self._store_drawings()  # the drawings shown go into the chunk first
+        drawn = ""
+        if frame_drawings(self.chunk, entry["id"]):
+            try:
+                export_drawings(self.chunk, entry, folder, stem=stem)
+                drawn = tr(" I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala, PNG, GeoPackage nelle "
+                           "coordinate del prospetto e GeoPackage in 3D sul rilievo (_mondo).", stem)
+            except Exception as exc:  # noqa: BLE001 - the products are written: say what failed
+                self._exc(tr("Disegni del prospetto non esportati"), exc)
         if write_profile_dxf(self.chunk, entry, Path(folder) / f"{stem}_profilo.dxf") is not None:
-            self._info("Prospetto", tr("Ortofoto, rilievo, piano e profilo (DXF) di «{0}» in {1}.", entry['name'], folder))
+            self._info("Prospetto", tr("Ortofoto, rilievo, piano e profilo (DXF) di «{0}» in {1}.", entry['name'], folder)
+                       + drawn)
             return
-        self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder))
+        self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder) + drawn)
 
     def delete_elevation(self, entry: dict, chunk=None) -> None:
         """The elevation out of the project, as Rimuovi in the workspace (Modifica > Annulla brings it back)."""
@@ -6668,6 +7174,8 @@ class MainWindow(QMainWindow):
                 self.show_precision_map()
             elif payload == "coverage":
                 self.show_coverage_map()
+            elif payload == "normal_map":
+                self.show_normal_map()
             elif payload in ("dem", "orthomosaic"):
                 self._show_raster("dem" if payload == "dem" else "ortho")
             elif isinstance(payload, str) and payload.startswith("ms:"):
@@ -6798,7 +7306,7 @@ class MainWindow(QMainWindow):
     def _photos_in_selected_area(self) -> None:
         from ..engine.patches import photos_for_area
 
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         ch = self.chunk
         if geom is None or ch is None:
             self._warn("Seleziona un poligono (strumento Seleziona) per filtrare le foto che lo inquadrano.")
@@ -6899,13 +7407,13 @@ class MainWindow(QMainWindow):
             self.reference.set_chunk(self.chunk)
 
     # ---------------------------------------------------------------- appearance and help
-    def _without_us_form(self, site: str | None) -> list[int]:
-        """The units drawn here with a US number whose form PyArchInit does not have (any type, any area
-        when the unit has none): the ones to bring into the Extended Matrix. Empty without a database."""
+    def _without_us_form(self, site: str | None, units: list | None = None) -> list[int]:
+        """The units drawn here (the plan's, or ``units``) with a US number whose form PyArchInit does not have (any
+        type, any area when the unit has none): the ones to bring into the Extended Matrix. Empty without a database."""
         if self.pa is None or not site:
             return []
         out = []
-        for i, u in enumerate(self.units):
+        for i, u in enumerate(self.units if units is None else units):
             if u.tipo == "UT" or not u.us or (u.attributes or {}).get("gid") is not None:
                 continue
             try:
@@ -6923,8 +7431,8 @@ class MainWindow(QMainWindow):
         site = self.project_site()
         if self.pa is None or not site:
             return
-        missing = set(self._without_us_form(site))
-        names = [self._unit_name(u) for i, u in enumerate(self.units) if i in missing and any(u is x for x in units)]
+        missing = set(self._without_us_form(site, self.shown_units))
+        names = [self._unit_name(u) for i, u in enumerate(self.shown_units) if i in missing and any(u is x for x in units)]
         if names:
             self.log_pane.info(tr("{0}: la scheda US non è ancora in PyArchInit. Strumenti > Proponi US e rapporti la "
                                   "crea, con i rapporti, per l'Extended Matrix", ", ".join(names)))
@@ -7113,7 +7621,7 @@ class MainWindow(QMainWindow):
             self._warn("Serve un altro DEM come riferimento: un altro chunk con il DEM, nello stesso sistema di "
                        "riferimento, o una versione conservata del DEM.")
             return
-        poly = self._selected_polygon()
+        poly = self._plan_selection()
         fields = [Field("reference", "DEM di riferimento", choices[0][0], choices=choices)]
         if poly is not None:
             fields.append(Field("areas", "Poligoni selezionati", "exclude",
@@ -7551,6 +8059,9 @@ class MainWindow(QMainWindow):
                          "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
+                 "breakline": tr("{0}: clic per i vertici, doppio clic o Invio per finire, Backspace toglie l'ultimo "
+                                 "vertice, Esc annulla; il tipo si sceglie dal menu del pulsante Linee",
+                                 tr(_bl_label(self.breakline_kind))),
                  "probe": "Clic su un punto: un punto di misura con coordinate, quota del DEM, temperatura, bande e "
                           "indici letti lì a piena risoluzione (layer Punti di misura, esportabile e in QGIS)",
                  "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "
@@ -7563,19 +8074,23 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(hints.get(mode, ""), 20000)
 
     def clear_drawings(self) -> None:
-        self.units = []
-        self.quote = []
-        self.probe_points = []
+        self.shown_units = []
+        self.shown_quote = []
+        self.shown_points = []
+        self.shown_lines = []
         self._sam_cancel()
         self.line_layers = {}
         self.ortho_view.clear_overlays()
         self._draw_sections()
+        self._draw_tin()  # a product, not a drawing: it stays
         self._dirty(True)
 
     # ---------------------------------------------------------------- drawings saved with the project
     def _store_drawings(self) -> None:
         """Units drawn here (not those loaded from PyArchInit) and spot heights go into the
-        active chunk, so they come back when the project is reopened."""
+        active chunk, so they come back when the project is reopened: those of the plan at the top of
+        ``chunk.meta["drawings"]``, those of the elevation or section shown in its own frame
+        (``chunk.meta["drawings"]["frames"][<elevation id>]``, in its ``(u, v)``)."""
         ch = self.chunk
         if ch is None:
             return
@@ -7584,33 +8099,64 @@ class MainWindow(QMainWindow):
         # Keep untouched projects unchanged, including snapshots used by Undo.
         if self.ortho_view.layer_settings or "layer_labels" in ch.meta:
             ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
-        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points)
+        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points, lines=self.lines)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
         if stones:
             ch.meta["stones"] = stones
         else:
             ch.meta.pop("stones", None)
+        if self.drawings_frame is not None:
+            self._store_chunk_drawings(ch, self.frame_units, self.frame_quote, self.frame_points,
+                                       frame=self.drawings_frame,
+                                       stones={k: [g.wkt for g in v] for k, v in self.frame_stones.items() if v},
+                                       lines=self.frame_lines)
 
     @staticmethod
-    def _store_chunk_drawings(ch, units: list, quote: list, points: list) -> None:
+    def _store_chunk_drawings(ch, units: list, quote: list, points: list, frame: str | None = None,
+                              stones: dict | None = None, lines: list | None = None) -> None:
         """``units`` (those drawn here: not those loaded from PyArchInit), ``quote`` and the measuring ``points`` into
-        ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active."""
+        ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active.
+        ``frame``: the id of the elevation they were drawn on (None: the plan), with its ``stones`` (``{key: [WKT]}``;
+        None keeps those it has). ``lines``: the break lines (:mod:`..archaeo.breaklines` records, key ``lines``,
+        only when there are some: a project without them is written as before); None keeps those it has. The drawings
+        of the other frames stay as they are."""
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in quote]
         points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in points]
-        if units or quote or points:
-            ch.meta["drawings"] = {"units": units, "quote": quote, **({"points": points} if points else {})}
+        data = ch.meta.get("drawings") or {}
+        frames = dict(data.get("frames") or {})
+        if frame is None:
+            lines = [dict(r) for r in (data.get("lines") or [] if lines is None else lines)]
+            new = {"units": units, "quote": quote, **({"points": points} if points else {}),
+                   **({"lines": lines} if lines else {})} if units or quote or points or lines else {}
+        else:
+            new = {k: v for k, v in data.items() if k != "frames"}
+            if stones is None:
+                stones = (frames.get(frame) or {}).get("stones") or {}
+            stones = {k: v for k, v in stones.items() if v}
+            lines = [dict(r) for r in ((frames.get(frame) or {}).get("lines") or [] if lines is None else lines)]
+            if units or quote or points or stones or lines:
+                frames[frame] = {"units": units, "quote": quote, **({"points": points} if points else {}),
+                                 **({"stones": stones} if stones else {}), **({"lines": lines} if lines else {})}
+            else:
+                frames.pop(frame, None)
+        if frames:
+            new["frames"] = frames
+        if new:
+            ch.meta["drawings"] = new
         else:
             ch.meta.pop("drawings", None)
 
     @staticmethod
-    def _chunk_drawings(ch) -> tuple[list, list, list]:
-        """The units, spot heights and measuring points ``ch`` keeps (:meth:`_store_chunk_drawings`); a broken record
-        is left out, said in the log."""
+    def _chunk_drawings(ch, frame: str | None = None) -> tuple[list, list, list]:
+        """The units, spot heights and measuring points ``ch`` keeps (:meth:`_store_chunk_drawings`) on the plan, or
+        on the elevation ``frame``; a broken record is left out, said in the log."""
         from ..archaeo.stratigraphy import UnitPolygon
 
         data = (ch.meta.get("drawings") or {}) if ch is not None else {}
+        if frame is not None:
+            data = (data.get("frames") or {}).get(frame) or {}
         units = []
         for d in data.get("units", []):
             try:
@@ -7623,6 +8169,120 @@ class MainWindow(QMainWindow):
         quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
         points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
         return units, quote, points
+
+    @staticmethod
+    def _chunk_lines(ch, frame: str | None = None) -> list[dict]:
+        """The break lines ``ch`` keeps on the plan, or on the elevation ``frame`` (broken records left out)."""
+        from ..archaeo import breaklines
+
+        return breaklines.records(ch, frame)
+
+    def _frame_stones(self, ch, frame: str | None) -> dict:
+        """The stones of the plan (``chunk.meta["stones"]``, by the name of the raster) or of the elevation ``frame``
+        (by its id), as polygons. The key "elevation.tif" of the projects before 1.7.0 - shared by every elevation,
+        its stones cannot be given to one - is left out, said in the log."""
+        from shapely import wkt
+
+        if ch is None:
+            return {}
+        rows = (ch.meta.get("stones") or {}) if frame is None else \
+            (((ch.meta.get("drawings") or {}).get("frames") or {}).get(frame) or {}).get("stones") or {}
+        out = {}
+        for key, items in rows.items():
+            if frame is None and key == "elevation.tif":
+                log.info("Pietre disegnate sui prospetti prima della 1.7.0 (%d) lasciate fuori: non si sa di quale "
+                         "prospetto fossero", len(items))
+                continue
+            try:
+                out[key] = [wkt.loads(r) for r in items]
+            except Exception as exc:  # a broken record must not stop the project from opening
+                log.warning("Pietre non lette dal progetto: %s", exc)
+        return out
+
+    def _stones_key(self) -> str | None:
+        """The key of the stones of the image shown: the id of the elevation, or the name of the raster of the plan."""
+        if self.drawings_frame is not None:
+            return self.drawings_frame
+        return self.ortho_view.path.name if self.ortho_view.path is not None else None
+
+    def _frame_entry(self, frame: str | None = None) -> dict | None:
+        """The entry of the elevation the drawings are on (``frame``, by default the one shown)."""
+        frame = self.drawings_frame if frame is None else frame
+        if frame is None or self.chunk is None:
+            return None
+        return next((e for e in self.chunk.meta.get("elevations") or [] if e.get("id") == frame), None)
+
+    @staticmethod
+    def _is_pa_unit(u) -> bool:
+        return str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")
+
+    def _set_drawings_frame(self, frame: str | None) -> None:
+        """The sets of the elevation ``frame`` shown (None: the plan alone): those of the frame shown so far go into
+        the chunk first. The plan's sets stay loaded whatever is shown."""
+        if frame == self.drawings_frame:
+            return
+        self._sam_cancel()
+        self._store_drawings()
+        self.drawings_frame = frame
+        self._restore_frame()
+
+    def _restore_frame(self) -> None:
+        """The sets of the elevation shown (:attr:`drawings_frame`) from the chunk; empty on the plan."""
+        ch = self.chunk
+        if self.drawings_frame is None or ch is None:
+            self.frame_units, self.frame_quote, self.frame_points, self.frame_stones = [], [], [], {}
+            self.frame_lines = []
+            return
+        self.frame_units, self.frame_quote, self.frame_points = self._chunk_drawings(ch, self.drawings_frame)
+        self.frame_stones = self._frame_stones(ch, self.drawings_frame)
+        self.frame_lines = self._chunk_lines(ch, self.drawings_frame)
+        self._ensure_ppg_ids()
+
+    # the sets the drawing tools of the 2D view work on: the plan's, or those of the elevation shown
+    @property
+    def shown_units(self) -> list:
+        return self.frame_units if self.drawings_frame is not None else self.units
+
+    @shown_units.setter
+    def shown_units(self, value: list) -> None:
+        if self.drawings_frame is not None:
+            self.frame_units = value
+        else:
+            self.units = value
+
+    @property
+    def shown_quote(self) -> list:
+        return self.frame_quote if self.drawings_frame is not None else self.quote
+
+    @shown_quote.setter
+    def shown_quote(self, value: list) -> None:
+        if self.drawings_frame is not None:
+            self.frame_quote = value
+        else:
+            self.quote = value
+
+    @property
+    def shown_points(self) -> list:
+        return self.frame_points if self.drawings_frame is not None else self.probe_points
+
+    @shown_points.setter
+    def shown_points(self, value: list) -> None:
+        if self.drawings_frame is not None:
+            self.frame_points = value
+        else:
+            self.probe_points = value
+
+    @property
+    def shown_stones(self) -> dict:
+        return self.frame_stones if self.drawings_frame is not None else self.stones
+
+    def _is_shown(self, item, kind: str = "units") -> bool:
+        """Whether a unit / spot height / measuring point belongs to the sets shown (only those are drawn on the 2D
+        view: a plan unit added while an elevation is shown is kept, not drawn there)."""
+        if self.drawings_frame is None:
+            return True
+        pool = {"units": self.frame_units, "quote": self.frame_quote, "points": self.frame_points}[kind]
+        return any(item is x for x in pool)
 
     def _activate_chunk(self, chunk) -> None:
         """Another chunk becomes the active one: the drawings of the one left stay with it (the
@@ -7647,6 +8307,7 @@ class MainWindow(QMainWindow):
                                   self._rustgis.chunk_label))
         self._sam_cancel()
         self.doc.chunk = chunk
+        self.drawings_frame = None  # the plan of the chunk now active
         self._reload_drawings(redraw=False)
         self.proxies_pane.set_proxies(chunk.meta.get("proxies", []) if chunk is not None else [])
         self.refresh_all(reset_views=True)
@@ -7655,28 +8316,25 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._poll_rustgis)  # RustGIS gets the chunk now active
 
     def _reload_drawings(self, redraw: bool = True) -> None:
-        """The drawings of the active chunk read again from the project; the units loaded from
-        PyArchInit (of the site, not of a chunk) stay."""
-        from_pa = [u for u in self.units
-                   if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        """The drawings of the active chunk read again from the project (the plan's, and those of the elevation shown);
+        the units loaded from PyArchInit (of the site, not of a chunk) stay."""
+        from_pa = [u for u in self.units if self._is_pa_unit(u)]
+        if self.drawings_frame is not None and self._frame_entry() is None:  # the elevation shown went: the plan
+            self.drawings_frame = None
         self._restore_drawings()
         self.units += from_pa
         if redraw:
             self._redraw_overlays()
 
     def _restore_drawings(self) -> None:
+        """The plan's drawings, and those of the elevation shown (:attr:`drawings_frame`), from the active chunk."""
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
         self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
+        self.lines = self._chunk_lines(ch)
+        self.stones = self._frame_stones(ch, None)
+        self._restore_frame()
         self._ensure_ppg_ids()
-        from shapely import wkt
-
-        self.stones = {}
-        for key, rows in ((ch.meta.get("stones") or {}) if ch is not None else {}).items():
-            try:
-                self.stones[key] = [wkt.loads(r) for r in rows]
-            except Exception as exc:  # a broken record must not stop the project from opening
-                log.warning("Pietre non lette dal progetto: %s", exc)
 
     def _redraw_drawings(self) -> None:
         self._redraw_overlays()
@@ -7726,8 +8384,8 @@ class MainWindow(QMainWindow):
                            attributes=extra, sito=self.project_site() or None)
 
     def _add_unit(self, u) -> None:
-        self.units.append(u)
-        self._draw_unit(u, len(self.units) - 1)
+        self.shown_units.append(u)
+        self._draw_unit(u, len(self.shown_units) - 1)
         self._dirty(True)
         self.log_pane.info(f"{u.tipo} {u.us or '?'}: area {u.geometry.area:.3f} m2"
                            + (tr(" (sito {0})", u.sito) if u.sito else ""))
@@ -7740,8 +8398,8 @@ class MainWindow(QMainWindow):
         units = list(units)
         if not units:
             return
-        start = len(self.units)
-        self.units.extend(units)
+        start = len(self.shown_units)
+        self.shown_units.extend(units)
         if self.ortho_view.tr is not None:  # else drawn with the orthophoto or the DEM, when shown
             with self.ortho_view.batch():  # hundreds of units: one update of the panes and of QGIS
                 for i, u in enumerate(units, start):
@@ -7781,7 +8439,7 @@ class MainWindow(QMainWindow):
         ref = self._unit_part(layer, attrs)
         if ref is None:
             return
-        u = self.units[ref[0]]
+        u = self.shown_units[ref[0]]
         parts = list(getattr(u.geometry, "geoms", [u.geometry]))
         outline = Polygon(np.asarray(xy, float)[:, :2])
         new = Polygon(outline.exterior.coords, [h.coords for h in parts[ref[1]].interiors
@@ -7804,7 +8462,7 @@ class MainWindow(QMainWindow):
 
         line = LineString(np.asarray(xy, float)[:, :2])
         layers = self.ortho_view.layers
-        for u in reversed(self.units):  # the units drawn last lie on top
+        for u in reversed(self.shown_units):  # the units drawn last lie on top
             lay = layers.get((u.attributes or {}).get("_layer"))
             if lay is None or not lay["visible"]:
                 continue
@@ -7829,6 +8487,8 @@ class MainWindow(QMainWindow):
             layer = unit_layer("UT", u.attributes.get("gruppo", ""))
         layer = layer or u.attributes.get("_layer") or "Unita' stratigrafiche"
         u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
+        if not self._is_shown(u):  # a plan unit while an elevation is shown: kept, drawn with the plan
+            return
         if not u.attributes.get(ID_FIELD):  # its identity in the QGIS link
             gid = u.attributes.get("gid")
             u.attributes[ID_FIELD] = stable_id("pyarchinit", u.sito, gid) if gid is not None else new_id()
@@ -7850,6 +8510,8 @@ class MainWindow(QMainWindow):
 
         if not q.get(ID_FIELD):
             q[ID_FIELD] = stable_id("pyarchinit_quote", q["gid"]) if q.get("gid") is not None else new_id()
+        if not self._is_shown(q, "quote"):
+            return
         attrs = {k: q.get(k, "") for k in QUOTE_FIELDS}
         attrs[ID_FIELD] = q[ID_FIELD]
         attrs["_quota"] = i
@@ -7857,7 +8519,8 @@ class MainWindow(QMainWindow):
             attrs["_gid"] = q["gid"]
         z = q.get("quota_q")
         label = f"{float(z):.2f}" if z not in (None, "") else "?"
-        self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
+        x, y = (q["u"], q["v"]) if self.drawings_frame is not None and "u" in q else (q["x"], q["y"])
+        self.ortho_view.add_point(float(x), float(y), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
 
     # ---------------------------------------------------------------- measuring points
     def _probe(self):
@@ -7880,24 +8543,40 @@ class MainWindow(QMainWindow):
         self._probe_obj = None
 
     def _draw_probe_point(self, q: dict, i: int) -> None:
+        if not self._is_shown(q, "points"):
+            return
         attrs = {k: v for k, v in q.items()}
         attrs["_probe"] = i
         t = q.get("temp_c")
         label = q.get("label") or f"P{i + 1}"
         if t is not None:
             label += f" {float(t):.1f}°"
-        self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ff5d8f", label, layer=PROBE_LAYER, attrs=attrs)
+        x, y = (q["u"], q["v"]) if self.drawings_frame is not None and "u" in q else (q["x"], q["y"])
+        self.ortho_view.add_point(float(x), float(y), "#ff5d8f", label, layer=PROBE_LAYER, attrs=attrs)
 
     def _probe_clicked(self, x: float, y: float) -> None:
-        """A measuring point: the values of every product of the chunk at the clicked point."""
+        """A measuring point: the values of every product of the chunk at the clicked point. On an elevation or a
+        section the point keeps its ``(u, v)`` there and the products are read at its world point on the surface
+        (through the relief of the elevation)."""
         if self.chunk is None:
             return
+        where = {}
+        entry = self._frame_entry()
+        if entry is not None:
+            from ..engine.elevation import world_of
+
+            p = world_of(entry, x, y, None, chunk=self.chunk)
+            if p is None:
+                self.statusBar().showMessage(tr("Fuori dal rilievo del prospetto: niente da misurare"), 8000)
+                return
+            where = {"u": float(x), "v": float(y), "z_superficie": round(float(p[2]), 4)}
+            x, y = float(p[0]), float(p[1])
         probe = self._probe()
-        q = probe.record(x, y, label=f"P{len(self.probe_points) + 1}")
-        self.probe_points.append(q)
-        self._draw_probe_point(q, len(self.probe_points) - 1)
+        q = {**probe.record(x, y, label=f"P{len(self.shown_points) + 1}"), **where}
+        self.shown_points.append(q)
+        self._draw_probe_point(q, len(self.shown_points) - 1)
         self._dirty(True)
-        values = probe.text({k: v for k, v in q.items() if k not in ("x", "y", "label")})
+        values = probe.text({k: v for k, v in q.items() if k not in ("x", "y", "label", "u", "v", "z_superficie")})
         self.log_pane.info(tr("Punto di misura {0} in X {1:.3f} Y {2:.3f}: {3}", q["label"], x, y,
                               values or tr("nessun prodotto qui")))
         self.statusBar().showMessage(f"{q['label']}  {values}", 15000)
@@ -7907,7 +8586,7 @@ class MainWindow(QMainWindow):
         """The measuring points of the chunk into a GeoPackage, a CSV or a GeoJSON (QGIS opens them)."""
         if not self._need_chunk():
             return
-        if not self.probe_points:
+        if not self.shown_points:
             self._warn("Nessun punto di misura: usa lo strumento Punto di misura sull'ortofoto, termica o multispettrale.")
             return
         from ..engine.probe import write_points
@@ -7919,17 +8598,34 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            out = write_points([{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.probe_points],
+            out = write_points([{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.shown_points],
                                path, self.chunk.crs if self.chunk.crs != "LOCAL" else None)
         except Exception as exc:
             self._exc("Esportazione dei punti non riuscita", exc)
             return
-        self._info(tr("Punti di misura"), tr("{0} punti esportati in {1}", len(self.probe_points), out))
+        self._info(tr("Punti di misura"), tr("{0} punti esportati in {1}", len(self.shown_points), out))
 
     def _quota_clicked(self, x: float, y: float) -> None:
         """A spot height at the clicked point: elevation from the DEM, then the columns of
-        pyarchinit_quote (asked once; "non chiedere più" keeps the values for the next points)."""
-        z = self._dem_value(x, y)
+        pyarchinit_quote (asked once; "non chiedere più" keeps the values for the next points). On an
+        elevation or a section the point keeps its ``(u, v)`` there; its height is the world Z of the
+        surface (from the relief of the elevation), ``x``, ``y`` its world position in plan."""
+        where = {}
+        entry = self._frame_entry()
+        if entry is not None:
+            from ..engine.elevation import world_of
+
+            p = world_of(entry, x, y, None, chunk=self.chunk)
+            where = {"u": float(x), "v": float(y)}
+            if p is None:
+                z = None
+            else:
+                x, y, z = float(p[0]), float(p[1]), float(p[2])
+        else:
+            z = self._dem_value(x, y)
+        if entry is not None and z is None:
+            self.statusBar().showMessage(tr("Fuori dal rilievo del prospetto: quota non letta"), 8000)
+            return
         keep = getattr(self, "_quota_keep", None)
         if keep is not None:
             v = dict(keep)
@@ -7952,7 +8648,7 @@ class MainWindow(QMainWindow):
                                                 "strumento per tornare a chiederli)"), 15000)
             if v.get("disegnatore"):
                 self.settings.setValue("pa/disegnatore", v["disegnatore"])
-        q = {"x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
+        q = {**where, "x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
         from ..engine.precision import precision_at
 
         sigma = precision_at(self.chunk, x, y) if self.chunk is not None else None
@@ -8144,13 +8840,20 @@ class MainWindow(QMainWindow):
     def _raster_point(self, x: float, y: float):
         """The point of the survey (internal frame) under world x, y of the orthophoto or the DEM:
         the height from the DEM at full resolution, else from the surface (dense cloud or tie
-        points) along the vertical; None where there is neither."""
+        points) along the vertical; None where there is neither. On an elevation or a section ``x``, ``y`` are its
+        (u, v): the point of the surface there (its relief)."""
         from ..core import geometry
         from ..markers import gcp
 
         ch = self.chunk
         if ch is None:
             return None
+        entry = self._frame_entry()
+        if entry is not None:  # an elevation or a section: (u, v) there, the point of the surface through its relief
+            from ..engine.elevation import world_of
+
+            p = world_of(entry, x, y, None, chunk=ch)
+            return None if p is None else ch.to_internal(np.asarray(p, float)[None])[0]
         z = self._dem_value(x, y)
         if z is not None:
             return ch.to_internal(np.array([[x, y, z]], float))[0]
@@ -8176,8 +8879,8 @@ class MainWindow(QMainWindow):
 
     def _add_quota(self, q: dict) -> None:
         q.pop("keep", None)
-        self.quote.append(q)
-        self._draw_quota(q, len(self.quote) - 1)
+        self.shown_quote.append(q)
+        self._draw_quota(q, len(self.shown_quote) - 1)
         self._dirty(True)
         self.log_pane.info(tr("Quota {0} {1}", q.get('quota_q'), q.get('unita_misu_q', ''))
                            + (f" ±{q['precisione_q'] * 1000:.1f} mm" if q.get("precisione_q") else "")
@@ -8199,6 +8902,130 @@ class MainWindow(QMainWindow):
                 return val
         except Exception:
             return self.ortho_view.elevation(x, y)
+
+    def _dem_values(self, xy) -> list:
+        """Heights of the DEM at full resolution at the points ``xy`` ((n, 2) world), None where it has none."""
+        ch = self.chunk
+        if ch is None or not ch.dem_path:
+            return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
+        try:
+            import rasterio
+
+            with rasterio.open(ch.dem_path) as src:
+                vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
+                nodata = src.nodata
+            return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+        except Exception:
+            return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
+
+    # ---------------------------------------------------------------- break lines (archaeo.breaklines)
+    @property
+    def shown_lines(self) -> list:
+        return self.frame_lines if self.drawings_frame is not None else self.lines
+
+    @shown_lines.setter
+    def shown_lines(self, value: list) -> None:
+        if self.drawings_frame is not None:
+            self.frame_lines = value
+        else:
+            self.lines = value
+
+    def set_breakline_kind(self, kind: str) -> None:
+        """The kind of the break lines drawn next (breakline, soft, boundary); the tool is taken up."""
+        from ..archaeo.breaklines import KINDS
+
+        if kind not in KINDS:
+            return
+        self.breakline_kind = kind
+        self.settings.setValue("draw/breakline_kind", kind)
+        a = self.breakline_kind_actions.get(kind)
+        if a is not None and not a.isChecked():
+            a.setChecked(True)
+        if self.ortho_view.tr is not None:
+            self.set_draw_mode("breakline")
+
+    def _breakline_drawn(self, xy) -> None:
+        """A break line drawn with the tool: on the plan each vertex has the height of the DEM there (None outside
+        it), on an elevation its (u, v) only."""
+        from ..archaeo import breaklines
+
+        xy = np.asarray(xy, float)[:, :2]
+        if len(xy) < 2:
+            return
+        if self.drawings_frame is None:
+            zs = self._dem_values(xy)
+            coords = [(x, y, z) for (x, y), z in zip(xy.tolist(), zs)]
+        else:
+            coords = [(x, y, None) for x, y in xy.tolist()]
+        rec = breaklines.new_record(self.breakline_kind, coords)
+        self.shown_lines.append(rec)
+        self._draw_line_record(rec, len(self.shown_lines) - 1)
+        self._dirty(True)
+        missing = sum(c[2] is None for c in rec["coords"]) if self.drawings_frame is None else 0
+        length = float(np.sum(np.hypot(*np.diff(xy, axis=0).T)))
+        self.log_pane.info(tr("{0}: {1} vertici, lunghezza {2} m", tr(_bl_label(rec["kind"])), len(xy), _it(length, 3))
+                           + (tr(" ({0} vertici fuori dal DEM, senza quota)", missing) if missing else ""))
+
+    def _draw_line_record(self, rec: dict, i: int) -> None:
+        from ..archaeo import breaklines
+
+        if self.drawings_frame is None and not any(rec is x for x in self.lines):
+            return  # a line of the plan is not drawn on an elevation, nor the reverse
+        if self.drawings_frame is not None and not any(rec is x for x in self.frame_lines):
+            return
+        kind = rec["kind"]
+        zs = [z for z in breaklines.heights(rec) if z is not None]
+        attrs = {"kind": kind, "tipo": tr(_bl_label(kind)), ID_FIELD: rec.get("id"), "_bline": i}
+        if zs:
+            attrs["z_min"], attrs["z_max"] = round(min(zs), 3), round(max(zs), 3)
+        xy = np.array([[c[0], c[1]] for c in rec["coords"]], float)
+        self.ortho_view.add_line(xy, breaklines.COLOURS[kind], breaklines.label(rec), layer=LINES_LAYER, attrs=attrs,
+                                 width=2.0, dash=kind == "soft")
+
+    def _draw_lines(self) -> None:
+        for i, rec in enumerate(self.shown_lines):
+            self._draw_line_record(rec, i)
+
+    def _tin_segments(self):
+        """The edges of the TIN of the chunk (at most :data:`TIN_MAX_EDGES`, the constrained ones always), world XY,
+        read once per file."""
+        ch = self.chunk
+        path = ch.product_path("tin") if ch is not None else None
+        if path is None or not path.exists():
+            return None
+        stamp = (str(path), path.stat().st_mtime)
+        if self._tin_edges is not None and self._tin_edges[:2] == stamp:
+            return self._tin_edges[2]
+        from ..engine import tin as T
+
+        try:
+            t = T.Tin.load(path)
+        except Exception as exc:  # noqa: BLE001 - a TIN that cannot be read is not drawn
+            log.warning("TIN non letto: %s", exc)
+            return None
+        edges = T.triangle_edges(t.triangles)
+        if len(edges) > TIN_MAX_EDGES:
+            keep = np.random.default_rng(0).choice(len(edges), TIN_MAX_EDGES, replace=False)
+            edges = edges[np.sort(keep)]
+        xy = t.world_xy
+        segs = np.stack([xy[edges[:, 0]], xy[edges[:, 1]]], axis=1)
+        con = np.asarray(t.constrained, np.int64).reshape(-1, 2)
+        cons = np.stack([xy[con[:, 0]], xy[con[:, 1]]], axis=1) if len(con) else np.zeros((0, 2, 2))
+        self._tin_edges = (*stamp, (segs, cons))
+        return self._tin_edges[2]
+
+    def _draw_tin(self) -> None:
+        """The edges of the TIN on the plan (layer TIN): the constrained ones thicker."""
+        if self.drawings_frame is not None or self.ortho_view.tr is None:
+            return
+        found = self._tin_segments()
+        if found is None:
+            return
+        segs, cons = found
+        self.ortho_view.add_segments(segs, "#a1887f", layer=TIN_LAYER, attrs={"tin": "triangoli"}, width=0.8)
+        if len(cons):
+            self.ortho_view.add_segments(cons, "#ff7f0e", layer=TIN_LAYER, attrs={"tin": "spigoli vincolati"},
+                                         width=2.0)
 
     def _sections_dir(self) -> Path:
         return (self.doc.path.parent if self.doc.path else Path.home()) / "sezioni"
@@ -8226,7 +9053,7 @@ class MainWindow(QMainWindow):
         self._draw_sections()
 
     def _draw_sections(self) -> None:
-        if self.ortho_view.tr is None:
+        if self.ortho_view.tr is None or self.drawings_frame is not None:  # plan traces: not on an elevation
             return
         with self.ortho_view.batch():
             for sdict in self.sections:
@@ -8266,6 +9093,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("Opzioni delle sezioni salvate: traccia la sezione sull'ortofoto"), 8000)
 
     def _section_drawn(self, a, b) -> None:
+        if self._plan_only():
+            return
         opts = self._section_options()
         source = opts.get("source", "model")
         if not self._need_chunk(product="model" if source == "model" else "point_cloud"):
@@ -8361,8 +9190,8 @@ class MainWindow(QMainWindow):
         if not 0 <= idx < len(feats):
             return
         attrs = feats[idx]
-        if key == "etichetta" and "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
-            u = self.units[attrs["_unit"]]
+        if key == "etichetta" and "_unit" in attrs and 0 <= attrs["_unit"] < len(self.shown_units):
+            u = self.shown_units[attrs["_unit"]]
             u.attributes["etichetta"] = str(value) if value is not None else ""
             for j, other in enumerate(feats):
                 if j != idx and other.get("_unit") == attrs["_unit"]:
@@ -8370,8 +9199,8 @@ class MainWindow(QMainWindow):
             self._store_drawings()
             self._dirty(True)
             return
-        if "_quota" in attrs and 0 <= attrs["_quota"] < len(self.quote):
-            q = self.quote[attrs["_quota"]]
+        if "_quota" in attrs and 0 <= attrs["_quota"] < len(self.shown_quote):
+            q = self.shown_quote[attrs["_quota"]]
             if key == "quota_q":
                 try:
                     value = round(float(value), 3)
@@ -8381,14 +9210,14 @@ class MainWindow(QMainWindow):
                                                        remember_label=False)
             if key != "etichetta":
                 q[key] = value
-        elif "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
-            u = self.units[attrs["_unit"]]
+        elif "_unit" in attrs and 0 <= attrs["_unit"] < len(self.shown_units):
+            u = self.shown_units[attrs["_unit"]]
             if key in ("unita_tipo_s", "tipo") and (str(value).upper() == "UT" or u.tipo == "UT"):
                 from ..archaeo.unit_identity import plan_units
                 from .unit_identity_actions import apply_to_window, reserved_units
 
                 try:
-                    changes = plan_units(self.units, [attrs["_unit"]], tipo=str(value), number_mode="keep",
+                    changes = plan_units(self.shown_units, [attrs["_unit"]], tipo=str(value), number_mode="keep",
                                          progetto=self.project_site() or None, reserved=reserved_units(self))
                     apply_to_window(self, changes)
                 except (ValueError, RuntimeError) as exc:
@@ -8498,7 +9327,7 @@ class MainWindow(QMainWindow):
     def _unit_part(self, layer: str, attrs: dict) -> tuple[int, int] | None:
         """(unit index, part index) of a feature drawn for a unit (one feature per polygon part)."""
         i = attrs.get("_unit")
-        if i is None or not 0 <= i < len(self.units):
+        if i is None or not 0 <= i < len(self.shown_units):
             return None
         k = 0
         for f in self.ortho_view.features(layer):
@@ -8527,15 +9356,17 @@ class MainWindow(QMainWindow):
         from PyArchInit leave the database only with *Salva modifiche in PyArchInit*."""
         from shapely.geometry import MultiPolygon
 
-        sel = self.ortho_view.selected_features()
+        sel = [f for f in self.ortho_view.selected_features() if f[0] != TIN_LAYER]  # the TIN: Rimuovi in the tree
         if not sel:
             return 0
         parts: dict[int, set[int]] = {}
         sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
-        probe_gone = set()
+        probe_gone, lines_gone = set(), set()
         for layer, idx, attrs in sel:
             if layer == PROBE_LAYER and "_probe" in attrs:
                 probe_gone.add(int(attrs["_probe"]))
+            elif layer == LINES_LAYER and "_bline" in attrs:
+                lines_gone.add(int(attrs["_bline"]))
             elif layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
             elif layer == STONES_LAYER:
@@ -8559,7 +9390,7 @@ class MainWindow(QMainWindow):
         for layer, _idx, attrs in sel:
             deleted.setdefault(layer, []).append(dict(attrs))
         if confirm:
-            from_pa = sum(1 for i in parts if (self.units[i].attributes or {}).get("gid") is not None)
+            from_pa = sum(1 for i in parts if (self.shown_units[i].attributes or {}).get("gid") is not None)
             text = tr("Eliminare {0} elementi selezionati?", len(sel))
             if sections:
                 text += tr("\n{0} tracce di sezione: anche i loro disegni (SVG/DXF).", len(sections))
@@ -8575,7 +9406,7 @@ class MainWindow(QMainWindow):
                 return 0
         removed = set()
         for i, ks in parts.items():
-            u = self.units[i]
+            u = self.shown_units[i]
             geoms = list(getattr(u.geometry, "geoms", [u.geometry]))
             keep = [g for k, g in enumerate(geoms) if k not in ks]
             if keep:
@@ -8583,13 +9414,15 @@ class MainWindow(QMainWindow):
             else:
                 removed.add(i)
             self._forget_pa_unit(u, deleted=not keep)
-        self.units = [u for i, u in enumerate(self.units) if i not in removed]
-        self.quote = [q for i, q in enumerate(self.quote) if i not in quote_gone]
+        self.shown_units = [u for i, u in enumerate(self.shown_units) if i not in removed]
+        self.shown_quote = [q for i, q in enumerate(self.shown_quote) if i not in quote_gone]
         if probe_gone:
-            self.probe_points = [q for i, q in enumerate(self.probe_points) if i not in probe_gone]
+            self.shown_points = [q for i, q in enumerate(self.shown_points) if i not in probe_gone]
+        if lines_gone:
+            self.shown_lines = [r for i, r in enumerate(self.shown_lines) if i not in lines_gone]
         if stones_gone and self.ortho_view.path is not None:
-            key = self.ortho_view.path.name
-            self.stones[key] = [s for i, s in enumerate(self.stones.get(key, [])) if i not in stones_gone]
+            key = self._stones_key()
+            self.shown_stones[key] = [s for i, s in enumerate(self.shown_stones.get(key, [])) if i not in stones_gone]
         for sdict in sections:
             self._delete_section(sdict, confirm=False, redraw=False)
         for layer, idxs in lines.items():
@@ -8641,14 +9474,14 @@ class MainWindow(QMainWindow):
         order = []
         for _layer, _idx, attrs in sel:
             i = attrs.get("_unit")
-            if i is not None and 0 <= i < len(self.units) and i not in order:
+            if i is not None and 0 <= i < len(self.shown_units) and i not in order:
                 order.append(i)
         if not order:
             return False
         keep = order[0]
-        if len({(self.units[i].tipo, self.units[i].us, self.units[i].area) for i in order}) > 1:
-            choices = [(str(i), f"{self.units[i].tipo} {self.units[i].us or '?'} (area {self.units[i].area or '-'})"
-                        + (tr(" - da PyArchInit") if (self.units[i].attributes or {}).get("gid") is not None else ""))
+        if len({(self.shown_units[i].tipo, self.shown_units[i].us, self.shown_units[i].area) for i in order}) > 1:
+            choices = [(str(i), f"{self.shown_units[i].tipo} {self.shown_units[i].us or '?'} (area {self.shown_units[i].area or '-'})"
+                        + (tr(" - da PyArchInit") if (self.shown_units[i].attributes or {}).get("gid") is not None else ""))
                        for i in order]
             vals = ParamDialog.ask(self, "Unisci unità", [
                 Field("keep", "Numero, area e tipo di", choices[0][0], choices=choices)],
@@ -8659,18 +9492,18 @@ class MainWindow(QMainWindow):
             keep = int(vals["keep"])
         # close the hairline gaps left between units digitised side by side (half a display pixel)
         eps = max(0.001, 0.5 * abs(self.ortho_view.tr.a)) if self.ortho_view.tr is not None else 0.001
-        merged = unary_union([self.units[i].geometry.buffer(eps, join_style=2) for i in order]).buffer(-eps, join_style=2)
+        merged = unary_union([self.shown_units[i].geometry.buffer(eps, join_style=2) for i in order]).buffer(-eps, join_style=2)
         polys = [g for g in getattr(merged, "geoms", [merged]) if g.geom_type == "Polygon" and not g.is_empty]
         if not polys:
             self._warn("L'unione non ha prodotto un poligono valido.")
             return False
-        target = self.units[keep]
+        target = self.shown_units[keep]
         target.geometry = polys[0] if len(polys) == 1 else MultiPolygon(polys)
         self._forget_pa_unit(target, deleted=False)
         for i in order:
             if i != keep:
-                self._forget_pa_unit(self.units[i], deleted=True)
-        self.units = [u for i, u in enumerate(self.units) if i == keep or i not in order]
+                self._forget_pa_unit(self.shown_units[i], deleted=True)
+        self.shown_units = [u for i, u in enumerate(self.shown_units) if i == keep or i not in order]
         self._update_pa_save_button()
         self._redraw_overlays()
         self._dirty(True)
@@ -8725,7 +9558,8 @@ class MainWindow(QMainWindow):
         self._ensure_ppg_ids()  # copies of a unit (a part split off) get an identity of their own
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
+                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -8737,18 +9571,24 @@ class MainWindow(QMainWindow):
                 color = (item.brush().color() if lay["kind"] == "point" else item.pen().color()).name()
                 others.append((name, lay["kind"], dict(attrs), color))
         v.clear_overlays()
-        for i, u in enumerate(self.units):
+        for i, u in enumerate(self.shown_units):
             self._draw_unit(u, i)
-        for i, q in enumerate(self.quote):
+        for i, q in enumerate(self.shown_quote):
             self._draw_quota(q, i)
-        for i, q in enumerate(self.probe_points):
+        for i, q in enumerate(self.shown_points):
             self._draw_probe_point(q, i)
-        self._draw_sections()
-        for name, lines in self.line_layers.items():
-            for coords, color, label, attrs, width in lines:
-                v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
-        self._draw_patches()
-        self._draw_markers_on_raster()
+        entry = self._frame_entry()
+        if entry is not None:  # an elevation: its markers and profile, nothing of the plan
+            self._draw_elevation_layers(entry)
+        else:
+            self._draw_sections()
+            for name, lines in self.line_layers.items():
+                for coords, color, label, attrs, width in lines:
+                    v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_tin()
+            self._draw_patches()
+            self._draw_markers_on_raster()
+        self._draw_lines()
         self._draw_stones()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
@@ -8805,7 +9645,7 @@ class MainWindow(QMainWindow):
         if not 0 <= idx < len(feats):
             return
         attrs = feats[idx]
-        u = self.units[attrs["_unit"]] if "_unit" in attrs and attrs["_unit"] < len(self.units) else None
+        u = self.shown_units[attrs["_unit"]] if "_unit" in attrs and attrs["_unit"] < len(self.shown_units) else None
         if u is not None and u.tipo == "UT":
             from .unit_identity_actions import open_ut_form
 
@@ -9073,7 +9913,9 @@ class MainWindow(QMainWindow):
     def _export_qgis_layers(self, force: bool = False) -> dict:
         """The drawings of the active chunk into the live GeoPackage, with the key of the chunk; never over another
         chunk's edits not read yet (:meth:`_live_file_ours`: read first, or a moment later). The files, or {} when
-        nothing could be written."""
+        nothing could be written. The layers of the plan come from the 2D view: while an elevation is shown the file
+        keeps the plan's drawings as last written. The drawings of every elevation and section go in too, placed on
+        the survey in 3D (:meth:`_export_elevation_tables`)."""
         try:
             link = self._qgis_live_link()
             if not self._live_file_ours(link):
@@ -9081,10 +9923,19 @@ class MainWindow(QMainWindow):
                 return {}
             if self._ensure_ppg_ids():
                 self._redraw_overlays()  # the features carry the identities given now
+            if self.drawings_frame is not None:  # the view shows an elevation: the plan as it was written
+                from ..io.qgis_link import LIVE_TABLES
+                from ..io import gpkg as _gpkg
+
+                if not _gpkg.is_geopackage(link.path) or link.stored_chunk() != self._chunk_key():
+                    return {}
+                self._export_elevation_tables(link)
+                return {t: link.path for t in LIVE_TABLES}
             view = self.ortho_view
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
-                      if name != "Marker"}  # the markers are the survey's control, not excavation drawings
+                      if name not in ("Marker", TIN_LAYER)}  # the markers: the survey's control; the TIN: a product
             files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
+            self._export_elevation_tables(link)
             self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
             previous, self._live_previous = self._live_previous, None
             if previous is not None and previous is not link:
@@ -9105,6 +9956,36 @@ class MainWindow(QMainWindow):
         if stamp != self._rustgis_stamp:  # rows written: RustGIS gets them at the next look
             self._rustgis_stamp, self._rustgis_wrote = stamp, True
         return files
+
+    def _frame_records(self) -> dict:
+        """The drawings of the elevation shown as the chunk keeps them (:meth:`_store_chunk_drawings`), without
+        storing them."""
+        units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.frame_units]
+        strip = lambda rows: [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in rows]  # noqa: E731
+        return {"units": units, "quote": strip(self.frame_quote), "points": strip(self.frame_points),
+                "stones": {k: [g.wkt for g in v] for k, v in self.frame_stones.items() if v}}
+
+    def _export_elevation_tables(self, link) -> None:
+        """The drawings of every elevation and section of the active chunk into the live GeoPackage, in 3D on the
+        survey (:meth:`.LiveLink.write_elevations`): QGIS and RustGIS show them with the plan."""
+        from ..engine.elevation import elevations, world_tables
+
+        ch = self.chunk
+        if ch is None:
+            return
+        tables = {}
+        for e in elevations(ch):
+            try:
+                data = self._frame_records() if e["id"] == self.drawings_frame else None
+                found = world_tables(ch, e, data)
+                if any(found[k][2] for k in ("unita", "quote", "punti", "pietre")):  # those with drawings
+                    tables[e["id"]] = (e.get("crs") or ch.crs, found)
+            except Exception as exc:  # noqa: BLE001 - one elevation that cannot be read never stops the plan
+                log.warning("Disegni del prospetto %s non scritti per QGIS: %s", e.get("name"), exc)
+        try:
+            link.write_elevations(tables)
+        except Exception as exc:  # noqa: BLE001 - the file held by QGIS a moment: the next write
+            log.warning("Disegni dei prospetti non scritti per QGIS: %s", exc)
 
     def _chunk_key(self) -> str | None:
         """The key of the active chunk as the live GeoPackage keeps it with its drawings."""
@@ -9155,13 +10036,13 @@ class MainWindow(QMainWindow):
             seen.add(pid)
             return pid
 
-        for u in self.units:
+        for u in [*self.units, *self.frame_units]:  # the plan's and the elevation shown
             if u.attributes is None:
                 u.attributes = {}
             gid = u.attributes.get("gid")
             u.attributes[ID_FIELD] = give(u.attributes.get(ID_FIELD), lambda u=u, gid=gid: (
                 ("pyarchinit", u.sito, gid) if gid is not None else ("unita", u.geometry.wkt, u.tipo, u.us, u.area, u.sito)))
-        for q in self.quote:
+        for q in [*self.quote, *self.frame_quote]:
             q[ID_FIELD] = give(q.get(ID_FIELD), lambda q=q: (
                 ("pyarchinit_quote", q["gid"]) if q.get("gid") is not None else ("quota", q.get("x"), q.get("y"),
                                                                                    q.get("quota_q"))))
@@ -9936,6 +10817,8 @@ class MainWindow(QMainWindow):
             self._warn("QGIS non trovato. Installalo da qgis.org (oppure indica il percorso con la variabile PPG_QGIS).")
             return
         ch = self.chunk
+        if self.drawings_frame is not None:  # the project of the plan: the 2D view back on it (an elevation: its menu)
+            self._load_raster()
         files = self._export_qgis_layers(force=True)
         if not files:
             self._warn(tr("Non riesco a scrivere i disegni per QGIS in {0}: vedi il log.", self._qgis_dir()))
@@ -10014,7 +10897,62 @@ class MainWindow(QMainWindow):
                 extra_vectors += list(more_vectors or [])
             except Exception as exc:  # noqa: BLE001 - a plugin must not stop the export
                 log.warning("QGIS: layer di un plugin saltati: %s", exc)
+        extra_vectors += self._qgis_elevation_vectors(ch)
         return rasters, extra_vectors
+
+    def _qgis_elevation_vectors(self, ch) -> list[dict]:
+        """The layers of the drawings of the elevations in the live GeoPackage (3D, on the survey), named after them."""
+        from ..io.qgis_link import ELEVATION_PREFIX, ELEVATION_TABLES
+
+        if ch is None:
+            return []
+        names = {e["id"]: e.get("name") or e["id"] for e in ch.meta.get("elevations") or []}
+        link = self._qgis_live_link()
+        out = []
+        for table, _gtype in link.elevation_tables():
+            eid, _, kind = table[len(ELEVATION_PREFIX):].partition("_")
+            title, geometry, colour = ELEVATION_TABLES.get(kind, (kind, "POINT", "#888888"))
+            out.append({"name": f"{names.get(eid, eid)} - {tr(title)} (3D)", "path": str(link.path), "table": table,
+                        "geometry": geometry, "color": colour, "label": "us" if kind == "unita" else ""})
+        return out
+
+    def open_elevation_in_qgis(self) -> None:
+        """*Apri il prospetto in QGIS*: a QGIS project in the frame of the elevation or section shown, unfolded - its
+        orthophoto and its drawings in its (u, v) metres, as a plan of the façade (no reference system)."""
+        from ..engine.elevation import _safe_stem, export_drawings
+        from ..io import qgis_link
+
+        entry = self._frame_entry()
+        if entry is None:
+            self._warn(tr("Mostra prima un prospetto o una sezione (doppio clic nell'area di lavoro)."))
+            return
+        q = qgis_link.find_qgis()
+        if q is None:
+            self._warn("QGIS non trovato. Installalo da qgis.org (oppure indica il percorso con la variabile PPG_QGIS).")
+            return
+        self._store_drawings()
+        ch = self.chunk
+        stem = _safe_stem(entry["name"]) + "_" + entry["id"]
+        folder = self._qgis_dir() / "prospetti" / stem
+        project = folder / f"{stem}.qgs"
+
+        def job(p):
+            p(0.1, "Disegni del prospetto")
+            files = export_drawings(ch, entry, folder, stem=stem, raster=True)
+            rasters = [{"name": entry["name"], "path": str(files["ortho"])}] if files.get("ortho") else []
+            vectors = [{"name": tr(title), "path": str(files["gpkg"]), "table": table, "geometry": geometry,
+                        "color": colour, "label": "us" if table == "unita" else ""}
+                       for table, (title, geometry, colour) in qgis_link.ELEVATION_TABLES.items() if table != "profilo"]
+            p(0.4, "Creazione del progetto QGIS")
+            rep = qgis_link.build_project(project, "", {}, rasters, title=entry["name"], qgis=q, extra_vectors=vectors)
+            qgis_link.open_in_qgis(project, q)
+            return rep
+
+        def done(rep):
+            self.log_pane.info(tr("Progetto QGIS del prospetto «{0}»: {1} (coordinate del prospetto, in metri)",
+                                  entry["name"], project))
+
+        self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- RustGIS, both ways
     # The drawings and products of the active chunk in the RustGIS that is open (io.rustgis_link), as with QGIS: the
@@ -10920,6 +11858,244 @@ class MainWindow(QMainWindow):
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
                       save=False)
 
+    # ---------------------------------------------------------------- TIN (engine.tin)
+    def _need_tin(self):
+        """The TIN of the active chunk, or None (said)."""
+        if not self._need_chunk():
+            return None
+        from ..engine import tin as T
+
+        try:
+            tin = T.chunk_tin(self.chunk)
+        except Exception as exc:  # noqa: BLE001 - a file that cannot be read
+            self._exc("TIN non leggibile", exc)
+            return None
+        if tin is None:
+            self._warn("Costruisci prima il TIN (Strumenti > TIN...).")
+        return tin
+
+    def build_tin(self) -> None:
+        """*Strumenti > TIN...*: the TIN of the active chunk from the DEM, the ground of the dense cloud or the spot
+        heights, with the break lines drawn on the plan and the spot heights; the polygon selected as its boundary."""
+        if not self._need_chunk() or self._plan_only():
+            return
+        from ..archaeo import breaklines
+        from ..engine import tin as T
+
+        ch = self.chunk
+        self._store_drawings()  # the spot heights of the window are those the TIN reads from the chunk
+        sources = []
+        if ch.dem_path:
+            sources.append(("dem", tr("DEM: triangoli raffinati fino alla tolleranza")))
+        if ch.product_path("point_cloud"):
+            sources.append(("cloud", tr("Terreno della nuvola densa")))
+        n_spots = len(T.chunk_spots(ch))
+        recs = [dict(r) for r in self.lines]
+        if n_spots or recs:
+            sources.append(("spots", tr("Solo quote puntuali e linee di rottura")))
+        if not sources:
+            self._warn("Il TIN ha bisogno del DEM, della nuvola densa o di quote puntuali e linee di rottura.")
+            return
+        selected = self.selected_polygon()
+        choices, codes = self._cloud_class_choices() if ch.product_path("point_cloud") else ([], [])
+        fields = [Field("source", tr("Punti del TIN"), sources[0][0], choices=sources),
+                  Field("max_error", tr("Tolleranza dal DEM (m; vuota: il doppio del rumore del DEM)"), None,
+                        kind="optional_float"),
+                  Field("lines", tr("Linee di rottura disegnate ({0})", len(recs)), bool(recs)),
+                  Field("spots", tr("Quote puntuali come vertici ({0})", n_spots), bool(n_spots))]
+        if selected is not None:
+            fields.append(Field("boundary", tr("Contorno: il poligono selezionato ({0} m2)", _it(selected.area, 2)),
+                                True))
+        if len(codes) > 1:
+            fields.append(Field("classes", tr("Classi del terreno (solo dalla nuvola)"),
+                                [2] if 2 in codes else codes, choices=choices, kind="checklist"))
+        v = ParamDialog.ask(self, "TIN", fields,
+                            intro=tr("Una rete di triangoli tra punti misurati: le linee di rottura diventano spigoli "
+                                     "che i triangoli non attraversano (il piede e la cresta di un muro, il bordo di "
+                                     "un taglio), le quote puntuali vertici con la loro quota misurata."))
+        if not v:
+            return
+        lines = breaklines.for_tin(recs) if v.get("lines") else None
+        boundary = selected if v.get("boundary") else None
+        classes = [int(c) for c in v["classes"]] if v.get("classes") and v["source"] == "cloud" else None
+        if v["source"] == "cloud" and "classes" in v and not v["classes"]:
+            self._warn("Scegli almeno una classe.")
+            return
+
+        def done(tin):
+            self._tin_edges = None
+            text = self._tin_report(tin)
+            for line in text.splitlines():
+                self.log_pane.info(line)
+            self.statusBar().showMessage(text.splitlines()[0], 15000)
+            if self.ortho_view.tr is not None and self.drawings_frame is None:
+                self._redraw_overlays()
+            self._info("TIN", text)
+
+        self.run_task("TIN", lambda p: T.build_tin(ch, source=v["source"], max_error=v.get("max_error"),
+                                                    breaklines=lines, boundary=boundary, spots=bool(v.get("spots")),
+                                                    classes=classes, progress=p), done)
+
+    def _tin_report(self, tin) -> str:
+        """What a build of the TIN gave, in the language of the interface: vertices, triangles, constrained edges,
+        the difference from the DEM, the warnings."""
+        from ..engine import tin as T
+
+        i = tin.info or {}
+        source = {"dem": tr("dal DEM"), "cloud": tr("dalla nuvola densa"), "spots": tr("dalle quote")}.get(
+            tin.source, tin.source)
+        out = [tr("TIN {0}: {1} vertici, {2} triangoli, {3} spigoli vincolati, {4} quote puntuali", source,
+                  _it(tin.n_vertices), _it(tin.n_triangles), _it(len(tin.constrained)), _it(len(tin.spots)))]
+        if "max_error" in i:
+            out.append(tr("Tolleranza {0} m, {1} giri di raffinamento", _it(i["max_error"], 4), i.get("rounds", 0)))
+        if "error_max" in i:
+            out.append(tr("Scarto dal DEM: massimo {0} m, il 95% entro {1} m", _it(i["error_max"], 4),
+                          _it(i["error_p95"], 4)))
+        for w in i.get("warnings") or []:
+            if w == T.NOT_CONSTRAINED:
+                out.append(tr("Attenzione: il nucleo nativo (pyarchinit-photogrammetry-core 0.7) non è installato: le "
+                              "linee di rottura e il contorno sono vertici del TIN ma non vincoli, i triangoli possono "
+                              "attraversarli"))
+            else:
+                out.append(tr("Attenzione: {0}", translate(w)))
+        return "\n".join(out)
+
+    def tin_contours(self) -> None:
+        """Contour lines of the TIN (exact on its triangles), as a layer of the plan and in a file."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..archaeo.terrain import CONTOUR_INTERVALS, export_contours
+        from ..engine import tin as T
+
+        relief = float(tin.z.max() - tin.z.min())
+        suggested = next((iv for iv in CONTOUR_INTERVALS if relief / iv <= 50), CONTOUR_INTERVALS[-1])
+        v = ParamDialog.ask(self, tr("Curve di livello dal TIN"), [
+            Field("interval", "Equidistanza (m)", suggested, minimum=0.001, maximum=100, decimals=3),
+            Field("index_every", "Curva direttrice ogni", 5, minimum=1, maximum=50),
+            Field("path", tr("Salva anche in un file (DXF, GeoPackage, GeoJSON; vuoto: solo nella vista)"), "",
+                  kind="file_save", filter="DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")],
+            intro=tr("Quote del TIN da {0} a {1} m: le curve sono esatte sui triangoli (le linee di rottura restano "
+                     "spigoli vivi).", _it(float(tin.z.min()), 2), _it(float(tin.z.max()), 2)))
+        if not v:
+            return
+        crs = self.chunk.crs
+
+        def job(p):
+            p(0.1, "Curve di livello dal TIN")
+            lines = T.contours(tin, float(v["interval"]), index_every=int(v["index_every"]))
+            if v.get("path"):
+                export_contours(lines, v["path"], crs=crs)
+            return lines
+
+        def done(lines):
+            if self.ortho_view.tr is None or self.drawings_frame is not None:
+                self._load_raster()
+            name = tr("Curve dal TIN ({0} m)", f"{v['interval']:g}")
+            self._draw_contours(name, lines)
+            self.show_view(self.ortho_view)
+            self.log_pane.info(tr("{0}: {1} linee", name, len(lines))
+                               + (tr(", salvate in {0}", v["path"]) if v.get("path") else ""))
+
+        self.run_task("Curve di livello dal TIN", job, done, refresh=False, save=False)
+
+    def tin_volume(self) -> None:
+        """Exact cut and fill of the TIN against a horizontal or a sloping plane, or the deposit above its lowest
+        vertex, shown as the volume of the DEM is."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..engine import tin as T
+
+        zmin = round(float(tin.z.min()), 3)
+        v = ParamDialog.ask(self, tr("Volume dal TIN"), [
+            Field("reference", "Superficie di riferimento", "min",
+                  choices=[("min", "Quota minima dell'area (deposito sopra il fondo)"),
+                           ("height", "Piano alla quota del terreno originario"),
+                           ("plane", tr("Piano inclinato z = a x + b y + c"))]),
+            Field("elevation", "Quota del piano (m)", zmin, minimum=-10000, maximum=10000, decimals=3),
+            Field("a", tr("a (pendenza lungo x)"), 0.0, minimum=-100, maximum=100, decimals=6),
+            Field("b", tr("b (pendenza lungo y)"), 0.0, minimum=-100, maximum=100, decimals=6),
+            Field("c", tr("c (m)"), zmin, minimum=-1e9, maximum=1e9, decimals=3)],
+            intro=tr("Volume esatto dei prismi sotto i triangoli del TIN, rispetto alla superficie scelta."))
+        if not v:
+            return
+        ref = {"min": None, "height": float(v["elevation"]),
+               "plane": (float(v["a"]), float(v["b"]), float(v["c"]))}[v["reference"]]
+
+        def done(r):
+            self._last_volume = r
+            if v["reference"] == "min":
+                what = tr("deposito sopra il fondo")
+            elif v["reference"] == "height":
+                what = tr("rispetto al ") + tr("piano a ") + f"{_it(v['elevation'], 3)} m"
+            else:
+                what = tr("rispetto al ") + tr("piano z = {0} x + {1} y + {2}", v["a"], v["b"], v["c"])
+            txt = (tr("Area {0:.3f} m2 ({1}): scavo (volume asportato) {2:.3f} m3, riporto {3:.3f} m3, netto {4:.3f} "
+                      "m3; quote attuali {5:.3f} / {6:.3f} m",
+                      r['area_m2'], what, r['cut_m3'], r['fill_m3'], r['net_m3'], r['quota_min'], r['quota_max']))
+            self._info(tr("Volume dal TIN"), txt)
+
+        self.run_task("Volume dal TIN", lambda p: T.volume(tin, ref), done, refresh=False, save=False)
+
+    def tin_to_dem(self) -> None:
+        """*DEM dal TIN*: the TIN rasterised as the active DEM; the DEM as it was stays among the versions."""
+        if self._need_tin() is None:
+            return
+        from ..engine import tin as T
+
+        ch = self.chunk
+
+        def done(path):
+            self._show_raster("dem")
+            self.log_pane.info(tr("DEM dal TIN: {0} ({1} m); il DEM di prima resta tra le versioni", path,
+                                  _it(ch.meta["dem"]["resolution"], 4)))
+
+        self.run_task("DEM dal TIN", lambda p: T.tin_to_dem(ch, progress=p), done)
+
+    def export_tin(self) -> None:
+        """*Esporta TIN...*: DXF (3DFACE, break lines, spot heights), PLY/OBJ, GeoPackage or LandXML."""
+        tin = self._need_tin()
+        if tin is None:
+            return
+        from ..engine import tin as T
+
+        path, _f = QFileDialog.getSaveFileName(self, tr("Esporta TIN"), str(Path(self._last_dir()) / "tin.dxf"),
+                                               "DXF (*.dxf);;LandXML (*.xml);;GeoPackage (*.gpkg);;PLY (*.ply);;"
+                                               "OBJ (*.obj)")
+        if not path:
+            return
+        try:
+            out = T.export(tin, path, self.chunk.crs)
+        except Exception as exc:
+            self._exc("Esportazione del TIN non riuscita", exc)
+            return
+        self._info("TIN", tr("TIN ({0} vertici, {1} triangoli) esportato in {2}", _it(tin.n_vertices),
+                                 _it(tin.n_triangles), out))
+
+    def export_breaklines(self) -> None:
+        """*Esporta le linee di rottura...*: the break lines shown (of the plan, or of the elevation shown) into a
+        DXF (layer LINEE), a GeoPackage (table linee) or a GeoJSON."""
+        if not self._need_chunk():
+            return
+        from ..archaeo import breaklines
+
+        if not self.shown_lines:
+            self._warn("Nessuna linea di rottura: disegnale con lo strumento Linee.")
+            return
+        path, _f = QFileDialog.getSaveFileName(self, tr("Esporta le linee di rottura"),
+                                               str(Path(self._last_dir()) / "linee.dxf"),
+                                               "DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")
+        if not path:
+            return
+        crs = None if self.drawings_frame is not None or self.chunk.crs == "LOCAL" else self.chunk.crs
+        try:
+            out = breaklines.write_lines(self.shown_lines, path, crs)
+        except Exception as exc:
+            self._exc("Esportazione delle linee non riuscita", exc)
+            return
+        self._info(tr("Linee di rottura"), tr("{0} linee esportate in {1}", len(self.shown_lines), out))
+
     def plan_slice(self, z_default: float | None = None) -> None:
         if not self._need_chunk(product="model"):
             return
@@ -11257,13 +12433,15 @@ class MainWindow(QMainWindow):
         self.set_draw_mode("patch")
 
     def patch_with_selection(self) -> None:
-        geom = self._selected_polygon()
+        geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono (strumento Seleziona) oppure disegna l'area con lo strumento Patch.")
             return
         self._patch_area(geom)
 
     def _patch_drawn(self, xy) -> None:
+        if self._plan_only():
+            return
         from shapely.geometry import Polygon
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
@@ -11384,7 +12562,7 @@ class MainWindow(QMainWindow):
         v = self.ortho_view
         if PATCH_LAYER in v.layers:
             v.remove_layer(PATCH_LAYER)
-        if self.chunk is None or v.kind != "ortho" or v.tr is None:
+        if self.chunk is None or v.kind != "ortho" or v.tr is None or self.drawings_frame is not None:
             return
         from ..engine import patches as P
 
@@ -11677,6 +12855,7 @@ class MainWindow(QMainWindow):
             a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
             a.setEnabled(chunk is not self.chunk)
             menu.addAction(icon("rename"), tr("Rinomina..."), lambda: self.rename_chunk(chunk))
+            menu.addAction(icon("add_chunk"), tr("Duplica chunk..."), lambda: self.duplicate_chunk(chunk))
             if chunk.enabled:
                 menu.addAction(icon("disable"), tr("Disattiva"), lambda: self.set_chunks_enabled([chunk], False))
             else:
@@ -11721,6 +12900,11 @@ class MainWindow(QMainWindow):
                                on(lambda: self.keep_version_copy(payload)))
                 menu.addAction(icon("edit"), tr("Rinomina questa versione..."),
                                lambda: self.rename_version(payload, None, chunk=chunk))
+            if payload == "tin" and present:
+                menu.addAction(icon("contours"), tr("Curve di livello dal TIN..."), on(self.tin_contours))
+                menu.addAction(icon("volume"), tr("Volume dal TIN..."), on(self.tin_volume))
+                menu.addAction(icon("dem"), tr("DEM dal TIN"), on(self.tin_to_dem))
+                menu.addAction(icon("export"), tr("Esporta TIN..."), on(self.export_tin))
             if isinstance(payload, str) and payload.startswith("calc:") and present:
                 info = (chunk.meta.get("calculator") or {}).get(payload[5:]) or {}
                 menu.addAction(icon("calculator"), tr("Calcola di nuovo con un'altra formula..."),
@@ -12698,7 +13882,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("stones/min", v["min_size"])
         self.settings.setValue("stones/max", v["max_size"])
-        path, key = view.path, view.path.name
+        path, key, frame, chunk = view.path, self._stones_key(), self.drawings_frame, self.chunk
 
         def job(p):
             return find_stones(path, self._segmenter(), bounds=bounds, min_size=v["min_size"], max_size=v["max_size"],
@@ -12707,9 +13891,24 @@ class MainWindow(QMainWindow):
         def done(found):
             from shapely.geometry import box
 
+            if chunk is not self.chunk:  # another chunk is active now: its stones are not these
+                self.log_pane.warning(tr("Le pietre trovate non sono state tenute: il chunk attivo è cambiato"))
+                return
             area = box(*bounds) if bounds is not None else None
-            kept = [s for s in self.stones.get(key, []) if area is not None and not s.intersects(area)]
-            self.stones[key] = kept + found
+            if frame is None or frame == self.drawings_frame:  # the image of the search: the plan, or shown
+                store = self.stones if frame is None else self.frame_stones
+                kept = [s for s in store.get(key, []) if area is not None and not s.intersects(area)]
+                store[key] = kept + found
+            else:  # an elevation no longer shown: its stones in the chunk
+                stones = self._frame_stones(chunk, frame)
+                kept = [s for s in stones.get(key, []) if area is not None and not s.intersects(area)]
+                stones[key] = kept + found
+                self._store_chunk_drawings(chunk, *self._chunk_drawings(chunk, frame), frame=frame,
+                                           stones={k: [g.wkt for g in rows] for k, rows in stones.items()})
+            if frame != self.drawings_frame:
+                entry = self._frame_entry(frame) if frame is not None else None
+                self.log_pane.info(tr("Le pietre trovate vanno all'immagine della ricerca ({0}), non a quella mostrata",
+                                      entry["name"] if entry else (tr("la pianta") if frame is None else frame)))
             self._draw_stones()
             self._dirty(True)
             self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
@@ -12724,7 +13923,7 @@ class MainWindow(QMainWindow):
         if view.path is None or view.tr is None:
             return
         with view.batch():
-            for i, g in enumerate(self.stones.get(view.path.name, [])):
+            for i, g in enumerate(self.shown_stones.get(self._stones_key(), [])):
                 for part in getattr(g, "geoms", [g]):
                     view.add_polygon(np.asarray(part.exterior.coords)[:, :2], "", "#5b3a1e", fill_alpha=0,
                                      layer=STONES_LAYER, attrs={"n": i + 1, "area_m2": round(g.area, 4),
@@ -12735,7 +13934,7 @@ class MainWindow(QMainWindow):
         from ..archaeo.stones import export_stones
 
         view = self.ortho_view
-        stones = self.stones.get(view.path.name, []) if view.path is not None else []
+        stones = self.shown_stones.get(self._stones_key(), []) if view.path is not None else []
         if not stones:
             self._warn("Nessuna pietra su questa immagine: usa lo strumento SAM «Pietre» (trascina un riquadro).")
             return
@@ -12773,8 +13972,8 @@ class MainWindow(QMainWindow):
                 for u in units:
                     u.sito = site
                     u.attributes = {"_layer": "Unita' da SAM", "stratigraph_index_us": 1}
-                    self.units.append(u)
-                    self._draw_unit(u, len(self.units) - 1)
+                    self.shown_units.append(u)
+                    self._draw_unit(u, len(self.shown_units) - 1)
             self._dirty(True)
             self.statusBar().showMessage(tr("{0} unità candidate nel layer «Unita' da SAM»: assegna le US (pannello "
                                             "Layer) prima di pubblicarle", len(units)), 20000)
@@ -12912,28 +14111,163 @@ class MainWindow(QMainWindow):
 
         self.run_task("Esportazione IFC", job, done, refresh=False, save=False)
 
+    def assistant_settings(self) -> None:
+        """*Strumenti > Assistente > Impostazioni dell'assistente...*: the model that answers, its keys and models."""
+        self.assistant.open_settings()
+
     def run_script(self) -> None:
+        """*Esegui script Python...*: the file chosen run in the worker (:meth:`run_script_source`), its output in
+        the console; Modifica > Annulla takes it back in one step."""
         path, _ = QFileDialog.getOpenFileName(self, tr("Script Python"), self._last_dir(), "Python (*.py)")
         if not path:
             return
         src = Path(path).read_text(encoding="utf-8")
         self._show_pane(self.bottom_tabs, self.console)
         self.console.write(tr("# esecuzione di {0}\n", path))
-        ns = self._namespace()
-        ns["__name__"] = "__main__"
-        ns["__file__"] = path
-        import contextlib
 
-        from .panels import _Stream
+        def done(result) -> None:
+            if result.output:
+                self.console.write(result.output if result.output.endswith("\n") else result.output + "\n")
+            if result.error:
+                self.console.write(result.traceback or result.error + "\n")
 
-        stream = _Stream(self.console.write)
+        self.run_script_source(src, Path(path).name, on_done=done, path=path)
+
+    def _namespace_for_worker(self) -> dict:
+        """The names a script run in the worker sees, built in the interface thread: ``doc``, ``chunk``, ``app``,
+        ``ppg``, ``np``, ``polygon`` (the polygons selected in the 2D view, merged; None), ``cameras`` (the photos
+        selected in the Foto pane) and ``window`` (:class:`_WindowProxy`: every attribute of the window, read and
+        called in the interface thread)."""
+        import pyarchinit_photogrammetry as ppg
+
         try:
-            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-                exec(compile(src, path, "exec"), ns)
-        except Exception:
-            self.console.write(traceback.format_exc())
-        self._after_console()
-        self.refresh_all()
+            polygon = self.selected_polygon()
+        except Exception:  # noqa: BLE001 - no selection to give
+            polygon = None
+        try:
+            cameras = list(self.selected_cameras())
+        except Exception:  # noqa: BLE001
+            cameras = []
+        return {"doc": self.doc, "chunk": self.chunk, "app": application, "ppg": ppg, "np": np, "polygon": polygon,
+                "cameras": cameras, "window": _WindowProxy(self, polygon), "__name__": "__main__"}
+
+    def run_script_source(self, source: str, label: str = "Script", on_done=None, path: str | None = None) -> bool:
+        """Run the Python ``source`` on the project in the worker thread (``assistant.scripts.run_script``): the
+        window stays usable, the progress window shows what it prints and can stop it. Whatever it changes in the
+        project - every chunk, the products it builds again (the previous ones kept first as versions), the files
+        it writes in the project's folder, the chunks it adds or removes - becomes ONE entry ``label`` of Modifica
+        > Annulla, also when it fails halfway. The calls it makes that cannot be undone (PyArchInit, QGIS's live
+        GeoPackage, exports) are said afterwards. ``on_done(result)``: the :class:`ScriptResult`, also on error.
+        Returns False when another step is running (said in the status bar)."""
+        from ..assistant.scripts import ScriptResult, run_script
+        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
+            return False
+        doc = self.doc
+        root = doc.files_dir
+        self._store_drawings()  # the drawings of the window are in the snapshot
+        namespace = self._namespace_for_worker()
+        if path:
+            namespace["__file__"] = path
+        before = snapshot_document(doc)
+        chunks = list(doc.chunks)
+        for ch in chunks:
+            ch.keep_versions = True
+            ch._kept_during = {}
+            ch._kept_folders = []
+        doc.script_removals = []
+        self._script_running = True
+        name = path or label
+
+        def job(progress):
+            files0 = files_under(root)  # walked here, in the worker: a large project takes a while
+            try:
+                result = run_script(source, namespace, progress, name=name)
+            except Cancelled:
+                result = ScriptResult("", tr("Script annullato"), None, [], 0.0)
+            except BaseException as exc:  # noqa: BLE001 - whatever happens, the script's entry is made
+                result = ScriptResult("", f"{type(exc).__name__}: {exc}", traceback.format_exc(), [], 0.0)
+            return result, files0, files_under(root)
+
+        def settle():
+            made, kept_folders = [], []
+            for ch in chunks:
+                ch.keep_versions = False
+                made += [(ch.key, product, vid) for product, vid in ch._kept_during.items() if vid]
+                kept_folders += [(ch.key, product, vid) for product, vid in ch._kept_folders]
+                ch._kept_during, ch._kept_folders = {}, []
+            removals = doc.script_removals or []
+            doc.script_removals = None
+            self._script_running = False
+            return made, kept_folders, removals
+
+        def finish(outcome) -> None:
+            result, files0, files1 = outcome
+            made, kept_folders, removals = settle()
+            if self.doc is not doc:  # the script opened another project: shown, nothing to undo
+                log.warning("%s: the script opened another project, it cannot be undone", label)
+                self.set_document(self.doc)
+                if on_done is not None:
+                    on_done(result)
+                return
+            after = snapshot_document(doc)
+            keys0 = set(chunk_keys(before))
+            new_chunks = [k for k in chunk_keys(after) if k not in keys0]
+            removed = {c.key: r for r in removals for c in r.chunks}
+            new_folders = [root / f"chunk_{k}" for k in new_chunks]
+            new_files = sorted(f for f in files1 - files0 if not any(f.is_relative_to(d) for d in new_folders))
+            changed = bool(made or kept_folders or new_files or new_chunks or removed) or \
+                snapshot_text(before) != snapshot_text(after)
+            with self._history_paused():
+                self._after_script_step(modified=changed)
+            if changed and self.history is not None:
+                self._store_drawings()
+                self.history.push(label, ScriptAction(self, before, snapshot_document(doc), made, new_files, new_chunks,
+                                                      removed, kept_folders), document=True)
+            if result.external:
+                calls = list(dict.fromkeys(result.external))
+                self._script_message(tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > "
+                                        "Annulla non riporta indietro.\n\nNon annullabili: {0}", ", ".join(calls)))
+            if result.error:
+                self.log_pane.warning(tr("{0}: {1}", label, result.error))
+            if on_done is not None:
+                on_done(result)
+
+        def failed(summary: str, details: str) -> None:
+            files = files_under(root)
+            finish((ScriptResult("", summary, details, [], 0.0), files, files))
+
+        started = self.runner.run(label, job, finish, failed)
+        if not started:
+            settle()
+        return started
+
+    def _script_changed(self) -> None:
+        """The entry of a script left the history: the project changed after it (said in the status bar)."""
+        text = tr("Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in "
+                  "Modifica > Annulla. La voce è stata tolta.")
+        self.log_pane.warning(text)
+        self.statusBar().showMessage(text, 12000)
+
+    def _script_message(self, text: str) -> None:
+        """A message after a script (non-native, as every message of the window)."""
+        self.log_pane.warning(text)
+        message(self, "warning", APP_TITLE, text)
+
+    def _before_script_step(self) -> None:
+        """Before *Annulla* or *Ripeti* of a script moves files of the project: nothing of the window holds them."""
+        self._release_views()
+
+    def _after_script_step(self, modified: bool = True) -> None:
+        """After a script, or its undo or redo: the window shows the project as it is now."""
+        self._reload_drawings(redraw=False)
+        self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk is not None else [])
+        self.refresh_all(reset_views=True)
+        self._clear_stale_photo()
+        if modified:
+            self.setWindowModified(True)
 
     # ---------------------------------------------------------------- PyArchInit
     def pyarchinit_connect(self, ask: bool = False, config: str | Path | None = None, url: str | None = None,
@@ -13118,6 +14452,9 @@ class MainWindow(QMainWindow):
         site = self._ensure_site("Unità e quote vengono scritte nel sito del progetto.")
         if not site:
             return
+        if self._frame_entry() is not None:
+            self._publish_elevation_drawings(site, what)
+            return
         units, quote, no_us = self._publishable()
         if what == "units":
             quote = []
@@ -13152,6 +14489,71 @@ class MainWindow(QMainWindow):
                                                                                            "pubblicate.",
                                                     no_us)
                                                  if no_us and units else ""))
+
+        self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
+
+    def _publish_elevation_drawings(self, site: str, what: str = "both") -> None:
+        """*Salva in PyArchInit* with an elevation or a section shown: its units create or update their US forms (the
+        fields only: a drawing in (u, v) has no geometry in plan), its spot heights go into ``pyarchinit_quote`` at
+        their world position, and its drawings (DXF, SVG) are registered as media "Prospetto" or "Sezione" of the
+        site, linked to those US: the same media at every save (``entry["media"]``), their files written again. Not
+        the media when only the spot heights are saved."""
+        from ..engine.elevation import export_drawings
+
+        entry = self._frame_entry()
+        units = [u for u in self.shown_units if u.tipo != "UT" and u.us] if what != "quote" else []
+        no_us = sum(1 for u in self.shown_units if u.tipo != "UT" and not u.us)
+        quote = [q for q in self.shown_quote if q.get("gid") is None] if what != "units" else []
+        self._store_drawings()
+        # the world positions are in the system the elevation was made in (kept when the system of the survey changes)
+        ch, pa, crs = self.chunk, self.pa, entry.get("crs") or self.chunk.crs
+        media_entry = {**entry, "media": dict(entry.get("media") or {})}  # written here, in the interface thread
+        folder = ch.data_dir / Path(entry["orthophoto"]).parent / "disegni"
+        stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in entry["name"]) + "_" + entry["id"]
+        fields = [(u, str(u.area or "1"), str(u.us), u.tipo or "US",
+                   {k: v for k, v in (u.attributes or {}).items()
+                    if not str(k).startswith("_") and k not in ("gid", "sito", "area", "us", "unita_tipo", "tipo")})
+                  for u in units]
+
+        def job(p):
+            p(0.1, "Schede US")
+            made = updated = 0
+            links = []
+            for _u, area, us, tipo, values in fields:
+                record = pa.us_record(site, area, us, tipo)
+                if record is None:
+                    pa.create_us(site, area, us, tipo, **values)
+                    made += 1
+                else:
+                    pa.update_us(int(record["id_us"]), **values)
+                    updated += 1
+                links.append((area, us, tipo))
+            p(0.5, "Quote")
+            gq = pa.publish_quote(quote, site, crs=crs) if quote else []
+            if what == "quote":
+                return made, updated, gq, 0, 0
+            p(0.7, "Disegni del prospetto")
+            paths = export_drawings(ch, entry, folder, stem=stem)
+            known = dict(media_entry["media"])
+            ids = pa.register_elevation_media(ch, media_entry, paths, sito=site, link_us=links)
+            new = len([k for k in media_entry["media"] if k not in known])
+            return made, updated, gq, new, len(ids) - new
+
+        def done(r):
+            made, updated, gq, new_media, old_media = r
+            if what != "quote":
+                entry["media"] = media_entry["media"]
+            for q, g in zip(quote, gq):
+                q["gid"] = g
+            self._redraw_overlays()
+            self._dirty(True)
+            self.pa_pane.refresh()
+            kind = tr("sezione") if entry.get("kind") == "section" else tr("prospetto")
+            self._info("PyArchInit", tr("Sito {0}, {1} «{2}»: {3} schede US nuove e {4} aggiornate, senza geometria in "
+                                        "pianta (le unità sono disegnate sul {1}); {5} quote in pyarchinit_quote; "
+                                        "disegni come media: {6} nuovi, {7} aggiornati.", site, kind, entry["name"],
+                                        made, updated, len(gq), new_media, old_media)
+                       + (tr("\n{0} unità senza numero di US non sono state scritte.", no_us) if no_us else ""))
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
 

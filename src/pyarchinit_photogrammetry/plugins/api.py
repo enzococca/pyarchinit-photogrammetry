@@ -162,8 +162,8 @@ class Context:
     def request_polygon(self, on_finished: Callable, on_cancelled: Callable | None = None, hint: str = "") -> bool:
         """Let the user draw a polygon on the 2D view with the program's own tool (drag a box, or click
         the vertices and double click or Enter; Backspace drops the last vertex, Esc cancels):
-        ``on_finished(xy)`` gets the vertices, an ``(N, 2)`` array in the coordinates of the chunk, in the
-        interface thread; ``on_cancelled()`` when the user picks another tool or another request comes.
+        ``on_finished(xy)`` gets the vertices, an ``(N, 2)`` array in the coordinates of the chunk (in the ``(u, v)``
+        metres of the elevation or section the window shows, when it shows one), in the interface thread; ``on_cancelled()`` when the user picks another tool or another request comes.
         ``hint``: the text of the status bar. False (and ``on_cancelled``) when there is nothing to draw
         on; in the command line there is no drawing (``RuntimeError``)."""
         return self._request("polygon", on_finished, on_cancelled, hint)
@@ -209,6 +209,9 @@ class Context:
         view = getattr(self.window, "ortho_view", None)
         if view is None:
             raise RuntimeError("the 2D view needs the window: not in the command line")
+        frame = getattr(self.window, "_set_drawings_frame", None)
+        if frame is not None:  # a frame of the chunk's coordinates: the drawings of the plan, not of an elevation
+            frame(None)
         view.show_frame(bounds, resolution, text)
 
     def mark_modified(self) -> None:
@@ -411,7 +414,8 @@ class Context:
         ``chunk``: the active one when None. In the window, on the active chunk, the units are drawn and
         are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into
         ``chunk.meta["drawings"]``, where the window finds them when that chunk becomes the active one
-        (the command line saves the project). Only in the interface thread (an action, ``done``), as
+        (the command line saves the project). While the window shows an elevation or a section, the polygons are in
+        its ``(u, v)`` metres and join its drawings. Only in the interface thread (an action, ``done``), as
         :meth:`store_drawings`. Returns how many units were added."""
         import threading
 

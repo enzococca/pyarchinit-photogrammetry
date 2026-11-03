@@ -127,9 +127,12 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     progress(0.0, "Undistorting photos")
     names = chunk.meta["sfm"].get("names", {})
     keep = []
-    if bad:  # only the readable photos
+    disabled = any(c.aligned and not c.enabled for c in chunk.cameras)  # in the model, left out by the user
+    if bad or disabled:  # only the readable photos that are enabled
         skipped = {c.key for c in bad}
         keep = [names[str(c.key)] for c in chunk.aligned_cameras if c.key not in skipped and str(c.key) in names]
+        if not keep:  # an empty list would undistort every photo of the model
+            raise RuntimeError("no enabled aligned photo for the depth maps")
     from .sfm import photo_folder
 
     with colmap_log.relay(progress.sub(0.0, 0.1), ws, phases={"undistort": (0.0, 1.0)}):

@@ -404,6 +404,7 @@ def import_model(chunk, path, frame: str = "world", offset=None, scale: float = 
         chunk.meta["metric"] = True  # metres, also in local coordinates
     internal = chunk.to_internal(xyz) if frame == "world" else xyz
     distance = None if empty else _distance_from_data(chunk, internal)
+    chunk._before_product_write("model")
     with tempfile.TemporaryDirectory() as tmp:
         _detach_pages(mesh, chunk.data_dir, Path(tmp))
         kept = versions.keep_active(chunk, "model", move=True) if keep else None

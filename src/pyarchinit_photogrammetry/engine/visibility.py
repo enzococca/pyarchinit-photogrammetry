@@ -1,6 +1,7 @@
 """Occlusion tests and camera selection shared by texturing, orthomosaic and SAM projection."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import cv2
@@ -8,6 +9,9 @@ import numpy as np
 
 from .. import _native
 from ..core.chunk import Chunk
+
+log = logging.getLogger(__name__)
+_FALLBACK_SAID = False  # the reason Open3D's ray casting was not used, logged once
 
 
 class Raycaster:
@@ -22,7 +26,12 @@ class Raycaster:
             scene.add_triangles(o3d.core.Tensor(np.asarray(vertices, np.float32)),
                                 o3d.core.Tensor(np.asarray(faces, np.uint32)))
             self._o3d = (o3d, scene)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - the ray casting of trimesh (with rtree) does the same, slower
+            global _FALLBACK_SAID
+            if not _FALLBACK_SAID:
+                _FALLBACK_SAID = True
+                log.info("Ray casting with trimesh: Open3D's RaycastingScene not available (%s: %s)",
+                         type(exc).__name__, exc)
             import trimesh
 
             self._mesh = trimesh.Trimesh(vertices, faces, process=False)

@@ -819,7 +819,16 @@ class PatchDialog(QDialog):
 # of the interface goes through these helpers, which force the Qt implementation.
 
 def message(parent, kind: str, title: str, text: str, details: str = "", buttons=None, default=None):
-    """Non-native message box. ``kind``: info, warning, critical, question. Returns the button."""
+    """Non-native message box. ``kind``: info, warning, critical, question. Returns the button. From another thread
+    (a script run in the worker) the box is shown by the interface thread and this one waits for it."""
+    from . import gui_thread
+
+    if not gui_thread.in_gui_thread():
+        return gui_thread.call(message, gui_thread.unwrap(parent), kind, title, text, details, buttons, default)
+    return _message_box(gui_thread.unwrap(parent), kind, title, text, details, buttons, default)
+
+
+def _message_box(parent, kind: str, title: str, text: str, details: str = "", buttons=None, default=None):
     from PySide6.QtWidgets import QMessageBox
 
     title, text = translate(title), translate(text)
@@ -841,7 +850,17 @@ def message(parent, kind: str, title: str, text: str, details: str = "", buttons
 def choice(parent, kind: str, title: str, text: str, options: list[str], default: int = 0,
            cancel: str | None = "Annulla") -> int | None:
     """Non-native message box with buttons named ``options``: the index of the one pressed, or
-    ``None`` for ``cancel`` (Esc) or a closed box."""
+    ``None`` for ``cancel`` (Esc) or a closed box. From another thread (a script run in the worker) the box is
+    shown by the interface thread and this one waits for the answer."""
+    from . import gui_thread
+
+    if not gui_thread.in_gui_thread():
+        return gui_thread.call(choice, gui_thread.unwrap(parent), kind, title, text, options, default, cancel)
+    return _choice_box(gui_thread.unwrap(parent), kind, title, text, options, default, cancel)
+
+
+def _choice_box(parent, kind: str, title: str, text: str, options: list[str], default: int = 0,
+                cancel: str | None = "Annulla") -> int | None:
     from PySide6.QtWidgets import QMessageBox
 
     title, text, options = translate(title), translate(text), [translate(o) for o in options]

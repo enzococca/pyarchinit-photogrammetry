@@ -46,6 +46,10 @@ class Chunk:
     meta: dict = field(default_factory=dict)
     _tie_points: PointCloud | None = field(default=None, repr=False)
     _surface_cache: dict = field(default_factory=dict, repr=False)  # markers measured in one photo
+    # while a script runs (core.versions.keep_during): every product it writes again is kept first as a version
+    keep_versions: bool = field(default=False, repr=False, compare=False)
+    _kept_during: dict = field(default_factory=dict, repr=False, compare=False)  # product -> version id
+    _kept_folders: list = field(default_factory=list, repr=False, compare=False)  # (product, id) taken out of the list
 
     # ------------------------------------------------------------------ paths
     @property
@@ -69,8 +73,17 @@ class Chunk:
         orthomosaic exported by Metashape - is never overwritten: the changed copy replaces
         it in the project only."""
         files = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif",
-                 "orthomosaic": "orthomosaic.tif"}
+                 "orthomosaic": "orthomosaic.tif", "normal_map": "normal_map.tif"}
         return self.data_dir / files.get(name, f"{name}.dat")
+
+    def _before_product_write(self, name: str) -> None:
+        """Called by every builder right before it writes the file of the product ``name``: while
+        :attr:`keep_versions` is on (a script runs, :func:`.versions.keep_during`) the product as it is
+        now is kept first - once per product - so that *Annulla lo script* can bring it back."""
+        if self.keep_versions:
+            from . import versions
+
+            versions.before_write(self, name)
 
     # ------------------------------------------------------------ properties
     @property
@@ -87,6 +100,7 @@ class Chunk:
     def tie_points(self, value: PointCloud | None) -> None:
         self._tie_points = value
         if value is not None and self.document is not None:
+            self._before_product_write("tie_points")
             path = value.save_ply(self.data_dir / "tie_points.ply")
             self._set_product("tie_points", path)
 
@@ -97,6 +111,7 @@ class Chunk:
 
     @point_cloud.setter
     def point_cloud(self, value: PointCloud) -> None:
+        self._before_product_write("point_cloud")
         path = value.save_ply(self.data_dir / "point_cloud.ply")
         self._set_product("point_cloud", path)
 
@@ -140,6 +155,27 @@ class Chunk:
             if c.key == label_or_key or c.label == label_or_key:
                 return c
         raise KeyError(label_or_key)
+
+    def set_cameras_enabled(self, cameras: Iterable[Camera | str], enabled: bool) -> int:
+        """Enable or disable photos (objects of the chunk, keys or labels): a disabled photo stays in
+        the chunk with its pose but alignment, depth maps, orthomosaic and texture leave it out from
+        their next run. Returns how many photos changed; KeyError for a name that is not there
+        (nothing changed then), ValueError for a Camera object of another chunk (a duplicate shares the keys
+        of its source: its photos are never taken for those of this chunk)."""
+        targets = []
+        for c in cameras:
+            if isinstance(c, Camera):
+                if not any(c is own for own in self.cameras):
+                    raise ValueError(f"the photo {c.label} is not a photo of the chunk {self.label}")
+                targets.append(c)
+            else:
+                targets.append(self.camera(c))
+        changed = 0
+        for cam in {id(c): c for c in targets}.values():
+            if cam.enabled != bool(enabled):
+                cam.enabled = bool(enabled)
+                changed += 1
+        return changed
 
     def marker(self, label_or_key) -> Marker:
         for m in self.markers:
@@ -752,17 +788,35 @@ class Chunk:
 
         return reset_region(self, source, margin, angle_deg)
 
+    def region_from_markers(self, a, b, c, thickness: float, extent: str = "region"):
+        """A thin box on the plane of three markers (label, key or target code): the axes of the
+        plane and its normal towards the photos, ``thickness`` along the normal centred on the
+        plane; the extent in the plane from the region there was (``extent="region"``) or from
+        the tie points (``"tie_points"``). Stored and returned."""
+        from ..engine.region import region_from_markers
+
+        return region_from_markers(self, a, b, c, thickness, extent)
+
+    def build_normal_map(self, source: str = "auto", progress: ProgressCallback | None = None) -> Path:
+        """The normal map on the grid of the orthomosaic (same pixels, same coordinates): an RGBA
+        GeoTIFF, red east, green north, blue up, from the model (``source="model"``, rays cast
+        straight down), the DEM (``"dem"``) or the model when there is one (``"auto"``); the
+        product ``normal_map`` of the chunk."""
+        from ..engine.normalmap import normal_map_on_grid
+
+        return normal_map_on_grid(self, source, progress=progress)
+
     def edit_dem(self, polygon, method: str = "plane", value: float | None = None, breaklines=None,
                  keep_version: bool = True, version_name: str | None = None,
-                 progress: ProgressCallback | None = None) -> dict:
+                 progress: ProgressCallback | None = None, lines: str = "selection") -> dict:
         """New heights for the DEM inside ``polygon`` from the ground around it: ``method``
         "plane", "constant" (``value``, default the median around), "idw" or "linear";
-        ``breaklines`` keep their heights. The DEM as it was is kept as a version first
-        (:mod:`engine.dem_edit`)."""
+        ``breaklines`` keep their heights; ``lines="drawn"``: also the break lines drawn on the plan
+        that reach the area. The DEM as it was is kept as a version first (:mod:`engine.dem_edit`)."""
         from ..engine import dem_edit
 
         return dem_edit.fill_area(self, polygon, method, value, breaklines, keep_version, version_name,
-                                  progress=as_progress(progress))
+                                  progress=as_progress(progress), lines=lines)
 
     def coregister_dem(self, reference, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
                        method: str = "auto", name: str | None = None, search: float | None = None,

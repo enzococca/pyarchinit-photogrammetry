@@ -196,6 +196,8 @@ multispettrali, termiche e satellitari, i plugin.
 | **Patch dell'ortofoto (assegna immagini)** | quale foto usare in un'area dell'ortofoto: [vedi sotto](#strumenti-patch-dellortofoto) |
 | **Curve di livello...** | le curve dal DEM, come layer da interrogare ed esportare |
 | **Volume scavo / riporto...** | il volume tolto e aggiunto rispetto a un piano o a un DEM di prima |
+| **TIN...** | una rete di triangoli dal DEM, dal terreno della nuvola o dalle quote, con le linee di rottura come spigoli ([TIN e linee di rottura](../tin.md)) |
+| **TIN e linee di rottura** | di nuovo il TIN, *Curve di livello dal TIN...*, *Volume dal TIN...*, *DEM dal TIN*, *Esporta TIN...*, *Disegna linee di rottura*, *Esporta le linee di rottura...* |
 | **Proponi US e rapporti (Extended Matrix)...** | numero, tipo e rapporti stratigrafici per le unità senza numero ([proposta US](archaeology.md#proposta-di-us-e-rapporti)) |
 | **Fasi dello scavo (volumi e rapporti)...** | un rilievo per fase: volumi tra le fasi e rapporti suggeriti ([fasi](archaeology.md#fasi-dello-scavo)) |
 | **Coregistra DEM...** | sposta il DEM sul DEM di un altro rilievo dove il terreno non è cambiato ([coregistrazione](processing.md#coregistrazione-dei-dem)) |
@@ -203,6 +205,8 @@ multispettrali, termiche e satellitari, i plugin.
 | **Calibra il colore con la tabella colori...** | una ColorChecker fotografata nello scavo rende confrontabili i colori Munsell |
 | **Visualizzazioni del rilievo...** | sky-view factor, openness, rilievo locale e multiscala, ombreggiature ([rilievo](archaeology.md#visualizzazioni-del-rilievo)) |
 | **Calcolatore raster...** | formule sui raster del progetto, anche quelli dei plugin, come in QGIS ([calcolatore](archaeology.md#calcolatore-raster)) |
+| **Regione sui marker...** | una regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto), con il suo spessore lungo la normale: mappe di profondità, nuvola densa e modello ne restano dentro |
+| **Mappa delle normali...** | le normali della superficie (modello o DEM) sulla griglia dell'ortofoto, rosso est, verde nord, blu alto; mostrata nella vista 2D ed elencata nell'Area di lavoro |
 | **Opzioni delle sezioni...** · **Pianta a quota (slice orizzontale)...** | da cosa tagliare le sezioni (modello o nuvola, classi); una pianta a una quota |
 | **Profilo ceramico da mesh...** | diametri, altezza e profilo di un vaso o di un frammento ([ceramica](archaeology.md#profili-ceramici)) |
 | **Proxy 3D delle US...** | i solidi delle unità per l'Extended Matrix e il BIM ([proxy](archaeology.md#proxy-3d-delle-us)) |
@@ -210,6 +214,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **Segment Anything 2.1** | unità e pietre disegnate da SAM 2.1: [vedi sotto](#strumenti-segment-anything-21) |
 | **Esporta IFC (BIM)...** | le unità o i loro proxy in un file IFC ([BIM e IFC](../bim.md)) |
 | **Esegui script Python...** | uno script con i moduli del programma ([API](../api.md)) |
+| **Assistente** | *Apri l'assistente* e *Impostazioni dell'assistente...*: il modello che risponde ([l'assistente](assistant.md)) |
 | **Multispettrale** · **Termico** | le riprese multispettrali e termiche: [vedi sotto](#strumenti-multispettrale) |
 | **Immagini satellitari** | scene satellitari sul DEM del rilievo: [vedi sotto](#strumenti-immagini-satellitari) |
 | **Nodi di rete...** | altri computer che lavorano allo stesso progetto ([nodi](processing.md#nodi-di-rete)) |
@@ -395,8 +400,9 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | Voce | A cosa serve |
 | --- | --- |
 | **Pannelli** | ogni pannello aperto o chiuso: [vedi sotto](#vista-pannelli) |
-| **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++) |
+| **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++; anche l'*Assistente*) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
+| **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
 | **Tema** | chiaro o scuro, ricordato |
 | **Lingua / Language** | italiano o inglese, al prossimo avvio (*Riavvia ora* riapre subito il progetto) |
 

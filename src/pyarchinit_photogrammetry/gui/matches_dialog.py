@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QGraphicsScene, QGraphicsView, QHBoxLayout,
                                QLabel, QSpinBox, QVBoxLayout)
 
 from ..engine import diagnostics
 from .i18n import tr
-from .image_views import to_qimage
+from .image_views import SegmentsItem, to_qimage
 
 GOOD, FAIR, WEAK = "#2a9d55", "#f4a261", "#d1495b"
 
@@ -212,13 +212,10 @@ class PairMatchesDialog(QDialog):
             if len(xa) > most:  # thousands of lines hide the photos: an even sample of them
                 pick = np.random.default_rng(0).choice(len(xa), most, replace=False)
                 xa, xb = xa[pick], xb[pick]
-            path = QPainterPath()
-            for (x1, y1), (x2, y2) in zip(xa, xb):
-                path.moveTo(QPointF(x1 * fa, y1 * fa))
-                path.lineTo(QPointF(offset + x2 * fb, y2 * fb))
+            xa, xb = np.asarray(xa, float).reshape(-1, 2), np.asarray(xb, float).reshape(-1, 2)
             pen = QPen(QColor(colour), 1)
-            pen.setCosmetic(True)
-            scene.addPath(path, pen)
+            pen.setCosmetic(True)  # one item, one drawLines (see image_views.polyline_path)
+            scene.addItem(SegmentsItem(np.stack([xa * fa, xb * fb + [offset, 0.0]], axis=1), pen))
 
         a, b = self.data["a"], self.data["b"]
         if self.c_rej.isChecked() and len(self.rejected):

@@ -20,6 +20,7 @@ project, reaches QGIS through the live link and goes into PyArchInit with *Publi
 | ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Height** | a spot height for `pyarchinit_quote` ([below](#spot-heights)) |
 | ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Point** | a measuring point: elevation, temperature, bands and indices |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | a marker where you click ([markers](photos-markers.md#markers)) |
+| ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Lines** | break lines, soft lines and boundaries for the TIN and the DEM edit; the kind in its menu ([TIN and break lines](../tin.md#break-lines)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | units and stones drawn by Segment Anything ([below](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | the photo to use in an area of the orthophoto ([patches](processing.md#orthophoto-patches)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Delete** | the selected features (++delete++) |

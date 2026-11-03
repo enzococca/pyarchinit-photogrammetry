@@ -249,16 +249,39 @@ on the public WorldView-3 datasets.
   programs (turned on once in RustGIS: *Let your Agents Control RustGIS*), with the same live GeoPackage as the QGIS
   link. The units drawn there reach PyArchInit from the window. See [Integrations](integrations.md#rustgis).
 
+## Done in 1.7
+
+* **The assistant** (1.7.0): explanations of the results, how to do things, Python scripts run with one click and
+  undone as one step; a local model by default, Claude or OpenAI as alternatives, nothing private leaving the
+  computer; `ppg assistant`. See [The assistant](gui/assistant.md), with the evaluation of the models.
+* **New functions of the program** (1.7.0): the reconstruction region on the plane of three markers, the normal
+  map on the orthomosaic's grid, a chunk duplicated with the photos chosen, photos enabled and disabled.
+* **A trackball in the 3D view** (1.7.0), as in Metashape: a sphere with three rings around the centre of rotation
+  (free rotation inside, about one axis on a ring, roll outside), pan, zoom toward the cursor, the centre of rotation
+  by double click, keys; shown when the mouse is over the view, always or never. See
+  [3D view and trackball](gui/view3d.md).
+* **TIN with break lines** (1.7.0): a constrained Delaunay surface in the native core (core 0.7, the crate spade) from
+  the DEM refined to a tolerance, the ground of the dense cloud or the spot heights alone, with break lines, soft
+  lines and boundaries drawn on the plan; contour lines exact on the triangles, exact volumes, a DEM from the TIN,
+  exports as DXF 3DFACE, PLY/OBJ, GeoPackage and LandXML; `ppg tin`. See [TIN and break lines](tin.md).
+* **Drawings on elevations and sections** (1.7.0): the units, lines, spot heights, points and stones drawn on an
+  elevation kept with it in its (u, v), exported with it unfolded and in 3D on the survey, opened in QGIS, sent to
+  PyArchInit as its media. See [Drawings on elevations and sections](gui/processing.md#drawings-on-elevations-and-sections).
+
 ## Next
 
-**1.7.0** - the assistant (explanations of the results, how to do things, Python scripts run with one click and
-undone as one step; a local model by default, Claude or OpenAI as alternatives, nothing private leaving the
-computer), three functions of the program (the region on three markers, the normal map on the orthomosaic's grid,
-a chunk duplicated with chosen photos) and a **TIN** in the native core: a constrained Delaunay surface from spot
-heights and break lines (edges, foot of slopes, walls), with its contour lines and volumes - the surface a
-surveyor expects next to the DEM grid.
+* **1.8.0 - Checks on real data**: the parts never tried on real data - the import from WebODM, a satellite scene
+  of one's own, `ppg remote` on a remote machine, network nodes on two real computers, a whole MicaSense flight to
+  the reflectance orthomosaic.
+* **1.9.0 - Change detection between surveys**: distances between the clouds and models of two dates along the
+  surface (M3C2), significant where they exceed the precision of both surveys; maps of change for walls, sections
+  and slopes, for the monitoring of sites and restorations, in the PDF report.
+* **1.10.0 - Publishing a survey on the web**: a static website of a survey - orthomosaic and DEM, model, cloud,
+  units with their attributes, sections - built from the exports already there (COG, COPC, 3D Tiles), for any web
+  host or GitHub Pages.
+* **Flight plans**, as a plugin, stay planned.
 
-New plugins, in this order:
+New plugins, in this order (the first three are released: landscape, geoarchaeology 0.2.0 and architecture):
 
 1. **Landscape through time** (Landlab): erosion and deposition simulated on the DEM - how a tell wears down,
    where colluvium gathers, scenarios of the ancient landscape tied to the phases of the timeline.
@@ -278,16 +301,9 @@ Other open points, in no fixed order:
   receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid
   receivers, the `.DAT` files of a DJI D-RTK base.
 
-* Parts never tried on real data: the import from WebODM, a satellite scene of one's own, `ppg remote`
-  on a remote machine, a whole MicaSense flight to the reflectance orthomosaic.
 * SpatiaLite on Windows ARM64: it waits for an ARM64 build of QGIS (its library is x64).
 * geoai: the comparison of two coregistered dates and the height differences of their DEMs, after the
   evaluation on a real annotated survey.
-* **Drawings on elevations and sections**: the units, lines, spot heights and points drawn on an elevation or a
-  section kept with it, in its coordinates (u, v; v the height on upright planes), not among the drawings of the
-  plan; shown again when the elevation is opened, exported with it (DXF, GeoPackage) and, for a section, sent to
-  PyArchInit as a section drawing. The stone-by-stone drawings of elevations kept per elevation too (today they
-  go by the file name, the same for every elevation).
 * Ideas not decided yet: a **topology** plugin on topologicpy - stratigraphic relations read from the faces
   the 3D proxies of the units share (*covers* from horizontal contacts, *abuts* from vertical ones) into the
   Extended Matrix, overlapping proxies split into clean cells for the volumes, the rooms of standing

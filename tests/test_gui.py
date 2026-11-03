@@ -55,6 +55,49 @@ def test_window_shows_products(window, qapp):
         assert w.model_view.canvas.grab_array().std() > 10
 
 
+def test_console_runs_a_pasted_block(window, qapp):
+    from PySide6.QtCore import QMimeData
+
+    c = window.console
+    assert c.paste_runs_blocks
+    c.run_source("a = 1\nfor i in range(3):\n    a += i\nprint(a)")
+    assert c.out.toPlainText().rstrip().endswith("4")
+    assert c.console.locals["a"] == 4
+    assert c.run_source("for i in range(2):") is True
+    c.console.resetbuffer()
+    mime = QMimeData()
+    mime.setText("b = 2\nc = b * 3")
+    c.inp.insertFromMimeData(mime)
+    assert c.console.locals["c"] == 6
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.clipboard().setText("d = 5\ne = d + 1")
+    c.inp.paste()
+    assert c.console.locals["e"] == 6
+    # the context menu's own Paste
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+    pasted = []
+
+    def fake_exec(menu, pos):
+        act = next(x for x in menu.actions() if x.text() == "Incolla")
+        pasted.append(act.isEnabled())
+        act.trigger()
+
+    c.inp.run_menu = fake_exec
+    QApplication.clipboard().setText("m1 = 10\nm2 = m1 + 1")
+    c.inp.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(1, 1), QPoint(1, 1)))
+    assert pasted == [True] and c.console.locals["m2"] == 11 and c.inp.text() == ""
+    # a pending continuation is dropped; the text typed before the paste leads the block
+    assert c.run_source("for i in range(2):") is True
+    c.run_source("u = 1\nv = u + 1")
+    assert c.console.locals["v"] == 2 and not c.console.buffer
+    c.inp.setText("w = 4")
+    mime.setText("x = w + 1\ny = x + 1")
+    c.inp.insertFromMimeData(mime)
+    assert c.console.locals["y"] == 6 and c.inp.text() == ""
+
+
 def test_console_and_photo_view(window, qapp):
     w = window
     assert not w.console.run_source("n = len(chunk.aligned_cameras)")

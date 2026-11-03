@@ -959,13 +959,17 @@ def _kept(chunk, georeferenced: bool, sections: list | None, fate: str) -> list[
     return kept
 
 
-def _drawn(chunk, mover, sections: list | None) -> tuple[dict, list | None]:
+def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None) -> tuple[dict, list | None]:
     """What was drawn on the products of ``chunk``, carried by ``mover`` aside (nothing of the chunk changes; a
     conversion that cannot be made raises here): the new values of the keys of ``chunk.meta`` and the new sections of
     the project (None to leave them)."""
     import copy
 
     meta, values = chunk.meta, {}
+    if any(not e.get("crs") for e in meta.get("elevations") or []):
+        # the elevations stay in the system they were made in (kept), and the world positions of the drawings made on
+        # them (spot heights, measuring points) too: that system written in each of them, which earlier versions did not
+        values["elevations"] = [{**e, "crs": e.get("crs") or old_crs or chunk.crs} for e in meta["elevations"]]
     if meta.get("drawings"):
         drawings = copy.deepcopy(meta["drawings"])
         for unit in _units(drawings):
@@ -1259,7 +1263,7 @@ def _put(chunk, crs: str) -> dict:
     else:
         mover = _Follow(chunk.transform @ np.linalg.inv(before),
                         _Ground(chunk.product_path("dem"), old, lambda: _level(spread(), before)))
-    values, moved = _drawn(chunk, mover, sections if fate == "convert" else None)
+    values, moved = _drawn(chunk, mover, sections if fate == "convert" else None, old)
     if mover.mode == "follow" and chunk.meta.get("region"):
         values["region"] = _region_follows(chunk.meta["region"], before, chunk.transform)
     shift, lift = _said(mover, old, crs)

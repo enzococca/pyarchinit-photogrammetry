@@ -147,6 +147,7 @@ def import_scans(doc, paths, label: str | None = None, crs: str | None = None, m
     chunk.transform[:3, 3] = origin
     pc = PointCloud(xyz - origin, rgb)
     path = chunk.data_dir / "point_cloud.ply"
+    chunk._before_product_write("point_cloud")
     pc.save(path)
     chunk._set_product("point_cloud", path)
     chunk.meta["scans"] = [{"name": s.name, "points": int(len(s)), "position": [float(v) for v in s.position]}
@@ -201,6 +202,7 @@ def colour_from_photos(target, photos, max_photos: int | None = None, progress: 
         sel = np.nonzero(who == k)[0]
         rgb[sel] = sample(cache.get(cams[k]), pix[sel])[:, ::-1]  # BGR -> RGB
     pc.rgb = rgb
+    target._before_product_write("point_cloud")
     target._set_product("point_cloud", pc.save(target.own_product_path("point_cloud")))
     n = int((who >= 0).sum())
     progress(1.0, f"Colours from {len(cams)} photos for {n:,} of {len(pts):,} points")

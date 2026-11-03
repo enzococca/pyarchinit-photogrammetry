@@ -1198,6 +1198,8 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
+    if product:
+        chunk._before_product_write("orthomosaic")
     replace_file(tmp, out_path)  # in one move, under a program reading the orthomosaic (RustGIS through the link)
     if not product:
         progress(1.0, f"Orthomosaic {w}x{h} px")
@@ -1207,7 +1209,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
                                  "blend_sigma": float(ctx.blend_sigma), "colour_correction": correction is not None,
                                  "ghosting": ctx.ghosting, "fill_holes": ctx.fill_holes,
                                  "hidden_classes": hidden_classes, "max_angle": float(max_angle),
-                                 "max_cameras": int(max_cameras)}
+                                 "max_cameras": int(max_cameras), "photos": len(cams)}
     if patches:
         chunk.meta["orthomosaic"]["patches"] = [dict(p) for p in patches]
         chunk.meta["orthomosaic"]["applied_patches"] = [dict(p) for p in patches]

@@ -1,6 +1,6 @@
 [package]
 name = "ppg_core"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Native kernels of pyarchinit-photogrammetry"
@@ -18,6 +18,8 @@ rayon = "1.10"
 wgpu = "24"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+# constrained Delaunay triangulation of the TIN (MIT OR Apache-2.0)
+spade = "=2.15.1"
 
 [build-dependencies]
 # RTKLIB (vendor/rtklib, C) for the post-processing of GNSS observations; build.rs needs

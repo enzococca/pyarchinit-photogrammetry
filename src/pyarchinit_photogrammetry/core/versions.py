@@ -9,17 +9,26 @@ versions), renamed or deleted; two DEMs can be subtracted.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 
-from ..io.files import replace_file
+from ..io.files import clone, replace_file
 
 PRODUCTS = {"point_cloud": "Nuvola densa", "model": "Modello", "dem": "DEM", "orthomosaic": "Ortofoto"}
 PARAMS = {"point_cloud": "dense", "model": "model", "dem": "dem", "orthomosaic": "orthomosaic"}  # chunk.meta keys
 FILES = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif", "orthomosaic": "orthomosaic.tif"}
+# written again by a script: kept as a copy for *Annulla lo script*, never listed among the versions
+COPIED = ("tie_points", "normal_map", "reconstruction", "tin")
+# files beside the file of a product of COPIED that go with it (kept, set aside and brought back together)
+SIDECARS = {"tin": ("tin.json",)}
+
+
+def _sidecars(product: str, path: Path) -> list[Path]:
+    return [path.parent / name for name in SIDECARS.get(product, ())]
 
 
 _translator = None  # the interface's: tr(text, *args); None in scripts and the command line (Italian)
@@ -54,6 +63,29 @@ def _move_file(src: Path, dst: Path) -> None:
         if exc.errno != errno.EXDEV:
             raise
         shutil.move(str(src), str(dst))
+
+
+def _clear(path: Path) -> None:
+    """Nothing at ``path``: a folder (the texture folder of version 0.5 and earlier), a file or a link removed."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _move_any(src: Path, dst: Path) -> None:
+    """A file or a folder moved to ``dst``, in the place of what is there."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        elif dst.exists():
+            dst.unlink()
+        shutil.move(str(src), str(dst))
+    else:
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        _move_file(src, dst)
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -153,15 +185,12 @@ def version_file(chunk, product: str, vid: str) -> Path:
     return chunk.data_dir / e["files"][product]
 
 
-def keep_active(chunk, product: str, move: bool = False) -> dict | None:
-    """Put the active version among the kept ones (copied, or moved with ``move`` when its
-    files are inside the chunk folder: a file of another program, like an orthomosaic
-    exported by Metashape, is always copied). Returns the new entry (None without product)."""
+def _put_aside(chunk, product: str, vid: str, move: bool) -> dict | None:
+    """The files of the active version in ``versions/<product>/<vid>/`` (moved or copied): its entry, not listed."""
     files = active_files(chunk, product)
     if not files:
         return None
     info = active_info(chunk, product)
-    vid = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     folder = chunk.data_dir / "versions" / product / vid
     folder.mkdir(parents=True)
     rel = {}
@@ -172,22 +201,43 @@ def keep_active(chunk, product: str, move: bool = False) -> dict | None:
                 shutil.move(str(src), str(dst))
             else:
                 _move_file(src, dst)
-        elif src.is_dir():
-            shutil.copytree(src, dst)
         else:
-            shutil.copy2(src, dst)
+            clone(src, dst)  # copy-on-write on APFS: instant, no space taken
         rel[role] = str(dst.relative_to(chunk.data_dir))
     if "textured" in rel:  # the OBJ inside the folder
         obj = chunk.product_path("model_textured")
         rel["model_textured"] = str((folder / files["textured"].name / obj.name).relative_to(chunk.data_dir))
-    entry = {"id": vid, "name": info["name"], "created": info["created"],
-             "params": dict(chunk.meta.get(PARAMS[product]) or {}), "files": rel}
+    return {"id": vid, "name": info["name"], "created": info["created"],
+            "params": dict(chunk.meta.get(PARAMS[product]) or {}), "files": rel}
+
+
+def _forget_active(chunk, product: str) -> None:
+    chunk.products.pop(product, None)
+    if product == "model":
+        chunk.products.pop("model_textured", None)
+
+
+def keep_active(chunk, product: str, move: bool = False) -> dict | None:
+    """Put the active version among the kept ones (copied, or moved with ``move`` when its
+    files are inside the chunk folder: a file of another program, like an orthomosaic
+    exported by Metashape, is always copied). Returns the new entry (None without product)."""
+    entry = _put_aside(chunk, product, datetime.now().strftime("%Y%m%d-%H%M%S-%f"), move)
+    if entry is None:
+        return None
     chunk.meta.setdefault("versions", {}).setdefault(product, []).append(entry)
     if move:
-        chunk.products.pop(product, None)
-        if product == "model":
-            chunk.products.pop("model_textured", None)
+        _forget_active(chunk, product)
+    kept = getattr(chunk, "_kept_during", None)
+    if getattr(chunk, "keep_versions", False) and kept is not None and product not in kept:
+        kept[product] = entry["id"]  # a script runs: this version holds the product as it was before it
     return entry
+
+
+def _unrecord(chunk, product: str, vid: str) -> None:
+    """A version recorded while a script runs (:func:`keep_during`) that is gone again: no longer recorded."""
+    kept = getattr(chunk, "_kept_during", None)
+    if kept and kept.get(product) == vid:
+        kept.pop(product)
 
 
 def restore(chunk, product: str, entry: dict) -> None:
@@ -195,9 +245,11 @@ def restore(chunk, product: str, entry: dict) -> None:
     _activate_files(chunk, product, entry)
     chunk.meta["versions"][product] = [e for e in versions(chunk, product) if e["id"] != entry["id"]]
     shutil.rmtree(chunk.data_dir / "versions" / product / entry["id"], ignore_errors=True)
+    _unrecord(chunk, product, entry["id"])
 
 
-def _activate_files(chunk, product: str, entry: dict) -> None:
+def _activate_files(chunk, product: str, entry: dict, copy: bool = False) -> None:
+    """The files of ``entry`` made the active ``product`` (moved; ``copy``: cloned, the version keeps them)."""
     for role, rel in entry["files"].items():
         src = chunk.data_dir / rel
         if role == product:
@@ -210,13 +262,15 @@ def _activate_files(chunk, product: str, entry: dict) -> None:
             dst = chunk.data_dir / Path(rel).name
         else:
             continue
-        if dst.is_dir():
-            shutil.rmtree(dst)
-        if src.is_dir():
-            if dst.exists():
-                dst.unlink()
+        if copy:
+            _clear(dst)
+            clone(src, dst)
+        elif src.is_dir():
+            _clear(dst)
             shutil.move(str(src), str(dst))
         else:
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
             _move_file(src, dst)  # over the file there, in one move
         if role == product:
             chunk._set_product(product, dst)
@@ -233,9 +287,13 @@ def activate(chunk, product: str, vid: str) -> dict | None:
     """Make a kept version the active one; the active one becomes a kept version (returned)."""
     entry = _entry(chunk, product, vid)
     previous = keep_active(chunk, product, move=True)
-    _activate_files(chunk, product, entry)
+    during = _script_runs(chunk)
+    _activate_files(chunk, product, entry, copy=during)
     chunk.meta["versions"][product] = [e for e in versions(chunk, product) if e["id"] != vid]
-    shutil.rmtree(chunk.data_dir / "versions" / product / vid, ignore_errors=True)
+    if during:  # its files stay for Annulla lo script; they go when the script's entry leaves the history
+        _keep_folder(chunk, product, vid)
+    else:
+        shutil.rmtree(chunk.data_dir / "versions" / product / vid, ignore_errors=True)
     return previous
 
 
@@ -253,7 +311,20 @@ def delete(chunk, product: str, vid: str) -> None:
     """Delete a kept version and its files."""
     _entry(chunk, product, vid)
     chunk.meta["versions"][product] = [e for e in versions(chunk, product) if e["id"] != vid]
+    if _script_runs(chunk) and getattr(chunk, "_kept_during", {}).get(product) != vid:
+        _keep_folder(chunk, product, vid)  # deleted by a script: the files stay for Annulla lo script
+        return
     shutil.rmtree(chunk.data_dir / "versions" / product / vid, ignore_errors=True)
+    _unrecord(chunk, product, vid)
+
+
+def _script_runs(chunk) -> bool:
+    return bool(getattr(chunk, "keep_versions", False))
+
+
+def _keep_folder(chunk, product: str, vid: str) -> None:
+    """A version taken out of the list by a script whose files stay until its entry leaves the history."""
+    chunk._kept_folders.append((product, vid))
 
 
 def dem_difference(chunk, vid: str, out: str | Path | None = None) -> Path:
@@ -284,5 +355,92 @@ def dem_difference(chunk, vid: str, out: str | Path | None = None) -> Path:
     return out
 
 
-__all__ = ["PRODUCTS", "active_files", "active_info", "set_active_name", "versions", "version_file", "keep_active",
+# ---------------------------------------------------------------- while a script runs
+@contextlib.contextmanager
+def keep_during(chunk):
+    """While inside, every product of ``chunk`` written again is kept first (:func:`before_write`, called by the
+    builders through ``Chunk._before_product_write``): the dense cloud, the model with its texture, the DEM and
+    the orthomosaic as versions (listed, as *Conservala per confrontarla* keeps them), the tie points and the
+    normal map as copies beside them (not listed). Once per product. Yields the record ``{product: id}`` (None:
+    there was no product to keep)."""
+    chunk.keep_versions = True
+    chunk._kept_during = {}
+    chunk._kept_folders = []
+    try:
+        yield chunk._kept_during
+    finally:
+        chunk.keep_versions = False
+
+
+def before_write(chunk, name: str) -> None:
+    """The product ``name`` is about to be written again while :func:`keep_during` is on: keep it, once."""
+    product = "model" if name == "model_textured" else name
+    kept = chunk._kept_during
+    if product in kept or (product not in PRODUCTS and product not in COPIED):
+        return
+    if product in PRODUCTS:
+        entry = keep_active(chunk, product, move=False)
+        kept[product] = None if entry is None else entry["id"]
+        return
+    path = chunk.product_path(product)
+    if path is None or not path.exists():
+        kept[product] = None
+        return
+    vid = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    clone(path, chunk.data_dir / "versions" / product / vid / path.name)
+    for side in _sidecars(product, path):
+        if side.exists():
+            clone(side, chunk.data_dir / "versions" / product / vid / side.name)
+    kept[product] = vid
+
+
+def set_aside(chunk, product: str, vid: str, origin: str | None = None) -> dict | None:
+    """The active ``product`` moved into ``versions/<product>/<vid>/`` and out of the project, NOT listed among the
+    versions (the window's *Annulla lo script* swaps products with it); the entry to :func:`bring_back` it.
+    A product of :data:`COPIED`: its file, ``origin`` its place relative to the chunk folder (None: where it is)."""
+    if product in PRODUCTS:
+        entry = _put_aside(chunk, product, vid, move=True)
+        if entry is not None:
+            _forget_active(chunk, product)
+        return entry
+    rel = origin or chunk.products.get(product)
+    src = chunk.data_dir / rel if rel else None
+    if src is None or not src.exists():
+        return None
+    dst = chunk.data_dir / "versions" / product / vid / src.name
+    dst.parent.mkdir(parents=True)
+    _move_any(src, dst)
+    for side in _sidecars(product, src):
+        if side.exists():
+            _move_any(side, dst.parent / side.name)
+    chunk.products.pop(product, None)
+    return {"id": vid, "files": {product: str(dst.relative_to(chunk.data_dir))}, "origin": rel}
+
+
+def bring_back(chunk, product: str, entry: dict) -> None:
+    """The files of ``entry`` (:func:`set_aside`, or a kept version) made the active ``product``; the version's
+    folder goes. Its entry in ``meta["versions"]``, if any, is left to the caller."""
+    if product in PRODUCTS:
+        _activate_files(chunk, product, entry)
+    else:
+        src = chunk.data_dir / entry["files"][product]
+        dst = chunk.data_dir / entry["origin"]
+        _move_any(src, dst)
+        for side in _sidecars(product, src):
+            if side.exists():
+                _move_any(side, dst.parent / side.name)
+        chunk._set_product(product, dst)
+    shutil.rmtree(chunk.data_dir / "versions" / product / entry["id"], ignore_errors=True)
+
+
+def copied_entry(chunk, product: str, vid: str, origin: str) -> dict:
+    """The entry of the copy :func:`before_write` made of a product of :data:`COPIED`, ``origin`` its place."""
+    folder = chunk.data_dir / "versions" / product / vid
+    sides = {Path(n).name for n in SIDECARS.get(product, ())}
+    names = sorted(p.name for p in folder.iterdir() if p.name not in sides) if folder.exists() else []
+    name = Path(origin).name if origin and Path(origin).name in names else next(iter(names), Path(origin).name)
+    return {"id": vid, "files": {product: str((folder / name).relative_to(chunk.data_dir))}, "origin": origin}
+
+
+__all__ = ["PRODUCTS", "COPIED", "keep_during", "before_write", "set_aside", "bring_back", "copied_entry", "active_files", "active_info", "set_active_name", "versions", "version_file", "keep_active",
            "restore", "activate", "rename", "delete", "dem_difference"]

@@ -7,7 +7,7 @@ start they are in three groups:
 | --- | --- |
 | left | [Workspace](#workspace), [Reference](#reference), [Layer](#layer) - always there |
 | right | [PyArchInit](#pyarchinit), [US proxies](#us-proxies), [Multispectral and Thermal](multispectral.md), the panes of the plugins |
-| bottom | [Photos](#photos), [Sections](#sections), [Python console](#python-console), [Log](#log) |
+| bottom | [Photos](#photos), [Sections](#sections), [Python console](#python-console), [Assistant](#assistant), [Log](#log) |
 
 The tabs of a group are on top, each with the icon of its pane; the title bar under them names the pane in
 front.
@@ -69,7 +69,7 @@ buttons that do not fit):
 
 | On... | Commands |
 | --- | --- |
-| a chunk | *Make active*, *Rename...*, *Enable* or *Disable*, *Remove chunk* |
+| a chunk | *Make active*, *Rename...*, *Duplicate chunk...* (all its photos, those selected in the Photos pane or those framing the polygon selected on the orthophoto: a new chunk with their poses, where depth maps and the rest are built again without aligning), *Enable* or *Disable*, *Remove chunk* |
 | the dense cloud, the model, the DEM, the orthophoto | *Show*, *Keep a copy as a version*, *Rename this version...*, *Remove* |
 | a kept version | *Show*, *Make active*, *Difference with the active DEM*, *Export...*, *Rename...*, *Remove* |
 | a photo | *Open*, *Enable* or *Disable*, *Remove the photo* |
@@ -189,7 +189,7 @@ or of an area - with *Show all* and *Previous* / *Next*. The filters come from:
 
 The right click on the thumbnails also measures the **image quality** (the sharpness of every photo compared
 with the sharpest ones; *blurred* under 0.5), disables the blurred photos, enables or disables the selected
-ones, sets their masks and their lens model (see [Photos and markers](photos-markers.md)).
+ones (a disabled photo keeps its pose, its thumbnail is greyed with a grey badge, and the next steps leave it out), sets their masks and their lens model (see [Photos and markers](photos-markers.md)).
 
 ## Sections
 
@@ -212,7 +212,16 @@ How to draw them is in [Drawing and measures](drawing.md#sections).
 ![The Python console](../img/gui/pane-console.png)
 
 A Python console with the project at hand: `doc` (the project), `chunk` (the active chunk), `app`, `ppg` (the
-library), `np` and `window`. What it changes shows in the window. ++ctrl+shift+p++ brings it to the front.
+library), `np` and `window`. What it changes shows in the window. A pasted block of several lines runs at once. ++ctrl+shift+p++ brings it to the front.
+
+## Assistant
+
+![The Assistant pane](../img/gui/pane-assistant.png)
+
+On the left a conversation with a language model about the project and the program - a model on this
+computer, Claude or OpenAI - with the dot that says whether anything leaves the computer and *What is sent*;
+on the right a script editor: *Run* runs the script on the project in the background and *Undo the script*
+takes it all back in one step. Everything is in [The assistant](assistant.md).
 
 ## Log
 

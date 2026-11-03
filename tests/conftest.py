@@ -195,6 +195,40 @@ def _qt_garbage_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _none_refcount(request):
+    """Before Python 3.12 ``None`` is an ordinary object: a C extension that releases a reference
+    to it it never took drains its count until the interpreter aborts with ``none_dealloc``
+    (the CI did so on 3.11, in whatever test the count ran out). The drop of each test is kept and
+    the tests that drain the most are printed at the end, so the extension can be found."""
+    import gc
+    import sys
+
+    if sys.version_info >= (3, 12):  # None is immortal: nothing to measure
+        yield
+        return
+    gc.collect()  # the count of the live objects only: garbage of earlier tests freed by a collection
+    before = sys.getrefcount(None)  # during this test would read as a drop
+    yield
+    gc.collect()
+    drop = before - sys.getrefcount(None)
+    if drop > 0:
+        _NONE_DROPS.append((drop, request.node.nodeid))
+    if drop > 50:  # said at once, past pytest's capture: the run may abort before its summary
+        print(f"[none refcount] -{drop} after {request.node.nodeid}", file=sys.__stderr__, flush=True)
+
+
+_NONE_DROPS: list[tuple[int, str]] = []
+
+
+def pytest_terminal_summary(terminalreporter):
+    if _NONE_DROPS:
+        worst = sorted(_NONE_DROPS, reverse=True)[:15]
+        terminalreporter.write_sep("-", "tests after which the reference count of None is lower")
+        for drop, nodeid in worst:
+            terminalreporter.write_line(f"{drop:8d}  {nodeid}")
+
+
+@pytest.fixture(autouse=True)
 def _geotiffs_may_pass_4_gb(monkeypatch):
     """Every GeoTIFF the program writes asks for BIGTIFF: a classic TIFF stops at 4 GB, and with
     compression GDAL's default (IF_NEEDED) never switches to BigTIFF, so writing goes on past the

@@ -51,6 +51,46 @@ def check_ppk(frozen: bool | None = None) -> tuple[str, bool]:
     return (f"missing (the native core {version} has no RTKLIB)" if version else "missing (no native core)"), not frozen
 
 
+def check_assistant(frozen: bool | None = None) -> tuple[str, bool]:
+    """What ``--check`` says of the assistant, and whether that is right: the Claude SDK (``anthropic``) and
+    ``keyring`` imported - the packaged application (``frozen``, default ``sys.frozen``) must carry them, an
+    installation from the sources may lack the extra ``assistant`` -, the backend of the keyring named (a computer
+    without one is no failure: the keys then come from the environment) and the guide the assistant searches loaded
+    (always required: it is packaged with the program)."""
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    parts, ok = [], True
+    try:
+        import anthropic
+
+        parts.append(f"anthropic {getattr(anthropic, '__version__', '?')}")
+    except Exception as exc:  # noqa: BLE001
+        parts.append(f"anthropic missing ({str(exc).splitlines()[0][:80]})")
+        ok = ok and not frozen
+    try:
+        import keyring
+
+        try:
+            backend = type(keyring.get_keyring()).__module__.rsplit(".", 1)[-1] + "." + \
+                type(keyring.get_keyring()).__name__
+        except Exception as exc:  # noqa: BLE001 - no backend: keys from the environment
+            backend = f"no backend ({str(exc).splitlines()[0][:80]})"
+        parts.append(f"keyring {backend}")
+    except Exception as exc:  # noqa: BLE001
+        parts.append(f"keyring missing ({str(exc).splitlines()[0][:80]})")
+        ok = ok and not frozen
+    try:
+        from ..assistant.knowledge import default_index
+
+        n = len(default_index("it").passages)
+        if not n:
+            raise RuntimeError("no passages")
+        parts.append(f"guide {n} passages")
+    except Exception as exc:  # noqa: BLE001
+        parts.append(f"guide missing ({str(exc).splitlines()[0][:80]})")
+        ok = False
+    return ", ".join(parts), ok
+
+
 def check_crinex(frozen: bool | None = None) -> tuple[str, bool]:
     """What ``--check`` says of the Hatanaka decoder, and whether that is right: the packaged application (``frozen``,
     default ``sys.frozen``) must carry it inside its native core (0.6, API 9) - every archive of the permanent stations
@@ -275,14 +315,15 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
+            assistant, assistant_ok = check_assistant()  # the packaged app without its SDK, keyring or guide fails
             from .. import _native
 
             ppk, ppk_ok = check_ppk()  # the packaged application without RTKLIB in its core fails
             crinex, crinex_ok = check_crinex()  # ... and without the decoder of the stations' files
-            ok = ok and ppk_ok and crinex_ok
+            ok = ok and ppk_ok and crinex_ok and assistant_ok
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | native: {_native.version() or 'missing'} | "
-                  f"ppk: {ppk} | crinex: {crinex} | log: {log_path}", flush=True)
+                  f"ppk: {ppk} | crinex: {crinex} | assistant: {assistant} | log: {log_path}", flush=True)
             if _frozen_posix():  # see --doctor
                 _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)

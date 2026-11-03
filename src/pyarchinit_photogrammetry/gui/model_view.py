@@ -6,8 +6,8 @@ import os
 import sys
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QLineF, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
                                QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
                                QWidget)
@@ -15,9 +15,37 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
 from .flow_layout import FlowLayout
 from .i18n import decimal_comma, thousands_points, tr
 from .scene import OrbitCamera, SceneData, available_views, build_scene, exaggerated, sample_mesh_colors, splat
+from .trackball import MODES as TRACKBALL_MODES
+from .trackball import OUTLINE_COLOUR, RING_COLOURS, SETTING as TRACKBALL_SETTING, Trackball
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
-               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US"}
+               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US",
+               "tin": "TIN"}
+
+
+def ring_runs(xy, ok, front, half: bool) -> list:
+    """The runs of consecutive segments of a closed ring (``xy`` (n, 2)) whose both ends are ``ok`` and whose first
+    end is on the ``front`` side ``half``, as lists of points: each run one polyline (one painter call)."""
+    n = len(xy)
+    use = [bool(ok[i] and ok[(i + 1) % n] and bool(front[i]) == half) for i in range(n)]
+    if not any(use):
+        return []
+    if all(use):
+        return [[xy[i] for i in range(n)] + [xy[0]]]
+    start = next(i for i in range(n) if not use[i])  # begin after a gap, so no run is split at the seam
+    runs, cur = [], []
+    for k in range(1, n + 1):
+        i = (start + k) % n
+        if use[i]:
+            if not cur:
+                cur = [xy[i]]
+            cur.append(xy[(i + 1) % n])
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return runs
 
 
 def exaggeration_text(factor: float) -> str:
@@ -25,13 +53,94 @@ def exaggeration_text(factor: float) -> str:
     return tr("Esagerazione verticale x{0}", decimal_comma(f"{factor:g}"))
 
 
-class SoftwareCanvas(QWidget):
-    """Orbit view rendered with numpy (left drag: orbit, right/middle drag: pan, wheel: zoom)."""
+KEY_NAMES = {Qt.Key.Key_Left: "left", Qt.Key.Key_Right: "right", Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down",
+             Qt.Key.Key_Plus: "plus", Qt.Key.Key_Equal: "plus", Qt.Key.Key_Minus: "minus",
+             Qt.Key.Key_F: "front", Qt.Key.Key_L: "left_side", Qt.Key.Key_Home: "home", Qt.Key.Key_T: "top"}
+
+
+def _icon(name: str) -> QIcon:
+    from .icons import icon
+
+    return icon(name)
+
+
+class _TrackballCanvas:
+    """What both canvases share: the trackball, its fading, the keys of the view."""
+
+    def _init_trackball(self) -> None:
+        self.trackball = Trackball(self)
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(50)
+        self._fade_timer.timeout.connect(self._fade_tick)
+
+    def view_size(self) -> tuple[int, int]:
+        return max(self.width(), 1), max(self.height(), 1)
+
+    def scene_up(self) -> np.ndarray:
+        return np.asarray(self.sd.up, np.float64)
+
+    def set_trackball_mode(self, mode: str) -> None:
+        self.trackball.mode = mode if mode in TRACKBALL_MODES else "auto"
+        self.redraw()
+
+    def set_pivot(self, point, recentre: bool = False) -> None:
+        """The centre of rotation (coordinates shown); the view stays where it is unless ``recentre``."""
+        self.trackball.set_pivot(point, recentre)
+
+    def pivot(self) -> np.ndarray:
+        return self.trackball._pivot(self.get_cam()).copy()
+
+    def centre_on_pivot(self) -> None:
+        self.trackball.centre_on_pivot()
+
+    def _mouse_seen(self, x=None, y=None) -> None:
+        self.trackball.touched(x, y)
+        if self.trackball.mode == "auto" and not self._fade_timer.isActive():
+            self._fade_timer.start()
+        self._redraw_if_changed()
+
+    def _mouse_gone(self) -> None:
+        self.trackball.left()
+        self._redraw_if_changed()
+
+    def _fade_tick(self) -> None:
+        if not self.trackball.fading():
+            self._fade_timer.stop()
+        self._redraw_if_changed()
+
+    def _redraw_if_changed(self) -> None:
+        """Draw again only when the trackball looks different: a VTK scene of millions of points is
+        not drawn again at every movement of the mouse."""
+        if self._trackball_state() != getattr(self, "_tb_drawn", None):
+            self.redraw()
+
+    def _trackball_state(self) -> tuple:
+        return round(self.trackball.opacity(), 2), self.trackball.hover
+
+    def view_key(self, key, shift: bool = False) -> bool:
+        """A key pressed on the view (``Qt.Key``): True when the view used it."""
+        name = KEY_NAMES.get(key)
+        if name == "home":
+            self.reset_view()
+        elif name == "top":
+            self.top_view()
+        elif name is None or not self.trackball.key(name, shift):
+            return False
+        self._mouse_seen()
+        return True
+
+
+class SoftwareCanvas(_TrackballCanvas, QWidget):
+    """Orbit view rendered with numpy, with the trackball (left drag: rotate, right/middle drag: pan,
+    wheel: zoom toward the cursor, Shift+wheel: dolly, double click: centre of rotation)."""
+
+    pivot_requested = Signal(float, float)  # a double click: the centre of rotation at this pixel
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(200, 150)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.sd = SceneData(np.zeros(3))
         self.cam = OrbitCamera(np.zeros(3), 5.0)
         self.pts = self.cols = None
@@ -47,6 +156,21 @@ class SoftwareCanvas(QWidget):
         self._full_timer = QTimer(self)
         self._full_timer.setSingleShot(True)
         self._full_timer.timeout.connect(self._render_full)
+        self._init_trackball()
+
+    # ----------------------------------------------------------- trackball
+    def get_cam(self) -> OrbitCamera:
+        return self.cam
+
+    def set_cam(self, cam: OrbitCamera) -> None:
+        self.cam = cam
+        self._dragging = True  # the light preview while it moves, the whole scene a moment after
+        self._dirty = True
+        self.update()
+        self._full_timer.start(150 if self.trackball.dragging else 200)
+
+    def redraw(self) -> None:
+        self.update()
 
     # ----------------------------------------------------------- data
     def set_scene(self, sd: SceneData, reset: bool = True) -> None:
@@ -74,12 +198,15 @@ class SoftwareCanvas(QWidget):
 
     def reset_view(self) -> None:
         self.cam = OrbitCamera(self.sd.center.astype(float), self.sd.extent * 1.1, up=self.sd.up)
+        self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
 
     def top_view(self) -> None:
         self.cam.pitch = 89.5
         self.cam.yaw = -90.0
+        self.cam.target = self.sd.center.astype(float)
+        self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
 
@@ -108,17 +235,18 @@ class SoftwareCanvas(QWidget):
         p.drawImage(0, 0, self._image)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        # few painter calls per frame: lines gathered and drawn with one drawLines (see image_views.polyline_path)
         if self.show_cameras and self.sd.cameras:
             p.setPen(QPen(QColor(90, 170, 255), 1))
+            lines = []
             for fr in self.sd.cameras:
                 x, y, _, ok = self.cam.project(fr, w, h)
                 if not ok.all():
                     continue
                 q = [QPointF(float(a), float(b)) for a, b in zip(x, y)]
-                for i in range(1, 5):
-                    p.drawLine(q[0], q[i])
-                for i in range(1, 5):
-                    p.drawLine(q[i], q[1 + i % 4])
+                lines += [QLineF(q[0], q[i]) for i in range(1, 5)] + [QLineF(q[i], q[1 + i % 4]) for i in range(1, 5)]
+            if lines:
+                p.drawLines(lines)
         if self.show_markers and self.sd.markers:
             p.setFont(QFont(self.font().family(), 9))
             for label, xyz, check in self.sd.markers:
@@ -128,9 +256,7 @@ class SoftwareCanvas(QWidget):
                 col = QColor(255, 160, 40) if check else QColor(80, 220, 90)
                 p.setPen(QPen(col, 2))
                 pt = QPointF(float(x[0]), float(y[0]))
-                p.drawLine(pt, pt + QPointF(0, -16))
-                p.drawLine(pt + QPointF(0, -16), pt + QPointF(9, -12))
-                p.drawLine(pt + QPointF(9, -12), pt + QPointF(0, -8))
+                p.drawPolyline(QPolygonF([pt, pt + QPointF(0, -16), pt + QPointF(9, -12), pt + QPointF(0, -8)]))
                 p.drawText(pt + QPointF(11, -10), label)
             for text, a, b, check in self.sd.scalebars:  # scale bars between their markers
                 x, y, _, ok = self.cam.project(np.array([a, b]), w, h)
@@ -150,46 +276,89 @@ class SoftwareCanvas(QWidget):
             p.setPen(pen)
             from ..engine.region import Region
 
-            for a, b in Region.EDGES:
-                if ok[a] and ok[b]:
-                    p.drawLine(QPointF(float(x[a]), float(y[a])), QPointF(float(x[b]), float(y[b])))
+            edges = [QLineF(float(x[a]), float(y[a]), float(x[b]), float(y[b])) for a, b in Region.EDGES
+                     if ok[a] and ok[b]]
+            if edges:
+                p.drawLines(edges)
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         if self.sd.exaggeration != 1.0:
             p.drawText(8, h - 26, exaggeration_text(self.sd.exaggeration))
+        self._paint_trackball(p)
         p.end()
+
+    def _paint_trackball(self, p: QPainter) -> None:
+        self._tb_drawn = self._trackball_state()
+        op = self.trackball.opacity()
+        if op <= 0 or (self.pts is None and not self.sd.cameras):
+            return
+        geo = self.trackball.geometry(self.cam)
+        cx, cy = geo["centre"]
+        r = geo["radius"]
+
+        def pen(rgb, alpha, width=1.5):
+            return QPen(QColor(*rgb, int(alpha * op)), width)
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(pen(OUTLINE_COLOUR, 150))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        for name, (_a, _pts, xy, ok, front) in geo["rings"].items():
+            width = 2.6 if name == self.trackball.hover else 1.5
+            for half, alpha in ((True, 220), (False, 90)):  # the front of the ring, then the back: one call each run
+                p.setPen(pen(RING_COLOURS[name], alpha, width))
+                for run in ring_runs(xy, ok, front, half):
+                    p.drawPolyline(QPolygonF([QPointF(float(a), float(b)) for a, b in run]))
+        p.setPen(pen((255, 255, 255), 230))
+        p.drawLine(QPointF(cx - 6, cy), QPointF(cx + 6, cy))
+        p.drawLine(QPointF(cx, cy - 6), QPointF(cx, cy + 6))
 
     # ----------------------------------------------------------- interaction
     def mousePressEvent(self, ev) -> None:
-        self._last = ev.position()
+        pos = ev.position()
+        self._last = pos
+        rotate = ev.button() == Qt.MouseButton.LeftButton and not (
+            ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.trackball.press(pos.x(), pos.y(), "rotate" if rotate else "pan")
         self._dragging = True
 
     def mouseMoveEvent(self, ev) -> None:
+        pos = ev.position()
         if self._last is None or not ev.buttons():
+            self._mouse_seen(pos.x(), pos.y())
             return
-        d = ev.position() - self._last
-        self._last = ev.position()
-        if ev.buttons() & Qt.MouseButton.LeftButton and not (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.cam.yaw -= d.x() * 0.4
-            self.cam.pitch = float(np.clip(self.cam.pitch + d.y() * 0.4, -89.5, 89.5))
-        else:
-            R = self.cam.basis()
-            k = self.cam.distance * 2 * np.tan(np.radians(self.cam.fov) / 2) / max(self.height(), 1)
-            self.cam.target = self.cam.target - R[0] * d.x() * k - R[1] * d.y() * k
-        self._dirty = True
-        self.update()
+        self._last = pos
+        self.trackball.move(pos.x(), pos.y())
 
     def mouseReleaseEvent(self, _ev) -> None:
         self._last = None
+        self.trackball.release()
         self._full_timer.start(120)
 
+    def mouseDoubleClickEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.trackball.release()
+            self._last = None
+            self.pivot_requested.emit(ev.position().x(), ev.position().y())
+
     def wheelEvent(self, ev) -> None:
-        steps = ev.angleDelta().y() / 120.0
-        self.cam.distance *= 0.88 ** steps
-        self._dragging = True
-        self._dirty = True
-        self.update()
-        self._full_timer.start(200)
+        delta = ev.angleDelta()
+        steps = (delta.y() or delta.x()) / 120.0  # Shift turns the wheel sideways on macOS
+        pos = ev.position()
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.trackball.zoom(steps, pos.x(), pos.y(), dolly=shift)
+        self._mouse_seen()
+
+    def keyPressEvent(self, ev) -> None:
+        if not self.view_key(ev.key(), bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+            super().keyPressEvent(ev)
+
+    def enterEvent(self, ev) -> None:
+        self._mouse_seen()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._mouse_gone()
+        super().leaveEvent(ev)
 
     def snapshot(self):
         """The current frame and the projection of scene points to widget pixels at this moment:
@@ -198,7 +367,15 @@ class SoftwareCanvas(QWidget):
 
         cam = copy.deepcopy(self.cam)
         w, h = max(self.width(), 1), max(self.height(), 1)
-        return self.grab().toImage(), lambda pts: cam.project(pts, w, h)
+        return self._grab(), lambda pts: cam.project(pts, w, h)
+
+    def _grab(self) -> QImage:
+        """The frame without the trackball."""
+        self.trackball.hidden = True
+        try:
+            return self.grab().toImage()
+        finally:
+            self.trackball.hidden = False
 
     def view_ray(self, x: float, y: float):
         """Line of sight through widget pixel (x, y): origin and unit direction in scene
@@ -209,14 +386,93 @@ class SoftwareCanvas(QWidget):
         return self.cam.eye.copy(), d / np.linalg.norm(d), (lambda dist: dist / f)
 
     def grab_array(self) -> np.ndarray:
-        img = self.grab().toImage().convertToFormat(QImage.Format.Format_RGB888)
+        img = self._grab().convertToFormat(QImage.Format.Format_RGB888)
         ptr = img.constBits()
         arr = np.frombuffer(ptr, np.uint8, img.sizeInBytes()).reshape(img.height(), img.bytesPerLine())
         return arr[:, : img.width() * 3].reshape(img.height(), img.width(), 3).copy()
 
 
-class VtkCanvas(QWidget):
-    """pyvista/pyvistaqt view (hardware OpenGL)."""
+def _trackball_style(canvas):
+    """A VTK interactor style that hands the mouse and the keys to the canvas's trackball (the
+    default handlers of the trackball camera style are replaced by these observers)."""
+    from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
+
+    class TrackballStyle(vtkInteractorStyleTrackballCamera):
+        def __init__(self):
+            super().__init__()
+            for event, slot in (("LeftButtonPressEvent", self._left), ("RightButtonPressEvent", self._pan),
+                                ("MiddleButtonPressEvent", self._pan), ("LeftButtonReleaseEvent", self._up),
+                                ("RightButtonReleaseEvent", self._up), ("MiddleButtonReleaseEvent", self._up),
+                                ("MouseMoveEvent", self._move), ("MouseWheelForwardEvent", self._wheel),
+                                ("MouseWheelBackwardEvent", self._wheel), ("KeyPressEvent", self._key),
+                                ("CharEvent", self._nothing), ("EnterEvent", self._enter),
+                                ("LeaveEvent", self._leave)):
+                self.AddObserver(event, slot)
+
+        def _xy(self):
+            iren = self.GetInteractor()
+            x, y = iren.GetEventPosition()
+            w, h = canvas.view_size()
+            size = iren.GetRenderWindow().GetSize()
+            ratio = (size[1] / h) if size[1] else 1.0
+            return x / ratio, h - y / ratio
+
+        def _left(self, _obj, _ev):
+            x, y = self._xy()
+            iren = self.GetInteractor()
+            if iren.GetRepeatCount():  # a double click
+                canvas.trackball.release()
+                canvas.pivot_requested.emit(x, y)
+                return
+            canvas.trackball.press(x, y, "pan" if iren.GetShiftKey() else "rotate")
+
+        def _pan(self, _obj, _ev):
+            canvas.trackball.press(*self._xy(), "pan")
+
+        def _up(self, _obj, _ev):
+            canvas.trackball.release()
+            canvas.redraw()
+
+        def _move(self, _obj, _ev):
+            x, y = self._xy()
+            if not canvas.trackball.move(x, y):
+                canvas._mouse_seen(x, y)
+
+        def _wheel(self, _obj, ev):
+            x, y = self._xy()
+            steps = 1.0 if ev == "MouseWheelForwardEvent" else -1.0
+            canvas.trackball.zoom(steps, x, y, dolly=bool(self.GetInteractor().GetShiftKey()))
+            canvas._mouse_seen()
+
+        def _key(self, _obj, _ev):
+            iren = self.GetInteractor()
+            key = {"Left": Qt.Key.Key_Left, "Right": Qt.Key.Key_Right, "Up": Qt.Key.Key_Up, "Down": Qt.Key.Key_Down,
+                   "plus": Qt.Key.Key_Plus, "equal": Qt.Key.Key_Equal, "minus": Qt.Key.Key_Minus,
+                   "KP_Add": Qt.Key.Key_Plus, "KP_Subtract": Qt.Key.Key_Minus, "Home": Qt.Key.Key_Home,
+                   "f": Qt.Key.Key_F, "l": Qt.Key.Key_L, "t": Qt.Key.Key_T}.get((iren.GetKeySym() or "").lower()
+                                                                              if len(iren.GetKeySym() or "") == 1
+                                                                              else iren.GetKeySym())
+            if key is not None:
+                canvas.view_key(key, bool(iren.GetShiftKey()))
+
+        def _nothing(self, _obj, _ev):  # no VTK single-letter commands (wireframe, stereo, quit...)
+            pass
+
+        def _enter(self, _obj, _ev):
+            canvas._mouse_seen()
+
+        def _leave(self, _obj, _ev):
+            canvas._mouse_gone()
+
+    return TrackballStyle()
+
+
+class VtkCanvas(_TrackballCanvas, QWidget):
+    """pyvista/pyvistaqt view (hardware OpenGL) with the trackball: its rings are line actors kept at
+    a constant size on the screen before every render."""
+
+    pivot_requested = Signal(float, float)
+    TB_ALPHA = {"back": 90, "outline": 150, "cross": 230}  # of 255, as the software canvas draws them
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -233,6 +489,123 @@ class VtkCanvas(QWidget):
         self.show_region = True
         self.point_size = 2.0  # screen pixels of a point
         self._cloud_actor = None
+        self._init_trackball()
+        self._tb_actors = self._make_trackball_actors()
+        from vtkmodules.vtkRenderingCore import vtkRenderer
+
+        self._tb_renderer = vtkRenderer()  # a layer above the scene: the rings are never hidden by it
+        self._tb_renderer.SetLayer(1)
+        self._tb_renderer.SetInteractive(False)
+        self._tb_renderer.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
+        rw = self.plotter.ren_win
+        rw.SetNumberOfLayers(max(rw.GetNumberOfLayers(), 2))
+        rw.AddRenderer(self._tb_renderer)
+        for actor, _poly in self._tb_actors.values():
+            self._tb_renderer.AddActor(actor)
+        self._style = _trackball_style(self)
+        self.plotter.iren.interactor.SetInteractorStyle(self._style)
+        # pyvista's own keys (Up/Down zoom, +/- point size, q closes, v, b, C...) would act beside the trackball's
+        self.plotter.iren.clear_key_event_callbacks()
+        # Shift+wheel: macOS turns the wheel sideways and QVTKRenderWindowInteractor reads only the vertical delta
+        self.plotter.interactor.installEventFilter(self)
+        self.plotter.renderer.AddObserver("StartEvent", lambda *_a: self._update_trackball_actors())
+
+    def eventFilter(self, obj, ev) -> bool:
+        from PySide6.QtCore import QEvent
+
+        if (obj is self.plotter.interactor and ev.type() == QEvent.Type.Wheel
+                and ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            delta = ev.angleDelta()
+            steps = (delta.y() or delta.x()) / 120.0
+            if steps:
+                pos = ev.position()
+                self.trackball.zoom(steps, pos.x(), pos.y(), dolly=True)
+                self._mouse_seen()
+            return True
+        return super().eventFilter(obj, ev)
+
+    # ----------------------------------------------------------- trackball
+    def get_cam(self) -> OrbitCamera:
+        c = self.plotter.renderer.GetActiveCamera()
+        pos, focal = np.array(c.GetPosition()), np.array(c.GetFocalPoint())
+        d = float(np.linalg.norm(focal - pos)) or 1.0
+        cam = OrbitCamera(focal, d, fov=c.GetViewAngle(), up=self.sd.up)
+        cam.R = OrbitCamera.looking((focal - pos) / d, np.array(c.GetViewUp()))
+        return cam
+
+    def set_cam(self, cam: OrbitCamera) -> None:
+        c = self.plotter.renderer.GetActiveCamera()
+        c.SetPosition(*cam.eye)
+        c.SetFocalPoint(*cam.target)
+        c.SetViewUp(*(-cam.basis()[1]))
+        self.plotter.renderer.ResetCameraClippingRange()
+        self.plotter.render()
+
+    def redraw(self) -> None:
+        self.plotter.render()
+
+    def _make_trackball_actors(self) -> dict:
+        from vtkmodules.vtkCommonCore import vtkPoints
+        from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
+        from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+
+        actors = {}
+        colours = {**RING_COLOURS, **{f"{k}_back": v for k, v in RING_COLOURS.items()}, "outline": OUTLINE_COLOUR,
+                   "cross": (255, 255, 255)}
+        for name, rgb in colours.items():
+            poly = vtkPolyData()
+            poly.SetPoints(vtkPoints())
+            poly.SetLines(vtkCellArray())
+            mapper = vtkPolyDataMapper()
+            mapper.SetInputData(poly)
+            actor = vtkActor()
+            actor.SetMapper(mapper)
+            prop = actor.GetProperty()
+            prop.SetColor(*[v / 255 for v in rgb])
+            prop.SetLighting(False)
+            prop.SetLineWidth(1.5)
+            actor.SetUseBounds(False)  # never part of the scene's extent (reset_camera)
+            actor.SetPickable(False)
+            actor.VisibilityOff()
+            actors[name] = (actor, poly)
+        return actors
+
+    def _update_trackball_actors(self) -> None:
+        from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+
+        self._tb_renderer.SetActiveCamera(self.plotter.renderer.GetActiveCamera())  # a camera set anew
+        self._tb_drawn = self._trackball_state()
+        op = self.trackball.opacity()
+        show = op > 0 and (self.sd.points is not None or self.sd.mesh_vertices is not None or bool(self.sd.cameras))
+        for name, (actor, _poly) in self._tb_actors.items():
+            actor.SetVisibility(show)
+            actor.GetProperty().SetOpacity(op * self.TB_ALPHA.get(name.split("_")[-1], 220) / 255)
+        if not show:
+            return
+        cam = self.get_cam()
+        geo = self.trackball.geometry(cam)
+        R, p, rw = cam.basis(), self.trackball.pivot, geo["world_radius"]
+        t = np.linspace(0, 2 * np.pi, 96, endpoint=False)
+        n = len(t)
+        seg = np.arange(n)
+        shapes = {}  # actor -> (points, first vertex of each segment)
+        for name, (_a, flat, _xy, _ok, front) in geo["rings"].items():
+            shapes[name] = (flat, seg[front])  # the half on the viewer's side, then the dimmer one behind
+            shapes[f"{name}_back"] = (flat, seg[~front])
+        shapes["outline"] = (p + rw * (np.outer(np.cos(t), R[0]) + np.outer(np.sin(t), R[1])), seg)
+        k = rw / geo["radius"] * 6  # six pixels
+        cross = np.array([p - R[0] * k, p + R[0] * k, p - R[1] * k, p + R[1] * k])
+        for name, (actor, poly) in self._tb_actors.items():
+            if name == "cross":
+                pts, cells = cross, np.array([2, 0, 1, 2, 2, 3])
+            else:
+                pts, first = shapes[name]
+                cells = np.column_stack([np.full(len(first), 2), first, (first + 1) % len(pts)]).ravel()
+            poly.GetPoints().SetData(numpy_to_vtk(np.ascontiguousarray(pts, np.float64), deep=True))
+            lines = poly.GetLines()
+            lines.SetCells(len(cells) // 3, numpy_to_vtkIdTypeArray(cells.astype(np.int64), deep=True))
+            poly.Modified()
+            actor.GetProperty().SetLineWidth(2.6 if name.split("_")[0] == self.trackball.hover else 1.5)
 
     def set_point_size(self, px: float) -> None:
         self.point_size = float(px)
@@ -308,16 +681,22 @@ class VtkCanvas(QWidget):
         eye = c + (0.55 * up - 0.8 * side / np.linalg.norm(side)) * d
         pl.camera_position = [tuple(eye), tuple(c), tuple(up)]
         pl.reset_camera()  # keep the direction, fit everything
+        self.trackball.pivot = None  # back to the middle of the scene (the focal point)
         pl.render()
 
     def top_view(self) -> None:
         c, up = self.sd.center, self.sd.up
         self.plotter.camera_position = [tuple(c + up * self.sd.extent * 1.2), tuple(c), (0, 1, 0)]
         self.plotter.reset_camera()
+        self.trackball.pivot = None  # back to the middle of the scene (the focal point)
         self.plotter.render()
 
     def grab_array(self) -> np.ndarray:
-        return np.asarray(self.plotter.screenshot(return_img=True))[:, :, :3]
+        self.trackball.hidden = True  # the frame without the trackball
+        try:
+            return np.asarray(self.plotter.screenshot(return_img=True))[:, :, :3]
+        finally:
+            self.trackball.hidden = False
 
     def snapshot(self):
         """The current frame and the projection of scene points to widget pixels (VTK camera)."""
@@ -394,14 +773,12 @@ class LassoOverlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pts = self.pts + ([self.cursor_pos] if self.cursor_pos is not None and self.pts else [])
         if len(pts) >= 2:
-            path = QPainterPath()
-            path.addPolygon(QPolygonF(pts))
-            path.closeSubpath()
-            p.fillPath(path, QBrush(QColor(0, 229, 255, 50)))
             pen = QPen(QColor("#00e5ff"), 2)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawPath(path)
+            p.setBrush(QBrush(QColor(0, 229, 255, 50)))
+            p.drawPolygon(QPolygonF(pts))  # filled and outlined in one call (see image_views.polyline_path)
+            p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QColor("white"))
         p.drawText(10, 20, "Lazo: clic per i vertici (o trascina), doppio clic o Invio per chiudere, "
                            "clic destro toglie l'ultimo, Esc annulla")
@@ -591,7 +968,34 @@ class ModelView(QWidget):
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
         b_reset = QPushButton(tr("Vista iniziale"))
+        b_reset.setToolTip(tr("La vista iniziale di tutta la scena (tasto Home)"))
         b_top = QPushButton(tr("Dall'alto"))
+        b_top.setToolTip(tr("La vista dall'alto (tasto T); F di fronte (verso +y), L da sinistra (verso +x)"))
+        self.b_center = QPushButton(tr("Centra la vista sul punto"))
+        self.b_center.setToolTip(tr("Porta al centro della vista il centro di rotazione (doppio clic su un punto "
+                                    "del modello o della nuvola per sceglierlo)"))
+        self.b_center.setIcon(_icon("pivot"))
+        self.b_trackball = QPushButton(_icon("trackball"), "Trackball")
+        self.b_trackball.setToolTip(tr("La sfera di rotazione: trascina dentro per ruotare liberamente, su un anello "
+                                       "per ruotare intorno al suo asse, fuori per girare intorno alla linea di "
+                                       "vista; tasto destro o centrale (o Maiusc+trascina) sposta, la rotella avvicina verso il "
+                                       "cursore (Maiusc+rotella senza spostare il centro), doppio clic sceglie il "
+                                       "centro di rotazione. Tasti: frecce ruotano di 15 gradi, Maiusc+frecce "
+                                       "spostano, + e - avvicinano, Home vista iniziale, T dall'alto, F di fronte, "
+                                       "L da sinistra"))
+        from PySide6.QtGui import QAction, QActionGroup
+
+        self.trackball_group = QActionGroup(self)
+        self.trackball_actions: dict[str, QAction] = {}
+        tb_menu = QMenu(self.b_trackball)
+        for mode, label in (("auto", "Quando il mouse è sulla vista"), ("always", "Sempre"), ("never", "Mai")):
+            a = QAction(tr(label), self, checkable=True)
+            a.setData(mode)
+            a.triggered.connect(lambda _=False, md=mode: self.set_trackball_mode(md))
+            self.trackball_group.addAction(a)
+            tb_menu.addAction(a)
+            self.trackball_actions[mode] = a
+        self.b_trackball.setMenu(tb_menu)
         self.exaggeration = 1.0
         self.exag_spin = QDoubleSpinBox()
         self.exag_spin.setRange(0.1, 50.0)
@@ -689,6 +1093,8 @@ class ModelView(QWidget):
         bar.addWidget(exag)
         bar.addWidget(b_top)
         bar.addWidget(b_reset)
+        bar.addWidget(self.b_center)
+        bar.addWidget(self.b_trackball)
         lay.addLayout(bar)
         self.canvas = None
         if _vtk_usable():
@@ -701,6 +1107,8 @@ class ModelView(QWidget):
         b_reset.clicked.connect(lambda: self.canvas.reset_view())
         self.point_spin.valueChanged.connect(lambda v: self.canvas.set_point_size(v))
         b_top.clicked.connect(lambda: self.canvas.top_view())
+        self.b_center.clicked.connect(lambda: self.canvas.centre_on_pivot())
+        self.canvas.pivot_requested.connect(self._pivot_at)
         self.lasso = LassoOverlay(self)
         self.lasso.finished.connect(self._lasso_finished)
         self.picker = PickOverlay(self)
@@ -726,6 +1134,50 @@ class ModelView(QWidget):
         self._project = None
         self._filling = False
         self._update_tools()
+        self.set_trackball_mode(self._saved_trackball_mode(), save=False)
+
+    # ----------------------------------------------------------- trackball
+    @staticmethod
+    def _saved_trackball_mode() -> str:
+        from . import app_settings
+
+        mode = str(app_settings().value(TRACKBALL_SETTING, "auto"))
+        return mode if mode in TRACKBALL_MODES else "auto"
+
+    def set_trackball_mode(self, mode: str, save: bool = True) -> None:
+        """When the trackball is shown: "auto" (while the mouse is over the view), "always", "never"."""
+        mode = mode if mode in TRACKBALL_MODES else "auto"
+        self.trackball_actions[mode].setChecked(True)
+        self.canvas.set_trackball_mode(mode)
+        if save:
+            from . import app_settings
+
+            app_settings().setValue(TRACKBALL_SETTING, mode)
+
+    def trackball_mode(self) -> str:
+        return self.canvas.trackball.mode
+
+    def pivot(self) -> np.ndarray | None:
+        """The centre of rotation in world coordinates (the chunk CRS)."""
+        if self.sd is None:
+            return None
+        return self.sd.from_display(self.canvas.pivot()[None])[0] + self.sd.offset
+
+    def set_pivot(self, point, recentre: bool = False) -> None:
+        """The centre of rotation at ``point`` (world coordinates); the view does not move unless
+        ``recentre``."""
+        if self.sd is None:
+            return
+        self.canvas.set_pivot(self.sd.to_display(np.asarray(point, np.float64)[None] - self.sd.offset)[0], recentre)
+
+    def _pivot_at(self, x: float, y: float) -> None:
+        """A double click: the centre of rotation on the surface under it (as a marker is placed)."""
+        if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
+            return
+        _image, project = self.canvas.snapshot()
+        point = self.pick_point(x, y, project, self.canvas.view_ray)
+        if point is not None:
+            self.set_pivot(self.chunk.to_world(np.asarray(point)[None])[0])
 
     @property
     def backend(self) -> str:
@@ -1101,8 +1553,11 @@ class ModelView(QWidget):
             return
         self.exaggeration = factor
         if self.base_sd is not None:
+            pivot = self.pivot()  # the centre of rotation stays on the same point of the scene
             self.sd = exaggerated(self.base_sd, factor)
             self.canvas.set_scene(self.sd, reset=False)
+            if pivot is not None:
+                self.set_pivot(pivot)
 
     def refresh(self, reset: bool = False) -> None:
         self.canvas.show_cameras = self.cb_cams.isChecked()

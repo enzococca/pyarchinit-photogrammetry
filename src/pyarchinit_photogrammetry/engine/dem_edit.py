@@ -36,6 +36,25 @@ def _densify(line: np.ndarray, step: float) -> np.ndarray:
     return np.asarray(out)
 
 
+def drawn_lines(chunk: Chunk, polygon, res: float | None = None) -> list[np.ndarray]:
+    """The break lines and soft lines drawn on the plan of ``chunk`` (:mod:`..archaeo.breaklines`) that reach the
+    area ``polygon`` and its ring of :data:`RING` known cells (``res``: the cell of the DEM, read when not given),
+    as (n, 3) arrays (NaN where a vertex has no height): those ``fill_area(lines="drawn")`` keeps."""
+    from shapely.geometry import LineString
+
+    from ..archaeo import breaklines as bl
+    from .crop import as_polygon
+
+    geom = as_polygon(polygon) if not hasattr(polygon, "geom_type") else polygon
+    if res is None:
+        import rasterio
+
+        with rasterio.open(chunk.dem_path) as src:
+            res = abs(src.transform.a)
+    reach = geom.buffer((RING + 1) * res)
+    return [ln for ln in bl.as_arrays(bl.records(chunk)) if LineString(ln[:, :2]).intersects(reach)]
+
+
 def new_heights(known: np.ndarray, target: np.ndarray, method: str, value: float | None = None,
                 power: float = 2.0, neighbours: int = 16) -> np.ndarray:
     """Heights at ``target`` (n, 2) from ``known`` (m, 3: x, y, z) by ``method`` (:data:`METHODS`)."""
@@ -68,12 +87,15 @@ def new_heights(known: np.ndarray, target: np.ndarray, method: str, value: float
 
 def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None = None, breaklines=None,
               keep_version: bool = True, version_name: str | None = None,
-              progress: Progress | None = None) -> dict:
+              progress: Progress | None = None, lines: str = "selection") -> dict:
     """New heights for the DEM cells inside ``polygon`` (chunk CRS, (N, 2) or a shapely geometry)
     from the cells in a ring of :data:`RING` cells around it. ``breaklines``: lines (each (N, 2) or
     (N, 3); without z the heights of the DEM at their vertices) whose heights are kept along them.
     ``keep_version``: the DEM as it was is kept among the versions first (``version_name``: the
-    name of the edited one). Returns ``{"cells", "method", "dz_mean", "dz_max", "version"}``."""
+    name of the edited one). ``lines``: ``"selection"`` - the ``breaklines`` given (the lines selected in
+    the window) - or ``"drawn"``: also the break lines and soft lines drawn on the plan of the chunk
+    (``chunk.meta["drawings"]["lines"]``, :mod:`..archaeo.breaklines`) that reach the area, with the heights
+    they were drawn with. Returns ``{"cells", "method", "dz_mean", "dz_max", "version", "lines"}``."""
     import rasterio
     from rasterio.windows import Window
     from scipy import ndimage
@@ -84,6 +106,8 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     from .crop import as_polygon
 
     progress = as_progress(progress)
+    if lines not in ("selection", "drawn"):
+        raise ValueError("lines: selection or drawn")
     src_path = chunk.dem_path
     if src_path is None or not src_path.exists():
         raise RuntimeError("build the DEM first")
@@ -110,14 +134,18 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
         raise ValueError("the area does not cover any cell of the DEM")
     ring = ndimage.binary_dilation(inside, iterations=RING) & ~inside & valid
     known = np.column_stack([x[ring], y[ring], z[ring]])
+    extra: list[np.ndarray] = []
+    breaklines = list(breaklines or [])
+    if lines == "drawn":
+        breaklines += drawn_lines(chunk, geom, res)
     if breaklines:
-        extra = []
         with rasterio.open(src_path) as src:
             for line in breaklines:
                 ln = np.asarray(line, np.float64)
-                if ln.shape[1] < 3:
+                if ln.shape[1] < 3 or not np.isfinite(ln[:, 2]).all():  # the heights missing: from the DEM
                     zs = np.array([v[0] for v in src.sample([(px, py) for px, py in ln[:, :2]])], np.float64)
-                    ln = np.column_stack([ln[:, :2], zs])
+                    ln = np.column_stack([ln[:, :2], np.where(np.isfinite(ln[:, 2]), ln[:, 2], zs)
+                                          if ln.shape[1] >= 3 else zs])
                 ln = ln[np.isfinite(ln[:, 2]) & ((ln[:, 2] != nodata) if nodata is not None else True)]
                 if len(ln) >= 2:
                     extra.append(_densify(ln, res))
@@ -127,7 +155,19 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     znew = new_heights(known, np.column_stack([x[inside], y[inside]]), method, value)
     z_out = z.copy()
     z_out[inside] = znew
+    # the cells a break line crosses take its heights: the interpolation alone does not hold them (on a grid of
+    # known cells the triangulation of the linear method is ambiguous, and Qhull resolves it differently from one
+    # platform to another; the plane, IDW and constant methods smooth them away)
+    for ln in extra:
+        fine = _densify(ln, res / 2)
+        cc = np.floor((fine[:, 0] - t.c) / t.a).astype(np.int64) - c0
+        rr = np.floor((fine[:, 1] - t.f) / t.e).astype(np.int64) - r0
+        ok = (rr >= 0) & (rr < z.shape[0]) & (cc >= 0) & (cc < z.shape[1])
+        rr, cc, zz = rr[ok], cc[ok], fine[ok, 2]
+        on = inside[rr, cc]
+        z_out[rr[on], cc[on]] = zz[on]
     kept = None
+    chunk._before_product_write("dem")
     if keep_version:  # the DEM as it was stays among the versions, under its name
         when = datetime.datetime.now().strftime("%d/%m %H:%M")
         old_name = versions.active_info(chunk, "dem")["name"]
@@ -155,13 +195,13 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
             with rasterio.open(own, "r+") as dst:
                 dst.build_overviews(factors, Resampling.average)
     had = valid[inside]  # cells that had a height: how much they changed
-    dz = znew[had] - z[inside][had]
+    dz = z_out[inside][had] - z[inside][had]
     info = {"cells": int(inside.sum()), "method": method, "value": value,
             "dz_mean": float(np.mean(dz)) if len(dz) else 0.0, "dz_max": float(np.max(np.abs(dz))) if len(dz) else 0.0,
-            "version": kept["id"] if kept else None}
+            "version": kept["id"] if kept else None, "lines": len(breaklines)}
     chunk.meta.setdefault("dem_edits", []).append({
         "polygon": np.asarray(geom.exterior.coords if hasattr(geom, "exterior") else [], float)[:, :2].tolist(),
-        "method": method, "value": value, "breaklines": len(breaklines or []),
+        "method": method, "value": value, "breaklines": len(breaklines),
         "when": datetime.datetime.now().isoformat(timespec="seconds"), "cells": info["cells"]})
     progress(1.0, f"DEM: {info['cells']:,} cells filled ({method})")
     return info

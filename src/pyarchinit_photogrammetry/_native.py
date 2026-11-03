@@ -42,16 +42,20 @@ def kernel(name: str):
 FEATURES = {
     "ppk": "ppk_solve",  # RTKLIB's post-processing (API 8)
     "crinex": "crx2rnx",  # Hatanaka-compressed RINEX decoded (API 9)
+    "tin": "tin_triangulate",  # constrained Delaunay triangulation and the TIN kernels (API 10)
 }
+TIN_API = 10  # tin_triangulate, tin_rasterize, tin_contours, tin_volume
 
 
 def supports(model: str) -> bool:
     """The projection kernels know the camera model ``model`` (a COLMAP model name), or the
     extension has the feature ``model`` of :data:`FEATURES` (``"ppk"``: RTKLIB's post-processing,
-    API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9)."""
+    API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10)."""
     core = _core() if enabled() else None
     if core is None:
         return False
+    if model == "tin":
+        return tin_kernel("tin_triangulate") is not None
     if model in FEATURES:
         return hasattr(core, FEATURES[model])
     return model in core.supported_models()
@@ -63,6 +67,15 @@ def has(feature: str) -> bool:
     packaged application), where :func:`supports` says what the program uses."""
     core = _core()
     return core is not None and feature in FEATURES and hasattr(core, FEATURES[feature])
+
+
+def tin_kernel(name: str):
+    """The TIN kernel ``name`` (``tin_triangulate``, ``tin_rasterize``, ``tin_contours``, ``tin_volume``)
+    of an extension of API 10 or later, or ``None``: the caller runs its numpy code."""
+    fn = kernel(name)
+    if fn is None or (api() or 0) < TIN_API:
+        return None
+    return fn
 
 
 def version() -> str | None:

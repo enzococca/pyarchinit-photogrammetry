@@ -592,6 +592,63 @@ class PyArchInit(TopographicMixin):
         return {"id_media": rid, "id_documentazione": did, "path": str(obj),
                 "paradata": str(paradata.write_provenance(chunk, product, obj))}
 
+    def register_elevation_media(self, chunk, entry: dict, paths: dict, sito: str | None = None,
+                                 link_us=None) -> list[int]:
+        """The drawings of an elevation or a section (``paths``: :func:`engine.elevation.export_drawings`; its DXF
+        and SVG) registered as media of the site - their thumbnail is ``paths["png"]``, the drawings over the
+        orthophoto, when given (else the orthophoto) - with a ``documentazione_table`` record "Sezione" or "Prospetto"
+        named as the elevation; ``link_us``: ``[(area, us) or (area, us, unita_tipo)]`` the US forms they are linked
+        to. The ids are kept in ``entry["media"]`` (``{"dxf": id, "svg": id}``): a later call registers no new
+        record, it writes the files and their previews again under the same ids and links the US added since.
+        ``sito``: by default the project's. Returns the media ids."""
+        from PIL import Image
+
+        from .media import raster_preview
+
+        if sito is None:
+            doc = getattr(chunk, "document", None)
+            sito = (doc.meta.get("sito") if doc is not None else None) or None
+        if not sito:
+            raise ValueError("the site of the drawings: give it, or set the site of the project")
+        self.ensure_site(sito)
+        tipo = "Sezione" if entry.get("kind") == "section" else "Prospetto"
+        name = entry.get("name") or entry["id"]
+        media = dict(entry.get("media") or {})
+        dest = self._media_folder(sito, "prospetti")
+        ortho = chunk.data_dir / entry["orthophoto"] if entry.get("orthophoto") else None
+        if paths.get("png") is not None and Path(paths["png"]).exists():
+            with Image.open(paths["png"]) as im:
+                preview = im.convert("RGB")
+        elif ortho is not None and ortho.exists():
+            preview = raster_preview(ortho, (2008, 1417))
+        else:
+            preview = Image.new("RGB", (150, 150), "white")
+        links = self._links(sito, link_us)
+        ids = []
+        for key in ("dxf", "svg"):
+            path = paths.get(key)
+            if path is None:
+                continue
+            target = dest / Path(path).name
+            known = media.get(key)
+            record = self.db.query("media_table", id_media=int(known)) if known is not None else []
+            if record and Path(record[0]["filepath"]) != target:  # the file was named otherwise (the elevation renamed)
+                target = Path(record[0]["filepath"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+
+                shutil.copy2(path, target)
+                path = target
+            # the same record when the file is registered already: its file, previews and links brought up to date
+            rid = register_media(self.db, path, mediatype="image", descrizione=f"{tipo}: {name} ({key.upper()})",
+                                 tags="['fotogrammetria', 'prospetto']", links=links, copy_to=target.parent,
+                                 overwrite=True, preview=preview, **self._media_dirs())
+            media[key] = rid
+            ids.append(rid)
+        self.add_documentation(sito, name, tipo, "Fotogrammetria", note=f"pyarchinit-photogrammetry {entry['id']}")
+        entry["media"] = media
+        return ids
+
     def publish_units(self, units, sito: str, area: str | None = None, crs: str | None = None,
                       rilievo_originale: str = "Fotogrammetria", disegnatore: str = "", nome_doc: str = "",
                       tipo_doc: str = "Fotopiano") -> list[int]:

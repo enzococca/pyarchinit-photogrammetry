@@ -16,6 +16,11 @@ does, with RTKLIB built into the extension), and the decoding of Hatanaka-compre
 (`crx2rnx`, from 0.6: Compact RINEX 1.0, 3.0 and 3.1 into the RINEX that RNXCMP's CRX2RNX
 writes, by a decoder of our own written from the description of the format in Hatanaka (2008),
 Bulletin of the Geographical Survey Institute 55, 21-30).
+From 0.7 (API 10) the kernels of the TIN (`engine.tin`): the constrained Delaunay triangulation of
+the vertices with the break lines as constraints (`tin_triangulate`, with the crate
+[spade](https://github.com/Stoeoef/spade), robust predicates in double precision; constraints that
+cross are split at a new vertex), the TIN rasterised on a grid (`tin_rasterize`), its contour
+segments (`tin_contours`) and its exact cut and fill against a plane (`tin_volume`).
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 
@@ -35,3 +40,6 @@ License: GPL-2.0-or-later. The extension includes RTKLIB-EX v2.5.1
 Copyright (c) 2007-2020, T. Takasu, distributed under the BSD 2-clause license: its text is in
 `vendor/rtklib/license.txt` and in `NOTICE`, which come with the package. RTKLIB's optional routines
 of the IAU SOFA library (`sofa.c`, a licence of their own) are not included.
+
+The Rust crates built into the extension are under licences compatible with the GPL (MIT or
+Apache-2.0: PyO3, numpy, rayon, wgpu, spade and their dependencies).

@@ -11,6 +11,10 @@ Not part of this package: RTKLIB's receiver decoders, streams and applications, 
 the IAU SOFA library that RTKLIB bundles in sofa.c for the positions of the Sun and the Moon (an
 option that is not built; SOFA has a licence of its own). See vendor/rtklib/VERSION.
 
+The Rust crates compiled into the extension (PyO3, numpy, rayon, wgpu, spade for the constrained
+Delaunay triangulation of the TIN, and their dependencies) are distributed under the MIT or the
+Apache-2.0 license, both compatible with the GPL.
+
 RTKLIB's license (vendor/rtklib/license.txt) follows.
 
 ================================================================================

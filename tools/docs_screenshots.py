@@ -235,6 +235,45 @@ def _worker(args) -> int:
         d.setFloating(False)
         pump(400)
 
+    def assistant_ready() -> None:
+        """A conversation with a model on this computer (made up: no server is asked) and a script run."""
+        from pyarchinit_photogrammetry.assistant.providers import Reply
+
+        it = lang == "it"
+        question = "Quanto è grande il DEM?" if it else "How large is the DEM?"
+        cells = "celle" if it else "cells"
+        script = ("import rasterio\n\nwith rasterio.open(chunk.dem_path) as src:\n"
+                  f"    print(src.width, 'x', src.height, '{cells},', round(src.res[0], 3), 'm')")
+        answer = (("Il DEM del chunk attivo copre la trincea a piena risoluzione. Per leggerne la dimensione "
+                   "esatta e la cella:" if it else
+                   "The DEM of the active chunk covers the trench at full resolution. To read its exact size "
+                   "and cell:") + f"\n\n```python\n{script}\n```\n")
+
+        class Shown:
+            kind, model = "local", "qwen3-coder-30b"
+            label = f"Locale · lmstudio · {model}" if it else f"Local · lmstudio · {model}"
+
+            def complete(self, messages, tools=None, on_text=None, cancel=None):
+                return Reply(answer, [], "end", {})
+
+            def list_models(self):
+                return [self.model]
+
+            def check(self):
+                return "ok"
+
+        pane = w.assistant
+        pane.set_provider(Shown())
+        pane.ask(question)
+        for _ in range(200):
+            pump(50)
+            if not pane.busy:
+                break
+        pane.open_in_editor(pane.scripts[-1])
+        pane.run_editor()
+        w.runner.wait()
+        pump(300)
+
     for name, widget in panes:
         if wanted(name):
             if name == "pane-layers":
@@ -243,6 +282,12 @@ def _worker(args) -> int:
                 tall_shot(widget, name)
             else:
                 pane_shot(widget, name)
+    if wanted("pane-assistant"):
+        assistant_ready()
+        dock = dock_of(w.assistant)
+        w.resizeDocks([dock], [430], Qt.Orientation.Vertical)
+        pane_shot(w.assistant, "pane-assistant")
+        w.resizeDocks([dock], [230], Qt.Orientation.Vertical)
     for widget in (w.workspace, w.photos, w.pa_pane):  # the panes in front as at the start
         dock_of(widget).raise_()
     pump(300)

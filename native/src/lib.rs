@@ -12,6 +12,7 @@ mod gpu_patchmatch;
 mod gpu_sift;
 mod patchmatch;
 mod ppk;
+mod tin;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,8 +27,9 @@ use rayon::prelude::*;
 
 use camera::{Camera, Pose};
 
-/// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx).
-const API: u32 = 9;
+/// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
+/// 10: the TIN kernels).
+const API: u32 = 10;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -700,6 +702,119 @@ fn gpu_fuse_cached(py: Python<'_>, device: i64) -> PyResult<Vec<i64>> {
     }).map_err(PyRuntimeError::new_err)
 }
 
+fn xy_rows(a: &PyReadonlyArray2<'_, f64>) -> PyResult<Vec<[f64; 2]>> {
+    if a.shape()[1] != 2 {
+        return Err(PyValueError::new_err(format!("xy must be N x 2, not {:?}", a.shape())));
+    }
+    let v = a.as_array();
+    Ok((0..a.shape()[0]).map(|i| [v[[i, 0]], v[[i, 1]]]).collect())
+}
+
+fn triangle_rows(a: &PyReadonlyArray2<'_, i64>, n: usize) -> PyResult<Vec<[usize; 3]>> {
+    if a.shape()[1] != 3 {
+        return Err(PyValueError::new_err(format!("triangles must be T x 3, not {:?}", a.shape())));
+    }
+    let v = a.as_array();
+    let mut out = Vec::with_capacity(a.shape()[0]);
+    for i in 0..a.shape()[0] {
+        let t = [v[[i, 0]], v[[i, 1]], v[[i, 2]]];
+        if t.iter().any(|&k| k < 0 || k as usize >= n) {
+            return Err(PyValueError::new_err(format!("triangle {i}: vertex index out of range")));
+        }
+        out.push([t[0] as usize, t[1] as usize, t[2] as usize]);
+    }
+    Ok(out)
+}
+
+fn heights(z: &PyReadonlyArray1<'_, f64>, n: usize) -> PyResult<Vec<f64>> {
+    if z.len() != n {
+        return Err(PyValueError::new_err(format!("z has {} values for {n} points", z.len())));
+    }
+    Ok(z.as_array().iter().copied().collect())
+}
+
+type TinTriangulation<'py> = (Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<f64>>,
+                              Bound<'py, PyArray2<i64>>);
+
+/// Constrained Delaunay triangulation of a TIN (`engine.tin.triangulate`, the crate spade): ``xy``
+/// (n x 2, local coordinates), ``constraints`` (m x 2 point indices: break lines, boundaries).
+/// Returns the counter-clockwise ``triangles`` (t x 3), the ``constrained`` edges of the
+/// triangulation (k x 2, smaller index first), and the vertices made where constraints cross:
+/// ``new_xy`` (j x 2, index n + row in the triangles) and ``new_on`` (j x 2, the endpoints of the
+/// constraint each one lies on). Points at the same place are one vertex, the first of them.
+#[pyfunction]
+fn tin_triangulate<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, constraints: PyReadonlyArray2<'py, i64>)
+                        -> PyResult<TinTriangulation<'py>> {
+    let pts = xy_rows(&xy)?;
+    let s = constraints.shape();
+    if s[0] > 0 && s[1] != 2 {
+        return Err(PyValueError::new_err(format!("constraints must be M x 2, not {s:?}")));
+    }
+    let c = constraints.as_array();
+    let mut cons = Vec::with_capacity(s[0]);
+    for i in 0..s[0] {
+        let (a, b) = (c[[i, 0]], c[[i, 1]]);
+        if a < 0 || b < 0 {
+            return Err(PyValueError::new_err(format!("constraint {i}: negative index")));
+        }
+        cons.push([a as usize, b as usize]);
+    }
+    let r = py.allow_threads(|| tin::triangulate(&pts, &cons)).map_err(PyValueError::new_err)?;
+    let tri = Array2::from_shape_vec((r.triangles.len(), 3), r.triangles.concat()).unwrap();
+    let con = Array2::from_shape_vec((r.constrained.len(), 2), r.constrained.concat()).unwrap();
+    let nxy = Array2::from_shape_vec((r.new_xy.len(), 2), r.new_xy.concat()).unwrap();
+    let non = Array2::from_shape_vec((r.new_on.len(), 2), r.new_on.concat()).unwrap();
+    Ok((tri.into_pyarray_bound(py), con.into_pyarray_bound(py), nxy.into_pyarray_bound(py),
+        non.into_pyarray_bound(py)))
+}
+
+/// The TIN on a grid (`engine.tin.rasterize`): ``height`` x ``width`` float32 cells of side
+/// ``cell``, top-left corner (``x0``, ``y0``), each centre linear in its triangle, NaN outside.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn tin_rasterize<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, z: PyReadonlyArray1<'py, f64>,
+                      triangles: PyReadonlyArray2<'py, i64>, x0: f64, y0: f64, cell: f64, width: usize,
+                      height: usize) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    if !(cell > 0.0) {
+        return Err(PyValueError::new_err("cell must be positive"));
+    }
+    if width.checked_mul(height).and_then(|n| n.checked_mul(4)).is_none() {
+        return Err(PyValueError::new_err(format!("a grid of {width} x {height} cells is too large")));
+    }
+    let pts = xy_rows(&xy)?;
+    let h = heights(&z, pts.len())?;
+    let tri = triangle_rows(&triangles, pts.len())?;
+    let grid = py.allow_threads(|| tin::rasterize(&pts, &h, &tri, x0, y0, cell, width, height));
+    Ok(Array2::from_shape_vec((height, width), grid).unwrap().into_pyarray_bound(py))
+}
+
+/// Contour segments of a TIN (`engine.tin.contour_segments`): (s x 2 x 2) segments and the
+/// index of their level in ``levels`` (s).
+#[pyfunction]
+fn tin_contours<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, z: PyReadonlyArray1<'py, f64>,
+                     triangles: PyReadonlyArray2<'py, i64>, levels: PyReadonlyArray1<'py, f64>)
+                     -> PyResult<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray1<i64>>)> {
+    let pts = xy_rows(&xy)?;
+    let h = heights(&z, pts.len())?;
+    let tri = triangle_rows(&triangles, pts.len())?;
+    let lv: Vec<f64> = levels.as_array().iter().copied().collect();
+    let (segs, idx) = py.allow_threads(|| tin::contours(&pts, &h, &tri, &lv));
+    let flat: Vec<f64> = segs.iter().flat_map(|s| [s[0][0], s[0][1], s[1][0], s[1][1]]).collect();
+    let s = Array3::from_shape_vec((segs.len(), 2, 2), flat).unwrap();
+    Ok((s.into_pyarray_bound(py), Array1::from_vec(idx).into_pyarray_bound(py)))
+}
+
+/// Exact volumes of a TIN against the plane z = a x + b y + c (`engine.tin.prism_volume`):
+/// ``(above, below, area)``.
+#[pyfunction]
+fn tin_volume(py: Python<'_>, xy: PyReadonlyArray2<'_, f64>, z: PyReadonlyArray1<'_, f64>,
+              triangles: PyReadonlyArray2<'_, i64>, plane: (f64, f64, f64)) -> PyResult<(f64, f64, f64)> {
+    let pts = xy_rows(&xy)?;
+    let h = heights(&z, pts.len())?;
+    let tri = triangle_rows(&triangles, pts.len())?;
+    Ok(py.allow_threads(|| tin::volume(&pts, &h, &tri, [plane.0, plane.1, plane.2])))
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -730,5 +845,9 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gpu_patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(ppk::ppk_solve, m)?)?;
     m.add_function(wrap_pyfunction!(crinex::crx2rnx, m)?)?;
+    m.add_function(wrap_pyfunction!(tin_triangulate, m)?)?;
+    m.add_function(wrap_pyfunction!(tin_rasterize, m)?)?;
+    m.add_function(wrap_pyfunction!(tin_contours, m)?)?;
+    m.add_function(wrap_pyfunction!(tin_volume, m)?)?;
     Ok(())
 }

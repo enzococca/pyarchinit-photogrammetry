@@ -260,6 +260,7 @@ def compute_model_confidence(chunk: Chunk, tol: float = 0.01, progress: Progress
     verts, faces = mesh.xyz, mesh.faces
     conf = depth_map_support(chunk, verts, tol, progress.sub(0.0, 0.9), abs_tol=half_edges(verts, faces))
     progress(0.92, "Salvataggio del modello")
+    chunk._before_product_write("model")
     chunk._set_product("model", write_model(chunk.own_product_path("model"), mesh, conf))
     preview = chunk.data_dir / "model_preview.ply"
     if preview.exists():

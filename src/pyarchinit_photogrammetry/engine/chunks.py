@@ -1288,7 +1288,137 @@ def _without_position(m: Marker) -> Marker:
     return Marker(key=m.key, label=m.label, projections=m.projections)
 
 
-__all__ = ["align_chunks", "merge_chunks", "resolve_chunk", "common_markers", "common_cameras", "marker_position",
+# what ``chunk.meta`` says of products, versions, drawings and proxies: not carried into a duplicate, which has none
+DUPLICATE_DROPPED_META = ("versions", "active_versions", "drawings", "proxies", "dense", "point_cloud_source",
+                          "point_cloud_cleaning", "confidence", "model", "texture", "dem", "dem_edits", "precision",
+                          "orthomosaic", "normal_map", "relief", "elevations", "calculator", "field_check", "stones",
+                          "pottery", "splat", "tin")
+# the products of the multispectral and thermal captures in their meta (as core.removal._meta_part sees them):
+# dropped from a duplicate, which keeps the settings of the captures (bands, panel, registration, parameters)
+DUPLICATE_DROPPED_CAPTURES = {"multispectral": ("reflectance", "reflectance_bands", "indices", "zoning"),
+                              "thermal": ("file", "resolution", "stats", "anomaly", "decoded")}
+
+
+def duplicate_label(doc: "Document", chunk: "Chunk") -> str:
+    """The default name of a duplicate of ``chunk``: ``"<label> (copia)"``, then ``"<label> (copia 2)"``, ... -
+    the first one no chunk of ``doc`` has. A name of the project's data, the same whatever the interface language."""
+    taken = {c.label for c in doc.chunks}
+    label, n = f"{chunk.label} (copia)", 1
+    while label in taken:
+        n += 1
+        label = f"{chunk.label} (copia {n})"
+    return label
+
+
+def _cameras_of(chunk: "Chunk", cameras) -> list[Camera]:
+    """The cameras of ``chunk`` named by ``cameras`` (objects of the chunk, keys or labels), in the order
+    of the chunk; ValueError for a camera of another chunk, KeyError for a name that is not there."""
+    keys = set()
+    for c in cameras:
+        if isinstance(c, Camera):
+            if not any(c is own for own in chunk.cameras):
+                raise ValueError(f"the photo {c.label} is not a photo of the chunk {chunk.label}")
+            keys.add(c.key)
+        else:
+            keys.add(chunk.camera(c).key)
+    return [c for c in chunk.cameras if c.key in keys]
+
+
+def cameras_in_area(chunk: "Chunk", polygon) -> list[Camera]:
+    """The cameras of ``chunk`` whose photo frames some of the surface (DEM or model) inside
+    ``polygon`` (chunk coordinates), in the order of the chunk (:func:`.patches.photos_for_area`)."""
+    from .patches import photos_for_area
+
+    keys = {r["key"] for r in photos_for_area(chunk, polygon, limit=100_000) if r.get("coverage", 0) > 0}
+    return [c for c in chunk.cameras if c.key in keys]
+
+
+def _copy_inputs(chunk: "Chunk", dup: "Chunk") -> None:
+    """What the photos of ``dup`` need from the folder of ``chunk``: their masks (settings of the photos, not
+    products) and the photos themselves when they live in it - the reference copies of multispectral and thermal
+    captures - copied to the same place in the folder of ``dup``, the cameras pointed there."""
+    from .masks import mask_dir
+
+    src_dir, dst_dir = chunk.data_dir.resolve(), dup.data_dir
+    masks = mask_dir(chunk)
+    for cam in dup.cameras:
+        mask = masks / f"{cam.key}.png"
+        if mask.exists():
+            target = mask_dir(dup) / mask.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(mask, target)
+        try:
+            rel = Path(cam.path).resolve().relative_to(src_dir)
+        except ValueError:  # a photo outside the chunk folder: shared as it is
+            continue
+        target = dst_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(cam.path), target)
+        cam.path = str(target)
+
+
+def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | None = None,
+                    keep_products: bool = False) -> "Chunk":
+    """See :meth:`Document.duplicate_chunk`."""
+    import copy
+
+    from .sfm import write_reconstruction_from_chunk
+
+    if keep_products:
+        raise ValueError("keep_products is reserved: a duplicate has no products in this version")
+    if not any(chunk is c for c in doc.chunks):
+        raise ValueError("the chunk does not belong to this document")
+    chosen = list(chunk.cameras) if cameras is None else _cameras_of(chunk, cameras)
+    if not chosen:
+        raise ValueError("no photo to put in the new chunk")
+    every = len(chosen) == len(chunk.cameras)
+    keys = {c.key for c in chosen}
+    tie = chunk.tie_points
+    if tie is None and not every and any(c.aligned for c in chosen):
+        # a model written from the poses alone has no 3D points: no stereo partners for the depth maps
+        raise ValueError(f"the chunk {chunk.label} has no tie points: a duplicate with some of its photos needs "
+                         "them (align the photos again, or duplicate all the photos)")
+    dup = doc.add_chunk(label or duplicate_label(doc, chunk))
+    try:
+        shutil.rmtree(dup.data_dir, ignore_errors=True)  # a fresh folder (a removed chunk may have left one)
+        dup.crs = chunk.crs
+        dup.transform = np.asarray(chunk.transform, float).copy()
+        dup.enabled = chunk.enabled
+        meta = copy.deepcopy(chunk.meta)
+        for key in DUPLICATE_DROPPED_META:
+            meta.pop(key, None)
+        for part, keys_ in DUPLICATE_DROPPED_CAPTURES.items():
+            if isinstance(meta.get(part), dict):
+                for key in keys_:
+                    meta[part].pop(key, None)
+        dup.meta = meta
+        dup.cameras = [copy.deepcopy(c) for c in chosen]
+        _copy_inputs(chunk, dup)
+        used = {c.sensor_key for c in chosen}
+        dup.sensors = {k: copy.deepcopy(s) for k, s in chunk.sensors.items() if k in used}
+        dup.markers = []
+        for m in chunk.markers:
+            new = copy.deepcopy(m)
+            new.projections = {k: p for k, p in new.projections.items() if k in keys}
+            dup.markers.append(new)
+        present = {m.key for m in dup.markers}
+        dup.scalebars = [copy.deepcopy(b) for b in chunk.scalebars if b.marker_a in present and b.marker_b in present]
+        if every and tie is not None:
+            src = chunk.product_path("tie_points")
+            out = dup.data_dir / src.name
+            shutil.copy2(src, out)
+            dup._set_product("tie_points", out)
+        if any(c.aligned for c in dup.cameras):
+            # the poses as a COLMAP model observing the tie points of the source: depth maps run on it
+            write_reconstruction_from_chunk(dup, points=tie)
+    except BaseException:
+        doc.remove_chunk(dup)
+        raise
+    return dup
+
+
+__all__ = ["align_chunks", "merge_chunks", "duplicate_chunk", "duplicate_label", "cameras_in_area", "resolve_chunk",
+           "common_markers", "common_cameras", "marker_position",
            "pose_similarity", "icp", "global_guesses", "fpfh_features", "ransac_rigid", "ransac_hypotheses",
            "registration_quality",
            "registration_cloud", "scene_depth", "affine_inverse", "ALIGN_METHODS", "INITIAL_GUESSES"]

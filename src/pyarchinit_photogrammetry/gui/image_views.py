@@ -9,10 +9,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QLineF, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
-from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene,
-                               QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
+from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsPixmapItem,
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
 import shiboken6
 
 from .i18n import tr
@@ -376,6 +376,60 @@ class _ZoomView(QGraphicsView):
         return pen
 
 
+NOT_PICKED = 2  # data key of a graphics item that clicks, queries and selections pass through (the edges of a TIN)
+
+
+# Few Qt calls per drawing. With Python 3.11 and PySide6 6.12.0 on Linux every call of QPainterPath.moveTo, lineTo
+# and addPolygon releases a reference to None it never took (tests/probe_none.py): a path built vertex by vertex - the
+# thousands of edges of a TIN, a long line - drained the count of None to zero and aborted the interpreter. A polyline
+# is therefore one addPolygon, a bundle of segments one item painted with one drawLines.
+def polyline_path(points, close: bool = False) -> QPainterPath:
+    """A path through ``points`` (QPointF or (x, y)) made with one call; ``close``: back to the first point."""
+    pts = [p if isinstance(p, QPointF) else QPointF(float(p[0]), float(p[1])) for p in points]
+    if close and len(pts) > 2 and pts[0] != pts[-1]:
+        pts.append(QPointF(pts[0]))
+    path = QPainterPath()
+    if pts:
+        path.addPolygon(QPolygonF(pts))
+    return path
+
+
+class SegmentsItem(QGraphicsItem):
+    """Many disjoint segments (``(n, 2, 2)`` scene coordinates) painted with one ``drawLines``, and optional dots
+    (``(m, 2)``) with one ``drawPoints``: the edges of a TIN, the residuals of tie points, the lines between matched
+    points. ``pen()``/``setPen()`` as a path item; the shape is the bounding box (it is never picked)."""
+
+    def __init__(self, segments, pen: QPen, dots=None, dot_pen: QPen | None = None, parent=None):
+        super().__init__(parent)
+        seg = np.asarray(segments, float).reshape(-1, 2, 2)
+        self._lines = [QLineF(a, b, c, d) for (a, b), (c, d) in seg.tolist()]
+        dots = np.asarray(dots if dots is not None else np.zeros((0, 2)), float).reshape(-1, 2)
+        self._dots = QPolygonF([QPointF(x, y) for x, y in dots.tolist()]) if len(dots) else None
+        self._pen, self._dot_pen = QPen(pen), QPen(dot_pen) if dot_pen is not None else None
+        allp = np.vstack([seg.reshape(-1, 2), dots]) if len(seg) or len(dots) else np.zeros((1, 2))
+        lo, hi = allp.min(axis=0), allp.max(axis=0)
+        pad = max(float((hi - lo).max()) * 1e-6, 1e-6)
+        self._rect = QRectF(float(lo[0]) - pad, float(lo[1]) - pad, float(hi[0] - lo[0]) + 2 * pad,
+                            float(hi[1] - lo[1]) + 2 * pad)
+
+    def boundingRect(self) -> QRectF:
+        return self._rect
+
+    def pen(self) -> QPen:
+        return QPen(self._pen)
+
+    def setPen(self, pen: QPen) -> None:
+        self._pen = QPen(pen)
+        self.update()
+
+    def paint(self, painter, _option, _widget=None) -> None:
+        painter.setPen(self._pen)
+        if self._lines:
+            painter.drawLines(self._lines)
+        if self._dots is not None:
+            painter.setPen(self._dot_pen or self._pen)
+            painter.drawPoints(self._dots)
+
 # The style of the labels of a layer (``layer_settings[layer]["label_style"]``); None = the default of the
 # layer's kind: units in bold white 11 pt, lines and points in their own colour, the window's font.
 LABEL_STYLE_KEYS = ("font", "size", "bold", "italic", "color", "halo", "halo_color", "halo_width")
@@ -406,10 +460,10 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
-                  "req_polygon", "req_line", "req_point", "reshape")
+                  "req_polygon", "req_line", "req_point", "reshape", "breakline")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
     REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
-    LINE_MODES = ("req_line", "reshape")  # click the vertices, double click or Enter to end
+    LINE_MODES = ("req_line", "reshape", "breakline")  # click the vertices, double click or Enter to end
     VERTEX_PX = 7.0  # vertex editing: how near (screen pixels) a press grabs a vertex or the middle of a side
     SAM_TOOLS = ("tap", "box", "area")
 
@@ -432,6 +486,7 @@ class RasterView(_ZoomView):
     request_cancelled = Signal()  # Esc during a request
     vertices_edited = Signal(str, object, object)  # layer, attributes of the unit part (the dict itself), outline (N,2)
     reshape_finished = Signal(object)  # (N,2) world XY: the line of a reshape
+    breakline_finished = Signal(object)  # (N,2) world XY: a break line drawn (its kind is the window's)
     raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
@@ -833,10 +888,7 @@ class RasterView(_ZoomView):
 
     def add_polygon(self, xy, label: str = "", color: str = "#ff3030", fill_alpha: int = 50,
                     layer: str = "Unita' stratigrafiche", attrs: dict | None = None):
-        path = QPainterPath()
-        poly = QPolygonF([self.scene_pt(x, y) for x, y in xy])
-        path.addPolygon(poly)
-        path.closeSubpath()
+        path = polyline_path([self.scene_pt(x, y) for x, y in xy], close=True)
         item = self.scene().addPath(path, self._pen(color, 2))
         c = QColor(color)
         c.setAlpha(fill_alpha)
@@ -847,14 +899,14 @@ class RasterView(_ZoomView):
             t.setBrush(QColor("white"))
             t.setFont(QFont(self.font().family(), 11, QFont.Weight.Bold))
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
-            t.setPos(poly.boundingRect().center())
+            t.setPos(path.boundingRect().center())
             self.scene().addItem(t)
         self._register(layer, "polygon", item, t, {"etichetta": label, **(attrs or {}),
                                                      "_geom": ("Polygon", [[float(x), float(y)] for x, y in xy])})
         return item
 
     def add_line(self, xy, color: str = "#ffd000", label: str = "", layer: str = "Linee", attrs: dict | None = None,
-                 width: float = 2.5):
+                 width: float = 2.5, dash: bool = False):
         xy = np.asarray(xy, float)[:, :2]
         inv = self._inverse()  # all the vertices at once: contour layers have hundreds of thousands
         cols = inv.a * xy[:, 0] + inv.b * xy[:, 1] + inv.c
@@ -862,7 +914,10 @@ class RasterView(_ZoomView):
         pts = [QPointF(c, r) for c, r in zip(cols.tolist(), rows.tolist())]
         path = QPainterPath()
         path.addPolygon(QPolygonF(pts))  # an open subpath
-        item = self.scene().addPath(path, self._pen(color, width))
+        pen = self._pen(color, width)
+        if dash:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        item = self.scene().addPath(path, pen)
         t = None
         if label:
             t = QGraphicsSimpleTextItem(label)
@@ -871,6 +926,22 @@ class RasterView(_ZoomView):
             t.setPos(pts[0])
             self.scene().addItem(t)
         self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {}), "_geom": ("LineString", xy.tolist())})
+        return item
+
+    def add_segments(self, segments, color: str = "#8d6e63", layer: str = "Segmenti", attrs: dict | None = None,
+                     width: float = 1.0):
+        """Many segments ((n, 2, 2) world XY: the edges of a TIN) as one feature of ``layer``, one path: drawn and
+        hidden at once, below the drawings (over the raster), no geometry of their own for snapping or QGIS, never
+        picked by a click, a query or a box or lasso selection (:data:`NOT_PICKED`)."""
+        seg = np.asarray(segments, float).reshape(-1, 2, 2)
+        inv = self._inverse()
+        cols = inv.a * seg[..., 0] + inv.b * seg[..., 1] + inv.c
+        rows = inv.d * seg[..., 0] + inv.e * seg[..., 1] + inv.f
+        item = SegmentsItem(np.stack([cols, rows], axis=-1), self._pen(color, width))
+        self.scene().addItem(item)
+        item.setZValue(-0.5)  # the raster is at -2 and -1, the drawings at 0: the units stay on top
+        item.setData(NOT_PICKED, True)
+        self._register(layer, "line", item, None, {"etichetta": "", **(attrs or {})})
         return item
 
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
@@ -1092,7 +1163,7 @@ class RasterView(_ZoomView):
         area = QRectF(scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r)
         for it in self.scene().items(area):
             layer = it.data(0)
-            if layer and it.isVisible():
+            if layer and it.isVisible() and not it.data(NOT_PICKED):
                 lay = self.layers.get(layer, {"features": []})
                 idx = next((i for i, f in enumerate(lay["features"]) if f[0] is it), -1)
                 attrs = dict(it.data(1) or {})
@@ -1125,8 +1196,8 @@ class RasterView(_ZoomView):
             path = QPainterPath()
             for g in getattr(geom, "geoms", [geom]):
                 for ring in [g.exterior, *g.interiors]:
+                    # a ring of shapely is closed already: one call per ring
                     path.addPolygon(QPolygonF([self.scene_pt(x, y) for x, y in np.asarray(ring.coords)[:, :2]]))
-                    path.closeSubpath()
             item = self.scene().addPath(path, pen, QBrush(QColor(0, 229, 255, 60)))
             item.setZValue(9000)
             self._sam_items.append(item)
@@ -1300,7 +1371,7 @@ class RasterView(_ZoomView):
 
     def _feature_items(self, items) -> list:
         """Feature items (not labels, highlights or the raster) among graphics items, visible only."""
-        return [it for it in items if it.data(0) in self.layers and it.isVisible()]
+        return [it for it in items if it.data(0) in self.layers and it.isVisible() and not it.data(NOT_PICKED)]
 
     def item_at(self, scene_pos: QPointF, radius_px: float = 8.0):
         r = radius_px / max(self.transform().m11(), 1e-9)
@@ -1322,10 +1393,7 @@ class RasterView(_ZoomView):
         points = list(scene_points)
         if len(points) < 3:
             return []
-        path = QPainterPath()
-        path.addPolygon(QPolygonF(points))
-        path.closeSubpath()
-        path = path.simplified()
+        path = polyline_path(points, close=True).simplified()
         if path.isEmpty():
             return []
         return self._feature_items(self.scene().items(path, Qt.ItemSelectionMode.IntersectsItemShape,
@@ -1376,10 +1444,7 @@ class RasterView(_ZoomView):
         return "replace"
 
     def _update_lasso(self) -> None:
-        path = QPainterPath(self._lasso_points[0])
-        for point in self._lasso_points[1:]:
-            path.lineTo(point)
-        path.closeSubpath()
+        path = polyline_path(self._lasso_points, close=True)
         if self._lasso_item is None:
             pen = self._pen("#00e5ff", 1.5)
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -1402,9 +1467,7 @@ class RasterView(_ZoomView):
         if dragged:
             # An incomplete stroke is cancelled without replacing the existing selection.
             if len(points) >= 3:
-                path = QPainterPath()
-                path.addPolygon(QPolygonF(points))
-                path.closeSubpath()
+                path = polyline_path(points, close=True)
                 if not path.simplified().isEmpty():
                     self.select_in_polygon(points, self._selection_operation(modifiers))
         else:
@@ -1436,7 +1499,9 @@ class RasterView(_ZoomView):
         pen = self._pen("#00e5ff", 3.0)
         pen.setStyle(Qt.PenStyle.DashLine)
         for it in self.selection:
-            if isinstance(it, QGraphicsPathItem):
+            if isinstance(it, SegmentsItem):  # a bundle of segments: its box
+                m = self.scene().addRect(it.boundingRect(), pen)
+            elif isinstance(it, QGraphicsPathItem):
                 polygon = self.layers.get(it.data(0), {}).get("kind") == "polygon"
                 m = self.scene().addPath(it.path(), pen, QBrush(QColor(0, 229, 255, 70)) if polygon else QBrush())
             else:  # a point marker: a ring around it, constant size on screen
@@ -1499,7 +1564,7 @@ class RasterView(_ZoomView):
             if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._vedit["current"] is not None:
                 self.remove_vertex(self._vedit["current"])
                 return
-        if self.mode in (*self.REQUEST_MODES, "reshape"):
+        if self.mode in (*self.REQUEST_MODES, "reshape", "breakline"):
             if ev.key() == Qt.Key.Key_Escape:
                 mode = self.mode
                 self.set_mode(mode)
@@ -1543,9 +1608,7 @@ class RasterView(_ZoomView):
         pts = list(self._clicks) + ([cursor] if cursor is not None else [])
         if not pts:
             return
-        path = QPainterPath(pts[0])
-        for p in pts[1:]:
-            path.lineTo(p)
+        path = polyline_path(pts)
         if self._rubber is None:
             self._rubber = self.scene().addPath(path, self._pen("#00e0ff", 2))
         else:
@@ -1759,7 +1822,7 @@ class RasterView(_ZoomView):
     def _finish_request(self) -> None:
         """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1); a
         vertex clicked again on the same screen pixel (a slow double click) counts once."""
-        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2}[self.mode]
+        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2, "breakline": 2}[self.mode]
         # one screen pixel in world units: a relative tolerance would join vertices metres apart in UTM
         pixel = abs(self.tr.a) / max(self.transform().m11(), 1e-12) if self.tr is not None else 0.0
         xy = [p for i, p in enumerate(self._click_xy)
@@ -1768,7 +1831,8 @@ class RasterView(_ZoomView):
             return
         mode = self.mode
         self.set_mode(mode)
-        (self.reshape_finished if mode == "reshape" else self.request_finished).emit(np.array(xy, float))
+        {"reshape": self.reshape_finished, "breakline": self.breakline_finished}.get(
+            mode, self.request_finished).emit(np.array(xy, float))
 
     # ----------------------------------------------------------- vertex editing
     def editing_vertices(self) -> bool:
@@ -1850,9 +1914,7 @@ class RasterView(_ZoomView):
         ed = self._vedit
         self._vedit_clear()
         pts = [self.scene_pt(x, y) for x, y in ed["xy"]]
-        path = QPainterPath()
-        path.addPolygon(QPolygonF(pts))
-        path.closeSubpath()
+        path = polyline_path(pts, close=True)
         if shiboken6.isValid(ed["item"]):
             ed["item"].setPath(path)
         pen = self._pen("#202020", 1.2)
@@ -2021,15 +2083,12 @@ class PhotoView(_ZoomView):
             sel = (err >= lo) & (err < hi)
             if not sel.any():
                 continue
-            path = QPainterPath()
-            for (x, y), (dx, dy) in zip(measured[sel], d[sel]):
-                path.moveTo(QPointF(x, y))
-                path.lineTo(QPointF(x + dx * scale, y + dy * scale))
-                path.addEllipse(QPointF(x, y), 1.5, 1.5)
-            item = QGraphicsPathItem(path)
+            m = measured[sel]
             pen = QPen(QColor(colour), 1.5)
             pen.setCosmetic(True)
-            item.setPen(pen)
+            dot = QPen(QColor(colour), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            dot.setCosmetic(True)
+            item = SegmentsItem(np.stack([m, m + d[sel] * scale], axis=1), pen, dots=m, dot_pen=dot)
             item.setZValue(5)
             self.scene().addItem(item)
             self.residual_items.append(item)
@@ -2061,11 +2120,7 @@ class PhotoView(_ZoomView):
 
     def _flag(self, x, y, label, color) -> None:
         pen = self._pen(color, 2)
-        path = QPainterPath(QPointF(0, 0))
-        path.lineTo(0, -22)
-        path.lineTo(12, -17)
-        path.lineTo(0, -12)
-        item = QGraphicsPathItem(path)
+        item = QGraphicsPathItem(polyline_path([(0, 0), (0, -22), (12, -17), (0, -12)]))
         item.setPen(pen)
         item.setBrush(QColor(color))
         item.setPos(QPointF(x, y))
@@ -2081,11 +2136,8 @@ class PhotoView(_ZoomView):
         self.items += [item, t]
 
     def _cross(self, x, y, color) -> None:
-        path = QPainterPath()
-        path.moveTo(-7, 0)
-        path.lineTo(7, 0)
-        path.moveTo(0, -7)
-        path.lineTo(0, 7)
+        path = polyline_path([(-7, 0), (7, 0)])
+        path.addPolygon(QPolygonF([QPointF(0, -7), QPointF(0, 7)]))
         item = QGraphicsPathItem(path)
         item.setPen(self._pen(color, 1.5))
         item.setPos(QPointF(x, y))
@@ -2161,9 +2213,7 @@ class PhotoView(_ZoomView):
         self._mask_poly.append((float(x), float(y)))
         if self._mask_poly_item is not None:
             self.scene().removeItem(self._mask_poly_item)
-        path = QPainterPath(QPointF(*self._mask_poly[0]))
-        for px, py in self._mask_poly[1:]:
-            path.lineTo(px, py)
+        path = polyline_path(self._mask_poly)
         pen = self._pen("#ff3030" if self.mask_mode != "unmask" else "#30d0ff", 2)
         pen.setStyle(Qt.PenStyle.DashLine)
         self._mask_poly_item = self.scene().addPath(path, pen)

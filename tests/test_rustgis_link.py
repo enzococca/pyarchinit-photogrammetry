@@ -5455,3 +5455,59 @@ def test_a_pull_writes_nothing_into_another_chunks_file(tmp_path):
     with pytest.raises(link.RustGisAbandoned):
         rl.pull()
     assert live.read_changes() == {} and live.stored_chunk() == "2"
+
+
+def _elevation_tables(n: int, x0: float = GX) -> dict:
+    """``{elevation id: (crs, world tables)}`` as the window writes them: ``n`` units of a wall, in 3D."""
+    from shapely.geometry import MultiPolygon, Point, Polygon
+
+    from pyarchinit_photogrammetry.engine.elevation import QUOTE_COLUMNS, UNIT_COLUMNS
+
+    units = [(MultiPolygon([Polygon([(x0 + k, GY, 99.0), (x0 + k + 0.5, GY, 99.0), (x0 + k + 0.5, GY, 99.4),
+                                     (x0 + k, GY, 99.4)])]), {"us": str(k + 1), "tipo": "US"}) for k in range(n)]
+    quote = [(Point(x0, GY, 99.25), {"quota_q": 99.25})]
+    return {"ab12cd34": (GB, {"unita": ("MULTIPOLYGON", dict(UNIT_COLUMNS), units),
+                              "quote": ("POINT", dict(QUOTE_COLUMNS), quote),
+                              "punti": ("POINT", {"label": "TEXT"}, []),
+                              "pietre": ("POLYGON", {"n": "INTEGER", "area_m2": "REAL"}, [])})}
+
+
+def test_the_drawings_of_the_elevations_go_to_rustgis_in_3d(tmp_path):
+    """The live GeoPackage holds the drawings of every elevation in 3D (``prospetto_<id>_<name>``): RustGIS gets them as
+    layers of a group "<chunk> - prospetti" at the start, and again, whole, when the program writes them again; the
+    plan's tables are untouched by it."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.io import gpkg
+    from pyarchinit_photogrammetry.io.qgis_link import ELEVATION_PREFIX
+
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    written = live.write_elevations(_elevation_tables(1))
+    assert written[:2] == [f"{ELEVATION_PREFIX}ab12cd34_unita", f"{ELEVATION_PREFIX}ab12cd34_quote"]
+    assert live.write_elevations(_elevation_tables(1)) == []  # unchanged: nothing written
+    con = sqlite3.connect(live.path)
+    (z,), = con.execute("SELECT z FROM gpkg_geometry_columns WHERE table_name = ?", (written[0],)).fetchall()
+    (blob,), = con.execute(f"SELECT geom FROM {written[0]}").fetchall()
+    con.close()
+    assert z == 1 and gpkg.geometry(blob).has_z and abs(gpkg.geometry(blob).bounds[0] - GX) < 1e-6
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    assert rl.start([])["layers"] == 7  # the plan's tables, as before
+    assert sorted(rl.elevation_layers) == sorted(written)
+    group = next(g for g in fake.groups if g["name"] == "Saggio 1 - prospetti")
+    assert sorted(group["layers"]) == sorted(rl.elevation_layers.values())
+    first = dict(rl.elevation_layers)
+    units = next(layer for layer in fake.layers if layer["id"] == first[written[0]])
+    assert len(units["features"]) == 1
+    # written again with two units: the next send loads them again, the old layers go
+    live.write_elevations(_elevation_tables(2))
+    assert rl.pending
+    rl.push()
+    assert set(rl.elevation_layers.values()).isdisjoint(first.values())
+    units = next(layer for layer in fake.layers if layer["id"] == rl.elevation_layers[written[0]])
+    assert len(units["features"]) == 2
+    assert [g["name"] for g in fake.groups].count("Saggio 1 - prospetti") == 1
+    # an elevation gone: its tables go from the file
+    live.write_elevations({})
+    assert live.elevation_tables() == []

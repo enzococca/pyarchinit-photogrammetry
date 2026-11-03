@@ -237,6 +237,7 @@ def _save_model(chunk: Chunk, mesh, progress: Progress):
 
     mesh = crop_mesh(chunk, mesh)  # nothing outside the reconstruction region
     path = chunk.data_dir / "model.ply"
+    chunk._before_product_write("model")
     mesh.export(str(path))
     chunk._set_product("model", path)
     chunk.products.pop("model_textured", None)

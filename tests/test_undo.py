@@ -143,3 +143,86 @@ def test_undo_in_the_window(window):
     w.runner.wait()
     app.processEvents()
     assert len(w.history.entries) == entries
+
+
+def test_script_entry_dropped(window):
+    """A script's entry that falls out of the history: the versions kept for its undo go when its products are the
+    active ones; what was put aside goes when they are not."""
+    from pyarchinit_photogrammetry.core import versions
+    from pyarchinit_photogrammetry.gui.undo import ScriptAction, files_under, snapshot_document
+
+    w, app = window
+    ch = w.chunk
+    kept = len(versions.versions(ch, "dem"))
+    snap = snapshot_document(w.doc)
+    assert set(snap) >= {ch.key, "meta", "order"} and snap[ch.key]["products"]["dem"] == ch.products["dem"]
+    assert not any("versions" in f.parts for f in files_under(w.doc.files_dir))
+    assert w.run_script_source("chunk.build_dem(resolution=0.02)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    action = w.history.entries[-1].action
+    assert isinstance(action, ScriptAction) and len(versions.versions(ch, "dem")) == kept + 1
+    w.history.reset()  # the entry falls out while the script's DEM is the active one: its version goes
+    assert len(versions.versions(w.chunk, "dem")) == kept
+    assert not (w.chunk.data_dir / "versions" / "dem" / action.versions[0][2]).exists()
+    assert w.run_script_source("chunk.build_dem(resolution=0.03)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    action = w.history.entries[-1].action
+    w.history.undo()
+    aside = w.chunk.data_dir / "versions" / "dem" / f"{action.versions[0][2]}-script"
+    assert aside.exists()  # the script's DEM put aside, for Ripeti
+    w.history.reset()
+    assert not aside.exists() and len(versions.versions(w.chunk, "dem")) == kept
+
+
+def test_a_tin_built_again_by_a_script_is_undone(window):
+    """The TIN (tin.npz and tin.json) written again by a script: Annulla puts the old files and meta back, Ripeti the
+    new ones."""
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    w, app = window
+    ch = w.chunk
+    T.build_tin(ch, source="dem", max_error=0.05)
+    w.doc.save()
+    w.history.reset()
+    folder = ch.data_dir / "tin"
+    old = {p.name: p.read_bytes() for p in folder.iterdir()}
+    old_meta = dict(ch.meta["tin"])
+    assert set(old) == {"tin.npz", "tin.json"}
+    assert w.run_script_source("from pyarchinit_photogrammetry.engine import tin as T\n"
+                               "T.build_tin(chunk, source='dem', max_error=0.01)", "TIN nuovo")
+    w.runner.wait()
+    app.processEvents()
+    new = {p.name: p.read_bytes() for p in folder.iterdir()}
+    new_meta = dict(w.chunk.meta["tin"])
+    assert new != old and new_meta["n_vertices"] != old_meta["n_vertices"]
+    w.undo()
+    ch = w.chunk
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == old and ch.meta["tin"] == old_meta
+    assert T.chunk_tin(ch).n_vertices == old_meta["n_vertices"]
+    w.redo()
+    ch = w.chunk
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == new and ch.meta["tin"] == new_meta
+    assert T.chunk_tin(ch).n_vertices == new_meta["n_vertices"]
+
+
+def test_versions_of_a_saved_script_are_kept_and_missing_ones_pruned(window, caplog):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import versions
+
+    w, app = window
+    kept = len(versions.versions(w.chunk, "dem"))
+    assert w.run_script_source("chunk.build_dem(resolution=0.02)", "DEM nuovo")
+    w.runner.wait()
+    app.processEvents()
+    vid = w.history.entries[-1].action.versions[0][2]
+    w.doc.save()  # saved after the script: the saved project lists the version
+    w.history.reset()
+    assert len(versions.versions(w.chunk, "dem")) == kept + 1
+    assert versions.version_file(w.chunk, "dem", vid).exists()
+    shutil.rmtree(w.chunk.data_dir / "versions" / "dem" / vid)
+    with caplog.at_level("WARNING"):
+        again = ppg.Document.open(w.doc.path)
+    assert all(e["id"] != vid for e in versions.versions(again.chunk, "dem"))
+    assert any(vid in m for m in caplog.messages)

@@ -85,6 +85,7 @@ plugins:
             Desktop interface: Interfaccia
             Menus: Menu
             Panes: Pannelli
+            3D view and trackball: Vista 3D e trackball
             Photos and markers: Foto e marker
             Processing: Elaborazione
             Drawing and measures: Disegno e misure
@@ -92,7 +93,10 @@ plugins:
             Multispectral and thermal: Multispettrale e termico
             Exports and reports: Esportazioni e rapporti
             Errors and updates: Errori e aggiornamenti
+            The assistant: L'assistente
+            TIN and break lines: TIN e linee di rottura
             Python API: API Python
+            Scripts: Script
             PyArchInit: PyArchInit
             QGIS, Metashape, WebODM, Photo3D: QGIS, Metashape, WebODM, Photo3D
             BIM and IFC: BIM e IFC
@@ -165,6 +169,7 @@ nav:
           - gui/index.md
           - Menus: gui/menus.md
           - Panes: gui/panes.md
+          - 3D view and trackball: gui/view3d.md
           - Photos and markers: gui/photos-markers.md
           - Processing: gui/processing.md
           - Drawing and measures: gui/drawing.md
@@ -172,7 +177,10 @@ nav:
           - Multispectral and thermal: gui/multispectral.md
           - Exports and reports: gui/exports.md
           - Errors and updates: gui/help.md
+          - The assistant: gui/assistant.md
+      - TIN and break lines: tin.md
       - Python API: api.md
+      - Scripts: scripting.md
       - PyArchInit: pyarchinit.md
       - QGIS, Metashape, WebODM, Photo3D: integrations.md
       - BIM and IFC: bim.md

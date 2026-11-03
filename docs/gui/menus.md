@@ -196,6 +196,8 @@ thermal and satellite captures, plugins.
 | **Orthophoto patch (assign images)** | which photo to use in an area of the orthophoto: [see below](#tools-orthophoto-patch) |
 | **Contour lines...** | the contours of the DEM, as a layer to query and export |
 | **Cut / fill volume...** | the volume removed and added against a plane or a DEM of before |
+| **TIN...** | a network of triangles from the DEM, the ground of the cloud or the spot heights, with the break lines as edges ([TIN and break lines](../tin.md)) |
+| **TIN and break lines** | the TIN again, *Contour lines from the TIN...*, *Volume from the TIN...*, *DEM from the TIN*, *Export TIN...*, *Draw break lines*, *Export the break lines...* |
 | **Propose US and relationships (Extended Matrix)...** | number, type and stratigraphic relationships for the units with no number ([US proposal](archaeology.md#us-proposal)) |
 | **Excavation phases (volumes and relationships)...** | a survey per phase: volumes between phases and relationships suggested ([phases](archaeology.md#excavation-phases)) |
 | **Coregister DEM...** | moves the DEM onto the DEM of another survey where the ground did not change ([coregistration](processing.md#dem-coregistration)) |
@@ -203,6 +205,8 @@ thermal and satellite captures, plugins.
 | **Calibrate the colour with the colour chart...** | a ColorChecker photographed in the trench makes the Munsell colours comparable |
 | **Relief visualisations...** | sky-view factor, openness, local and multi-scale relief, hillshades ([relief](archaeology.md#relief-visualisations)) |
 | **Raster calculator...** | formulas on the rasters of the project, those of the plugins too, as in QGIS ([calculator](archaeology.md#raster-calculator)) |
+| **Region on markers...** | a thin reconstruction region on the plane of three markers (a wall, an object), its thickness along the normal: depth maps, dense cloud and model stay inside it |
+| **Normal map...** | the normals of the surface (model or DEM) on the grid of the orthophoto, red east, green north, blue up; shown in the 2D view and listed in the Workspace |
 | **Section options...** · **Plan slice (horizontal slice)...** | what the sections cut (model or cloud, classes); a plan at a height |
 | **Pottery profile from a mesh...** | diameters, height and profile of a vessel or a sherd ([pottery](archaeology.md#pottery-profiles)) |
 | **3D proxies of the units...** | the solids of the units for the Extended Matrix and BIM ([proxies](archaeology.md#us-proxies)) |
@@ -210,6 +214,7 @@ thermal and satellite captures, plugins.
 | **Segment Anything 2.1** | units and stones drawn by SAM 2.1: [see below](#tools-segment-anything-21) |
 | **Export IFC (BIM)...** | the units or their proxies in an IFC file ([BIM and IFC](../bim.md)) |
 | **Run Python script...** | a script with the modules of the program ([API](../api.md)) |
+| **Assistant** | *Open the assistant* and *Assistant settings...*: the model that answers ([the assistant](assistant.md)) |
 | **Multispectral** · **Thermal** | multispectral and thermal captures: [see below](#tools-multispectral) |
 | **Satellite imagery** | satellite scenes on the DEM of the survey: [see below](#tools-satellite-imagery) |
 | **Network nodes...** | other computers working on the same project ([nodes](processing.md#network-nodes)) |
@@ -395,8 +400,9 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | Item | What it is for |
 | --- | --- |
 | **Panes** | every pane open or closed: [see below](#view-panes) |
-| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++) |
+| **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++; also the *Assistant*) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
+| **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
 | **Theme** | light or dark, remembered |
 | **Lingua / Language** | Italian or English, at the next start (*Restart now* opens the project again at once) |
 

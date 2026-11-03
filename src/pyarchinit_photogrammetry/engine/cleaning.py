@@ -332,6 +332,7 @@ def store_model(chunk: Chunk, mesh, texture_kept: bool = True) -> Path:
         mesh.texcoords = None
         mesh.set_texture_file(None)
         chunk.products.pop("model_textured", None)
+    chunk._before_product_write("model")
     path = write_mesh(chunk.own_product_path("model"), mesh)
     chunk._set_product("model", path)
     preview = chunk.data_dir / "model_preview.ply"

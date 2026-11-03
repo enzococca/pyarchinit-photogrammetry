@@ -22,10 +22,16 @@ hidden = (collect_submodules("pyarchinit_photogrammetry") + collect_submodules("
              "matplotlib.backends.backend_svg", "matplotlib.backends.backend_pdf", "matplotlib.backends.backend_ps",
              "matplotlib.backends.backend_qtagg",
              # the PDF report (fpdf2) and the Excel tables (openpyxl), imported only when used
-             "fpdf", "openpyxl"]
+             "fpdf", "openpyxl",
+             # the assistant: Claude through its SDK (imported only when chosen) and the API keys in the keychain of
+             # the system, whose backend keyring picks at run time through entry points PyInstaller does not follow
+             "anthropic", "keyring", "keyring.backends.macOS", "keyring.backends.Windows",
+             "keyring.backends.SecretService"]
           # fontTools loads the tables of a font by their tags (__import__): the PDF report embeds DejaVu Sans
-          + collect_submodules("fontTools.ttLib.tables") + collect_submodules("fpdf") + collect_submodules("openpyxl"))
-for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core", "pye57", "colour"):  # ppg_core: native kernels
+          + collect_submodules("fontTools.ttLib.tables") + collect_submodules("fpdf") + collect_submodules("openpyxl")
+          + collect_submodules("keyring.backends"))
+for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core", "pye57", "colour",  # ppg_core: native kernels
+                 "anthropic"):  # anthropic: the Claude provider of the assistant (its SDK, in the extra `assistant`)
     try:
         __import__(optional)
     except Exception:
@@ -44,7 +50,10 @@ datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / name), "pyarc
          + collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh")
-         + collect_data_files("fpdf"))  # its colour profile (importlib.resources)
+         + collect_data_files("fpdf")  # its colour profile (importlib.resources)
+         # the guide the assistant reads (Markdown of docs/) and its evaluation set, in their folders; already in
+         # collect_data_files("pyarchinit_photogrammetry"), named here so that a change of that line cannot drop them
+         + collect_data_files("pyarchinit_photogrammetry.assistant", includes=["guide/**/*.md", "evaluation/*.json"]))
 try:  # the native core carries RTKLIB (BSD 2-clause): its notice goes with the application, in the core's
     datas += copy_metadata("pyarchinit-photogrammetry-core")  # dist-info (licenses/NOTICE, license.txt)
 except importlib_metadata.PackageNotFoundError:  # no core, no RTKLIB
