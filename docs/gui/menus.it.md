@@ -288,8 +288,8 @@ Sono gli strumenti della barra *Disegno*, descritti con le loro finestre in [Dis
 | --- | --- |
 | **Disegna un'area e scegli le sue foto** | un'area, poi la foto da usare lì (con l'anteprima) |
 | **Assegna immagini al poligono selezionato...** | lo stesso su un'unità già disegnata |
-| **Aggiorna l'ortofoto con le patch** | applica le patch non ancora applicate |
-| **Rimuovi tutte le patch...** | l'ortofoto torna come era |
+| **Aggiorna con le patch** | applica le patch non ancora applicate, sull'ortofoto o sul prospetto mostrato |
+| **Rimuovi tutte le patch...** | l'ortofoto (o il prospetto mostrato) torna come era |
 
 Come si sceglie la foto giusta è spiegato in [Elaborazione](processing.md#patch-dellortofoto).
 

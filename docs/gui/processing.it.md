@@ -354,7 +354,7 @@ una modifica sul prospetto in cui è stata fatta.
 * Una **quota** cliccata su un prospetto prende la quota della superficie in quel punto (la Z del punto del
   modello, letta attraverso il rilievo) e la sua posizione in pianta; sul prospetto mostra quella quota. Un **punto
   di misura** legge i prodotti del chunk in quello stesso punto della superficie, e un **marker** vi viene messo.
-* Gli strumenti che lavorano sulla pianta - traccia di sezione, ritaglio, patch, misura area, modifica del DEM, foto
+* Gli strumenti che lavorano sulla pianta - traccia di sezione, ritaglio, misura area, modifica del DEM, foto
   di un'area, regione, tavola dei colori - sono rifiutati mentre è mostrato un prospetto, con un messaggio nella
   barra di stato: apri l'ortofoto o il DEM.
 * Le **pietre** trovate con SAM su un prospetto sono sue (ogni prospetto ha il suo layer *Pietre*). Le pietre
@@ -380,6 +380,18 @@ una modifica sul prospetto in cui è stata fatta.
   **QField** porta solo la pianta.
 * I disegni della pianta restano caricati qualunque cosa sia mostrata: le funzioni che lavorano sulla pianta
   (proxy, volumi, classi, IFC, proposta di US, PyArchInit, fasi, rapporto) usano sempre i disegni della pianta.
+
+### Patch sui prospetti
+
+Lo strumento *Patch* funziona anche su un prospetto o una sezione, come sull'ortofoto (vedi
+[Patch dell'ortofoto](#patch-dellortofoto)): l'area si disegna sul prospetto, nei suoi metri (u, v), e la finestra
+propone le foto che la inquadrano lì, le migliori prima. Cambia questo: la superficie è il rilievo del prospetto,
+quindi non c'è *Sul suolo attorno all'area* né la texture del modello; una patch appartiene al suo prospetto
+(conservata nella sua voce, elencata nel layer *Patch ortofoto* finché è mostrato) e non tocca mai la pianta né un
+altro prospetto. *Applica* ridisegna solo le celle della patch; *Elimina* sulla patch la toglie e le celle tornano
+com'erano; *Modifica > Annulla* copre entrambe. Casi tipici: una foto con la parete bruciata dal sole, esclusa su una
+fascia; una buona foto assegnata dove la mesh è sbagliata e la foto migliore per quelle celle è quella sbagliata.
+Dalla riga di comando: `ppg patch scavo.ppg --elevation "Parete sud" --suggest --bbox ...`.
 
 ## Modificare il DEM
 
@@ -437,7 +449,7 @@ albero sopra un muro, una persona nel saggio, un'ombra).
 
 Le patch sono un layer, *Patch ortofoto*: selezionane una e premi ++delete++ (o *Elimina selezionati*) e
 l'ortofoto viene ridisegnata lì senza di essa. Una costruzione successiva dell'ortofoto applica di nuovo ogni
-patch; *Aggiorna l'ortofoto con le patch* applica quelle non ancora applicate (dopo un aggiornamento interrotto).
+patch; *Aggiorna con le patch* applica quelle non ancora applicate (dopo un aggiornamento interrotto).
 Un'ortofoto di un altro programma (esportata da Metashape) viene copiata nella cartella del chunk alla prima
 patch, e i suoi pixel tornano dove una patch viene tolta.
 
