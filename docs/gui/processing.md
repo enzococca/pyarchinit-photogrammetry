@@ -294,6 +294,28 @@ of the 3D view. The orthophoto and the relief of the model are built on a plane,
   the first to the second;
 * the **cylinder of a selected polygon**: the development of a well or a tower, seen from inside or from outside.
 
+**The axis of a cylindrical development.** The dialog of a cylinder asks for its *Axis*:
+
+* **Vertical** (the default): v is the height, as on a section. A tower that leans, or whose courses are not level,
+  comes out with its crest and its courses as waves: the height is right, the picture is not straight.
+* **The region's** (offered only when the chunk has a region): the Z axis of the region, as Metashape develops a
+  cylinder along its region.
+* **From the tower's crest**: the normal of the plane through the top of the wall all round (the highest point of
+  the model every 5 degrees, a plane fitted twice leaving out the points far from it). A crest that is not a plane
+  - a side collapsed - is refused with its residual: use the region's axis or two points then. A single fallen
+  stretch is left out and does not tilt the axis.
+* **Two points in the 3D view**: after the dialog, click the bottom and the top of the tower's axis.
+
+With a tilted axis **v is the distance along the axis**, not the height, and the courses and the crest come out
+straight. Before building, the window says the tilt and its direction ("axis tilted 6.6° towards NE", the direction
+the top leans to); cancel there if it is not the tower's axis. The tilt stays with the elevation (its tooltip in the
+workspace).
+
+**Scale on the wall.** By default u is the arc on the reference cylinder (the circle fitted to the polygon): where
+the wall stands outside the circle the development is shorter than the wall, where it stands inside it is longer.
+With *Scale on the wall* u is the length measured along the wall (an oval tower, an irregular well): a first pass
+measures where the wall is all round, then the development is built on that length.
+
 <figure markdown="span">
   ![The 3D view with the Elevation button](../img/gui/elevation-3d-view.png)
   <figcaption>The 3D view looking at a tell from the south: <em>Elevation > Orthophoto from this view</em> takes this plane.</figcaption>
@@ -332,6 +354,8 @@ its metres. From the command line:
 ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
 ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
+ppg elevation scavo.ppg --circle X1,Y1,X2,Y2,X3,Y3 --outside [--axis vertical|region|crest|points]
+    [--axis-points X,Y,Z,X,Y,Z] [--scale cylinder|wall]
 ```
 
 ### Drawings on elevations and sections

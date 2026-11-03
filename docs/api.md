@@ -1414,8 +1414,10 @@ ray from the viewer side on the model, kept within `depth=(dmin, dmax)` (what st
 | `plane_from_markers(points, a, b, c=None, d=None, toward=None, heights=True)` | the plane of markers with the axes chosen, as Metashape's planar projection: u from `a` towards `b` (0 at `a`), v along `c` -> `d` or perpendicular and upwards; facing `toward` (the cameras) |
 | `plane_from_view(centre, toward, up, heights=True)` | the plane of a view: through `centre`, facing `toward`, v along the `up` of the screen |
 | `with_heights(plane)`, `heights_measured(frame)` | v made the world height when the v axis is vertical within a degree; whether it is |
-| `cylinder_from_circle(chunk, points, inside=True)` | the vertical cylinder through a circle fitted to plan points |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation")` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]`; `kind="section"` keeps only what lies behind the plane and saves the profile |
+| `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | the cylinder through a circle fitted to plan points; its axis by `cylinder_axis`, kept in `Cylinder.tilt` |
+| `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | the axis of a cylinder and `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder")` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]`; `kind="section"` keeps only what lies behind the plane and saves the profile |
+| `wall_map(surface)`, `wall_length(entry)` | the `u_map` that makes u the length along the wall; the length of the wall all round |
 | `cut_profile(chunk, frame, bounds=None, simplify=0)` | the line where a plane cuts the model, polylines of `(u, v)` |
 | `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | the profile of a section; as a DXF in the coordinates of the elevation (layers PROFILO, MARKER) |
 | `markers_on(chunk, entry)` | `(label, u, v, d)` of the markers lying on an elevation |
@@ -1428,6 +1430,22 @@ colour correction) and writes the files in `<chunk data>/elevations/<id>/` (fram
 in `frame.json`). `bounds=(u0, v0, u1, v1)` builds only that part (what a view shows); without it the
 part of the model inside the depth band. The entry says `kind`, `bounds`, `v_is_height` and, for a
 section, the `profile` file. CLI: `ppg elevation`.
+
+**The axis of a cylinder.** `cylinder_axis` methods: `vertical` ([0, 0, 1], centre at height 0, v = the
+height); `region` (the local Z of `chunk.meta["region"]`, ValueError without a region); `crest` (the upward
+normal of the plane of the crest: the highest model vertex every 5 degrees within the radial band `depth`,
+default (-3, 3) m, a plane fitted twice without the points over 3 MAD; ValueError when the 90th percentile
+of the residuals is over `tolerance`); `points` (two world points, bottom and top, at least 1 m apart). The
+azimuth is where the top of the axis leans (0 = north, clockwise); the centre goes to `centre_z` so that the
+axis passes through the tower. With a tilted axis v is the distance along it. The tilt is written in the
+frame (`"tilt"`) and in the entry (`entry["tilt"]`).
+
+**The scale on the wall.** `Cylinder(..., u_map=[[theta_deg, u], ...])`: theta from `start` in the direction
+u grows, a full turn, both columns increasing; `point` and `coords` interpolate it both ways. Without it
+u = theta x radius. `build_elevation(scale="wall")` measures the mean depth of the wall in columns of 1
+degree, builds the map with the length of the wall's trace (from -180 degrees, u = 0 at `start`: the seam
+stays where it is without a map) and builds the development on it; `entry["scale"] = "wall"`. Entries
+without `tilt` and `u_map` are vertical and on the cylinder, as before 1.7.1.
 
 ### Drawings on elevations and sections
 

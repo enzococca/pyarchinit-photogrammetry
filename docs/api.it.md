@@ -1459,8 +1459,10 @@ una sezione lasciata davanti al muro - viene attraversato).
 | `plane_from_markers(points, a, b, c=None, d=None, toward=None, heights=True)` | il piano dei marker con gli assi scelti, come la proiezione planare di Metashape: u da `a` verso `b` (0 su `a`), v lungo `c` -> `d` o perpendicolare e verso l'alto; rivolto verso `toward` (le camere) |
 | `plane_from_view(centre, toward, up, heights=True)` | il piano di una vista: per `centre`, rivolto verso `toward`, v lungo l'`up` dello schermo |
 | `with_heights(plane)`, `heights_measured(frame)` | v diventa la quota mondo quando l'asse v è verticale entro un grado; se lo è |
-| `cylinder_from_circle(chunk, points, inside=True)` | il cilindro verticale per un cerchio adattato a punti in pianta |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation")` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | il cilindro per un cerchio adattato a punti in pianta; il suo asse da `cylinder_axis`, tenuto in `Cylinder.tilt` |
+| `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | l'asse di un cilindro e `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder")` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `wall_map(surface)`, `wall_length(entry)` | la `u_map` che fa di u la lunghezza lungo il muro; la lunghezza del muro tutto intorno |
 | `cut_profile(chunk, frame, bounds=None, simplify=0)` | la linea dove un piano taglia il modello, polilinee di `(u, v)` |
 | `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | il profilo di una sezione; come DXF nelle coordinate del prospetto (layer PROFILO, MARKER) |
 | `markers_on(chunk, entry)` | `(nome, u, v, d)` dei marker che stanno su un prospetto |
@@ -1473,6 +1475,22 @@ delle foto, fusione, correzione del colore) e scrive i file in `<dati chunk>/ele
 (sistema nei tag e in `frame.json`). `bounds=(u0, v0, u1, v1)` costruisce solo quella parte (quello che
 mostra una vista); senza, la parte del modello dentro la fascia di profondità. La voce dice `kind`,
 `bounds`, `v_is_height` e, per una sezione, il file `profile`. Riga di comando: `ppg elevation`.
+
+**L'asse di un cilindro.** I metodi di `cylinder_axis`: `vertical` ([0, 0, 1], centro a quota 0, v = la
+quota); `region` (l'asse Z locale di `chunk.meta["region"]`, ValueError senza regione); `crest` (la normale
+verso l'alto del piano della cresta: il vertice più alto del modello ogni 5 gradi dentro la fascia radiale
+`depth`, predefinita (-3, 3) m, un piano adattato due volte senza i punti oltre 3 MAD; ValueError quando il
+90° percentile degli scarti supera `tolerance`); `points` (due punti mondo, in basso e in alto, distanti
+almeno 1 m). L'azimut è la direzione verso cui pende la sommità dell'asse (0 = nord, in senso orario); il
+centro va a `centre_z` così che l'asse passi per la torre. Con un asse inclinato v è la distanza lungo
+l'asse. L'inclinazione è scritta nel sistema (`"tilt"`) e nella voce (`entry["tilt"]`).
+
+**La scala sulla parete.** `Cylinder(..., u_map=[[theta_gradi, u], ...])`: theta da `start` nel verso in
+cui cresce u, un giro intero, entrambe le colonne crescenti; `point` e `coords` la interpolano nei due sensi.
+Senza, u = theta x raggio. `build_elevation(scale="wall")` misura la profondità media del muro in colonne di
+1 grado, costruisce la mappa con la lunghezza della traccia del muro (da -180 gradi, u = 0 su `start`: la
+cucitura resta dove sta senza mappa) e costruisce lo sviluppo su di essa; `entry["scale"] = "wall"`. Le voci
+senza `tilt` e `u_map` sono verticali e sul cilindro, come prima della 1.7.1.
 
 ### Disegni sui prospetti e sulle sezioni
 

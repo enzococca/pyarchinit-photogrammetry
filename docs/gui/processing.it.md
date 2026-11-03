@@ -303,6 +303,28 @@ viene da:
   secondo;
 * il **cilindro di un poligono selezionato**: lo sviluppo di un pozzo o di una torre, visto da dentro o da fuori.
 
+**L'asse di uno sviluppo cilindrico.** Il dialogo di un cilindro chiede l'*Asse*:
+
+* **Verticale** (il predefinito): v è la quota, come in una sezione. Una torre che pende, o i cui corsi non sono
+  in piano, viene con la cresta e i corsi a onde: la quota è giusta, l'immagine non è diritta.
+* **Della regione** (proposto solo quando il chunk ha una regione): l'asse Z della regione, come Metashape sviluppa
+  un cilindro lungo la sua regione.
+* **Dalla cresta della torre**: la normale al piano che passa per la sommità del muro tutto intorno (il punto più
+  alto del modello ogni 5 gradi, un piano adattato due volte lasciando fuori i punti lontani). Una cresta che non è
+  un piano - un lato crollato - viene rifiutata con il suo scarto: in quel caso si usa l'asse della regione o due
+  punti. Un solo tratto caduto viene lasciato fuori e non inclina l'asse.
+* **Due punti nella vista 3D**: dopo il dialogo si clicca il punto in basso e quello in alto dell'asse della torre.
+
+Con un asse inclinato **v è la distanza lungo l'asse**, non la quota, e i corsi e la cresta vengono diritti. Prima
+di costruire, la finestra dice l'inclinazione e la direzione ("asse inclinato di 6,6° verso NE", la direzione verso
+cui pende la sommità); se non è l'asse della torre si annulla lì. L'inclinazione resta con il prospetto (il suo
+suggerimento nell'area di lavoro).
+
+**Scala sulla parete.** Di norma u è l'arco sul cilindro di riferimento (il cerchio adattato al poligono): dove il
+muro sta fuori dal cerchio lo sviluppo è più corto del muro, dove sta dentro è più lungo. Con *Scala sulla parete*
+u è la lunghezza misurata lungo il muro (una torre ovale, un pozzo irregolare): un primo passaggio misura dove sta
+il muro tutto intorno, poi lo sviluppo viene costruito su quella lunghezza.
+
 <figure markdown="span">
   ![La vista 3D con il pulsante Prospetto](../img/gui/elevation-3d-view.png)
   <figcaption>La vista 3D che guarda un tell da sud: <em>Prospetto > Ortofoto da questa vista</em> prende questo piano.</figcaption>
@@ -341,6 +363,8 @@ nei suoi metri. Dalla riga di comando:
 ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
 ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
+ppg elevation scavo.ppg --circle X1,Y1,X2,Y2,X3,Y3 --outside [--axis vertical|region|crest|points]
+    [--axis-points X,Y,Z,X,Y,Z] [--scale cylinder|wall]
 ```
 
 ### Disegni sui prospetti e sulle sezioni
