@@ -115,8 +115,16 @@ the top:
   the vertices and double click), *The part shown in the 2D view*;
 * **Least confidence** (0.30): higher, fewer and surer proposals;
 * **Smallest area** and **Largest area** in m² (empty: no limit);
-* **Resolution**: automatic - that of the raster, but not finer than 1 cm/px, which is plenty for
-  stones - or coarser, for fewer tiles and a faster search;
+* **Resolution**: automatic - that of the raster, but not finer than 1 cm/px, good for objects from
+  30 cm up - or coarser, for fewer tiles and a faster search;
+* **Size of the objects** (plugin 0.4.0): how big the things looked for are; the automatic resolution
+  follows it so that the models see them a few dozen pixels wide (stones of 15 cm: 0.5 cm/px). The
+  models look at a tile of 1024 px resized to 800 px (Grounding DINO) or 1008 px (SAM 3): at 1 cm/px a
+  stone of 15 cm is 12 px to them, and most are missed;
+* **Above the ground (DEM)** (plugin 0.4.0): with the chunk's DEM, every proposal is cut to the part
+  standing at least this height above the local ground, and the proposals that do not stand go. For
+  walls and raised structures: the models see a wall from above with a confidence of 0.05-0.2, the
+  stones around it as much, and the relief is what delineates it. 15 cm is a good start;
 * **Models**: *Normal* (Grounding DINO base, SAM 2.1 small), *Fast* (tiny, tiny), *Precise* (base,
   large);
 * *Find*;
@@ -170,6 +178,8 @@ ppg plugin samgeo install                                   # PyTorch and the mo
 ppg plugin samgeo segment scavo.ppg pietre                  # the whole orthophoto
 ppg plugin samgeo segment scavo.ppg "roof tile" --area 2480000,4500000,2480004,4500003 --units
 ppg plugin samgeo segment scavo.ppg muri --resolution 0.02 --min-area 0.5 --models precise --json
+ppg plugin samgeo segment scavo.ppg pietre --size 0.15                  # 15 cm stones: searched at 0.5 cm/px
+ppg plugin samgeo segment scavo.ppg muri --relief 0.15                  # what stands 15 cm above the ground (DEM)
 ppg plugin samgeo list scavo.ppg
 ppg plugin samgeo export scavo.ppg samgeo.gpkg --run pietre
 ppg plugin samgeo remove scavo.ppg pietre
@@ -187,18 +197,31 @@ everything found.
 2. Each tile goes to the models; each mask becomes a polygon in the coordinates of the chunk.
 3. An object cut by the border of a tile is joined with its other part from the next tile; two boxes on
    the same object leave one proposal; with more than one tile, a box as large as a whole tile is left
-   out (Grounding DINO often answers "the whole image" beside the objects). Then the score and area
-   filters and, with a polygon, only what lies inside it.
+   out (Grounding DINO often answers "the whole image" beside the objects). Objects lying inside a
+   bigger one are either its parts (a stone's face in its stone, the two halves of a wall: they go, the
+   object stays) or the objects a box was drawn around (two or more with ground between them, or one
+   covering under a fifth of it: the group goes). No two proposals overlap: the better one keeps the
+   edge two masks share. Then the score and area filters and, with a polygon, only what lies inside
+   it.
+4. With *Above the ground* the chunk's DEM cuts every proposal to what stands above the local ground
+   (the DEM opened over 3 m) and drops what does not stand on at least a fifth of its area; the column
+   `relief_m` of the GeoPackage is the median height of what stayed.
 
 ## Reading the results { #results }
 
 * **Proposals, not a drawing.** The models find most of the objects they recognise and miss others -
   small ones, a few pixels across, above all; some proposals are wrong. Check them before making
   units.
-* **The score** is Grounding DINO's confidence in the box: typical values on aerial images are 0.3-0.5.
-  Raising the least confidence leaves fewer, surer proposals; lowering it finds more, and more errors.
-* **The resolution** matters: an object should be at least some ten pixels across. For stones of
-  10-20 cm, 1 cm/px.
+* **The score** is Grounding DINO's confidence in the box (SAM 3's in the mask): typical values on
+  aerial images are 0.3-0.5. Raising the least confidence leaves fewer, surer proposals; lowering it
+  finds more, and more errors. Walls seen from above score 0.05-0.2, and so does the ground around
+  them: lowering the confidence to find them covers the area with proposals; the relief finds them.
+* **The resolution** matters: an object should be a few dozen pixels across in the tile the models
+  see, which is the tile of 1024 px resized to 800 (Grounding DINO) or 1008 (SAM 3). Give the size of
+  the objects and the resolution follows: stones of 15 cm at 0.5 cm/px, not at 1 cm/px. After a run
+  the log says when the proposals were small or the models unsure, and what to change.
+* **Stones one by one** are the program's stone tool's job (*Pietre* on the drawing bar: SAM on every
+  object of the view, no text); Samgeo finds things by name.
 * **Objects, not soils.** The models find objects - stones, bricks, tiles, trees, people, tools - far
   better than the contrast between two soils: that will be the task of the plugin geoai, which learns
   from your drawings.
