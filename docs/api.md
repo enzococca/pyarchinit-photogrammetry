@@ -1499,7 +1499,7 @@ A patch takes the colours of an area of the orthomosaic from photos chosen by ha
 | `chunk.update_elevation(frame, progress=None, workers=None, skip_unreadable=False)` | the same as `update_orthomosaic` for the orthophoto of an elevation: redraws only the cells of its changed patches, with the settings it was built with (`engine.elevation.entry_settings(entry)`) |
 | `chunk.remove_ortho_patch(id, frame=None)` | removes one |
 | `engine.patches.remove_patch(chunk, id, frame=None)`, `clear_patches(chunk, frame=None)` | remove one, or all |
-| `engine.patches.changed_patches(chunk, frame=None)` | the patches added, changed or removed since the orthomosaic file was written |
+| `engine.patches.changed_patches(chunk, frame=None)` | the patches added, changed or removed since the orthomosaic file (or the elevation's) was written |
 | `engine.patches.photos_for_area(chunk, polygon, limit=12, frame=None)` | the photos that frame the area, best first: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
 | `engine.patches.previews(chunk, polygon, photos, max_side=320, frame=None)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
 | `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")` | colours again the faces of the textured model inside a polygon (seen from above) or chosen by index, from the chosen photos |

@@ -1546,7 +1546,7 @@ precedente).
 | `chunk.update_elevation(frame, progress=None, workers=None, skip_unreadable=False)` | come `update_orthomosaic` per l'ortofoto di un prospetto: ridisegna solo le celle delle sue patch cambiate, con le impostazioni con cui è stata costruita (`engine.elevation.entry_settings(entry)`) |
 | `chunk.remove_ortho_patch(id, frame=None)` | ne toglie una |
 | `engine.patches.remove_patch(chunk, id, frame=None)`, `clear_patches(chunk, frame=None)` | ne tolgono una, o tutte |
-| `engine.patches.changed_patches(chunk, frame=None)` | le patch aggiunte, cambiate o tolte da quando il file dell'ortofoto è stato scritto |
+| `engine.patches.changed_patches(chunk, frame=None)` | le patch aggiunte, cambiate o tolte da quando il file dell'ortofoto (o del prospetto) è stato scritto |
 | `engine.patches.photos_for_area(chunk, polygon, limit=12, frame=None)` | le foto che inquadrano l'area, le migliori per prime: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
 | `engine.patches.previews(chunk, polygon, photos, max_side=320, frame=None)` | `({(label, surface): RGBA}, now, bounds)`: l'area da ogni foto su ogni superficie, il resto com'è |
 | `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")` | colora di nuovo le facce del modello con texture dentro un poligono (visto dall'alto) o scelte per indice, dalle foto scelte |

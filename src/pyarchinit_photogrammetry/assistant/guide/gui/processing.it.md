@@ -391,6 +391,8 @@ quindi non c'è *Sul suolo attorno all'area* né la texture del modello; una pat
 altro prospetto. *Applica* ridisegna solo le celle della patch; *Elimina* sulla patch la toglie e le celle tornano
 com'erano; *Modifica > Annulla* copre entrambe. Casi tipici: una foto con la parete bruciata dal sole, esclusa su una
 fascia; una buona foto assegnata dove la mesh è sbagliata e la foto migliore per quelle celle è quella sbagliata.
+Le patch restano a quel prospetto: un nuovo prospetto costruito sulla stessa parete parte senza (a differenza
+dell'ortofoto, le cui costruzioni successive applicano di nuovo le sue patch).
 Dalla riga di comando: `ppg patch scavo.ppg --elevation "Parete sud" --suggest --bbox ...`.
 
 ## Modificare il DEM

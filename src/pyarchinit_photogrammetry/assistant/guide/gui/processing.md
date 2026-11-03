@@ -350,7 +350,6 @@ where it was made.
   orthophoto or the DEM.
 * The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*). Stones drawn
   on elevations by versions before 1.7.0 were shared by all of them: they are left out when the project opens.
-
 * **Export** (right click on the elevation) writes, beside orthophoto, relief, plane and profile, its drawings:
   `<name>_disegni.dxf` in the metres of the elevation (layers US, USM, QUOTE, PIETRE, PUNTI and PROFILO for a
   section), `<name>_disegni.svg` at scale over the orthophoto, `<name>_disegni.png`, and two GeoPackages:
@@ -382,6 +381,8 @@ so there is no *On the ground around the area* and no texture of the model; a pa
 another elevation. *Apply* redraws only the cells of the patch; *Delete* on the patch feature takes it away and the
 cells come back; *Edit > Undo* covers both. Typical cases: a photo with the wall washed out by the sun, excluded on a band;
 one good photo assigned where the mesh is off and the best photo of the cells is the wrong one.
+The patches stay with that elevation: a new elevation built on the same wall starts without them (unlike the
+orthomosaic, whose later builds apply its patches again).
 From the command line: `ppg patch scavo.ppg --elevation "South wall" --suggest --bbox ...`.
 
 ## Editing the DEM
