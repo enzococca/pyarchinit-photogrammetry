@@ -406,6 +406,13 @@ def test_ground_under_the_tower_does_not_move_the_axis(tower):
         z = cyl.tilt["centre_z"]
         true = BASE + (z - BASE[2]) / AXIS[2] * AXIS
         assert np.linalg.norm(cyl.centre - true) < 0.05, (method, np.linalg.norm(cyl.centre - true))
+    # a pick along the true axis is not flagged with the ground in the band; the battered face still is
+    for plan in (rings[0], rings[len(rings) // 2]):
+        circle = E.cylinder_from_circle(ch, plan[::10, :2], inside=False)
+        _axis, info = E.cylinder_axis(ch, circle, "points", points=[BASE + 0.2 * AXIS, BASE + 2.8 * AXIS])
+        assert info["points_drift_m"] < 0.3 and info["points_angle_deg"] < 1.0, info
+        _axis, info = E.cylinder_axis(ch, circle, "points", points=[rings[0][0], rings[-1][0]])
+        assert info["points_angle_deg"] > 1.0, info
 
 
 def test_axis_needs_a_plain_circle(tower):

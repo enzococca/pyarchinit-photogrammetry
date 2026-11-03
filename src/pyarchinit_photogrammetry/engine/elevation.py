@@ -344,10 +344,10 @@ def _axis_info(method: str, axis: np.ndarray, centre_z: float, residual=None) ->
             "residual_m": None if residual is None else float(residual), "centre_z": float(centre_z)}
 
 
-def _fit_circle(xy: np.ndarray):
+def _fit_circle(xy: np.ndarray, kept: bool = False):
     """Centre and radius of the circle through 2D points: the algebraic fit on the points shifted to their mean,
     then again without the points whose radial residual is over 3 MAD, until none more is dropped (3 passes at
-    most)."""
+    most). ``kept``: also the mask of the points the last fit used (those on the wall)."""
     def fit(q):
         mean = q.mean(axis=0)
         d = q - mean
@@ -365,7 +365,7 @@ def _fit_circle(xy: np.ndarray):
             break
         keep = now
         centre, r = fit(xy[keep])
-    return centre, r
+    return (centre, r, keep) if kept else (centre, r)
 
 
 def _axis_line(axis: np.ndarray, centre_z: float, band: np.ndarray, origin: np.ndarray):
@@ -385,7 +385,8 @@ DRIFT_SLICE = 0.2  # the lowest and the highest fifth of the wall along a clicke
 
 
 def _line_drift(direction: np.ndarray, band: np.ndarray, origin: np.ndarray):
-    """How far a direction is from the tower's own axis: the wall seen along ``direction``, a circle fitted to its
+    """How far a direction is from the tower's own axis: the wall seen along ``direction`` - the vertices the robust
+    circle of the whole band keeps, so that ground or rubble in the band are left out - and a circle fitted to its
     lowest and to its highest ``DRIFT_SLICE`` (12 vertices at least each); the drift of the two centres square to
     the direction (metres) and the angle it makes over the slices' separation (degrees). None when the wall is too
     short or too sparse."""
@@ -393,6 +394,10 @@ def _line_drift(direction: np.ndarray, band: np.ndarray, origin: np.ndarray):
     e1 /= np.linalg.norm(e1)
     e2 = np.cross(direction, e1)
     q = band - origin
+    _c, _r, wall = _fit_circle(np.column_stack([q @ e1, q @ e2]), kept=True)
+    q = q[wall]
+    if len(q) < 24:
+        return None
     t = q @ direction
     lo, hi = np.quantile(t, [DRIFT_SLICE, 1.0 - DRIFT_SLICE])
     low, high = t <= lo, t >= hi

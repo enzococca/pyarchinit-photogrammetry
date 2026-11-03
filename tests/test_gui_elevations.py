@@ -201,6 +201,14 @@ def test_points_off_the_centre_are_warned_and_esc_gives_up(dialog, monkeypatch):
     win.model_view.elevation_requested.emit("axis", list(win.chunk.to_internal(world)))
     assert "non è parallela alla torre" in rec["choices"][-1] and "7,6°" in rec["choices"][-1]
     assert "42 cm" in rec["choices"][-1]
+    rec["answers"].update(axis="points")  # too little wall to check: said, not warned
+    monkeypatch.setattr(E, "cylinder_from_circle", lambda ch, ring, inside=True, **k: E.Cylinder(
+        real(ch, ring, inside).centre, [0.05, 0.0, 1.0], 1.0, inside,
+        tilt={**TILT, "method": "points", "residual_m": None, "points_drift_m": None, "points_angle_deg": None}))
+    win.build_elevation()
+    win.model_view.elevation_requested.emit("axis", list(win.chunk.to_internal(world)))
+    assert "Non si può verificare" in rec["choices"][-1] and "non è parallela" not in rec["choices"][-1]
+    monkeypatch.setattr(E, "cylinder_from_circle", off_centre)
     assert not rec["builds"]
     # Esc during the picks: the points that come later build nothing
     win.build_elevation()

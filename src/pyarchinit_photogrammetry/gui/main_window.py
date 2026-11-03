@@ -6909,6 +6909,9 @@ class MainWindow(QMainWindow):
                                              "faccia del muro: due punti su una torre a scarpa danno la scarpa, "
                                              "non l'asse. Per una torre a scarpa usa la cresta o la regione.",
                                              _it(angle, 1), _it(100 * drift, 0))
+                    elif axis == "points" and drift is None:
+                        text += "\n\n" + tr("Non si può verificare che la linea dei due punti sia parallela alla "
+                                             "torre: troppo pochi vertici del muro intorno al cerchio.")
                     if choice(self, "question", tr("Asse dello sviluppo"), text, [tr("Costruisci")]) is None:
                         return
                 self.statusBar().showMessage(tr("Sviluppo cilindrico: {0}", said), 15000)

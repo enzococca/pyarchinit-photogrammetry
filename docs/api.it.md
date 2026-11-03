@@ -1486,7 +1486,7 @@ Un asse inclinato passa per il centro della torre: il muro (i vertici entro `dep
 guardato lungo l'asse, un cerchio adattato lì (`info["fitted_radius"]`), il punto dell'asse a `centre_z` in
 `info["centre"]` - lì v = 0 (la quota media della cresta, il punto medio dei due punti, la quota media del
 modello); `points` dà anche `info["points_drift_m"]` e
-`info["points_angle_deg"]`: il muro guardato lungo la linea dei punti, cerchi adattati al suo quinto più basso e
+`info["points_angle_deg"]`: il muro (i vertici della fascia sul cerchio robusto, non il terreno) guardato lungo la linea dei punti, cerchi adattati al suo quinto più basso e
 a quello più alto, lo spostamento dei loro centri e l'angolo che fa - quanto la linea è lontana dall'essere
 parallela alla torre. Con un
 asse inclinato v è la distanza lungo l'asse. L'inclinazione è scritta nel sistema (`"tilt"`) e nella voce (`entry["tilt"]`).
