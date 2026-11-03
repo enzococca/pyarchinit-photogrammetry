@@ -345,7 +345,7 @@ where it was made.
 * A **spot height** clicked on an elevation takes the height of the surface there (the world Z of the point of the
   model, read through the relief), and its position in plan; on the elevation it shows that height. A **measuring
   point** reads the products of the chunk at that same point of the surface, and a **marker** is placed there.
-* The tools that work on the plan - section trace, crop, patch, area measure, DEM editing, photos of an area, the
+* The tools that work on the plan - section trace, crop, area measure, DEM editing, photos of an area, the
   region, the colour chart - are refused while an elevation is shown, with a message in the status bar: open the
   orthophoto or the DEM.
 * The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*). Stones drawn
@@ -370,6 +370,20 @@ where it was made.
   package carries the plan only.
 * The drawings of the plan stay loaded whatever is shown: the features that work on the plan (proxies, volumes,
   classes, IFC, US proposal, PyArchInit, timeline, report) always use the plan's drawings.
+
+### Patches on elevations
+
+The *Patch* tool works on an elevation or a section too, as on the orthophoto (see
+[Orthophoto patches](#orthophoto-patches)): the area is drawn on the elevation, in its metres (u, v), and the
+window offers the photos that frame it there, best first. What differs: the surface is the relief of the elevation,
+so there is no *On the ground around the area* and no texture of the model; a patch belongs to its elevation
+(kept on its entry, listed in the layer *Orthophoto patches* while it is shown) and never touches the plan or
+another elevation. *Apply* redraws only the cells of the patch; *Delete* on the patch feature takes it away and the
+cells come back; *Edit > Undo* covers both. Typical cases: a photo with the wall washed out by the sun, excluded on a band;
+one good photo assigned where the mesh is off and the best photo of the cells is the wrong one.
+The patches stay with that elevation: a new elevation built on the same wall starts without them (unlike the
+orthomosaic, whose later builds apply its patches again).
+From the command line: `ppg patch scavo.ppg --elevation "South wall" --suggest --bbox ...`.
 
 ## Editing the DEM
 
@@ -425,8 +439,8 @@ over a wall, a person in the trench, a shadow).
    was.
 
 The patches are a layer, *Orthophoto patches*: select one and press ++delete++ (or *Delete selected*) and the
-orthophoto is redrawn there without it. A later build of the orthophoto applies every patch again; *Update the
-orthophoto with the patches* applies the ones not applied yet (after an interrupted update). An orthophoto of
+orthophoto is redrawn there without it. A later build of the orthophoto applies every patch again; *Update with the
+patches* applies the ones not applied yet (after an interrupted update). An orthophoto of
 another program (exported by Metashape) is copied into the chunk folder at the first patch, and its pixels come
 back where a patch is removed.
 

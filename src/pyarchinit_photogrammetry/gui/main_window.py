@@ -1128,7 +1128,7 @@ class MainWindow(QMainWindow):
         pm = m.addMenu(icon("patch"), tr("Patch dell'ortofoto (assegna immagini)"))
         self._act(pm, tr("Disegna un'area e scegli le sue foto"), self.start_patch, icon_name="patch")
         self._act(pm, tr("Assegna immagini al poligono selezionato..."), self.patch_with_selection, icon_name="patch")
-        self.a_patch_update = self._act(pm, tr("Aggiorna l'ortofoto con le patch"), self.update_ortho_patches,
+        self.a_patch_update = self._act(pm, tr("Aggiorna con le patch"), self.update_ortho_patches,
                                         processing=True, icon_name="patch_update")
         self._act(pm, tr("Rimuovi tutte le patch..."), self.clear_ortho_patches, processing=True,
                   icon_name="patch_remove")
@@ -4326,7 +4326,9 @@ class MainWindow(QMainWindow):
         if ch is not None:
             state.update(markers=[m.to_dict() for m in ch.markers], scalebars=[sb.to_dict() for sb in ch.scalebars],
                          excluded=ch.meta.get("marker_excluded"),
-                         patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"))
+                         patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"),
+                         frame_patches={e["id"]: e["patches"] for e in ch.meta.get("elevations") or []
+                                        if e.get("id") and e.get("patches")})
         return state
 
     @staticmethod
@@ -4497,18 +4499,64 @@ class MainWindow(QMainWindow):
             else:
                 ch.meta.pop("region", None)
             self._region_changed("Regione di ricostruzione come prima")
-        if ch is not None and "patches" in state:
-            ch.meta.setdefault("orthomosaic", {})["patches"] = state["patches"] or []
-            if ch.orthomosaic_path is not None:
-                self.run_task("Patch dell'ortofoto", lambda p: ch.update_orthomosaic(progress=p),
-                              lambda _r: self._draw_patches(), refresh=False)
-            else:
-                self._draw_patches()
+        if ch is not None and parts & {"patches", "frame_patches"}:
+            self._undo_patches(state)
         if products:
             self.workspace.populate(self.doc)
             if self.model_view.kind:
                 self.model_view.refresh(reset=False)
         self._dirty(True)
+
+    def _undo_patches(self, state: dict) -> None:
+        """The patches of the orthomosaic (part ``patches``) and of the elevations (``frame_patches``: elevation id ->
+        patches, one absent has none) as a snapshot has them; the images that no longer match are drawn again in ONE
+        task (the runner takes one at a time), the elevation shown reloaded on the same area."""
+        from ..engine import elevation as E
+        from ..engine import patches as P
+
+        ch = self.chunk
+        plan = False
+        if "patches" in state:
+            ch.meta.setdefault("orthomosaic", {})["patches"] = state["patches"] or []
+            plan = ch.orthomosaic_path is not None
+        frames = []
+        if "frame_patches" in state:
+            wanted = state["frame_patches"] or {}
+            for entry in ch.meta.get("elevations") or []:
+                eid = entry.get("id")
+                if not eid:
+                    continue
+                want = [dict(p) for p in wanted.get(eid) or []]
+                if (entry.get("patches") or []) != want:  # no empty list written into an entry without patches
+                    entry["patches"] = want
+                if P.changed_patches(ch, frame=eid) and E.elevation_paths(ch, entry)[0].exists():
+                    frames.append(eid)
+        if not plan and not frames:
+            self._show_patches()
+            return
+        view = self.ortho_view.visible_world_bounds() if self.drawings_frame in frames else None
+        steps = int(plan) + len(frames)
+
+        def job(p):
+            if plan:
+                ch.update_orthomosaic(progress=p.sub(0.0, 1 / steps))
+            for i, eid in enumerate(frames):
+                ch.update_elevation(eid, progress=p.sub((int(plan) + i) / steps, 1 / steps))
+
+        def done(_r):
+            if self.drawings_frame is not None and self.drawings_frame in frames:
+                self._reload_elevation(view)
+            else:
+                self._show_patches()
+
+        self.run_task("Patch del prospetto" if frames else "Patch dell'ortofoto", job, done, refresh=False)
+
+    def _show_patches(self) -> None:
+        """The patch layer of what is shown: the orthomosaic's, or the elevation's."""
+        if self.drawings_frame is None:
+            self._draw_patches()
+        else:
+            self._draw_frame_patches()
 
     def _undo_actions(self) -> None:
         h = self.history
@@ -6837,6 +6885,7 @@ class MainWindow(QMainWindow):
             self._draw_lines()
         self._draw_stones()
         self._draw_elevation_layers(entry)
+        self._draw_frame_patches()
         self.show_view(self.ortho_view)
         self.workspace.populate(self.doc)
         if entry.get("v_is_height"):
@@ -8023,7 +8072,7 @@ class MainWindow(QMainWindow):
             self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
             return
-        if mode == "patch" and self.ortho_view.kind != "ortho":
+        if mode == "patch" and self.ortho_view.kind != "ortho" and self.drawings_frame is None:  # an elevation: on it
             if self.chunk is None or self.chunk.orthomosaic_path is None:
                 self.draw_actions["pan"].setChecked(True)
                 self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
@@ -9362,11 +9411,14 @@ class MainWindow(QMainWindow):
         parts: dict[int, set[int]] = {}
         sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
         probe_gone, lines_gone = set(), set()
+        frame_patches: dict[str, set] = {}  # patches of elevations: elevation id -> patch ids
         for layer, idx, attrs in sel:
             if layer == PROBE_LAYER and "_probe" in attrs:
                 probe_gone.add(int(attrs["_probe"]))
             elif layer == LINES_LAYER and "_bline" in attrs:
                 lines_gone.add(int(attrs["_bline"]))
+            elif layer == PATCH_LAYER and attrs.get("frame"):
+                frame_patches.setdefault(attrs["frame"], set()).add(attrs.get("patch"))
             elif layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
             elif layer == STONES_LAYER:
@@ -9399,6 +9451,9 @@ class MainWindow(QMainWindow):
                             "PyArchInit».", from_pa))
             if patch_ids:
                 text += tr("\n{0} patch dell'ortofoto: l'ortofoto viene aggiornata senza di esse.", len(patch_ids))
+            if frame_patches:
+                text += tr("\n{0} patch del prospetto: il prospetto viene aggiornato senza di esse.",
+                           sum(len(x) for x in frame_patches.values()))
             r = message(self, "question", "Elimina selezionati", text,
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.Yes)
@@ -9439,6 +9494,15 @@ class MainWindow(QMainWindow):
                     P.remove_patch(self.chunk, pid)
                 except KeyError:
                     pass
+        if frame_patches and self.chunk is not None:
+            from ..engine import patches as P
+
+            for frame, ids in frame_patches.items():
+                for pid in ids:
+                    try:
+                        P.remove_patch(self.chunk, pid, frame=frame)
+                    except KeyError:  # the elevation or the patch is gone already
+                        pass
         self._update_pa_save_button()
         self._redraw_overlays(skip=skip)
         self._dirty(True)
@@ -9447,6 +9511,9 @@ class MainWindow(QMainWindow):
             self.features_deleted.emit(layer, features)
         if patch_ids:
             self.update_ortho_patches()
+        for frame in frame_patches:  # the shown elevation in practice: only its patches are drawn
+            if self._frame_entry(frame) is not None:
+                self.update_elevation_patches(frame)
         return len(sel)
 
     def merge_selected(self) -> bool:
@@ -9578,8 +9645,9 @@ class MainWindow(QMainWindow):
         for i, q in enumerate(self.shown_points):
             self._draw_probe_point(q, i)
         entry = self._frame_entry()
-        if entry is not None:  # an elevation: its markers and profile, nothing of the plan
+        if entry is not None:  # an elevation: its markers, profile and patches, nothing of the plan
             self._draw_elevation_layers(entry)
+            self._draw_frame_patches()
         else:
             self._draw_sections()
             for name, lines in self.line_layers.items():
@@ -12427,36 +12495,39 @@ class MainWindow(QMainWindow):
     def start_patch(self) -> None:
         if not self._need_chunk():
             return
-        if self.chunk.orthomosaic_path is None:
+        if self.drawings_frame is None and self.chunk.orthomosaic_path is None:  # an elevation is its own image
             self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
             return
         self.set_draw_mode("patch")
 
     def patch_with_selection(self) -> None:
-        geom = self._plan_selection()
+        geom = self._plan_selection() if self.drawings_frame is None else self._selected_polygon()
         if geom is None:
             self._warn("Seleziona un poligono (strumento Seleziona) oppure disegna l'area con lo strumento Patch.")
             return
-        self._patch_area(geom)
+        self._patch_area(geom, self.drawings_frame)
 
     def _patch_drawn(self, xy) -> None:
-        if self._plan_only():
-            return
+        """An area drawn with the patch tool: on the plan's orthomosaic, or on the elevation shown (its (u, v))."""
         from shapely.geometry import Polygon
 
         geom = Polygon(np.asarray(xy, float)[:, :2])
         if not geom.is_valid or geom.area <= 0:
             self._warn("L'area non è valida (i lati si incrociano o non ha area): ridisegnala.")
             return
-        self._patch_area(geom)
+        self._patch_area(geom, self.drawings_frame)
 
-    def _patch_area(self, geom) -> None:
-        """The photos that see an area of the orthomosaic, each with the area seen from it: the
-        user chooses, then the patch is saved and the orthomosaic updated there."""
+    def _patch_area(self, geom, frame: str | None = None) -> None:
+        """The photos that see an area of the orthomosaic - or of the elevation ``frame``, in its (u, v) -, each with
+        the area seen from it: the user chooses, then the patch is saved and the image updated there."""
         if not self._need_chunk():
             return
         ch = self.chunk
-        if ch.orthomosaic_path is None:
+        entry = self._frame_entry(frame) if frame is not None else None
+        if frame is not None and entry is None:
+            self._warn("Il prospetto non c'è più nel progetto.")
+            return
+        if frame is None and ch.orthomosaic_path is None:
             self._warn("Costruisci prima l'ortofoto.")
             return
         if geom.geom_type != "Polygon":  # several polygons selected: the largest one
@@ -12467,30 +12538,46 @@ class MainWindow(QMainWindow):
             from ..engine import patches as P
 
             p(0.02, "Foto che vedono l'area")
-            cands = P.photos_for_area(ch, polygon, limit=12)
-            imgs, now, bounds = P.previews(ch, polygon, [c["label"] for c in cands], 320, progress=p.sub(0.15, 0.85))
+            cands = P.photos_for_area(ch, polygon, limit=12, frame=frame)
+            imgs, now, bounds = P.previews(ch, polygon, [c["label"] for c in cands], 320, progress=p.sub(0.15, 0.85),
+                                           frame=frame)
             for c in cands:
-                c["previews"] = {s: _outlined(imgs[(c["label"], s)], polygon, bounds) for s in P.SURFACES}
-                c["preview"] = c["previews"]["dem"]
+                if frame is None:
+                    c["previews"] = {s: _outlined(imgs[(c["label"], s)], polygon, bounds) for s in P.SURFACES}
+                    c["preview"] = c["previews"]["dem"]
+                else:  # the relief of the elevation only: no choice of surface
+                    c["preview"] = _outlined(imgs[(c["label"], "dem")], polygon, bounds)
             return cands, None if now is None else _outlined(now, polygon, bounds)
 
         def done(result):
             cands, now = result
             if not cands:
-                self._warn("Nessuna foto vede quest'area dell'ortofoto.")
+                self._warn("Nessuna foto vede quest'area del prospetto." if frame is not None
+                           else "Nessuna foto vede quest'area dell'ortofoto.")
                 return
-            intro = (tr("Area di {0} m2. Scegli da quali foto prendere i colori: per esempio una sola foto per "
-                        "alberi, veicoli o persone che l'ortofoto mostra a vortici o tagliati, oppure escludi la "
-                        "foto con un'ombra o un oggetto che si muove. La patch resta nel progetto (layer «Patch "
-                        "ortofoto») e vale anche per le prossime costruzioni dell'ortofoto.", _it(geom.area, 2)))
-            dlg = PatchDialog("Assegna immagini (patch dell'ortofoto)", now, cands, intro, "ortho",
-                              texture=False if self._texture_image() is not None else None, parent=self)
+            if frame is None:
+                intro = (tr("Area di {0} m2. Scegli da quali foto prendere i colori: per esempio una sola foto per "
+                            "alberi, veicoli o persone che l'ortofoto mostra a vortici o tagliati, oppure escludi la "
+                            "foto con un'ombra o un oggetto che si muove. La patch resta nel progetto (layer «Patch "
+                            "ortofoto») e vale anche per le prossime costruzioni dell'ortofoto.", _it(geom.area, 2)))
+                dlg = PatchDialog("Assegna immagini (patch dell'ortofoto)", now, cands, intro, "ortho",
+                                  texture=False if self._texture_image() is not None else None, parent=self)
+            else:
+                intro = tr("Area di {0} m2 del prospetto «{1}». Scegli da quali foto prendere i colori: per esempio "
+                           "una sola foto dove il prospetto mostra una foto slavata o doppi contorni, oppure escludi "
+                           "la foto con un'ombra o un oggetto davanti alla parete. La patch resta con il prospetto "
+                           "(layer «Patch ortofoto»).", _it(geom.area, 2), entry["name"])
+                dlg = PatchDialog("Assegna immagini (patch del prospetto)", now, cands, intro, "ortho",
+                                  texture=None, parent=self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
-                self._apply_patch(polygon, dlg.values())
+                self._apply_patch(polygon, dlg.values(), frame)
 
         self.run_task("Foto dell'area", job, done, refresh=False, save=False)
 
-    def _apply_patch(self, polygon, v: dict) -> None:
+    def _apply_patch(self, polygon, v: dict, frame: str | None = None) -> None:
+        if frame is not None:
+            self._apply_frame_patch(polygon, v, frame)
+            return
         skip = self._photos_to_skip("Patch dell'ortofoto")
         if skip is None:
             return
@@ -12519,8 +12606,44 @@ class MainWindow(QMainWindow):
 
         self.run_task("Patch dell'ortofoto", job, done, refresh=False, undo=True)
 
+    def _apply_frame_patch(self, polygon, v: dict, frame: str) -> None:
+        """A patch on the elevation ``frame``: kept on its entry, its cells of ``elevation.tif`` drawn again (on its
+        relief: no ground surface, no texture)."""
+        skip = self._photos_to_skip("Patch del prospetto")
+        if skip is None:
+            return
+        ch = self.chunk
+        view = self.ortho_view.visible_world_bounds() if self.drawings_frame == frame else None
+
+        def job(p):
+            from ..engine import patches as P
+
+            patch = P.add_patch(ch, polygon, v["photos"], v["mode"], "dem", frame=frame)
+            ch.update_elevation(frame, progress=p, skip_unreadable=skip)
+            return patch
+
+        def done(patch):
+            entry = self._frame_entry(frame)
+            how = tr("solo da ") if patch["mode"] == "assign" else tr("senza ")
+            self.log_pane.info(tr("Patch {0} del prospetto «{1}»: colori {2}{3}", patch["id"],
+                                  entry["name"] if entry else frame, how, ", ".join(patch["photos"])))
+            self._after_frame_update(frame, view)
+
+        self.run_task("Patch del prospetto", job, done, refresh=False, undo=True)
+
+    def _after_frame_update(self, frame: str, view) -> None:
+        """The elevation ``frame`` written again: shown again on the same area when it is the one shown."""
+        if self.drawings_frame == frame:
+            self._reload_elevation(view)
+        else:
+            self.workspace.populate(self.doc)
+
     def update_ortho_patches(self) -> None:
-        """Apply the patches added, changed or removed since the orthomosaic was written."""
+        """Apply the patches added, changed or removed since the orthomosaic was written - those of the elevation
+        when one is shown."""
+        if self.drawings_frame is not None:
+            self.update_elevation_patches()
+            return
         if not self._need_chunk():
             return
         from ..engine import patches as P
@@ -12539,21 +12662,59 @@ class MainWindow(QMainWindow):
         self.run_task("Aggiorna l'ortofoto (patch)", lambda p: ch.update_orthomosaic(progress=p, skip_unreadable=skip),
                       lambda _r: self._reload_ortho(view), refresh=False)
 
+    def update_elevation_patches(self, frame: str | None = None) -> None:
+        """Apply the patches of the elevation ``frame`` (by default the one shown) added, changed or removed since its
+        image was written."""
+        if not self._need_chunk():
+            return
+        from ..engine import patches as P
+
+        frame = self.drawings_frame if frame is None else frame
+        entry = self._frame_entry(frame) if frame is not None else None
+        if entry is None:
+            self._warn("Mostra prima un prospetto o una sezione.")
+            return
+        from ..engine import elevation as E
+
+        ch = self.chunk
+        if not E.elevation_paths(ch, entry)[0].exists():
+            self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry["name"]))
+            return
+        if not P.changed_patches(ch, frame=frame):
+            self.statusBar().showMessage(tr("Il prospetto «{0}» è già aggiornato con le patch", entry["name"]),
+                                         8000)
+            return
+        skip = self._photos_to_skip("Aggiorna il prospetto")
+        if skip is None:
+            return
+        view = self.ortho_view.visible_world_bounds() if self.drawings_frame == frame else None
+        self.run_task(tr("Aggiorna il prospetto «{0}» (patch)", entry["name"]),
+                      lambda p: ch.update_elevation(frame, progress=p, skip_unreadable=skip),
+                      lambda _r: self._after_frame_update(frame, view), refresh=False)
+
     def clear_ortho_patches(self) -> None:
         if not self._need_chunk():
             return
         from ..engine import patches as P
 
-        n = len(P.patches(self.chunk))
-        if not n:
-            self.statusBar().showMessage(tr("Nessuna patch nell'ortofoto"), 8000)
+        frame = self.drawings_frame
+        n = len(P.patches(self.chunk, frame=frame))
+        if frame is not None:
+            entry = self._frame_entry(frame)
+            name = entry["name"] if entry else frame
+            if not n:
+                self.statusBar().showMessage(tr("Nessuna patch nel prospetto «{0}»", name), 8000)
+                return
+            text = tr("Togliere le {0} patch del prospetto «{1}»? Le loro aree tornano come senza patch.", n, name)
+        else:
+            if not n:
+                self.statusBar().showMessage(tr("Nessuna patch nell'ortofoto"), 8000)
+                return
+            text = tr("Togliere le {0} patch dell'ortofoto? Le loro aree tornano come senza patch (per un'ortofoto di "
+                      "un altro programma, i suoi pixel originali).", n)
+        if choice(self, "question", "Rimuovi le patch", text, ["Rimuovi"]) != 0:
             return
-        if choice(self, "question", "Rimuovi le patch", tr("Togliere le {0} patch dell'ortofoto? Le loro aree "
-                                                           "tornano come senza patch (per un'ortofoto di un altro "
-                                                           "programma, i suoi pixel originali).", n),
-                  ["Rimuovi"]) != 0:
-            return
-        P.clear_patches(self.chunk)
+        P.clear_patches(self.chunk, frame=frame)
         self._dirty(True)
         self.update_ortho_patches()
 
@@ -12567,8 +12728,7 @@ class MainWindow(QMainWindow):
         from ..engine import patches as P
 
         for patch in P.patches(self.chunk):
-            names = ", ".join(short_label(n) for n in patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
-            label = f"{patch['id']}: " + (names if patch["mode"] == "assign" else tr("senza {0}", names))
+            label = self._patch_label(patch)
             ground = patch.get("surface") == "ground"
             v.add_polygon(patch["polygon"], label=label + (tr(" (suolo)") if ground else ""), color="#e84393",
                           fill_alpha=18, layer=PATCH_LAYER,
@@ -12576,15 +12736,50 @@ class MainWindow(QMainWindow):
                                  "modalita": "usa solo" if patch["mode"] == "assign" else "escludi",
                                  "superficie": "suolo attorno all'area" if ground else "DEM"})
 
+    @staticmethod
+    def _patch_label(patch: dict) -> str:
+        """The label of a patch on its layer: its id and (the first two of) its photos."""
+        names = ", ".join(short_label(n) for n in patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
+        return f"{patch['id']}: " + (names if patch["mode"] == "assign" else tr("senza {0}", names))
+
+    def _draw_frame_patches(self) -> None:
+        """The patches of the elevation shown as the same layer over it, each feature with the id of the elevation
+        (``frame``) so that Delete tells them from the plan's."""
+        v = self.ortho_view
+        if PATCH_LAYER in v.layers:
+            v.remove_layer(PATCH_LAYER)
+        entry = self._frame_entry()
+        if entry is None or v.tr is None:
+            return
+        from ..engine import patches as P
+
+        for patch in P.patches(self.chunk, frame=entry["id"]):
+            v.add_polygon(patch["polygon"], label=self._patch_label(patch), color="#e84393", fill_alpha=18,
+                          layer=PATCH_LAYER,
+                          attrs={"patch": patch["id"], "frame": entry["id"], "foto": ", ".join(patch["photos"]),
+                                 "modalita": "usa solo" if patch["mode"] == "assign" else "escludi"})
+
     def _reload_ortho(self, view_bounds=None) -> None:
         """The orthomosaic again after an update, on the same area as before."""
         self._load_raster("ortho")
         self.show_view(self.ortho_view)
+        self._fit_bounds(view_bounds)
+        self.workspace.populate(self.doc)
+
+    def _reload_elevation(self, view_bounds=None) -> None:
+        """The elevation shown again after an update of its image (a patch), on the same area as before."""
+        entry = self._frame_entry()
+        if entry is None:
+            return
+        self.show_elevation(entry)
+        self._fit_bounds(view_bounds)
+
+    def _fit_bounds(self, view_bounds) -> None:
+        """The raster view on ``(x0, y0, x1, y1)`` of its image (None: as it is)."""
         if view_bounds is not None and self.ortho_view.tr is not None:
             x0, y0, x1, y1 = view_bounds
             rect = QRectF(self.ortho_view.scene_pt(x0, y1), self.ortho_view.scene_pt(x1, y0)).normalized()
             self.ortho_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
-        self.workspace.populate(self.doc)
 
     def _texture_patch(self, faces) -> None:
         """Faces of the model chosen in the 3D view: the photos that see them, then the texture

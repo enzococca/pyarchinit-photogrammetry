@@ -1538,15 +1538,17 @@ precedente).
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `chunk.add_ortho_patch(polygon, photos, mode="assign")` | una nuova patch |
-| `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | lo stesso; `surface="ground"` proietta l'area sul terreno circostante invece che sul DEM |
+| `chunk.add_ortho_patch(polygon, photos, mode="assign", frame=None)` | una nuova patch; `frame` è l'id di un prospetto: la patch resta su quel prospetto (poligono nei suoi metri `(u, v)`) |
+| `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem", frame=None)` | lo stesso; `surface="ground"` proietta l'area sul terreno circostante invece che sul DEM (`ValueError` su un prospetto) |
 | `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | ridisegna solo le celle delle patch aggiunte, cambiate o tolte da quando il file è stato scritto, poi le overview di quelle finestre |
-| `chunk.ortho_patches` | le patch del chunk |
-| `chunk.remove_ortho_patch(id)` | ne toglie una |
-| `engine.patches.clear_patches(chunk)` | le toglie tutte |
-| `engine.patches.changed_patches(chunk)` | le patch aggiunte, cambiate o tolte da quando il file dell'ortofoto è stato scritto |
-| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | le foto che inquadrano l'area, le migliori per prime: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
-| `engine.patches.previews(chunk, polygon, photos, max_side=320)` | `({(label, surface): RGBA}, now, bounds)`: l'area da ogni foto su ogni superficie, il resto com'è |
+| `chunk.ortho_patches` | le patch della pianta |
+| `chunk.elevation_patches(frame)`, `engine.patches.patches(chunk, frame=None)`, `engine.patches.entry_of(chunk, frame)` | le patch di un prospetto (o della pianta); la voce del prospetto |
+| `chunk.update_elevation(frame, progress=None, workers=None, skip_unreadable=False)` | come `update_orthomosaic` per l'ortofoto di un prospetto: ridisegna solo le celle delle sue patch cambiate, con le impostazioni con cui è stata costruita (`engine.elevation.entry_settings(entry)`) |
+| `chunk.remove_ortho_patch(id, frame=None)` | ne toglie una |
+| `engine.patches.remove_patch(chunk, id, frame=None)`, `clear_patches(chunk, frame=None)` | ne tolgono una, o tutte |
+| `engine.patches.changed_patches(chunk, frame=None)` | le patch aggiunte, cambiate o tolte da quando il file dell'ortofoto (o del prospetto) è stato scritto |
+| `engine.patches.photos_for_area(chunk, polygon, limit=12, frame=None)` | le foto che inquadrano l'area, le migliori per prime: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
+| `engine.patches.previews(chunk, polygon, photos, max_side=320, frame=None)` | `({(label, surface): RGBA}, now, bounds)`: l'area da ogni foto su ogni superficie, il resto com'è |
 | `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")` | colora di nuovo le facce del modello con texture dentro un poligono (visto dall'alto) o scelte per indice, dalle foto scelte |
 | `engine.patches.photos_for_faces(chunk, faces)` | le foto che vedono quelle facce, le migliori per prime |
 | `engine.patches.preview_faces(chunk, faces, photo)` | la parte di una foto in cui si vedono le facce |

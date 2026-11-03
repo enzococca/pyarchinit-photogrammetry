@@ -22,7 +22,7 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | un marker dove fai clic ([marker](photos-markers.md#marker)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Linee** | linee di rottura, linee morbide e contorni per il TIN e la modifica del DEM; il tipo nel suo menu ([TIN e linee di rottura](../tin.md#linee-di-rottura)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | unità e pietre disegnate da Segment Anything ([sotto](#segment-anything)) |
-| ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto ([patch](processing.md#patch-dellortofoto)) |
+| ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto o del prospetto mostrato ([patch](processing.md#patch-dellortofoto)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Elimina** | gli elementi selezionati (++delete++) |
 | ![](../img/gui/icons/unisci-selezionati.png){ width=20 } | **Unisci** | le unità selezionate in un solo poligono, o linee contigue |
 | ![](../img/gui/icons/cancella-disegni.png){ width=20 } | **Cancella disegni** | tutti i disegni del chunk |

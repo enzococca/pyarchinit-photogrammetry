@@ -1560,38 +1560,79 @@ def crop(project: Path,
         typer.echo(str(path))
 
 
+def _elevation_id(ch, which: str) -> str:
+    """The id of an elevation or section from its id or its name (a unique match)."""
+    from .engine import elevation as E
+
+    entries = E.elevations(ch)
+    for e in entries:
+        if e["id"] == which:
+            return e["id"]
+    found = [e for e in entries if e.get("name") == which]
+    if len(found) == 1:
+        return found[0]["id"]
+    names = ", ".join(f"{e.get('name')} ({e['id']})" for e in entries) or "none"
+    why = "is ambiguous" if found else "is not an elevation of the chunk"
+    typer.echo(f"error: '{which}' {why}; the elevations are: {names}", err=True)
+    raise typer.Exit(1)
+
+
 @app.command()
 def patch(project: Path,
           photos: Optional[str] = typer.Option(None, help="labels of the photos for the area, comma separated"),
-          polygon: Optional[str] = typer.Option(None, help="'x1,y1 x2,y2 x3,y3 ...' in the chunk CRS"),
+          polygon: Optional[str] = typer.Option(None, help="'x1,y1 x2,y2 x3,y3 ...' in the chunk CRS "
+                                                           "(with --elevation: in metres of the elevation, u,v)"),
           bbox: Optional[str] = typer.Option(None, help="'xmin,ymin,xmax,ymax'"),
           wkt: Optional[str] = typer.Option(None, help="a WKT polygon"),
           geojson: Optional[Path] = typer.Option(None, help="a GeoJSON file (its polygons, merged)"),
           exclude: bool = typer.Option(False, help="every photo but these"),
           ground: bool = typer.Option(False, help="project on the ground around the area instead of the DEM: trees, "
-                                                  "vehicles and people as the photo shows them; fills DEM holes"),
-          texture: bool = typer.Option(False, help="also colour the texture of the model in the area"),
+                                                  "vehicles and people as the photo shows them; fills DEM holes "
+                                                  "(not on an elevation)"),
+          texture: bool = typer.Option(False, help="also colour the texture of the model in the area "
+                                                   "(ignored on an elevation)"),
           suggest: bool = typer.Option(False, help="list the photos that frame the area, best first"),
           remove: Optional[str] = typer.Option(None, help="take a patch away: its id, or 'all'"),
           list_patches: bool = typer.Option(False, "--list", help="list the patches"),
+          elevation: Optional[str] = typer.Option(None, help="work on the patches of this elevation or section "
+                                                             "(its id or its name) instead of the orthomosaic"),
           chunk: Optional[str] = None):
-    """Patches of the orthomosaic: the colours of an area from chosen photos (as Metashape's
-    "assign images"). The orthomosaic is updated only where patches changed."""
+    """Patches of the orthomosaic, or of an elevation: the colours of an area from chosen photos (as Metashape's
+    "assign images"). The orthophoto is updated only where patches changed."""
     from .engine import patches as P
 
     doc, ch = _open(project, chunk)
+    frame = None
+    if elevation:
+        if ground:
+            typer.echo("error: --ground does not apply to an elevation (its surface is the relief)", err=True)
+            raise typer.Exit(1)
+        if texture:
+            typer.echo("note: --texture is ignored on an elevation")
+            texture = False
+        frame = _elevation_id(ch, elevation)
+
+    def update():
+        if not frame:
+            return ch.update_orthomosaic(progress=print_progress)
+        try:  # the elevation was built skipping the photos that cannot be read: so is its update
+            return ch.update_elevation(frame, progress=print_progress, skip_unreadable=True)
+        except RuntimeError as exc:  # e.g. its orthophoto is missing
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from None
+
     if list_patches:
-        for p in P.patches(ch):
+        for p in P.patches(ch, frame=frame):
             how = "only" if p["mode"] == "assign" else "all but"
-            typer.echo(f"{p['id']}: {how} {', '.join(p['photos'])} on the {p.get('surface', 'dem')}, "
+            typer.echo(f"{p['id']}: {how} {', '.join(p['photos'])} on the {'relief' if frame else p.get('surface', 'dem')}, "
                        f"{len(p['polygon'])} vertices")
         return
     if remove:
         if remove == "all":
-            P.clear_patches(ch)
+            P.clear_patches(ch, frame=frame)
         else:
-            P.remove_patch(ch, remove)
-        typer.echo(str(ch.update_orthomosaic(progress=print_progress)))
+            P.remove_patch(ch, remove, frame=frame)
+        typer.echo(str(update()))
         doc.save()
         return
     region = _region(polygon, bbox, wkt, geojson)
@@ -1599,17 +1640,18 @@ def patch(project: Path,
         region = max(region.geoms, key=lambda g: g.area)
     ring = [list(xy[:2]) for xy in region.exterior.coords[:-1]]
     if suggest:
-        for d in P.photos_for_area(ch, ring):
+        for d in P.photos_for_area(ch, ring, frame=frame):
+            towards, product = ("view", "the elevation") if frame else ("vertical", "the orthomosaic")
             typer.echo(f"{d['label']}: frames {100 * d['coverage']:.0f}% of the area, {d['angle']:.0f} deg from the "
-                       f"vertical, {100 * d['gsd']:.2f} cm/px, the orthomosaic takes {100 * d['used']:.0f}% from it")
+                       f"{towards}, {100 * d['gsd']:.2f} cm/px, {product} takes {100 * d['used']:.0f}% from it")
         return
     if not photos:
         raise typer.BadParameter("give --photos (--suggest lists the photos of the area)")
     labels = [x.strip() for x in photos.split(",") if x.strip()]
     mode = "exclude" if exclude else "assign"
-    p = P.add_patch(ch, ring, labels, mode, "ground" if ground else "dem")
+    p = P.add_patch(ch, ring, labels, mode, "ground" if ground else "dem", frame=frame)
     typer.echo(f"patch {p['id']}")
-    typer.echo(str(ch.update_orthomosaic(progress=print_progress)))
+    typer.echo(str(update()))
     if texture:
         r = ch.patch_texture(labels, polygon=ring, mode=mode, progress=print_progress)
         typer.echo(f"texture: {r['faces']} faces")

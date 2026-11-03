@@ -115,20 +115,38 @@ def _meta(chunk: Chunk) -> dict:
     return chunk.meta.setdefault("orthomosaic", {})
 
 
-def patches(chunk: Chunk) -> list[dict]:
-    """The patches of the orthomosaic of a chunk (oldest first)."""
-    return [dict(p) for p in (chunk.meta.get("orthomosaic") or {}).get("patches") or []]
+def entry_of(chunk: Chunk, frame: str) -> dict:
+    """The entry of the elevation (or section) ``frame`` (its id) in ``chunk.meta["elevations"]``."""
+    for entry in chunk.meta.get("elevations") or []:
+        if entry.get("id") == frame:
+            return entry
+    raise KeyError(frame)
 
 
-def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str = "dem") -> dict:
-    """A new patch: inside ``polygon`` (CRS of the chunk) the colours come only from
-    ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
-    ``surface`` "dem" or "ground" (see the module). Call :func:`update_orthomosaic` (or build
-    the orthomosaic) to apply it."""
+def _store(chunk: Chunk, frame: str | None) -> dict:
+    """Where the patches are kept: the orthomosaic's meta, or the entry of the elevation ``frame``."""
+    return _meta(chunk) if frame is None else entry_of(chunk, frame)
+
+
+def patches(chunk: Chunk, frame: str | None = None) -> list[dict]:
+    """The patches of the orthomosaic of a chunk, or of its elevation ``frame`` (oldest first)."""
+    held = (chunk.meta.get("orthomosaic") or {}) if frame is None else entry_of(chunk, frame)
+    return [dict(p) for p in held.get("patches") or []]
+
+
+def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str = "dem",
+              frame: str | None = None) -> dict:
+    """A new patch: inside ``polygon`` (CRS of the chunk; (u, v) metres on the elevation ``frame``) the colours come
+    only from ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
+    ``surface`` "dem" or "ground" (see the module; an elevation takes its relief, "dem", only). Call
+    :func:`update_orthomosaic` / :func:`update_elevation` (or build the product) to apply it."""
     if mode not in MODES:
         raise ValueError(f"mode: one of {', '.join(MODES)}")
     if surface not in SURFACES:
         raise ValueError(f"surface: one of {', '.join(SURFACES)}")
+    if frame is not None and surface != "dem":
+        raise ValueError("on an elevation a patch takes the relief: surface 'dem'")
+    store = _store(chunk, frame)
     labels = []
     for p in photos:
         labels.append(chunk.camera(p).label)  # KeyError for a photo that is not in the chunk
@@ -136,33 +154,37 @@ def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str 
         raise ValueError("choose at least one photo")
     geom = _geometry(polygon)
     ring = np.asarray(geom.exterior.coords if geom.geom_type == "Polygon" else polygon, float)[:, :2]
-    used = [int(p["id"][1:]) for p in patches(chunk) if str(p.get("id", "")).startswith("p")
+    used = [int(p["id"][1:]) for p in patches(chunk, frame) if str(p.get("id", "")).startswith("p")
             and str(p["id"])[1:].isdigit()]
     patch = {"id": f"p{max(used, default=0) + 1}", "polygon": ring.round(4).tolist(), "photos": labels,
              "mode": mode, "surface": surface}
-    _meta(chunk).setdefault("patches", []).append(patch)
+    store.setdefault("patches", []).append(patch)
     return dict(patch)
 
 
-def remove_patch(chunk: Chunk, patch_id: str) -> None:
-    """Take a patch away (:func:`update_orthomosaic` then redraws its cells without it)."""
-    meta = _meta(chunk)
-    before = meta.get("patches") or []
-    meta["patches"] = [p for p in before if p.get("id") != patch_id]
-    if len(meta["patches"]) == len(before):
+def remove_patch(chunk: Chunk, patch_id: str, frame: str | None = None) -> None:
+    """Take a patch away (:func:`update_orthomosaic` / :func:`update_elevation` then redraws its cells without it)."""
+    store = _store(chunk, frame)
+    before = store.get("patches") or []
+    store["patches"] = [p for p in before if p.get("id") != patch_id]
+    if len(store["patches"]) == len(before):
         raise KeyError(patch_id)
 
 
-def clear_patches(chunk: Chunk) -> None:
-    _meta(chunk)["patches"] = []
+def clear_patches(chunk: Chunk, frame: str | None = None) -> None:
+    _store(chunk, frame)["patches"] = []
 
 
 # ---------------------------------------------------------------- updating the orthomosaic
-def changed_patches(chunk: Chunk) -> list[dict]:
-    """Patches added, changed or removed since the orthomosaic file was written."""
-    meta = chunk.meta.get("orthomosaic") or {}
-    current = [dict(p) for p in meta.get("patches") or []]
-    applied = [] if _external(chunk) else [dict(p) for p in meta.get("applied_patches") or []]
+def changed_patches(chunk: Chunk, frame: str | None = None) -> list[dict]:
+    """Patches added, changed or removed since the orthomosaic file (or that of the elevation ``frame``) was written."""
+    if frame is None:
+        held = chunk.meta.get("orthomosaic") or {}
+        applied = [] if _external(chunk) else [dict(p) for p in held.get("applied_patches") or []]
+    else:
+        held = entry_of(chunk, frame)
+        applied = [dict(p) for p in held.get("applied_patches") or []]
+    current = [dict(p) for p in held.get("patches") or []]
     return [p for p in current if p not in applied] + [p for p in applied if p not in current]
 
 
@@ -177,10 +199,8 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     """Redraw the cells of the patches added, changed or removed since the orthomosaic was
     written (the rest of the file is left as it is), then its overviews."""
     import rasterio
-    from rasterio.enums import Resampling
-    from rasterio.windows import Window
 
-    from .ortho import _context, _on_grid, _run_tiles, _surface, correction_for, stored_blending
+    from .ortho import _context, _on_grid, _surface, correction_for, stored_blending
     from .visibility import raycaster_for_chunk, readable_cameras
 
     progress = as_progress(progress)
@@ -208,7 +228,6 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
         base = None  # the original is gone: the cells of a removed patch are made again
     with rasterio.open(own) as src:
         t, h, w = src.transform, src.height, src.width
-        factors = src.overviews(1)
     resolution = abs(t.a)
     progress(0.01, "Surface for the orthomosaic")
     raycaster = raycaster_for_chunk(chunk)
@@ -222,8 +241,28 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
                    current, 512, lock, sigma, correction_for(chunk, bool(meta.get("colour_correction"))))
     ctx.redo = [_geometry(p["polygon"]) for p in changed]
     ctx.base = base
+    _redraw(ctx, own, len(changed), progress, "Orthomosaic", (2, 4, 8, 16, 32, 64, 128))
+    meta["applied_patches"] = current
+    progress(1.0, f"Orthomosaic updated: {len(current)} patches")
+    return own
+
+
+def _redraw(ctx, path: Path, n_changed: int, progress: Progress, name: str, levels) -> None:
+    """Redraw in ``path`` the cells of the polygons ``ctx.redo`` (the tiles they meet; the other cells of a tile
+    as they are; ``ctx.base``: cells taken from the unpatched file of another program), then its overviews (those of
+    the changed tiles only when it has them, ``levels`` when it has none)."""
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+
+    from . import overviews
+    from .ortho import _run_tiles
+
+    with rasterio.open(path) as src:
+        t, h, w = src.transform, src.height, src.width
+        factors = src.overviews(1)
+    resolution, tile, base = ctx.resolution, ctx.tile, ctx.base
     boxes = [g.bounds for g in ctx.redo]
-    tile = ctx.tile
     tiles = []
     for r in range(0, h, tile):
         for c in range(0, w, tile):
@@ -231,9 +270,9 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
             x1, y0 = x0 + tile * resolution, y1 - tile * resolution
             if any(b[0] <= x1 and b[2] >= x0 and b[1] <= y1 and b[3] >= y0 for b in boxes):
                 tiles.append((r, c))
-    progress(0.02, f"Orthomosaic: {len(changed)} patches changed, {len(tiles)} tiles")
+    progress(0.02, f"{name}: {n_changed} patches changed, {len(tiles)} tiles")
     written = []
-    with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(own, "r+") as dst, \
+    with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(path, "r+") as dst, \
             (rasterio.open(base) if base else nullcontext()) as bsrc:
 
         def put(r0, c0, result):
@@ -254,17 +293,54 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
         if tiles:
             _run_tiles(ctx, tiles, ctx.workers, progress, put, start=0.03, span=0.82)
     # the overviews of the changed tiles only (a minute for all of them on a 45,000 px orthomosaic)
-    from . import overviews
-
-    progress(0.86, "Overviews of the orthomosaic")
-    if not (factors and (not written or overviews.refresh(own, written, factors))):
-        factors = factors or [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]
+    progress(0.86, f"Overviews of the {name.lower()}")
+    if not (factors and (not written or overviews.refresh(path, written, factors))):
+        factors = factors or [f for f in levels if min(h, w) // f >= 64]
         if factors:
-            with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(own, "r+") as dst:
+            with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(path, "r+") as dst:
                 dst.build_overviews(factors, Resampling.average)
-    meta["applied_patches"] = current
-    progress(1.0, f"Orthomosaic updated: {len(current)} patches")
-    return own
+
+
+def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None, workers: int | None = None,
+                     skip_unreadable: bool = False) -> Path:
+    """Redraw the cells of the patches added, changed or removed since the orthophoto of the elevation (or section)
+    ``frame`` was written, painted as the elevation was built (the rest of the file is left as it is, its relief
+    never changes), then its overviews. Returns the path of the orthophoto."""
+    from .elevation import elevation_paths, entry_settings, frame_grid
+    from .ortho import _context, correction_for
+    from .visibility import raycaster_for_chunk, readable_cameras
+
+    progress = as_progress(progress)
+    entry = entry_of(chunk, frame)
+    path = elevation_paths(chunk, entry)[0]
+    if not path.exists():
+        raise RuntimeError(f"the orthophoto of the elevation is missing: {path}")
+    changed = changed_patches(chunk, frame)
+    if not changed:
+        progress(1.0, "Elevation: no patch to apply")
+        return path
+    progress(0.0, "Checking the photos")
+    cams, _bad = readable_cameras(chunk, skip_unreadable)
+    progress(0.01, "Surface of the elevation")
+    raycaster = raycaster_for_chunk(chunk)
+    lock = threading.Lock()
+    surf = frame_grid(chunk, entry, raycaster, lock)
+    resolution = float(entry["resolution"])
+    frm = surf.frame
+    tile = 512 if frm.kind == "plane" else max(32, min(512, int(0.15 * frm.radius / resolution)))  # as built
+    settings = entry_settings(entry)  # as the file was made, so that the patches match the rest
+    current = [dict(p) for p in entry.get("patches") or []]
+    ctx = _context(chunk, resolution, cams, surf, raycaster, settings["blending"], settings["max_angle"],
+                   settings["max_cameras"], workers, None, current, tile, lock, settings["blend_sigma"],
+                   correction_for(chunk, settings["colour_correction"]), ghosting=settings["ghosting"],
+                   fill_holes=settings["fill_holes"])
+    ctx.frame = frm
+    ctx.redo = [_geometry(p["polygon"]) for p in changed]
+    ctx.base = None
+    _redraw(ctx, path, len(changed), progress, "Elevation", (2, 4, 8, 16, 32, 64))
+    entry["applied_patches"] = current
+    progress(1.0, f"Elevation updated: {len(current)} patches")
+    return path
 
 
 # ---------------------------------------------------------------- choosing the photos
@@ -279,15 +355,27 @@ def _area_grid(geom, cells: int):
     return (x0, y1), (rows, cols), res
 
 
+def _frame_surface(chunk: Chunk, entry: dict, origin, shape, res: float, raycaster, lock):
+    """The surface of the elevation ``entry`` on the grid ``origin``, ``shape``, ``res`` (an area of it)."""
+    from .elevation import FrameSurface, bounds_of, frame_from_dict
+    from .ortho import _on_grid
+
+    surf = FrameSurface(chunk, raycaster, frame_from_dict(entry["frame"]), res, lock, tuple(entry["depth"]),
+                        bounds_of(chunk, entry))  # never None: that would read the whole model again
+    return _on_grid(surf, origin, shape, res)
+
+
 def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: bool = True,
-                    cells: int = 32) -> list[dict]:
+                    cells: int = 32, frame: str | None = None) -> list[dict]:
     """The photos that frame the surface inside ``polygon``, best first (the share of the area
     framed times how well: close, from above, near the centre): ``{"label", "key", "coverage"
     (share of the area in the photo), "visible" (share of it not hidden by the model, e.g. the
     ground under trees), "angle" (degrees from the vertical), "gsd" (world units per pixel),
     "score", "used" (share of the area the orthomosaic takes from it now)}``. A patch with one
     photo takes it wherever the photo frames the area, hidden or not, so that a tree or a
-    vehicle comes out whole, as that photo shows it."""
+    vehicle comes out whole, as that photo shows it. On the elevation ``frame`` (``polygon`` in
+    its (u, v) metres) the surface is its relief, every photo is a candidate, "angle" is measured
+    from the direction the area is seen from and "used" is the share its orthophoto takes."""
     from shapely import contains_xy
 
     from .ortho import _colour, _context, _on_grid, _surface, stored_blending
@@ -298,7 +386,11 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     origin, shape, res = _area_grid(geom, cells)
-    surf = _on_grid(_surface(chunk, res, _surface_kind(chunk), raycaster, lock), origin, shape, res)
+    entry = None if frame is None else entry_of(chunk, frame)
+    if entry is None:
+        surf = _on_grid(_surface(chunk, res, _surface_kind(chunk), raycaster, lock), origin, shape, res)
+    else:
+        surf = _frame_surface(chunk, entry, origin, shape, res, raycaster, lock)
     z = surf.tile(0, 0, *shape)
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
     X = origin[0] + (cols.ravel() + 0.5) * res
@@ -306,13 +398,28 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
     ok = contains_xy(geom, X, Y) & np.isfinite(z.ravel())
     if not ok.any():
         return []
-    world = np.column_stack([X[ok], Y[ok], z.ravel()[ok]])
-    meta = chunk.meta.get("orthomosaic") or {}
-    ctx = _context(chunk, res, cams, surf, raycaster, stored_blending(meta)[0], meta.get("max_angle", 70.0),
-                   meta.get("max_cameras", 8), 1, None, None, 512, lock)
+    if entry is None:
+        world = np.column_stack([X[ok], Y[ok], z.ravel()[ok]])
+        meta = chunk.meta.get("orthomosaic") or {}
+        ctx = _context(chunk, res, cams, surf, raycaster, stored_blending(meta)[0], meta.get("max_angle", 70.0),
+                       meta.get("max_cameras", 8), 1, None, None, 512, lock)
+    else:
+        from .elevation import entry_settings
+
+        world = surf.frame.point(X[ok], Y[ok], z.ravel()[ok])
+        settings = entry_settings(entry)
+        ctx = _context(chunk, res, cams, surf, raycaster, settings["blending"], settings["max_angle"],
+                       settings["max_cameras"], 1, None, None, 512, lock)
+        ctx.frame = surf.frame
+        # the photos look at the area from its viewer side, not from above (as the tiles of an elevation do)
+        view = ctx.inv[:3, :3] @ surf.frame.view(np.array([X[ok].mean()]), np.array([Y[ok].mean()]))[0]
+        ctx.up_int = view / np.linalg.norm(view)
     pts = world @ ctx.inv[:3, :3].T + ctx.inv[:3, 3]
-    x0, y0, x1, y1 = geom.bounds
-    near = [ctx.cams[i] for i in ctx.footprints.candidates((x0, y0, x1, y1), float(np.median(world[:, 2])))]
+    if entry is None:
+        x0, y0, x1, y1 = geom.bounds
+        near = [ctx.cams[i] for i in ctx.footprints.candidates((x0, y0, x1, y1), float(np.median(world[:, 2])))]
+    else:
+        near = list(ctx.cams)
     _c, got, keys = _colour(ctx, pts, near, want_choice=True, colours=False)
     used = {int(k): float(np.mean(keys == k)) for k in np.unique(keys[got])}
     out = []
@@ -371,31 +478,44 @@ def preview_area(chunk: Chunk, polygon, photos=None, max_side: int = 320, margin
     return np.moveaxis(rgba, 0, -1), bounds
 
 
-def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFACES, progress=None):
+def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFACES, progress=None,
+             frame: str | None = None):
     """What a patch of ``polygon`` would look like with each photo: ``({(label, surface): RGBA
     (h, w, 4)}, now, bounds)`` - inside the polygon the area from that photo alone, outside it
     the orthomosaic as it is (``now``, None without one), over :func:`preview_grid`. Quick: one
-    photo frames every cell it sees, so no occlusion is tested."""
+    photo frames every cell it sees, so no occlusion is tested. On the elevation ``frame`` the
+    area is on its relief (``surfaces`` is "dem" only) and ``now`` is its orthophoto."""
     from shapely import contains_xy
 
     from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile, correction_for
 
     progress = progress or (lambda *_a, **_k: None)
     bounds, shape, res = preview_grid(polygon, max_side)
-    now = current_area(chunk, bounds, shape)
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
     inside = contains_xy(_geometry(polygon), bounds[0] + (cols + 0.5) * res, bounds[3] - (rows + 0.5) * res)
-    kind = _surface_kind(chunk)
-    raycaster = None
-    if kind == "model" or chunk.dem_path is None:
+    lock = threading.Lock()
+    if frame is None:
+        now = current_area(chunk, bounds, shape)
+        kind = _surface_kind(chunk)
+        raycaster = None
+        if kind == "model" or chunk.dem_path is None:
+            from .visibility import raycaster_for_chunk
+
+            raycaster = raycaster_for_chunk(chunk)  # the surface itself is the model
+        surf = _on_grid(_surface(chunk, res, kind, raycaster, lock), (bounds[0], bounds[3]), shape, res)
+        colour_correction = bool((chunk.meta.get("orthomosaic") or {}).get("colour_correction"))
+    else:
+        from .elevation import elevation_paths
         from .visibility import raycaster_for_chunk
 
-        raycaster = raycaster_for_chunk(chunk)  # the surface itself is the model
-    lock = threading.Lock()
-    surf = _on_grid(_surface(chunk, res, kind, raycaster, lock), (bounds[0], bounds[3]), shape, res)
+        entry = entry_of(chunk, frame)
+        now = current_area(chunk, bounds, shape, path=elevation_paths(chunk, entry)[0])
+        surfaces = ("dem",)  # the relief of the elevation: there is no ground around an area of a wall
+        raycaster = raycaster_for_chunk(chunk)
+        surf = _frame_surface(chunk, entry, (bounds[0], bounds[3]), shape, res, raycaster, lock)
+        colour_correction = bool(entry.get("colour_correction"))
     cams = [chunk.camera(p) for p in photos]
-    meta = chunk.meta.get("orthomosaic") or {}
-    cache = _PhotoCache(len(cams) + 2, correction_for(chunk, bool(meta.get("colour_correction"))))
+    cache = _PhotoCache(len(cams) + 2, correction_for(chunk, colour_correction))
     out = {}
     jobs = [(cam, s) for cam in cams for s in surfaces]
     for i, (cam, s) in enumerate(jobs):
@@ -405,6 +525,8 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
         ctx = _context(chunk, res, [cam], surf, raycaster, "disabled", 89.0, 1, 1, None, [patch],
                        max(shape), lock)  # one photo: nothing to blend
         ctx.cache, ctx.occlusion = cache, False
+        if frame is not None:
+            ctx.frame = surf.frame
         block = _tile(ctx, 0, 0)
         rgba = np.zeros((*shape, 4), np.uint8) if block is None else np.moveaxis(block, 0, -1)
         img = (now.copy() if now is not None else np.zeros((*shape, 4), np.uint8))
@@ -413,14 +535,14 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
     return out, now, bounds
 
 
-def current_area(chunk: Chunk, bounds, shape) -> np.ndarray | None:
-    """The orthomosaic of the project over ``bounds`` (xmin, ymin, xmax, ymax) at ``shape``,
-    RGBA ``(h, w, 4)`` (None without orthomosaic)."""
+def current_area(chunk: Chunk, bounds, shape, path=None) -> np.ndarray | None:
+    """The orthomosaic of the project (or the raster ``path``, e.g. the orthophoto of an elevation) over ``bounds``
+    (xmin, ymin, xmax, ymax) at ``shape``, RGBA ``(h, w, 4)`` (None without the file)."""
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.windows import from_bounds
 
-    path = chunk.orthomosaic_path
+    path = chunk.orthomosaic_path if path is None else Path(path)
     if path is None or not path.exists():
         return None
     with rasterio.open(path) as src:
@@ -700,6 +822,6 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
     return {"faces": int(len(faces)), "coloured": int((choice >= 0).sum()), "texels": written}
 
 
-__all__ = ["MODES", "SURFACES", "add_patch", "changed_patches", "clear_patches", "current_area", "faces_in_polygon",
-           "patches", "photos_for_area", "photos_for_faces", "preview_area", "preview_faces", "preview_grid", "previews",
-           "remove_patch", "retexture", "update_orthomosaic"]
+__all__ = ["MODES", "SURFACES", "add_patch", "changed_patches", "clear_patches", "current_area", "entry_of",
+           "faces_in_polygon", "patches", "photos_for_area", "photos_for_faces", "preview_area", "preview_faces",
+           "preview_grid", "previews", "remove_patch", "retexture", "update_elevation", "update_orthomosaic"]

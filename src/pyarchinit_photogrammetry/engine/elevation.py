@@ -506,7 +506,9 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
              "frame": frame.to_dict(), "depth": [surf.dmin, surf.dmax], "resolution": resolution,
              "bounds": list(surf.bounds), "v_is_height": heights,
              "orthophoto": str(ortho_path.relative_to(chunk.data_dir)), "relief": str(dem_path.relative_to(chunk.data_dir)),
-             "size": [w, h], "blending": blending, "colour_correction": correction is not None}
+             "size": [w, h], "blending": blending, "colour_correction": correction is not None,
+             "max_angle": float(max_angle), "max_cameras": 8, "blend_sigma": ctx.blend_sigma,
+             "ghosting": bool(ghosting), "fill_holes": bool(fill_holes)}
     if kind == "section":
         progress(0.985, "Profile of the section")
         lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)
@@ -532,6 +534,54 @@ def remove_elevation(chunk: Chunk, eid: str) -> bool:
 
 def elevation_paths(chunk: Chunk, entry: dict) -> tuple[Path, Path]:
     return chunk.data_dir / entry["orthophoto"], chunk.data_dir / entry["relief"]
+
+
+def entry_settings(entry: dict) -> dict:
+    """How the orthophoto of an elevation was painted, to paint some of its cells again the same way. Entries made
+    before these were stored (1.7.0) take the values build_elevation used then."""
+    from .ortho import BLEND_SIGMA
+
+    blending = entry.get("blending", "mosaic")
+    return {"blending": blending,
+            "blend_sigma": float(entry.get("blend_sigma", BLEND_SIGMA if blending == "mosaic" else 0.0)),
+            "max_angle": float(entry.get("max_angle", 80.0)), "max_cameras": int(entry.get("max_cameras", 8)),
+            "ghosting": bool(entry.get("ghosting", False)), "fill_holes": bool(entry.get("fill_holes", True)),
+            "colour_correction": bool(entry.get("colour_correction", False))}
+
+
+def _file_grid(path: Path):
+    import rasterio
+
+    with rasterio.open(path) as src:
+        return src.transform, (src.height, src.width)
+
+
+def bounds_of(chunk: Chunk, entry: dict) -> tuple[float, float, float, float]:
+    """``(u0, v0, u1, v1)`` of an elevation: from its entry, or, for entries made before 1.5.5 (no ``bounds``), the
+    extent of its orthophoto (the file is the grid)."""
+    if entry.get("bounds"):
+        return tuple(float(b) for b in entry["bounds"])
+    t, (h, w) = _file_grid(elevation_paths(chunk, entry)[0])
+    return (t.c, t.f + h * t.e, t.c + w * t.a, t.f)
+
+
+def frame_grid(chunk: Chunk, entry: dict, raycaster, lock: threading.Lock) -> FrameSurface:
+    """The surface of an elevation on the grid of its file (depth band and bounds of the entry); ``RuntimeError`` when
+    the file is missing or its grid is not the entry's. An entry without bounds (made before 1.5.5) takes the grid of
+    the file."""
+    path = elevation_paths(chunk, entry)[0]
+    if not path.exists():
+        raise RuntimeError(f"the orthophoto of the elevation is missing: {path}")
+    t, shape = _file_grid(path)
+    surf = FrameSurface(chunk, raycaster, frame_from_dict(entry["frame"]), float(entry["resolution"]), lock,
+                        tuple(entry["depth"]), bounds_of(chunk, entry))
+    if not entry.get("bounds"):  # the extent of the file gives the grid exactly (no rounding of floor/ceil)
+        surf.origin, surf.shape = (float(t.c), float(t.f)), shape
+    tol = 1e-6 * max(1.0, abs(t.c), abs(t.f))
+    if shape != surf.shape or abs(t.c - surf.origin[0]) > tol or abs(t.f - surf.origin[1]) > tol or \
+            abs(abs(t.a) - surf.resolution) > 1e-9 or abs(abs(t.e) - surf.resolution) > 1e-9:
+        raise RuntimeError(f"the file of the elevation does not match its record: {path}")
+    return surf
 
 
 # ---------------------------------------------------------------- drawings made on an elevation

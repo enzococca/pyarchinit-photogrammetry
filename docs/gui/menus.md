@@ -288,8 +288,8 @@ These are the tools of the *Drawing* bar, described with their windows in [Drawi
 | --- | --- |
 | **Draw an area and choose its photos** | an area, then the photo to use there (with a preview) |
 | **Assign images to the selected polygon...** | the same on a unit already drawn |
-| **Update the orthophoto with the patches** | applies the patches not applied yet |
-| **Remove all patches...** | the orthophoto as it was |
+| **Update with the patches** | applies the patches not applied yet, on the orthophoto or on the elevation shown |
+| **Remove all patches...** | the orthophoto (or the elevation shown) as it was |
 
 How to choose the right photo is in [Processing](processing.md#orthophoto-patches).
 

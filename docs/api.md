@@ -1491,15 +1491,17 @@ A patch takes the colours of an area of the orthomosaic from photos chosen by ha
 
 | Call | Description |
 | --- | --- |
-| `chunk.add_ortho_patch(polygon, photos, mode="assign")` | a new patch |
-| `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | the same; `surface="ground"` projects the area on the ground around it instead of the DEM |
+| `chunk.add_ortho_patch(polygon, photos, mode="assign", frame=None)` | a new patch; `frame` an elevation id: the patch is kept on that elevation (polygon in its `(u, v)` metres) |
+| `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem", frame=None)` | the same; `surface="ground"` projects the area on the ground around it instead of the DEM (`ValueError` on an elevation) |
 | `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | redraws only the cells of the patches added, changed or removed since the file was written, then the overviews of those windows |
-| `chunk.ortho_patches` | the patches of the chunk |
-| `chunk.remove_ortho_patch(id)` | removes one |
-| `engine.patches.clear_patches(chunk)` | removes them all |
-| `engine.patches.changed_patches(chunk)` | the patches added, changed or removed since the orthomosaic file was written |
-| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | the photos that frame the area, best first: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
-| `engine.patches.previews(chunk, polygon, photos, max_side=320)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
+| `chunk.ortho_patches` | the patches of the plan |
+| `chunk.elevation_patches(frame)`, `engine.patches.patches(chunk, frame=None)`, `engine.patches.entry_of(chunk, frame)` | the patches of an elevation (or of the plan); the entry of the elevation |
+| `chunk.update_elevation(frame, progress=None, workers=None, skip_unreadable=False)` | the same as `update_orthomosaic` for the orthophoto of an elevation: redraws only the cells of its changed patches, with the settings it was built with (`engine.elevation.entry_settings(entry)`) |
+| `chunk.remove_ortho_patch(id, frame=None)` | removes one |
+| `engine.patches.remove_patch(chunk, id, frame=None)`, `clear_patches(chunk, frame=None)` | remove one, or all |
+| `engine.patches.changed_patches(chunk, frame=None)` | the patches added, changed or removed since the orthomosaic file (or the elevation's) was written |
+| `engine.patches.photos_for_area(chunk, polygon, limit=12, frame=None)` | the photos that frame the area, best first: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
+| `engine.patches.previews(chunk, polygon, photos, max_side=320, frame=None)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
 | `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")` | colours again the faces of the textured model inside a polygon (seen from above) or chosen by index, from the chosen photos |
 | `engine.patches.photos_for_faces(chunk, faces)` | the photos that see those faces, best first |
 | `engine.patches.preview_faces(chunk, faces, photo)` | the part of a photo where the faces are seen |

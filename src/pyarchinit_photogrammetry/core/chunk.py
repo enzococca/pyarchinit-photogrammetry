@@ -841,25 +841,34 @@ class Chunk:
 
         return colour.estimate(self, samples=samples, vignetting=vignetting, progress=as_progress(progress))
 
-    def add_ortho_patch(self, polygon, photos, mode: str = "assign") -> dict:
+    def add_ortho_patch(self, polygon, photos, mode: str = "assign", surface: str = "dem",
+                        frame: str | None = None) -> dict:
         """A patch of the orthomosaic: inside ``polygon`` (chunk CRS) the colours come only from
         ``photos`` (labels), or from every photo but them with ``mode="exclude"`` - trees,
         vehicles or seamlines the automatic choice renders badly. Applied by
-        :meth:`update_orthomosaic` and by every later build (see :mod:`..engine.patches`)."""
+        :meth:`update_orthomosaic` and by every later build (see :mod:`..engine.patches`).
+        ``frame``: the id of an elevation or section, ``polygon`` in its (u, v) metres, applied by
+        :meth:`update_elevation`."""
         from ..engine import patches
 
-        return patches.add_patch(self, polygon, photos, mode)
+        return patches.add_patch(self, polygon, photos, mode, surface, frame=frame)
 
-    def remove_ortho_patch(self, patch_id: str) -> None:
+    def remove_ortho_patch(self, patch_id: str, frame: str | None = None) -> None:
         from ..engine import patches
 
-        patches.remove_patch(self, patch_id)
+        patches.remove_patch(self, patch_id, frame=frame)
 
     @property
     def ortho_patches(self) -> list[dict]:
         from ..engine import patches
 
         return patches.patches(self)
+
+    def elevation_patches(self, frame: str) -> list[dict]:
+        """The patches of the elevation (or section) ``frame`` (its id)."""
+        from ..engine import patches
+
+        return patches.patches(self, frame=frame)
 
     def update_orthomosaic(self, progress: ProgressCallback | None = None, skip_unreadable: bool = False,
                            workers: int | None = None) -> Path:
@@ -869,6 +878,15 @@ class Chunk:
 
         return patches.update_orthomosaic(self, progress=as_progress(progress), workers=workers,
                                           skip_unreadable=skip_unreadable)
+
+    def update_elevation(self, frame: str, progress: ProgressCallback | None = None, workers: int | None = None,
+                         skip_unreadable: bool = False) -> Path:
+        """Redraw only the cells of the patches of the elevation (or section) ``frame`` added, changed or removed
+        since its orthophoto was written."""
+        from ..engine import patches
+
+        return patches.update_elevation(self, frame, progress=as_progress(progress), workers=workers,
+                                        skip_unreadable=skip_unreadable)
 
     def patch_texture(self, photos, polygon=None, faces=None, mode: str = "assign",
                       progress: ProgressCallback | None = None) -> dict:

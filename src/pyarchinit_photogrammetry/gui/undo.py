@@ -4,8 +4,8 @@ Two kinds of changes are kept:
 
 * what lives in the project - drawings (units, spot heights, sections, edits waiting for
   PyArchInit), markers, scale bars, photos where a marker is not to be estimated, patches of the
-  orthomosaic, the reconstruction region: the window gives a snapshot of them (``get_state``, a
-  dict of JSON-able parts) and :meth:`UndoHistory.record` is called whenever the project is
+  orthomosaic and of the elevations, the reconstruction region: the window gives a snapshot of
+  them (``get_state``, a dict of JSON-able parts) and :meth:`UndoHistory.record` is called whenever the project is
   modified; the parts that changed since the last snapshot become an entry, and undo hands their
   previous value back to the window (``set_state``);
 * products changed in place - the dense cloud (classes by hand, deleted or kept points, cleaning),
@@ -35,7 +35,8 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 
 PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
               "markers": "Marker", "excluded": "Marker", "scalebars": "Barre di scala",
-              "patches": "Patch dell'ortofoto", "region": "Regione di ricostruzione", "lines": "Linee di rottura"}
+              "patches": "Patch dell'ortofoto", "frame_patches": "Patch dei prospetti",
+              "region": "Regione di ricostruzione", "lines": "Linee di rottura"}
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
                  "reconstruction": "Punti di legame", "model_textured": "Texture"}
 
