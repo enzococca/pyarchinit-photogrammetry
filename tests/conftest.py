@@ -207,6 +207,8 @@ def _none_refcount(request):
     drop = before - sys.getrefcount(None)
     if drop > 0:
         _NONE_DROPS.append((drop, request.node.nodeid))
+    if drop > 50:  # said at once, past pytest's capture: the run may abort before its summary
+        print(f"[none refcount] -{drop} after {request.node.nodeid}", file=sys.__stderr__, flush=True)
 
 
 _NONE_DROPS: list[tuple[int, str]] = []
