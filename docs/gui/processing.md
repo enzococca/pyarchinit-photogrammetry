@@ -307,8 +307,9 @@ of the 3D view. The orthophoto and the relief of the model are built on a plane,
 * **Two points in the 3D view**: after the dialog, click two points of one straight line of the structure that
   runs along its axis and is not battered (a column, a shaft, an upright edge), the bottom one first. A click lands
   on the face of the wall: two clicks on a battered tower give the batter, not the axis - for a battered tower the
-  crest or the region is the way. The window warns when the line of the two points runs more than 30 cm from the
-  centre of the tower.
+  crest or the region is the way. The window warns when the line of the two points is not parallel to the tower:
+  the wall seen along the line, its centre at the foot and at the top more than 30 cm apart, or more than 1 degree
+  off.
 
 Whatever the method, the axis passes through the centre of the tower: once its direction is known, the wall is seen
 along it and a circle is fitted there, so a polygon drawn at the foot of a leaning tower does not put the axis off

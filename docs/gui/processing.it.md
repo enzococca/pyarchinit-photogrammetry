@@ -316,8 +316,9 @@ viene da:
 * **Due punti nella vista 3D**: dopo il dialogo si cliccano due punti di una stessa linea diritta della struttura
   che corre lungo il suo asse e non è a scarpa (una colonna, un fusto, uno spigolo verticale), prima quello in basso.
   Un clic cade sulla faccia del muro: due clic su una torre a scarpa danno la scarpa, non l'asse - per una torre a
-  scarpa si usa la cresta o la regione. La finestra avvisa quando la linea dei due punti passa a più di 30 cm dal
-  centro della torre.
+  scarpa si usa la cresta o la regione. La finestra avvisa quando la linea dei due punti non è parallela alla torre: il
+  muro guardato lungo la linea, il suo centro al piede e in cima a più di 30 cm l'uno dall'altro, o più di 1 grado
+  di scarto.
 
 Qualunque sia il metodo, l'asse passa per il centro della torre: trovata la direzione, il muro viene guardato lungo
 l'asse e lì si adatta un cerchio, così un poligono disegnato al piede di una torre che pende non sposta l'asse dal

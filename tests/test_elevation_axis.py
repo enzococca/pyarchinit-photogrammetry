@@ -357,13 +357,55 @@ def test_tilted_axis_passes_through_the_tower(tower, method):
     assert abs(cyl.centre[2] - cyl.tilt["centre_z"]) < 1e-9  # v = 0 at centre_z
     assert abs(cyl.tilt["fitted_radius"] - 2.8) < 0.25
     if method == "points":
-        assert cyl.tilt["points_offset_m"] < 0.05
+        assert cyl.tilt["points_drift_m"] < 0.05
 
 
-def test_points_on_a_battered_face_are_flagged(tower):
+def _side(radius: float = 3.0):
+    """A unit direction square to the tower's axis (towards the north)."""
+    side = np.cross(AXIS, [1.0, 0.0, 0.0])
+    side /= np.linalg.norm(side)
+    return radius * side
+
+
+def test_points_along_the_batter_are_flagged_not_an_upright_line(tower):
     ch, circle, rings = tower
+    # two clicks on the battered face (the cone: radius 3 at the bottom, 2.6 at the top): not parallel to the axis
     _axis, info = E.cylinder_axis(ch, circle, "points", points=[rings[0][0], rings[-1][0]])
-    assert info["points_offset_m"] > 0.3  # the face of the wall, not the axis
+    assert info["points_angle_deg"] > 1.0 and info["points_drift_m"] > 0.03
+    # two clicks on the surface along a line parallel to the true axis (an upright edge): the line is R from the
+    # axis, yet it is the axis' direction - not flagged
+    bottom = BASE + 0.3 * AXIS + _side()
+    _axis, info = E.cylinder_axis(ch, circle, "points", points=[bottom, bottom + 2.4 * AXIS])
+    assert info["points_angle_deg"] < 0.5 and info["points_drift_m"] < 0.03
+
+
+def test_ground_under_the_tower_does_not_move_the_axis(tower):
+    ch, circle, rings = tower
+    g = np.arange(-6.0, 6.01, 0.25)
+    gx, gy = np.meshgrid(g, g)
+    ground = np.column_stack([gx.ravel() + BASE[0], gy.ravel() + BASE[1], np.full(gx.size, BASE[2] - 0.02)])
+    n = len(g)
+    xyz = np.concatenate([rings.reshape(-1, 3), ground])
+    first = rings.shape[0] * rings.shape[1]
+    faces = []
+    for i in range(rings.shape[0] - 1):
+        for j in range(rings.shape[1]):
+            a, b = i * rings.shape[1] + j, i * rings.shape[1] + (j + 1) % rings.shape[1]
+            faces += [(a, b, b + rings.shape[1]), (a, b + rings.shape[1], a + rings.shape[1])]
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a = first + i * n + j
+            faces += [(a, a + 1, a + n + 1), (a, a + n + 1, a + n)]
+    internal = ch.to_internal(xyz)
+    v = np.empty(len(internal), [("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+    v["x"], v["y"], v["z"] = internal.T
+    write_mesh(ch.data_dir / "tower.ply", MeshData(v, np.asarray(faces, np.int64)))
+    for method in ("crest", "points"):
+        cyl = E.cylinder_from_circle(ch, rings[0][::10, :2], inside=False, axis=method,
+                                     axis_points=[BASE + 0.2 * AXIS, BASE + 2.8 * AXIS])
+        z = cyl.tilt["centre_z"]
+        true = BASE + (z - BASE[2]) / AXIS[2] * AXIS
+        assert np.linalg.norm(cyl.centre - true) < 0.05, (method, np.linalg.norm(cyl.centre - true))
 
 
 def test_axis_needs_a_plain_circle(tower):

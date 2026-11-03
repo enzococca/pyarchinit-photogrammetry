@@ -190,7 +190,8 @@ def test_points_off_the_centre_are_warned_and_esc_gives_up(dialog, monkeypatch):
     def off_centre(ch, ring, inside=True, axis="vertical", axis_points=None, depth=None):
         c = real(ch, ring, inside)
         return E.Cylinder(c.centre, [0.05, 0.0, 1.0], c.radius, c.inside, c.start,
-                          tilt={**TILT, "method": "points", "residual_m": None, "points_offset_m": 1.2})
+                          tilt={**TILT, "method": "points", "residual_m": None, "points_drift_m": 0.42,
+                                "points_angle_deg": 7.6})
 
     monkeypatch.setattr(E, "cylinder_from_circle", off_centre)
     rec["answers"].update(axis="points")
@@ -198,7 +199,8 @@ def test_points_off_the_centre_are_warned_and_esc_gives_up(dialog, monkeypatch):
     world = np.array([ORIGIN + [2.0, 1.5, -0.5], ORIGIN + [2.1, 1.5, 1.5]])
     win.build_elevation()
     win.model_view.elevation_requested.emit("axis", list(win.chunk.to_internal(world)))
-    assert "non passano per il centro" in rec["choices"][-1] and "120 cm" in rec["choices"][-1]
+    assert "non è parallela alla torre" in rec["choices"][-1] and "7,6°" in rec["choices"][-1]
+    assert "42 cm" in rec["choices"][-1]
     assert not rec["builds"]
     # Esc during the picks: the points that come later build nothing
     win.build_elevation()

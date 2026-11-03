@@ -346,7 +346,8 @@ def _axis_info(method: str, axis: np.ndarray, centre_z: float, residual=None) ->
 
 def _fit_circle(xy: np.ndarray):
     """Centre and radius of the circle through 2D points: the algebraic fit on the points shifted to their mean,
-    then once more without the points whose radial residual is over 3 MAD."""
+    then again without the points whose radial residual is over 3 MAD, until none more is dropped (3 passes at
+    most)."""
     def fit(q):
         mean = q.mean(axis=0)
         d = q - mean
@@ -355,10 +356,14 @@ def _fit_circle(xy: np.ndarray):
         return sol[:2] + mean, float(np.sqrt(max(sol[2] + sol[0] ** 2 + sol[1] ** 2, 0.0)))
 
     centre, r = fit(xy)
-    res = np.linalg.norm(xy - centre, axis=1) - r
-    dev = np.abs(res - np.median(res))
-    keep = dev <= 3 * max(1.4826 * np.median(dev), 1e-6)
-    if keep.sum() >= 3 and not keep.all():
+    keep = np.ones(len(xy), bool)
+    for _ in range(3):  # until nothing more is dropped (ground or a wall inside the band pull the first fit)
+        res = np.linalg.norm(xy - centre, axis=1) - r
+        dev = np.abs(res - np.median(res[keep]))
+        now = dev <= 3 * max(1.4826 * np.median(dev[keep]), 1e-6)
+        if now.sum() < 3 or np.array_equal(now, keep):
+            break
+        keep = now
         centre, r = fit(xy[keep])
     return centre, r
 
@@ -374,6 +379,31 @@ def _axis_line(axis: np.ndarray, centre_z: float, band: np.ndarray, origin: np.n
     centre2, r = _fit_circle(np.column_stack([q @ e1, q @ e2]))
     c0 = origin + centre2[0] * e1 + centre2[1] * e2  # on the line, in the plane through origin square to the axis
     return c0 + (centre_z - c0[2]) / axis[2] * axis, r
+
+
+DRIFT_SLICE = 0.2  # the lowest and the highest fifth of the wall along a clicked direction
+
+
+def _line_drift(direction: np.ndarray, band: np.ndarray, origin: np.ndarray):
+    """How far a direction is from the tower's own axis: the wall seen along ``direction``, a circle fitted to its
+    lowest and to its highest ``DRIFT_SLICE`` (12 vertices at least each); the drift of the two centres square to
+    the direction (metres) and the angle it makes over the slices' separation (degrees). None when the wall is too
+    short or too sparse."""
+    e1 = np.cross(direction, [0.0, 1.0, 0.0] if abs(direction[1]) < 0.9 else [1.0, 0.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(direction, e1)
+    q = band - origin
+    t = q @ direction
+    lo, hi = np.quantile(t, [DRIFT_SLICE, 1.0 - DRIFT_SLICE])
+    low, high = t <= lo, t >= hi
+    if low.sum() < 12 or high.sum() < 12:
+        return None
+    centres = [_fit_circle(np.column_stack([q[m] @ e1, q[m] @ e2]))[0] for m in (low, high)]
+    separation = float(np.median(t[high]) - np.median(t[low]))
+    if separation <= 1e-6:
+        return None
+    drift = float(np.linalg.norm(centres[1] - centres[0]))
+    return drift, float(np.degrees(np.arctan2(drift, separation)))
 
 
 def _through_the_tower(info: dict, axis: np.ndarray, band: np.ndarray, circle: "Cylinder",
@@ -450,9 +480,10 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
     A tilted axis passes through the tower's own centre: once its direction is known, the wall (the model's
     vertices within ``depth`` of the plan circle) is seen along it and a circle fitted there (``info["centre"]``,
     the axis' point at ``centre_z``; ``info["fitted_radius"]``); the plan circle, picked at whatever height, would
-    put the axis off the centre of a leaning tower. ``points``: ``info["points_offset_m"]``, how far the line of
-    the two points runs from that centre (a click lands on the face: two clicks on a battered tower give the
-    batter, not the axis)."""
+    put the axis off the centre of a leaning tower. ``points``: ``info["points_drift_m"]`` and
+    ``info["points_angle_deg"]``, how far the line of the two points is from parallel to the tower (:func:`_line_drift`:
+    a click lands on the face, so two clicks on a battered tower give the batter, not the axis; on an upright edge
+    the line is the radius away from the axis but parallel to it)."""
     if method == "vertical":
         info = _axis_info("vertical", np.array([0.0, 0.0, 1.0]), 0.0)
         info["centre"] = [float(circle.centre[0]), float(circle.centre[1]), 0.0]
@@ -476,10 +507,11 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
         axis = _unit(p1 - p0)
         if axis[2] < 0:
             axis = -axis
-        info = _through_the_tower(_axis_info("points", axis, (p0[2] + p1[2]) / 2), axis, band_or_none(), circle,
-                                  fallback=p0)
-        off = p0 - np.asarray(info["centre"])
-        info["points_offset_m"] = float(np.linalg.norm(off - (off @ axis) * axis))  # the points' line from the axis
+        band = band_or_none()
+        info = _through_the_tower(_axis_info("points", axis, (p0[2] + p1[2]) / 2), axis, band, circle, fallback=p0)
+        drift = _line_drift(axis, band, np.array([circle.centre[0], circle.centre[1], float(np.median(band[:, 2]))])) \
+            if len(band) >= 24 else None
+        info["points_drift_m"], info["points_angle_deg"] = drift if drift is not None else (None, None)
         return axis, info
     if method == "region":
         from .region import get_region

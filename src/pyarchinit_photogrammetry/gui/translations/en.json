@@ -3708,6 +3708,6 @@
   "Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, annulla e scegli un altro asse.": "The development will follow the {0} (crest residual: {1}). If it is not the tower's axis, cancel and choose another axis.",
   "Sviluppo cilindrico: {0}": "Cylindrical development: {0}",
   "asse inclinato di {0}° verso {1}": "axis tilted {0}° towards {1}",
-  "I due punti non passano per il centro della torre: la loro linea ne dista {0} cm. Un clic cade sulla faccia del muro: due punti su una torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa usa la cresta o la regione.": "The two points do not pass through the centre of the tower: their line runs {0} cm from it. A click lands on the face of the wall: two points on a battered tower give the batter, not the axis. For a battered tower use the crest or the region."
+  "La linea dei due punti non è parallela alla torre: si discosta di {0}° dal suo asse ({1} cm fra il piede e la cima). Un clic cade sulla faccia del muro: due punti su una torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa usa la cresta o la regione.": "The line of the two points is not parallel to the tower: it is {0}° off its axis ({1} cm between the foot and the top). A click lands on the face of the wall: two points on a battered tower give the batter, not the axis. For a battered tower use the crest or the region."
  }
 }

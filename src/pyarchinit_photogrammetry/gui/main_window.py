@@ -6902,12 +6902,13 @@ class MainWindow(QMainWindow):
                               "annulla e scegli un altro asse.", said,
                               "-" if frame.tilt.get("residual_m") is None
                               else _it(100 * frame.tilt["residual_m"], 1) + " cm")
-                    off = frame.tilt.get("points_offset_m")
-                    if off is not None and off > 0.3:
-                        text += "\n\n" + tr("I due punti non passano per il centro della torre: la loro linea ne "
-                                             "dista {0} cm. Un clic cade sulla faccia del muro: due punti su una "
-                                             "torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa "
-                                             "usa la cresta o la regione.", _it(100 * off, 0))
+                    drift, angle = frame.tilt.get("points_drift_m"), frame.tilt.get("points_angle_deg")
+                    if drift is not None and (drift > 0.3 or angle > 1.0):
+                        text += "\n\n" + tr("La linea dei due punti non è parallela alla torre: si discosta di {0}° "
+                                             "dal suo asse ({1} cm fra il piede e la cima). Un clic cade sulla "
+                                             "faccia del muro: due punti su una torre a scarpa danno la scarpa, "
+                                             "non l'asse. Per una torre a scarpa usa la cresta o la regione.",
+                                             _it(angle, 1), _it(100 * drift, 0))
                     if choice(self, "question", tr("Asse dello sviluppo"), text, [tr("Costruisci")]) is None:
                         return
                 self.statusBar().showMessage(tr("Sviluppo cilindrico: {0}", said), 15000)

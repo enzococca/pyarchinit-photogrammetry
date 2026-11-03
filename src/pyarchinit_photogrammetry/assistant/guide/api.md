@@ -1439,8 +1439,9 @@ of the residuals is over `tolerance`); `points` (two world points, bottom and to
 azimuth is where the top of the axis leans (0 = north, clockwise). A tilted axis passes through the tower's
 centre: the wall (the vertices within `depth` of the plan circle) seen along the axis, a circle fitted there
 (`info["fitted_radius"]`), the axis' point at `centre_z` in `info["centre"]` - v = 0 there (the crest's mean
-height, the points' midpoint, the model's mid height); `points` also gives `info["points_offset_m"]`, how far
-the points' line runs from that centre. With a tilted axis v is the distance along it. The tilt is written in the
+height, the points' midpoint, the model's mid height); `points` also gives `info["points_drift_m"]` and
+`info["points_angle_deg"]`: the wall seen along the points' line, circles fitted to its lowest and highest fifth,
+the drift of their centres and the angle it makes - how far the line is from parallel to the tower. With a tilted axis v is the distance along it. The tilt is written in the
 frame (`"tilt"`) and in the entry (`entry["tilt"]`).
 
 **The scale on the wall.** `Cylinder(..., u_map=[[theta_deg, u], ...])`: theta from `start` in the direction

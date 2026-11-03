@@ -1485,7 +1485,10 @@ almeno 1 m). L'azimut è la direzione verso cui pende la sommità dell'asse (0 =
 Un asse inclinato passa per il centro della torre: il muro (i vertici entro `depth` dal cerchio in pianta)
 guardato lungo l'asse, un cerchio adattato lì (`info["fitted_radius"]`), il punto dell'asse a `centre_z` in
 `info["centre"]` - lì v = 0 (la quota media della cresta, il punto medio dei due punti, la quota media del
-modello); `points` dà anche `info["points_offset_m"]`, quanto la linea dei punti dista da quel centro. Con un
+modello); `points` dà anche `info["points_drift_m"]` e
+`info["points_angle_deg"]`: il muro guardato lungo la linea dei punti, cerchi adattati al suo quinto più basso e
+a quello più alto, lo spostamento dei loro centri e l'angolo che fa - quanto la linea è lontana dall'essere
+parallela alla torre. Con un
 asse inclinato v è la distanza lungo l'asse. L'inclinazione è scritta nel sistema (`"tilt"`) e nella voce (`entry["tilt"]`).
 
 **La scala sulla parete.** `Cylinder(..., u_map=[[theta_gradi, u], ...])`: theta da `start` nel verso in
