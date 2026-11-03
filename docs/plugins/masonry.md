@@ -81,6 +81,11 @@ tools work on it: stones, US drawing, QGIS, exports.
   fits (`--force` on the command line builds it anyway).
 - **Polygonal tower**: the outline of the slice at a height is simplified into a polygon. Each side longer than the
   minimum (0.5 m by default) becomes a face on its own plane, seen from outside.
+- **Existing elevation** (plugin 0.1.1): an elevation the program already made with its *Elevation* button or
+  `ppg elevation` (on a plane or a cylinder, also one developed on the tower's own axis) becomes a face as it is:
+  nothing is rebuilt, its patches, drawings and resolution stay the program's. On the command line
+  `ppg plugin masonry face PROJECT WALL --existing "name or id"`. Sections and elevations without their orthophoto
+  are refused; an elevation can be the face of one wall only.
 
 A face keeps only the surface within its **depth band** (0.5 m in front of the plane and 0.3 m behind it, by default).
 Whatever stands further in front, such as scaffolding or a section left in front of the wall, is left out. When the
