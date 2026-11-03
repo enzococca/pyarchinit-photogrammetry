@@ -94,6 +94,51 @@ def _cases(rng):
             s.items(QRectF(0, 0, 500, 500))
         s.clear()
 
+    def polyline_path_once():  # the program's polyline: one addPolygon for the whole line
+        from pyarchinit_photogrammetry.gui.image_views import polyline_path
+
+        polyline_path(seg.reshape(-1, 2).tolist())
+
+    def polyline_path_many():  # N / 10 polylines of 20 vertices: one call each (the drain, if any, per polyline)
+        from pyarchinit_photogrammetry.gui.image_views import polyline_path
+
+        pts = seg.reshape(-1, 2).tolist()
+        for k in range(0, len(pts), 20):
+            polyline_path(pts[k:k + 20])
+
+    def segments_item_paint():  # the TIN edges: one item, painted with one drawLines (and dots with drawPoints)
+        from PySide6.QtGui import QColor, QImage, QPainter, QPen
+
+        from pyarchinit_photogrammetry.gui.image_views import SegmentsItem
+
+        s = QGraphicsScene()
+        item = SegmentsItem(seg, QPen(QColor("red"), 1), dots=seg[:, 0], dot_pen=QPen(QColor("blue"), 3))
+        s.addItem(item)
+        img = QImage(400, 400, QImage.Format.Format_ARGB32)
+        for _ in range(20):  # twenty repaints of the view
+            p = QPainter(img)
+            s.render(p)
+            p.end()
+        s.clear()
+
+    def painter_lines_per_segment():  # what the 3D view's trackball and frusta did per segment before
+        from PySide6.QtGui import QImage, QPainter
+
+        img = QImage(400, 400, QImage.Format.Format_ARGB32)
+        p = QPainter(img)
+        for (c0, c1), (r0, r1) in zip(xs, ys):
+            p.drawLine(QPointF(c0, r0), QPointF(c1, r1))
+        p.end()
+
+    def painter_draw_lines_once():  # ... and what it does now: one drawLines / drawPolyline
+        from PySide6.QtGui import QImage, QPainter
+
+        img = QImage(400, 400, QImage.Format.Format_ARGB32)
+        p = QPainter(img)
+        p.drawLines([QLineF(c0, r0, c1, r1) for (c0, c1), (r0, r1) in zip(xs, ys)])
+        p.drawPolyline(QPolygonF([QPointF(c0, r0) for (c0, c1), (r0, r1) in zip(xs, ys)]))
+        p.end()
+
     def delaunay():
         from scipy.spatial import Delaunay
 
@@ -135,6 +180,11 @@ def _cases(rng):
         "one addPolygon of 2N points": one_polygon,
         "scene addLine QLineF": scene_lines,
         "scene items(rect)": scene_items,
+        "polyline_path once (2N points)": polyline_path_once,
+        "polyline_path N/10 lines of 20": polyline_path_many,
+        "SegmentsItem N, 20 repaints": segments_item_paint,
+        "QPainter.drawLine per segment": painter_lines_per_segment,
+        "QPainter drawLines+drawPolyline": painter_draw_lines_once,
         "scipy Delaunay 20k": delaunay,
         "rasterio index/xy": rasterio_io,
         "engine.tin fallback 5k": tin_fallback,

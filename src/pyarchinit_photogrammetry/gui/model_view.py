@@ -6,8 +6,8 @@ import os
 import sys
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QLineF, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
                                QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
                                QWidget)
@@ -21,6 +21,31 @@ from .trackball import OUTLINE_COLOUR, RING_COLOURS, SETTING as TRACKBALL_SETTIN
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
                "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US",
                "tin": "TIN"}
+
+
+def ring_runs(xy, ok, front, half: bool) -> list:
+    """The runs of consecutive segments of a closed ring (``xy`` (n, 2)) whose both ends are ``ok`` and whose first
+    end is on the ``front`` side ``half``, as lists of points: each run one polyline (one painter call)."""
+    n = len(xy)
+    use = [bool(ok[i] and ok[(i + 1) % n] and bool(front[i]) == half) for i in range(n)]
+    if not any(use):
+        return []
+    if all(use):
+        return [[xy[i] for i in range(n)] + [xy[0]]]
+    start = next(i for i in range(n) if not use[i])  # begin after a gap, so no run is split at the seam
+    runs, cur = [], []
+    for k in range(1, n + 1):
+        i = (start + k) % n
+        if use[i]:
+            if not cur:
+                cur = [xy[i]]
+            cur.append(xy[(i + 1) % n])
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return runs
 
 
 def exaggeration_text(factor: float) -> str:
@@ -210,17 +235,18 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         p.drawImage(0, 0, self._image)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        # few painter calls per frame: lines gathered and drawn with one drawLines (see image_views.polyline_path)
         if self.show_cameras and self.sd.cameras:
             p.setPen(QPen(QColor(90, 170, 255), 1))
+            lines = []
             for fr in self.sd.cameras:
                 x, y, _, ok = self.cam.project(fr, w, h)
                 if not ok.all():
                     continue
                 q = [QPointF(float(a), float(b)) for a, b in zip(x, y)]
-                for i in range(1, 5):
-                    p.drawLine(q[0], q[i])
-                for i in range(1, 5):
-                    p.drawLine(q[i], q[1 + i % 4])
+                lines += [QLineF(q[0], q[i]) for i in range(1, 5)] + [QLineF(q[i], q[1 + i % 4]) for i in range(1, 5)]
+            if lines:
+                p.drawLines(lines)
         if self.show_markers and self.sd.markers:
             p.setFont(QFont(self.font().family(), 9))
             for label, xyz, check in self.sd.markers:
@@ -230,9 +256,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
                 col = QColor(255, 160, 40) if check else QColor(80, 220, 90)
                 p.setPen(QPen(col, 2))
                 pt = QPointF(float(x[0]), float(y[0]))
-                p.drawLine(pt, pt + QPointF(0, -16))
-                p.drawLine(pt + QPointF(0, -16), pt + QPointF(9, -12))
-                p.drawLine(pt + QPointF(9, -12), pt + QPointF(0, -8))
+                p.drawPolyline(QPolygonF([pt, pt + QPointF(0, -16), pt + QPointF(9, -12), pt + QPointF(0, -8)]))
                 p.drawText(pt + QPointF(11, -10), label)
             for text, a, b, check in self.sd.scalebars:  # scale bars between their markers
                 x, y, _, ok = self.cam.project(np.array([a, b]), w, h)
@@ -252,9 +276,10 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
             p.setPen(pen)
             from ..engine.region import Region
 
-            for a, b in Region.EDGES:
-                if ok[a] and ok[b]:
-                    p.drawLine(QPointF(float(x[a]), float(y[a])), QPointF(float(x[b]), float(y[b])))
+            edges = [QLineF(float(x[a]), float(y[a]), float(x[b]), float(y[b])) for a, b in Region.EDGES
+                     if ok[a] and ok[b]]
+            if edges:
+                p.drawLines(edges)
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         if self.sd.exaggeration != 1.0:
@@ -279,12 +304,10 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         p.drawEllipse(QPointF(cx, cy), r, r)
         for name, (_a, _pts, xy, ok, front) in geo["rings"].items():
             width = 2.6 if name == self.trackball.hover else 1.5
-            n = len(xy)
-            for i in range(n):
-                j = (i + 1) % n
-                if ok[i] and ok[j]:
-                    p.setPen(pen(RING_COLOURS[name], 220 if front[i] else 90, width))
-                    p.drawLine(QPointF(*xy[i]), QPointF(*xy[j]))
+            for half, alpha in ((True, 220), (False, 90)):  # the front of the ring, then the back: one call each run
+                p.setPen(pen(RING_COLOURS[name], alpha, width))
+                for run in ring_runs(xy, ok, front, half):
+                    p.drawPolyline(QPolygonF([QPointF(float(a), float(b)) for a, b in run]))
         p.setPen(pen((255, 255, 255), 230))
         p.drawLine(QPointF(cx - 6, cy), QPointF(cx + 6, cy))
         p.drawLine(QPointF(cx, cy - 6), QPointF(cx, cy + 6))
@@ -750,14 +773,12 @@ class LassoOverlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pts = self.pts + ([self.cursor_pos] if self.cursor_pos is not None and self.pts else [])
         if len(pts) >= 2:
-            path = QPainterPath()
-            path.addPolygon(QPolygonF(pts))
-            path.closeSubpath()
-            p.fillPath(path, QBrush(QColor(0, 229, 255, 50)))
             pen = QPen(QColor("#00e5ff"), 2)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            p.drawPath(path)
+            p.setBrush(QBrush(QColor(0, 229, 255, 50)))
+            p.drawPolygon(QPolygonF(pts))  # filled and outlined in one call (see image_views.polyline_path)
+            p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QColor("white"))
         p.drawText(10, 20, "Lazo: clic per i vertici (o trascina), doppio clic o Invio per chiudere, "
                            "clic destro toglie l'ultimo, Esc annulla")

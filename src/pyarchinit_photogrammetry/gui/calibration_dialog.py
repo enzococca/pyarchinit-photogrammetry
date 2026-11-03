@@ -4,8 +4,8 @@ point of the photo goes compared with an ideal pinhole, and the shift along the 
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
                                QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -75,14 +75,18 @@ class DistortionPlot(QWidget):
         biggest = float(np.nanmax(mag)) if finite.any() else 0.0
         step = box.width() / 12
         k = 0.8 * step / biggest if biggest > 0 else 1.0  # the longest arrow 80 % of the grid step
-        p.setPen(QPen(QColor("#d1495b"), 1.6))
+        lines, tips = [], []
         for (x0, y0), (dx, dy), ok in zip(ideal, d, finite):
             if not ok:
                 continue
             a = QPointF(box.x() + x0 * scale, box.y() + y0 * scale)
             b = QPointF(a.x() + dx * k, a.y() + dy * k)
-            p.drawLine(a, b)
-            p.drawEllipse(b, 1.6, 1.6)
+            lines.append(QLineF(a, b))
+            tips.append(b)
+        p.setPen(QPen(QColor("#d1495b"), 1.6))  # one call for the arrows, one for their tips
+        p.drawLines(lines)
+        p.setPen(QPen(QColor("#d1495b"), 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawPoints(QPolygonF(tips))
         p.setPen(self.palette().text().color())
         p.drawText(QRectF(10, 2, self.width() - 20, 20), Qt.AlignmentFlag.AlignLeft,
                    decimal_comma(tr("Distorsione: fino a {0:.1f} px dal punto ideale (frecce x{1:.0f})", biggest,
@@ -106,19 +110,10 @@ class DistortionPlot(QWidget):
         p.drawRect(chart)
         zero = chart.center().y()
         p.drawLine(QPointF(chart.left(), zero), QPointF(chart.right(), zero))
-        path = QPainterPath()
-        first = True
-        for ri, si in zip(r, shift):
-            if not np.isfinite(si):
-                continue
-            pt = QPointF(chart.left() + ri / corner * chart.width(), zero - si / lim * chart.height() / 2)
-            if first:
-                path.moveTo(pt)
-                first = False
-            else:
-                path.lineTo(pt)
+        curve = QPolygonF([QPointF(chart.left() + ri / corner * chart.width(), zero - si / lim * chart.height() / 2)
+                           for ri, si in zip(r, shift) if np.isfinite(si)])
         p.setPen(QPen(QColor("#2e86ab"), 2))
-        p.drawPath(path)
+        p.drawPolyline(curve)  # one call (see image_views.polyline_path)
         p.setPen(self.palette().text().color())
         p.drawText(QRectF(chart.left(), chart.bottom() + 2, chart.width(), 18), Qt.AlignmentFlag.AlignCenter,
                    tr("distanza dal centro (0 - {0:.0f} px, verso l'angolo)", corner))
