@@ -72,14 +72,14 @@ def fake_tools(monkeypatch):
     """run_tool replaced: dem_statistics gives DEM, project_summary names the site, the rest as facts does."""
     seen = []
 
-    def run_tool(name, arguments, document, index):
+    def run_tool(name, arguments, document, index, act=None):
         seen.append((name, dict(arguments or {}), document))
         if name == "dem_statistics" and document is not None:
             return dict(DEM)
         if name == "project_summary" and document is not None:
             return {"project": "Rilievo Nord", "site": "Tell Sultan",
                     "chunks": [{"label": "Volo 28/08", "key": 0, "photos": 0}]}
-        return F.run_tool(name, arguments, document, index)
+        return F.run_tool(name, arguments, document, index, act=act)
 
     monkeypatch.setattr(S, "run_tool", run_tool)
     return seen
@@ -471,3 +471,75 @@ def test_an_explicit_filter_is_kept(doc):
     assert assistant.filter is filter_
     assert "Persona 1" in fake.calls[0][0][-1].content
     assert turn.text == "Mario Rossi e Tell Sultan."
+
+
+# ---------------------------------------------------------------- actions
+
+
+def test_action_tools_are_offered_only_with_act(doc):
+    assistant, fake = make(doc, [text("ok")])
+    assistant.ask("Ciao")
+    _, tools = fake.calls[0]
+    assert [t.name for t in tools] == F.tool_names()
+    assert not any(t.name.startswith("act_") for t in tools)
+    assert "act_stones" not in fake.calls[0][0][0].content  # the system prompt names only what is offered
+    assert {"act_show", "act_select_photos", "act_stones", "act_build", "act_segment", "act_export",
+            "act_run_script"} <= set(F.tool_names(acts=True))
+    assistant, fake = make(doc, [text("ok")])
+    assistant.ask("Ciao", act=lambda name, args: {"ran": True})
+    system, tools = fake.calls[0][0][0].content, fake.calls[0][1]
+    assert [t.name for t in tools] == F.tool_names(acts=True)
+    assert "act_stones" in system and '"ran"' in system and '"declined"' in system and '"stopped"' in system
+    stones = next(t for t in tools if t.name == "act_stones")
+    assert stones.acts and stones.parameters["type"] == "object"
+    assert stones.parameters["properties"]["min_size"]["description"]  # the English description of the schema
+    json.dumps([t.parameters for t in tools])
+    build = next(t for t in tools if t.name == "act_build")
+    assert "resolution" in build.parameters["properties"]["params"]["description"]
+
+
+def test_an_action_tool_without_the_window_says_so(doc):
+    assert F.run_tool("act_show", {"what": "dem"}, doc, None) == {"error": "actions need the window"}
+    seen = []
+    out = F.run_tool("act_show", {"what": "dem"}, doc, None, act=lambda n, a: seen.append((n, a)) or {"ran": True})
+    assert out == {"ran": True} and seen == [("show", {"what": "dem"})]
+    assert F.run_tool("act_show", {}, doc, None, act=lambda n, a: 1 / 0)["error"].startswith("ZeroDivisionError")
+
+
+def test_an_action_gets_the_real_names_and_its_result_goes_back_filtered(doc):
+    seen = []
+
+    def act(name, args):
+        seen.append((name, args))
+        return {"ran": True, "shown": "orthomosaic", "chunk": "Volo 28/08"}
+
+    assistant, fake = make(doc, [calls(("act_show", {"what": "ortho", "chunk_label": "chunk 1",
+                                                     "elevation": ["chunk 1"]})),
+                                 text("Ecco l'ortofoto di chunk 1.")])
+    turn = assistant.ask("Mostra l'ortofoto del chunk Volo 28/08", act=act)
+    assert seen == [("show", {"what": "ortho", "chunk_label": "Volo 28/08", "elevation": ["Volo 28/08"]})]
+    (result,) = tool_messages(fake.calls[1][0])
+    assert "Volo 28/08" not in result.content and json.loads(result.content)["ran"] is True
+    assert turn.text == "Ecco l'ortofoto di Volo 28/08."
+    assert "strumento: act_show (eseguita)" in turn.read
+
+
+def test_a_declined_action_is_said_to_the_model(doc):
+    assistant, fake = make(doc, [calls(("act_stones", {"min_size": 0.1})), text("Non le ho disegnate.")],
+                           kind="local")
+    turn = assistant.ask("Disegna le pietre", act=lambda name, args: {"declined": True})
+    (result,) = tool_messages(fake.calls[1][0])
+    assert json.loads(result.content) == {"declined": True}
+    assert turn.text == "Non le ho disegnate." and "strumento: act_stones (rifiutata)" in turn.read
+
+
+def test_a_stopped_action_ends_the_turn_saying_so(doc):
+    asked = []
+    assistant, fake = make(doc, [calls(("act_stones", {}), ("act_show", {"what": "dem"}), t="Cerco le pietre."),
+                                 text("Fatto!")], language="en")
+    turn = assistant.ask("Draw the stones", act=lambda name, args: asked.append(name) or {"stopped": True})
+    assert len(fake.calls) == 1  # no other round: the model is not asked to go on
+    assert asked == ["stones"]  # after a stop the next action of the same reply is not asked for
+    assert turn.cancelled and turn.text.startswith("Cerco le pietre.")
+    assert "act_stones" in turn.text and "stopped" in turn.text and "Fatto" not in turn.text
+    assert "tool: act_stones (stopped)" in turn.read

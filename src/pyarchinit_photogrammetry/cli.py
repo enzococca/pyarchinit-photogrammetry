@@ -2351,7 +2351,9 @@ def assistant_ask(project: Path = typer.Argument(..., help="the .ppg project the
                                                         "local one only on this computer; default: the usual ports)"),
                   lang: str = typer.Option("it", help="language of the conversation: it or en"),
                   show_sent: bool = typer.Option(False, "--show-sent", help="also print what was sent")):
-    """Ask the assistant one question about a project and print the answer (and what it read)."""
+    """Ask the assistant one question about a project and print the answer (and what it read). Here the assistant
+    only reads: its actions (showing, choosing photos, stones, builds, SAM, exports, scripts) need the window and are
+    not offered - in the Assistente pane of ppg-gui they are."""
     from .assistant import inventory
     from .assistant.knowledge import default_index
     from .assistant.session import Assistant
@@ -2417,13 +2419,13 @@ def assistant_eval(project: Path = typer.Argument(..., help="the .ppg project (t
                    base_url: str = typer.Option("", help="address of the server"),
                    cases: Optional[Path] = typer.Option(None, help="the evaluation set (default: "
                                                                    "the set shipped with the program)"),
-                   only: str = typer.Option("all", help="all, questions or scripts"),
+                   only: str = typer.Option("all", help="all, questions, scripts or actions"),
                    lang: str = typer.Option("it", help="language of the questions: it or en"),
                    out: Optional[Path] = typer.Option(None, help="write the results to this JSON file"),
                    record: bool = typer.Option(False, "--record", help="keep the score as the last evaluation of "
                                                                        "this kind in the settings of the interface")):
-    """Evaluate a model: the questions and the script tasks of the set on a project (the scripts run on copies:
-    the project is never changed). Prints one line per case and the score."""
+    """Evaluate a model: the questions, the script tasks and the actions of the set on a project (the scripts run on
+    copies, the actions are only recorded: the project is never changed). Prints one line per case and the score."""
     from .assistant import evaluate
 
     path = cases or evaluate.CASES

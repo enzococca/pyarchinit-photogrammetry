@@ -115,6 +115,23 @@ def test_the_evaluation_set_is_complete_and_its_examples_pass_their_own_checks()
         assert case["task_it"].strip() and case["task_en"].strip()
         compile(case["check"], case["id"], "eval")
         compile(case["example"], case["id"], "exec")
+    from pyarchinit_photogrammetry.assistant import facts
+
+    actions = {c["id"]: c for c in data["actions"]}
+    assert len(actions) >= 6 and "ambiguous_orthophoto" in actions
+    assert not set(actions) & set(ids)
+    for case in actions.values():
+        assert case["kind"] == "action"
+        for lang in ("it", "en"):
+            assert case[f"question_{lang}"].strip()
+            for pattern in case.get("must_contain", []):
+                assert re.search(pattern, case[f"example_{lang}"], re.IGNORECASE), (case["id"], lang, pattern)
+        if case.get("tool"):
+            assert case["tool"] in facts.tool_names(acts=True)
+            assert evaluate._contains(case["example_args"], case["args_contain"]), case["id"]
+    ambiguous = actions["ambiguous_orthophoto"]
+    assert ambiguous.get("tool") is None and ambiguous["setup"] == "two_orthophotos"
+    assert any("quale" in p and "which" in p for p in ambiguous["must_contain"])
 
 
 class _OpenAI:
@@ -339,7 +356,7 @@ def test_a_script_that_raises_cancelled_itself_is_not_a_timeout(small):
 def test_a_slow_script_is_stopped_and_counted_as_failed(small):
     project, _ = small
     cases = {"questions": [], "scripts": [{"id": "slow", "task_it": "Aspetta.", "task_en": "Wait.", "check": "True",
-                                           "example": "import time\ntime.sleep(3)"}]}
+                                           "example": "import time\nwhile True:\n    cancel()\n    time.sleep(0.02)"}]}
     result = run_eval(CasesProvider(cases), project, cases, kinds="scripts", script_timeout=0.3)
     slow = result["scripts"]["results"][0]
     assert not slow["passed"] and slow["attempts"] == 2 and "tempo scaduto" in slow["detail"]
@@ -359,3 +376,49 @@ def test_a_context_error_of_llama_cpp_is_retried_shorter_then_said_without_the_a
     turn = _local_assistant(server, project).ask("Riassumi il progetto")
     assert turn.error == ("La conversazione supera il contesto del modello (32768 token): inizia una nuova "
                           "conversazione")
+
+
+def test_the_action_cases_pass_with_the_reference_answers_on_the_demo(processed):
+    doc, _ch, _ = processed
+    result = run_eval(CasesProvider(), doc.path, kinds="actions")
+    actions = result["actions"]
+    assert actions["of"] >= 6 and actions["passed"] == actions["of"], evaluate.table(result)
+    assert result["questions"]["of"] == 0 and result["scripts"]["of"] == 0 and result["score_scripts"] is None
+    ambiguous = next(r for r in actions["results"] if r["id"] == "ambiguous_orthophoto")
+    assert ambiguous["kind"] == "action" and ambiguous["passed"]
+    import pyarchinit_photogrammetry as ppg
+
+    assert [c.label for c in ppg.Document.open(doc.path).chunks] == ["Saggio 1"]  # the setup ran on a copy
+
+    class _Talks(CasesProvider):
+        """Answers every action with words, never with the tool."""
+
+        def complete(self, messages, tools=None, on_text=None, cancel=None):
+            return Reply("Lo faccio subito. Quale? Area nord o Area sud.", [], "end", {})
+
+    talks = run_eval(_Talks(), doc.path, kinds="actions")["actions"]
+    by_id = {r["id"]: r for r in talks["results"]}
+    assert not by_id["action_stones"]["passed"] and "act_stones" in by_id["action_stones"]["detail"]
+    assert by_id["ambiguous_orthophoto"]["passed"]  # a question and no action: what the case wants
+
+    class _Rushes(CasesProvider):
+        """Draws the stones on the ambiguous question instead of asking."""
+
+        def complete(self, messages, tools=None, on_text=None, cancel=None):
+            if messages[-1].role == "user" and "ortofoto" in messages[-1].content and \
+                    not any(m.role == "tool" for m in messages):
+                from pyarchinit_photogrammetry.assistant.providers import ToolCall
+
+                return Reply("", [ToolCall("c", "act_stones", {})], "tool_calls", {})
+            return super().complete(messages, tools, on_text, cancel)
+
+    rushes = run_eval(_Rushes(), doc.path, kinds="actions")["actions"]
+    ambiguous = next(r for r in rushes["results"] if r["id"] == "ambiguous_orthophoto")
+    assert not ambiguous["passed"] and "act_stones" in ambiguous["detail"]
+
+
+def test_the_command_line_ask_says_it_does_not_act():
+    from pyarchinit_photogrammetry.cli import app
+
+    out = CliRunner().invoke(app, ["assistant", "ask", "--help"], terminal_width=200)
+    assert out.exit_code == 0 and "not offered" in " ".join(out.output.split())

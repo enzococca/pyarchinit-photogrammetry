@@ -1,8 +1,9 @@
 # The assistant
 
-The *Assistant* pane (at the bottom, beside the *Python console*; *View > Assistant* or *Tools > Assistant >
-Open the assistant*) is a conversation with a language model about your project and about the program, and a
-script editor to run on the project what the model proposes - or what you write yourself.
+The *Assistant* pane (at the bottom, beside the *Python console*; *View > Assistant > Open the assistant* or *Tools >
+Assistant > Open the assistant*) is a conversation with a language model about your project and about the program,
+a script editor to run on the project what the model proposes - or what you write yourself - and the actions the
+model carries out on the open project when you ask it to do something.
 
 ![The Assistant pane](../img/gui/pane-assistant.png)
 
@@ -12,6 +13,53 @@ The model reads the questions together with the passages of this guide that fit 
 project through tools that only read: the summary of the project, the alignment and its errors, the markers,
 the DEM, the orthophoto, the dense cloud, the model, the thermal and multispectral products. It answers in the language of the interface. When the answer holds
 a Python script, *Open in the editor* under it copies the script into the editor on the right.
+
+### What it knows of the open project
+
+Every question carries a short block, *The project now*, read from the project and the window just before the
+question leaves: the chunks (photos, aligned photos, products with their versions and the active one, the rasters of
+the raster calculator by name, how many units, spot heights, stones, lines and elevations they have), the active
+chunk, what the 2D view shows (the orthophoto, the DEM, a raster of the calculator, a version, an elevation), what the
+3D view shows, the selection (a polygon and its area, how many photos are selected) and the photo filter. Only names,
+kinds and counts: never a path, a coordinate or the pixels of a raster. With it the model writes scripts for *this*
+project - `chunk` is the active chunk it names, another chunk is `doc.chunk_by_label("...")` - and works on the raster
+shown unless you name another. When a product exists in several chunks or versions and the question does not say
+which, it asks one question ("which orthophoto: that of Area nord or that of Area sud?").
+
+## Actions
+
+When you ask the assistant to *do* something, it does it with an action instead of writing a script:
+
+| Action | What it does |
+| --- | --- |
+| Show | the orthophoto, the DEM, the model, the cloud, an elevation or a raster of the calculator (also a kept version or another chunk) |
+| Choose the photos | by area (the selected polygon), by markers, by name, all or none; then filters or selects them in the Photos pane, or switches them on or off |
+| Stones (SAM) | the stone finder on the orthophoto, an elevation or a raster of the calculator (the one shown unless named; a DEM is refused), stones drawn in the layer «Pietre» |
+| Build again | the DEM, orthophoto, dense cloud, model, texture, relief, normal map, TIN or contour lines with the parameters you give; the product before is kept as a version |
+| Units (SAM) | the units SAM finds in an area of the raster shown, as candidates in the layer «Unita' da SAM» |
+| Export | a product or the drawings to a file (the window asks where) |
+| Script | a script the model writes, run as *Run* in the editor runs it |
+
+The same functions are `ppg.actions` in a script (see [Scripts](../scripting.md)).
+
+**When they run** - *View > Assistant > Actions*:
+
+* **Always ask**: every action appears as a card in the conversation and waits;
+* **Quick ones at once** (the default): showing, and filtering or selecting photos, run at once (a line in the chat
+  says what ran); stones, builds, units, exports, photos switched on or off and scripts wait for you;
+* **Run everything**: every action runs at once and its card says what it did.
+
+A card names the action and its parameters in words, with **Run**, **Edit** (the parameters in a small form; the card
+waits again for *Run*) and **No**. The model gets what happened - done with its facts, *No*, stopped or the error - and
+must say so: it never says it did something that did not run. **Stop** while a card waits or an action runs stops it.
+
+**Undo**: an action runs like a script, in the background with the window usable, and everything it changes in the
+project is ONE entry of *Edit > Undo* named after it ("Assistant: Stones (SAM)"), also when it fails halfway; the
+**Undo** button of its card is the same, while the action is the last step. Exports and the other calls outside the
+project are said in the card and cannot be undone. Only one step runs at a time: an action asked while another step
+runs is refused and the model is told.
+
+`ppg assistant ask` on the command line has no window: there the assistant only reads, the actions are not offered.
 
 ## The three kinds of model
 
@@ -39,10 +87,14 @@ With a local model nothing leaves. With Claude or OpenAI the text goes through a
   ("Sito A", "Persona 1") and put back in the answer;
 * only relative coordinates and heights are sent, the reference system as "projected, in metres" or
   "geographic"; file, chunk and project names become neutral;
-* photos, GPS and GNSS positions are never sent.
+* photos, GPS and GNSS positions are never sent;
+* the block *The project now* goes through the same filter: chunk, raster and version names become neutral names,
+  counts and kinds stay; the names the model uses in an action are turned back into the real ones before it runs, and
+  what the action answers goes back through the filter.
 
 The filter cannot recognise what you type yourself: before the first question of an external conversation an
-orange line says so - **do not write coordinates or names in the question**. *What is sent* shows, question by
+orange line says so - **do not write coordinates or names in the question**. Names of versions and rasters you type
+reach an external model as you typed them, as they do with the statistics tools. *What is sent* shows, question by
 question, the exact text that left the computer, and the table of the names the filter replaced (real name,
 sent as).
 
@@ -68,8 +120,8 @@ ends it. What it prints and its error, if any, are in the box under the editor.
   with the corrected script.
 * **Save as .py**: the script in a file, to run again with *Tools > Run Python script...*.
 
-A script only runs when you click *Run*: the assistant never runs anything by itself. See
-[Scripts](../scripting.md) for what a script can do.
+A script of the editor only runs when you click *Run*; what the assistant runs by itself are the actions above, as
+*View > Assistant > Actions* allows. See [Scripts](../scripting.md) for what a script can do.
 
 ## Settings
 
@@ -94,7 +146,11 @@ project (`ppg demo FOLDER --process`): the questions about the project (DEM, ort
 markers) and about the program (contour lines, IFC, confidence, holes in the DEM); the scripts the region on three
 markers, the normal map, a chunk with the photos of an area, the photos outside an area disabled, a DEM of the ground
 only, the ground points exported. Each script runs on a copy of the project and is checked; after an error the model
-gets one second try, as with *Error? Ask the assistant*. The score is the number of script tasks done.
+gets one second try, as with *Error? Ask the assistant*. The score is the number of script tasks done. The set also
+has requests to act (show the DEM, stones bigger than 10 cm, the DEM again at 2 cm, photos switched off by name, the
+photos of the selected area, the orthophoto exported): each passes when the model calls the right action with those
+parameters - the calls are recorded, nothing runs - and one ambiguous request (two chunks each with an orthophoto,
+"draw the stones on the orthophoto") passes when the model asks which one and acts on none (`--only actions`).
 
 ```bash
 ppg assistant eval FOLDER/scavo.ppg --kind local --base-url http://127.0.0.1:8080/v1 --out local.json --record

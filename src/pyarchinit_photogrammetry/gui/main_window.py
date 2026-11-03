@@ -1351,7 +1351,10 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Sezioni"), lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, tr("Console Python"), lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
-        self._act(m, tr("Assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant), icon_name="assistant")
+        vam = m.addMenu(icon("assistant"), tr("Assistente"))
+        self._act(vam, tr("Apri l'assistente"), lambda: self._show_pane(self.bottom_tabs, self.assistant),
+                  icon_name="assistant")
+        self._build_assistant_actions_menu(vam.addMenu(tr("Azioni")))
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
@@ -14453,6 +14456,39 @@ class MainWindow(QMainWindow):
 
         self.run_script_source(src, Path(path).name, on_done=done, path=path)
 
+    def _build_assistant_actions_menu(self, menu) -> None:
+        """*Vista > Assistente > Azioni*: when the assistant's actions run (the setting ``assistant_actions``)."""
+        from .assistant_pane import ACTION_MODE_NAMES, ACTION_MODE_TIPS, ACTION_MODES, action_mode
+
+        group = QActionGroup(self)
+        self.assistant_action_modes = {}
+        mode_now = action_mode()
+        for mode in ACTION_MODES:
+            a = QAction(tr(ACTION_MODE_NAMES[mode]), self, checkable=True)
+            a.setToolTip(tr(ACTION_MODE_TIPS[mode]))
+            a.setStatusTip(tr(ACTION_MODE_TIPS[mode]))
+            a.setChecked(mode == mode_now)
+            a.triggered.connect(lambda _=False, md=mode: self.set_assistant_actions(md))
+            group.addAction(a)
+            menu.addAction(a)
+            self.assistant_action_modes[mode] = a
+        menu.setToolTipsVisible(True)
+
+    def set_assistant_actions(self, mode: str) -> None:
+        """When the assistant's actions run: "ask" (every one waits for *Esegui*), "quick" (showing and choosing
+        photos at once) or "all"."""
+        from . import app_settings
+        from .assistant_pane import ACTION_MODES, ACTION_SETTING
+
+        if mode not in ACTION_MODES:
+            raise ValueError(f"mode: one of {', '.join(ACTION_MODES)}")
+        s = app_settings()
+        s.setValue(ACTION_SETTING, mode)
+        s.sync()
+        a = getattr(self, "assistant_action_modes", {}).get(mode)
+        if a is not None and not a.isChecked():
+            a.setChecked(True)
+
     def _namespace_for_worker(self) -> dict:
         """The names a script run in the worker sees, built in the interface thread: ``doc``, ``chunk``, ``app``,
         ``ppg``, ``np``, ``polygon`` (the polygons selected in the 2D view, merged; None), ``cameras`` (the photos
@@ -14479,12 +14515,78 @@ class MainWindow(QMainWindow):
         > Annulla, also when it fails halfway. The calls it makes that cannot be undone (PyArchInit, QGIS's live
         GeoPackage, exports) are said afterwards. ``on_done(result)``: the :class:`ScriptResult`, also on error.
         Returns False when another step is running (said in the status bar)."""
-        from ..assistant.scripts import ScriptResult, run_script
-        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
+        from ..assistant.scripts import run_script
 
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
             return False
+        name = path or label
+        return self._script_step(label, lambda namespace, progress: run_script(source, namespace, progress, name=name),
+                                 on_done, path=path)
+
+    def run_action(self, name: str, args: dict, done) -> bool:
+        """The action ``name`` of the assistant (:data:`..assistant.actions.ACTIONS`) with the arguments ``args``
+        (as the model gave them, the real names restored) on the active chunk, run in the worker as a script runs
+        (:meth:`run_script_source`): what it changes is ONE entry of Modifica > Annulla named after it, the products
+        it builds again kept first as versions, the window shown again after a build, photos switched on or off or a
+        script (showing, stones, units and exports draw or write through the window themselves). ``done(result)``
+        in the interface thread: ``{"ran": True, ...the facts of the action}`` (plus
+        ``"not_undoable"``: the calls outside the project), ``{"stopped": True}`` when *Ferma* stopped it,
+        ``{"error": text}`` when it failed or could not start - another step is running (then ``done`` is called
+        at once and False returned)."""
+        import time as _time
+
+        from ..assistant import actions
+        from ..assistant.scripts import ExternalCalls, ScriptResult
+        from .assistant_pane import ACTION_TITLES
+
+        if name not in actions.ACTIONS:
+            done({"error": f"unknown action {name}"})
+            return False
+        if self.runner.busy:
+            done({"error": tr("Un'elaborazione è in corso: l'azione non parte")})
+            return False
+        title = tr(ACTION_TITLES.get(name, name))
+        label = tr("Assistente: {0}", title)
+
+        def work(namespace, progress):
+            t0 = _time.monotonic()
+            with ExternalCalls() as external:
+                value = actions.call(name, namespace["chunk"], namespace["window"], args, progress)
+            return ScriptResult("", None, None, list(external.calls), _time.monotonic() - t0, value=value)
+
+        def finished(result) -> None:
+            if result.value == {"stopped": True} or result.error == tr("Script annullato"):
+                done({"stopped": True})
+            elif result.error:
+                done({"error": result.error})
+            elif isinstance(result.value, dict) and result.value.get("error"):  # a script of the model that failed
+                done({k: v for k, v in result.value.items() if v not in (None, [], "")})
+            else:
+                value = result.value if isinstance(result.value, dict) else {"value": result.value}
+                out = {"ran": True, **value}
+                if result.external:
+                    out["not_undoable"] = list(dict.fromkeys(result.external))
+                done(out)
+
+        # what shows, draws or writes elsewhere leaves the views as they are (the stones drawn on the elevation shown
+        # stay there); a product built again, photos switched on or off, a script: the window shown again
+        refresh = "changed" if name in ("build", "select_photos", "run_script") else "never"
+        started = self._script_step(label, work, finished, refresh=refresh, tell_external=False)
+        if not started:
+            done({"error": tr("Un'elaborazione è in corso: l'azione non parte")})
+        return started
+
+    def _script_step(self, label: str, work, on_done=None, path: str | None = None, refresh: str = "always",
+                     tell_external: bool = True) -> bool:
+        """``work(namespace, progress) -> ScriptResult`` in the worker with the bookkeeping of a script: the
+        snapshot before, the products kept as versions, ONE :class:`ScriptAction` ``label`` after (also when it
+        fails halfway), the window shown again (``refresh``: "always" - a script -, "changed" - only when the project
+        changed - or "never"), the calls outside the project said (``tell_external``: in a message; else in the Log
+        only). ``on_done(result)`` in the interface thread."""
+        from ..assistant.scripts import ScriptResult
+        from .undo import ScriptAction, chunk_keys, files_under, snapshot_document, snapshot_text
+
         doc = self.doc
         root = doc.files_dir
         self._store_drawings()  # the drawings of the window are in the snapshot
@@ -14499,12 +14601,11 @@ class MainWindow(QMainWindow):
             ch._kept_folders = []
         doc.script_removals = []
         self._script_running = True
-        name = path or label
 
         def job(progress):
             files0 = files_under(root)  # walked here, in the worker: a large project takes a while
             try:
-                result = run_script(source, namespace, progress, name=name)
+                result = work(namespace, progress)
             except Cancelled:
                 result = ScriptResult("", tr("Script annullato"), None, [], 0.0)
             except BaseException as exc:  # noqa: BLE001 - whatever happens, the script's entry is made
@@ -14541,15 +14642,22 @@ class MainWindow(QMainWindow):
             changed = bool(made or kept_folders or new_files or new_chunks or removed) or \
                 snapshot_text(before) != snapshot_text(after)
             with self._history_paused():
-                self._after_script_step(modified=changed)
+                if refresh == "always" or (refresh == "changed" and changed):
+                    self._after_script_step(modified=changed)
+                elif changed:
+                    self.setWindowModified(True)
             if changed and self.history is not None:
                 self._store_drawings()
                 self.history.push(label, ScriptAction(self, before, snapshot_document(doc), made, new_files, new_chunks,
                                                       removed, kept_folders), document=True)
             if result.external:
                 calls = list(dict.fromkeys(result.external))
-                self._script_message(tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > "
-                                        "Annulla non riporta indietro.\n\nNon annullabili: {0}", ", ".join(calls)))
+                text = tr("Lo script ha fatto anche operazioni fuori dal progetto, che Modifica > Annulla non riporta "
+                          "indietro.\n\nNon annullabili: {0}", ", ".join(calls))
+                if tell_external:
+                    self._script_message(text)
+                else:
+                    self.log_pane.warning(text)
             if result.error:
                 self.log_pane.warning(tr("{0}: {1}", label, result.error))
             if on_done is not None:

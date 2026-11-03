@@ -10,6 +10,11 @@ another reason the error as ``{"error": "<type>: <message>"}``: :func:`run_tool`
 Raster statistics read an overview of the file (at most :data:`MAX_SAMPLES` cells on a side), the point clouds
 and the meshes only their headers (and the class or confidence column, memory-mapped): a project of a tell answers
 in a moment. No GUI here.
+
+The actions of :mod:`.actions` are tools too (``act_<name>``, :attr:`ToolSpec.acts`): :func:`run_tool` does not run
+them, it hands them to the ``act`` callable the session was given (the window's, which may ask the user first) and
+answers with what that returns; without ``act`` (the command line, the evaluation of the facts) an action tool answers
+``{"error": "actions need the window"}``.
 """
 from __future__ import annotations
 
@@ -100,8 +105,53 @@ TOOLS: list[ToolSpec] = [
 ]
 
 
-def tool_names() -> list[str]:
-    return [t.name for t in TOOLS]
+ACTION_PREFIX = "act_"  # the tool of the action "stones" is "act_stones"
+
+
+def _action_parameters(schema: dict) -> dict:
+    """The JSON schema a model reads from the schema of :data:`.actions.ACTIONS`: the English descriptions, the
+    types, enums, defaults and items; ``build``'s ``params`` an object whose description lists the keywords of each
+    product (they are passed through to the builder as they are)."""
+    props = {}
+    for key, p in (schema.get("properties") or {}).items():
+        q = {k: p[k] for k in ("type", "enum", "default", "items") if k in p}
+        description = str(p.get("description_en") or "")
+        if "per_product" in p:
+            q["type"] = "object"
+            q["additionalProperties"] = True
+            description += ". By product: " + "; ".join(f"{product}: {', '.join(keys)}"
+                                                        for product, keys in p["per_product"].items())
+        q["description"] = description
+        props[key] = q
+    out: dict = {"type": "object", "properties": props, "additionalProperties": False}
+    if schema.get("required"):
+        out["required"] = list(schema["required"])
+    return out
+
+
+def _action_tools() -> list[ToolSpec]:
+    from .actions import ACTIONS
+
+    return [ToolSpec(ACTION_PREFIX + name, f"{entry[3]}. ACTS on the project: its answer says ran, declined, "
+                                           "stopped or error.", _action_parameters(entry[4]), acts=True)
+            for name, entry in ACTIONS.items()]
+
+
+TOOLS += _action_tools()
+
+
+def tool_names(acts: bool = False) -> list[str]:
+    """The names of the tools that read; with ``acts`` also those of the actions."""
+    return [t.name for t in TOOLS if acts or not t.acts]
+
+
+def action_name(tool: str) -> str | None:
+    """The action a tool name stands for (``"act_stones"`` -> ``"stones"``), None for a tool that reads."""
+    from .actions import ACTIONS
+
+    if tool.startswith(ACTION_PREFIX) and tool[len(ACTION_PREFIX):] in ACTIONS:
+        return tool[len(ACTION_PREFIX):]
+    return None
 
 
 # ------------------------------------------------------------------ helpers
@@ -541,14 +591,25 @@ _DOCUMENT_TOOLS: dict[str, Callable] = {"project_summary": project_summary, "gui
                                         "scripting_api": scripting_api}
 
 
-def run_tool(name: str, arguments: dict | None, document, index: Index | None) -> dict:
-    """Run the tool ``name`` with its JSON ``arguments`` over ``document`` (None: no project open). Never raises."""
+def run_tool(name: str, arguments: dict | None, document, index: Index | None,
+             act: Callable[[str, dict], dict] | None = None) -> dict:
+    """Run the tool ``name`` with its JSON ``arguments`` over ``document`` (None: no project open). An action tool
+    (``act_<action>``) is ``act(action, arguments)``: its answer as it is (``{"ran": True, ...}``,
+    ``{"declined": True}``, ``{"stopped": True}`` or ``{"error": ...}``); without ``act``
+    ``{"error": "actions need the window"}``. Never raises."""
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
         return {"error": f"arguments must be a JSON object, not {type(arguments).__name__}"}
     try:
         arguments = dict(arguments)
+        action = action_name(name)
+        if action is not None:
+            if act is None:
+                return {"error": "actions need the window"}
+            result = act(action, arguments)
+            return result if isinstance(result, dict) else \
+                {"error": f"the action {action} answered {type(result).__name__}, not an object"}
         if name in _DOCUMENT_TOOLS:
             return _DOCUMENT_TOOLS[name](document, arguments, index)
         if name in _CHUNK_TOOLS:

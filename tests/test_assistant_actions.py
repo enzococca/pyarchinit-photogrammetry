@@ -414,3 +414,31 @@ def test_the_schemas_accept_what_the_actions_take():
                 jsonschema.validate(v, per_product[product][key])
     with pytest.raises(jsonschema.ValidationError):  # and still refuse what is wrong
         jsonschema.validate("fine", per_product["dem"]["resolution"])
+
+
+def test_call_passes_the_tool_arguments_to_the_action(monkeypatch):
+    """What the model sends: empty keys left out, build's params flattened, progress to who takes it, an unknown
+    parameter named."""
+    from pyarchinit_photogrammetry.assistant import actions
+
+    seen = []
+
+    def build(chunk, window, product, chunk_label=None, progress=None, **params):
+        seen.append(("build", product, chunk_label, progress, params))
+        return {"built": product}
+
+    def show(chunk, window, what, chunk_label=None):
+        seen.append(("show", what, chunk_label))
+        return {}
+
+    monkeypatch.setitem(actions.ACTIONS, "build", (build, *actions.ACTIONS["build"][1:]))
+    monkeypatch.setitem(actions.ACTIONS, "show", (show, *actions.ACTIONS["show"][1:]))
+    assert actions.call("build", "C", None, {"product": "dem", "chunk_label": None,
+                                             "params": {"resolution": 0.02, "source": None}}, "P") == {"built": "dem"}
+    assert seen[-1] == ("build", "dem", None, "P", {"resolution": 0.02})
+    actions.call("show", "C", "W", {"what": "dem", "chunk_label": "B"}, "P")
+    assert seen[-1] == ("show", "dem", "B")
+    with pytest.raises(ValueError, match="colore"):
+        actions.call("show", "C", "W", {"what": "dem", "colore": "rosso"})
+    with pytest.raises(ValueError, match="sconosciuta"):
+        actions.call("vola", "C", "W", {})

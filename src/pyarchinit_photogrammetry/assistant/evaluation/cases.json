@@ -168,5 +168,124 @@
    "check": "(Path(doc.path).parent / 'classe2.las').is_file() and set(np.unique(__import__('laspy').read(str(Path(doc.path).parent / 'classe2.las')).classification).tolist()) == {2}",
    "example": "from pathlib import Path\nfrom pyarchinit_photogrammetry.ai.classify import classify_chunk\n\nif 2 not in chunk.point_classes():\n    classify_chunk(chunk)\nout = chunk.export_point_cloud(Path(doc.path).parent / \"classe2.las\", classes=[2])\nprint(out)"
   }
+ ],
+ "actions": [
+  {
+   "id": "action_show_dem",
+   "kind": "action",
+   "question_it": "Mostrami il DEM nella vista 2D.",
+   "question_en": "Show me the DEM in the 2D view.",
+   "tool": "act_show",
+   "args_contain": {
+    "what": "dem"
+   },
+   "example_args": {
+    "what": "dem"
+   },
+   "example_it": "Il DEM è nella vista 2D.\n\nHo letto: strumento act_show",
+   "example_en": "The DEM is in the 2D view.\n\nI read: tool act_show"
+  },
+  {
+   "id": "action_stones",
+   "kind": "action",
+   "question_it": "Disegna le pietre sull'ortofoto, solo quelle più grandi di 10 cm.",
+   "question_en": "Draw the stones on the orthophoto, only those larger than 10 cm.",
+   "tool": "act_stones",
+   "args_contain": {
+    "min_size": 0.1
+   },
+   "example_args": {
+    "min_size": 0.1
+   },
+   "example_it": "Ho disegnato le pietre nel layer «Pietre».\n\nHo letto: strumento act_stones",
+   "example_en": "The stones are drawn in the layer «Pietre».\n\nI read: tool act_stones"
+  },
+  {
+   "id": "action_rebuild_dem",
+   "kind": "action",
+   "question_it": "Ricostruisci il DEM con celle di 2 cm.",
+   "question_en": "Build the DEM again with 2 cm cells.",
+   "tool": "act_build",
+   "args_contain": {
+    "product": "dem",
+    "resolution": 0.02
+   },
+   "example_args": {
+    "product": "dem",
+    "params": {
+     "resolution": 0.02
+    }
+   },
+   "example_it": "Il DEM è stato ricostruito a 2 cm; quello di prima è tra le versioni.\n\nHo letto: strumento act_build",
+   "example_en": "The DEM was built again at 2 cm; the one before is among the versions.\n\nI read: tool act_build"
+  },
+  {
+   "id": "action_disable_photos",
+   "kind": "action",
+   "question_it": "Disattiva le foto il cui nome inizia con IMG_00.",
+   "question_en": "Switch off the photos whose name starts with IMG_00.",
+   "tool": "act_select_photos",
+   "args_contain": {
+    "by": "names",
+    "then": "disable"
+   },
+   "example_args": {
+    "by": "names",
+    "pattern": "IMG_00*",
+    "then": "disable"
+   },
+   "example_it": "Ho disattivato le foto che iniziano con IMG_00.\n\nHo letto: strumento act_select_photos",
+   "example_en": "The photos starting with IMG_00 are switched off.\n\nI read: tool act_select_photos"
+  },
+  {
+   "id": "action_filter_area",
+   "kind": "action",
+   "question_it": "Mostra nel pannello Foto solo le foto che vedono l'area selezionata.",
+   "question_en": "Show in the Photos pane only the photos that see the selected area.",
+   "tool": "act_select_photos",
+   "args_contain": {
+    "by": "area",
+    "then": "filter"
+   },
+   "example_args": {
+    "by": "area",
+    "area": "selection",
+    "then": "filter"
+   },
+   "example_it": "Il pannello Foto mostra le foto che vedono l'area selezionata.\n\nHo letto: strumento act_select_photos",
+   "example_en": "The Photos pane shows the photos that see the selected area.\n\nI read: tool act_select_photos"
+  },
+  {
+   "id": "action_export_orthophoto",
+   "kind": "action",
+   "question_it": "Esporta l'ortofoto in GeoTIFF.",
+   "question_en": "Export the orthophoto as a GeoTIFF.",
+   "tool": "act_export",
+   "args_contain": {
+    "what": "orthomosaic",
+    "format": "tif"
+   },
+   "example_args": {
+    "what": "orthomosaic",
+    "format": "tif"
+   },
+   "example_it": "L'ortofoto è esportata in GeoTIFF.\n\nHo letto: strumento act_export",
+   "example_en": "The orthophoto is exported as a GeoTIFF.\n\nI read: tool act_export"
+  },
+  {
+   "id": "ambiguous_orthophoto",
+   "kind": "action",
+   "setup": "two_orthophotos",
+   "question_it": "Disegna le pietre sull'ortofoto.",
+   "question_en": "Draw the stones on the orthophoto.",
+   "tool": null,
+   "must_contain": [
+    "quale|which",
+    "Area nord",
+    "Area sud"
+   ],
+   "example_it": "Quale ortofoto: quella del chunk «Area nord» o quella del chunk «Area sud»?\n\nHo letto: niente",
+   "example_en": "Which orthophoto: the one of the chunk «Area nord» or the one of the chunk «Area sud»?\n\nI read: nothing"
+  }
  ]
 }

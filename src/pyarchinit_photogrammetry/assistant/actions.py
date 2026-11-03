@@ -999,6 +999,34 @@ ACTIONS: dict[str, tuple] = {
 }
 
 
+def call(name: str, chunk, window, args: dict | None, progress=None) -> dict:
+    """The action ``name`` with the arguments of its tool ``args`` (as the model gives them): the keys left empty
+    (None) are left out, ``build``'s ``params`` object is passed through to the builder as its keywords (flattened
+    beside ``product`` and ``chunk_label``), ``progress`` given to the actions that take it. A parameter the action
+    does not know is a ``ValueError`` naming the ones it knows."""
+    import inspect
+
+    if name not in ACTIONS:
+        raise ValueError(f"azione sconosciuta «{name}»: {', '.join(ACTIONS)}")
+    function = ACTIONS[name][0]
+    kwargs = {k: v for k, v in dict(args or {}).items() if v is not None}
+    params = kwargs.pop("params", None) if name == "build" else None
+    if isinstance(params, dict):
+        kwargs.update({k: v for k, v in params.items() if v is not None})
+    elif params is not None:
+        raise ValueError("params: un oggetto con i parametri del prodotto")
+    signature = inspect.signature(function)
+    takes_any = any(p.kind is p.VAR_KEYWORD for p in signature.parameters.values())
+    known = [k for k in signature.parameters if k not in ("chunk", "window", "progress")]
+    unknown = [k for k in kwargs if k not in known and k != "progress"]
+    if unknown and not takes_any:
+        raise ValueError(f"parametri sconosciuti per {name}: {', '.join(unknown)} (sono {', '.join(known)})")
+    kwargs.pop("progress", None)
+    if "progress" in signature.parameters:
+        kwargs["progress"] = progress
+    return function(chunk, window, **kwargs)
+
+
 def is_quick(name: str, params: dict | None = None) -> bool:
     """Whether the action ``name`` with ``params`` runs at once under *Subito le rapide*: showing, and selecting
     photos to filter or select them (not to switch them on or off)."""
@@ -1008,5 +1036,5 @@ def is_quick(name: str, params: dict | None = None) -> bool:
     return bool(entry and entry[1])
 
 
-__all__ = ["ACTIONS", "BUILD_PARAMS", "EXPORTS", "PRODUCTS", "build", "export", "is_quick", "run_script", "segment",
-           "select_photos", "show", "stones"]
+__all__ = ["ACTIONS", "BUILD_PARAMS", "EXPORTS", "PRODUCTS", "build", "call", "export", "is_quick", "run_script",
+           "segment", "select_photos", "show", "stones"]

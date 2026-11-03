@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import inventory as _inventory
-from .facts import TOOLS, run_tool
+from .facts import TOOLS, action_name, run_tool
 from .knowledge import Index, guide_folder
 from .privacy import WARNING, Filter
 from .providers import ContextOverflow, Message, Provider, ProviderError, Reply, ToolCall
@@ -64,6 +64,10 @@ OMITTED = {"it": "(risultato omesso)", "en": "(result omitted)"}
 TOO_LONG = {"it": "La conversazione supera il contesto del modello{tokens}: inizia una nuova conversazione",
             "en": "The conversation exceeds the context of the model{tokens}: start a new conversation"}
 TOKENS = {"it": " ({0} token)", "en": " ({0} tokens)"}
+ACTION_STOPPED = {"it": "[azione fermata: {0} non è andata fino in fondo]",
+                  "en": "[action stopped: {0} did not run to the end]"}
+ACTION_LABELS = {"it": {"ran": "eseguita", "declined": "rifiutata", "stopped": "fermata"},
+                 "en": {"ran": "ran", "declined": "declined", "stopped": "stopped"}}
 
 TOOL_RESULT_CHARS = 4000  # of one tool result sent back to the model
 KEEP_TOOL_RESULTS = 12  # a local model gets the last ones in full, the older ones as OMITTED
@@ -80,7 +84,7 @@ _INSTRUCTIONS = {
         "- Per come si fa una cosa nel programma usa i passaggi della guida allegati alla domanda o lo strumento "
         "guide_search; per le funzioni Python usa scripting_api.\n"
         "- Quando ti viene chiesto uno script, dai UN solo blocco ```python che usa i nomi della console ({names}); "
-        "il programma lo mostra all'utente e non esegue mai nulla da solo: non dire mai di averlo eseguito.\n"
+        "il programma lo mostra all'utente e lo esegue solo quando lui preme Esegui: non dire mai di averlo eseguito.\n"
         "- Il blocco \"## Il progetto adesso\" dice cosa contiene il progetto aperto e cosa mostra la finestra. Gli "
         "script sono per QUESTO progetto: `chunk` è il chunk attivo nominato lì, un altro chunk si prende col suo "
         "nome con `doc.chunk_by_label(\"nome\")`; usa i nomi di prodotti, raster e versioni che elenca.\n"
@@ -99,7 +103,7 @@ _INSTRUCTIONS = {
         "- For how a thing is done in the program use the guide passages attached to the question or the "
         "guide_search tool; for the Python functions use scripting_api.\n"
         "- When asked for a script, give ONE ```python block that uses the names of the console ({names}); the "
-        "program shows it to the user and never runs anything by itself: never say you ran it.\n"
+        "program shows it to the user and runs it only when they press Run: never say you ran it.\n"
         "- The block \"## The project now\" says what the open project holds and what the window shows. Scripts are "
         "for THIS project: `chunk` is the active chunk named there, another chunk is taken by its label with "
         "`doc.chunk_by_label(\"label\")`; use the names of the products, rasters and versions it lists.\n"
@@ -118,6 +122,21 @@ _PLACEHOLDERS = {
     "en": ("- The names you see (Sito A, Luogo 1, Persona 1, chunk 1, progetto) are placeholders the program put in "
            "place of the real names: keep them as they are in the answer, the program restores the real ones. Never "
            "ask for the real names nor for coordinates."),
+}
+_ACTIONS_RULE = {
+    "it": ("- Gli strumenti che iniziano con act_ agiscono sul progetto aperto (mostrare, scegliere foto, pietre, "
+           "ricostruire un prodotto, unità con SAM, esportare, eseguire uno script); il programma può chiedere "
+           "all'utente prima di eseguirli. Uno per richiesta. La loro risposta dice cosa è successo: \"ran\": "
+           "true = fatto (riferisci i fatti che dà); \"declined\": true = l'utente ha detto no: di' che non è stato "
+           "fatto; \"stopped\": true = fermato dall'utente; \"error\" = non riuscito: di' perché. Non dire mai di "
+           "aver fatto una cosa che uno strumento act_ non ha riportato come \"ran\". Se il bersaglio non è "
+           "chiaro, fai una domanda invece di agire."),
+    "en": ("- The tools whose name starts with act_ act on the open project (showing, choosing photos, stones, "
+           "building a product again, units by SAM, exporting, running a script); the program may ask the user "
+           "before running them. One per request. Their answer says what happened: \"ran\": true = done (report "
+           "the facts it gives); \"declined\": true = the user said no: say it was not done; \"stopped\": true = "
+           "stopped by the user; \"error\" = it failed: say why. Never say you did something an act_ tool did not "
+           "report as \"ran\". When the target is not clear, ask a question instead of acting."),
 }
 _HEADINGS = {"it": ("## Script", "## Strumenti"), "en": ("## Scripts", "## Tools")}
 
@@ -184,6 +203,10 @@ def read_label(name: str, result: Any, lang: str = "it") -> str:
     when there is nothing short to say."""
     if not isinstance(result, dict):
         return name
+    if action_name(name) is not None:
+        for key in ("ran", "declined", "stopped"):
+            if result.get(key) is True:
+                return f"{name} ({ACTION_LABELS[lang][key]})"
     if "error" in result:
         return f"{name} ({ERROR_LABEL[lang]})"
     if "none" in result:
@@ -332,19 +355,22 @@ class Assistant:
             self._overview = cut.rstrip()
         return self._overview
 
-    def system_prompt(self, inventory: str | None = None) -> str:
+    def system_prompt(self, inventory: str | None = None, actions: bool = False) -> str:
         """The instructions, the scripting overview, the tools and, when given, the block of the open project
-        (:func:`.inventory.text`, already filtered for an external model)."""
+        (:func:`.inventory.text`, already filtered for an external model). ``actions``: the action tools are
+        offered (the rule on how their answers are reported is added, and they are listed)."""
         lang = self.language
         names = ", ".join(f"`{n}`" for n in CONSOLE_NAMES)
         parts = [_INSTRUCTIONS[lang].format(names=names)]
+        if actions:
+            parts[0] += "\n" + _ACTIONS_RULE[lang]
         if self.external:
             parts[0] += "\n" + _PLACEHOLDERS[lang]
         scripts, tools = _HEADINGS[lang]
         overview = self._scripting_overview()
         if overview:
             parts.append(f"{scripts}\n\n{overview}")
-        parts.append(f"{tools}\n\n" + "\n".join(f"- {t.name}: {t.description}" for t in TOOLS))
+        parts.append(f"{tools}\n\n" + "\n".join(f"- {t.name}: {t.description}" for t in _tools(actions)))
         if inventory:
             parts.append(inventory)
         return "\n\n".join(parts)
@@ -366,9 +392,9 @@ class Assistant:
         labels = list(dict.fromkeys(f"{GUIDE_LABEL[lang]}: {p.page}" for p in found))
         return f"{FROM_GUIDE[lang]}\n\n" + "\n\n".join(blocks), labels
 
-    def _messages(self, inventory: str | None = None) -> list[Message]:
+    def _messages(self, inventory: str | None = None, actions: bool = False) -> list[Message]:
         """The system prompt and the history as the model sees it (filtered when external)."""
-        messages = [Message("system", self.system_prompt(inventory))]
+        messages = [Message("system", self.system_prompt(inventory, actions))]
         for turn in self.history:
             if turn.role == "user":
                 messages.append(Message("user", self._filter.outgoing(turn.text)))
@@ -379,17 +405,28 @@ class Assistant:
     def _mark(self, text: str) -> str:
         return text if self.external else NOT_SENT[self.language] + text
 
-    def _run_call(self, call: ToolCall, document: Any) -> tuple[Message, str]:
-        """The tool message of ``call`` and its label for ``read``."""
+    def _incoming(self, value: Any) -> Any:
+        """``value`` with every placeholder restored, also inside lists and objects (the ``params`` of a build,
+        the names of markers)."""
+        if isinstance(value, str):
+            return self._filter.incoming(value)
+        if isinstance(value, list):
+            return [self._incoming(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._incoming(v) for k, v in value.items()}
+        return value
+
+    def _run_call(self, call: ToolCall, document: Any, act: Callable | None = None) -> tuple[Message, str, dict]:
+        """The tool message of ``call``, its label for ``read`` and the result as the tool gave it."""
         lang = self.language
         arguments = call.arguments if isinstance(call.arguments, dict) else {}
         if "_invalid_json" in arguments:
             raw = str(arguments["_invalid_json"])[:200]
             result: dict = {"error": f"arguments were not valid JSON: {raw}"}
         else:
-            # a placeholder in an argument (chunk "chunk 1") names the real chunk
-            arguments = {k: self._filter.incoming(v) if isinstance(v, str) else v for k, v in arguments.items()}
-            result = run_tool(call.name, arguments, document, self.index)
+            # a placeholder in an argument (chunk "chunk 1") names the real chunk; an action gets the real names
+            arguments = {k: self._incoming(v) for k, v in arguments.items()}
+            result = run_tool(call.name, arguments, document, self.index, act=act)
             if not isinstance(result, dict):
                 result = {"error": f"the tool {call.name} returned {type(result).__name__}, not an object"}
         label = f"{TOOL_LABEL[lang]}: {read_label(call.name, result, lang)}"
@@ -399,7 +436,7 @@ class Assistant:
         content = json.dumps(safe, ensure_ascii=False, default=str)
         if len(content) > TOOL_RESULT_CHARS:  # one result never fills the context by itself
             content = content[:TOOL_RESULT_CHARS] + TRUNCATED[lang]
-        return Message("tool", content, tool_call_id=call.id, error="error" in result), label
+        return Message("tool", content, tool_call_id=call.id, error="error" in result), label, result
 
     def _fit(self, messages: list[Message]) -> list[Message]:
         """The request as it is sent: a local model gets the last KEEP_TOOL_RESULTS tool results in full and the
@@ -441,7 +478,8 @@ class Assistant:
                     messages[i] = _omitted(messages[i], omitted)
 
     def ask(self, question: str, on_text: Callable[[str], None] | None = None,
-            cancel: Callable[[], bool] | None = None, inventory: dict | None = None) -> Turn:
+            cancel: Callable[[], bool] | None = None, inventory: dict | None = None,
+            act: Callable[[str, dict], dict] | None = None) -> Turn:
         """Asks ``question``: the answer's turn, appended to the history after the question's.
 
         ``on_text`` receives the deltas of every round as they arrive (restored best-effort: a placeholder split
@@ -451,7 +489,13 @@ class Assistant:
 
         ``inventory``: the snapshot of the open project (:func:`.inventory.snapshot`, taken where the window may be
         read), written as the block ``## Il progetto adesso`` of the system prompt - through the privacy filter for an
-        external model - and listed among what was sent. None: the prompt without it."""
+        external model - and listed among what was sent. None: the prompt without it.
+
+        ``act(action, arguments) -> dict``: the window's way to carry out an action (:mod:`.actions`), called from
+        this thread with the arguments the model gave, placeholders already turned back into the real names; it
+        answers ``{"ran": True, ...}``, ``{"declined": True}``, ``{"stopped": True}`` or ``{"error": ...}``, which
+        go back to the model through the filter. Only with ``act`` are the action tools offered. An action that
+        answers ``stopped`` ends the turn at once (no other round): its text says so and ``cancelled`` is set."""
         lang = self.language
         document = self._document_now()
         block = _inventory.text(_inventory.filtered(inventory, self._filter), lang) if inventory is not None else None
@@ -472,7 +516,9 @@ class Assistant:
         turn.sent.append(self._mark(composed))
         self.history.append(Turn("user", question))
         self.history.append(turn)
-        messages = self._messages(block)[:-1] + [Message("user", composed)]
+        actions = act is not None
+        offered = _tools(actions)
+        messages = self._messages(block, actions)[:-1] + [Message("user", composed)]
 
         def stream(delta: str) -> None:
             if on_text is not None:
@@ -484,6 +530,7 @@ class Assistant:
         state: dict = {}
         earlier = ""  # the text of the rounds that ended in tool calls
         reply: Reply | None = None
+        stopped: str | None = None  # the action the user stopped
         try:
             while True:
                 with_tools = rounds < self.max_tool_rounds and repeats < REPEAT_ROUNDS
@@ -492,7 +539,7 @@ class Assistant:
                     last = ANSWER_NOW[lang] if rounds >= self.max_tool_rounds else HAVE_RESULTS[lang]
                     messages.append(Message("user", last))
                     turn.sent.append(self._mark(last))
-                reply = self._complete(messages, TOOLS if with_tools else None, stream, cancel, state)
+                reply = self._complete(messages, offered if with_tools else None, stream, cancel, state)
                 if not (reply.tool_calls and with_tools and reply.stop != "refusal") or _cancelled(cancel):
                     break
                 messages.append(Message("assistant", reply.text, tool_calls=[_as_written(c) for c in reply.tool_calls]))
@@ -507,11 +554,16 @@ class Assistant:
                                           error=earlier_result.error)
                         turn.sent.append(self._mark(f"[{ALREADY[lang]}: {call.name}]"))
                         turn.read.append(f"{TOOL_LABEL[lang]}: {call.name} - {ALREADY[lang]}")
+                    elif stopped and action_name(call.name) is not None:  # after a stop no other action
+                        message = Message("tool", json.dumps({"stopped": True}), tool_call_id=call.id)
+                        turn.read.append(f"{TOOL_LABEL[lang]}: {read_label(call.name, {'stopped': True}, lang)}")
                     else:
                         new_call = True
-                        message, label = self._run_call(call, document)
+                        message, label, result = self._run_call(call, document, act)
                         done[key] = message
                         turn.read.append(label)
+                        if result.get("stopped") is True and action_name(call.name) is not None:
+                            stopped = stopped or call.name
                     messages.append(message)
                     turn.sent.append(self._mark(message.content))
                 repeats = 0 if new_call else repeats + 1
@@ -520,14 +572,19 @@ class Assistant:
                     if on_text is not None:
                         on_text("\n")
                 rounds += 1
+                if stopped:  # the user stopped an action: the model is not asked to go on
+                    break
         except ProviderError as exc:
             turn.error = str(exc)
             if reply is None:
                 return turn
         if reply is None:
             return turn
-        turn.cancelled = _cancelled(cancel)
+        turn.cancelled = _cancelled(cancel) or stopped is not None
         answer = reply.text or earlier
+        if stopped is not None:
+            line = ACTION_STOPPED[lang].format(stopped)
+            answer = f"{earlier}\n\n{line}" if earlier else line
         if reply.stop == "refusal":
             turn.error = REFUSED[lang]
         elif reply.stop == "length":
@@ -537,13 +594,19 @@ class Assistant:
         return turn
 
     def ask_about_error(self, script: str, error: str, on_text: Callable[[str], None] | None = None,
-                        cancel: Callable[[], bool] | None = None, inventory: dict | None = None) -> Turn:
+                        cancel: Callable[[], bool] | None = None, inventory: dict | None = None,
+                        act: Callable[[str, dict], dict] | None = None) -> Turn:
         """Asks why ``script`` failed with ``error`` (its traceback) and for the corrected script."""
         question = ERROR_QUESTION[self.language].format(script=(script or "").rstrip(), error=(error or "").rstrip())
-        return self.ask(question, on_text=on_text, cancel=cancel, inventory=inventory)
+        return self.ask(question, on_text=on_text, cancel=cancel, inventory=inventory, act=act)
 
 
 _NO_DOCUMENT = object()  # before the first question
+
+
+def _tools(actions: bool) -> list:
+    """The tools offered: those that read, and the actions when there is a window to act in."""
+    return [t for t in TOOLS if actions or not t.acts]
 
 
 def _ref(document: Any) -> Any:

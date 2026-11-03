@@ -4,35 +4,208 @@ computer one click away; on the right a script editor whose scripts run in the w
 
 The model answers in a thread of its own (:class:`AssistantWorker`): the pane, and the window, stay usable while it
 thinks, a question can be stopped, and a failed one is said in the conversation. Widgets are only touched in the
-interface thread: the worker talks through signals."""
+interface thread: the worker talks through signals.
+
+Actions: the session is given :meth:`AssistantPane.act`. When the model calls an action tool, ``act`` runs in the
+assistant's thread: it hands the call to the interface thread (a queued signal carrying a
+:class:`concurrent.futures.Future`) and waits on the future. In the interface thread :meth:`AssistantPane._on_action`
+decides by the setting ``assistant_actions`` (*Vista > Assistente > Azioni*: "ask" every action waits for *Esegui*,
+"quick" - the default - showing and choosing photos to filter or select them run at once, "all" everything runs at
+once) whether an :class:`ActionCard` waits for *Esegui* / *Modifica* / *No*, and runs the action through
+:meth:`MainWindow.run_action` (one entry of Modifica > Annulla, *Annulla* on the card). The future gets
+``{"ran": True, ...}``, ``{"declined": True}``, ``{"stopped": True}`` (*Ferma*, which also stops a running action) or
+``{"error": ...}``. The arguments arrive with the real names already restored by the session."""
 from __future__ import annotations
 
 import html
+import json
 import logging
 import textwrap
 import threading
 import time
 import weakref
+from concurrent.futures import Future, InvalidStateError
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor, QTextDocument, QTextDocumentFragment
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+                               QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTableWidget,
+                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
+from ..assistant import actions as _actions
 from ..assistant import inventory, privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
 from .assistant_settings import (KIND_NAMES, KINDS, context_chars_of, keep_thread, park, release_thread,
                                  same_provider, saved_kind, saved_model)
-from .i18n import current, tr
+from .dialogs import Field, ParamDialog
+from .i18n import NO_TRANSLATE, current, decimal_comma, tr
 from .icons import icon
 
 log = logging.getLogger(__name__)
 
 COLOURS = {"green": "#2e7d32", "orange": "#ef6c00", "grey": "#757575"}
 SHUTDOWN_MS = 5000
+
+ACTION_SETTING = "assistant_actions"  # "ask" | "quick" | "all"
+ACTION_MODES = ("ask", "quick", "all")
+ACTION_DEFAULT = "quick"
+ACTION_MODE_NAMES = {"ask": "Chiedi sempre", "quick": "Subito le rapide", "all": "Esegui tutto"}
+ACTION_MODE_TIPS = {
+    "ask": "Ogni azione dell'assistente aspetta Esegui",
+    "quick": "Mostrare e filtrare o selezionare foto subito; pietre, ricostruzioni, SAM, esportazioni, foto attivate "
+             "o disattivate e script aspettano Esegui",
+    "all": "Ogni azione parte subito: la scheda dice cosa ha fatto e la annulla"}
+# the name of each action in the cards and in Modifica > Annulla ("Assistente: Pietre (SAM)")
+ACTION_TITLES = {"show": "Mostra", "select_photos": "Scegli le foto", "stones": "Pietre (SAM)",
+                 "build": "Ricostruisci", "segment": "Unità (SAM)", "export": "Esporta", "run_script": "Script"}
+MAX_CARDS = 4  # cards kept under the conversation (the oldest go)
+
+
+def action_mode(settings=None) -> str:
+    """The setting *Vista > Assistente > Azioni*: "ask", "quick" (the default) or "all"."""
+    if settings is None:
+        from . import app_settings
+
+        settings = app_settings()
+    mode = str(settings.value(ACTION_SETTING, ACTION_DEFAULT) or ACTION_DEFAULT)
+    return mode if mode in ACTION_MODES else ACTION_DEFAULT
+
+
+def _value_text(value) -> str:
+    """A parameter's value as the card writes it: numbers with the decimal comma in Italian, yes/no, lists."""
+    if isinstance(value, bool):
+        return tr("sì") if value else tr("no")
+    if isinstance(value, (int, float)):
+        return decimal_comma(f"{value:g}")
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_value_text(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "; ".join(f"{k}: {_value_text(v)}" for k, v in value.items())
+    return str(value)
+
+
+def _label(prop: dict, key: str) -> str:
+    return str(prop.get("description_it" if current() == "it" else "description_en") or key)
+
+
+def describe_action(name: str, args: dict) -> list[tuple[str, str]]:
+    """The parameters of an action in words: ``(label of the schema, value)`` in the language of the interface;
+    ``build``'s ``params`` one by one with the labels of the product."""
+    entry = _actions.ACTIONS.get(name)
+    props = (entry[4].get("properties") or {}) if entry else {}
+    out = []
+    for key, value in (args or {}).items():
+        if value is None or value == "":
+            continue
+        prop = props.get(key) or {}
+        if key == "params" and isinstance(value, dict) and "per_product" in prop:
+            per = prop["per_product"].get(str(args.get("product")), {})
+            out += [(_label(per.get(k) or {}, k), _value_text(v)) for k, v in value.items() if v is not None]
+            continue
+        out.append((_label(prop, key), _value_text(value)))
+    return out
+
+
+def _resolve(future: Future, value: dict) -> None:
+    """The answer of an action, once (a future already answered - stopped meanwhile - keeps its answer)."""
+    if not future.done():
+        try:
+            future.set_result(value)
+        except InvalidStateError:
+            pass
+
+
+class ActionCard(QFrame):
+    """An action the model asks for, in the conversation: its name and parameters in words; *Esegui*, *Modifica*
+    (the parameters in a small form), *No* while it waits; then the result line and *Annulla* (the window's undo of
+    that step, while it is the last one). ``state``: "waiting", "running", "done", "declined", "stopped", "failed"."""
+
+    STATES = {"waiting": "in attesa", "running": "in corso...", "done": "eseguita", "declined": "non eseguita",
+              "stopped": "fermata", "failed": "non riuscita"}
+
+    def __init__(self, name: str, args: dict, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.args = dict(args)
+        self.state = "waiting"
+        self.entry = None  # the entry of Modifica > Annulla the action made
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        self.title = QLabel()
+        font = self.title.font()
+        font.setBold(True)
+        self.title.setFont(font)
+        self.title.setProperty(NO_TRANSLATE, True)
+        lay.addWidget(self.title)
+        self.params = QLabel()
+        self.params.setWordWrap(True)
+        self.params.setProperty(NO_TRANSLATE, True)  # values and labels already in the interface's language
+        lay.addWidget(self.params)
+        self.result_label = QLabel()
+        self.result_label.setWordWrap(True)
+        self.result_label.setProperty(NO_TRANSLATE, True)
+        self.result_label.hide()
+        lay.addWidget(self.result_label)
+        row = QHBoxLayout()
+        self.b_run = QPushButton(icon("run"), tr("Esegui"))
+        self.b_edit = QPushButton(icon("settings"), tr("Modifica"))
+        self.b_no = QPushButton(icon("cancel"), tr("No"))
+        self.b_undo = QPushButton(icon("undo"), tr("Annulla", context="undo"))
+        self.b_undo.setToolTip(tr("Riporta il progetto a prima di questa azione (come Modifica > Annulla)"))
+        self.b_undo.hide()
+        for b in (self.b_run, self.b_edit, self.b_no, self.b_undo):
+            row.addWidget(b)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.refresh()
+
+    def heading(self) -> str:
+        return tr("Azione: {0}", tr(ACTION_TITLES.get(self.name, self.name)))
+
+    def text(self) -> str:
+        """What the card says: its heading and its parameters."""
+        return f"{self.title.text()}\n{self.params.text()}"
+
+    def refresh(self) -> None:
+        self.title.setText(f"{self.heading()} ({tr(self.STATES[self.state])})")
+        words = describe_action(self.name, self.args)
+        self.params.setText("\n".join(f"{label}: {value}" for label, value in words) if words else
+                            tr("con i valori predefiniti"))
+        waiting = self.state == "waiting"
+        for b in (self.b_run, self.b_edit, self.b_no):
+            b.setVisible(waiting)
+        self.b_undo.setVisible(self.entry is not None)
+
+    def set_state(self, state: str) -> None:
+        self.state = state
+        self.refresh()
+
+    def finish(self, result: dict, entry=None) -> None:
+        """After the run: the state and the result line from ``result``, *Annulla* for ``entry``."""
+        self.entry = entry
+        self.result_label.setText(result_line(self.name, result))
+        self.result_label.show()
+        self.set_state("done" if result.get("ran") else "stopped" if result.get("stopped") else "failed")
+        self.b_undo.setEnabled(entry is not None)
+
+
+def result_line(name: str, result: dict) -> str:
+    """The result of an action in one line for the user."""
+    if result.get("stopped"):
+        return tr("Fermata")
+    if result.get("declined"):
+        return tr("Non eseguita")
+    if "error" in result:
+        return tr("Errore: {0}", result["error"])
+    facts = {k: v for k, v in result.items() if k not in ("ran", "not_undoable")}
+    line = "; ".join(f"{k}: {_value_text(v)}" for k, v in facts.items()) or tr("fatto")
+    if result.get("not_undoable"):
+        line += " - " + tr("non annullabili: {0}", ", ".join(result["not_undoable"]))
+    return line
 
 
 def scripts_of(text: str) -> list[str]:
@@ -57,10 +230,14 @@ class AssistantWorker(QObject):
     def __init__(self):
         super().__init__()
         self.assistant: Assistant | None = None
+        self.act = None  # the pane's way to carry out an action (AssistantPane.act), given to every question
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     def arm(self) -> None:
         """Before a question is sent (from the interface thread): a Ferma pressed after this stops it, even before
@@ -99,12 +276,13 @@ class AssistantWorker(QObject):
 
     @Slot(str, object)
     def ask(self, question: str, inventory=None) -> None:
-        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set, inventory=inventory))
+        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set, inventory=inventory,
+                                  act=self.act))
 
     @Slot(str, str, object)
     def ask_error(self, script: str, error: str, inventory=None) -> None:
         self._run(lambda a: a.ask_about_error(script, error, on_text=self.text.emit, cancel=self._cancel.is_set,
-                                              inventory=inventory))
+                                              inventory=inventory, act=self.act))
 
     @Slot(int)
     def resolve(self, request: int) -> None:
@@ -145,6 +323,7 @@ class AssistantPane(QWidget):
     _ask = Signal(str, object)  # the question and the inventory of the project (taken here, in the interface)
     _ask_error = Signal(str, str, object)
     _resolve = Signal(int)
+    _act_request = Signal(str, object, object)  # an action from the assistant's thread: name, arguments, Future
 
     def __init__(self, window):
         super().__init__()
@@ -165,8 +344,12 @@ class AssistantPane(QWidget):
         self._skip_note = False
         self._doc_ref = None  # the project the conversation on screen is about
         self._asking = None  # the assistant the question in progress was asked of
+        self.cards: list[ActionCard] = []
+        self._action: dict | None = None  # the action of the question in progress: future, card, running
+        self._action_lines: list[str] = []  # what the actions of the question in progress did, for the chat
         self._build()
         self._show_kind(saved_kind(self._settings()), None)
+        self._act_request.connect(self._on_action, Qt.ConnectionType.QueuedConnection)
 
     # ------------------------------------------------------------------ building
     def _build(self) -> None:
@@ -201,6 +384,11 @@ class AssistantPane(QWidget):
         self.chat.setOpenLinks(False)
         self.chat.anchorClicked.connect(self._link)
         ll.addWidget(self.chat, 1)
+        self.cards_area = QWidget()  # the cards of the actions, under the conversation
+        self.cards_layout = QVBoxLayout(self.cards_area)
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_area.hide()
+        ll.addWidget(self.cards_area)
         self.warning = QLabel(tr(privacy.WARNING))
         self.warning.setWordWrap(True)
         self.warning.setStyleSheet(f"color: {COLOURS['orange']};")
@@ -382,6 +570,7 @@ class AssistantPane(QWidget):
             return
         self._thread = QThread()
         self._worker = AssistantWorker()
+        self._worker.act = self.act
         self._worker.moveToThread(self._thread)
         self._ask.connect(self._worker.ask)
         self._ask_error.connect(self._worker.ask_error)
@@ -483,12 +672,172 @@ class AssistantPane(QWidget):
             return None
 
     def stop(self) -> None:
+        """*Ferma*: the question stopped; an action waiting for *Esegui* answers ``stopped``, a running one is
+        stopped too (the task runner's cancel) and its answer is ``stopped`` at once."""
+        self._stop_action()
         if self._worker is not None:
             self._worker.cancel()
         if self._waiting is not None:  # still looking for the model: nothing asked
             self._waiting = None
             self._request += 1
             self._set_busy(False)
+
+    # ------------------------------------------------------------------ actions
+    def action_mode(self) -> str:
+        """*Vista > Assistente > Azioni*: "ask", "quick" (default) or "all"."""
+        return action_mode(self._settings())
+
+    def act(self, name: str, args: dict) -> dict:
+        """The action ``name`` with ``args`` (real names), asked by the model: called in the assistant's thread, it
+        hands the call to the interface thread and waits for the answer (``{"ran": True, ...}``,
+        ``{"declined": True}``, ``{"stopped": True}`` or ``{"error": ...}``). The question stopped while it waits
+        (the window closing) answers ``stopped``."""
+        if threading.current_thread() is threading.main_thread():  # never wait on the thread that answers
+            return {"error": "actions are asked from the assistant's thread"}
+        worker = self._worker
+        if worker is not None and worker.cancelled():  # Ferma already pressed: nothing more is asked
+            return {"stopped": True}
+        future: Future = Future()
+        self._act_request.emit(name, dict(args or {}), future)
+        while True:
+            try:
+                return future.result(timeout=0.1)
+            except FutureTimeout:
+                if worker is not None and worker.cancelled():
+                    try:
+                        return future.result(timeout=0.5)  # Ferma answers in the interface thread
+                    except FutureTimeout:
+                        future.cancel()
+                        return {"stopped": True}
+
+    @Slot(str, object, object)
+    def _on_action(self, name: str, args: dict, future: Future) -> None:
+        """In the interface thread: the card, or the action at once, as the setting says."""
+        if future.done():
+            return
+        mode = self.action_mode()
+        quick = _actions.is_quick(name, args)
+        at_once = mode == "all" or (mode == "quick" and quick)
+        card = None
+        if not (at_once and quick):  # a quick action that runs at once leaves only a line in the chat
+            card = self._add_card(name, args, future)
+        self._action = {"future": future, "card": card, "running": False, "name": name, "args": args}
+        if at_once:
+            self._execute(self._action)
+
+    def _add_card(self, name: str, args: dict, future: Future) -> ActionCard:
+        card = ActionCard(name, args, self.cards_area)
+        card.b_run.clicked.connect(lambda: self._card_run(card, future))
+        card.b_no.clicked.connect(lambda: self._card_no(card, future))
+        card.b_edit.clicked.connect(lambda: self._card_edit(card))
+        card.b_undo.clicked.connect(lambda: self._card_undo(card))
+        self.cards.append(card)
+        self.cards_layout.addWidget(card)
+        while len(self.cards) > MAX_CARDS:
+            old = self.cards.pop(0)
+            old.setParent(None)
+            old.deleteLater()
+        self.cards_area.show()
+        return card
+
+    def _card_run(self, card: ActionCard, future: Future) -> None:
+        action = self._action
+        if card.state != "waiting" or future.done() or action is None or action["future"] is not future:
+            return
+        action["args"] = dict(card.args)
+        self._execute(action)
+
+    def _card_no(self, card: ActionCard, future: Future) -> None:
+        if card.state != "waiting":
+            return
+        card.set_state("declined")
+        self._action_lines.append(f"{card.heading()}: {tr('non eseguita')}")
+        if self._action is not None and self._action["future"] is future:
+            self._action = None
+        _resolve(future, {"declined": True})
+
+    def _card_edit(self, card: ActionCard) -> None:
+        """*Modifica*: the parameters of the action in a form; the card waits again for *Esegui*."""
+        entry = _actions.ACTIONS.get(card.name)
+        if entry is None or card.state != "waiting":
+            return
+        fields = []
+        for key, prop in (entry[4].get("properties") or {}).items():
+            value = card.args.get(key)
+            label = _label(prop, key)
+            if prop.get("enum") and not isinstance(value, (list, dict)):
+                choices = [("", tr("(predefinito)"))] + [(v, str(v)) for v in prop["enum"]]
+                fields.append(Field(key, label, value if value is not None else "", choices=choices))
+            else:  # a text: a number, true/false, a list or an object as JSON, a name as it is
+                text = "" if value is None else value if isinstance(value, str) else json.dumps(value)
+                fields.append(Field(key, label, text, kind="text"))
+        values = ParamDialog.ask(self, card.heading(), fields)
+        if values is None:
+            return
+        args = {}
+        for key, value in values.items():
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    value = value.strip()
+            args[key] = value
+        card.args = args
+        card.refresh()
+
+    def _card_undo(self, card: ActionCard) -> None:
+        """*Annulla* on a card: the window's undo, while the action's entry is the last one."""
+        h = getattr(self._main, "history", None)
+        if card.entry is None or h is None or not h.can_undo() or h.entries[h.index - 1] is not card.entry:
+            self._main.statusBar().showMessage(tr("L'azione non è più l'ultimo passo: usa Modifica > Annulla"), 8000)
+            card.b_undo.setEnabled(False)
+            return
+        self._main.undo()
+        if _top(h) is not card.entry:  # undone (an undo that failed leaves it the last one)
+            card.b_undo.setEnabled(False)
+            card.result_label.setText(card.result_label.text() + " - " + tr("annullata"))
+
+    def _execute(self, action: dict) -> None:
+        """The action in the task runner (:meth:`MainWindow.run_action`); its answer resolves the future."""
+        from .undo import ScriptAction
+
+        future, card, name = action["future"], action["card"], action["name"]
+        action["running"] = True
+        if card is not None:
+            card.set_state("running")
+        h = getattr(self._main, "history", None)
+        top0 = _top(h)
+
+        def done(result: dict) -> None:
+            if self._action is action:
+                self._action = None
+            entry = _top(h)
+            made = entry if entry is not top0 and entry is not None and isinstance(entry.action, ScriptAction) \
+                else None
+            if card is not None and card in self.cards:
+                card.finish(result, made)
+            if not future.done():  # stopped meanwhile: the question already ended saying so
+                title = tr(ACTION_TITLES.get(name, name))
+                self._action_lines.append(f"{tr('Azione: {0}', title)}: {result_line(name, result)}")
+            _resolve(future, result)
+
+        self._main.run_action(name, action["args"], done)
+
+    def _stop_action(self) -> None:
+        action, self._action = self._action, None
+        if action is None:
+            return
+        card = action["card"]
+        if action["running"]:
+            self._main.runner.cancel()
+        if card is not None and card in self.cards and card.state in ("waiting", "running"):
+            card.set_state("stopped")
+        if not action["future"].done():
+            title = tr(ACTION_TITLES.get(action["name"], action["name"]))
+            self._action_lines.append(f"{tr('Azione: {0}', title)}: {tr('fermata')}")
+        _resolve(action["future"], {"stopped": True})
 
     def _end(self) -> QTextCursor:
         cursor = self.chat.textCursor()
@@ -533,6 +882,7 @@ class AssistantPane(QWidget):
         skip_note, self._skip_note = self._skip_note, False
         if turn.note and not skip_note:
             self._paragraph(f"<p><i>{html.escape(turn.note)}</i></p>")
+        self._write_action_lines()
         if turn.text:
             markdown = QTextDocument()
             # no HTML: a model writing <US12> or <percorso> in its prose is shown as written
@@ -561,8 +911,15 @@ class AssistantPane(QWidget):
             self._set_busy(False)
             return
         self._drop_stream()
+        self._write_action_lines()
         self._error_line(text)
         self._set_busy(False)
+
+    def _write_action_lines(self) -> None:
+        """What the actions of the question did, in the chat (written once the streamed text is gone)."""
+        lines, self._action_lines = self._action_lines, []
+        for line in lines:
+            self._paragraph(f"<p><i>{html.escape(line)}</i></p>")
 
     def _link(self, url: QUrl) -> None:
         if url.scheme() == "script":
@@ -580,6 +937,13 @@ class AssistantPane(QWidget):
 
     def _clear_chat(self, line: str = "") -> None:
         """The chat emptied (and what belongs to it), with ``line`` saying why."""
+        self._stop_action()  # an action of the old conversation waiting for Esegui: stopped
+        for card in self.cards:
+            card.setParent(None)
+            card.deleteLater()
+        self.cards = []
+        self._action_lines = []
+        self.cards_area.hide()
         self.chat.clear()
         self.scripts = []
         self._stream_at = None
@@ -650,6 +1014,13 @@ class AssistantPane(QWidget):
         self.output.appendPlainText(tr("Salvato in {0}", target))
 
 
+def _top(history):
+    """The last entry of Modifica > Annulla that can be undone, None when there is none."""
+    if history is None or not history.can_undo():
+        return None
+    return history.entries[history.index - 1]
+
+
 def _weak(obj):
     try:
         return weakref.ref(obj)
@@ -698,4 +1069,5 @@ class SentDialog(QDialog):
         lay.addWidget(buttons)
 
 
-__all__ = ["AssistantPane", "AssistantWorker", "SentDialog", "scripts_of"]
+__all__ = ["ACTION_MODES", "ACTION_SETTING", "ACTION_TITLES", "ActionCard", "AssistantPane", "AssistantWorker",
+           "SentDialog", "action_mode", "describe_action", "result_line", "scripts_of"]

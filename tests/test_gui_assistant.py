@@ -556,3 +556,191 @@ def test_the_program_exits_with_a_hung_model(tmp_path, how):
     assert r.returncode == 0, r.stderr[-2000:]
     assert "exiting" in r.stdout and "Destroyed while thread" not in r.stderr
     assert time.monotonic() - t0 < 20
+
+
+# ---------------------------------------------------------------- actions
+
+
+def _calls(name, args, t=""):
+    from pyarchinit_photogrammetry.assistant.providers import ToolCall
+
+    return Reply(t, [ToolCall("call_0", name, args)], "tool_calls", {})
+
+
+def _until(app, condition, timeout=20.0):
+    t0 = time.monotonic()
+    while not condition() and time.monotonic() - t0 < timeout:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    assert condition(), "the condition did not come true"
+
+
+def _tool_result(fake):
+    import json
+
+    return json.loads(next(m for m in fake.calls[-1] if m.role == "tool").content)
+
+
+@pytest.fixture
+def fake_actions(window, monkeypatch):
+    """``stones`` and ``show`` replaced by fakes that record their calls in the thread they run in; ``stones``
+    writes into the chunk (an entry of Modifica > Annulla)."""
+    from pyarchinit_photogrammetry.assistant import actions
+
+    w, app = window
+    seen = []
+
+    def stones(chunk, window, progress=None, **kw):
+        seen.append(("stones", kw, threading.current_thread() is threading.main_thread()))
+        chunk.meta["pietre_finte"] = chunk.meta.get("pietre_finte", 0) + 3  # a change every time
+        return {"stones": 3, "layer": "Pietre", "chunk": chunk.label}
+
+    def show(chunk, window, what="ortho", **kw):
+        seen.append(("show", {"what": what, **kw}, threading.current_thread() is threading.main_thread()))
+        return {"shown": what}
+
+    monkeypatch.setitem(actions.ACTIONS, "stones", (stones, *actions.ACTIONS["stones"][1:]))
+    monkeypatch.setitem(actions.ACTIONS, "show", (show, *actions.ACTIONS["show"][1:]))
+    return seen
+
+
+def _mode(pane, mode):
+    pane._settings().setValue("assistant_actions", mode)
+
+
+def test_a_card_waits_for_run_and_the_action_is_undone_in_one_step(window, fake_actions):
+    w, app = window
+    pane = w.assistant
+    _mode(pane, "ask")
+    fake = FakeProvider([_calls("act_stones", {"min_size": 0.1}), text("Ho trovato 3 pietre.")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    card = pane.cards[-1]
+    assert not fake_actions and pane.busy  # nothing ran: the card waits
+    assert "Pietra più piccola" in card.text() and "0,1" in card.text()
+    card.b_run.click()
+    _wait(app, pane)
+    assert fake_actions == [("stones", {"min_size": 0.1}, False)]  # in the task runner, not in the interface
+    assert card.state == "done" and "3" in card.result_label.text()
+    result = _tool_result(fake)
+    assert result["ran"] is True and result["stones"] == 3
+    assert "Ho trovato 3 pietre." in pane.chat.toPlainText()
+    assert w.chunk.meta["pietre_finte"] == 3
+    assert w.history.undo_text().endswith("Pietre (SAM)")
+    assert card.b_undo.isEnabled()
+    card.b_undo.click()
+    app.processEvents()
+    assert "pietre_finte" not in w.chunk.meta and not card.b_undo.isEnabled()
+
+
+def test_no_declines_and_stop_stops(window, fake_actions):
+    w, app = window
+    pane = w.assistant
+    _mode(pane, "ask")
+    fake = FakeProvider([_calls("act_stones", {}), text("Va bene, non le disegno.")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    pane.cards[-1].b_no.click()
+    _wait(app, pane)
+    assert _tool_result(fake) == {"declined": True} and not fake_actions
+    assert pane.cards[-1].state == "declined" and "non le disegno" in pane.chat.toPlainText()
+    fake = FakeProvider([_calls("act_stones", {}), text("Fatto!")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    pane.b_stop.click()
+    _wait(app, pane)
+    assert not fake_actions and pane.cards[-1].state == "stopped" and len(fake.calls) == 1
+    shown = pane.chat.toPlainText()
+    assert "Fatto!" not in shown and "fermata" in shown
+    assert pane.b_send.isEnabled() and not w.isWindowModified()
+
+
+def test_modify_changes_the_parameters_before_running(window, fake_actions, monkeypatch):
+    from pyarchinit_photogrammetry.gui import assistant_pane
+
+    w, app = window
+    pane = w.assistant
+    _mode(pane, "ask")
+    asked = []
+
+    def edit(parent, title, fields, intro=""):
+        asked.append({f.name: f.default for f in fields})
+        return {**asked[-1], "min_size": "0.2", "thoroughness": "massima"}
+
+    monkeypatch.setattr(assistant_pane.ParamDialog, "ask", staticmethod(edit))
+    pane.set_provider(FakeProvider([_calls("act_stones", {"min_size": 0.1}), text("Fatto.")]))
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    pane.cards[-1].b_edit.click()
+    assert asked and asked[0]["min_size"] == "0.1"
+    assert pane.cards[-1].state == "waiting" and "0,2" in pane.cards[-1].text()
+    pane.cards[-1].b_run.click()
+    _wait(app, pane)
+    assert fake_actions[0][1] == {"min_size": 0.2, "thoroughness": "massima"}
+    w.setWindowModified(False)
+
+
+def test_quick_runs_showing_at_once_and_all_runs_everything(window, fake_actions):
+    w, app = window
+    pane = w.assistant
+    assert pane.action_mode() == "quick"  # the default
+    fake = FakeProvider([_calls("act_show", {"what": "dem"}), text("Ecco il DEM."),
+                         _calls("act_stones", {}), text("Fatto.")])
+    pane.set_provider(fake)
+    pane.ask("mostra il DEM")
+    _wait(app, pane)
+    assert fake_actions == [("show", {"what": "dem"}, False)] and not pane.cards  # no card for a quick one
+    assert _tool_result(fake) == {"ran": True, "shown": "dem"}
+    pane.ask("disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")  # not quick: it waits
+    pane.cards[-1].b_run.click()
+    _wait(app, pane)
+    assert len(fake_actions) == 2
+    # Vista > Assistente > Azioni > Esegui tutto
+    w.assistant_action_modes["all"].trigger()
+    assert pane.action_mode() == "all" and pane._settings().value("assistant_actions") == "all"
+    fake = FakeProvider([_calls("act_stones", {"max_size": 0.5}), text("Fatto.")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _wait(app, pane)
+    assert len(fake_actions) == 3 and pane.cards[-1].state == "done"  # ran at once, the card says what ran
+    assert pane.cards[-1].b_undo.isEnabled()
+    w.assistant_action_modes["quick"].trigger()
+    w.setWindowModified(False)
+
+
+def test_a_failing_action_says_its_error_and_the_window_stays_usable(window, monkeypatch):
+    from pyarchinit_photogrammetry.assistant import actions
+
+    w, app = window
+    pane = w.assistant
+
+    def broken(chunk, window, progress=None, **kw):
+        chunk.meta["mezzo"] = 1
+        raise RuntimeError("rotto")
+
+    monkeypatch.setitem(actions.ACTIONS, "stones", (broken, *actions.ACTIONS["stones"][1:]))
+    _mode(pane, "all")
+    fake = FakeProvider([_calls("act_stones", {}), text("Non è andata.")])
+    pane.set_provider(fake)
+    pane.ask("disegna le pietre")
+    _wait(app, pane)
+    assert "rotto" in _tool_result(fake)["error"] and pane.cards[-1].state == "failed"
+    assert not w.runner.busy and pane.b_send.isEnabled()
+    # what it changed before failing is one step back
+    assert w.chunk.meta.get("mezzo") == 1
+    w.undo()
+    assert "mezzo" not in w.chunk.meta
+    # refused while another step runs
+    got = []
+    release = threading.Event()
+    assert w.runner.run("lungo", lambda progress: release.wait(10))
+    assert w.run_action("stones", {}, got.append) is False
+    assert got and "error" in got[0]
+    release.set()
+    w.runner.wait()
+    w.setWindowModified(False)
