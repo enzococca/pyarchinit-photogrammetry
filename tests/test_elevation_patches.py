@@ -348,3 +348,50 @@ def test_candidates_on_a_cylinder_look_along_the_view(well, plain_photos):
     ray = point - ch.to_world(np.asarray(cam.center)[None])[0]
     ray /= np.linalg.norm(ray)
     assert abs(np.degrees(np.arccos(np.clip(-ray @ view, -1, 1))) - cands[0]["angle"]) < 15
+
+
+def test_command_line_on_an_elevation(wall, plain_photos, monkeypatch):
+    """ppg patch --elevation: candidates, a patch (by name), the list, refusals, and back without it."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    ch, eid, entry = wall
+    ch.document.save()
+    project = str(ch.document.path)
+    sensor = ch.sensor(ch.cameras[0])
+
+    def photo(cam, flags=None):  # the chunk the command opens is another one: take the size from this one
+        return np.full((sensor.height, sensor.width, 3), _colour_of(cam.key), np.uint8)
+
+    from pyarchinit_photogrammetry.engine import ortho, visibility
+
+    monkeypatch.setattr(ortho, "read_photo", photo)
+    monkeypatch.setattr(visibility, "read_photo", photo)
+    path0 = E.elevation_paths(ch, entry)[0]
+    before = _read(path0)
+    u, v = _surface_cell(ch, entry)
+    box_ = f"{u - 0.15},{v - 0.1},{u + 0.15},{v + 0.1}"
+    run = CliRunner()
+
+    def go(*args, code=0):
+        r = run.invoke(app, list(args))
+        assert r.exit_code == code, r.output + repr(r.exception)
+        return r.output
+
+    out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--suggest")
+    cands = P.photos_for_area(ch, box(u - 0.15, v - 0.1, u + 0.15, v + 0.1), frame=eid)
+    assert "frames" in out and out.splitlines()[0].split(":")[0] == cands[0]["label"]
+    label = min(cands[:4], key=lambda c: c["used"])["label"]
+    out = go("patch", project, "--elevation", eid, "--bbox", box_, "--photos", label)
+    assert "patch p1" in out
+    assert not np.array_equal(_read(path0), before)
+    assert go("patch", project, "--elevation", "Parete sud", "--list").startswith(f"p1: only {label} on the dem")
+    assert go("patch", project, "--list") == ""
+    out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--photos", label, "--ground", code=1)
+    assert "--ground" in out
+    out = go("patch", project, "--elevation", "Nessuna", "--list", code=1)
+    assert "Parete sud" in out and "Pozzo" in out
+    go("patch", project, "--elevation", "Parete sud", "--remove", "all")
+    assert go("patch", project, "--elevation", "Parete sud", "--list") == ""
+    assert np.array_equal(_read(path0), before)
