@@ -547,5 +547,9 @@ def test_a_stopped_action_ends_the_turn_saying_so(doc):
 
 def test_the_reason_of_a_stop_is_said(doc):
     assistant, fake = make(doc, [calls(("act_stones", {})), text("Fatto!")], kind="local")
-    turn = assistant.ask("Disegna le pietre", act=lambda name, args: {"stopped": True, "reason": "progetto cambiato"})
+    turn = assistant.ask("Disegna le pietre", act=lambda name, args: {"stopped": True, "reason": "project_changed"})
     assert turn.cancelled and turn.text.endswith(": progetto cambiato]") and len(fake.calls) == 1
+
+    assistant, _ = make(doc, [calls(("act_stones", {})), text("Done!")], kind="local", language="en")
+    turn = assistant.ask("Draw the stones", act=lambda name, args: {"stopped": True, "reason": "chunk_changed"})
+    assert turn.text.endswith(": the active chunk changed]")  # the code said in the conversation's language

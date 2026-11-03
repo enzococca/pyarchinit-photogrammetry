@@ -26,6 +26,9 @@ ACTION_MODE_TIPS = {
 ACTION_TITLES = {"show": "Mostra", "select_photos": "Scegli le foto", "stones": "Pietre (SAM)",
                  "build": "Ricostruisci", "segment": "Unità (SAM)", "export": "Esporta", "run_script": "Script"}
 MAX_CARDS = 4  # cards kept under the conversation (the oldest go)
+# why an action was stopped: the code goes to the session (which says it in the conversation's language), the text
+# to the card and the chat
+STOP_REASONS = {"project_changed": "progetto cambiato", "chunk_changed": "chunk attivo cambiato"}
 
 
 def action_mode(settings=None) -> str:
@@ -73,7 +76,7 @@ def describe_action(name: str, args: dict) -> list[tuple[str, str]]:
     return out
 
 
-def _resolve(future: Future, value: dict) -> None:
+def resolve_future(future: Future, value: dict) -> None:
     """The answer of an action, once (a future already answered - stopped meanwhile - keeps its answer)."""
     if not future.done():
         try:
@@ -139,10 +142,11 @@ class ActionCard(QFrame):
     def refresh(self) -> None:
         state = tr(self.STATES[self.state])
         if self.why:
-            state = f"{state}: {self.why}"
+            state = f"{state}: {tr(STOP_REASONS.get(self.why, self.why))}"
         self.title.setText(f"{self.heading()} ({state})")
         words = describe_action(self.name, self.args)
-        lines = [tr("Chunk: {0}", self.chunk_label)] if self.chunk_label else []
+        chunk = self.args.get("chunk_label") or self.chunk_label  # the chunk the arguments name, else the active one
+        lines = [tr("Chunk: {0}", chunk)] if chunk else []
         lines += [f"{label}: {value}" for label, value in words] if words else [tr("con i valori predefiniti")]
         self.params.setText("\n".join(lines))
         waiting = self.state == "waiting"

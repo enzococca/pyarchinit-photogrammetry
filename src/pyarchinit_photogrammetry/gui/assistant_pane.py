@@ -37,8 +37,8 @@ from ..assistant import actions as _actions
 from ..assistant import inventory, privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
-from .assistant_actions import (ACTION_TITLES, MAX_CARDS, ActionCard, _resolve, action_mode, edit_args,
-                                result_line)
+from .assistant_actions import (ACTION_TITLES, MAX_CARDS, ActionCard, STOP_REASONS, action_mode, edit_args,
+                                resolve_future, result_line)
 from .assistant_settings import (KIND_NAMES, KINDS, context_chars_of, keep_thread, park, release_thread,
                                  same_provider, saved_kind, saved_model)
 from .i18n import current, tr
@@ -606,7 +606,7 @@ class AssistantPane(QWidget):
         self._action_lines.append(f"{card.heading()}: {tr('non eseguita')}")
         if self._action is not None and self._action["future"] is future:
             self._action = None
-        _resolve(future, {"declined": True})
+        resolve_future(future, {"declined": True})
 
     def _card_edit(self, card: ActionCard) -> None:
         """*Modifica*: the parameters of the action in a form; the card waits again for *Esegui*."""
@@ -630,13 +630,14 @@ class AssistantPane(QWidget):
             card.result_label.setText(card.result_label.text() + " - " + tr("annullata"))
 
     def _moved(self, action: dict) -> str | None:
-        """Why ``action`` must not run any more: the project or the active chunk is not the one it was asked on."""
+        """Why ``action`` must not run any more (a code of :data:`STOP_REASONS`): the project or the active chunk
+        is not the one it was asked on - or the one an action of the same question left active."""
         doc = self._main.doc
         if action["doc"]() is not doc:
-            return tr("progetto cambiato")
+            return "project_changed"
         chunk = getattr(doc, "chunk", None)
         if (chunk.key if chunk is not None else None) != action["chunk"]:
-            return tr("chunk attivo cambiato")
+            return "chunk_changed"
         return None
 
     def _execute(self, action: dict) -> None:
@@ -663,15 +664,19 @@ class AssistantPane(QWidget):
                 else None
             if card is not None and card in self.cards:
                 card.finish(result, made)
+            if result.get("ran") and not future.done():
+                # the assistant's own step (a chunk it made active): the next action of this question starts from here
+                self._asked_on = self._where()
             if not future.done():  # stopped meanwhile: the question already ended saying so
                 title = tr(ACTION_TITLES.get(name, name))
                 self._action_lines.append(f"{tr('Azione: {0}', title)}: {result_line(name, result)}")
-            _resolve(future, result)
+            resolve_future(future, result)
 
         self._main.run_action(name, action["args"], done)
 
     def _stop_action(self, why: str | None = None) -> None:
-        """The pending or running action stopped (``why``: the reason, said on the card and to the model)."""
+        """The pending or running action stopped (``why``: a code of :data:`STOP_REASONS`, said on the card and in
+        the chat in the interface's language; the model gets the code, the session says it in its own)."""
         action, self._action = self._action, None
         if action is None:
             return
@@ -682,14 +687,14 @@ class AssistantPane(QWidget):
             card.set_state("stopped", why)
         title = tr(ACTION_TITLES.get(action["name"], action["name"]))
         if not action["future"].done():
-            stopped = tr("fermata") if why is None else tr("fermata: {0}", why)
+            stopped = tr("fermata") if why is None else tr("fermata: {0}", tr(STOP_REASONS.get(why, why)))
             self._action_lines.append(f"{tr('Azione: {0}', title)}: {stopped}")
-        _resolve(action["future"], {"stopped": True, "reason": why} if why else {"stopped": True})
+        resolve_future(action["future"], {"stopped": True, "reason": why} if why else {"stopped": True})
 
     def project_changed(self) -> None:
         """The window shows another project: an action of the old one waiting or running is stopped (the model is
         told the project changed); the conversation itself ends at the next question."""
-        self._stop_action(tr("progetto cambiato"))
+        self._stop_action("project_changed")
 
     def _end(self) -> QTextCursor:
         cursor = self.chat.textCursor()

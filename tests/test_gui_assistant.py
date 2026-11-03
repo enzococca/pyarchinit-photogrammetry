@@ -845,3 +845,40 @@ def test_modify_reads_the_fields_by_the_type_of_the_parameter():
     assert parse_value("true", {"type": "boolean"}) is True
     assert parse_value("  ", {"type": "number"}) is None
     assert parse_value('{"resolution": 0.02}', {"type": "object"}) == {"resolution": 0.02}
+
+
+def test_the_assistants_own_steps_do_not_stop_the_next_action(window, monkeypatch):
+    """show makes another chunk active, then stones in the same reply: the chunk changed by the assistant itself,
+    not by the user - the stones run on it."""
+    from pyarchinit_photogrammetry.assistant import actions
+    from pyarchinit_photogrammetry.assistant.providers import ToolCall
+
+    w, app = window
+    pane = w.assistant
+    w.doc.add_chunk("Saggio 2")
+    seen = []
+
+    def show(chunk, window, what="ortho", chunk_label=None, **kw):
+        window._activate_chunk(window.doc.chunk_by_label(chunk_label))
+        return {"shown": what, "chunk": chunk_label}
+
+    def stones(chunk, window, progress=None, **kw):
+        seen.append(chunk.label)
+        chunk.meta["pietre_finte"] = 1
+        return {"stones": 1}
+
+    monkeypatch.setitem(actions.ACTIONS, "show", (show, *actions.ACTIONS["show"][1:]))
+    monkeypatch.setitem(actions.ACTIONS, "stones", (stones, *actions.ACTIONS["stones"][1:]))
+    _mode(pane, "quick")
+    two = Reply("", [ToolCall("c0", "act_show", {"what": "ortho", "chunk_label": "Saggio 2"}),
+                     ToolCall("c1", "act_stones", {})], "tool_calls", {})
+    fake = FakeProvider([two, text("Fatto su Saggio 2.")])
+    pane.set_provider(fake)
+    pane.ask("quella di Saggio 2: disegna le pietre")
+    _until(app, lambda: pane.cards and pane.cards[-1].state == "waiting")
+    assert w.chunk.label == "Saggio 2" and "Saggio 2" in pane.cards[-1].text()
+    pane.cards[-1].b_run.click()
+    _wait(app, pane)
+    assert seen == ["Saggio 2"] and pane.cards[-1].state == "done"
+    assert "Fatto su Saggio 2." in pane.chat.toPlainText()
+    w.setWindowModified(False)

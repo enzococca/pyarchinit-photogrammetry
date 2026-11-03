@@ -66,6 +66,8 @@ TOO_LONG = {"it": "La conversazione supera il contesto del modello{tokens}: iniz
 TOKENS = {"it": " ({0} token)", "en": " ({0} tokens)"}
 ACTION_STOPPED = {"it": "[azione fermata: {0} non è andata fino in fondo]",
                   "en": "[action stopped: {0} did not run to the end]"}
+STOP_REASONS = {"it": {"project_changed": "progetto cambiato", "chunk_changed": "chunk attivo cambiato"},
+                "en": {"project_changed": "the project changed", "chunk_changed": "the active chunk changed"}}
 ACTION_LABELS = {"it": {"ran": "eseguita", "declined": "rifiutata", "stopped": "fermata"},
                  "en": {"ran": "ran", "declined": "declined", "stopped": "stopped"}}
 
@@ -587,7 +589,7 @@ class Assistant:
         if stopped is not None:
             line = ACTION_STOPPED[lang].format(stopped)
             if why:
-                line = f"{line[:-1]}: {why}]"
+                line = f"{line[:-1]}: {STOP_REASONS[lang].get(str(why), str(why))}]"
             answer = f"{earlier}\n\n{line}" if earlier else line
         if reply.stop == "refusal":
             turn.error = REFUSED[lang]
