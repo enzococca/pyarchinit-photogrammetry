@@ -192,3 +192,98 @@ def test_photos_of_the_selected_area(win, monkeypatch):
     win._photos_in_selected_area()
     both = {c.key for c in win.photos.visible_cameras()}
     assert one <= both
+
+
+def test_patch_tool_on_an_elevation(win, qapp, monkeypatch):
+    """On an elevation the patch tool stays on it: the area drawn in its (u, v), the photos of that area, the patch kept
+    on the elevation's entry (never on the plan), its cells redrawn in its file only, the layer showing it; undo takes
+    it back on the elevation, Delete on its feature too, without touching the plan's orthomosaic."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from shapely import contains_xy
+    from shapely.geometry import Polygon
+    from test_elevation_patches import ORIGIN, _plain, _prepare, _surface_cell
+
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import patches as P
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = win
+    v = w.ortho_view
+    ch = w.chunk
+    _plain(monkeypatch)
+    _prepare(ch)
+    entry = E.build_elevation(ch, E.plane_from_line(ch, ORIGIN[:2] + [1.05, 0.9], ORIGIN[:2] + [2.95, 0.9],
+                                                    side=ORIGIN[:2] + [2.0, 1.5]),
+                              resolution=0.01, depth=(-0.08, 0.08), max_angle=89.0, name="Parete sud")
+    eid = entry["id"]
+    entry = P.entry_of(ch, eid)
+    path = E.elevation_paths(ch, entry)[0]
+    plan_before, _, _ = _read(ch.orthomosaic_path)
+    before, tr, _b = _read(path)
+    w.show_elevation(entry)
+    w.history.rebase()  # the elevation built here is not an edit to undo
+    monkeypatch.setattr(mw, "PatchDialog", _Choose)
+    monkeypatch.setattr(w, "_warn", lambda *a, **k: pytest.fail(f"warned: {a}"))
+    _Choose.seen = []
+    monkeypatch.setattr(_Choose, "texture", False)
+    monkeypatch.setattr(_Choose, "surface", "dem")
+    # a photo the elevation hardly uses there now, so that the patch changes the cells
+    monkeypatch.setattr(_Choose, "pick", staticmethod(lambda cands: [min(cands[:4], key=lambda c: c["used"])["label"]]))
+    w.start_patch()  # the elevation stays: its (u, v) are where the patch goes
+    assert w.drawings_frame == eid and v.mode == "patch" and w.draw_actions["patch"].isChecked()
+    v.fit()
+    qapp.processEvents()
+    u, vv = _surface_cell(ch, entry)
+
+    def vp(x, y):
+        return v.mapFromScene(v.scene_pt(x, y))
+
+    QTest.mousePress(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(u - 0.15, vv - 0.1))
+    QTest.mouseMove(v.viewport(), vp(u, vv))
+    QTest.mouseMove(v.viewport(), vp(u + 0.15, vv + 0.1))
+    QTest.mouseRelease(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(u + 0.15, vv + 0.1))
+    w.runner.wait()  # the photos of the area and their previews
+    qapp.processEvents()
+    w.runner.wait()  # the patch and the update of the elevation
+    qapp.processEvents()
+    dlg = _Choose.seen[-1]
+    assert dlg.candidates and dlg.texture_offered is None  # no texture on an elevation
+    assert all(c["preview"] is not None and c["preview"].shape[2] == 4 for c in dlg.candidates)
+    assert all("ground" not in (c.get("previews") or {}) for c in dlg.candidates)
+    assert [p["id"] for p in P.patches(ch, frame=eid)] == ["p1"] and P.patches(ch) == []
+    patch = P.patches(ch, frame=eid)[0]
+    assert patch["surface"] == "dem" and patch["photos"] == _Choose.pick(dlg.candidates)
+    assert P.changed_patches(ch, frame=eid) == []  # applied
+    assert w.drawings_frame == eid and v.path == path  # the view is still the elevation
+    feats = v.features(mw.PATCH_LAYER)
+    assert len(feats) == 1 and feats[0]["patch"] == "p1" and feats[0]["frame"] == eid
+    after, _, _ = _read(path)
+    geom = Polygon(patch["polygon"])
+    rows, cols = np.mgrid[0:after.shape[1], 0:after.shape[2]]
+    x, y = tr.c + (cols + 0.5) * tr.a, tr.f + (rows + 0.5) * tr.e
+    outside = ~contains_xy(geom.buffer(0.015), x, y)
+    assert np.array_equal(after[:, outside], before[:, outside]) and not np.array_equal(after, before)
+    assert np.array_equal(_read(ch.orthomosaic_path)[0], plan_before)  # the plan's orthomosaic untouched
+    # undo: the record goes, the cells are drawn again without it, the view stays on the elevation
+    w.undo()
+    w.runner.wait()
+    qapp.processEvents()
+    assert P.patches(ch, frame=eid) == [] and P.changed_patches(ch, frame=eid) == []
+    assert w.drawings_frame == eid and not v.features(mw.PATCH_LAYER)
+    assert np.array_equal(_read(path)[0], before)
+    w.redo()
+    w.runner.wait()
+    qapp.processEvents()
+    assert [p["id"] for p in P.patches(ch, frame=eid)] == ["p1"] and np.array_equal(_read(path)[0], after)
+    assert len(v.features(mw.PATCH_LAYER)) == 1
+    # Delete on its feature: the elevation is updated, not the plan's orthomosaic
+    w.set_draw_mode("select")
+    assert w.drawings_frame == eid
+    v.select_items([v.layers[mw.PATCH_LAYER]["features"][0][0]])
+    assert w.delete_selected(confirm=False) == 1
+    w.runner.wait()
+    qapp.processEvents()
+    assert P.patches(ch, frame=eid) == [] and P.patches(ch) == [] and P.changed_patches(ch, frame=eid) == []
+    assert np.array_equal(_read(path)[0], before) and np.array_equal(_read(ch.orthomosaic_path)[0], plan_before)
+    assert w.drawings_frame == eid and not v.features(mw.PATCH_LAYER)

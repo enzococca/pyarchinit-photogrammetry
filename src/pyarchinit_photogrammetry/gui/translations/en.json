@@ -2780,7 +2780,14 @@
   "TIN non leggibile": "TIN not readable",
   "Esportazione del TIN non riuscita": "Export of the TIN failed",
   "Esportazione delle linee non riuscita": "Export of the lines failed",
-  "Cancella": "Clear"
+  "Cancella": "Clear",
+  "Il prospetto non c'è più nel progetto.": "The elevation is no longer in the project.",
+  "Nessuna foto vede quest'area del prospetto.": "No photo sees this area of the elevation.",
+  "Assegna immagini (patch del prospetto)": "Assign images (elevation patch)",
+  "Patch del prospetto": "Elevation patch",
+  "Patch dei prospetti": "Elevation patches",
+  "Mostra prima un prospetto o una sezione.": "Show an elevation or a section first.",
+  "Aggiorna il prospetto": "Update the elevation"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3675,6 +3682,13 @@
   ", salvate in {0}": ", saved in {0}",
   "piano z = {0} x + {1} y + {2}": "plane z = {0} x + {1} y + {2}",
   "TIN  ({0} triangoli, {1} spigoli vincolati)": "TIN  ({0} triangles, {1} constrained edges)",
-  "Usa le linee di rottura disegnate che toccano l'area o il suo bordo ({0})": "Use the break lines drawn that reach the area or its edge ({0})"
+  "Usa le linee di rottura disegnate che toccano l'area o il suo bordo ({0})": "Use the break lines drawn that reach the area or its edge ({0})",
+  "Area di {0} m2 del prospetto «{1}». Scegli da quali foto prendere i colori: per esempio una sola foto dove il prospetto mostra una foto slavata o doppi contorni, oppure escludi la foto con un'ombra o un oggetto davanti alla parete. La patch resta con il prospetto (layer «Patch ortofoto»).": "Area of {0} m2 of the elevation «{1}». Choose the photos to take the colours from: for example a single photo where the elevation shows a washed-out photo or double outlines, or exclude the photo with a shadow or an object in front of the wall. The patch stays with the elevation (layer «Patch ortofoto»).",
+  "Patch {0} del prospetto «{1}»: colori {2}{3}": "Patch {0} of the elevation «{1}»: colours {2}{3}",
+  "Il prospetto «{0}» è già aggiornato con le patch": "The elevation «{0}» is already up to date with the patches",
+  "Aggiorna il prospetto «{0}» (patch)": "Update the elevation «{0}» (patches)",
+  "Nessuna patch nel prospetto «{0}»": "No patch in the elevation «{0}»",
+  "Togliere le {0} patch del prospetto «{1}»? Le loro aree tornano come senza patch.": "Remove the {0} patches of the elevation «{1}»? Their areas go back to how they were without patches.",
+  "\n{0} patch del prospetto: il prospetto viene aggiornato senza di esse.": "\n{0} elevation patches: the elevation is updated without them."
  }
 }

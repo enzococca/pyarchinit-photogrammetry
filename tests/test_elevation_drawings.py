@@ -435,8 +435,8 @@ def test_measuring_point_and_marker_on_an_elevation_read_the_surface(with_elevat
 
 
 def test_plan_tools_are_refused_on_an_elevation(with_elevations, tmp_path, gui):
-    """A section trace, a crop, a patch or an area measured are plan tools: on an elevation they are refused, said in
-    the status bar, nothing done with (u, v) as plan coordinates."""
+    """A section trace, a crop or an area measured are plan tools: on an elevation they are refused, said in the
+    status bar, nothing done with (u, v) as plan coordinates. A patch is not: it goes on the elevation."""
     open_window, _app, _mw = gui
     doc, sid, _wid = _copy(with_elevations, tmp_path)
     w = open_window(doc)
@@ -452,6 +452,12 @@ def test_plan_tools_are_refused_on_an_elevation(with_elevations, tmp_path, gui):
     w.measure_area = lambda geom: asked.append(geom)
     w._area_drawn([(u, v), (u + 0.2, v), (u + 0.2, v + 0.2)])
     assert asked == [] and w._plan_selection() is None
+    # the patch tool works on the elevation now: the photos of the area are looked for, in its (u, v)
+    tasks = []
+    w.run_task = lambda name, job, done, **k: tasks.append(name)
+    w.statusBar().clearMessage()
+    w._patch_drawn([(u, v), (u + 0.2, v), (u + 0.2, v + 0.2)])
+    assert tasks == ["Foto dell'area"] and "pianta" not in w.statusBar().currentMessage()
 
 
 def test_stones_found_after_a_switch_go_to_the_image_of_the_search(with_elevations, tmp_path, gui, monkeypatch):
