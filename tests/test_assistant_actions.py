@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -260,6 +262,16 @@ def test_export_and_run_script_headless(project, tmp_path):
     assert r["error"] is None and r["output"].strip() == f"{ch.label} {len(ch.cameras)}"
     r = actions.run_script(ch, None, "1 / 0")
     assert r["error"].startswith("ZeroDivisionError")
+    import json
+
+    r = actions.run_script(ch, None, "import json\njson.loads('x')")
+    folder = str(Path(json.__file__).parent)
+    assert r["error"].startswith("JSONDecodeError") and "decoder.py" in r["traceback"]
+    assert folder not in r["traceback"] and folder not in r["error"]
+    with pytest.raises(ValueError, match="un numero"):
+        actions.build(ch, None, "dem", resolution="fine")
+    with pytest.raises(ValueError, match="true o false"):
+        actions.build(ch, None, "dem", interpolate="si")
 
 
 # ---------------------------------------------------------------- in the window and from a script
@@ -269,7 +281,7 @@ def test_stones_in_the_window_and_from_a_script(wall, tmp_path, monkeypatch):
     doc, ch, n = wall
     w, app, mw = _window(doc, tmp_path)
     try:
-        monkeypatch.setattr(w, "_segmenter", lambda: WallSegmenter())
+        w.sam = WallSegmenter()
         w._show_raster("ortho")
         r = actions.stones(w.chunk, w, min_size=0.1, max_size=0.6)
         assert r["stones"] == n and len(w.stones["orthomosaic.tif"]) == n
@@ -324,7 +336,7 @@ def test_show_select_and_segment_in_the_window(project, tmp_path, monkeypatch):
         assert not ch.cameras[2].enabled
         # SAM units on the raster shown, in the layer of the SAM tools
         monkeypatch.setenv("PPG_SAM_FAKE", "1")
-        monkeypatch.setattr(w, "_segmenter", lambda: sam_env.ExternalSam2Segmenter(python=sys.executable))
+        w.sam = sam_env.ExternalSam2Segmenter(python=sys.executable)
         actions.show(ch, w, "ortho")
         before = len(w.units)
         r = actions.segment(ch, w)
@@ -332,3 +344,73 @@ def test_show_select_and_segment_in_the_window(project, tmp_path, monkeypatch):
         assert all(u.attributes["_layer"] == "Unita' da SAM" for u in w.units[before:])
     finally:
         _close(w, app)
+
+
+def test_sam_is_made_in_the_scripts_thread_not_in_the_window(wall, tmp_path, monkeypatch):
+    """From a script the segmenter is made in the worker (the SAM worker starts and loads its model there: in the
+    interface thread the window would freeze) and handed to the window, which keeps it."""
+    import threading
+
+    from pyarchinit_photogrammetry.ai import sam_env
+
+    doc, _ch, n = wall
+    w, app, _mw = _window(doc, tmp_path)
+    try:
+        made = []
+
+        def make(model="small"):
+            made.append((threading.current_thread() is threading.main_thread(), model))
+            return WallSegmenter()
+
+        monkeypatch.setattr(sam_env, "make_segmenter", make)
+        w.sam = None
+        w.settings.setValue("sam/model", "tiny")
+        w._show_raster("ortho")
+        results = []
+        src = "print(ppg.actions.stones(chunk, window, min_size=0.1, max_size=0.6)['stones'])"
+        assert w.run_script_source(src, "Pietre", on_done=results.append)
+        w.runner.wait()
+        app.processEvents()
+        assert results and results[0].error is None, results[0].traceback
+        assert results[0].output.strip() == str(n)
+        assert made == [(False, "tiny")] and isinstance(w.sam, WallSegmenter)
+    finally:
+        _close(w, app)
+
+
+# the values the tests above give to each action: the schema of the registry must accept every one of them
+GIVEN = {
+    "show": {"what": ["ortho", "dem", "orthomosaic", "model"], "version": ["nessuna"], "chunk_label": ["Saggio 1"],
+             "elevation": ["Muro nord"]},
+    "select_photos": {"by": ["names", "all", "area", "markers"], "then": ["filter", "select", "enable", "disable"],
+                      "pattern": ["DJI_01*"], "area": [[0.0, 0.0, 1.0, 1.0], "selection"],
+                      "markers": [["target 1", "2"], "target 1", 3], "enabled": [True, False]},
+    "stones": {"raster": ["orthomosaic", "dem"], "bounds": [[0.0, 0.75, 1.0, 1.5], "selection"],
+               "min_size": [0.1, 0.05], "max_size": [0.6, 1], "thoroughness": ["normale", "alta"]},
+    "build": {"product": ["dem", "contours"], "chunk_label": ["Saggio 1"],
+              "params": [{"resolution": 0.02}, {"interval": 0.05}]},
+    "segment": {"prompt": ["USM", "muro"], "bounds": ["selection", [0, 0, 1, 1]], "thoroughness": ["normale"]},
+    "export": {"what": ["dem"], "format": ["tif", "cog"], "path": ["/tmp/dem_export"]},
+    "run_script": {"source": ["print(1)"]},
+}
+PARAMS_GIVEN = {"dem": {"resolution": [0.02, 1], "interpolate": [True], "classes": [[2]], "source": ["point_cloud"]},
+                "contours": {"interval": [0.05], "index_every": [5], "smooth": [0.2]},
+                "model": {"face_count": ["medium", 200000]}}
+
+
+def test_the_schemas_accept_what_the_actions_take():
+    jsonschema = pytest.importorskip("jsonschema")
+    from pyarchinit_photogrammetry.assistant import actions
+
+    for name, values in GIVEN.items():
+        props = actions.ACTIONS[name][4]["properties"]
+        for key, examples in values.items():
+            for v in examples:
+                jsonschema.validate(v, props[key])
+    per_product = actions.ACTIONS["build"][4]["properties"]["params"]["per_product"]
+    for product, values in PARAMS_GIVEN.items():
+        for key, examples in values.items():
+            for v in examples:
+                jsonschema.validate(v, per_product[product][key])
+    with pytest.raises(jsonschema.ValidationError):  # and still refuse what is wrong
+        jsonschema.validate("fine", per_product["dem"]["resolution"])

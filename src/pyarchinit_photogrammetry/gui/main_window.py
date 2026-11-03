@@ -14149,29 +14149,14 @@ class MainWindow(QMainWindow):
                                thoroughness=v["thoroughness"], progress=p)
 
         def done(found):
-            from shapely.geometry import box
-
             if chunk is not self.chunk:  # another chunk is active now: its stones are not these
                 self.log_pane.warning(tr("Le pietre trovate non sono state tenute: il chunk attivo è cambiato"))
                 return
-            area = box(*bounds) if bounds is not None else None
-            if frame is None or frame == self.drawings_frame:  # the image of the search: the plan, or shown
-                store = self.stones if frame is None else self.frame_stones
-                kept = [s for s in store.get(key, []) if area is not None and not s.intersects(area)]
-                store[key] = kept + found
-            else:  # an elevation no longer shown: its stones in the chunk
-                stones = self._frame_stones(chunk, frame)
-                kept = [s for s in stones.get(key, []) if area is not None and not s.intersects(area)]
-                stones[key] = kept + found
-                self._store_chunk_drawings(chunk, *self._chunk_drawings(chunk, frame), frame=frame,
-                                           stones={k: [g.wkt for g in rows] for k, rows in stones.items()})
             if frame != self.drawings_frame:
                 entry = self._frame_entry(frame) if frame is not None else None
                 self.log_pane.info(tr("Le pietre trovate vanno all'immagine della ricerca ({0}), non a quella mostrata",
                                       entry["name"] if entry else (tr("la pianta") if frame is None else frame)))
-            self._draw_stones()
-            self._dirty(True)
-            self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
+            self.set_stones(key, found, bounds)
 
         self.run_task("SAM - pietre", job, done, refresh=False, save=False)
 

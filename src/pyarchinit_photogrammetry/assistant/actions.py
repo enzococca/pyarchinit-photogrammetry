@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import re
 from pathlib import Path
 
 from ..core.progress import as_progress
@@ -63,7 +64,7 @@ BUILD_PARAMS: dict[str, dict[str, tuple]] = {
         "source": ("string", "Da cosa si costruisce", "What it is built from",
                    ["point_cloud", "depth_maps", "tie_points"]),
         "surface": ("string", "Tipo di superficie", "Kind of surface", ["arbitrary", "height_field"]),
-        "face_count": ("string", "Numero di facce (low, medium, high o un numero)",
+        "face_count": (["string", "integer"], "Numero di facce (low, medium, high o un numero)",
                        "Number of faces (low, medium, high or a number)", None),
         "classes": ("array", "Solo i punti di queste classi", "Only the points of these classes", None)},
     "texture": {
@@ -268,14 +269,21 @@ def _image_with_colours(chunk, window, raster, what: str) -> dict:
 
 @contextlib.contextmanager
 def _segmenter(chunk, window):
-    """SAM 2.1: the window's (kept for the next time) or one of its own, closed afterwards."""
+    """SAM 2.1: the window's (``window.sam``; made in this thread and given to the window when it has none yet) or,
+    without a window, one of its own, closed afterwards."""
     from ..ai import sam_env
 
     own = None
     try:
-        if window is not None and getattr(window, "_segmenter", None) is not None:
-            seg = window._segmenter()
-        else:
+        seg = getattr(window, "sam", None) if window is not None else None
+        if seg is None and window is not None and hasattr(window, "sam"):
+            # made here, in the calling thread (a script's worker): starting the SAM worker and waiting for its model
+            # in the interface thread would freeze the window; handed to the window, which uses it from now on
+            settings = getattr(window, "settings", None)
+            model = str(settings.value("sam/model", "small") or "small") if settings is not None else "small"
+            seg = sam_env.make_segmenter(model)
+            window.sam = seg
+        elif seg is None:
             seg = own = sam_env.make_segmenter()
     except ImportError:
         raise ValueError("SAM 2.1 non è installato: installalo da Strumenti > SAM (Segment Anything) prima") from None
@@ -418,8 +426,10 @@ def select_photos(chunk, window, by: str, then: str = "filter", area=None, marke
            "labels": [c.label for c in cams[:LABELS_SHOWN]], "chunk": chunk.label}
     if then == "filter":
         _activate(chunk, window)
-        title = {"area": "Foto dell'area", "markers": "Foto dei marker", "names": f"Foto «{pattern}»",
-                 "all": "", "none": "Nessuna foto"}[by]
+        from ..gui.i18n import tr
+
+        title = {"area": tr("Foto dell'area"), "markers": tr("Foto dei marker"), "names": tr("Foto «{0}»", pattern),
+                 "all": "", "none": tr("Nessuna foto")}[by]
         window.photos.set_filter(None if by == "all" and enabled is None else keys, title)
         window._show_pane(window.bottom_tabs, window.photos_panel)
     elif then == "select":
@@ -477,14 +487,12 @@ def _photos_of_area(chunk, window, area) -> list:
 
     from ..engine.patches import photos_for_area
 
+    frame = None
     if area is None or (isinstance(area, str) and area.strip().lower() in ("selection", "selezione")):
         if window is None or not _active(chunk, window):
             raise ValueError("per scegliere le foto dell'area serve l'area (un riquadro) o il poligono selezionato "
                              "nella finestra")
-        shown = _shown(window) or {}
-        if shown.get("frame") is not None:
-            raise ValueError("con un prospetto mostrato la selezione è nelle sue coordinate: apri l'ortofoto o il DEM "
-                             "e seleziona l'area sulla pianta")
+        frame = (_shown(window) or {}).get("frame")  # an elevation shown: the selection is in its (u, v)
         geom = window.selected_polygon()
         if geom is None or geom.is_empty:
             raise ValueError("nessun poligono selezionato: selezionane uno nella vista 2D (strumento Seleziona)")
@@ -492,7 +500,7 @@ def _photos_of_area(chunk, window, area) -> list:
         geom = area
     else:
         geom = box(*_box(area, window))
-    rows = photos_for_area(chunk, geom, limit=100_000)
+    rows = photos_for_area(chunk, geom, limit=100_000, frame=frame)
     keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
     return [c for c in chunk.cameras if c.key in keys]
 
@@ -619,11 +627,19 @@ def build(chunk, window, product: str, chunk_label: str | None = None, progress=
         raise ValueError(f"parametri sconosciuti per «{product}»: {', '.join(unknown)}; quelli validi sono "
                          f"{', '.join(known)}")
     for k, v in params.items():
+        if v is None:
+            continue
+        kinds = known[k][0] if isinstance(known[k][0], (list, tuple)) else [known[k][0]]
+        if not any(_of_type(v, t) for t in kinds):
+            raise ValueError(f"{k} per «{product}»: serve {' o '.join(_TYPE_NAMES[t] for t in kinds)}, non {v!r}")
         allowed = known[k][3]
-        if allowed is not None and v is not None and v not in allowed:
+        if allowed is not None and v not in allowed:
             raise ValueError(f"{k} «{v}» per «{product}»: {', '.join(map(str, allowed))}")
     chunk = _chunk(chunk, window, chunk_label)
     params = {k: v for k, v in params.items() if v is not None}
+    if product == "dense":  # the GPU the window is set to use (Allinea foto > GPU), else the program's default
+        settings = getattr(window, "settings", None) if window is not None else None
+        params["gpu"] = str(settings.value("sfm/gpu", "auto") or "auto") if settings is not None else None
     progress = as_progress(progress)
     if product == "contours":
         return _contours(chunk, window, progress, **params)
@@ -641,6 +657,20 @@ def build(chunk, window, product: str, chunk_label: str | None = None, progress=
         entry = next((e for e in versions.versions(chunk, kept_as) if e["id"] == vid), None) if vid else None
         out["version_kept"] = str(entry.get("name") or vid) if entry else None
     return out
+
+
+_TYPE_NAMES = {"number": "un numero", "integer": "un intero", "boolean": "true o false", "string": "un testo",
+               "array": "una lista"}
+
+
+_PYTHON_TYPES = {"number": (int, float), "integer": int, "string": str, "array": (list, tuple)}
+
+
+def _of_type(value, kind: str) -> bool:
+    """Whether ``value`` is of the JSON type ``kind``."""
+    if kind == "boolean":
+        return isinstance(value, bool)
+    return not isinstance(value, bool) and isinstance(value, _PYTHON_TYPES[kind])
 
 
 def _raster_facts(path) -> dict:
@@ -680,8 +710,9 @@ def _build_orthomosaic(chunk, progress, params):
 def _build_dense(chunk, progress, params):
     depth = {k: params[k] for k in ("quality", "filter_mode", "skip_unreadable") if k in params}
     cloud = {k: params[k] for k in ("point_colors",) if k in params}
-    chunk.build_depth_maps(progress=progress.sub(0.0, 0.7), **depth)
-    chunk.build_point_cloud(progress=progress.sub(0.7, 0.3), **cloud)
+    gpu = params.get("gpu")
+    chunk.build_depth_maps(progress=progress.sub(0.0, 0.7), gpu=gpu, **depth)
+    chunk.build_point_cloud(progress=progress.sub(0.7, 0.3), gpu=gpu, **cloud)
     return {"points": _ply_facts(chunk.product_path("point_cloud")).get("vertices")}
 
 
@@ -853,14 +884,23 @@ def run_script(chunk, window, source: str, progress=None) -> dict:
     namespace = {"doc": _document(chunk, window), "chunk": chunk, "app": ppg.app, "ppg": ppg, "np": np,
                  "window": window, "polygon": polygon, "cameras": cameras, "__name__": "__main__"}
     result = run(source, namespace, as_progress(progress), name="assistant")
-    return {"output": result.output[-4000:], "error": result.error,
-            "traceback": result.traceback[-2000:] if result.traceback else None,
+    return {"output": result.output[-4000:], "error": _no_paths(result.error),
+            "traceback": _no_paths(result.traceback[-2000:]) if result.traceback else None,
             "external": list(dict.fromkeys(result.external)), "seconds": round(result.elapsed, 2)}
 
 
+_PATH = re.compile(r"""(?<![\w.])(?:[A-Za-z]:)?(?:[\\/][^\s"'<>\\/]+)*[\\/]([^\s"'<>\\/]+)""")
+
+
+def _no_paths(text: str | None) -> str | None:
+    """``text`` with every absolute path reduced to its file name (what reaches the model never says where)."""
+    return None if text is None else _PATH.sub(r"\1", text)
+
+
 # ------------------------------------------------------------------ the registry for the tools
-def _prop(kind: str, it: str, en: str, enum=None, default=None, items: str | None = None) -> dict:
-    out = {"type": kind, "description_it": it, "description_en": en}
+def _prop(kind: str | list, it: str, en: str, enum=None, default=None, items: str | None = None) -> dict:
+    out = {"type": list(kind) if isinstance(kind, (list, tuple)) else kind, "description_it": it,
+           "description_en": en}
     if enum is not None:
         out["enum"] = list(enum)
     if default is not None:
@@ -872,9 +912,11 @@ def _prop(kind: str, it: str, en: str, enum=None, default=None, items: str | Non
 
 _CHUNK_LABEL = _prop("string", "Il chunk (per nome); vuoto: quello attivo",
                      "The chunk (by label); empty: the active one")
-_BOUNDS = _prop("array", "Riquadro (xmin, ymin, xmax, ymax) nelle coordinate del raster, o \"selection\" per il "
-                "poligono selezionato", "Box (xmin, ymin, xmax, ymax) in the raster's coordinates, or \"selection\" "
-                "for the polygon selected", items="number")
+_BOUNDS = _prop(["array", "string"],
+                "Riquadro [xmin, ymin, xmax, ymax] nelle coordinate del raster, o il testo \"selection\": il poligono "
+                "selezionato nella vista 2D",
+                "Box [xmin, ymin, xmax, ymax] in the raster's coordinates, or the text \"selection\": the polygon "
+                "selected in the 2D view", items="number")
 _THOROUGH = ["normale", "alta", "massima"]
 
 ACTIONS: dict[str, tuple] = {
@@ -901,8 +943,10 @@ ACTIONS: dict[str, tuple] = {
                           "by": _prop("string", "Come scegliere le foto", "How to choose the photos", BY),
                           "then": _prop("string", "Cosa farne", "What to do with them", THEN, "filter"),
                           "area": _BOUNDS,
-                          "markers": _prop("array", "I marker (nomi, chiavi o codici)",
-                                           "The markers (labels, keys or codes)", items="string"),
+                          "markers": _prop(["array", "string", "integer"],
+                                           "I marker: una lista di nomi, chiavi o codici, o uno solo",
+                                           "The markers: a list of labels, keys or codes, or one of them",
+                                           items="string"),
                           "pattern": _prop("string", "Schema dei nomi (es. DJI_01*)", "Pattern of the names "
                                            "(e.g. DJI_01*)"),
                           "enabled": _prop("boolean", "Solo le foto attive (true) o disattivate (false)",
