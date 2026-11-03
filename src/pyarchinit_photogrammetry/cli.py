@@ -1613,8 +1613,13 @@ def patch(project: Path,
         frame = _elevation_id(ch, elevation)
 
     def update():
-        return ch.update_elevation(frame, progress=print_progress) if frame else \
-            ch.update_orthomosaic(progress=print_progress)
+        if not frame:
+            return ch.update_orthomosaic(progress=print_progress)
+        try:  # the elevation was built skipping the photos that cannot be read: so is its update
+            return ch.update_elevation(frame, progress=print_progress, skip_unreadable=True)
+        except RuntimeError as exc:  # e.g. its orthophoto is missing
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from None
 
     if list_patches:
         for p in P.patches(ch, frame=frame):
@@ -1636,8 +1641,9 @@ def patch(project: Path,
     ring = [list(xy[:2]) for xy in region.exterior.coords[:-1]]
     if suggest:
         for d in P.photos_for_area(ch, ring, frame=frame):
+            towards, product = ("view", "the elevation") if frame else ("vertical", "the orthomosaic")
             typer.echo(f"{d['label']}: frames {100 * d['coverage']:.0f}% of the area, {d['angle']:.0f} deg from the "
-                       f"vertical, {100 * d['gsd']:.2f} cm/px, the orthomosaic takes {100 * d['used']:.0f}% from it")
+                       f"{towards}, {100 * d['gsd']:.2f} cm/px, {product} takes {100 * d['used']:.0f}% from it")
         return
     if not photos:
         raise typer.BadParameter("give --photos (--suggest lists the photos of the area)")

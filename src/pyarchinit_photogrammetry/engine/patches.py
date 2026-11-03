@@ -357,11 +357,11 @@ def _area_grid(geom, cells: int):
 
 def _frame_surface(chunk: Chunk, entry: dict, origin, shape, res: float, raycaster, lock):
     """The surface of the elevation ``entry`` on the grid ``origin``, ``shape``, ``res`` (an area of it)."""
-    from .elevation import FrameSurface, frame_from_dict
+    from .elevation import FrameSurface, bounds_of, frame_from_dict
     from .ortho import _on_grid
 
     surf = FrameSurface(chunk, raycaster, frame_from_dict(entry["frame"]), res, lock, tuple(entry["depth"]),
-                        tuple(entry["bounds"]))
+                        bounds_of(chunk, entry))  # never None: that would read the whole model again
     return _on_grid(surf, origin, shape, res)
 
 

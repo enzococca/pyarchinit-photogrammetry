@@ -294,6 +294,31 @@ def test_a_patch_beyond_the_relief_and_the_bounds(wall, plain_photos):
     assert inside.any() and P.changed_patches(ch, frame=eid) == []
 
 
+def test_an_entry_without_bounds_takes_the_grid_of_its_file(wall, plain_photos):
+    """Entries made before 1.5.5 have no "bounds": the grid comes from elevation.tif."""
+    ch, eid, entry = wall
+    entry.pop("bounds")
+    path = E.elevation_paths(ch, entry)[0]
+    before = _read(path)
+    with rasterio.open(path) as src:
+        t, shape = src.transform, (src.height, src.width)
+    surf = E.frame_grid(ch, entry, None, None)
+    assert surf.shape == shape and surf.origin == (t.c, t.f)
+    assert np.allclose(E.bounds_of(ch, entry), (t.c, t.f - shape[0] * t.a, t.c + shape[1] * t.a, t.f))
+    assert E.entry_settings(entry)["blending"] == entry["blending"]
+    u, v = _surface_cell(ch, entry)
+    poly = box(u - 0.15, v - 0.1, u + 0.15, v + 0.1)
+    cands = P.photos_for_area(ch, poly, frame=eid)
+    label = min(cands[:4], key=lambda c: c["used"])["label"]
+    imgs, _now, _b = P.previews(ch, np.asarray(poly.exterior.coords), [label], max_side=60, frame=eid)
+    assert set(imgs) == {(label, "dem")}
+    P.add_patch(ch, poly, [label], frame=eid)
+    after = _read(P.update_elevation(ch, eid))
+    inside, outside = _cells(ch, entry, poly, after.shape[1:])
+    assert _share(after, inside, plain_colour(ch, label)) > 0.9
+    assert (after[:, outside] == before[:, outside]).all()
+
+
 def test_ground_is_refused_on_an_elevation(wall):
     ch, eid, entry = wall
     u, v = _surface_cell(ch, entry)
@@ -382,9 +407,17 @@ def test_command_line_on_an_elevation(wall, plain_photos, monkeypatch):
     out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--suggest")
     cands = P.photos_for_area(ch, box(u - 0.15, v - 0.1, u + 0.15, v + 0.1), frame=eid)
     assert "frames" in out and out.splitlines()[0].split(":")[0] == cands[0]["label"]
+    assert "deg from the view" in out and "the elevation takes" in out and "orthomosaic" not in out
     label = min(cands[:4], key=lambda c: c["used"])["label"]
+    real_update, calls = P.update_elevation, []
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("skip_unreadable"))
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(P, "update_elevation", spy)
     out = go("patch", project, "--elevation", eid, "--bbox", box_, "--photos", label)
-    assert "patch p1" in out
+    assert "patch p1" in out and calls == [True]  # built skipping unreadable photos: updated the same way
     assert not np.array_equal(_read(path0), before)
     assert go("patch", project, "--elevation", "Parete sud", "--list").startswith(f"p1: only {label} on the relief")
     assert go("patch", project, "--list") == ""
@@ -403,6 +436,9 @@ def test_command_line_on_an_elevation(wall, plain_photos, monkeypatch):
     go("patch", project, "--elevation", "Parete sud", "--remove", "all")
     assert go("patch", project, "--elevation", "Parete sud", "--list") == ""
     assert np.array_equal(_read(path0), before)
+    path0.unlink()  # a missing orthophoto: an error message, not a traceback
+    out = go("patch", project, "--elevation", "Parete sud", "--bbox", box_, "--photos", label, code=1)
+    assert "error:" in out and "missing" in out and "Traceback" not in out
 
 
 def test_command_line_elevation_without_elevations(processed, tmp_path):
