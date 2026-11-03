@@ -2787,7 +2787,22 @@
   "Patch del prospetto": "Elevation patch",
   "Patch dei prospetti": "Elevation patches",
   "Mostra prima un prospetto o una sezione.": "Show an elevation or a section first.",
-  "Aggiorna il prospetto": "Update the elevation"
+  "Aggiorna il prospetto": "Update the elevation",
+  "Asse": "Axis",
+  "Asse dello sviluppo": "Axis of the development",
+  "Con un asse inclinato, come quello di una torre che pende, i corsi e la cresta vengono diritti; v è la distanza lungo l'asse, non più la quota. L'inclinazione viene mostrata prima di costruire.": "With a tilted axis, as that of a leaning tower, the courses and the crest come out straight; v is the distance along the axis, no longer the height. The tilt is shown before building.",
+  "Costruisci": "Build",
+  "Dalla cresta della torre (normale al piano della cresta)": "From the tower's crest (normal to the crest plane)",
+  "Della regione (asse Z della regione)": "The region's (Z axis of the region)",
+  "Due punti nella vista 3D (in basso e in alto)": "Two points in the 3D view (bottom and top)",
+  "Scala sulla parete": "Scale on the wall",
+  "Scala sulla parete: u = lunghezza lungo il muro": "Scale on the wall: u = length along the wall",
+  "Verticale (v = quota)": "Vertical (v = height)",
+  "asse verticale": "vertical axis",
+  "u = lunghezza misurata lungo il muro (una torre ovale o un pozzo irregolare) invece dell'arco sul cilindro di riferimento": "u = the length measured along the wall (an oval tower, an irregular well) instead of the arc on the reference cylinder",
+  "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)": "the bottom point of a straight line of the structure parallel to its axis (a column, a shaft; not the batter of a tower: for that use the crest or the region)",
+  "il punto in alto della stessa linea, sulla stessa verticale della struttura": "the top point of the same line, on the same upright of the structure",
+  "Non si può verificare che la linea dei due punti sia parallela alla torre: troppo pochi vertici del muro intorno al cerchio.": "Cannot check that the line of the two points is parallel to the tower: too few vertices of the wall around the circle."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3689,6 +3704,11 @@
   "Aggiorna il prospetto «{0}» (patch)": "Update the elevation «{0}» (patches)",
   "Nessuna patch nel prospetto «{0}»": "No patch in the elevation «{0}»",
   "Togliere le {0} patch del prospetto «{1}»? Le loro aree tornano come senza patch.": "Remove the {0} patches of the elevation «{1}»? Their areas go back to how they were without patches.",
-  "\n{0} patch del prospetto: il prospetto viene aggiornato senza di esse.": "\n{0} elevation patches: the elevation is updated without them."
+  "\n{0} patch del prospetto: il prospetto viene aggiornato senza di esse.": "\n{0} elevation patches: the elevation is updated without them.",
+  "L'asse scelto non si può usare: {0}": "The chosen axis cannot be used: {0}",
+  "Lo sviluppo seguirà l'{0} (scarto della cresta: {1}). Se non è l'asse della torre, annulla e scegli un altro asse.": "The development will follow the {0} (crest residual: {1}). If it is not the tower's axis, cancel and choose another axis.",
+  "Sviluppo cilindrico: {0}": "Cylindrical development: {0}",
+  "asse inclinato di {0}° verso {1}": "axis tilted {0}° towards {1}",
+  "La linea dei due punti non è parallela alla torre: si discosta di {0}° dal suo asse ({1} cm fra il piede e la cima). Un clic cade sulla faccia del muro: due punti su una torre a scarpa danno la scarpa, non l'asse. Per una torre a scarpa usa la cresta o la regione.": "The line of the two points is not parallel to the tower: it is {0}° off its axis ({1} cm between the foot and the top). A click lands on the face of the wall: two points on a battered tower give the batter, not the axis. For a battered tower use the crest or the region."
  }
 }

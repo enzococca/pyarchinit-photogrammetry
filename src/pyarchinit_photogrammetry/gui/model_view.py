@@ -947,7 +947,8 @@ class ModelView(QWidget):
     slice_requested = Signal(object)  # a point at the height of a plan slice (internal frame)
     move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
     cut_requested = Signal(str, object)  # cut the model: "horizontal" (1 point), "vertical" (2), "points" (3), "values"
-    elevation_requested = Signal(str, object)  # an orthophoto on a plane: "view" (view_frame()), "points" (3, internal)
+    elevation_requested = Signal(str, object)  # an orthophoto on a plane: "view" (view_frame()), "points" (3, internal);
+    # "axis" (2 points, internal): the axis of a cylindrical development
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1324,7 +1325,7 @@ class ModelView(QWidget):
         self._purpose = purpose
         if purpose != "section_end":
             self._section_start = None
-        if purpose in ("cut_h", "cut_v", "cut_p", "elev_p"):
+        if purpose in ("cut_h", "cut_v", "cut_p", "elev_p", "axis_p"):
             self._cut_points = []
         what = {"photos": "le foto che lo vedono", "section": "il primo estremo della sezione",
                 "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta",
@@ -1332,7 +1333,10 @@ class ModelView(QWidget):
                 "cut_v2": "il secondo punto della linea di taglio", "cut_p": "il primo dei tre punti del piano",
                 "cut_p2": "il secondo dei tre punti del piano", "cut_p3": "il terzo dei tre punti del piano",
                 "elev_p": "il primo punto del prospetto (l'asse orizzontale va dal primo al secondo)",
-                "elev_p2": "il secondo punto del prospetto", "elev_p3": "il terzo punto del prospetto"}.get(
+                "elev_p2": "il secondo punto del prospetto", "elev_p3": "il terzo punto del prospetto",
+                "axis_p": "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, "
+                          "un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)",
+                "axis_p2": "il punto in alto della stessa linea, sulla stessa verticale della struttura"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
                                     tr(what)))
@@ -1340,10 +1344,13 @@ class ModelView(QWidget):
 
     def _pick_finished(self, pos) -> None:
         self.stack.setCurrentWidget(self.canvas)
+        purpose = getattr(self, "_purpose", "marker")
         if pos is None or self._project is None:
+            if purpose.startswith("axis_p"):  # Esc: the cylinder waiting for its axis is given up
+                self._cut_points = []
+                self.elevation_requested.emit("axis_cancel", None)
             return
         point = self.pick_point(pos[0], pos[1], self._project, self._ray)
-        purpose = getattr(self, "_purpose", "marker")
         if purpose == "photos":
             self.photos_point_requested.emit(point)
         elif purpose == "section":
@@ -1368,6 +1375,18 @@ class ModelView(QWidget):
             else:
                 self._cut_points = []
                 self.elevation_requested.emit("points", points)
+        elif purpose.startswith("axis_p"):
+            if point is None:
+                self._cut_points = []
+                self.elevation_requested.emit("axis_cancel", None)
+                return
+            points = getattr(self, "_cut_points", []) + [point]
+            self._cut_points = points
+            if purpose == "axis_p":
+                self.start_pick("axis_p2")
+            else:
+                self._cut_points = []
+                self.elevation_requested.emit("axis", points)
         elif purpose.startswith("cut_"):
             if point is None:
                 return

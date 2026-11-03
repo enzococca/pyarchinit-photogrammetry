@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,17 +73,37 @@ class Plane:
                 "v_axis": self.v_axis.tolist()}
 
 
+def _interp(x, xp, fp) -> np.ndarray:
+    """Piecewise linear ``fp(xp)`` at ``x``, prolonged past both ends by the end segments (``x`` any shape,
+    a scalar too)."""
+    x = np.asarray(x, np.float64)
+    flat = np.atleast_1d(x).ravel()
+    y = np.interp(flat, xp, fp)
+    lo, hi = flat < xp[0], flat > xp[-1]
+    y[lo] = fp[0] + (flat[lo] - xp[0]) * (fp[1] - fp[0]) / (xp[1] - xp[0])
+    y[hi] = fp[-1] + (flat[hi] - xp[-1]) * (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+    return y.reshape(x.shape)
+
+
 @dataclass
 class Cylinder:
     """A vertical (or any ``axis``) cylinder of ``radius`` around the line through ``centre``,
     seen from outside (a tower, a column) or from the axis (``inside``: a well, an apse);
-    ``start``: the direction (perpendicular to the axis) where ``u`` = 0."""
+    ``start``: the direction (perpendicular to the axis) where ``u`` = 0.
+
+    ``tilt``: how the axis was chosen (:func:`cylinder_axis` ``info``), None for the vertical.
+    ``u_map``: ``[theta_deg, u]`` pairs, both strictly increasing - theta the turn from ``start`` in the
+    direction ``u`` grows, covering a full turn - so that ``u`` is the arc on the wall instead of ``theta *
+    radius``; ``point`` and ``coords`` interpolate it linearly both ways. A map from -180 degrees keeps the seam
+    of the development behind ``start``, where it is without a map."""
 
     centre: np.ndarray
     axis: np.ndarray
     radius: float
     inside: bool = False
     start: np.ndarray | None = None
+    tilt: dict | None = None
+    u_map: np.ndarray | None = None
     kind: str = field(default="cylinder", init=False)
 
     def __post_init__(self):
@@ -94,9 +115,35 @@ class Cylinder:
             s = np.array([0.0, 1.0, 0.0]) - self.axis[1] * self.axis
         self.start = _unit(s)
         self.radius = float(self.radius)
+        if self.tilt is not None:
+            self.tilt = dict(self.tilt)
+        if self.u_map is not None:
+            m = np.asarray(self.u_map, np.float64).reshape(-1, 2)
+            if len(m) < 2 or not (np.all(np.diff(m[:, 0]) > 0) and np.all(np.diff(m[:, 1]) > 0)):
+                raise ValueError("the u map needs two pairs at least, theta and u both strictly increasing")
+            if m[-1, 0] - m[0, 0] < 360.0 - 1e-9:
+                raise ValueError("the u map must cover a full turn (360 degrees)")
+            self.u_map = m
+
+    def _turn(self, u) -> np.ndarray:
+        """The turn (radians, in the direction ``u`` grows) from ``start`` of ``u``."""
+        u = np.asarray(u, np.float64)
+        if self.u_map is None:
+            return u / self.radius
+        return np.radians(_interp(u, self.u_map[:, 1], self.u_map[:, 0]))
+
+    def _u(self, turn) -> np.ndarray:
+        """``u`` of a turn (radians, in (-pi, pi]) from ``start``; with a map, the turn is taken within the turn
+        of 360 degrees that starts at the map's first angle."""
+        turn = np.asarray(turn, np.float64)
+        if self.u_map is None:
+            return turn * self.radius
+        t0 = self.u_map[0, 0]
+        deg = t0 + np.mod(np.degrees(turn) - t0, 360.0)
+        return _interp(deg, self.u_map[:, 0], self.u_map[:, 1])
 
     def _e(self, u) -> np.ndarray:
-        theta = np.asarray(u, np.float64) / self.radius * (-1.0 if self.inside else 1.0)
+        theta = self._turn(u) * (-1.0 if self.inside else 1.0)
         other = np.cross(self.axis, self.start)
         return np.cos(theta)[..., None] * self.start + np.sin(theta)[..., None] * other
 
@@ -116,7 +163,7 @@ class Cylinder:
         other = np.cross(self.axis, self.start)
         theta = np.arctan2(radial @ other, radial @ self.start)
         r = np.linalg.norm(radial, axis=1)
-        u = theta * self.radius * (-1.0 if self.inside else 1.0)
+        u = self._u(theta * (-1.0 if self.inside else 1.0))
         d = self.radius - r if self.inside else r - self.radius
         return np.column_stack([u, v, d])
 
@@ -124,13 +171,19 @@ class Cylinder:
         return self.radius if self.inside else np.inf  # from inside a ray starts on the axis at most
 
     def to_dict(self) -> dict:
-        return {"kind": "cylinder", "centre": self.centre.tolist(), "axis": self.axis.tolist(),
-                "radius": self.radius, "inside": self.inside, "start": self.start.tolist()}
+        out = {"kind": "cylinder", "centre": self.centre.tolist(), "axis": self.axis.tolist(),
+               "radius": self.radius, "inside": self.inside, "start": self.start.tolist()}
+        if self.tilt is not None:
+            out["tilt"] = dict(self.tilt)
+        if self.u_map is not None:
+            out["u_map"] = self.u_map.tolist()
+        return out
 
 
 def frame_from_dict(d: dict):
     if d.get("kind") == "cylinder":
-        return Cylinder(d["centre"], d["axis"], d["radius"], bool(d.get("inside")), d.get("start"))
+        return Cylinder(d["centre"], d["axis"], d["radius"], bool(d.get("inside")), d.get("start"),
+                        tilt=d.get("tilt"), u_map=d.get("u_map"))
     return Plane(d["origin"], d["u_axis"], d["v_axis"])
 
 
@@ -255,9 +308,12 @@ def plane_from_view(centre, toward, up, heights: bool = True) -> Plane:
     return with_heights(plane) if heights else plane
 
 
-def cylinder_from_circle(chunk: Chunk, points, inside: bool = True) -> Cylinder:
-    """The vertical cylinder through a circle fitted to plan points (three or more on the rim of a
-    well or around a tower, chunk CRS)."""
+def cylinder_from_circle(chunk: Chunk, points, inside: bool = True, axis: str = "vertical", axis_points=None,
+                         depth=None) -> Cylinder:
+    """The cylinder through a circle fitted to plan points (three or more on the rim of a well or
+    around a tower, chunk CRS). ``axis``: ``vertical`` (the default, ``v`` = the height) or a method of
+    :func:`cylinder_axis` (``region``, ``crest``, ``points`` with ``axis_points``; ``depth`` the radial band
+    of the crest); a tilted cylinder keeps the choice in its ``tilt``."""
     q = np.asarray(points, np.float64)[:, :2]
     if len(q) < 3:
         raise ValueError("three points at least")
@@ -270,7 +326,224 @@ def cylinder_from_circle(chunk: Chunk, points, inside: bool = True) -> Cylinder:
     sol = np.linalg.lstsq(a, (d ** 2).sum(axis=1), rcond=None)[0]
     r = float(np.sqrt(sol[2] + sol[0] * sol[0] + sol[1] * sol[1]))
     cx, cy = float(sol[0] + mean[0]), float(sol[1] + mean[1])
-    return Cylinder([cx, cy, 0.0], [0.0, 0.0, 1.0], r, inside, [q[0, 0] - cx, q[0, 1] - cy, 0.0])
+    circle = Cylinder([cx, cy, 0.0], [0.0, 0.0, 1.0], r, inside, [q[0, 0] - cx, q[0, 1] - cy, 0.0])
+    if axis == "vertical":
+        return circle
+    direction, info = cylinder_axis(chunk, circle, axis, points=axis_points, depth=depth)
+    return Cylinder(info["centre"], direction, r, inside, circle.start, tilt=info)
+
+
+AXIS_METHODS = ("vertical", "region", "crest", "points")
+CREST_SECTOR_DEG = 5.0
+
+
+def _axis_info(method: str, axis: np.ndarray, centre_z: float, residual=None) -> dict:
+    tilt = float(np.degrees(np.arccos(np.clip(axis[2], -1.0, 1.0))))
+    azimuth = float(np.degrees(np.arctan2(axis[0], axis[1])) % 360.0) if tilt > 1e-9 else 0.0
+    return {"method": method, "tilt_deg": tilt, "azimuth_deg": azimuth,
+            "residual_m": None if residual is None else float(residual), "centre_z": float(centre_z)}
+
+
+def _fit_circle(xy: np.ndarray, kept: bool = False):
+    """Centre and radius of the circle through 2D points: the algebraic fit on the points shifted to their mean,
+    then again without the points whose radial residual is over 3 MAD, until none more is dropped (3 passes at
+    most). ``kept``: also the mask of the points the last fit used (those on the wall)."""
+    def fit(q):
+        mean = q.mean(axis=0)
+        d = q - mean
+        a = np.column_stack([2 * d, np.ones(len(d))])
+        sol = np.linalg.lstsq(a, (d ** 2).sum(axis=1), rcond=None)[0]
+        return sol[:2] + mean, float(np.sqrt(max(sol[2] + sol[0] ** 2 + sol[1] ** 2, 0.0)))
+
+    centre, r = fit(xy)
+    keep = np.ones(len(xy), bool)
+    for _ in range(3):  # until nothing more is dropped (ground or a wall inside the band pull the first fit)
+        res = np.linalg.norm(xy - centre, axis=1) - r
+        dev = np.abs(res - np.median(res[keep]))
+        now = dev <= 3 * max(1.4826 * np.median(dev[keep]), 1e-6)
+        if now.sum() < 3 or np.array_equal(now, keep):
+            break
+        keep = now
+        centre, r = fit(xy[keep])
+    return (centre, r, keep) if kept else (centre, r)
+
+
+def _axis_line(axis: np.ndarray, centre_z: float, band: np.ndarray, origin: np.ndarray):
+    """The point at height ``centre_z`` of the axis line (direction ``axis``) through the centre of the tower:
+    the circle fitted to ``band`` (world vertices of the wall) seen along the axis; and that circle's radius.
+    ``origin``: a point near the data, for the rounding (projected coordinates)."""
+    e1 = np.cross(axis, [0.0, 1.0, 0.0] if abs(axis[1]) < 0.9 else [1.0, 0.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(axis, e1)
+    q = band - origin
+    centre2, r = _fit_circle(np.column_stack([q @ e1, q @ e2]))
+    c0 = origin + centre2[0] * e1 + centre2[1] * e2  # on the line, in the plane through origin square to the axis
+    return c0 + (centre_z - c0[2]) / axis[2] * axis, r
+
+
+DRIFT_SLICE = 0.2  # the lowest and the highest fifth of the wall along a clicked direction
+
+
+def _line_drift(direction: np.ndarray, band: np.ndarray, origin: np.ndarray):
+    """How far a direction is from the tower's own axis: the wall seen along ``direction`` - the vertices the robust
+    circle of the whole band keeps, so that ground or rubble in the band are left out - and a circle fitted to its
+    lowest and to its highest ``DRIFT_SLICE`` (12 vertices at least each); the drift of the two centres square to
+    the direction (metres) and the angle it makes over the slices' separation (degrees). None when the wall is too
+    short or too sparse."""
+    e1 = np.cross(direction, [0.0, 1.0, 0.0] if abs(direction[1]) < 0.9 else [1.0, 0.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(direction, e1)
+    q = band - origin
+    _c, _r, wall = _fit_circle(np.column_stack([q @ e1, q @ e2]), kept=True)
+    q = q[wall]
+    if len(q) < 24:
+        return None
+    t = q @ direction
+    lo, hi = np.quantile(t, [DRIFT_SLICE, 1.0 - DRIFT_SLICE])
+    low, high = t <= lo, t >= hi
+    if low.sum() < 12 or high.sum() < 12:
+        return None
+    centres = [_fit_circle(np.column_stack([q[m] @ e1, q[m] @ e2]))[0] for m in (low, high)]
+    separation = float(np.median(t[high]) - np.median(t[low]))
+    if separation <= 1e-6:
+        return None
+    drift = float(np.linalg.norm(centres[1] - centres[0]))
+    return drift, float(np.degrees(np.arctan2(drift, separation)))
+
+
+def _through_the_tower(info: dict, axis: np.ndarray, band: np.ndarray, circle: "Cylinder",
+                       fallback: np.ndarray | None = None) -> dict:
+    """``info`` with ``centre`` (the point of the axis line at ``centre_z``) and ``fitted_radius``: the line
+    through the centre of the circle fitted to the wall seen along the axis; with too little wall, through
+    ``fallback`` (a point of the line) or the plan circle's centre."""
+    z = info["centre_z"]
+    if len(band) >= 12:
+        origin = np.array([circle.centre[0], circle.centre[1], float(np.median(band[:, 2]))])
+        centre, r = _axis_line(axis, z, band, origin)
+        info["fitted_radius"] = float(r)
+    else:
+        base = fallback if fallback is not None else np.array([circle.centre[0], circle.centre[1], z])
+        centre = base + (z - base[2]) / axis[2] * axis
+        info["fitted_radius"] = None
+    info["centre"] = [float(c) for c in centre]
+    return info
+
+
+def _band_vertices(chunk: Chunk, circle: Cylinder, depth) -> np.ndarray:
+    """World vertices of the model within the radial band ``depth`` (towards the viewer) of the circle."""
+    from ..io.mesh_ply import read_mesh
+
+    path = chunk.product_path("model")
+    if path is None:
+        raise ValueError("build the model first: the axis is read on the model")
+    xyz = chunk.to_world(read_mesh(path).xyz)
+    lo, hi = depth if depth is not None else (-3.0, 3.0)
+    d = circle.coords(xyz)[:, 2]
+    return xyz[(d >= lo) & (d <= hi)]
+
+
+def _crest_points(circle: Cylinder, xyz: np.ndarray) -> np.ndarray:
+    """The highest vertex in each sector of ``CREST_SECTOR_DEG`` around the circle."""
+    turn = np.degrees(circle.coords(xyz)[:, 0] / circle.radius) % 360.0
+    sector = np.floor(turn / CREST_SECTOR_DEG).astype(np.int64)
+    order = np.lexsort((-xyz[:, 2], sector))
+    first = np.ones(len(order), bool)
+    first[1:] = sector[order][1:] != sector[order][:-1]
+    return xyz[order[first]]
+
+
+def _robust_plane(p: np.ndarray, centre: np.ndarray):
+    """``z = a x + b y + c`` (x, y from ``centre``) fitted twice, the second time without the points over 3 MAD
+    of the first fit; returns the coefficients and the residuals of all the points."""
+    x, y = p[:, 0] - centre[0], p[:, 1] - centre[1]
+    a = np.column_stack([x, y, np.ones(len(p))])
+    coef = np.linalg.lstsq(a, p[:, 2], rcond=None)[0]
+    res = p[:, 2] - a @ coef
+    mad = np.median(np.abs(res - np.median(res)))
+    keep = np.abs(res - np.median(res)) <= 3 * max(mad * 1.4826, 1e-6)
+    if keep.sum() >= 3:
+        coef = np.linalg.lstsq(a[keep], p[keep, 2], rcond=None)[0]
+    return coef, p[:, 2] - a @ coef
+
+
+def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", points=None,
+                  tolerance: float = 0.3, depth=None) -> tuple[np.ndarray, dict]:
+    """The axis (unit, pointing up) of a cylindrical development around ``circle`` and how it was chosen:
+    ``info`` = ``{method, tilt_deg, azimuth_deg, residual_m, centre_z}``; the azimuth is where the top of the
+    axis leans (0 = north, clockwise, chunk CRS); ``centre_z`` the height where the axis meets the tower (the
+    circle's centre is moved there).
+
+    ``vertical``: [0, 0, 1], the centre stays at height 0 (``v`` = the height). ``region``: the local Z of the
+    chunk's region. ``crest``: the upward normal of the plane of the crest - the highest vertex of the model in
+    each sector of 5 degrees within the radial band ``depth`` (default (-3, 3) m) of the circle, a plane fitted
+    twice (outliers over 3 MAD out of the second fit); refused when the crest is not a plane (90 % of the sectors
+    within ``tolerance`` metres of it: ``residual_m``) - a single fallen sector is dropped as an outlier and the
+    crest accepted, a side collapsed (a quarter of the crest) is refused. ``points``: the direction of two world points (bottom,
+    top), at least 1 m apart. For ``region`` the centre goes to the model's mid height within the band, for
+    ``crest`` to the crest's mean height, for ``points`` to the points' mid height: ``v`` = 0 there.
+
+    A tilted axis passes through the tower's own centre: once its direction is known, the wall (the model's
+    vertices within ``depth`` of the plan circle) is seen along it and a circle fitted there (``info["centre"]``,
+    the axis' point at ``centre_z``; ``info["fitted_radius"]``); the plan circle, picked at whatever height, would
+    put the axis off the centre of a leaning tower. ``points``: ``info["points_drift_m"]`` and
+    ``info["points_angle_deg"]``, how far the line of the two points is from parallel to the tower (:func:`_line_drift`:
+    a click lands on the face, so two clicks on a battered tower give the batter, not the axis; on an upright edge
+    the line is the radius away from the axis but parallel to it)."""
+    if method == "vertical":
+        info = _axis_info("vertical", np.array([0.0, 0.0, 1.0]), 0.0)
+        info["centre"] = [float(circle.centre[0]), float(circle.centre[1]), 0.0]
+        return np.array([0.0, 0.0, 1.0]), info
+    if circle.u_map is not None:
+        raise ValueError("the axis is found around a plain circle: give the cylinder without its u map")
+
+    def band_or_none():
+        try:
+            return _band_vertices(chunk, circle, depth)
+        except ValueError:
+            return np.zeros((0, 3))
+
+    if method == "points":
+        if points is None or len(points) != 2:
+            raise ValueError("the axis by two points needs two points: the bottom and the top of the tower")
+        p0, p1 = (np.asarray(q, np.float64).reshape(3) for q in points)
+        if np.linalg.norm(p1 - p0) < 1.0:
+            raise ValueError(f"the two points of the axis are {np.linalg.norm(p1 - p0):.2f} m apart: "
+                             "pick them at least 1 m apart, at the bottom and at the top of the tower")
+        axis = _unit(p1 - p0)
+        if axis[2] < 0:
+            axis = -axis
+        band = band_or_none()
+        info = _through_the_tower(_axis_info("points", axis, (p0[2] + p1[2]) / 2), axis, band, circle, fallback=p0)
+        drift = _line_drift(axis, band, np.array([circle.centre[0], circle.centre[1], float(np.median(band[:, 2]))])) \
+            if len(band) >= 24 else None
+        info["points_drift_m"], info["points_angle_deg"] = drift if drift is not None else (None, None)
+        return axis, info
+    if method == "region":
+        from .region import get_region
+
+        region = get_region(chunk)
+        if region is None:
+            raise ValueError("the chunk has no region: set the region first, or choose another axis")
+        axis = _unit(region.rotation[:, 2])
+        if axis[2] < 0:
+            axis = -axis
+        band = band_or_none()
+        mid = (band[:, 2].min() + band[:, 2].max()) / 2 if len(band) else region.center[2]
+        return axis, _through_the_tower(_axis_info("region", axis, mid), axis, band, circle)
+    if method == "crest":
+        band = _band_vertices(chunk, circle, depth)
+        crest = _crest_points(circle, band) if len(band) else band
+        if len(crest) < 12:
+            raise ValueError("too little of the model around the circle to find the crest of the tower")
+        coef, res = _robust_plane(crest, circle.centre)
+        residual = float(np.percentile(np.abs(res), 90))
+        if residual > tolerance:
+            raise ValueError(f"the crest of the tower is not a plane (residual {residual:.2f} m, over "
+                             f"{tolerance:.2f} m): use the axis of the region or two points instead")
+        axis = _unit([-coef[0], -coef[1], 1.0])
+        return axis, _through_the_tower(_axis_info("crest", axis, float(crest[:, 2].mean()), residual), axis,
+                                        band, circle)
+    raise ValueError(f"unknown axis method {method!r}: one of {', '.join(AXIS_METHODS)}")
 
 
 # ---------------------------------------------------------------- the surface of a frame
@@ -315,7 +588,10 @@ class FrameSurface:
 
     def tile(self, r0: int, c0: int, th: int, tw: int) -> np.ndarray:
         u, v = self.cell_uv(r0, c0, th, tw)
-        u, v = u.ravel(), v.ravel()
+        return self.depth_at(u.ravel(), v.ravel()).reshape(th, tw)
+
+    def depth_at(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Depth ``d`` of the surface at frame points ``(u, v)`` (NaN where no surface in the band)."""
         start = self.frame.point(u, v, np.full(len(u), self.dmax))
         direction = -self.frame.view(u, v)
         start_int = start @ self._inv[:3, :3].T + self._inv[:3, 3]
@@ -325,7 +601,54 @@ class FrameSurface:
             t = self.raycaster.hit_distance(start_int, dir_int) * self.chunk.scale  # world units
         d = self.dmax - t
         d[~np.isfinite(t) | (d < self.dmin)] = np.nan
-        return d.reshape(th, tw)
+        return d
+
+
+WALL_COLUMN_DEG = 1.0
+
+
+def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
+    """The ``u_map`` of a cylinder that makes ``u`` the length along the wall: the median depth of the surface in
+    every column of ``WALL_COLUMN_DEG`` (``samples`` heights within the surface's bounds; columns with no surface
+    take the mean of the nearest columns with one), the wall's radius ``r`` = R + d (R - d from inside), the
+    length of each column sqrt(r^2 + (dr/dtheta)^2) dtheta (the wall's trace, also where it is not square to the
+    radius), cumulated from -180 degrees (the seam behind ``start``) with ``u`` = 0 at ``start``."""
+    frame = surface.frame
+    if frame.kind != "cylinder":
+        raise ValueError("the scale on the wall is for cylindrical developments")
+    n = int(round(360.0 / WALL_COLUMN_DEG))
+    edges = np.linspace(-180.0, 180.0, n + 1)
+    mids = np.radians((edges[:-1] + edges[1:]) / 2)
+    _u0, v0, _u1, v1 = surface.bounds
+    vs = np.linspace(v0, v1, max(2, min(samples, int(np.ceil((v1 - v0) / surface.resolution)) + 1)))
+    uu = np.repeat(frame._u(mids), len(vs))
+    vv = np.tile(vs, n)
+    d = surface.depth_at(uu, vv).reshape(n, len(vs))
+    with warnings.catch_warnings():  # a column with no wall: "All-NaN slice", filled below
+        warnings.simplefilter("ignore", RuntimeWarning)
+        column = np.nanmedian(d, axis=1)  # the median: a drainpipe or a tree in front does not pull the column
+    ok = np.isfinite(column)
+    if not ok.any():
+        raise ValueError("no surface on the cylinder: the scale on the wall needs the wall")
+    if not ok.all():  # the columns with no wall: from the nearest ones with it, all round
+        idx = np.flatnonzero(ok)
+        column = np.interp(np.arange(n), np.concatenate([idx - n, idx, idx + n]), np.tile(column[idx], 3))
+    r = np.maximum(frame.radius - column if frame.inside else frame.radius + column, 1e-3 * frame.radius)
+    step = np.radians(WALL_COLUMN_DEG)
+    dr = (np.roll(r, -1) - np.roll(r, 1)) / (2 * step)
+    length = np.hypot(r, dr) * step
+    u = np.concatenate([[0.0], np.cumsum(length)])
+    u -= np.interp(0.0, edges, u)  # u = 0 at start
+    return [[float(a), float(b)] for a, b in zip(edges, u)]
+
+
+def wall_length(entry: dict) -> float:
+    """The length of the wall all round (metres) of an elevation scaled on the wall (``entry["scale"]`` "wall"),
+    else the reference cylinder's circumference."""
+    frame = frame_from_dict(entry["frame"])
+    if getattr(frame, "u_map", None) is None:
+        return float(2 * np.pi * frame.radius) if frame.kind == "cylinder" else float("nan")
+    return float(frame.u_map[-1, 1] - frame.u_map[0, 1])
 
 
 # ---------------------------------------------------------------- products
@@ -427,14 +750,22 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
-                    bounds=None, kind: str = "elevation") -> dict:
+                    bounds=None, kind: str = "elevation", scale: str = "cylinder") -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
 
     ``bounds``: ``(u0, v0, u1, v1)`` of the part to build (default: the model in the depth band).
     ``kind`` ``section``: nothing in front of the plane is kept (the depth band starts at 0) and the
-    line where the plane cuts the model is saved as the profile (``profile.json``, a plane only)."""
+    line where the plane cuts the model is saved as the profile (``profile.json``, a plane only).
+
+    ``scale`` (a cylinder): ``cylinder`` - ``u`` the arc on the reference cylinder, as the frame says; ``wall`` -
+    ``u`` the length along the wall (:func:`wall_map` from a first pass on the relief, kept in the frame's
+    ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall"."""
+    if scale not in ("cylinder", "wall"):
+        raise ValueError(f"unknown scale {scale!r}: cylinder or wall")
+    if scale == "wall" and frame.kind != "cylinder":
+        raise ValueError("the scale on the wall is for cylindrical developments")
     if kind == "section":
         if frame.kind != "plane":
             raise ValueError("a section is made on a plane")
@@ -458,6 +789,14 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
+    if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
+        frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
+    if scale == "wall":
+        progress(0.02, "Length of the wall")
+        plain = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
+        umap = wall_map(FrameSurface(chunk, raycaster, plain, resolution, lock, depth, None))
+        frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt,
+                         u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
     tile = 512 if frame.kind == "plane" else max(32, min(512, int(0.15 * frame.radius / resolution)))
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, 8, workers, None, [], tile, lock,
@@ -509,6 +848,10 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
              "size": [w, h], "blending": blending, "colour_correction": correction is not None,
              "max_angle": float(max_angle), "max_cameras": 8, "blend_sigma": ctx.blend_sigma,
              "ghosting": bool(ghosting), "fill_holes": bool(fill_holes)}
+    if getattr(frame, "tilt", None):
+        entry["tilt"] = dict(frame.tilt)
+    if scale == "wall":
+        entry["scale"] = "wall"
     if kind == "section":
         progress(0.985, "Profile of the section")
         lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)
