@@ -3,6 +3,9 @@ name: probe-none
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["assistant"]
+    paths: ["tests/probe_none.py", ".github/workflows/probe-none.yml"]
 
 jobs:
   probe:
