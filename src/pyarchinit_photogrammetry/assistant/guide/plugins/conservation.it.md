@@ -37,6 +37,15 @@ plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main
 7. **Tavola...**, **Tabelle...**, **Disegni...**, **Apri in QGIS**, **Salva in PyArchInit**, **IFC 4.3...**.
 8. **Confronta...** due campagne dello stesso paramento.
 
+<figure markdown="span">
+  ![La finestra con una campagna sul prospetto di una torre e il pannello Conservazione](../img/plugins/conservation/window.it.jpg)
+  <figcaption>Una campagna su cinque metri del prospetto sviluppato di una torre circolare (Khutm), nella vista 2D del
+  programma: una mancanza dove il paramento è crollato (viola, retino verticale), pietre smosse (rosa, punti), perdita di
+  malta (marrone, retino incrociato) con una nota, alveolizzazione (contorni viola) e le lesioni trovate dal rilevatore
+  (rosso), una con una stuccatura da eseguire (azzurro, tratteggiata). A destra il pannello <em>Conservazione</em> con
+  la scelta dei termini e la tabella della campagna.</figcaption>
+</figure>
+
 ## Cosa serve a ogni passo
 
 | Passo | Serve |
@@ -247,9 +256,24 @@ viene proposta la data del chunk. **Mostra** mostra il prospetto con gli element
 *Lesioni*, *Interventi* e *Note* (e *Proposte*, tratteggiate). Quando il paramento appartiene a un muro del plugin
 *Murature*, prende il nome del muro.
 
+<figure markdown="span">
+  ![Il pannello Conservazione](../img/plugins/conservation/pane.it.png){ width="420" }
+  <figcaption>Il pannello: prospetto e campagna, la scelta dei termini, i pulsanti della mappatura, la tabella degli
+  elementi, gli interventi, la valutazione EN 16096, gli esiti, la sovrapposizione di un confronto e il riepilogo della
+  campagna con il suggerimento del plugin.</figcaption>
+</figure>
+
 ### 2. Mappatura
 
 Scegli il termine nell'elenco: per famiglia, con la ricerca nelle tre lingue, i preferiti e gli ultimi dieci usati.
+
+<figure markdown="span">
+  ![La scelta dei termini per famiglia](../img/plugins/conservation/terms.it.png){ width="420" }
+  ![La ricerca trova il termine ICOMOS-ISCS e quello UNI 11182](../img/plugins/conservation/terms-search.it.png){ width="420" }
+  <figcaption>A sinistra i termini per famiglia di ICOMOS-ISCS, poi UNI 11182 e i termini locali; a destra la ricerca di
+  «alveol» trova il termine ICOMOS-ISCS con il suo sottotipo e il termine UNI 11182.</figcaption>
+</figure>
+
 Poi:
 
 - **Area**: un poligono (degrado);
@@ -260,6 +284,13 @@ L'elemento prende il termine, la sua estensione (m² o m) e la campagna. La sche
 alta), l'apertura di una lesione (mm), la profondità di una mancanza (mm), causa, urgenza e note. **Foto** apre la foto
 che vede meglio l'elemento, centrata su di esso: le foto sono quelle le cui camere vedono il centro dell'elemento
 sulla superficie.
+
+<figure markdown="span">
+  ![La scheda di un elemento con l'elenco dei termini aperto](../img/plugins/conservation/feature-form.it.png)
+  <figcaption>La scheda di una mancanza: il termine (con l'elenco aperto a destra, qui i termini ICOMOS-ISCS delle forme
+  indotte da perdita di materiale), intensità, profondità, causa, urgenza, note, le foto tenute e le foto che vedono
+  l'elemento, ognuna con distanza e angolo.</figcaption>
+</figure>
 
 La tabella elenca gli elementi della campagna (termine, tipo, estensione, intensità, stato, foto, note), con
 l'ordinamento e un filtro per famiglia. **Modifica...** cambia il termine e gli attributi; per cambiare una geometria,
@@ -275,6 +306,20 @@ disegnata sulla vista, in background. Oltre 30 milioni di pixel lesioni e mancan
 **Accetta**: le proposte sono disegnate tratteggiate, e un elemento accettato conserva `proposed:<rilevatore>` come
 fonte, così le tabelle dicono cosa era automatico. Ogni rilevatore scrive i suoi parametri nelle note dell'elemento.
 
+<figure markdown="span">
+  ![La finestra Proposte con i parametri dei rilevatori](../img/plugins/conservation/proposals-dialog.it.png)
+  <figcaption>La finestra <em>Proposte</em>: cosa proporre, la finestra, i parametri di lesioni e mancanze, delle classi di
+  colore e di SAM.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![Le proposte sul prospetto, tratteggiate, quasi tutte da nominare](../img/plugins/conservation/proposals.jpg)
+  <figcaption>Le proposte sugli stessi cinque metri, tratteggiate e chiare: le lesioni (rosso) sono arrivate con il loro
+  termine; i segmenti di SAM e le mancanze senza termine hanno un «?» e sono ancora da nominare. Nella campagna mostrata
+  sopra le lesioni sono state accettate e il resto scartato; gli alveoli vengono da un passaggio precedente del
+  rilevatore su una finestra più grande, e le aree più grandi sono state disegnate a mano.</figcaption>
+</figure>
+
 | Rilevatore | Cosa fa | Parametri (predefiniti) |
 |---|---|---|
 | **Lesioni** | Le valli del rilievo a più scale (hessiana, alla Frangi) unite alle linee scure e sottili dell'ortofoto (black-hat su L), assottigliate e seguite come polilinee. L'apertura è la mediana lungo la lesione della larghezza scura e, dove il rilievo ha valori, della larghezza a metà profondità. Una linea che per più del 60 % della lunghezza sta su un giunto fra due pietre disegnate sul paramento (entro 1 cm) viene scartata. Una linea più larga dell'apertura massima è un giunto di malta, non una lesione: tolta e contata. Senza pietre disegnate il pannello lo dice prima di partire e propone di disegnarle o di cambiare l'apertura massima (un giunto di questo muro, misurato). Il limite vale anche con le pietre disegnate: una vera lesione strutturale più larga viene tolta e contata, a meno di alzare il limite. | scale 2, 5, 10, 20 mm; lunghezza minima 10 cm; apertura massima 12 mm; valle minima 0,5 mm; contrasto minimo 12 L |
@@ -285,6 +330,13 @@ fonte, così le tabelle dicono cosa era automatico. Ogni rilevatore scrive i suo
 Solo lesioni e mancanze di materiale si danno un termine da sole. Un'area ancora da nominare non si può accettare e
 resta fuori da ogni esito (i messaggi dicono quante sono).
 
+<figure markdown="span">
+  ![Dare un nome alle classi di colore](../img/plugins/conservation/colour-classes.it.png)
+  <figcaption>Le classi di colore della finestra, ognuna con la sua quota e il colore medio: il plugin ne segna una come
+  scura e una come verde e metterebbe per primi i termini che suggerisce, ma qui la classe scura è l'ombra dei vuoti e
+  quella «verde» il cielo visto sopra il muro. Niente ha un nome in partenza: una classe senza termine resta fuori.</figcaption>
+</figure>
+
 ### 4. Interventi
 
 Gli stessi strumenti con il vocabolario degli interventi (famiglie della EN 15898). Un intervento è un'area, o una
@@ -292,6 +344,12 @@ linea per una lesione sigillata, con tecnica, materiali, data ed *eseguito* / *d
 un intervento sulla geometria dell'area di degrado scelta, con una tecnica abituale per quel termine come
 suggerimento. Nella tavola gli interventi hanno retini propri; quelli eseguiti un contorno continuo, quelli da eseguire
 tratteggiato.
+
+<figure markdown="span">
+  ![La scheda di un intervento proposto da Da restaurare](../img/plugins/conservation/treatment.it.png)
+  <figcaption><em>Da restaurare</em> su un'area di perdita di malta: la tecnica suggerita per quel termine, materiali, data,
+  eseguito o da eseguire, da chi.</figcaption>
+</figure>
 
 ### 5. Valutazione (EN 16096)
 
@@ -310,6 +368,13 @@ La quota è l'unione delle aree di degrado (non i termini generali né una patin
 superficie del paramento. **UC** è suggerita come la più alta urgenza data a un elemento. **RC non è mai
 suggerita.** Le soglie sono del plugin, non della norma.
 
+<figure markdown="span">
+  ![Le classi EN 16096 con il suggerimento del plugin](../img/plugins/conservation/classes.it.png)
+  <figcaption>Le classi di condizione e di urgenza del paramento: sopra il suggerimento con la sua regola (una lesione di
+  11,1 mm e una mancanza profonda 18 cm danno CC 3; UC è la più alta urgenza degli elementi), le soglie, le classi che
+  scegli tu.</figcaption>
+</figure>
+
 ### 6. Esiti
 
 I file di una campagna stanno in `<dati del chunk>/conservation/<id del prospetto>/<id della campagna>/` se non scegli
@@ -326,6 +391,13 @@ un'altra cartella; `<nome>` sono i nomi del prospetto e della campagna.
 | **Apri la cartella** | la cartella della campagna |
 
 L'interfaccia inglese scrive gli stessi file con i nomi inglesi (`_plate`, `_tables`...).
+
+<figure markdown="span">
+  ![La tavola della campagna in scala 1:20](../img/plugins/conservation/plate.it.jpg)
+  <figcaption>La tavola della campagna qui sopra (A3, scala automatica 1:20), resa dal suo PDF: l'ortofoto del prospetto in
+  metri (u, v), gli elementi con i colori e i retini della legenda, le lesioni con la loro apertura, la scala grafica,
+  il cartiglio con le classi EN 16096 e la legenda con i nomi ICOMOS-ISCS e UNI 11182 e i codici.</figcaption>
+</figure>
 
 ### PyArchInit
 
@@ -407,6 +479,17 @@ Cosa dà, in `<dati del chunk>/conservation/<id del prospetto>/compare_<campagna
   cambiamento, con un riepilogo) e `confronto.json`.
 
 Un confronto è fatto di file, mai di record: rifallo quando le campagne cambiano.
+
+<figure markdown="span">
+  ![La finestra Confronta](../img/plugins/conservation/compare-dialog.it.png)
+  ![Il PDF del confronto](../img/plugins/conservation/compare.it.jpg)
+  <figcaption>Sopra, la campagna A (la prova del plugin su dieci metri della torre) confrontata con la campagna B (il
+  rilievo mostrato in questa pagina) dello stesso prospetto. Sotto, la pagina di <code>confronto.pdf</code>: le due
+  ortofoto, il cambiamento di colore e il riepilogo (degrado in più e in meno, lesioni nuove, invariate, più lunghe e
+  non più viste). Le due campagne sono disegnate sulle stesse foto, quindi il cambiamento di colore è nullo: con un
+  rilievo successivo in un chunk allineato il terzo riquadro mostra dove il paramento è diventato più scuro o più
+  chiaro.</figcaption>
+</figure>
 
 ## Riga di comando
 

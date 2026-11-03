@@ -36,6 +36,15 @@ repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/
 7. **Plate...**, **Tables...**, **Drawings...**, **Open in QGIS**, **Save in PyArchInit**, **IFC 4.3...**.
 8. **Compare...** two campaigns of the same face.
 
+<figure markdown="span">
+  ![The window with a campaign on the elevation of a tower and the Conservation pane](../img/plugins/conservation/window.jpg)
+  <figcaption>A campaign on five metres of the developed elevation of a round tower (Khutm), in the program's 2D view:
+  a missing part where the facing collapsed (violet, vertical hatch), displaced stones (pink, dots), loss of mortar
+  (brown, cross hatch) with a note, alveolization (violet outlines) and the cracks found by the detector (red), one of
+  them with a filling to do (cyan, dashed). On the right the <em>Conservation</em> pane with the term chooser and the
+  campaign's table.</figcaption>
+</figure>
+
 ## What each step needs
 
 | Step | Needs |
@@ -244,10 +253,26 @@ chunk's date is proposed. **Show** shows the elevation with the campaign's featu
 *Lesioni*, *Interventi* and *Note* (and *Proposte*, dashed). When the face belongs to a wall of the *Masonry* plugin,
 it is named after the wall.
 
+<figure markdown="span">
+  ![The Conservation pane](../img/plugins/conservation/pane.png){ width="420" }
+  <figcaption>The pane: elevation and campaign, the term chooser, the mapping buttons, the table of the features, the
+  interventions, the EN 16096 assessment, the outputs, the overlay of a comparison and the campaign's summary with the
+  plugin's suggestion.</figcaption>
+</figure>
+
 ### 2. Mapping
 
 Choose the term in the list: grouped by family, with a search in the three languages, the favourites and the last ten
-used. Then:
+used.
+
+<figure markdown="span">
+  ![The term chooser grouped by family](../img/plugins/conservation/terms.png){ width="420" }
+  ![The search finds the ICOMOS-ISCS and the UNI 11182 term](../img/plugins/conservation/terms-search.png){ width="420" }
+  <figcaption>Left, the terms grouped by the families of ICOMOS-ISCS, then UNI 11182 and the local terms; right, a
+  search for "alveol" finds the ICOMOS-ISCS term with its sub-type and the UNI 11182 term.</figcaption>
+</figure>
+
+Then:
 
 - **Area**: a polygon (decay);
 - **Line**: a crack or an open joint;
@@ -256,6 +281,13 @@ used. Then:
 The feature takes the term, its extent (m² or m) and the campaign. The form asks intensity (low, medium, high), the
 opening of a crack (mm), the depth of a loss (mm), cause, urgency and notes. **Photos** opens the photo that sees the
 feature best, centred on it: the photos are those whose cameras see the feature's centre on the surface.
+
+<figure markdown="span">
+  ![The form of a feature with its list of terms open](../img/plugins/conservation/feature-form.png)
+  <figcaption>The form of a missing part: the term (its list open on the right, here the ICOMOS-ISCS terms of the
+  features induced by material loss), intensity, depth, cause, urgency, notes, the photos kept and the photos that see
+  the feature, each with its distance and angle.</figcaption>
+</figure>
 
 The table lists the campaign's features (term, kind, extent, intensity, status, photos, notes), with sorting and a
 filter by family. **Edit...** changes the term and the attributes; to change a geometry, draw it again. *Seleziona*
@@ -271,6 +303,20 @@ colour classes ask for a smaller window. Nothing enters the campaign without **A
 dashed, and an accepted feature keeps `proposed:<detector>` as its source, so the tables say what was automatic. Each
 detector writes its parameters in the feature's notes.
 
+<figure markdown="span">
+  ![The Proposals dialog with the parameters of the detectors](../img/plugins/conservation/proposals-dialog.png)
+  <figcaption>The <em>Proposals</em> dialog: what to propose, the window, the parameters of cracks and losses, of the
+  colour classes and of SAM.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![Proposals on the elevation, dashed, most of them still to be named](../img/plugins/conservation/proposals.jpg)
+  <figcaption>The proposals on the same five metres, dashed and pale: the cracks (red) came with their term; the SAM
+  segments and the losses without a term carry a "?" and are still to be named. In the campaign shown above the
+  cracks were accepted and the rest discarded; the alveoli come from an earlier run of the detector on a larger window,
+  and the larger areas were drawn by hand.</figcaption>
+</figure>
+
 | Detector | What it does | Parameters (default) |
 |---|---|---|
 | **Cracks** | Valleys of the relief at several scales (Hessian, Frangi-like) joined with the dark thin lines of the orthophoto (black-hat on L), thinned and followed into polylines. The opening is the median along the crack of the dark width and, where the relief has values, of the width at half depth. A line lying for more than 60 % of its length on a joint between two stones drawn on the face (within 1 cm) is dropped. A line wider than the largest opening is a mortar joint, not a crack: dropped and counted. With no stones drawn the pane says so before running and offers to draw them or to change the largest opening (measure a joint of this wall). The limit applies with the stones drawn too: a real structural crack wider than it is dropped and counted unless you raise the limit. | scales 2, 5, 10, 20 mm; least length 10 cm; largest opening 12 mm; least valley 0.5 mm; least contrast 12 L |
@@ -281,12 +327,25 @@ detector writes its parameters in the feature's notes.
 Only cracks and losses of material claim a term by themselves. An area still to be named cannot be accepted, and it is
 left out of every output (the messages say how many).
 
+<figure markdown="span">
+  ![Naming the colour classes](../img/plugins/conservation/colour-classes.png)
+  <figcaption>The colour classes of the window, each with its share and mean colour: the plugin marks one as dark and
+  one as green and would put its suggested terms first, but here the dark class is the shadow of the voids and the
+  "green" one the sky seen above the wall. Nothing is named by default: a class without a term is left out.</figcaption>
+</figure>
+
 ### 4. Interventions
 
 The same tools with the interventions' vocabulary (families of EN 15898). A treatment is an area, or a line for a
 crack sealed, with technique, materials, date and *done* / *to do*. **To treat** proposes a treatment on the
 geometry of the decay area chosen, with a usual technique for that term as a suggestion. On the plate treatments have
 their own hatches; those done have a solid outline, those to do a dashed one.
+
+<figure markdown="span">
+  ![The form of a treatment proposed by To treat](../img/plugins/conservation/treatment.png)
+  <figcaption><em>To treat</em> on an area of loss of mortar: the technique suggested for that term, materials, date,
+  done or to do, by whom.</figcaption>
+</figure>
 
 ### 5. Assessment (EN 16096)
 
@@ -305,6 +364,13 @@ The share is the union of the deterioration areas (not the general terms, nor a 
 over the face's surface. **UC** is suggested as the highest urgency you gave to a feature. **RC is never
 suggested.** The thresholds are the plugin's, not the standard's.
 
+<figure markdown="span">
+  ![The EN 16096 classes with the plugin's suggestion](../img/plugins/conservation/classes.png)
+  <figcaption>The condition and urgency classes of the face: the suggestion and its rule above (a crack of 11.1 mm and
+  a loss 18 cm deep give CC 3; UC is the highest urgency of the features), the thresholds, the classes you choose.
+  </figcaption>
+</figure>
+
 ### 6. Outputs
 
 Files of a campaign are in `<chunk data>/conservation/<elevation id>/<campaign id>/` unless you choose another
@@ -321,6 +387,14 @@ folder; `<stem>` is the elevation's and the campaign's names.
 | **Open the folder** | the campaign's folder |
 
 The English interface writes the same files with English names (`_plate`, `_tables`...).
+
+<figure markdown="span">
+  ![The plate of the campaign at 1:20](../img/plugins/conservation/plate.jpg)
+  <figcaption>The plate of the campaign above (A3, automatic scale 1:20), drawn here from its PDF: the orthophoto of
+  the elevation in (u, v) metres, the features with the legend's colours and hatches, the cracks with their opening,
+  the scale bar, the title block with the EN 16096 classes and the legend with the ICOMOS-ISCS and UNI 11182 names and
+  the codes.</figcaption>
+</figure>
 
 ### PyArchInit
 
@@ -398,6 +472,16 @@ What it gives, in `<chunk data>/conservation/<elevation id>/compare_<campaign A>
   and the change, with a summary) and `confronto.json`.
 
 A comparison is files, never records: run it again whenever the campaigns change.
+
+<figure markdown="span">
+  ![The Compare dialog](../img/plugins/conservation/compare-dialog.png)
+  ![The comparison PDF](../img/plugins/conservation/compare.jpg)
+  <figcaption>Above, campaign A (the plugin's trial on ten metres of the tower) compared with campaign B (the survey
+  shown on this page) of the same elevation. Below, the page of <code>confronto.pdf</code>: the two orthophotos, the
+  colour change and the summary (decay gained and lost, cracks new, unchanged, longer and no longer seen). The two
+  campaigns are drawn on the same photos, so the colour change is zero: with a later survey in an aligned chunk the
+  third panel shows where the face became darker or lighter.</figcaption>
+</figure>
 
 ## Command line
 
