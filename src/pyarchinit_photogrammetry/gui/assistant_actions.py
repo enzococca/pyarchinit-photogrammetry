@@ -239,6 +239,8 @@ def edit_args(parent, name: str, args: dict, title: str) -> dict | None:
     props = entry[4].get("properties") or {}
     fields = []
     for key, prop in props.items():
+        if prop.get("script_only"):  # a script's parameter (export's path): the window asks for it, as for the model
+            continue
         value = args.get(key)
         label = _label(prop, key)
         if prop.get("enum") and not isinstance(value, (list, dict)):

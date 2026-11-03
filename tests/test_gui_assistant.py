@@ -847,6 +847,22 @@ def test_modify_reads_the_fields_by_the_type_of_the_parameter():
     assert parse_value('{"resolution": 0.02}', {"type": "object"}) == {"resolution": 0.02}
 
 
+def test_modify_never_offers_a_scripts_only_parameter(monkeypatch):
+    """The export's ``path`` is a script's parameter: the window asks for the file, so the form of *Modifica* does not
+    show it either (a path typed there would bypass the save dialog)."""
+    from pyarchinit_photogrammetry.gui import assistant_actions as aa
+
+    seen = {}
+
+    def fake_ask(parent, title, fields):
+        seen["keys"] = [f.name for f in fields]
+        return None
+
+    monkeypatch.setattr(aa.ParamDialog, "ask", staticmethod(fake_ask))
+    assert aa.edit_args(None, "export", {"what": "dem", "format": "tif"}, "Esporta") is None
+    assert "what" in seen["keys"] and "path" not in seen["keys"]
+
+
 def test_the_assistants_own_steps_do_not_stop_the_next_action(window, monkeypatch):
     """show makes another chunk active, then stones in the same reply: the chunk changed by the assistant itself,
     not by the user - the stones run on it."""
