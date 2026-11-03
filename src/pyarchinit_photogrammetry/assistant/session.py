@@ -29,6 +29,7 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import inventory as _inventory
 from .facts import TOOLS, run_tool
 from .knowledge import Index, guide_folder
 from .privacy import WARNING, Filter
@@ -37,7 +38,7 @@ from .providers import ContextOverflow, Message, Provider, ProviderError, Reply,
 log = logging.getLogger(__name__)
 
 PASSAGES = 3  # guide passages retrieved for a question
-OVERVIEW_CHARS = 1500  # of the scripting page in the system prompt
+OVERVIEW_CHARS = 4000  # of the scripting page in the system prompt (the names, `window`, the bounds of a script)
 CONSOLE_NAMES = ("doc", "chunk", "app", "ppg", "np", "window", "polygon", "cameras", "progress")
 
 REFUSED = {"it": "Il modello ha rifiutato la risposta", "en": "The model refused to answer"}
@@ -80,6 +81,14 @@ _INSTRUCTIONS = {
         "guide_search; per le funzioni Python usa scripting_api.\n"
         "- Quando ti viene chiesto uno script, dai UN solo blocco ```python che usa i nomi della console ({names}); "
         "il programma lo mostra all'utente e non esegue mai nulla da solo: non dire mai di averlo eseguito.\n"
+        "- Il blocco \"## Il progetto adesso\" dice cosa contiene il progetto aperto e cosa mostra la finestra. Gli "
+        "script sono per QUESTO progetto: `chunk` è il chunk attivo nominato lì, un altro chunk si prende col suo "
+        "nome con `doc.chunk_by_label(\"nome\")`; usa i nomi di prodotti, raster e versioni che elenca.\n"
+        "- Il raster su cui lavorare è quello mostrato nella vista 2D, a meno che la domanda ne nomini un altro.\n"
+        "- Se un prodotto c'è in più versioni o in più chunk e la domanda non dice quale, fai UNA domanda breve "
+        "prima di scrivere lo script o di agire.\n"
+        "- Quando l'utente chiede di fare una cosa, falla con uno strumento che agisce se ce n'è uno; dai uno script "
+        "quando chiede uno script.\n"
         "- Alla fine della risposta, in una sola riga che inizia con \"Ho letto:\", elenca gli strumenti usati e le "
         "pagine della guida lette (o \"Ho letto: niente\")."),
     "en": (
@@ -91,6 +100,14 @@ _INSTRUCTIONS = {
         "guide_search tool; for the Python functions use scripting_api.\n"
         "- When asked for a script, give ONE ```python block that uses the names of the console ({names}); the "
         "program shows it to the user and never runs anything by itself: never say you ran it.\n"
+        "- The block \"## The project now\" says what the open project holds and what the window shows. Scripts are "
+        "for THIS project: `chunk` is the active chunk named there, another chunk is taken by its label with "
+        "`doc.chunk_by_label(\"label\")`; use the names of the products, rasters and versions it lists.\n"
+        "- The raster to work on is the one shown in the 2D view, unless the question names another.\n"
+        "- When a product exists in several versions or in several chunks and the question does not say which, ask "
+        "ONE short question before writing the script or acting.\n"
+        "- When the user asks to do something, do it with a tool that acts when there is one; give a script when "
+        "they ask for a script.\n"
         "- At the end of the answer, in one line starting with \"I read:\", list the tools used and the guide pages "
         "read (or \"I read: nothing\")."),
 }
@@ -309,10 +326,15 @@ class Assistant:
             except OSError:
                 log.debug("scripting overview %s", name, exc_info=True)
                 text = ""
-            self._overview = text[:OVERVIEW_CHARS].rstrip()
+            cut = text[:OVERVIEW_CHARS]
+            if len(text) > OVERVIEW_CHARS and "\n" in cut:  # whole lines: never half a sentence
+                cut = cut[:cut.rindex("\n")]
+            self._overview = cut.rstrip()
         return self._overview
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, inventory: str | None = None) -> str:
+        """The instructions, the scripting overview, the tools and, when given, the block of the open project
+        (:func:`.inventory.text`, already filtered for an external model)."""
         lang = self.language
         names = ", ".join(f"`{n}`" for n in CONSOLE_NAMES)
         parts = [_INSTRUCTIONS[lang].format(names=names)]
@@ -323,6 +345,8 @@ class Assistant:
         if overview:
             parts.append(f"{scripts}\n\n{overview}")
         parts.append(f"{tools}\n\n" + "\n".join(f"- {t.name}: {t.description}" for t in TOOLS))
+        if inventory:
+            parts.append(inventory)
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ asking
@@ -342,9 +366,9 @@ class Assistant:
         labels = list(dict.fromkeys(f"{GUIDE_LABEL[lang]}: {p.page}" for p in found))
         return f"{FROM_GUIDE[lang]}\n\n" + "\n\n".join(blocks), labels
 
-    def _messages(self) -> list[Message]:
+    def _messages(self, inventory: str | None = None) -> list[Message]:
         """The system prompt and the history as the model sees it (filtered when external)."""
-        messages = [Message("system", self.system_prompt())]
+        messages = [Message("system", self.system_prompt(inventory))]
         for turn in self.history:
             if turn.role == "user":
                 messages.append(Message("user", self._filter.outgoing(turn.text)))
@@ -417,15 +441,20 @@ class Assistant:
                     messages[i] = _omitted(messages[i], omitted)
 
     def ask(self, question: str, on_text: Callable[[str], None] | None = None,
-            cancel: Callable[[], bool] | None = None) -> Turn:
+            cancel: Callable[[], bool] | None = None, inventory: dict | None = None) -> Turn:
         """Asks ``question``: the answer's turn, appended to the history after the question's.
 
         ``on_text`` receives the deltas of every round as they arrive (restored best-effort: a placeholder split
         across two deltas reaches it as the model wrote it) and ``"\\n"`` after a round that ended in tool calls:
         when the turn ends, replace what was shown with ``Turn.text``, which is the restored answer. ``cancel`` is
-        read from a watcher thread too: give a thread-safe callable (an ``Event.is_set``)."""
+        read from a watcher thread too: give a thread-safe callable (an ``Event.is_set``).
+
+        ``inventory``: the snapshot of the open project (:func:`.inventory.snapshot`, taken where the window may be
+        read), written as the block ``## Il progetto adesso`` of the system prompt - through the privacy filter for an
+        external model - and listed among what was sent. None: the prompt without it."""
         lang = self.language
         document = self._document_now()
+        block = _inventory.text(_inventory.filtered(inventory, self._filter), lang) if inventory is not None else None
         context, labels = self._context(question)
         outgoing = self._filter.outgoing(question)
         composed = f"{outgoing}\n\n{context}" if context else outgoing
@@ -438,10 +467,12 @@ class Assistant:
         if self.external and not self._warned:
             turn.sent.append(WARNING)
             self._warned = True
+        if block:
+            turn.sent.append(self._mark(block))
         turn.sent.append(self._mark(composed))
         self.history.append(Turn("user", question))
         self.history.append(turn)
-        messages = self._messages()[:-1] + [Message("user", composed)]
+        messages = self._messages(block)[:-1] + [Message("user", composed)]
 
         def stream(delta: str) -> None:
             if on_text is not None:
@@ -506,10 +537,10 @@ class Assistant:
         return turn
 
     def ask_about_error(self, script: str, error: str, on_text: Callable[[str], None] | None = None,
-                        cancel: Callable[[], bool] | None = None) -> Turn:
+                        cancel: Callable[[], bool] | None = None, inventory: dict | None = None) -> Turn:
         """Asks why ``script`` failed with ``error`` (its traceback) and for the corrected script."""
         question = ERROR_QUESTION[self.language].format(script=(script or "").rstrip(), error=(error or "").rstrip())
-        return self.ask(question, on_text=on_text, cancel=cancel)
+        return self.ask(question, on_text=on_text, cancel=cancel, inventory=inventory)
 
 
 _NO_DOCUMENT = object()  # before the first question

@@ -21,7 +21,30 @@ In the console and in **Run Python script...** these names are ready, bound to t
 | `app` | the application state (`ppg.app`): `app.document` is the open project, the same as `doc` |
 | `ppg` | the package, `import pyarchinit_photogrammetry as ppg` already done |
 | `np` | NumPy |
-| `window` | the main window: `window.mark_modified()`, `window.refresh_all()`, `window.selected_polygon()`. In **Run Python script...** the script runs in the background and `window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts written for the window run unchanged; the supported names are `window.show_raster("dem")`, `window.show_model("model")`, `window.log("text")` and `window.refresh()` (done without waiting), `window.selected_polygon()` (the selection when the script started) and `window.mark_modified()` (nothing to do: the script's entry of *Edit > Undo* marks the project); `window.runner`, `window.history`, `window.undo` and `window.redo` are refused (the script would wait on itself or undo the project under its own entry) |
+| `window` | the main window: what it does from a script is in [What `window` does](#what-window-does) below |
+
+### What `window` does
+
+In the console `window` is the window itself. In **Run Python script...** the script runs in the background and
+`window` hands every attribute and method of the window to the window's own thread, waiting for the answer, so scripts
+written for the window run unchanged. What a script does with it:
+
+* `window.show_raster("ortho")` or `window.show_raster("dem")`: the orthophoto or the DEM of the active chunk in the 2D
+  view; `window.show_model("model")` (also `"model_textured"`, `"point_cloud"`, `"tie_points"`, `"cameras"`): the 3D view;
+* `window.photos.set_filter(keys, "title")`: only the photos with these camera keys in the *Photos* pane
+  (`window.photos.set_filter(None)`: all of them again); `window.filter_photos_by_markers(marker_keys)`: the photos
+  where these markers are;
+* `window.selected_cameras()`: the photos selected in the *Photos* pane; `window.enable_photos(cameras, False)`:
+  switches them off (`True`: on again), as the right click in the pane does;
+* `window.selected_polygon()`: the polygons selected in the 2D view, merged, or `None`;
+* `window.log("text")`: a line in the *Log* pane; `window.refresh()`: the window shows the project again;
+  `window.mark_modified()`: the project has changes to save.
+
+In **Run Python script...** `show_raster`, `show_model`, `log` and `refresh` are done without waiting,
+`selected_polygon()` is the selection when the script started (the names `polygon` and `cameras` below hold the same),
+`mark_modified()` has nothing to do (the script's entry of *Edit > Undo* marks the project), and `window.runner`,
+`window.history`, `window.undo` and `window.redo` are refused (the script would wait on itself or undo the project
+under its own entry).
 
 **Run Python script...** (from 1.7.0) adds these, since the script runs in the background, away from the window:
 
@@ -140,7 +163,8 @@ aligned are used. In the window the same calls are in the *Workflow* menu.
 
 ## Examples
 
-The three scripts below are written for the Python console, where `window` is the window itself. They use the
+The first three scripts below are written for the Python console, where `window` is the window itself, the last
+three for **Run Python script...** (the stones one also uses `polygon` and `progress`). The first three use the
 functions the program has from 1.7.0 on: `chunk.region_from_markers(...)` and `chunk.build_normal_map(...)` (the
 first two examples, one call each; `ppg region-markers` and `ppg normal-map` on the command line, *Tools > Region on
 markers...* and *Tools > Normal map...* in the window), then `doc.duplicate_chunk(...)`, `chunk.set_cameras_enabled(...)`
@@ -229,3 +253,70 @@ else:
 With the photos switched off, `chunk.build_orthomosaic(...)` uses only the others; to use them again,
 `chunk.set_cameras_enabled(chunk.cameras, True)`. The new chunk carries the photos with their poses and the markers they
 see, so depth maps and the following steps can run on it.
+
+### Photos by area, by markers or by name
+
+The photos to work with, chosen three ways; the *Photos* pane shows them (a filter: nothing changes in the project)
+and, if you want, the others are switched off, so the next steps use only these (*Edit > Undo* takes it back).
+
+```python
+from pyarchinit_photogrammetry.engine.patches import photos_for_area
+
+BY = "area"                                           # "area", "markers" or "name"
+if BY == "area":                                      # the photos that see the polygon selected in the 2D view
+    area = window.selected_polygon()
+    if area is None:
+        raise SystemExit("Select a polygon on the 2D view first.")
+    if area.geom_type == "MultiPolygon":
+        area = max(area.geoms, key=lambda g: g.area)
+    rows = photos_for_area(chunk, np.asarray(area.exterior.coords), limit=100_000)
+    keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
+    window.photos.set_filter(keys, "Photos of the area")
+elif BY == "markers":                                 # the photos where these markers are
+    markers = [chunk.marker("target 1"), chunk.marker("target 2")]
+    window.filter_photos_by_markers([m.key for m in markers])
+    keys = {c.key for c in window.photos.visible_cameras()}
+else:                                                 # by the name of the file
+    keys = {c.key for c in chunk.cameras if c.label.startswith("DJI_01")}
+    window.photos.set_filter(keys, "DJI_01...")
+print(len(keys), "photos out of", len(chunk.cameras))
+
+SWITCH_OFF_THE_OTHERS = False
+if SWITCH_OFF_THE_OTHERS:
+    n = chunk.set_cameras_enabled([c for c in chunk.cameras if c.key not in keys], False)
+    print("Switched off:", n)
+```
+
+`window.photos.set_filter(None)` shows all the photos again; `chunk.set_cameras_enabled(chunk.cameras, True)` switches
+them all on. Another chunk than the active one: `doc.chunk_by_label("its label")`.
+
+### Stones on a raster
+
+From 1.7.1 the stone finder of the program (*Draw stones* of the 2D view, SAM) runs from a script, without its dialog:
+`ppg.actions.stones(chunk, window, raster=None, bounds=None, min_size=0.05, max_size=1.0, thoroughness="alta",
+progress=None)`. `raster` is a name of the raster calculator (`"orthomosaic"`, a kept version, an index...: the raster
+shown in the 2D view when it is `None`; a DEM is refused, its reason said); `bounds` is the box `(xmin, ymin, xmax,
+ymax)` in the coordinates of the chunk to search in (`None`: the whole raster); `min_size` and `max_size` are the
+diameters of the smallest and the largest stone, in metres; `thoroughness` is `"normale"`, `"alta"` or `"massima"`.
+The stones are kept as the tool keeps them (layer *Stones* of that raster), drawn on the 2D view, one entry of
+*Edit > Undo*; the function returns a dictionary that says what it did.
+
+```python
+bounds = polygon.bounds if polygon is not None else None   # only the area selected, if there is one
+result = ppg.actions.stones(chunk, window, raster="orthomosaic", bounds=bounds, min_size=0.05, max_size=0.6,
+                            thoroughness="alta", progress=progress)
+print(result)
+```
+
+### A product built again and shown
+
+The DEM of the ground points only, the orthophoto on it, then the orthophoto shown in the 2D view. The products as they
+were are kept as versions (*Edit > Undo* makes them active again).
+
+```python
+chunk.build_dem(resolution=0.02, source="point_cloud", interpolate=True, classes=[2])
+chunk.build_orthomosaic(resolution=0.01, surface="dem", blending="mosaic")
+window.show_raster("ortho")
+```
+
+On another chunk: `doc.chunk_by_label("its label").build_dem(...)`; `window.show_raster` shows the active chunk.

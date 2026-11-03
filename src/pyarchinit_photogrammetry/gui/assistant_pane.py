@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
                                QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
                                QVBoxLayout, QWidget)
 
-from ..assistant import privacy
+from ..assistant import inventory, privacy
 from ..assistant.providers import Provider
 from ..assistant.session import _SCRIPT, Assistant, Turn
 from .assistant_settings import (KIND_NAMES, KINDS, context_chars_of, keep_thread, park, release_thread,
@@ -97,13 +97,14 @@ class AssistantWorker(QObject):
         except RuntimeError:  # parked (the window went away while the model hung): nobody listens any more
             log.debug("assistente: risposta di un thread parcheggiato", exc_info=True)
 
-    @Slot(str)
-    def ask(self, question: str) -> None:
-        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set))
+    @Slot(str, object)
+    def ask(self, question: str, inventory=None) -> None:
+        self._run(lambda a: a.ask(question, on_text=self.text.emit, cancel=self._cancel.is_set, inventory=inventory))
 
-    @Slot(str, str)
-    def ask_error(self, script: str, error: str) -> None:
-        self._run(lambda a: a.ask_about_error(script, error, on_text=self.text.emit, cancel=self._cancel.is_set))
+    @Slot(str, str, object)
+    def ask_error(self, script: str, error: str, inventory=None) -> None:
+        self._run(lambda a: a.ask_about_error(script, error, on_text=self.text.emit, cancel=self._cancel.is_set,
+                                              inventory=inventory))
 
     @Slot(int)
     def resolve(self, request: int) -> None:
@@ -141,8 +142,8 @@ class _Editor(QPlainTextEdit):
 class AssistantPane(QWidget):
     """The pane of the window (bottom area, beside the Python console)."""
 
-    _ask = Signal(str)
-    _ask_error = Signal(str, str)
+    _ask = Signal(str, object)  # the question and the inventory of the project (taken here, in the interface)
+    _ask_error = Signal(str, str, object)
     _resolve = Signal(int)
 
     def __init__(self, window):
@@ -466,10 +467,20 @@ class AssistantPane(QWidget):
         self._stream_at = self._end().position()
         self._worker.assistant = self.assistant
         self._worker.arm()
+        snap = self._inventory(doc)  # the window is read here, never from the assistant's thread
         if mode == "ask":
-            self._ask.emit(args[0])
+            self._ask.emit(args[0], snap)
         else:
-            self._ask_error.emit(args[0], args[1])
+            self._ask_error.emit(args[0], args[1], snap)
+
+    def _inventory(self, doc):
+        """What the project holds and the window shows now (:func:`..assistant.inventory.snapshot`); None when it
+        cannot be read: the question goes without it."""
+        try:
+            return inventory.snapshot(doc, self._main)
+        except Exception:  # noqa: BLE001 - the question is never stopped by its inventory
+            log.warning("assistente: inventario del progetto", exc_info=True)
+            return None
 
     def stop(self) -> None:
         if self._worker is not None:

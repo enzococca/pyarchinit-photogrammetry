@@ -210,6 +210,7 @@ def test_cli_assistant_models_and_ask(small, openai_server):
     r = runner.invoke(app, ["assistant", "sent"])
     assert r.exit_code == 0, r.output
     assert "Che risoluzione ha il DEM?" in r.output and "[non inviato: modello locale]" in r.output
+    assert "## Il progetto adesso" in r.output  # the inventory of the project, from the document alone
     # a server that is not on this computer is refused
     r = runner.invoke(app, ["assistant", "models", "--kind", "local", "--base-url", "http://192.0.2.1:8080/v1"])
     assert r.exit_code != 0

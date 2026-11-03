@@ -2352,6 +2352,7 @@ def assistant_ask(project: Path = typer.Argument(..., help="the .ppg project the
                   lang: str = typer.Option("it", help="language of the conversation: it or en"),
                   show_sent: bool = typer.Option(False, "--show-sent", help="also print what was sent")):
     """Ask the assistant one question about a project and print the answer (and what it read)."""
+    from .assistant import inventory
     from .assistant.knowledge import default_index
     from .assistant.session import Assistant
 
@@ -2359,7 +2360,7 @@ def assistant_ask(project: Path = typer.Argument(..., help="the .ppg project the
     provider = _assistant_provider(kind, model, base_url)
     assistant = Assistant(provider, lambda: doc, default_index("it" if lang.startswith("it") else "en"),
                           language=lang)
-    turn = assistant.ask(question)
+    turn = assistant.ask(question, inventory=inventory.snapshot(doc))  # the project alone: no window here
     _LAST_SENT[:] = assistant.sent_log
     if turn.note:
         typer.echo(turn.note)
