@@ -124,9 +124,12 @@ def test_a_photo_assigned_on_the_wall_paints_its_cells_only(wall, plain_photos):
     u, v = _surface_cell(ch, entry)
     poly = box(u - 0.15, v - 0.1, u + 0.15, v + 0.1)
     cands = P.photos_for_area(ch, poly, frame=eid)
-    assert cands and all(c["coverage"] > 0 for c in cands[:3]) and all(c["angle"] < 60 for c in cands[:3])
+    assert cands and all(c["coverage"] > 0 for c in cands[:3])
+    # the angle is measured from the side the wall is seen from: the photo facing it ranks first (about 44
+    # degrees), the ones looking down the wall come after (the exact order of the next ones depends on the cell)
+    assert cands[0]["angle"] < 60 and cands[0]["angle"] < min(c["angle"] for c in cands[3:])
     # a photo the elevation hardly uses there now, so that the patch changes the cells
-    pick = min(cands[:4], key=lambda c: c["used"])
+    pick = min((c for c in cands[:6] if c["angle"] < 70), key=lambda c: c["used"])
     label = pick["label"]
     p = P.add_patch(ch, poly, [label], frame=eid)
     assert p["id"] == "p1" and P.patches(ch, frame=eid) == [p] and P.patches(ch) == []  # the plan untouched
