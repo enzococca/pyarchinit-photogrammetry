@@ -562,7 +562,8 @@ def frame_grid(chunk: Chunk, entry: dict, raycaster, lock: threading.Lock) -> Fr
     with rasterio.open(path) as src:
         t, shape = src.transform, (src.height, src.width)
     tol = 1e-6 * max(1.0, abs(t.c), abs(t.f))
-    if shape != surf.shape or abs(t.c - surf.origin[0]) > tol or abs(t.f - surf.origin[1]) > tol:
+    if shape != surf.shape or abs(t.c - surf.origin[0]) > tol or abs(t.f - surf.origin[1]) > tol or \
+            abs(abs(t.a) - surf.resolution) > 1e-9 or abs(abs(t.e) - surf.resolution) > 1e-9:
         raise RuntimeError(f"the file of the elevation does not match its record: {path}")
     return surf
 

@@ -158,7 +158,7 @@ def test_a_photo_assigned_on_the_wall_paints_its_cells_only(wall, plain_photos):
     label = pick["label"]
     p = P.add_patch(ch, poly, [label], frame=eid)
     assert p["id"] == "p1" and P.patches(ch, frame=eid) == [p] and P.patches(ch) == []  # the plan untouched
-    assert ch.ortho_patches == plan_before == [] and ch.ortho_patches(frame=eid) == [p]
+    assert ch.ortho_patches == plan_before == [] and ch.elevation_patches(eid) == [p]
     assert [x["id"] for x in P.changed_patches(ch, frame=eid)] == ["p1"] and P.changed_patches(ch) == []
     relief_before = _read(E.elevation_paths(ch, entry)[1])
     path = ch.update_elevation(eid)
@@ -192,6 +192,81 @@ def test_an_excluded_photo_is_left_out_on_the_wall(wall, plain_photos):
     after = _read(P.update_elevation(ch, eid))
     assert _share(after, inside, colour) < 0.01
     assert (after[:, outside] == before[:, outside]).all()
+
+
+def test_clearing_the_patches_redraws_their_cells(wall, plain_photos):
+    ch, eid, entry = wall
+    before = _read(E.elevation_paths(ch, entry)[0])
+    u, v = _surface_cell(ch, entry)
+    poly = box(u - 0.15, v - 0.1, u + 0.15, v + 0.1)
+    label = min(P.photos_for_area(ch, poly, frame=eid)[:4], key=lambda c: c["used"])["label"]
+    p = P.add_patch(ch, poly, [label], frame=eid)
+    patched = _read(P.update_elevation(ch, eid))
+    inside, _outside = _cells(ch, entry, poly, patched.shape[1:])
+    assert (patched[:3][:, inside] != before[:3][:, inside]).any()
+    P.clear_patches(ch, frame=eid)
+    assert P.patches(ch, frame=eid) == [] and P.changed_patches(ch, frame=eid) == [p]
+    assert P.patches(ch) == [] and "patches" not in (ch.meta.get("orthomosaic") or {})  # the plan's list untouched
+    again = _read(P.update_elevation(ch, eid))
+    assert np.abs(again.astype(int) - before).max() <= 3
+    assert P.changed_patches(ch, frame=eid) == [] and entry["applied_patches"] == []
+
+
+def test_the_overviews_of_the_patched_cells_are_refreshed(wall, plain_photos):
+    from rasterio.enums import Resampling
+
+    ch, eid, entry = wall
+    path = E.elevation_paths(ch, entry)[0]
+    with rasterio.open(path, "r+") as dst:
+        dst.build_overviews([2], Resampling.average)
+        dst.update_tags(ns="rio_overview", resampling="average")
+
+    def half():
+        with rasterio.open(path) as src:
+            assert src.overviews(1) == [2]
+        with rasterio.open(path, overview_level=0) as ovr:  # the overview itself (no resampling of the read)
+            return ovr.read()
+
+    full_before, half_before = _read(path), half()
+    u, v = _surface_cell(ch, entry)
+    poly = box(u - 0.15, v - 0.1, u + 0.15, v + 0.1)
+    label = min(P.photos_for_area(ch, poly, frame=eid)[:4], key=lambda c: c["used"])["label"]
+    P.add_patch(ch, poly, [label], frame=eid)
+    P.update_elevation(ch, eid)
+    full_after, half_after = _read(path), half()
+    inside, outside = _cells(ch, entry, poly, full_after.shape[1:], margin=0.03)
+    h2, w2 = full_after.shape[1] // 2, full_after.shape[2] // 2  # the overview cells over whole 2 x 2 blocks
+    half_before, half_after = half_before[:, :h2, :w2], half_after[:, :h2, :w2]
+
+    def blocks(mask):
+        return mask[:2 * h2, :2 * w2].reshape(h2, 2, w2, 2).all(axis=(1, 3))
+
+    all_in = blocks(inside)
+    assert all_in.sum() > 20
+    assert (half_after[:3][:, all_in] != half_before[:3][:, all_in]).any(axis=0).mean() > 0.5
+    assert _share(half_after, all_in, plain_colour(ch, label)) > 0.9
+    # the refreshed overview is the average of the cells as they are now, inside and outside the polygon (cells
+    # with a transparent one among the four are left out: GDAL and overviews.refresh weigh them differently)
+    opaque = blocks(full_after[3] == 255)
+    mean = full_after[:, :2 * h2, :2 * w2].reshape(4, h2, 2, w2, 2).mean(axis=(2, 4))
+    assert (opaque & blocks(outside)).sum() > 100
+    assert np.abs(half_after[:, opaque] - mean[:, opaque]).max() <= 2
+    assert (full_after[:, outside] == full_before[:, outside]).all()
+
+
+def test_a_file_on_another_grid_is_refused(wall, plain_photos):
+    from rasterio.transform import Affine
+
+    ch, eid, entry = wall
+    path = E.elevation_paths(ch, entry)[0]
+    with rasterio.open(path, "r+") as dst:
+        t = dst.transform
+        dst.transform = Affine(t.a * 1.1, 0.0, t.c, 0.0, t.e * 1.1, t.f)  # same origin and size, other pixel
+    u, v = _surface_cell(ch, entry)
+    P.add_patch(ch, box(u - 0.1, v - 0.1, u + 0.1, v + 0.1), [ch.cameras[0].label], frame=eid)
+    with pytest.raises(RuntimeError, match="does not match"):
+        P.update_elevation(ch, eid)
+    assert P.changed_patches(ch, frame=eid) != []
 
 
 def test_old_entries_paint_as_they_were_built(wall, plain_photos, monkeypatch):

@@ -30,20 +30,6 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", "
 QUALITY_DOWNSCALE = {"ultra": 1, "highest": 1, "high": 2, "medium": 4, "low": 8, "lowest": 16}
 
 
-class _Patches(list):
-    """The patches of the orthomosaic of a chunk (``chunk.ortho_patches``, a list as before 1.7.1); called with
-    ``frame=`` it gives those of an elevation or section."""
-
-    def __init__(self, items, chunk):
-        super().__init__(items)
-        self._chunk = chunk
-
-    def __call__(self, frame: str | None = None) -> list[dict]:
-        from ..engine import patches
-
-        return patches.patches(self._chunk, frame=frame)
-
-
 @dataclass
 class Chunk:
     key: int
@@ -873,11 +859,16 @@ class Chunk:
         patches.remove_patch(self, patch_id, frame=frame)
 
     @property
-    def ortho_patches(self) -> _Patches:
-        """The patches of the orthomosaic (a list); ``chunk.ortho_patches(frame=id)`` those of an elevation."""
+    def ortho_patches(self) -> list[dict]:
         from ..engine import patches
 
-        return _Patches(patches.patches(self), self)
+        return patches.patches(self)
+
+    def elevation_patches(self, frame: str) -> list[dict]:
+        """The patches of the elevation (or section) ``frame`` (its id)."""
+        from ..engine import patches
+
+        return patches.patches(self, frame=frame)
 
     def update_orthomosaic(self, progress: ProgressCallback | None = None, skip_unreadable: bool = False,
                            workers: int | None = None) -> Path:

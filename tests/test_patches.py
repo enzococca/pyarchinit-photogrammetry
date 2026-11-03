@@ -93,7 +93,7 @@ def test_assigned_photo_inside_the_polygon_only(processed, tmp_path, plain_photo
     assert pick["coverage"] * pick["visible"] > 0.8
     patch = P.add_patch(ch, poly, [pick["label"]])
     assert patch["id"] == "p1" and P.changed_patches(ch) == [patch]
-    assert ch.ortho_patches == [patch] == P.patches(ch, frame=None)  # the plan's list, as before 1.7.1
+    assert ch.ortho_patches == [patch] == P.patches(ch, frame=None)  # the plan's list
     P.update_orthomosaic(ch)
     after, _ = _read(ch.orthomosaic_path)
     geom = Polygon(poly)
