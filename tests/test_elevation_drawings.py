@@ -99,9 +99,11 @@ def _surface_cell(ch, entry):
 
 def _surface_cell_on_the_dem(ch, entry):
     """``(u, v, world point)`` of a cell of the elevation with a relief whose world point has a cell with a value in
-    the plan DEM, the 3 x 3 cells around it too and flat there (within 2 cm), the nearest such to the middle: a
-    section cell at the edge of the survey can fall outside the DEM or on its empty cells, one on the face of a wall
-    has the top of the wall in the DEM above it, and the fixture is built a little differently on every platform."""
+    the plan DEM, the 3 x 3 cells around it too and flat there (within 2 cm), and the DEM there at the height of the
+    point (within 3 cm: the ground the DEM sees, not a point down the face of a wall whose cells are the flat top of
+    the wall), the nearest such to the middle: a section cell at the edge of the survey can fall outside the DEM or
+    on its empty cells, the middle of a section is mostly the face of the far wall, and the fixture is built a little
+    differently on every platform (the CI of 3.12 once chose a face cell 12 cm under the top)."""
     import rasterio
 
     with rasterio.open(E.elevation_paths(ch, entry)[1]) as src:
@@ -123,6 +125,8 @@ def _surface_cell_on_the_dem(ch, entry):
             if np.ma.count_masked(block) or not np.isfinite(block.filled(np.nan)).all():
                 continue
             if float(block.max() - block.min()) > 0.02:  # the ground, not the face of a wall or the edge of a cut
+                continue
+            if abs(float(block[1, 1]) - p[2]) > 0.03:  # the point is the ground the DEM sees, not under its cells
                 continue
             return u, v, p
     raise AssertionError("no cell of the section has a cell of the plan DEM under it")
