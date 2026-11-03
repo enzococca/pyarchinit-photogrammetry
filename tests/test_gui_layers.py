@@ -29,8 +29,20 @@ def window(qapp, processed, tmp_path):
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
     from pyarchinit_photogrammetry.gui.main_window import MainWindow
 
-    doc, ch, _ = processed
-    ch.meta.pop("drawings", None)  # the processed project is shared: no drawings left by other tests
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+
+    # a copy of the processed project, shared by the session: the window saves what is drawn (a task saves the
+    # project), and the drawings left in the shared files went into the copies other modules make of it
+    src, _ch, _ = processed
+    d = tmp_path / "copia"
+    d.mkdir()
+    shutil.copy2(src.path, d / src.path.name)
+    shutil.copytree(src.files_dir, d / src.files_dir.name)
+    shutil.copytree(src.path.parent / "photos", d / "photos")
+    doc = ppg.Document.open(d / src.path.name)
+    doc.chunk.meta.pop("drawings", None)
     doc.meta["sito"] = "Saggio"  # the site of the project: drawing does not ask for it
     w = MainWindow(doc, autoconnect=False)
     w.runner.show_dialog = False
