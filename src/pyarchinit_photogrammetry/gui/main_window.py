@@ -10126,6 +10126,10 @@ class MainWindow(QMainWindow):
         layer = None if not chosen or chosen == from_file else chosen
         try:
             got = fio.import_features(self.chunk, path, layer=layer)
+        except fio.StaleDem:
+            self._warn(tr("I disegni del file non hanno quote e il DEM va rifatto prima di prenderle (Flusso di "
+                          "lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato"))
+            return
         except Exception as exc:
             self._exc("Importazione dei disegni 3D non riuscita", exc)
             return

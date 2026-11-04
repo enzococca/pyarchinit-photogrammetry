@@ -1,5 +1,10 @@
-"""Measures on the survey: surface area in 3D, slope and aspect, height above the ground.
+"""Measures on the survey: lengths and areas of drawings in 3D, surface area, slope and aspect, height above the
+ground.
 
+* :func:`length_3d` / :func:`length_plan`: the length of a line through 3D vertices, along its segments or in plan;
+  :func:`area_3d`: the area of a polygon in its best-fit plane; :func:`model_area_inside`: the area of the model's
+  surface a polygon was drawn on (the connected patch of faces reached from its vertices, overlaps in plan resolved
+  toward the viewer); :func:`feature_measures`: all of them for a free drawing (since 1.7.2);
 * :func:`surface_area`: inside a plan polygon, the area in plan and the area of the surface - from
   the DEM (each cell counted ``sqrt(1 + gx^2 + gy^2)`` times, the cells on the border by the share
   of them inside) or from the faces of the model whose centre is inside;

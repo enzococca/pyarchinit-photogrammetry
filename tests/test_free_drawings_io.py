@@ -137,6 +137,35 @@ def test_import_without_z_takes_the_dem(tmp_path):
     assert len(copies) == 2 and not ({r["id"] for r in copies} & before)
 
 
+def test_import_refused_when_the_heights_would_come_from_a_dem_to_rebuild(tmp_path):
+    """A DEM built in another system of the chunk (an orientation since): no heights taken from it, nothing added;
+    drawings with their own heights still come in."""
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.engine import dem as dem_mod
+
+    _doc, ch = _chunk(tmp_path)
+    ground = np.full((10, 10), 100.0, np.float32)
+    ch._set_product("dem", dem_mod.write_geotiff(ch.data_dir / "dem.tif", ground, (X0, Y0 + 1.0), 0.1, ch.crs,
+                                                 nodata=dem_mod.NODATA))
+    stamps.stamp(ch, "dem")
+    t = np.eye(4)
+    t[:3, 3] = [2.0, -1.0, 0.5]
+    ch.transform = t @ np.asarray(ch.transform, float)
+    assert stamps.is_stale(ch, "dem")
+    flat = tmp_path / "piatti.geojson"
+    flat.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"name": "senza quota"},
+         "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5]}}]}), encoding="utf-8")
+    with pytest.raises(fio.StaleDem):
+        fio.import_features(ch, flat)
+    assert not fd.features(ch)
+    with_z = tmp_path / "quote.geojson"
+    with_z.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"name": "con quota"},
+         "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5, 99.0]}}]}), encoding="utf-8")
+    assert fio.import_features(ch, with_z)["added"] == 1
+
+
 def test_geojson_crs_member(tmp_path):
     _doc, ch = _chunk(tmp_path, crs="EPSG:3004")
     _three(ch)

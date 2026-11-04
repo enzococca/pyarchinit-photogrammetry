@@ -403,6 +403,11 @@ def fill_missing(values: list, xy) -> list | None:
     return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
 
 
+class StaleDem(ValueError):
+    """The drawings of a file have no heights and the DEM they would take them from was built in another system of
+    the chunk (an orientation since): its heights would land off the model. Rebuild the DEM first."""
+
+
 def _dem_heights(chunk, xy) -> list:
     path = chunk.dem_path
     if path is None or not Path(path).exists():
@@ -420,11 +425,19 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
     else the name of the file; a feature without Z gets the heights of the DEM (:func:`fill_missing` along the drawing;
     skipped when no vertex has one); a new identity when the one it has is in the chunk already. Returns
     ``{"added", "dem_z" (of those added, how many took the DEM's heights), "skipped", "holes_dropped" (the holes of
-    polygons left out: a free drawing has one ring)}``."""
+    polygons left out: a free drawing has one ring)}``. :class:`StaleDem` (nothing added) when heights are wanted
+    from a DEM to rebuild (:mod:`..core.stamps`)."""
+    from ..core import stamps
+
     path = Path(path)
+    records = list(read(path))
+    wanting = any(not rec["has_z"] or any(p[2] is None for p in rec["xyz"]) for rec in records)
+    if wanting and chunk.products.get("dem") and stamps.is_stale(chunk, "dem"):
+        raise StaleDem(f"{path.name}: drawings without heights and the DEM is to be rebuilt (built in another "
+                       "system of the chunk): rebuild it first")
     have = {r["id"] for r in free_drawings.features(chunk)}
     added = dem_z = skipped = holes = 0
-    for rec in read(path):
+    for rec in records:
         xyz = rec["xyz"]
         took_dem = False
         if not rec["has_z"] or any(p[2] is None for p in xyz):
@@ -457,4 +470,4 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
 
 
 __all__ = ["TABLES", "TITLES", "FREE_PREFIX", "FORMATS", "write_tables", "write_gpkg", "write_geojson", "write_dxf",
-           "write_csv", "export", "read", "import_features", "fill_missing", "attribute_columns"]
+           "write_csv", "export", "read", "import_features", "fill_missing", "attribute_columns", "StaleDem"]
