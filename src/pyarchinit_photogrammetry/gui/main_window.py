@@ -62,6 +62,10 @@ PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
+# the drawing tools refused on a raster built before the last change of the chunk's system (core.stamps): what they
+# draw would sit where the raster is, not where the model is; measuring, selecting and panning stay allowed
+STALE_REFUSED = ("polygon", "vertices", "reshape", "line", "quota", "marker", "breakline", "probe", "sam", "patch",
+                 "dem_edit", "free_line", "free_polygon", "free_point")
 # the live link with RustGIS (io.rustgis_link): how often the window looks at RustGIS and how long it waits for it
 RUSTGIS_POLL_MS = 2000  # a look every 2 s while the link is on
 RUSTGIS_PULL_EVERY = 10.0  # seconds: a pull at least this often while RustGIS lists edits in the linked layers
@@ -899,6 +903,11 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
                          "piano adattato: tutto quello che è nelle sue coordinate lo segue"))
+        self.a_rebuild_stale = self._act(
+            m, tr("Ricostruisci i prodotti da rifare"), lambda: self.rebuild_stale(), icon_name="run",
+            tip=tr("DEM, ortofoto, prospetti, rilievi e TIN fatti prima dell'ultimo cambio del sistema del chunk, "
+                   "rifatti in ordine con i parametri con cui erano stati costruiti"))
+        self.a_rebuild_stale.setEnabled(False)
         self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
         self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
                   tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
@@ -1668,6 +1677,7 @@ class MainWindow(QMainWindow):
         self._load_raster()
         self._update_stack()
         self._capture_states()
+        self._update_rebuild_action()
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
@@ -1682,11 +1692,14 @@ class MainWindow(QMainWindow):
             path = (ch.orthomosaic_path if kind == "ortho" else ch.dem_path) if ch is not None else None
         if path is None or not Path(path).exists():
             self.ortho_view.clear_raster(tr("Costruisci il DEM o l'ortofoto per vederli qui"))
+            self._raster_version = None
+            self._update_stale_banner()
             return
         self.ortho_view.load(path, kind, bands=bands)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
         self._raster_version = None
+        self._update_stale_banner()
         with self.ortho_view.batch():  # thousands of contour lines: one update of panes and QGIS
             for i, u in enumerate(self.units):
                 self._draw_unit(u, i)
@@ -1734,6 +1747,12 @@ class MainWindow(QMainWindow):
             self._show_raster("ortho" if self.chunk.orthomosaic_path else "dem")
         if view.tr is None:
             self._warn("Costruisci prima l'ortofoto o il DEM.")
+            if on_cancelled is not None:
+                on_cancelled()
+            return False
+        if self._shown_raster_stale():  # what is drawn would sit where the old raster is, not where the model is
+            self._warn(tr("Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i "
+                          "prodotti da rifare)"))
             if on_cancelled is not None:
                 on_cancelled()
             return False
@@ -3671,6 +3690,291 @@ class MainWindow(QMainWindow):
         result = orient.orient(chunk, **kw)
         self._orient_finish(chunk, result, said=False)
         return result
+
+    # ---------------------------------------------------------------- products built in another system
+    def _shown_raster_stale(self) -> bool:
+        """The raster in the 2D view was built in another transform of the active chunk (:mod:`..core.stamps`): the
+        DEM, the orthomosaic or another product of the plan, a kept version of the DEM or of the orthomosaic, an
+        elevation or a section. A raster of the plan that is none of the chunk's products (a difference of DEMs, a
+        plugin's file) is not judged."""
+        ch, view = self.chunk, self.ortho_view
+        if ch is None or view.tr is None:
+            return False
+        rv = getattr(self, "_raster_version", None)
+        try:
+            if isinstance(rv, tuple) and rv and rv[0] == "elevation":
+                entry = next((e for e in ch.meta.get("elevations") or [] if e.get("id") == rv[1]), None)
+                return entry is not None and stamps.entry_stale(ch, entry)
+            if isinstance(rv, tuple) and len(rv) == 2:  # (product, id) of a kept version shown
+                from ..core import versions
+
+                entry = next((e for e in versions.versions(ch, rv[0]) if e.get("id") == rv[1]), None)
+                return entry is not None and stamps.entry_stale(ch, entry)
+            path = view.path
+            if path is None:
+                return False
+            shown = Path(path).resolve()
+
+            def same(p) -> bool:
+                return p is not None and Path(p).resolve() == shown
+
+            for name in (*stamps.GRID_PRODUCTS, "slope", "aspect"):
+                if same(ch.product_path(name)):
+                    return stamps.is_stale(ch, name)
+            for method, record in (ch.meta.get("relief") or {}).items():
+                if isinstance(record, dict) and same(ch.product_path(method)):
+                    return stamps.entry_stale(ch, record)
+            calc = ch.meta.get("calculator") or {}
+            if calc:
+                from ..engine import rastercalc
+
+                for name, record in calc.items():
+                    if isinstance(record, dict) and same(rastercalc.result_path(ch, name)):
+                        return stamps.entry_stale(ch, record)
+        except Exception as exc:  # noqa: BLE001 - a notice: never in the way of showing the raster
+            log.warning("Stato del raster mostrato non letto: %s", exc)
+        return False
+
+    def _update_stale_banner(self) -> None:
+        """The notice over the 2D view when the raster shown is to be built again, none otherwise."""
+        self.ortho_view.set_banner(tr("Questo raster è stato fatto prima dell'ultimo cambio del sistema del chunk: va "
+                                      "rifatto (Ricostruisci i prodotti da rifare)")
+                                   if self._shown_raster_stale() else None)
+
+    def _update_rebuild_action(self) -> None:
+        action = getattr(self, "a_rebuild_stale", None)
+        if action is None:
+            return
+        try:
+            action.setEnabled(self.chunk is not None and bool(self._rebuild_plan(self.chunk)[0]))
+        except Exception:  # noqa: BLE001 - the menu never stops a refresh
+            action.setEnabled(False)
+
+    def _rebuild_plan(self, ch, items=None) -> tuple[list, list, list]:
+        """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
+        by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
+        each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
+        calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
+        kept versions made in another system."""
+        items = list(stamps.stale_products(ch) if items is None else items)
+        steps: list = []
+        by_hand: list = []
+        kept: list = []
+        done_tin = False
+        for item in items:
+            kind, product = item.get("kind"), item.get("product")
+            name = tr(item.get("name") or product) if kind == "product" else str(item.get("name") or product)
+            if kind == "product":
+                if product == "dem" and (ch.meta.get("dem") or {}).get("source") == "tin":
+                    if (ch.meta.get("tin") or {}).get("source") == "dem":
+                        by_hand.append(tr("{0} (dal TIN fatto dal DEM che ha sostituito)", name))
+                        continue
+                    steps.append((tr("TIN"), lambda p, ch=ch: self._rebuild_tin(ch, p)))
+                    done_tin = True
+                    steps.append((name, lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p)))
+                elif product == "tin":
+                    if not done_tin:
+                        steps.append((name, lambda p, ch=ch: self._rebuild_tin(ch, p)))
+                elif product in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect"):
+                    steps.append((name, lambda p, ch=ch, product=product: self._rebuild_product(ch, product, p)))
+                else:
+                    by_hand.append(name)
+            elif kind == "elevation":
+                entry = next((e for e in ch.meta.get("elevations") or [] if e.get("id") == item.get("id")), None)
+                if entry is not None:
+                    steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
+            elif kind == "relief":
+                steps.append((name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p)))
+            elif kind == "version":
+                kept.append(f"{tr(stamps.NAMES.get(product, product))} «{name}»")
+            else:
+                by_hand.append(name)
+        return steps, by_hand, kept
+
+    def _rebuild_product(self, ch, product: str, p):
+        """``product`` of ``ch`` built again with the parameters it was built with."""
+        if product == "dem":
+            saved = ch.meta.get("dem") or {}
+            classes = saved.get("classes")
+            return ch.build_dem(saved.get("resolution"), saved.get("source") or "point_cloud", True,
+                                classes=list(classes) if classes else None, progress=p)
+        if product == "orthomosaic":
+            from ..engine.ortho import BLEND_SIGMA
+
+            saved = ch.meta.get("orthomosaic") or {}
+            hidden = saved.get("hidden_classes")
+            return ch.build_orthomosaic(saved.get("resolution"), saved.get("surface") or "dem",
+                                        saved.get("blending") or "mosaic", hide_classes=list(hidden) if hidden else None,
+                                        progress=p, skip_unreadable=bool(saved.get("skipped_photos")),
+                                        max_angle=float(saved.get("max_angle", 70.0)),
+                                        blend_sigma=float(saved.get("blend_sigma", BLEND_SIGMA)),
+                                        colour_correction=bool(saved.get("colour_correction", True)),
+                                        ghosting=bool(saved.get("ghosting", False)),
+                                        fill_holes=bool(saved.get("fill_holes", False)))
+        if product == "dem_precision":
+            from ..engine import precision
+
+            return precision.dem_precision(ch, progress=p)
+        if product == "coverage":
+            from ..engine.fieldcheck import MIN_PHOTOS, field_check
+
+            saved = ch.meta.get("field_check") or {}
+            return field_check(ch, min_photos=int(saved.get("min_photos", MIN_PHOTOS)),
+                               resolution=saved.get("resolution"), quality="blurred" in saved, progress=p)
+        return self._terrain_raster_job(ch, product, p)
+
+    def _rebuild_relief(self, ch, method: str, p):
+        saved = (ch.meta.get("relief") or {}).get(method) or {}
+        return ch.build_relief(method, radius=saved.get("radius_m"), directions=int(saved.get("directions", 16)),
+                               min_size=saved.get("min_size_m"), max_size=saved.get("max_size_m"),
+                               scaling=float(saved.get("scaling", 2.0)), progress=p)
+
+    def _rebuild_tin(self, ch, p):
+        """The TIN of ``ch`` again from its source, its tolerance, the break lines and the spot heights it had."""
+        from ..archaeo import breaklines
+        from ..engine import tin as T
+
+        saved = ch.meta.get("tin") or {}
+        lines = breaklines.for_tin([dict(r) for r in ch.meta.get("drawings", {}).get("lines") or []]) \
+            if saved.get("n_breaklines") else None
+        max_error = saved.get("max_error") if saved.get("source", "dem") == "dem" else None
+        return T.build_tin(ch, source=saved.get("source") or "dem", max_error=max_error, breaklines=lines,
+                           spots=bool(saved.get("n_spots")), progress=p)
+
+    def _rebuild_dem_from_tin(self, ch, p):
+        from ..engine import tin as T
+
+        saved = ch.meta.get("dem") or {}
+        return T.tin_to_dem(ch, resolution=saved.get("resolution"), progress=p)
+
+    def _rebuild_elevation(self, ch, eid: str, p):
+        """The elevation (or section) ``eid`` of ``ch`` built again on its frame, its part and depth, with the settings
+        it was painted with; it keeps its id, name and place in the list - and so the drawings kept with it - and its
+        patches, applied again."""
+        from ..engine import elevation as E
+
+        entries = ch.meta.get("elevations") or []
+        old = next(e for e in entries if e.get("id") == eid)
+        settings = E.entry_settings(old)
+        kind = old.get("kind") or "elevation"
+        depth = old.get("depth")
+        depth = (float(depth[0]), float(depth[1])) if depth else None
+        new = E.build_elevation(ch, E.frame_from_dict(old["frame"]), resolution=old.get("resolution"),
+                                name=old.get("name"), depth=depth, bounds=E.bounds_of(ch, old), kind=kind,
+                                scale=old.get("scale") or "cylinder", blending=settings["blending"],
+                                colour_correction=settings["colour_correction"], ghosting=settings["ghosting"],
+                                fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p)
+        nid = new["id"]
+        root = ch.data_dir / "elevations"
+        entries = ch.meta["elevations"]
+        entries[:] = [e for e in entries if e is not new]
+        aside = root / f"{eid}.old"
+        shutil.rmtree(aside, ignore_errors=True)
+        if (root / eid).exists():
+            (root / eid).rename(aside)
+        (root / nid).rename(root / eid)
+        shutil.rmtree(aside, ignore_errors=True)
+        for key in ("orthophoto", "relief", "profile"):
+            if new.get(key):
+                parts = list(Path(new[key]).parts)
+                new[key] = str(Path(*[eid if part == nid else part for part in parts]))
+        new["id"] = eid
+        for key, value in old.items():  # what was added to it after the build (its patches, a plugin's keys)
+            if key not in new and key != "applied_patches":
+                new[key] = value
+        i = next(i for i, e in enumerate(entries) if e.get("id") == eid and e is old)
+        entries[i] = new
+        if new.get("patches"):
+            ch.update_elevation(eid, progress=p)
+        return new
+
+    def rebuild_stale(self, chunk=None, items=None) -> bool:
+        """*Flusso di lavoro > Ricostruisci i prodotti da rifare*: the products of ``chunk`` (default the active one)
+        built before the last change of its system - ``items`` as :func:`..core.stamps.stale_products` gives them -
+        built again in that order, with the parameters each was built with, in one task. A product that fails is
+        logged and the next one goes on. The kept versions and the rasters that need their own inputs (raster
+        calculator, multispectral, thermal, satellite) are listed, to be made by hand. Not *Elabora tutto*: that aligns
+        the photos again. False when nothing was started."""
+        ch = chunk if chunk is not None else self.chunk
+        if ch is None:
+            return False
+        steps, by_hand, kept = self._rebuild_plan(ch, items)
+        if not steps:
+            text = tr("Nessun prodotto da rifare")
+            if by_hand or kept:
+                text = "\n".join(self._rebuild_left(by_hand, kept))
+                self._info(tr("Ricostruisci i prodotti da rifare"), text)
+            else:
+                self.statusBar().showMessage(text, 8000)
+            return False
+        shown = (self.ortho_view.kind, getattr(self, "_raster_version", None)) \
+            if self.ortho_view.tr is not None else None
+        self._store_drawings()
+
+        def job(progress):
+            rebuilt, failed = [], []
+            n = len(steps)
+            for i, (name, fn) in enumerate(steps):
+                progress(i / n, tr("Ricostruzione: {0} ({1} di {2})", name, i + 1, n))
+                try:
+                    fn(progress.sub(i / n, 1 / n))
+                    rebuilt.append(name)
+                except Cancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one product failing does not stop the others
+                    log.error("Ricostruzione di %s non riuscita: %s\n%s", name, exc, traceback.format_exc())
+                    failed.append(f"{name} ({exc})")
+            progress(1.0, tr("Ricostruzione finita"))
+            return rebuilt, failed
+
+        def done(result):
+            rebuilt, failed = result
+            if ch is self.chunk:
+                self._reshow(shown)
+            lines = []
+            if rebuilt:
+                lines.append(tr("Rifatti: {0}", ", ".join(rebuilt)))
+                self.log_pane.info(lines[-1])
+            if failed:
+                lines.append(tr("Non riusciti: {0}", "; ".join(failed)))
+                self.log_pane.warning(lines[-1])
+            for line in self._rebuild_left(by_hand, kept):
+                lines.append(line)
+                self.log_pane.info(line)
+            text = "\n".join(lines)
+            self._update_rebuild_action()
+            self._info(tr("Ricostruisci i prodotti da rifare"), text)
+
+        return bool(self.run_task("Ricostruisci i prodotti da rifare", job, done))
+
+    rebuild_stale_products = rebuild_stale  # the name the result of the orientation offers it under
+
+    @staticmethod
+    def _rebuild_left(by_hand, kept) -> list[str]:
+        lines = []
+        if by_hand:
+            lines.append(tr("Da rifare a mano: {0}", ", ".join(by_hand)))
+        if kept:
+            lines.append(tr("Versioni conservate fatte in un altro sistema (rifalle attivandole e ricostruendo): {0}",
+                            ", ".join(kept)))
+        return lines
+
+    def _reshow(self, shown) -> None:
+        """The 2D view on what it showed (``(kind, _raster_version)``), the notice judged again."""
+        if shown is None:
+            self._update_stale_banner()
+            return
+        kind, rv = shown
+        ch = self.chunk
+        if isinstance(rv, tuple) and rv and rv[0] == "elevation":
+            entry = next((e for e in ch.meta.get("elevations") or [] if e.get("id") == rv[1]), None)
+            if entry is not None:
+                self.show_elevation(entry)
+                return
+        if kind in ("dem", "ortho") and rv is None:
+            self._show_raster(kind)
+            return
+        self._update_stale_banner()
 
     def merge_chunks(self) -> None:
         """A new chunk with the photos, markers and clouds of the chosen chunks (already aligned)."""
@@ -6757,29 +7061,32 @@ class MainWindow(QMainWindow):
         if ch is None or ch.dem_path is None:
             self._warn("Costruisci prima il DEM.")
             return
-        from ..archaeo import measures, terrain
-
-        out = ch.data_dir / "terrain" / f"{kind}.tif"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        from ..core import crs as crs_mod
-
-        crs = None if crs_mod.is_local(ch.crs) else ch.crs
-
         def job(p):
-            p(0.2, "Pendenza del DEM" if kind == "slope" else "Esposizione del DEM")
-            if kind == "slope":
-                terrain.slope_degrees(ch.dem_path, out, crs=crs)
-            else:
-                measures.aspect_raster(ch.dem_path, out, crs=crs)
-            ch._set_product(kind, out)
-            stamps.inherit(ch, kind, "dem")  # in the DEM's coordinates (core.stamps)
-            return out
+            return self._terrain_raster_job(ch, kind, p)
 
         def done(path):
             self.workspace.populate(self.doc)
             self.show_terrain_raster(kind)
 
         self.run_task("Pendenza del DEM" if kind == "slope" else "Esposizione del DEM", job, done, refresh=False)
+
+    @staticmethod
+    def _terrain_raster_job(ch, kind: str, p):
+        """The slope (``kind`` "slope") or the aspect of the DEM of ``ch`` in degrees, its product kept; the path."""
+        from ..archaeo import measures, terrain
+        from ..core import crs as crs_mod
+
+        out = ch.data_dir / "terrain" / f"{kind}.tif"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        crs = None if crs_mod.is_local(ch.crs) else ch.crs
+        p(0.2, "Pendenza del DEM" if kind == "slope" else "Esposizione del DEM")
+        if kind == "slope":
+            terrain.slope_degrees(ch.dem_path, out, crs=crs)
+        else:
+            measures.aspect_raster(ch.dem_path, out, crs=crs)
+        ch._set_product(kind, out)
+        stamps.inherit(ch, kind, "dem")  # in the DEM's coordinates (core.stamps)
+        return out
 
     RELIEF_CHOICES = [("svf", "Sky-view factor (quanto cielo si vede)"),
                       ("openness_pos", "Openness positiva (creste, muri)"),
@@ -7158,6 +7465,7 @@ class MainWindow(QMainWindow):
         self._draw_stones()
         self._draw_elevation_layers(entry)
         self._draw_frame_patches()
+        self._update_stale_banner()
         self.show_view(self.ortho_view)
         self.workspace.populate(self.doc)
         if entry.get("v_is_height"):
@@ -8350,6 +8658,12 @@ class MainWindow(QMainWindow):
                 self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
                 return
             self._show_raster("ortho")
+        if mode in STALE_REFUSED and self._shown_raster_stale():
+            self.draw_actions["pan"].setChecked(True)
+            self.ortho_view.set_mode("pan")
+            self._warn(tr("Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i "
+                          "prodotti da rifare)"))
+            return
         self._quota_keep = None
         if mode != "sam":
             self._sam_cancel()
@@ -13744,6 +14058,7 @@ class MainWindow(QMainWindow):
         if product in ("dem", "orthomosaic"):
             self._load_raster("dem" if product == "dem" else "ortho", path)
             self._raster_version = (product, vid)
+            self._update_stale_banner()
             self.show_view(self.ortho_view)
         else:
             self.model_view.show_version(product, path, title)
@@ -13772,6 +14087,10 @@ class MainWindow(QMainWindow):
             else:
                 self.model_view.set_chunk(chunk, product)
                 self.show_view(self.model_view)
+            if product in stamps.GRID_PRODUCTS and stamps.is_stale(chunk, product):
+                text = tr("La versione «{0}» è stata fatta in un altro sistema del chunk: va rifatta", title)
+                self.log_pane.warning(text)
+                self.statusBar().showMessage(text, 20000)
 
         self.run_task("Cambio di versione", lambda p: versions.activate(chunk, product, vid), done)
 

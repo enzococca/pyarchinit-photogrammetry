@@ -174,7 +174,8 @@ def test_apply_and_undo_redo(win, qapp):
     assert np.abs(np.asarray(ch.transform) - want).max() < 1e-6
     assert ch.meta["orientation"]["method"] == "points"
     assert [m.label for m in ch.markers if m.orientation] == list(orient.MARKER_LABELS)
-    assert any(kind == "info" for kind, _t in win.said), win.said  # the result said
+    # the result said, with *Ricostruisci i prodotti da rifare* offered (the DEM and the orthomosaic are stale)
+    assert any(kind == "choice" for kind, _t in win.said), win.said
     assert win.history.undo_text() == "Orienta il sistema locale"
     units_after = [u.to_dict() for u in win.units]
     assert units_after != units_before  # moved with the chunk

@@ -251,3 +251,40 @@ def drawn(ch) -> dict:
         typed.append(m.label)
     ch.document.save()
     return {"centre": c, "square": square, "plane": plane, "proxy": box, "markers": typed}
+
+
+def window(processed, tmp_path, monkeypatch):
+    """The window on a LOCAL, tilted copy of the trench with one drawing of each store (:func:`drawn`); the modal
+    boxes recorded in ``w.said`` instead of shown, the task runner without its dialog. Close it with
+    :func:`close_window`."""
+    from PySide6.QtCore import QSettings
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+    from pyarchinit_photogrammetry.gui.main_window import MainWindow
+
+    doc, ch, _t_bad = local_copy(processed, tmp_path)
+    drawn(ch)
+    said: list = []
+    monkeypatch.setattr(mwmod, "message", lambda *a, **k: said.append(("message", a[2] if len(a) > 2 else "")))
+    monkeypatch.setattr(mwmod, "choice", lambda *a, **k: said.append(("choice", a[2] if len(a) > 2 else "")))
+    w = MainWindow(doc, autoconnect=False)
+    w.said = said
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(("warn", text)))
+    monkeypatch.setattr(w, "_info", lambda title, text: said.append(("info", text)))
+    w.runner.show_dialog = False
+    w.show()
+    return w
+
+
+def close_window(w) -> None:
+    dlg = getattr(w, "_orient_dialog", None)
+    if dlg is not None:
+        try:
+            dlg.close()
+        except RuntimeError:  # already deleted
+            pass
+    w.photos.stop()
+    w.setWindowModified(False)
+    w.close()

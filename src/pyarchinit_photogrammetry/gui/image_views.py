@@ -12,7 +12,7 @@ import numpy as np
 from PySide6.QtCore import QLineF, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsPixmapItem,
-                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QLabel, QMenu)
 import shiboken6
 
 from .i18n import tr
@@ -562,6 +562,36 @@ class RasterView(_ZoomView):
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             bar.valueChanged.connect(self._view_changed)
             bar.rangeChanged.connect(self._view_changed)
+        # a notice over the raster (a stale raster, see MainWindow._shown_raster_stale): a child of the viewport, not
+        # of the scene, so that loading another raster does not take it away; the window decides after each load
+        self._banner = QLabel(self.viewport())
+        self._banner.setObjectName("rasterBanner")
+        self._banner.setWordWrap(True)
+        self._banner.setStyleSheet("QLabel#rasterBanner { background: #fff3cd; color: #3d2f00; padding: 6px; "
+                                   "border-bottom: 1px solid #e0c97a; }")
+        self._banner.hide()
+
+    def set_banner(self, text: str | None) -> None:
+        """A notice fixed at the top of the view, over the raster and the drawings (``None`` or "" hides it). Loading
+        or clearing the raster leaves it as it is."""
+        if not text:
+            self._banner.clear()
+            self._banner.hide()
+            return
+        self._banner.setText(text)
+        self._place_banner()
+        self._banner.show()
+        self._banner.raise_()
+
+    def banner_text(self) -> str:
+        """The notice shown at the top of the view; "" when none."""
+        return self._banner.text() if not self._banner.isHidden() else ""
+
+    def _place_banner(self) -> None:
+        w = self.viewport().width()
+        self._banner.setFixedWidth(max(1, w))
+        self._banner.adjustSize()
+        self._banner.move(0, 0)
 
     @contextmanager
     def batch(self):
@@ -713,6 +743,8 @@ class RasterView(_ZoomView):
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
+        if not self._banner.isHidden():
+            self._place_banner()
         self._view_changed()
 
     def _detail_request(self):

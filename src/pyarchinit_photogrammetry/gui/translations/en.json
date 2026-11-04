@@ -2925,7 +2925,15 @@
   "il punto A, origine": "point A, the origin",
   "il punto B, sull'asse x": "point B, on the x axis",
   "il punto C, sul piano orizzontale": "point C, on the horizontal plane",
-  "Il chunk attivo è cambiato: riapri Orienta il sistema locale": "The active chunk has changed: open Orient the local system again"
+  "Il chunk attivo è cambiato: riapri Orienta il sistema locale": "The active chunk has changed: open Orient the local system again",
+  "Nessun prodotto da rifare": "No product to build again",
+  "DEM, ortofoto, prospetti, rilievi e TIN fatti prima dell'ultimo cambio del sistema del chunk, rifatti in ordine con i parametri con cui erano stati costruiti": "DEM, orthomosaic, elevations, reliefs and TIN made before the last change of the chunk's system, built again in order with the parameters they were built with",
+  "Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i prodotti da rifare)": "This raster is to be built again before drawing on it (Workflow > Rebuild the stale products)",
+  "Questo raster è stato fatto prima dell'ultimo cambio del sistema del chunk: va rifatto (Ricostruisci i prodotti da rifare)": "This raster was made before the last change of the chunk's system: it is to be built again (Rebuild the stale products)",
+  "Ricostruzione finita": "Rebuild finished",
+  "TIN": "TIN",
+  "Precisione del DEM": "DEM precision",
+  "Copertura": "Coverage"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3854,6 +3862,13 @@
   "Clic sul punto {0} nella vista 3D": "Click point {0} in the 3D view",
   "Clic sul punto {0} sull'ortofoto: la quota dal DEM": "Click point {0} on the orthophoto: the height from the DEM",
   "{0} punti, scarto dal piano (NMAD) {1} mm": "{0} points, deviation from the plane (NMAD) {1} mm",
-  "Questi chunk allineati hanno marker o posizioni delle foto propri che al prossimo calcolo della georeferenziazione li riporterebbero indietro: {0}": "These aligned chunks have markers or photo positions of their own that would bring them back at the next fit of their georeference: {0}"
+  "Questi chunk allineati hanno marker o posizioni delle foto propri che al prossimo calcolo della georeferenziazione li riporterebbero indietro: {0}": "These aligned chunks have markers or photo positions of their own that would bring them back at the next fit of their georeference: {0}",
+  "Da rifare a mano: {0}": "To make again by hand: {0}",
+  "Versioni conservate fatte in un altro sistema (rifalle attivandole e ricostruendo): {0}": "Kept versions made in another system (make them again by activating and rebuilding them): {0}",
+  "La versione «{0}» è stata fatta in un altro sistema del chunk: va rifatta": "The version «{0}» was made in another system of the chunk: it is to be built again",
+  "Ricostruzione: {0} ({1} di {2})": "Rebuilding: {0} ({1} of {2})",
+  "Rifatti: {0}": "Built again: {0}",
+  "Non riusciti: {0}": "Failed: {0}",
+  "{0} (dal TIN fatto dal DEM che ha sostituito)": "{0} (from the TIN made from the DEM it replaced)"
  }
 }
