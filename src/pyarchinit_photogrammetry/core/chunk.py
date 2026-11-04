@@ -8,6 +8,7 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -337,6 +338,7 @@ class Chunk:
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
                               ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
+        self.meta["alignment_id"] = uuid.uuid4().hex  # a new frame: what was kept in the old one knows it
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()
@@ -390,6 +392,7 @@ class Chunk:
             c.meta.pop("precision", None)
 
     def reset_alignment(self) -> None:
+        self.meta["alignment_id"] = uuid.uuid4().hex
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         for c in self.cameras:
@@ -582,6 +585,13 @@ class Chunk:
 
         self.forget_precision()
         return gcp.update_transform(self, use_cameras=use_cameras)
+
+    def orient(self, M=None, **kw) -> dict:
+        """The local system of the chunk oriented by three points, a plane or a given motion ``M``, kept by three
+        orientation markers (see :func:`engine.orient.orient`). Since 1.7.2."""
+        from ..engine import orient
+
+        return orient.orient(self, M=M, **kw)
 
     def reference_errors(self) -> list[dict]:
         from ..markers import gcp
