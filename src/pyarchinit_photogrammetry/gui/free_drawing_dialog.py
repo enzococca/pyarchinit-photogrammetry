@@ -19,17 +19,27 @@ from .i18n import decimal_comma, tr
 log = logging.getLogger(__name__)
 
 
+_MODEL_CACHE: dict = {}  # (path, mtime, transform) -> the trimesh of the last model read
+
+
 def model_in_chunk(chunk):
-    """The model of ``chunk`` as a trimesh in the chunk's coordinates (as the free drawings are), None without one."""
+    """The model of ``chunk`` as a trimesh in the chunk's coordinates (as the free drawings are), None without one;
+    kept while its file and the chunk's transform stay the same (one model)."""
     path = chunk.product_path("model") if chunk is not None else None
     if path is None or not path.exists():
         return None
+    key = (str(path), path.stat().st_mtime_ns, np.asarray(chunk.transform, np.float64).tobytes())
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key]
     import trimesh
 
     from ..io.mesh_ply import read_mesh
 
     m = read_mesh(path)
-    return trimesh.Trimesh(chunk.to_world(np.asarray(m.xyz, np.float64)), m.faces, process=False)
+    mesh = trimesh.Trimesh(chunk.to_world(np.asarray(m.xyz, np.float64)), m.faces, process=False)
+    _MODEL_CACHE.clear()
+    _MODEL_CACHE[key] = mesh
+    return mesh
 
 
 def measures_text(rec: dict, model=None, toward=None) -> str:
@@ -97,7 +107,7 @@ class FreeDrawingDialog(QDialog):
         form.addRow(tr("Layer"), self.layer_combo)
         row = QHBoxLayout()
         self.colour_edit = QLineEdit(self._own_colour)
-        self.colour_edit.setPlaceholderText("#rrggbb")
+        self.colour_edit.setPlaceholderText(tr("#rrggbb (vuoto: il colore del layer)"))
         self.b_colour = QPushButton(tr("Scegli..."))
         self.b_colour.clicked.connect(self._pick_colour)
         row.addWidget(self.colour_edit, 1)
@@ -171,7 +181,8 @@ class FreeDrawingDialog(QDialog):
             self.colour_edit.setText(c.name())
 
     def values(self) -> dict:
-        """What the form holds: ``name``, ``layer``, ``colour`` ("#rrggbb", or None when not changed), ``attributes``
+        """What the form holds: ``name``, ``layer``, ``colour`` ("#rrggbb"; None when not changed; "" when emptied: the
+        layer's colour again), ``attributes``
         (a dict; rows without a field left out), ``xyz``. ValueError for a z that is not a number or a colour that is
         not one."""
         attrs = {}
@@ -190,7 +201,9 @@ class FreeDrawingDialog(QDialog):
                 raise ValueError(tr("La quota del vertice {0} non è un numero", r + 1))
             xyz.append([float(x), float(y), z])
         colour = self.colour_edit.text().strip()
-        if colour.lower() == self._own_colour.lower():
+        if not colour:
+            colour = "" if self.rec.get("colour") else None  # emptied: the layer's colour
+        elif colour.lower() == self._own_colour.lower():
             colour = None
         elif not QColor.isValidColorName(colour):
             raise ValueError(tr("Il colore non è valido: {0}", colour))

@@ -325,24 +325,6 @@ class _CallThread:
         return not self._thread.is_alive()
 
 
-class _FreeDoubleClick(QObject):
-    """A double click in the 3D view on the free drawing it has selected: the drawing's form
-    (:meth:`MainWindow.free_properties`)."""
-
-    def __init__(self, window):
-        super().__init__(window)
-        self.window = window
-
-    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt's name
-        from PySide6.QtCore import QEvent
-
-        if ev.type() == QEvent.Type.MouseButtonDblClick and ev.button() == Qt.MouseButton.LeftButton:
-            fid = self.window.model_view.selected_free
-            if fid:
-                QTimer.singleShot(0, lambda: self.window.free_properties(fid))
-        return False
-
-
 def _runs(mask, closed: bool = False) -> list:
     """The runs of consecutive True of ``mask`` as index arrays; ``closed``: the last and the first are neighbours
     (a run across the end joined)."""
@@ -605,9 +587,9 @@ class MainWindow(QMainWindow):
         self.model_view.free_delete_requested.connect(self._free_delete_requested)
         self.model_view.free_drape_requested.connect(self._free_draped)
         self._free_selected = ""  # the free drawing selected in the 3D view
-        self._free_dbl = _FreeDoubleClick(self)  # a double click on the drawing selected in 3D: its form
-        for w in (self.model_view.canvas, self.model_view.editor):
-            w.installEventFilter(self._free_dbl)
+        # a double click on the drawing selected in 3D: its form, once the mouse events of the view are over
+        self.model_view.free_properties_requested.connect(
+            lambda fid: QTimer.singleShot(0, lambda: self.free_properties(fid)))
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
@@ -9862,13 +9844,28 @@ class MainWindow(QMainWindow):
         else:
             from ..engine import elevation as E
 
-            ds = _fill_missing([E.relief_at(ch, entry, u, v) for u, v in xy], xy)
+            ds = _fill_missing(self._relief_values(entry, xy), xy)
             if ds is None:
                 self._warn(tr("Il disegno libero prende la profondità dal rilievo del prospetto: serve il rilievo "
                               "sotto almeno un vertice"))
                 return
             xyz = np.array([E.world_of(entry, u, v, d) for (u, v), d in zip(xy, ds)], float)
         self._free_add(kind, xyz)
+
+    def _relief_values(self, entry: dict, uv) -> list:
+        """The depth of the relief of the elevation ``entry`` at each (u, v), None where it has none (one reading of
+        the file for every vertex; :func:`..engine.elevation.relief_at` per point)."""
+        from ..engine import elevation as E
+
+        _ortho, relief = E.elevation_paths(self.chunk, entry)
+        if not relief.exists():
+            return [None] * len(uv)
+        import rasterio
+
+        with rasterio.open(relief) as src:
+            vals = [float(v[0]) for v in src.sample([(float(u), float(v)) for u, v in uv])]
+            nodata = src.nodata
+        return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
 
     def _free_selected_in_3d(self, fid: str) -> None:
         self._free_selected = fid or ""
@@ -10039,16 +10036,18 @@ class MainWindow(QMainWindow):
             return False
         ch = self.chunk
         names = {x["name"] for x in free_drawings.layers(ch)}
-        if values["layer"] not in names:
-            free_drawings.set_layer(ch, values["layer"])
         fields = {k: values[k] for k in ("name", "layer", "attributes", "xyz")}
-        if values.get("colour"):
+        if values.get("colour") == "":  # back to the layer's colour
+            fields["colour"] = None
+        elif values.get("colour"):
             fields["colour"] = values["colour"]
         try:
             free_drawings.update(ch, fid, **fields)
         except ValueError as exc:
             self._warn(tr("Disegno non modificato: {0}", str(exc)))
             return False
+        if values["layer"] not in names:  # a new layer, kept with the change (one step)
+            free_drawings.set_layer(ch, values["layer"])
         self._dirty(True)
         self._draw_free()
         return True
@@ -10344,6 +10343,18 @@ class MainWindow(QMainWindow):
         if not 0 <= idx < len(feats):
             return
         attrs = feats[idx]
+        if attrs.get("_free"):  # a free drawing: its name is the record's
+            if key == "name" and self.chunk is not None and str(value or "").strip():
+                from ..core import free_drawings
+
+                try:
+                    free_drawings.update(self.chunk, str(attrs.get(ID_FIELD)), name=str(value).strip())
+                except (KeyError, ValueError) as exc:
+                    log.warning("Nome del disegno libero non cambiato: %s", exc)
+                    return
+                self._dirty(True)
+                QTimer.singleShot(0, self._draw_free)  # not inside the pane's own signal
+            return
         if key == "etichetta" and "_unit" in attrs and 0 <= attrs["_unit"] < len(self.shown_units):
             u = self.shown_units[attrs["_unit"]]
             u.attributes["etichetta"] = str(value) if value is not None else ""

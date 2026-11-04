@@ -1052,6 +1052,7 @@ class FreeEditOverlay(QWidget):
     moved = Signal(int, float, float)  # a handle let go at (x, y), widget pixels
     delete_requested = Signal(int)  # the chosen handle, -1: none chosen
     clicked = Signal(float, float)  # a click away from the handles
+    double_clicked = Signal(float, float)  # a double click at (x, y), widget pixels
     left = Signal()  # Esc
 
     def __init__(self, parent=None):
@@ -1117,6 +1118,11 @@ class FreeEditOverlay(QWidget):
         p.setPen(QColor("white"))
         p.drawText(10, 20, self.text)
         p.end()
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        self.mousePressEvent(ev)  # as QWidget does: the second press of the double click
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(float(ev.position().x()), float(ev.position().y()))
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() != Qt.MouseButton.LeftButton:
@@ -1298,6 +1304,8 @@ class ModelView(QWidget):
     # refuses a vertex that would leave a line under 2 or a polygon under 3 (or deletes the drawing)
     free_delete_requested = Signal(str, int)
     free_drape_requested = Signal(str, object)  # id, the vertices with the surface points added (internal)
+    # select mode: a double click on the selected free drawing (in the live view or on the vertex editor): its form
+    free_properties_requested = Signal(str)
     CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
     def __init__(self, parent=None):
@@ -1488,6 +1496,7 @@ class ModelView(QWidget):
         self.editor.moved.connect(self._edit_moved)
         self.editor.delete_requested.connect(self._edit_delete)
         self.editor.clicked.connect(self._edit_clicked)
+        self.editor.double_clicked.connect(self._edit_double_clicked)
         self.editor.left.connect(lambda: self.stack.setCurrentWidget(self.canvas))
         self.stack.addWidget(self.editor)
         self.legend = ClassLegend()
@@ -2479,6 +2488,9 @@ class ModelView(QWidget):
                     and (time.monotonic() - press[2]) * 1000 <= CLICK_MS):
                 self._select_at(x, y, self.canvas.projector())
         elif kind == QEvent.Type.MouseButtonDblClick:
+            self._press = None
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._properties_at(ev.position().x(), ev.position().y(), self.canvas.projector())
             return True  # not the centre of rotation
         elif kind == QEvent.Type.KeyPress:
             if ev.key() == Qt.Key.Key_Escape:
@@ -2566,6 +2578,16 @@ class ModelView(QWidget):
                              "(o il disegno) - Esc torna alla vista"))
         self.stack.setCurrentWidget(self.editor)
         self.editor.setFocus()
+
+    def _properties_at(self, x: float, y: float, project) -> None:
+        """A double click in select mode: :attr:`free_properties_requested` when the selected drawing is under it."""
+        fid = self._selected_id
+        if fid and self._select_on and self.free_at(x, y, project) == fid:
+            self.free_properties_requested.emit(fid)
+
+    def _edit_double_clicked(self, x: float, y: float) -> None:
+        if self._edit_project is not None:
+            self._properties_at(x, y, self._edit_project)
 
     def _edit_clicked(self, x: float, y: float) -> None:
         if self._edit_project is not None:

@@ -353,3 +353,102 @@ def test_free_tools_refused_on_a_stale_raster(win, qapp):
     win.draw_actions["free"].trigger()
     assert win.ortho_view.mode == "pan"
     assert win.said
+
+
+def _real_double_click(view, x: float, y: float) -> None:
+    """A double click as the mouse sends it: Press, Release, Press, DblClick, Release, each to the widget of the 3D
+    view under the mouse at that moment (the first click may open the vertex editor in place of the live view)."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    left, none = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+    pos = QPointF(float(round(x)), float(round(y)))
+    for kind, buttons in ((QEvent.Type.MouseButtonPress, left), (QEvent.Type.MouseButtonRelease, none),
+                          (QEvent.Type.MouseButtonPress, left), (QEvent.Type.MouseButtonDblClick, left),
+                          (QEvent.Type.MouseButtonRelease, none)):
+        target = view.editor if view.stack.currentWidget() is view.editor else view._draw_target()
+        ev = QMouseEvent(kind, pos, target.mapToGlobal(pos), left, buttons, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(target, ev)
+
+
+def test_3d_double_click_opens_the_form_only_on_the_selected_drawing(win, qapp, monkeypatch):
+    from free3d_helpers import screen_of
+
+    from pyarchinit_photogrammetry.gui import free_drawing_dialog as fdd
+
+    ch = win.chunk
+    mv = win.model_view
+    win.show_view(mv)
+    mv.resize(640, 480)
+    mv.set_chunk(ch, "model")
+    win._draw_free_3d()
+    mv.canvas.top_view()
+    qapp.processEvents()
+    asked = []
+    monkeypatch.setattr(fdd.FreeDrawingDialog, "ask", classmethod(lambda cls, w, c, r: asked.append(r["id"])))
+    internal = _model_vertices(ch, 2)
+    before = _ids(ch)
+    mv.free_drawn.emit("line", internal)
+    fid = _new(ch, before)["id"]
+    qapp.processEvents()
+    a, b = (screen_of(mv, p) for p in internal)
+    middle = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    mv.start_free_select()
+    qapp.processEvents()
+    _real_double_click(mv, *middle)
+    qapp.processEvents()
+    assert mv.selected_free == fid
+    assert asked == [fid]
+    # a double click on empty space: the selection goes, no form
+    w, h = mv.canvas.width(), mv.canvas.height()
+    _real_double_click(mv, 3, 3)
+    qapp.processEvents()
+    assert asked == [fid]
+    assert mv.selected_free is None
+    # the double click that ends a new 3D line: no form, though a drawing was selected before
+    _real_double_click(mv, *middle)
+    qapp.processEvents()
+    assert mv.selected_free == fid and asked == [fid, fid]
+    mv.start_drawing("line")
+    before = _ids(ch)
+    from free3d_helpers import click_at
+
+    p, q = (0.4 * w, 0.45 * h), (0.6 * w, 0.55 * h)  # the middle of the trench seen from above: on the model
+    click_at(mv, *p)
+    assert len(mv.drawing_vertices()) == 1
+    _real_double_click(mv, *q)
+    qapp.processEvents()
+    assert len(_ids(ch)) == len(before) + 1  # the line ended
+    assert asked == [fid, fid]
+    mv.stop_drawing()
+
+
+def test_name_in_the_layer_pane_and_colour_back_to_the_layer(win, qapp):
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.gui import free_drawing_dialog as fdd
+
+    ch = win.chunk
+    win._show_raster("dem")
+    name = PREFIX + "Disegni 3D"
+    idx = _layer_ids(win.ortho_view, name).index("f1")
+    win.layers_pane.attribute_edited.emit(name, idx, "name", "Soglia")
+    qapp.processEvents()
+    assert next(f for f in free_drawings.features(ch) if f["id"] == "f1")["name"] == "Soglia"
+    free_drawings.update(ch, "f1", colour="#ff0000")
+    rec = next(f for f in free_drawings.features(ch) if f["id"] == "f1")
+    dlg = fdd.FreeDrawingDialog(win, ch, rec)
+    dlg.colour_edit.setText("")
+    values = dlg.values()
+    dlg.close()
+    assert values["colour"] == ""
+    import pytest as _pt
+
+    mp = _pt.MonkeyPatch()
+    try:
+        mp.setattr(fdd.FreeDrawingDialog, "ask", classmethod(lambda cls, w, c, r: values))
+        assert win.free_properties("f1")
+    finally:
+        mp.undo()
+    rec = next(f for f in free_drawings.features(ch) if f["id"] == "f1")
+    assert "colour" not in rec and free_drawings.colour_of(ch, rec) == free_drawings.DEFAULT_COLOUR
