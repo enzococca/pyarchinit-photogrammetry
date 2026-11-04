@@ -3762,6 +3762,16 @@ class MainWindow(QMainWindow):
         calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
         kept versions made in another system."""
         items = list(stamps.stale_products(ch) if items is None else items)
+
+        def on_dem(name, fn):
+            """A step made on the DEM: left by hand when the DEM is still stale at its turn (its rebuild failed or
+            it is to be made by hand), never built on the DEM of the old system."""
+            def step(p):
+                if stamps.is_stale(ch, "dem"):
+                    raise _LeftByHand(name)
+                return fn(p)
+            return step
+
         steps: list = []
         by_hand: list = []
         kept: list = []
@@ -3782,9 +3792,15 @@ class MainWindow(QMainWindow):
                     steps.append((name, lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p)))
                 elif product == "tin":
                     if not done_tin:
-                        steps.append((name, lambda p, ch=ch: self._rebuild_tin(ch, p)))
+                        fn = lambda p, ch=ch: self._rebuild_tin(ch, p)  # noqa: E731
+                        from_dem = ((ch.meta.get("tin") or {}).get("source") or "dem") == "dem"
+                        steps.append((name, on_dem(name, fn) if from_dem else fn))
                 elif product in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect"):
-                    steps.append((name, lambda p, ch=ch, product=product: self._rebuild_product(ch, product, p)))
+                    fn = lambda p, ch=ch, product=product: self._rebuild_product(ch, product, p)  # noqa: E731
+                    from_dem = product in ("dem_precision", "coverage", "slope", "aspect") or (
+                        product == "orthomosaic" and ((ch.meta.get("orthomosaic") or {}).get("surface") or "dem")
+                        == "dem")
+                    steps.append((name, on_dem(name, fn) if from_dem else fn))
                 else:
                     by_hand.append(name)
             elif kind == "elevation":
@@ -3792,7 +3808,7 @@ class MainWindow(QMainWindow):
                 if entry is not None:
                     steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
             elif kind == "relief":
-                steps.append((name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p)))
+                steps.append((name, on_dem(name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p))))
             elif kind == "version":
                 kept.append(f"{tr(stamps.NAMES.get(product, product))} «{name}»")
             else:

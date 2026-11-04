@@ -100,6 +100,7 @@ def test_three_picks_fill_the_dialog_and_preview(win, qapp):
     assert np.allclose(axes[1], frame.axes, atol=1e-9)
     assert axes[2] >= 0.05
     win.show_view(win.model_view)
+    qapp.processEvents()  # the view laid out and sized before it is painted (it was not, once, under load)
     shown = win.model_view.canvas.grab().toImage()  # the axes painted over the view
     from PySide6.QtGui import QColor
 

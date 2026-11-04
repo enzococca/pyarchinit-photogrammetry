@@ -277,7 +277,8 @@ def test_tin_left_by_hand_when_the_dem_stays_stale(win, qapp, monkeypatch):
     assert built == []
     text = next(t for kind, t in win.said if kind == "info")
     assert "Non riusciti: DEM" in text
-    assert "Da rifare a mano: TIN" in text
+    left = next(line for line in text.splitlines() if line.startswith("Da rifare a mano: "))
+    assert "TIN" in left.split(": ", 1)[1].split(", ")
     assert stamps.is_stale(ch, "tin")
 
 
@@ -306,3 +307,58 @@ def test_tin_rebuilt_with_its_boundary_and_classes(win, qapp, monkeypatch):
     want = np.asarray(square) @ m[:2, :2].T + m[:2, 3]
     got = np.asarray(k["boundary"].exterior.coords)[:-1, :2]
     assert np.allclose(got, want, atol=1e-6)
+
+
+def test_precision_and_coverage_follow_a_stale_dem(win, monkeypatch):
+    from orient_helpers import centre
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.engine import fieldcheck, precision
+
+    ch = win.chunk
+    x, y, z = centre(ch)
+    gx, gy = np.meshgrid(np.linspace(x - 3, x + 3, 5), np.linspace(y - 3, y + 3, 5))
+    xyz = np.column_stack([gx.ravel(), gy.ravel(), np.full(gx.size, z)])
+    monkeypatch.setattr(precision, "tie_point_precision", lambda chunk: (xyz, np.full((len(xyz), 3), 0.002)))
+    precision.dem_precision(ch)
+    assert not stamps.is_stale(ch, "dem_precision")
+    used: list = []
+    fieldcheck.coverage(ch, used=used)
+    assert used == ["dem"]  # the heights of the cells from the DEM
+    fieldcheck.field_check(ch, quality=False)
+    assert not stamps.is_stale(ch, "coverage")
+    ch.meta["built_in"]["dem"] = np.eye(4).tolist()  # the DEM of another system
+    precision.dem_precision(ch)
+    assert stamps.is_stale(ch, "dem_precision")  # on the DEM's grid: stale too
+    fieldcheck.field_check(ch, quality=False)
+    assert stamps.is_stale(ch, "coverage")
+
+
+def test_products_on_the_dem_left_by_hand_when_its_rebuild_fails(win, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    win._terrain_raster_job(ch, "slope", lambda *a, **k: None)
+    _orient(win, qapp)
+    stale = {s["product"] for s in stamps.stale_products(ch)}
+    assert {"dem", "orthomosaic", "slope"} <= stale
+    ch.meta.setdefault("orthomosaic", {})["surface"] = "dem"
+    slope = ch.product_path("slope")
+    before = slope.stat().st_mtime_ns
+    built = []
+
+    def broken(*a, **k):
+        raise RuntimeError("prova")
+
+    monkeypatch.setattr(ch, "build_dem", broken)
+    monkeypatch.setattr(ch, "build_orthomosaic", lambda *a, **k: built.append("orthomosaic"))
+    win.rebuild_stale(ch)
+    win.runner.wait()
+    qapp.processEvents()
+    assert built == []
+    assert slope.stat().st_mtime_ns == before
+    text = next(t for kind, t in win.said if kind == "info")
+    assert "Non riusciti: DEM" in text and "Rifatti" not in text
+    left = next(line for line in text.splitlines() if line.startswith("Da rifare a mano: "))
+    assert "Ortofoto" in left and "Pendenza" in left
+    assert stamps.is_stale(ch, "orthomosaic") and stamps.is_stale(ch, "slope")

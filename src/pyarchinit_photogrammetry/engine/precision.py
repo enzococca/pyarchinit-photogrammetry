@@ -318,7 +318,7 @@ def dem_precision(chunk: Chunk, max_side: int = 1024, progress: Progress | None 
                        transform=transform, nodata=-9999.0, compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(out, 1)
     chunk._set_product("dem_precision", path)
-    stamps.stamp(chunk, "dem_precision")
+    stamps.inherit(chunk, "dem_precision", "dem")  # on the DEM's grid: from a stale DEM, stale too
     progress(1.0, f"Precision of the DEM: median sigma Z {np.median(out[valid]) * 1000:.1f} mm")
     return path
 
