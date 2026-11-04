@@ -231,11 +231,12 @@ def set_layer(chunk, name: str, colour: str | None = None, visible: bool | None 
     return dict(entry)
 
 
-def colour_of(chunk, rec: dict) -> str:
-    """The colour of the free drawing ``rec``: its own, else its layer's, else :data:`DEFAULT_COLOUR`."""
+def colour_of(chunk, rec: dict, layers_: list | None = None) -> str:
+    """The colour of the free drawing ``rec``: its own, else its layer's, else :data:`DEFAULT_COLOUR`. ``layers_``:
+    the layers already read with :func:`layers` (a redraw reads them once, not once per drawing)."""
     if rec.get("colour"):
         return str(rec["colour"])
-    for x in layers(chunk):
+    for x in layers(chunk) if layers_ is None else layers_:
         if x["name"] == rec.get("layer"):
             return str(x.get("colour") or DEFAULT_COLOUR)
     return DEFAULT_COLOUR

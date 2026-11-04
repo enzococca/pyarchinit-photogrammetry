@@ -9937,9 +9937,10 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         if ch is None or self.model_view.chunk is not ch:
             return
-        hidden = {x["name"] for x in free_drawings.layers(ch) if not x.get("visible", True)}
+        layers = free_drawings.layers(ch)  # once per redraw: reading them per drawing made a redraw quadratic
+        hidden = {x["name"] for x in layers if not x.get("visible", True)}
         shown = [f for f in free_drawings.features(ch) if f["layer"] not in hidden]
-        self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f) for f in shown})
+        self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f, layers) for f in shown})
 
     def _draw_free_2d(self) -> None:
         """Per user layer a layer :data:`LAYER_PREFIX` + its name on the 2D view: on the plan the drawings by their x,
@@ -9962,15 +9963,18 @@ class MainWindow(QMainWindow):
             lo, hi = entry.get("depth") or (-np.inf, np.inf)
             margin = 2.0 * float(entry.get("resolution") or 0.0)
             band = (float(lo) - margin, float(hi) + margin)
-        layers = free_drawings.layers(ch)
+        layers = free_drawings.layers(ch)  # the layers and the drawings read once per redraw
+        by_layer: dict[str, list] = {}
+        for rec in free_drawings.features(ch):
+            by_layer.setdefault(rec["layer"], []).append(rec)
         with v.batch():
             for lay in layers:
-                feats = free_drawings.features(ch, lay["name"])
+                feats = by_layer.get(lay["name"])
                 if not feats:
                     continue
                 name = LAYER_PREFIX + lay["name"]
                 for rec in feats:
-                    colour = free_drawings.colour_of(ch, rec)
+                    colour = free_drawings.colour_of(ch, rec, layers)
                     attrs = {ID_FIELD: rec["id"], "_free": True, "name": rec["name"]}
                     xyz = np.asarray(rec["xyz"], float)
                     if frame is None:

@@ -479,3 +479,27 @@ def test_form_shows_the_vertices_in_the_interface_number_format(win, qapp):
         dlg.close()
     finally:
         i18n.set_current("it")
+
+
+def test_three_thousand_drawings_redraw_in_under_a_second(win, qapp):
+    """A redraw reads the layers once, not once per drawing: 3000 polygons in 5 layers (an imported QGIS layer of
+    stones) shown again in 2D and 3D in under a second."""
+    import time
+
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    ch = win.chunk
+    win._show_raster("dem")
+    c = ch.to_world(_model_vertices(ch, 1))[0]
+    ring = 0.01 * np.array([[np.cos(a), np.sin(a), 0.0] for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)])
+    rng = np.random.default_rng(0)
+    for i in range(3000):
+        at = c + np.array([*rng.uniform(-0.5, 0.5, 2), 0.0])
+        free_drawings.add(ch, "polygon", (at + ring).tolist(), layer=f"Pietre {i % 5}")
+    win._draw_free()  # warm up (the layers on the view created once)
+    qapp.processEvents()
+    t0 = time.perf_counter()
+    win._draw_free()
+    took = time.perf_counter() - t0
+    assert len(win.ortho_view.features(PREFIX + "Pietre 0")) == 600
+    assert took < 1.0, f"{took:.2f} s"
