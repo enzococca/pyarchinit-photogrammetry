@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import numpy as np
-from PySide6.QtCore import QLineF, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLineF, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
                                QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
                                QWidget)
 
+from ..core.free_drawings import DEFAULT_COLOUR as FREE_COLOUR
+from ..core.free_drawings import KINDS as FREE_KINDS
+from ..core.free_drawings import MIN_VERTICES as FREE_MIN_VERTICES
 from .flow_layout import FlowLayout
 from .i18n import decimal_comma, thousands_points, tr
 from .scene import OrbitCamera, SceneData, available_views, build_scene, exaggerated, sample_mesh_colors, splat
@@ -147,6 +151,48 @@ def plane_corners(origin, axes, size: float) -> np.ndarray:
     return np.array([origin - x - y, origin + x - y, origin + x + y, origin - x + y])
 
 
+# drawing in the 3D view (lines, polygons and points of the user's layers), the view live between the clicks
+CLICK_PX = 4  # a press and a release this close (screen pixels) ...
+CLICK_MS = 300  # ... and this quick are a click (a vertex); otherwise a drag of the trackball
+RUBBER_MS = 30  # the end of the rubber band picked again at most this often while the mouse moves
+SNAP_PX = 10  # a click this close to a vertex of a drawing shown or to a marker takes its exact position
+DRAWING_COLOUR = "#00e5ff"  # the feature being drawn and its rubber band
+
+
+def screen_runs(x, y, ok) -> list[list[QPointF]]:
+    """The runs of consecutive projected points that are all in the view: each one polyline (one painter call)."""
+    runs, cur = [], []
+    for a, b, good in zip(x, y, ok):
+        if good:
+            cur.append(QPointF(float(a), float(b)))
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def free_lines(sd) -> tuple[list, list]:
+    """The lines of the free drawings shown (``SceneData.free`` and the one being drawn) as (points, colour,
+    selected) lists to draw, and their points to draw as dots ((point, colour) pairs, points shown)."""
+    lines, dots = [], []
+    for _fid, kind, xyz, colour, selected in sd.free:
+        pts = np.asarray(xyz, np.float64).reshape(-1, 3)
+        if kind == "point":
+            dots += [(p, colour, selected) for p in pts]
+            continue
+        if kind == "polygon" and len(pts) >= 3:
+            pts = np.vstack([pts, pts[:1]])
+        lines.append((pts, colour, selected))
+    if sd.drawing is not None and len(sd.drawing):
+        pts = np.asarray(sd.drawing, np.float64).reshape(-1, 3)
+        if len(pts) >= 2:
+            lines.append((pts, DRAWING_COLOUR, None))  # None: the drawing in progress
+        dots += [(p, DRAWING_COLOUR, None) for p in pts]
+    return lines, dots
+
+
 class SoftwareCanvas(_TrackballCanvas, QWidget):
     """Orbit view rendered with numpy, with the trackball (left drag: rotate, right/middle drag: pan,
     wheel: zoom toward the cursor, Shift+wheel: dolly, double click: centre of rotation)."""
@@ -166,6 +212,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         self.show_markers = True
         self.show_region = True
         self.point_size = 2  # screen pixels of a point
+        self.hint = ""  # a line of help in the upper left corner (drawing in 3D)
         self._image: QImage | None = None
         self._dirty = True
         self._dragging = False
@@ -299,6 +346,11 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
                 p.drawLines(edges)
         if self.sd.axes is not None:  # the axes of a new local system (Orienta il sistema locale)
             self._paint_axes(p, w, h)
+        if self.sd.free or self.sd.drawing is not None:  # the free drawings and the one being drawn
+            self._paint_free(p, w, h)
+        if self.hint:
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(8, 18, self.hint)
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         if self.sd.exaggeration != 1.0:
@@ -309,6 +361,40 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
     def update_axes(self) -> None:
         """Only the axes drawn again: painted over the image, which stays."""
         self.update()
+
+    def update_free(self) -> None:
+        """Only the free drawings drawn again: painted over the image, which stays."""
+        self.update()
+
+    def set_hint(self, text: str) -> None:
+        self.hint = text
+        self.update()
+
+    def _paint_free(self, p: QPainter, w: int, h: int) -> None:
+        """The free drawings: one polyline per line or polygon (closed), the points and the vertices of the drawing in
+        progress as dots, one ``drawPoints`` per colour; the drawing in progress dashed."""
+        lines, dots = free_lines(self.sd)
+        for pts, colour, selected in lines:
+            pen = QPen(QColor(colour), 4 if selected else 2)
+            if selected is None:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            x, y, _, ok = self.cam.project(pts, w, h)
+            for run in screen_runs(x, y, ok):
+                if len(run) >= 2:
+                    p.drawPolyline(QPolygonF(run))
+        groups: dict = {}
+        for pt, colour, selected in dots:
+            groups.setdefault((colour, selected), []).append(pt)
+        for (colour, selected), pts in groups.items():
+            x, y, _, ok = self.cam.project(np.asarray(pts), w, h)
+            q = [QPointF(float(a), float(b)) for a, b, good in zip(x, y, ok) if good]
+            if not q:
+                continue
+            pen = QPen(QColor(colour), 10 if selected else (6 if selected is None else 8))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawPoints(QPolygonF(q))
 
     def _paint_axes(self, p: QPainter, w: int, h: int) -> None:
         """The previewed axes: the plane x-y a translucent square, then x, y, z from the origin."""
@@ -406,11 +492,15 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
     def snapshot(self):
         """The current frame and the projection of scene points to widget pixels at this moment:
         ``(QImage, project(pts) -> (x, y, depth, ok))``."""
+        return self._grab(), self.projector()
+
+    def projector(self):
+        """The projection of scene points to widget pixels at this moment, without grabbing the frame."""
         import copy
 
         cam = copy.deepcopy(self.cam)
         w, h = max(self.width(), 1), max(self.height(), 1)
-        return self._grab(), lambda pts: cam.project(pts, w, h)
+        return lambda pts: cam.project(pts, w, h)
 
     def _grab(self) -> QImage:
         """The frame without the trackball."""
@@ -531,6 +621,8 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         self.show_markers = True
         self.show_region = True
         self.point_size = 2.0  # screen pixels of a point
+        self.hint = ""  # a line of help in the upper left corner (drawing in 3D)
+        self._free_actors: list = []
         self._cloud_actor = None
         self._init_trackball()
         self._tb_actors = self._make_trackball_actors()
@@ -711,6 +803,10 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             pl.add_mesh(pv.PolyData(np.asarray(sd.region, np.float64), lines=lines), color="#ffd200", line_width=2)
         self._axes_actors = []
         self._add_axes(sd)
+        self._free_actors = []
+        self._add_free(sd)
+        if self.hint:
+            pl.add_text(self.hint, position="upper_left", font_size=10, color="white", name="ppg_hint")
         if sd.exaggeration != 1.0:
             pl.add_text(exaggeration_text(sd.exaggeration), position="lower_left", font_size=10, color="#c8c8c8")
         if reset:
@@ -732,6 +828,52 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             self._axes_actors.append(pl.add_mesh(pv.PolyData(np.vstack([origin, origin + size * axes[i]]),
                                                              lines=np.array([2, 0, 1])),
                                                  color=AXES_COLOURS[i], line_width=2))
+
+    def _add_free(self, sd: SceneData) -> None:
+        """The free drawings as actors of their own: one polydata of the lines (colour per cell), one of the selected
+        lines (thicker), one of the dots (points and the vertices of the drawing in progress)."""
+        import pyvista as pv
+
+        lines, dots = free_lines(sd)
+        pl = self.plotter
+        for chosen in (False, True):
+            pts, cells, rgb = [], [], []
+            for xyz, colour, selected in lines:
+                if bool(selected) != chosen:
+                    continue
+                first = sum(len(a) for a in pts)
+                pts.append(xyz)
+                cells += [len(xyz)] + list(range(first, first + len(xyz)))
+                rgb.append(QColor(colour).getRgb()[:3])
+            if not pts:
+                continue
+            poly = pv.PolyData(np.vstack(pts), lines=np.asarray(cells, np.int64))
+            poly.cell_data["rgb"] = np.asarray(rgb, np.uint8)
+            self._free_actors.append(pl.add_mesh(poly, scalars="rgb", rgb=True, preference="cell",
+                                                 line_width=5 if chosen else 3, lighting=False,
+                                                 show_scalar_bar=False, reset_camera=False))
+        if dots:
+            cloud = pv.PolyData(np.asarray([d[0] for d in dots], np.float64))
+            cloud["rgb"] = np.asarray([QColor(d[1]).getRgb()[:3] for d in dots], np.uint8)
+            self._free_actors.append(pl.add_mesh(cloud, scalars="rgb", rgb=True, point_size=9,
+                                                 render_points_as_spheres=True, lighting=False,
+                                                 show_scalar_bar=False, reset_camera=False))
+
+    def update_free(self) -> None:
+        """Only the free drawings drawn again (``sd.free`` or ``sd.drawing`` changed): the rest of the scene stays."""
+        for actor in self._free_actors:
+            self.plotter.remove_actor(actor, render=False)
+        self._free_actors = []
+        if self.sd is not None:
+            self._add_free(self.sd)
+        self.plotter.render()
+
+    def set_hint(self, text: str) -> None:
+        self.hint = text
+        self.plotter.remove_actor("ppg_hint", render=False)
+        if text:
+            self.plotter.add_text(text, position="upper_left", font_size=10, color="white", name="ppg_hint")
+        self.plotter.render()
 
     def update_axes(self) -> None:
         """Only the axes drawn again (``sd.axes`` changed): the rest of the scene stays."""
@@ -770,14 +912,19 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
     def snapshot(self):
         """The current frame and the projection of scene points to widget pixels (VTK camera)."""
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        project = self.projector()
+        arr = np.ascontiguousarray(self.grab_array())
+        img = QImage(arr.data, arr.shape[1], arr.shape[0], 3 * arr.shape[1], QImage.Format.Format_RGB888).copy()
+        return img.scaled(w, h), project
+
+    def projector(self):
+        """The projection of scene points to widget pixels at this moment (VTK camera), without grabbing the frame."""
         ren = self.plotter.renderer
         cam = ren.GetActiveCamera()
         w, h = max(self.width(), 1), max(self.height(), 1)
         m = cam.GetCompositeProjectionTransformMatrix(ren.GetTiledAspectRatio(), -1, 1)
         M = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)])
-        arr = np.ascontiguousarray(self.grab_array())
-        img = QImage(arr.data, arr.shape[1], arr.shape[0], 3 * arr.shape[1], QImage.Format.Format_RGB888).copy()
-        img = img.scaled(w, h)
 
         def project(pts):
             P = np.c_[np.asarray(pts, float), np.ones(len(pts))] @ M.T
@@ -787,7 +934,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             ok = (wv > 0) & (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1)
             return (ndc[:, 0] + 1) / 2 * w, (1 - ndc[:, 1]) / 2 * h, wv, ok
 
-        return img, project
+        return project
 
     def view_ray(self, x: float, y: float):
         """Line of sight through widget pixel (x, y) (scene coordinates) and the size of a pixel
@@ -1023,6 +1170,8 @@ class ModelView(QWidget):
     # whole cloud or the faces of the model, from start_lasso("orient")
     orient_requested = Signal(str, object)
     # "axis" (2 points, internal): the axis of a cylindrical development
+    free_drawn = Signal(str, object)  # a free drawing ended: kind (line, polygon, point), (N, 3) vertices (internal)
+    CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1137,6 +1286,20 @@ class ModelView(QWidget):
         elev_menu.addAction(tr("Ortofoto da questa vista"), self._elevation_from_view)
         elev_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("elev_p"))
         self.b_elevation.setMenu(elev_menu)
+        self.b_draw3d = QPushButton(tr("Disegna"))
+        self.b_draw3d.setToolTip(tr("Linee, poligoni e punti disegnati sul modello o sulla nuvola nei layer dei disegni: "
+                                    "clic per i vertici, trascina per ruotare la vista fra un clic e l'altro, "
+                                    "Backspace toglie l'ultimo vertice, Invio o doppio clic finisce, Esc annulla"))
+        draw_menu = QMenu(self.b_draw3d)
+        draw_menu.addAction(tr("Linea 3D"), lambda: self.start_drawing("line"))
+        draw_menu.addAction(tr("Poligono 3D"), lambda: self.start_drawing("polygon"))
+        draw_menu.addAction(tr("Punto 3D"), lambda: self.start_drawing("point"))
+        draw_menu.addSeparator()
+        self.a_free_select = draw_menu.addAction(tr("Seleziona e modifica"))
+        self.a_free_drape = draw_menu.addAction(tr("Drappeggia sul modello"))
+        self.a_free_select.setEnabled(False)
+        self.a_free_drape.setEnabled(False)
+        self.b_draw3d.setMenu(draw_menu)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -1158,6 +1321,7 @@ class ModelView(QWidget):
         bar.addWidget(self.b_slice)
         bar.addWidget(self.b_cut)
         bar.addWidget(self.b_elevation)
+        bar.addWidget(self.b_draw3d)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
@@ -1209,6 +1373,17 @@ class ModelView(QWidget):
         self.highlight = None  # mask over the dense cloud shown in red (what a cleaning would remove)
         self._project = None
         self._filling = False
+        self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
+        self._draw_kind: str | None = None  # the kind being drawn, None: not drawing
+        self._draw_pts: list = []  # its vertices (internal)
+        self._rubber = None  # the end of its rubber band (internal), None: nothing under the cursor
+        self._press = None  # (x, y, time) of a left press while drawing
+        self._rubber_pos = None
+        self._rubber_last = 0.0
+        self._rubber_timer = QTimer(self)
+        self._rubber_timer.setSingleShot(True)
+        self._rubber_timer.timeout.connect(self._rubber_tick)
+        self._draw_target().installEventFilter(self)
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
 
@@ -1293,6 +1468,7 @@ class ModelView(QWidget):
             self._filling = filling
 
     def set_chunk(self, chunk, kind: str | None = None) -> None:
+        self.stop_drawing()
         self._clear_version()
         self.highlight = None
         self.chunk = chunk
@@ -1368,6 +1544,7 @@ class ModelView(QWidget):
         self.b_cut.setVisible(self.kind in ("model", "model_textured") and not self.paths)
         self.b_elevation.setVisible(self.kind in self.PICK_KINDS and not self.paths)
         self.b_photos.setVisible(self.kind in self.PICK_KINDS)
+        self.b_draw3d.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
                                or (self.kind in ("point_cloud", "model") and mode == "confidence"))
@@ -1395,6 +1572,7 @@ class ModelView(QWidget):
         photos that see the point (``purpose`` "photos")."""
         if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
             return
+        self.stop_drawing()
         image, self._project = self.canvas.snapshot()
         self._ray = self.canvas.view_ray
         self._purpose = purpose
@@ -1565,6 +1743,7 @@ class ModelView(QWidget):
         inside))`` instead (the area of a plane of the orientation, not a selection to classify or delete)."""
         if self.kind not in ("point_cloud", "model") or self.chunk is None:
             return
+        self.stop_drawing()
         self._lasso_purpose = purpose
         image, self._project = self.canvas.snapshot()
         self.lasso.start(image)
@@ -1730,6 +1909,8 @@ class ModelView(QWidget):
                 self.set_pivot(pivot)
 
     def refresh(self, reset: bool = False) -> None:
+        if self.kind not in self.PICK_KINDS or self.chunk is None:
+            self.stop_drawing()
         self.canvas.show_cameras = self.cb_cams.isChecked()
         self.canvas.show_markers = self.cb_marks.isChecked()
         self.canvas.show_region = self.cb_region.isChecked()
@@ -1744,6 +1925,7 @@ class ModelView(QWidget):
                           max_textured_faces=8_000_000 if vtk else 3_000_000)
               if self.chunk is not None else SceneData(np.zeros(3)))
         sd.axes = self._scene_axes(sd)
+        sd.free, sd.drawing = self._scene_free(sd), self._scene_drawing(sd)
         self.base_sd = sd
         self.sd = sd = exaggerated(sd, self.exaggeration)
         if mode == "class":
@@ -1755,3 +1937,232 @@ class ModelView(QWidget):
                                 else tr("Senza confidenza: Flusso di lavoro > Calcola la confidenza"))
         self.info_label.setVisible(bool(sd.confidence_missing or sd.hag_missing))
         self.canvas.set_scene(sd, reset=reset)
+
+    # ----------------------------------------------------------- free drawings
+    def set_free(self, features_world, colours=None, selected=None) -> None:
+        """The free drawings shown: ``features_world`` records with ``id``, ``kind`` and ``xyz`` in the coordinates of
+        the chunk (as :func:`core.free_drawings.features` gives them); ``colours`` id -> "#rrggbb" (or a list in the
+        order of the features; the record's own ``colour`` or the default otherwise); ``selected`` an id or ids drawn
+        thicker."""
+        colours = colours if colours is not None else {}
+        chosen = {selected} if isinstance(selected, str) else set(selected or ())
+        out = []
+        for i, rec in enumerate(features_world):
+            fid = str(rec["id"])
+            colour = colours.get(fid) if isinstance(colours, dict) else (colours[i] if i < len(colours) else None)
+            out.append((fid, str(rec["kind"]), np.asarray(rec["xyz"], np.float64).reshape(-1, 3),
+                        colour or rec.get("colour") or FREE_COLOUR, fid in chosen))
+        self._free = out
+        self._put_free()
+
+    @property
+    def drawing_kind(self) -> str | None:
+        """The kind being drawn (line, polygon, point), None when not drawing."""
+        return self._draw_kind
+
+    def drawing_vertices(self) -> np.ndarray:
+        """The vertices clicked so far (internal), (N, 3)."""
+        return np.array(self._draw_pts, np.float64).reshape(-1, 3)
+
+    def _draw_target(self) -> QWidget:
+        """The widget that gets the mouse and the keys of the view."""
+        return self.canvas.plotter.interactor if isinstance(self.canvas, VtkCanvas) else self.canvas
+
+    def start_drawing(self, kind: str) -> None:
+        """Draw a ``kind`` (line, polygon, point) on what is shown: the view stays live, a click adds a vertex on
+        the surface (or the vertex of a drawing or a marker within ``SNAP_PX``), a drag rotates; Backspace removes the
+        last vertex, Enter or a double click ends, Esc gives up; a point ends at its click. Each feature ended goes
+        to ``free_drawn`` and the tool stays on for the next one until Esc."""
+        if kind not in FREE_KINDS or self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
+            return
+        current = self.stack.currentWidget()  # a pick or a lasso on screen is given up
+        if current is self.picker:
+            self.picker.finished.emit(None)
+        elif current is self.lasso:
+            self.lasso.finished.emit(None)
+        self._draw_kind = kind
+        self._draw_pts, self._rubber, self._press = [], None, None
+        self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
+        self._put_free()
+        self._draw_target().setFocus()
+
+    def stop_drawing(self) -> None:
+        """The drawing given up (nothing emitted) and the tool off."""
+        if getattr(self, "_draw_kind", None) is None:
+            return
+        self._draw_kind = None
+        self._draw_pts, self._rubber, self._press = [], None, None
+        self._draw_mesh = None
+        self._rubber_timer.stop()
+        self.canvas.set_hint("")
+        self._put_free()
+
+    def _scene_free(self, sd) -> list:
+        if sd is None:
+            return []
+        off = np.asarray(sd.offset, np.float64)
+        return [(fid, kind, xyz - off, colour, sel) for fid, kind, xyz, colour, sel in self._free]
+
+    def _scene_drawing(self, sd):
+        if sd is None or self._draw_kind is None or self.chunk is None:
+            return None
+        pts = list(self._draw_pts) + ([self._rubber] if self._rubber is not None and self._draw_pts else [])
+        if not pts:
+            return None
+        return self.chunk.to_world(np.asarray(pts, np.float64)) - np.asarray(sd.offset, np.float64)
+
+    def _put_free(self) -> None:
+        """The free drawings and the drawing in progress put on the scenes (true and shown) and drawn again."""
+        if self.base_sd is not None:
+            self.base_sd.free, self.base_sd.drawing = self._scene_free(self.base_sd), self._scene_drawing(self.base_sd)
+        if self.sd is None:
+            return
+        sd = self.sd
+        sd.free = [(fid, kind, sd.to_display(xyz), colour, sel) for fid, kind, xyz, colour, sel in self._scene_free(sd)]
+        drawing = self._scene_drawing(sd)
+        sd.drawing = None if drawing is None else sd.to_display(drawing)
+        if self.canvas is not None:
+            self.canvas.update_free()
+
+    def eventFilter(self, obj, ev) -> bool:
+        if getattr(self, "_draw_kind", None) is None or obj is not self._draw_target():
+            return super().eventFilter(obj, ev)
+        kind = ev.type()
+        if kind == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+            self._press = (ev.position().x(), ev.position().y(), time.monotonic())
+        elif kind == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton:
+            press, self._press = self._press, None
+            x, y = ev.position().x(), ev.position().y()
+            if (press is not None and np.hypot(x - press[0], y - press[1]) <= CLICK_PX
+                    and (time.monotonic() - press[2]) * 1000 <= CLICK_MS):
+                self._click(x, y)
+        elif kind == QEvent.Type.MouseButtonDblClick:
+            self._press = None
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._finish()
+            return True  # not the centre of rotation
+        elif kind == QEvent.Type.MouseMove and not ev.buttons():
+            self._rubber_request(ev.position().x(), ev.position().y())
+        elif kind == QEvent.Type.KeyPress:
+            key = ev.key()
+            if key == Qt.Key.Key_Backspace:
+                if self._draw_pts:
+                    self._draw_pts.pop()
+                    self._put_free()
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish()
+                return True
+            if key == Qt.Key.Key_Escape:
+                self.stop_drawing()
+                return True
+        return super().eventFilter(obj, ev)
+
+    def _snap(self, x: float, y: float, project):
+        """The exact position (internal) of the vertex of a drawing shown or of the marker within ``SNAP_PX`` of
+        the pixel (x, y), the nearest one; None when there is none."""
+        sd, chunk = self.sd, self.chunk
+        shown, inner = [], []
+        for _fid, _kind, world, _colour, _sel in self._free:
+            shown.append(sd.to_display(world - sd.offset))
+            inner.append(chunk.to_internal(world))
+        if sd.markers:
+            marks = np.array([m[1] for m in sd.markers], np.float64)
+            shown.append(marks)
+            inner.append(chunk.to_internal(sd.from_display(marks) + sd.offset))
+        if not shown:
+            return None
+        px, py, _depth, ok = project(np.vstack(shown))
+        d2 = (px - x) ** 2 + (py - y) ** 2
+        d2[~ok] = np.inf
+        k = int(np.argmin(d2))
+        return np.vstack(inner)[k] if d2[k] <= SNAP_PX ** 2 else None
+
+    def _click(self, x: float, y: float) -> None:
+        """A click while drawing: a vertex on the surface under it (or snapped); the same place clicked again
+        (the second click of a double click) adds nothing."""
+        if self.chunk is None or self.sd is None:
+            return
+        _image, project = self.canvas.snapshot()
+        if self._draw_pts:
+            last = self.sd.to_display(self.chunk.to_world(np.asarray(self._draw_pts[-1])[None]) - self.sd.offset)
+            lx, ly, _d, ok = project(last)
+            if ok[0] and np.hypot(lx[0] - x, ly[0] - y) <= CLICK_PX:
+                return
+        point = self._snap(x, y, project)
+        if point is None and self.kind in ("model", "model_textured"):
+            point = self._model_hit(x, y)
+        if point is None:
+            point = self.pick_point(x, y, project, self.canvas.view_ray)
+        if point is None:  # nothing of the model there
+            return
+        self._draw_pts.append(np.asarray(point, np.float64).reshape(3))
+        self._rubber = None
+        if self._draw_kind == "point":
+            self._finish()
+        else:
+            self._put_free()
+
+    def _model_hit(self, x: float, y: float):
+        """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
+        the model cannot be read: a vertex drawn on the model lies on the model, not on the dense cloud near it."""
+        path = self.paths.get(self.kind) or self.paths.get("model") or self.chunk.product_path("model")
+        if not path or not os.path.exists(path):
+            return None
+        key = (str(path), os.path.getmtime(path))
+        cached = getattr(self, "_draw_mesh", None)
+        if cached is None or cached[0] != key:
+            try:
+                from ..engine.visibility import Raycaster
+                from ..io.mesh_ply import read_mesh
+
+                mesh = read_mesh(path)
+                xyz = np.asarray(mesh.xyz, np.float64)
+                centre = xyz.mean(axis=0) if len(xyz) else np.zeros(3)
+                cached = (key, centre, Raycaster(xyz - centre, np.asarray(mesh.faces, np.int64)))
+            except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
+                cached = (key, None, None)
+            self._draw_mesh = cached
+        _key, centre, caster = cached
+        if caster is None:
+            return None
+        sd = self.sd
+        origin, direction, _pixel = self.canvas.view_ray(x, y)  # a line of the view is a line of the true scene too
+        o, e = self.chunk.to_internal(sd.from_display(np.array([origin, origin + direction])) + sd.offset)
+        d = (e - o) / np.linalg.norm(e - o)
+        t = float(caster.hit_distance((o - centre)[None], d[None])[0])
+        return o + t * d if np.isfinite(t) else None
+
+    def _finish(self) -> None:
+        """The feature ended when it has enough vertices (emitted, the tool ready for the next one); otherwise the
+        drawing goes on."""
+        kind = self._draw_kind
+        if kind is None or len(self._draw_pts) < FREE_MIN_VERTICES[kind]:
+            return
+        xyz = self.drawing_vertices()
+        self._draw_pts, self._rubber = [], None
+        self._put_free()
+        self.free_drawn.emit(kind, xyz)
+
+    def _rubber_request(self, x: float, y: float) -> None:
+        """The cursor moved while drawing: the end of the rubber band picked again, at most every ``RUBBER_MS``."""
+        if not self._draw_pts or self._draw_kind == "point":
+            return
+        self._rubber_pos = (x, y)
+        wait = RUBBER_MS - (time.monotonic() - self._rubber_last) * 1000
+        if wait <= 0:
+            self._rubber_tick()
+        elif not self._rubber_timer.isActive():
+            self._rubber_timer.start(int(np.ceil(wait)))
+
+    def _rubber_tick(self) -> None:
+        if self._draw_kind is None or not self._draw_pts or self._rubber_pos is None or self.sd is None:
+            return
+        self._rubber_last = time.monotonic()
+        x, y = self._rubber_pos
+        project = self.canvas.projector()
+        point = self._snap(x, y, project)
+        if point is None:
+            point = self.pick_point(x, y, project)  # no refinement on the surface: fast while moving
+        self._rubber = None if point is None else np.asarray(point, np.float64).reshape(3)
+        self._put_free()
