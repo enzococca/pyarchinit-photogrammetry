@@ -359,6 +359,66 @@ def _adjacency(fa: np.ndarray, allowed: np.ndarray):
     return np.searchsorted(src[order], np.arange(k + 1)), dst[order], fl[order]
 
 
+def _height_at(t: np.ndarray, h: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Height of the plane of each projected triangle ``t`` (P, 3, 2) with corner heights ``h`` (P, 3) at the
+    point ``q`` (P, 2) (barycentric)."""
+    e1, e2, d = t[:, 1] - t[:, 0], t[:, 2] - t[:, 0], q - t[:, 0]
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    det = np.where(det != 0, det, 1.0)
+    b1 = (d[:, 0] * e2[:, 1] - d[:, 1] * e2[:, 0]) / det
+    b2 = (e1[:, 0] * d[:, 1] - e1[:, 1] * d[:, 0]) / det
+    return h[:, 0] + b1 * (h[:, 1] - h[:, 0]) + b2 * (h[:, 2] - h[:, 0])
+
+
+def _nearest_wins(geoms, tris, a2: np.ndarray, depth: np.ndarray, eps: float) -> np.ndarray:
+    """Area of each clipped projection ``geoms`` (S,) once every overlap between them is given to the face nearer
+    the viewer: ``tris`` the whole projected faces as polygons, ``a2`` (S, 3, 2) their corners, ``depth`` (S, 3)
+    the corners' heights along the view. The pairs whose boxes meet come from an STRtree; the separating-axis
+    test on the two triangles drops, with ``eps`` of tolerance, the pairs that only touch (every neighbour of a
+    face in a sound mesh); the few that overlap are cut exactly, and the face lower at a point of the overlap
+    loses it (an overhang hides the ground under it, a fold is counted once)."""
+    import shapely
+
+    area = shapely.area(geoms)
+    if len(geoms) < 2:
+        return area
+    i, j = shapely.STRtree(tris).query(tris)
+    pair = i < j
+    i, j = i[pair], j[pair]
+    if not len(i):
+        return area
+    ta, tb = a2[i], a2[j]
+    apart = np.zeros(len(i), bool)
+    for t in (ta, tb):
+        for k in range(3):
+            e = t[:, (k + 1) % 3] - t[:, k]
+            axis = np.stack([-e[:, 1], e[:, 0]], axis=1)
+            length = np.linalg.norm(axis, axis=1)
+            real = length > 0
+            axis /= np.where(real, length, 1.0)[:, None]
+            pa, pb = np.einsum("pkd,pd->pk", ta, axis), np.einsum("pkd,pd->pk", tb, axis)
+            apart |= real & ((pa.max(axis=1) <= pb.min(axis=1) + eps) | (pb.max(axis=1) <= pa.min(axis=1) + eps))
+    i, j = i[~apart], j[~apart]
+    if not len(i):
+        return area
+    over = shapely.intersection(geoms[i], geoms[j])
+    real = shapely.area(over) > eps * eps
+    i, j, over = i[real], j[real], over[real]
+    if not len(i):
+        return area
+    q = shapely.get_coordinates(shapely.point_on_surface(over))
+    loser = np.where(_height_at(a2[i], depth[i], q) >= _height_at(a2[j], depth[j], q), j, i)
+    order = np.argsort(loser, kind="stable")
+    loser, over = loser[order], over[order]
+    who, start, count = np.unique(loser, return_index=True, return_counts=True)
+    hidden = np.zeros(len(geoms))
+    one = count == 1
+    hidden[who[one]] = shapely.area(over[start[one]])
+    for w, s, c in zip(who[~one], start[~one], count[~one]):
+        hidden[w] = shapely.area(shapely.union_all(over[s:s + c]))
+    return np.maximum(area - hidden, 0.0)
+
+
 def model_area_inside(model, xyz, toward=None) -> dict:
     """Surface of the model that the polygon ``xyz`` was drawn on: the connected patch of its faces reached
     from the faces under the vertices.
@@ -373,9 +433,11 @@ def model_area_inside(model, xyz, toward=None) -> dict:
     back of a closed object do not; the normals are made to agree along the way, so the winding of the
     mesh does not matter). Nothing in front of the drawing is tested: a roof over a floor or a screen before
     a wall is measured only if the mesh joins it to the drawn surface within the footprint; a curved wall
-    drawn by its corners is followed whole. A face seen edge-on (|cosine| < EDGE_ON, an exactly vertical
-    face in plan) counts its 3D area by the share of its projected segment inside the footprint (on the
-    outline: none).
+    drawn by its corners is followed whole. Where two faces of the patch overlap in the projection (the
+    ground under a ledge reached through the ledge's front, a fold of a noisy mesh) the overlap goes to the
+    face nearer the viewer, so the projected area never exceeds the footprint. A face seen edge-on
+    (|cosine| < EDGE_ON, an exactly vertical face in plan) counts its 3D area by the share of its projected
+    segment inside the footprint (on the outline: none).
     Returns ``surface``, ``plan`` (the clipped area in the projection used: horizontal, or the plane's;
     edge-on faces add nothing to it), ``coverage`` (``plan`` / the polygon's area in that projection, at most
     1), ``faces`` (faces with something counted) and ``projection``."""
@@ -473,20 +535,19 @@ def model_area_inside(model, xyz, toward=None) -> dict:
             orient[nb] = o[ok][first]
             frontier = nb
     # the areas: the clipped projection / |cosine| of the faces seen face-on, exact where a face may cross the
-    # outline; the 3D area of the faces seen edge-on by the share of their segment inside the outline
+    # outline, the overlaps between them (an overhang over the ground, a fold) counted once, for the nearer face;
+    # the 3D area of the faces seen edge-on by the share of their segment inside the outline
     clip = np.zeros(len(active))
-    solid = kept & ~edge_on
-    convex = poly.geom_type == "Polygon" and poly.convex_hull.area <= poly.area * (1 + 1e-9)
-    whole = solid & inside3 if convex else np.zeros(len(active), bool)
-    clip[whole] = np.abs(nrm[whole, 2]) / 2.0
-    rest = np.flatnonzero(solid & ~whole)
-    if len(rest):
-        g = shapely.polygons(a2[rest])
-        if not convex:
-            inner = shapely.contains_properly(poly, g)
-            clip[rest[inner]] = np.abs(nrm[rest[inner], 2]) / 2.0
-            rest, g = rest[~inner], g[~inner]
-        clip[rest] = shapely.area(shapely.intersection(g, poly))
+    solid = np.flatnonzero(kept & ~edge_on)
+    if len(solid):
+        g = shapely.polygons(a2[solid])
+        if poly.geom_type == "Polygon" and poly.convex_hull.area <= poly.area * (1 + 1e-9):
+            whole = inside3[solid]
+        else:
+            whole = shapely.contains_properly(poly, g)
+        cg = g.copy()
+        cg[~whole] = shapely.intersection(g[~whole], poly)
+        clip[solid] = _nearest_wins(cg, g, a2[solid], side * tri[solid, :, 2], 1e-9 * max(x1 - x0, y1 - y0))
     surface = float((clip[solid] / np.abs(cosine[solid])).sum())
     counted = clip > 0
     sharp = np.flatnonzero(kept & edge_on & (seg_len > 0))

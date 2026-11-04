@@ -397,6 +397,7 @@ def test_model_area_is_fast_on_a_large_mesh(noisy):
     out = measures.model_area_inside(mesh, poly)
     assert time.perf_counter() - start < 1.0
     assert out["coverage"] >= 0.98 and out["surface"] > out["plan"]
+    assert out["plan"] <= measures.area_plan(poly) + 1e-9  # the folds of the noisy mesh are not counted twice
     if not noisy:
         assert out["coverage"] == pytest.approx(1.0, abs=1e-9)
 
@@ -476,6 +477,58 @@ def test_a_box_resting_on_a_coarse_ground(size, at):
     out = measures.model_area_inside(_merge(ground, box), poly)
     assert out["surface"] == pytest.approx(9.0, abs=1e-9) and out["faces"] == 2
     assert out["coverage"] == pytest.approx(1.0, abs=1e-9)
+
+
+def _ground_wall_and_ledge():
+    """Ground in front of a wall (y = 3) with a ledge 2 m wide and 1 m deep projecting from it at 0.85-1.15 m:
+    one connected surface (shared vertices), the ground running on under the ledge."""
+    import trimesh
+
+    index, verts, faces = {}, [], []
+
+    def vid(x, y, z):
+        key = (round(float(x), 6), round(float(y), 6), round(float(z), 6))
+        if key not in index:
+            index[key] = len(verts)
+            verts.append(key)
+        return index[key]
+
+    def quad(p0, p1, p2, p3):
+        a, b, c, d = (vid(*p) for p in (p0, p1, p2, p3))
+        faces.extend([[a, b, c], [a, c, d]])
+
+    xs = np.round(np.arange(-3, 3.001, 0.2), 6)
+    ys = np.round(np.arange(0, 3.001, 0.2), 6)
+    zs = np.array([0, 0.2, 0.4, 0.6, 0.85, 1.15, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5])
+    for i in range(len(xs) - 1):
+        for j in range(len(ys) - 1):  # the ground
+            quad((xs[i], ys[j], 0), (xs[i + 1], ys[j], 0), (xs[i + 1], ys[j + 1], 0), (xs[i], ys[j + 1], 0))
+        for k in range(len(zs) - 1):  # the wall, without the ledge's back
+            if abs(xs[i] + 0.1) < 1 and 0.85 <= zs[k] < 1.15:
+                continue
+            quad((xs[i], 3, zs[k]), (xs[i + 1], 3, zs[k]), (xs[i + 1], 3, zs[k + 1]), (xs[i], 3, zs[k + 1]))
+    lx, ly = xs[np.abs(xs) <= 1 + 1e-9], ys[ys >= 2 - 1e-9]
+    for i in range(len(lx) - 1):
+        for j in range(len(ly) - 1):
+            quad((lx[i], ly[j], 1.15), (lx[i + 1], ly[j], 1.15), (lx[i + 1], ly[j + 1], 1.15), (lx[i], ly[j + 1], 1.15))
+            quad((lx[i], ly[j], 0.85), (lx[i], ly[j + 1], 0.85), (lx[i + 1], ly[j + 1], 0.85), (lx[i + 1], ly[j], 0.85))
+        quad((lx[i], 2, 0.85), (lx[i + 1], 2, 0.85), (lx[i + 1], 2, 1.15), (lx[i], 2, 1.15))  # the front
+    for j in range(len(ly) - 1):
+        for x in (-1.0, 1.0):
+            quad((x, ly[j], 0.85), (x, ly[j + 1], 0.85), (x, ly[j + 1], 1.15), (x, ly[j], 1.15))  # the sides
+    return trimesh.Trimesh(np.array(verts, float), np.array(faces), process=False)
+
+
+def test_a_ledge_over_the_ground_is_counted_once():
+    """An outline 1 x 1.4 m from the ground onto the top of a ledge projecting from the wall: the ground under the
+    ledge is hidden by it, so the plan area is the outline's and the surface is the ground in front (0.5), the
+    ledge's top (0.9) and its front face (1 x 0.3)."""
+    mesh = _ground_wall_and_ledge()
+    poly = np.array([[-0.5, 1.5, 0], [0.5, 1.5, 0], [0.5, 2.9, 1.15], [-0.5, 2.9, 1.15]], float)
+    out = measures.model_area_inside(mesh, poly)
+    assert out["projection"] == "plan"
+    assert out["plan"] == pytest.approx(1.4, abs=1e-6) and out["coverage"] == pytest.approx(1.0, abs=1e-6)
+    assert out["surface"] == pytest.approx(0.5 + 0.9 + 0.3, abs=1e-6)
 
 
 def _coarse_floor_with_a_block(x0, x1, y0, y1, h=0.15):
