@@ -948,3 +948,36 @@ def test_undo_tells_the_listeners(processed, tmp_path):
         stop()
     assert len(seen) == 2
     assert np.allclose(seen[1] @ seen[0], np.eye(4), atol=1e-12)
+
+
+def test_photo_positions_are_carried_by_the_motion(processed, tmp_path):
+    from orient_helpers import local_copy
+
+    from pyarchinit_photogrammetry.core.camera import Reference
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    _referenced_photos(ch)
+    gps = ch.cameras[-1]  # a position in a real system (the GPS of the EXIF): not in the local frame, left as it is
+    gps.reference = Reference(location=[14.25, 41.1, 120.0], accuracy=[5.0, 5.0, 10.0])
+    gps.meta["reference_crs"] = "EPSG:4326"
+    cams = [c for c in ch.cameras if c.reference.location and c is not gps]
+    old = {c.key: np.array(c.reference.location, float) for c in cams}
+    old_accuracy = {c.key: list(c.reference.accuracy) for c in cams}
+    result = orient.orient(ch, points=ch.to_world(_surface_points(ch)))
+    m = np.asarray(result["M"], float)
+    assert result["moved"]["camera_references"] == len(cams)
+    for cam in cams:
+        assert np.allclose(cam.reference.location, geo.apply(m, old[cam.key][None])[0], atol=1e-9)
+    assert gps.reference.location == [14.25, 41.1, 120.0]
+    gps.reference = Reference()  # the fit below in the local system alone
+    oriented = np.array(ch.transform, float)
+    for mk in _orientation_markers(ch):  # the markers lose their positions: the photos place the chunk again
+        mk.position = None
+        mk.projections = {}
+    report = ch.update_transform(use_cameras=True)
+    assert "cameras" in report["method"]
+    assert np.abs(np.asarray(ch.transform) - oriented).max() < 1e-6
+    orient.put_back(result["state"])
+    for cam in cams:
+        assert np.allclose(cam.reference.location, old[cam.key], atol=0)
+        assert cam.reference.accuracy == old_accuracy[cam.key]

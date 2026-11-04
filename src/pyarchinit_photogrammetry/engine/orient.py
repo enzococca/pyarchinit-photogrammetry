@@ -332,9 +332,10 @@ def _claimed() -> set:
 @dataclass
 class OrientState:
     """What :func:`apply` changes, to put it back (:func:`put_back`): per chunk its transform (the array itself and its
-    values), system, the keys of :data:`MOVED_KEYS`, markers and scale bars; the file of the sections of the project;
-    the text of the elevations' ``frame.json`` / ``profile.json``, the tags and the grid of their rasters; clones of
-    the proxies' PLY files (under ``<chunk data>/undo/orient-<id>/``, removed by :func:`drop`)."""
+    values), system, the keys of :data:`MOVED_KEYS`, markers, scale bars and the photos' references; the file of the
+    sections of the project; the text of the elevations' ``frame.json`` / ``profile.json``, the tags and the grid of
+    their rasters; clones of the proxies' PLY files (under ``<chunk data>/undo/orient-<id>/``, removed by
+    :func:`drop`)."""
 
     chunks: list = _field(default_factory=list)
     sections: _Path | None = None
@@ -366,7 +367,8 @@ def capture(chunks, project_sections=None) -> OrientState:
         state.chunks.append({
             "chunk": ch, "transform": ch.transform, "values": np.array(ch.transform, float).copy(), "crs": ch.crs,
             "meta": {k: _copy.deepcopy(ch.meta[k]) for k in MOVED_KEYS if k in ch.meta},
-            "markers": [m.to_dict() for m in ch.markers], "scalebars": [s.to_dict() for s in ch.scalebars]})
+            "markers": [m.to_dict() for m in ch.markers], "scalebars": [s.to_dict() for s in ch.scalebars],
+            "cameras": [(cam, _copy.deepcopy(cam.reference.to_dict())) for cam in ch.cameras]})
         for _e, frame_json, profile, rasters in _elevation_files(ch):
             for path in (frame_json, profile):
                 if path is not None and path.exists():
@@ -399,6 +401,7 @@ def put_back(state: OrientState) -> None:
     import rasterio
     from affine import Affine
 
+    from ..core.camera import Reference
     from ..core.marker import Marker, ScaleBar
 
     for saved in state.chunks:
@@ -413,6 +416,8 @@ def put_back(state: OrientState) -> None:
                 ch.meta.pop(key, None)
         ch.markers = [Marker.from_dict(d) for d in saved["markers"]]
         ch.scalebars = [ScaleBar.from_dict(dict(d)) for d in saved["scalebars"]]
+        for cam, reference in saved.get("cameras") or []:
+            cam.reference = Reference.from_dict(_copy.deepcopy(reference))
     for path, text in state.texts.items():
         path.write_text(text, encoding="utf-8")
     for path, (tags, grid) in state.rasters.items():
@@ -701,6 +706,17 @@ def move_stores(chunk, m, sections=None) -> dict:
                                          accuracy=[float(a) * s for a in mk.reference.accuracy],
                                          enabled=mk.reference.enabled)))
     counts["markers"] = len(references)
+    # the photos' positions typed or imported in the local system (not those in a real system, e.g. the GPS of the
+    # EXIF in EPSG:4326): carried as the markers' references, so that the photos still agree with the chunk
+    photos = []
+    for cam in chunk.cameras:
+        if cam.reference.location and crs_mod.is_local(cam.meta.get("reference_crs", chunk.crs)):
+            from ..core.camera import Reference
+
+            photos.append((cam, Reference(location=[float(v) for v in _point(m, cam.reference.location)],
+                                          accuracy=[float(a) * s for a in cam.reference.accuracy],
+                                          enabled=cam.reference.enabled)))
+    counts["camera_references"] = len(photos)
     # written: the files first, then the chunk
     for path, text in texts.items():
         path.write_text(text, encoding="utf-8")
