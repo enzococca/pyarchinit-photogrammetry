@@ -130,6 +130,23 @@ class _TrackballCanvas:
         return True
 
 
+AXES_COLOURS = ("#e0382d", "#2da12d", "#2d5fe0")  # x, y, z of the axes previewed
+ORIENT_PURPOSES = {"orient_p": "A", "orient_p2": "B", "orient_p3": "C"}  # picks for the rows of the orientation
+
+
+def axes_geometry(axes) -> tuple[np.ndarray, np.ndarray, float]:
+    """``SceneData.axes`` as arrays: origin (3,), axes (3, 3) rows x y z (unit), size."""
+    origin, rows, size = axes
+    rows = np.asarray(rows, np.float64).reshape(3, 3)
+    return np.asarray(origin, np.float64).reshape(3), rows / np.linalg.norm(rows, axis=1)[:, None], float(size)
+
+
+def plane_corners(origin, axes, size: float) -> np.ndarray:
+    """The four corners of the square of side ``2 * size`` centred on ``origin`` in the plane of x and y."""
+    x, y = axes[0] * size, axes[1] * size
+    return np.array([origin - x - y, origin + x - y, origin + x + y, origin - x + y])
+
+
 class SoftwareCanvas(_TrackballCanvas, QWidget):
     """Orbit view rendered with numpy, with the trackball (left drag: rotate, right/middle drag: pan,
     wheel: zoom toward the cursor, Shift+wheel: dolly, double click: centre of rotation)."""
@@ -280,12 +297,34 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
                      if ok[a] and ok[b]]
             if edges:
                 p.drawLines(edges)
+        if self.sd.axes is not None:  # the axes of a new local system (Orienta il sistema locale)
+            self._paint_axes(p, w, h)
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         if self.sd.exaggeration != 1.0:
             p.drawText(8, h - 26, exaggeration_text(self.sd.exaggeration))
         self._paint_trackball(p)
         p.end()
+
+    def _paint_axes(self, p: QPainter, w: int, h: int) -> None:
+        """The previewed axes: the plane x-y a translucent square, then x, y, z from the origin."""
+        origin, axes, size = axes_geometry(self.sd.axes)
+        x, y, _, ok = self.cam.project(np.vstack([origin, origin + size * axes, plane_corners(origin, axes, size)]),
+                                       w, h)
+        q = [QPointF(float(a), float(b)) for a, b in zip(x, y)]
+        if ok[4:].all():
+            colour = QColor(AXES_COLOURS[2])
+            colour.setAlphaF(0.25)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(colour))
+            p.drawPolygon(QPolygonF(q[4:]))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        if not ok[0]:
+            return
+        for i in range(3):
+            if ok[1 + i]:
+                p.setPen(QPen(QColor(AXES_COLOURS[i]), 2))
+                p.drawLine(q[0], q[1 + i])
 
     def _paint_trackball(self, p: QPainter) -> None:
         self._tb_drawn = self._trackball_state()
@@ -666,6 +705,13 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
             lines = np.hstack([[2, a, b] for a, b in Region.EDGES])
             pl.add_mesh(pv.PolyData(np.asarray(sd.region, np.float64), lines=lines), color="#ffd200", line_width=2)
+        if sd.axes is not None:  # the axes of a new local system (Orienta il sistema locale)
+            origin, axes, size = axes_geometry(sd.axes)
+            pl.add_mesh(pv.PolyData(plane_corners(origin, axes, size), faces=np.array([4, 0, 1, 2, 3])),
+                        color=AXES_COLOURS[2], opacity=0.25, lighting=False)
+            for i in range(3):
+                pl.add_mesh(pv.PolyData(np.vstack([origin, origin + size * axes[i]]), lines=np.array([2, 0, 1])),
+                            color=AXES_COLOURS[i], line_width=2)
         if sd.exaggeration != 1.0:
             pl.add_text(exaggeration_text(sd.exaggeration), position="lower_left", font_size=10, color="#c8c8c8")
         if reset:
@@ -948,6 +994,9 @@ class ModelView(QWidget):
     move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
     cut_requested = Signal(str, object)  # cut the model: "horizontal" (1 point), "vertical" (2), "points" (3), "values"
     elevation_requested = Signal(str, object)  # an orthophoto on a plane: "view" (view_frame()), "points" (3, internal);
+    # Orienta il sistema locale: ("point", (label "A"/"B"/"C", internal xyz)); ("points" | "faces", (visible, inside))
+    # masks over the whole cloud or the faces of the model, from start_lasso("orient")
+    orient_requested = Signal(str, object)
     # "axis" (2 points, internal): the axis of a cylindrical development
 
     def __init__(self, parent=None):
@@ -998,6 +1047,7 @@ class ModelView(QWidget):
             self.trackball_actions[mode] = a
         self.b_trackball.setMenu(tb_menu)
         self.exaggeration = 1.0
+        self._axes = None  # (origin, axes, size) of a new local system previewed, world coordinates
         self.exag_spin = QDoubleSpinBox()
         self.exag_spin.setRange(0.1, 50.0)
         self.exag_spin.setDecimals(1)
@@ -1336,7 +1386,9 @@ class ModelView(QWidget):
                 "elev_p2": "il secondo punto del prospetto", "elev_p3": "il terzo punto del prospetto",
                 "axis_p": "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, "
                           "un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)",
-                "axis_p2": "il punto in alto della stessa linea, sulla stessa verticale della struttura"}.get(
+                "axis_p2": "il punto in alto della stessa linea, sulla stessa verticale della struttura",
+                "orient_p": "il punto A, origine", "orient_p2": "il punto B, sull'asse x",
+                "orient_p3": "il punto C, sul piano orizzontale"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
                                     tr(what)))
@@ -1364,6 +1416,9 @@ class ModelView(QWidget):
         elif purpose == "slice":
             if point is not None:
                 self.slice_requested.emit(point)
+        elif purpose in ORIENT_PURPOSES:  # one point for a row of the dialog: no chain
+            if point is not None:
+                self.orient_requested.emit("point", (ORIENT_PURPOSES[purpose], point))
         elif purpose.startswith("elev_p"):
             if point is None:
                 return
@@ -1475,15 +1530,20 @@ class ModelView(QWidget):
                 return hit
         return picked
 
-    def start_lasso(self) -> None:
+    def start_lasso(self, purpose: str = "") -> None:
+        """A lasso drawn on the frozen view: the points or faces inside go to ``points_selected`` /
+        ``faces_selected``; with ``purpose`` "orient" to ``orient_requested("points" | "faces", (visible,
+        inside))`` instead (the area of a plane of the orientation, not a selection to classify or delete)."""
         if self.kind not in ("point_cloud", "model") or self.chunk is None:
             return
+        self._lasso_purpose = purpose
         image, self._project = self.canvas.snapshot()
         self.lasso.start(image)
         self.stack.setCurrentWidget(self.lasso)
 
     def _lasso_finished(self, pts) -> None:
         self.stack.setCurrentWidget(self.canvas)
+        purpose, self._lasso_purpose = getattr(self, "_lasso_purpose", ""), ""
         if pts is None or self._project is None or self.sd is None:
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1494,6 +1554,9 @@ class ModelView(QWidget):
                 visible, inside = self.select_points(pts, self._project)
         finally:
             QApplication.restoreOverrideCursor()
+        if purpose == "orient":
+            self.orient_requested.emit("faces" if self.kind == "model" else "points", (visible, inside))
+            return
         (self.faces_selected if self.kind == "model" else self.points_selected).emit(visible, inside)
 
     @staticmethod
@@ -1559,6 +1622,48 @@ class ModelView(QWidget):
             ok &= ~np.isin(confidence_bins(pc.confidence), list(hidden))
         return self._inside_and_visible(polygon, x, y, z, ok, depth_tol, cell)
 
+    # ----------------------------------------------------------- the axes of a new local system
+    def axes_size(self) -> float:
+        """The length of the axes previewed: 15 % of the extent of what is shown (the largest side), at least 5 cm."""
+        sd = self.base_sd if self.base_sd is not None else self.sd
+        arrs = [np.asarray(a, np.float64) for a in ((sd.points, sd.mesh_vertices) if sd is not None else ())
+                if a is not None and len(a)]
+        if not arrs:
+            return 0.05
+        return max(0.05, 0.15 * float(np.max(np.ptp(np.vstack(arrs), axis=0))))
+
+    def show_axes(self, origin_world, axes, size: float) -> None:
+        """The axes of a new local system drawn from ``origin_world`` (coordinates of the chunk): ``axes`` (3, 3) rows
+        x, y, z (red, green, blue) as directions in the coordinates of the chunk, ``size`` long, and the plane x-y as a
+        translucent square; kept through a refresh of the view until :meth:`hide_axes`."""
+        self._axes = (np.asarray(origin_world, np.float64).reshape(3), np.asarray(axes, np.float64).reshape(3, 3),
+                      float(size))
+        self._put_axes()
+
+    def hide_axes(self) -> None:
+        self._axes = None
+        self._put_axes()
+
+    def _scene_axes(self, sd):
+        if self._axes is None or sd is None:
+            return None
+        origin, axes, size = self._axes
+        return (origin - np.asarray(sd.offset, np.float64), axes, size)
+
+    def _put_axes(self) -> None:
+        if self.base_sd is not None:
+            self.base_sd.axes = self._scene_axes(self.base_sd)
+        if self.sd is None:
+            return
+        scene = self._scene_axes(self.sd)
+        self.sd.axes = None if scene is None else (self.sd.to_display(scene[0][None])[0], scene[1], scene[2])
+        if self.canvas is None:
+            return
+        if isinstance(self.canvas, SoftwareCanvas):  # drawn over the image: no new image
+            self.canvas.update()
+        else:
+            self.canvas.set_scene(self.sd, reset=False)
+
     def set_exaggeration(self, factor: float) -> None:
         """Heights of what is shown multiplied by ``factor`` around the centre of the scene (1: as
         they are). Only the view changes: picks and selections give the true coordinates."""
@@ -1592,6 +1697,7 @@ class ModelView(QWidget):
                           hidden_bins=bins, highlight=highlight, max_points=3_000_000 if vtk else 400_000,
                           max_textured_faces=8_000_000 if vtk else 3_000_000)
               if self.chunk is not None else SceneData(np.zeros(3)))
+        sd.axes = self._scene_axes(sd)
         self.base_sd = sd
         self.sd = sd = exaggerated(sd, self.exaggeration)
         if mode == "class":

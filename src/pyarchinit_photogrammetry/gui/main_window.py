@@ -896,6 +896,9 @@ class MainWindow(QMainWindow):
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
         self._act(m, tr("Aggiungi chunk"), self.add_chunk, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
+        self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
+                  tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
+                         "piano adattato: tutto quello che è nelle sue coordinate lo segue"))
         self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
         self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
                   tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
@@ -3470,6 +3473,173 @@ class MainWindow(QMainWindow):
         self.run_task("Allineamento dei chunk",
                       lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p),
                       done)
+
+    # ---------------------------------------------------------------- Orienta il sistema locale
+    def orient_local(self) -> None:
+        """*Flusso di lavoro > Orienta il sistema locale*: the dialog (:class:`.orient_dialog.OrientDialog`, not modal)
+        for the active chunk, or the refusal said when something else gives its orientation (a system of the world,
+        control markers with coordinates, the chunk it is aligned to)."""
+        from ..engine import orient
+        from .orient_dialog import OrientDialog, refusal_text
+
+        ch = self.chunk
+        if ch is None:
+            return
+        try:
+            orient.check(ch, cameras=False)
+        except orient.OrientRefused as exc:
+            self._warn(refusal_text(exc))
+            return
+        old = getattr(self, "_orient_dialog", None)
+        if old is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                old.close()
+        dlg = OrientDialog.ask(self, ch)
+        dlg.apply_requested.connect(self._orient_apply)
+        dlg.destroyed.connect(lambda *_a: setattr(self, "_orient_dialog", None)
+                              if getattr(self, "_orient_dialog", None) is dlg else None)
+        self._orient_dialog = dlg
+
+    def _orient_apply(self, kwargs: dict) -> None:
+        """The orientation of the active chunk (:func:`..engine.orient.orient` with ``kwargs``) in the background, as
+        the change of the survey's system: RustGIS's last edits read and the drawings and sections the window holds
+        stored first; then everything read again (:meth:`_orient_finish`) and one step of *Modifica > Annulla*."""
+        from ..engine import orient
+
+        ch = self.chunk
+        if ch is None:
+            return
+        self._rustgis_leave()
+        self._store_drawings()
+        self._save_sections()
+
+        def run(progress):
+            progress(0.0, tr("Orienta il sistema locale"))
+            try:
+                return orient.orient(ch, **kwargs)
+            except orient.OrientRefused as exc:  # the engine checks again: said in the window's words
+                return exc
+
+        def done(result) -> None:
+            from .orient_dialog import refusal_text
+
+            if isinstance(result, orient.OrientRefused):
+                self._warn(refusal_text(result))
+                return
+            self._orient_finish(ch, result)
+
+        self.run_task("Orienta il sistema locale", run, done, refresh=False, save=False)
+
+    def _orient_read_again(self) -> None:
+        """The line layers of the old frame taken away (to draw again), the drawings and the sections read again."""
+        for name in sorted(self.line_layers):
+            self.ortho_view.remove_layer(name)
+            self.line_layers.pop(name, None)
+        self._reload_drawings(redraw=False)
+        self._load_sections()
+
+    def _orient_reload(self, chunk) -> None:
+        """After ``chunk`` moved by the undo or the redo of an orientation: read again and shown again."""
+        self._orient_read_again()
+        self.refresh_all()
+        if self._live_on():
+            self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new frame at once
+
+    def _orient_finish(self, chunk, result: dict, said: bool = True) -> None:
+        """The window after :func:`..engine.orient.orient` of ``chunk``: read again, the step pushed on *Modifica >
+        Annulla* (:class:`.orient_dialog.OrientStep`), the project saved, what happened in the log and, with ``said``,
+        in a box (with *Ricostruisci i prodotti da rifare* when the window can do it)."""
+        from .orient_dialog import OrientStep
+
+        self._orient_read_again()
+        if self.history is not None and result.get("state") is not None:
+            # a step of the chunk: another chunk active drops it (its clones live in the chunk's undo folder)
+            self.history.push(tr("Orienta il sistema locale"), OrientStep(self, chunk, result), document=False)
+        saved = False
+        if self.doc.path:
+            try:
+                self.doc.save()
+                saved = True
+            except Exception as exc:  # noqa: BLE001 - the orientation is made: the project stays to be saved
+                log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
+        self._dirty(not saved)
+        self.refresh_all()
+        if self.history is not None:
+            self.history.rebase()
+        if self._live_on():
+            self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new frame at once
+        text = self._orient_text(result)
+        head = text.splitlines()[0] if text else ""
+        self.log_pane.info(tr("Sistema locale orientato: {0}", head))
+        self.statusBar().showMessage(tr("Sistema locale orientato: {0}", head), 15000)
+        if not said:
+            for line in text.splitlines()[1:]:
+                self.log_pane.info(line)
+            return
+        stale = result.get("stale") or []
+        if stale and hasattr(self, "rebuild_stale_products"):
+            self.log_pane.info(text)
+            if choice(self, "info", tr("Orienta il sistema locale"), text,
+                      [tr("Ricostruisci i prodotti da rifare"), tr("Chiudi")], cancel=None) == 0:
+                self.rebuild_stale_products(chunk, stale)
+        else:
+            self._info(tr("Orienta il sistema locale"), text)
+
+    @staticmethod
+    def _orient_text(result: dict) -> str:
+        """What an orientation did (the ``result`` of :func:`..engine.orient.orient`), in lines."""
+        d = result.get("describe") or {}
+        t = d.get("translation") or [0.0, 0.0, 0.0]
+        lines = [tr("Inclinazione {0}° verso {1}°, direzione {2}°; traslazione {3}, {4}, {5} m; scala {6}",
+                    number(d.get("tilt_deg", 0.0), 1), number(d.get("tilt_direction_deg", 0.0), 1),
+                    number(d.get("heading_deg", 0.0), 1), number(t[0], 3), number(t[1], 3), number(t[2], 3),
+                    number(d.get("scale", 1.0), 6))]
+        if result.get("aligned"):
+            lines.append(tr("Chunk allineati spostati con lui: {0}", ", ".join(result["aligned"])))
+        if result.get("aligned_left"):
+            lines.append(tr("Chunk allineati lasciati dove sono: {0}", ", ".join(result["aligned_left"])))
+        kept = {"sections": tr("Sezioni del progetto lasciate dove sono (un altro chunk è in coordinate locali)"),
+                "section_drawings": tr("Disegni delle sezioni (SVG, DXF) da rifare"),
+                "vertical_sections": tr("Sezioni verticali: restano verticali, ora tagliano il rilievo su un altro "
+                                        "piano")}
+        for item in result.get("kept") or []:
+            what = kept.get(item.get("what"), str(item.get("what")))
+            names = item.get("names") or []
+            lines.append(what + (": " + ", ".join(str(n) for n in names) if names else ""))
+        if result.get("sent_out"):
+            lines.append(tr("Geometrie già inviate (PyArchInit, QField, esportazioni): restano dov'erano"))
+        if result.get("weak_markers"):
+            lines.append(tr("Marker di orientamento visti da meno di due foto (un nuovo allineamento non li ritrova): "
+                            "{0}", ", ".join(result["weak_markers"])))
+        if result.get("cameras_replaced"):
+            lines.append(tr("Le posizioni di {0} foto non danno più l'orientamento: lo danno i marker di "
+                            "orientamento", len(result["cameras_replaced"])))
+        if result.get("bar_dropped"):
+            lines.append(tr("La distanza A-B scritta prima ({0} m) era di altri punti: tolta",
+                            number(result["bar_dropped"].get("distance") or 0.0, 4)))
+        if result.get("plugins_unaware"):
+            lines.append(tr("Dati di plugin che non seguono l'orientamento: {0}",
+                            ", ".join(result["plugins_unaware"])))
+        stale = result.get("stale") or []
+        if stale:
+            lines.append(tr("Da rifare: {0}", ", ".join(str(x.get("name") or x.get("product")) for x in stale)))
+        return "\n".join(lines)
+
+    def orient_chunk(self, chunk, **kw) -> dict:
+        """:func:`..engine.orient.orient` of ``chunk`` for a plugin (``Context.orient``), in the interface thread:
+        with ``dry_run`` as it is; otherwise the window's drawings stored first, then read again with one step of
+        *Modifica > Annulla* and the project saved. The refusal (:class:`..engine.orient.OrientRefused`) goes on to
+        the caller."""
+        from ..engine import orient
+
+        if kw.get("dry_run"):
+            return orient.orient(chunk, **kw)
+        self._rustgis_leave()
+        self._store_drawings()
+        self._save_sections()
+        result = orient.orient(chunk, **kw)
+        self._orient_finish(chunk, result, said=False)
+        return result
 
     def merge_chunks(self) -> None:
         """A new chunk with the photos, markers and clouds of the chosen chunks (already aligned)."""

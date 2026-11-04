@@ -36,6 +36,9 @@ class SceneData:
     shown_index: np.ndarray | None = None  # rows of the whole cloud that are displayed
     exaggeration: float = 1.0  # heights shown multiplied by this along ``up`` around ``pivot``
     pivot: np.ndarray | None = None
+    # the axes of a new local system previewed (*Orienta il sistema locale*): origin (scene coordinates), (3, 3) rows
+    # x y z as directions of the scene, length of the drawn axes; None: nothing previewed
+    axes: tuple | None = None
 
     def to_display(self, pts) -> np.ndarray:
         """Scene coordinates -> the coordinates shown (heights exaggerated)."""
@@ -90,6 +93,8 @@ def exaggerated(sd: SceneData, factor: float) -> SceneData:
     out.cameras = [shown(c) for c in sd.cameras]
     out.markers = [(label, shown(xyz[None])[0], check) for label, xyz, check in sd.markers]
     out.scalebars = [(text, shown(a[None])[0], shown(b[None])[0], check) for text, a, b, check in sd.scalebars]
+    if sd.axes is not None:  # the origin where it is shown; the directions as they are
+        out.axes = (out.to_display(np.asarray(sd.axes[0], np.float64)[None])[0], sd.axes[1], sd.axes[2])
     return out
 
 

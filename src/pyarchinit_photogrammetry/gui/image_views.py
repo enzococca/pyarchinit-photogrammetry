@@ -460,7 +460,7 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
-                  "req_polygon", "req_line", "req_point", "reshape", "breakline")
+                  "req_polygon", "req_line", "req_point", "reshape", "breakline", "orient_pick")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
     REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
     LINE_MODES = ("req_line", "reshape", "breakline")  # click the vertices, double click or Enter to end
@@ -482,6 +482,7 @@ class RasterView(_ZoomView):
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
     probe_clicked = Signal(float, float)  # a measuring point at world x, y (elevation, temperature, bands)
+    orient_clicked = Signal(float, float)  # a point for Orienta il sistema locale at world x, y (z from the DEM)
     request_finished = Signal(object)  # (N,2) world XY drawn for a request: polygon, line or one point
     request_cancelled = Signal()  # Esc during a request
     vertices_edited = Signal(str, object, object)  # layer, attributes of the unit part (the dict itself), outline (N,2)
@@ -1767,9 +1768,10 @@ class RasterView(_ZoomView):
         xy = self.world(sp)
         if self.mode in self.DRAW_MODES and ev.button() != Qt.MouseButton.RightButton:
             sp, _kind, xy = self.snap_world(sp)
-        if self.mode in ("quota", "marker", "probe"):
+        if self.mode in ("quota", "marker", "probe", "orient_pick"):
             if ev.button() == Qt.MouseButton.LeftButton:
-                {"quota": self.quota_clicked, "marker": self.marker_clicked, "probe": self.probe_clicked}[self.mode].emit(*xy)
+                {"quota": self.quota_clicked, "marker": self.marker_clicked, "probe": self.probe_clicked,
+                 "orient_pick": self.orient_clicked}[self.mode].emit(*xy)
             return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
