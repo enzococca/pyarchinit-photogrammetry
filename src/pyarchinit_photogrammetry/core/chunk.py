@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from . import crs as crs_mod
-from . import geometry
+from . import geometry, stamps
 from .camera import Camera, Reference, Sensor
 from .marker import Marker, Projection, ScaleBar
 from .pointcloud import PointCloud
@@ -764,9 +764,8 @@ class Chunk:
                                    min_size=min_size, max_size=max_size, scaling=scaling,
                                    crs=None if crs_mod.is_local(self.crs) else self.crs, progress=as_progress(progress))
         self._set_product(method, out)
-        from .stamps import stamp_entry
-
-        self.meta.setdefault("relief", {})[method] = stamp_entry(self, {k: v for k, v in info.items() if k != "path"})
+        record = {k: v for k, v in info.items() if k != "path"}
+        self.meta.setdefault("relief", {})[method] = stamps.inherit_entry(self, record, "dem")  # in the DEM's coordinates
         return out
 
     @property

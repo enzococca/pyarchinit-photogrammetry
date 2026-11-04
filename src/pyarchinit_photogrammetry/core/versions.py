@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..io.files import clone, replace_file
+from .stamps import is_stale
 
 PRODUCTS = {"point_cloud": "Nuvola densa", "model": "Modello", "dem": "DEM", "orthomosaic": "Ortofoto"}
 PARAMS = {"point_cloud": "dense", "model": "model", "dem": "dem", "orthomosaic": "orthomosaic"}  # chunk.meta keys
@@ -294,7 +295,8 @@ def _activate_files(chunk, product: str, entry: dict, copy: bool = False) -> Non
 def activate(chunk, product: str, vid: str) -> dict | None:
     """Make a kept version the active one; the active one becomes a kept version (returned). When the version made
     active was built in another transform of the chunk (``core.stamps``), the returned entry is a copy with
-    ``"stale": True`` (the window says it is da rifare; ``{"id": None, "stale": True}`` without a previous one)."""
+    ``"stale": True`` (the window says it is da rifare); None, as always, without a previous active product (then
+    ``core.stamps.is_stale`` says it)."""
     entry = _entry(chunk, product, vid)
     previous = keep_active(chunk, product, move=True)
     during = _script_runs(chunk)
@@ -304,10 +306,8 @@ def activate(chunk, product: str, vid: str) -> dict | None:
         _keep_folder(chunk, product, vid)
     else:
         shutil.rmtree(chunk.data_dir / "versions" / product / vid, ignore_errors=True)
-    from .stamps import is_stale
-
-    if is_stale(chunk, product):
-        return {**(previous or {"id": None}), "stale": True}
+    if previous is not None and is_stale(chunk, product):
+        return {**previous, "stale": True}
     return previous
 
 

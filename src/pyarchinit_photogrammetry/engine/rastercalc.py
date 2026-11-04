@@ -144,6 +144,59 @@ def slug(text: str) -> str:
     return s
 
 
+def _input_stamps(chunk, inputs) -> list:
+    """The stamps (``core.stamps``) of the rasters ``inputs`` read by a formula, found by their file among the records
+    of the chunk: products, kept versions, reliefs, multispectral and thermal rasters, results of the calculator (None
+    for a raster nobody recorded: a plugin's, a satellite scene's full bands)."""
+    data = chunk.data_dir
+    meta = chunk.meta
+    known: dict[str, object] = {}
+
+    def put(path, built_in) -> None:
+        if built_in is None:
+            return
+        try:
+            known.setdefault(str(Path(path).resolve()), built_in)
+        except OSError:
+            pass
+
+    built = meta.get("built_in") or {}
+    relief = meta.get("relief") or {}
+    for key in chunk.products:
+        path = chunk.product_path(key)
+        if path is not None:
+            put(path, built.get(key) if key in built else (relief.get(key) or {}).get("built_in"))
+    for product, entries in (meta.get("versions") or {}).items():
+        for e in entries or []:
+            rel = (e.get("files") or {}).get(product)
+            if rel:
+                put(data / rel, e.get("built_in"))
+    ms = meta.get("multispectral") or {}
+    if ms.get("reflectance"):
+        put(data / ms["reflectance"], ms.get("built_in"))
+    for info in (ms.get("indices") or {}).values():
+        if info.get("file"):
+            put(data / info["file"], info.get("built_in"))
+    for z in (ms.get("zoning") or {}).values():
+        if z.get("raster"):
+            put(data / z["raster"], z.get("built_in"))
+    th = meta.get("thermal") or {}
+    if th.get("file"):
+        put(data / th["file"], th.get("built_in"))
+    if (th.get("anomaly") or {}).get("file"):
+        put(data / th["anomaly"]["file"], th["anomaly"].get("built_in"))
+    for info in (meta.get(FOLDER) or {}).values():
+        if info.get("file"):
+            put(data / info["file"], info.get("built_in"))
+    out = []
+    for r in inputs:
+        try:
+            out.append(known.get(str(Path(r.path).resolve())))
+        except OSError:
+            out.append(None)
+    return out
+
+
 def rasters(chunk) -> list[Raster]:
     """Every raster of ``chunk`` the calculator can read, each with its name for the formulas (see
     the module docstring); the elevations (a frame of their own) are not among them."""
@@ -647,7 +700,7 @@ def calculate(chunk, formula: str, name: str, grid: str | None = None, resolutio
     entry = {"file": out.relative_to(chunk.data_dir).as_posix(), "formula": formula,
              "inputs": [f"{r.name}@{b}" for r, b in f.inputs], "grid": ref_raster.name, "resolution": res,
              "size": [int(width), int(height)], "stats": stats, "made": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    stamps.stamp_entry(chunk, entry)
+    stamps.inherit_entry(chunk, entry, *_input_stamps(chunk, [r for r, _b in f.inputs]))  # stale input: stale result
     chunk.meta.setdefault(FOLDER, {})[name] = entry
     progress(1.0, f"Raster calculator: {name} ({stats.get('min', float('nan')):.4g} to "
                   f"{stats.get('max', float('nan')):.4g})")

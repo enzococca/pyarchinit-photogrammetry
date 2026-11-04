@@ -73,21 +73,62 @@ def test_a_changed_transform_makes_them_stale(bare):
     bare.transform = geometry.compose_similarity(1.0, _rotation_z(0.01), big[:3, 3])
     assert stamps.is_stale(bare, "orthomosaic")
     assert stamps.same_transform(big, big + 1e-12 * np.abs(big))
+    shifted = big.copy()
+    shifted[0, 3] += 0.006  # 6 mm at Gauss-Boaga size shows
+    assert not stamps.same_transform(big, shifted)
 
 
 def test_elevations_stale_only_with_a_scale(bare):
+    """Moved with a rigid change and re-stamped (the orientation's contract): current; a scale, or a change that leaves
+    the frames where they were: stale."""
     entry = {"id": "e1", "name": "Prospetto"}
     stamps.stamp_entry(bare, entry)
     bare.meta["elevations"] = [entry]
     rigid = geometry.compose_similarity(1.0, _rotation_z(30), np.array([5.0, -3.0, 2.0]))
     bare.transform = rigid @ T0
-    assert not stamps.entry_stale(bare, entry, scale_only=True)
-    assert stamps.entry_stale(bare, entry)
-    assert stamps.stale_products(bare) == []
-    bare.transform = geometry.compose_similarity(1.001, np.eye(3), np.zeros(3)) @ T0
-    assert stamps.entry_stale(bare, entry, scale_only=True)
+    assert not stamps.entry_stale(bare, entry, scale_only=True)  # its pixels stay valid: the frame may follow
     assert stamps.stale_products(bare) == [{"kind": "elevation", "product": "elevation", "name": "Prospetto",
-                                            "id": "e1"}]
+                                            "id": "e1"}]  # not moved: stale
+    assert stamps.restamp_entries(bare, ("elevations",)) == 1  # the frames moved with it
+    assert stamps.stale_products(bare) == []
+    bare.transform = geometry.compose_similarity(1.001, np.eye(3), np.zeros(3)) @ bare.transform
+    assert stamps.entry_stale(bare, entry, scale_only=True)
+    assert [s["kind"] for s in stamps.stale_products(bare)] == ["elevation"]
+
+
+def test_levelling_leaves_an_elevation_stale(bare, monkeypatch):
+    from pyarchinit_photogrammetry.engine import dem, meshing
+
+    bare.crs = "LOCAL"
+    entry = stamps.stamp_entry(bare, {"id": "e1", "name": "Prospetto"})
+    bare.meta["elevations"] = [entry]
+    up = np.array([0.2, 0.1, 1.0])
+    monkeypatch.setattr(meshing, "up_vector_internal", lambda chunk: up / np.linalg.norm(up))
+    dem.ensure_level(bare)
+    assert bare.meta.get("levelled")
+    assert [s["id"] for s in stamps.stale_products(bare) if s["kind"] == "elevation"] == ["e1"]
+
+
+def test_derived_products_take_the_stamp_of_their_input(excavation):
+    from pyarchinit_photogrammetry.engine import rastercalc
+
+    ch = excavation
+    ch.build_dem(resolution=0.05)
+    t1 = ch.transform.copy()
+    t1[:3, 3] += [0.5, 0.0, 0.0]
+    ch.transform = t1  # the DEM is now stale
+    ch.build_relief("slrm")
+    rastercalc.calculate(ch, "dem * 2", "doppio")
+    stale = [(s["kind"], s["product"]) for s in stamps.stale_products(ch)]
+    assert ("product", "dem") in stale and ("relief", "slrm") in stale and ("calculator", "calculator") in stale
+    assert stamps.same_transform(ch.meta["relief"]["slrm"]["built_in"], ch.meta["built_in"]["dem"])
+    # a derived product of a current input is current; without a stamp on the input it is the chunk's transform
+    stamps.inherit(ch, "slope", "aspect")
+    assert not stamps.is_stale(ch, "slope")
+    ch.build_dem(resolution=0.05)
+    ch.build_relief("slrm")
+    rastercalc.calculate(ch, "dem * 2", "doppio")
+    assert stamps.stale_products(ch) == []
 
 
 def test_stamps_follow_versions_and_undo(excavation):
@@ -126,18 +167,29 @@ def test_stamps_follow_versions_and_undo(excavation):
     entry.pop("built_in")
     versions.activate(ch, "dem", entry["id"])
     assert "dem" not in ch.meta["built_in"] and not stamps.is_stale(ch, "dem")
+    # no active DEM before: None, as always, even for a stale version (is_stale says it)
+    versions.keep_active(ch, "dem", move=True)
+    assert versions.activate(ch, "dem", versions.versions(ch, "dem")[0]["id"]) is None  # the DEM built in T1
+    assert stamps.is_stale(ch, "dem")
 
 
 def test_builders_stamp_their_products(processed):
     _doc, ch, _report = processed
     for name in ("dem", "orthomosaic"):
-        assert ch.meta["built_in"][name] == ch.transform.tolist()
+        assert stamps.same_transform(ch.meta["built_in"][name], ch.transform)  # the session chunk: never moved here
     assert stamps.stale_products(ch) == []
 
 
 def test_order_of_the_rebuild(bare):
+    for name in ("slope", "aspect"):
+        path = bare.data_dir / "terrain" / f"{name}.tif"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        bare._set_product(name, path)
     for name in stamps.GRID_PRODUCTS:
         stamps.stamp(bare, name)
+    stamps.inherit(bare, "slope", "dem")
+    stamps.inherit(bare, "aspect", "dem")
     meta = bare.meta
     rec = {}
     for key in ("elevation", "relief", "calc", "refl", "index", "zones", "thermal", "anomaly", "scene", "version"):
@@ -157,7 +209,7 @@ def test_order_of_the_rebuild(bare):
     got = [(s["kind"], s["product"], s["id"]) for s in stamps.stale_products(bare)]
     assert got == [("product", "dem", None), ("product", "orthomosaic", None), ("product", "dem_precision", None),
                    ("product", "coverage", None), ("elevation", "elevation", "e1"), ("relief", "slrm", "slrm"),
-                   ("product", "tin", None), ("calculator", "calculator", "ndvi2"),
+                   ("product", "slope", None), ("product", "aspect", None), ("product", "tin", None), ("calculator", "calculator", "ndvi2"),
                    ("multispectral", "reflectance", "reflectance"), ("multispectral", "index", "NDVI"),
                    ("multispectral", "zoning", "NDVI"), ("thermal", "thermal", "temperature"),
                    ("thermal", "thermal_anomaly", "anomalies"), ("satellite", "scenes", "v1"),

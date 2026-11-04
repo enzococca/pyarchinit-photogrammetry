@@ -14,6 +14,15 @@ Each builder stamps its product with the transform it was built in:
 A product is stale when its stamp differs from the transform of the chunk (:func:`same_transform`); a product without a
 stamp (built before 1.7.2) reads as current. Since the stamps live in ``chunk.meta``, undoing a change of the transform
 makes the products current again by itself. Products changed in place (an edited DEM, patches) keep the stamp they had.
+
+A product made from another raster (a relief, the slope or the aspect of the DEM, the DEM of the TIN, the orthomosaic on
+the DEM, an index of the reflectance, its zoning, the thermal anomalies, a result of the raster calculator) takes the
+stamp of its input (:func:`inherit`, :func:`inherit_entry`): built from a stale input it is stale too, since its cells
+are in the input's coordinates.
+
+The elevations are compared on the whole transform like everything else. Whoever moves their frames together with a
+change of the transform (the orientation of a local system) re-stamps them afterwards (:func:`restamp_entries`): moved
+with it they are current, left behind by any other change (``dem.ensure_level``, ``align_chunks``) they are stale.
 """
 from __future__ import annotations
 
@@ -23,9 +32,10 @@ from . import geometry
 
 GRID_PRODUCTS = ("dem", "orthomosaic", "dem_precision", "coverage", "tin")
 STAMP_RTOL = 1e-9
+TRANSLATION_ATOL, TRANSLATION_RTOL = 5e-7, 1e-12  # metres, and per metre of the translation
 
 NAMES = {"dem": "DEM", "orthomosaic": "Ortofoto", "dem_precision": "Precisione del DEM", "coverage": "Copertura",
-         "tin": "TIN"}  # Italian data names, like ``core.versions.PRODUCTS``: the window translates them
+         "tin": "TIN", "slope": "Pendenza", "aspect": "Esposizione"}  # Italian data names, like ``core.versions.PRODUCTS``: the window translates them
 
 
 def _matrix(m) -> np.ndarray:
@@ -45,15 +55,15 @@ def stamp_entry(chunk, entry: dict) -> dict:
 
 def same_transform(a, b) -> bool:
     """Two transforms equal within :data:`STAMP_RTOL`: the linear part with an absolute tolerance relative to its
-    size, the translation relative to its length - so that a rotation still shows when the translation is that of a
-    projected system (millions of metres)."""
+    size (so that a rotation still shows when the translation is that of a projected system, millions of metres), the
+    translation within ``5e-7 + 1e-12 * |t|`` metres (5 micrometres at Gauss-Boaga: a shift of a millimetre shows)."""
     a, b = _matrix(a), _matrix(b)
     if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
         return False
     lin = max(1.0, float(np.abs(a[:3, :3]).max()), float(np.abs(b[:3, :3]).max()))
-    t = max(1.0, float(np.linalg.norm(a[:3, 3])), float(np.linalg.norm(b[:3, 3])))
+    t = max(float(np.linalg.norm(a[:3, 3])), float(np.linalg.norm(b[:3, 3])))
     return bool(np.allclose(a[:3, :3], b[:3, :3], rtol=STAMP_RTOL, atol=STAMP_RTOL * lin)
-                and np.allclose(a[:3, 3], b[:3, 3], rtol=STAMP_RTOL, atol=STAMP_RTOL * t)
+                and np.allclose(a[:3, 3], b[:3, 3], rtol=0.0, atol=TRANSLATION_ATOL + TRANSLATION_RTOL * t)
                 and np.allclose(a[3], b[3], rtol=STAMP_RTOL, atol=STAMP_RTOL))
 
 
@@ -78,13 +88,59 @@ def entry_stale(chunk, entry: dict, scale_only: bool = False) -> bool:
     return _stale(chunk, (entry or {}).get("built_in"), scale_only)
 
 
+def stamp_of(chunk, source):
+    """The stamp of ``source``: a product name (``meta["built_in"]``) or a record (its ``"built_in"``); None without."""
+    if isinstance(source, str):
+        return (chunk.meta.get("built_in") or {}).get(source)
+    if isinstance(source, dict):
+        return source.get("built_in")
+    return source  # a stamp itself, or None
+
+
+def derived_stamp(chunk, *sources) -> list:
+    """The stamp of a product made now from ``sources`` (names, records or stamps): the first stamp of a source built
+    in another transform (the product is in its coordinates: stale too), else the transform of the chunk."""
+    for source in sources:
+        built_in = stamp_of(chunk, source)
+        if built_in is not None and not same_transform(built_in, chunk.transform):
+            return [list(row) for row in _matrix(built_in).tolist()]
+    return _matrix(chunk.transform).tolist()
+
+
+def inherit(chunk, product: str, *sources) -> None:
+    """The product ``product`` was made now from ``sources``: :func:`derived_stamp` in ``meta["built_in"]``."""
+    chunk.meta.setdefault("built_in", {})[product] = derived_stamp(chunk, *sources)
+
+
+def inherit_entry(chunk, entry: dict, *sources) -> dict:
+    """The record ``entry`` of a raster made now from ``sources``: :func:`derived_stamp`; returned."""
+    entry["built_in"] = derived_stamp(chunk, *sources)
+    return entry
+
+
+def restamp_entries(chunk, kinds=("elevations",)) -> int:
+    """The records of ``kinds`` (keys of ``chunk.meta``: a list or a dict of records) stamped with the transform of the
+    chunk now. The contract: who changes ``chunk.transform`` AND moves those records' frames with it (the orientation
+    moves the elevations' frames, which stay valid under a rigid motion) calls this afterwards; any other change leaves
+    them stale. Records without a stamp (built before 1.7.2) are stamped too. Returns how many."""
+    n = 0
+    for kind in kinds:
+        records = chunk.meta.get(kind)
+        values = records.values() if isinstance(records, dict) else (records or [])
+        for e in values:
+            if isinstance(e, dict):
+                stamp_entry(chunk, e)
+                n += 1
+    return n
+
+
 def _item(kind: str, product: str, name: str, eid) -> dict:
     return {"kind": kind, "product": product, "name": name, "id": eid}
 
 
 def stale_products(chunk) -> list[dict]:
     """What is to be built again, in the order of a rebuild: the DEM, the orthomosaic, the precision of the DEM, the
-    coverage, the elevations, the reliefs, the TIN, then the results of the raster calculator, the multispectral, the
+    coverage, the elevations, the reliefs, the slope and the aspect, the TIN, then the results of the raster calculator, the multispectral, the
     thermal and the satellite rasters and the kept versions of the DEM and the orthomosaic. Each item is
     ``{"kind", "product", "name", "id"}`` (kind "product", "version", "elevation", "relief", "calculator",
     "multispectral", "thermal" or "satellite")."""
@@ -98,12 +154,14 @@ def stale_products(chunk) -> list[dict]:
 
     for name in ("dem", "orthomosaic", "dem_precision", "coverage"):
         product(name)
-    for e in meta.get("elevations") or []:
-        if isinstance(e, dict) and entry_stale(chunk, e, scale_only=True):
+    for e in meta.get("elevations") or []:  # their frames were moved and re-stamped when they could be
+        if isinstance(e, dict) and entry_stale(chunk, e):
             out.append(_item("elevation", "elevation", e.get("name") or e.get("id"), e.get("id")))
     for method, e in (meta.get("relief") or {}).items():
         if isinstance(e, dict) and entry_stale(chunk, e):
             out.append(_item("relief", method, method, method))
+    product("slope")
+    product("aspect")
     product("tin")
     for name, e in (meta.get("calculator") or {}).items():
         if isinstance(e, dict) and entry_stale(chunk, e):
@@ -131,5 +189,5 @@ def stale_products(chunk) -> list[dict]:
     return out
 
 
-__all__ = ["GRID_PRODUCTS", "STAMP_RTOL", "stamp", "stamp_entry", "same_transform", "is_stale", "entry_stale",
-           "stale_products"]
+__all__ = ["GRID_PRODUCTS", "STAMP_RTOL", "NAMES", "stamp", "stamp_entry", "same_transform", "is_stale", "entry_stale",
+           "stamp_of", "derived_stamp", "inherit", "inherit_entry", "restamp_entries", "stale_products"]

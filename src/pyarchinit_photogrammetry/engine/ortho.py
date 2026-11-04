@@ -1206,7 +1206,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
         progress(1.0, f"Orthomosaic {w}x{h} px")
         return out_path
     chunk._set_product("orthomosaic", out_path)
-    stamps.stamp(chunk, "orthomosaic")
+    stamps.inherit(chunk, "orthomosaic", *(("dem",) if isinstance(surf, _DemSurface) else ()))  # on a stale DEM: stale
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
                                  "blend_sigma": float(ctx.blend_sigma), "colour_correction": correction is not None,
                                  "ghosting": ctx.ghosting, "fill_holes": ctx.fill_holes,

@@ -887,7 +887,7 @@ def tin_to_dem(chunk, resolution: float | None = None, name: str | None = None,
         own = chunk.own_product_path("dem")
         tmp.replace(own)
         chunk._set_product("dem", own)
-        stamps.stamp(chunk, "dem")
+        stamps.inherit(chunk, "dem", "tin")  # in the TIN's coordinates
     except BaseException:
         if kept is not None:
             versions.restore(chunk, "dem", kept)

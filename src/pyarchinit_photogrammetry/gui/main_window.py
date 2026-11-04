@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWid
 
 from .. import __version__, _native, updates
 from ..app import app as application
+from ..core import stamps
 from ..core.document import Document
 from ..core.progress import Cancelled
 from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
@@ -6572,6 +6573,7 @@ class MainWindow(QMainWindow):
             else:
                 measures.aspect_raster(ch.dem_path, out, crs=crs)
             ch._set_product(kind, out)
+            stamps.inherit(ch, kind, "dem")  # in the DEM's coordinates (core.stamps)
             return out
 
         def done(path):
