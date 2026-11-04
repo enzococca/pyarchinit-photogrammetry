@@ -3726,8 +3726,12 @@ class MainWindow(QMainWindow):
             what = kept.get(item.get("what"), str(item.get("what")))
             names = item.get("names") or []
             lines.append(what + (": " + ", ".join(str(n) for n in names) if names else ""))
-        if result.get("sent_out"):
-            lines.append(tr("Geometrie già inviate (PyArchInit, QField, esportazioni): restano dov'erano"))
+        sent = {x.get("what"): x.get("names") or [] for x in result.get("sent_out") or []}
+        if sent.get("pyarchinit"):
+            lines.append(tr("Geometrie già inviate a PyArchInit, restano dov'erano: {0}",
+                            ", ".join(str(n) for n in sent["pyarchinit"])))
+        if "qfield" in sent or "exports" in sent:  # not recorded by the project: a reminder, not a finding
+            lines.append(tr("Se hai già esportato file o un progetto QField, le loro geometrie restano dov'erano"))
         if result.get("weak_markers"):
             lines.append(tr("Marker di orientamento visti da meno di due foto (un nuovo allineamento non li ritrova): "
                             "{0}", ", ".join(result["weak_markers"])))

@@ -2880,7 +2880,6 @@
   "Sezioni del progetto lasciate dove sono (un altro chunk è in coordinate locali)": "Sections of the project left where they are (another chunk is in local coordinates)",
   "Disegni delle sezioni (SVG, DXF) da rifare": "Drawings of the sections (SVG, DXF) to make again",
   "Sezioni verticali: restano verticali, ora tagliano il rilievo su un altro piano": "Vertical sections: they stay vertical, now they cut the survey on another plane",
-  "Geometrie già inviate (PyArchInit, QField, esportazioni): restano dov'erano": "Geometries already sent (PyArchInit, QField, exports): they stay where they were",
   "Ricostruisci i prodotti da rifare": "Rebuild the stale products",
   "Il chunk è in un sistema di coordinate: l'orientamento lo danno i marker con coordinate": "The chunk is in a coordinate system: the markers with coordinates give its orientation",
   "L'orientamento lo danno i marker di controllo con coordinate: cambia le loro coordinate": "The control markers with coordinates give the orientation: change their coordinates",
@@ -2979,7 +2978,8 @@
   "Orientamento, non usato: i punti di controllo (o il sistema scelto) collocano il rilievo; le coordinate del marker sono nel sistema orientato a mano": "Orientation, not used: the control points (or the chosen system) place the survey; the marker's coordinates are in the frame oriented by hand",
   "L'orientamento non si può più annullare: il chunk è cambiato dopo (prodotti rifatti, nuovo allineamento, georeferenziazione o ottimizzazione). La voce è stata tolta.": "The orientation can no longer be undone: the chunk changed after it (products rebuilt, a new alignment, the georeference or the optimisation). The entry was removed.",
   "Il punto si prende sulla pianta (ortofoto o DEM), non su un prospetto: mostra la pianta o prendilo nella vista 3D": "The point is taken on the plan (orthophoto or DEM), not on an elevation: show the plan or take it in the 3D view",
-  "Questo raster va rifatto prima di prenderci un punto (Flusso di lavoro > Ricostruisci i prodotti da rifare): prendilo nella vista 3D": "This raster is to be built again before a point is taken on it (Workflow > Rebuild the stale products): take it in the 3D view"
+  "Questo raster va rifatto prima di prenderci un punto (Flusso di lavoro > Ricostruisci i prodotti da rifare): prendilo nella vista 3D": "This raster is to be built again before a point is taken on it (Workflow > Rebuild the stale products): take it in the 3D view",
+  "Se hai già esportato file o un progetto QField, le loro geometrie restano dov'erano": "If you already exported files or a QField project, their geometries stay where they were"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3935,6 +3935,7 @@
   "{0} disegni 3D esportati in {1}": "{0} 3D drawings exported to {1}",
   "{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)": "{0} 3D drawings imported from {1} ({2} with the heights of the DEM, {3} skipped)",
   "; {0} buchi di poligoni lasciati fuori (un disegno libero ha un solo contorno)": "; {0} holes of polygons left out (a free drawing has one outline)",
-  "orientamento a mano non usato ({0}): lo danno i punti di controllo": "hand orientation not used ({0}): the control points give it"
+  "orientamento a mano non usato ({0}): lo danno i punti di controllo": "hand orientation not used ({0}): the control points give it",
+  "Geometrie già inviate a PyArchInit, restano dov'erano: {0}": "Geometries already sent to PyArchInit stay where they were: {0}"
  }
 }

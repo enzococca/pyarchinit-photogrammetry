@@ -701,7 +701,11 @@ def _orient_lines(result: dict, dry_run: bool) -> list[str]:
     for key, title in (("kept", "kept"), ("sent_out", "sent out")):
         for item in result.get(key) or []:
             names = item.get("names") or []
-            lines.append(f"{title}: {item['what']}" + (f" ({', '.join(names)})" if names else ""))
+            if key == "sent_out" and item["what"] in ("qfield", "exports"):
+                title_ = "if already sent out (not recorded by the project)"
+            else:
+                title_ = title
+            lines.append(f"{title_}: {item['what']}" + (f" ({', '.join(names)})" if names else ""))
     if result.get("weak_markers"):
         lines.append("weak markers (seen in fewer than two photos): " + ", ".join(result["weak_markers"]))
     if result.get("cameras_replaced"):
@@ -787,6 +791,8 @@ def orient(project: Path,
         raise typer.Exit(code=1) from exc
     if not dry_run:
         doc.save()
+        if result.get("state") is not None:  # nothing will undo it from here: its copies go
+            orient_mod.drop(result["state"])
     typer.echo(f"{ch.label}: " + ("orientation (dry run)" if dry_run else "oriented"))
     for line in _orient_lines(result, dry_run):
         typer.echo(f"    {line}")

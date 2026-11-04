@@ -1112,12 +1112,10 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     moving = [chunk] + (aligned if move_aligned else [])
     state = capture(moving, hg._sections_file(chunk))
     previous = {k: _copy.deepcopy(chunk.meta[k]) for k in ("orientation", "marker_excluded") if k in chunk.meta}
-    listeners = list(_LISTENERS)
-    if dry_run:
-        _LISTENERS.clear()
     try:
         made, weak = write_markers(chunk, [a, b, c], np.eye(4))
-        result = apply(chunk, m, move_aligned=move_aligned, notify=notify)
+        # a dry run tells nobody, but the listeners stay registered: their keys are not said unaware
+        result = apply(chunk, m, move_aligned=move_aligned, notify=notify and not dry_run)
         drop(result.pop("state"))  # ours (taken before the markers) puts back the earlier ones too
         for mk in made:  # apply scaled the accuracy with the references: the markers' own
             mk.reference.accuracy = [MARKER_ACCURACY] * 3
@@ -1130,9 +1128,6 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     except BaseException:
         _restore(chunk, state, previous)
         raise
-    finally:
-        if dry_run:
-            _LISTENERS[:] = listeners
     result.update(M=m.tolist(), describe=describe(m), method=method, cameras_replaced=replaced, weak_markers=weak,
                   bar_dropped=dropped)
     if dry_run:

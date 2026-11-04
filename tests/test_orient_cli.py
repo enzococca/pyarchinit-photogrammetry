@@ -48,7 +48,10 @@ def test_cli_markers_and_quota(processed, tmp_path):
     import pyarchinit_photogrammetry as ppg
     from orient_helpers import local_copy
 
+    from orient_helpers import drawn
+
     doc, ch, _ = local_copy(processed, tmp_path)
+    drawn(ch)  # a proxy among them: its PLY is copied for an undo
     placed = [m.label for m in ch.markers if m.position is not None][:2]
     r = _run(doc.path, "--markers", ",".join(placed), "--quota", "100")
     assert r.exit_code == 0, r.output
@@ -57,6 +60,24 @@ def test_cli_markers_and_quota(processed, tmp_path):
     assert set(marks) == set(orient.MARKER_LABELS)
     assert abs(marks[orient.MARKER_LABELS[0]].reference.location[2] - 100.0) < 1e-9
     assert again.meta["orientation"]["method"] == "markers"
+    # nothing undoes a command: the copies kept for an undo are not left in the chunk's folder
+    assert not list(again.data_dir.glob("undo/orient-*"))
+
+
+def test_dry_run_does_not_call_listening_plugins_unaware(processed, tmp_path):
+    from orient_helpers import local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    ch.meta["myplugin"] = {"x": 1}
+    heard = []
+    off = orient.on_transform_changed(lambda c, m: heard.append(m), keys=("myplugin",))
+    try:
+        a = np.asarray(ch.to_world(np.zeros((1, 3))))[0]
+        result = orient.orient(ch, points=[a, a + [1.0, 0.2, 0.1], a + [0.1, 1.0, 0.0]], dry_run=True)
+    finally:
+        off()
+    assert "myplugin" not in result["plugins_unaware"]
+    assert not heard  # a dry run tells nobody
 
 
 def test_cli_refuses_a_projected_chunk(processed):
