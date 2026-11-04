@@ -17,18 +17,18 @@ project, reaches QGIS through the live link and goes into PyArchInit with *Publi
 | ![](../img/gui/icons/snap.png){ width=20 } | **Snap** | the points on the vertices and segments of the visible layers |
 | ![](../img/gui/icons/traccia-sezione.png){ width=20 } | **Section** | two clicks: the section of the model along the trace ([below](#sections)) |
 | ![](../img/gui/icons/misura-distanza.png){ width=20 } | **Measure** | distance and height difference |
-| ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Height** | a spot height for `pyarchinit_quote` ([below](#spot-heights)) |
-| ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Point** | a measuring point: elevation, temperature, bands and indices |
+| ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Height** | a spot height for `pyarchinit_quote` ([below](#spot-heights)); *Measuring point* in its menu |
+| ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | *Measuring point* (menu of **Height**) | a measuring point: elevation, temperature, bands and indices |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | a marker where you click ([markers](photos-markers.md#markers)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Lines** | break lines, soft lines and boundaries for the TIN and the DEM edit; the kind in its menu ([TIN and break lines](../tin.md#break-lines)) |
-| ![](../img/gui/icons/disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png){ width=20 } | **Free drawing** | lines, polygons and points in layers of your own, in 3D on the model; the kind, the layer and *Properties...* in its menu ([below](#free-drawings-2d-and-3d)) |
+| ![](../img/gui/icons/disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png){ width=20 } | **Free** (*Free drawing*) | lines, polygons and points in layers of your own, in 3D on the model; the kind, the layer and *Properties...* in its menu ([below](#free-drawings-2d-and-3d)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | units and stones drawn by Segment Anything ([below](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | the photo to use in an area of the orthophoto or of the elevation shown ([patches](processing.md#orthophoto-patches)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Delete** | the selected features (++delete++) |
 | ![](../img/gui/icons/unisci-selezionati.png){ width=20 } | **Merge** | the selected units into one polygon, or contiguous lines |
 | ![](../img/gui/icons/cancella-disegni.png){ width=20 } | **Clear drawings** | every drawing of the chunk |
-| ![](../img/gui/icons/layer.png){ width=20 } | **Layer** | the [Layer pane](panes.md#layer) |
-| ![](../img/gui/icons/sezioni.png){ width=20 } | **Sections** | the [Sections pane](panes.md#sections) |
+| ![](../img/gui/icons/layer.png){ width=20 } | **Layer** | the [Layer pane](panes.md#layer); *Sections* in its menu |
+| ![](../img/gui/icons/sezioni.png){ width=20 } | *Sections* (menu of **Layer**) | the [Sections pane](panes.md#sections) |
 | ![](../img/gui/icons/apri-in-qgis-collegamento-dal-vivo.png){ width=20 } | **QGIS** | opens the drawings in QGIS ([QGIS, live](archaeology.md#qgis-live)) |
 | ![](../img/gui/icons/pubblica.png){ width=20 } | **Publish** | writes the drawn units and spot heights in PyArchInit |
 
@@ -152,7 +152,7 @@ floor and a point](../img/free-3d.png)
   move it (it is picked again on the surface where you let go, never left in the air), Delete removes the chosen
   vertex or, with none chosen, the drawing (a polygon keeps three vertices, a line two), a double click opens the form.
 
-**On the plan or on an elevation** (*Free drawing* in the drawing bar, its menu for *Line*, *Polygon*, *Point*, the
+**On the plan or on an elevation** (*Free*, that is *Free drawing*, in the drawing bar, its menu for *Line*, *Polygon*, *Point*, the
 layer and *New layer...*): click the vertices as with the other tools (snap included; a polygon also freehand);
 on the plan each vertex takes the height of the DEM there, on an elevation the depth of its relief, so the drawing
 is the same 3D feature. A vertex without a value takes the one interpolated along the drawing from its neighbours; a

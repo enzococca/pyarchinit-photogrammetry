@@ -206,7 +206,10 @@ def test_window_fits_a_laptop_screen(window, qapp):
             assert tb.sizeHint().width() <= width
             styles[width, tb.objectName()] = [b.toolButtonStyle() for b in buttons]
     icon_only = styles[1280, "drawing_toolbar"][-1]
-    assert icon_only not in styles[2200, "drawing_toolbar"]  # texts everywhere on a wide screen
+    bar = next(tb for tb in w._toolbar_sizes if tb.objectName() == "drawing_toolbar")
+    other, widths = w._toolbar_sizes[bar]
+    assert icon_only not in styles[2200, "drawing_toolbar"], \
+        (other + sum(f for f, _ in widths), other, widths)  # texts everywhere on a wide screen
     pan = styles[1280, "drawing_toolbar"][0]
     assert pan != icon_only  # the first drawing tools keep their names
 

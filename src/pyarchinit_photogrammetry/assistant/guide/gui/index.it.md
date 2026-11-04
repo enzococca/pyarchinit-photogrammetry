@@ -107,9 +107,9 @@ elaborazione sono disattivati.
 ![La barra Disegno](../img/gui/toolbar-drawing.png)
 
 Sempre visibile sotto il flusso di lavoro: le modalità di disegno (*Sposta*, *Seleziona*, *Disegna US* con
-*Mano libera* nel suo menu, *Vertici* con *Rimodella* nel suo menu, *Snap*, *Sezione*, *Misura*, *Quota*,
-*Punto di misura*, *Marker*, *SAM*), *Patch*, *Elimina*, *Unisci*, *Cancella disegni*, e le scorciatoie ai
-pannelli *Layer* e *Sezioni*, a QGIS e a *Pubblica*. Ogni strumento è descritto in
+*Mano libera* nel suo menu, *Vertici* con *Rimodella* nel suo menu, *Snap*, *Sezione*, *Misura*, *Quota*
+con *Punto di misura* nel suo menu, *Linee*, *Libero* (*Disegno libero*), *Marker*, *SAM*), *Patch*, *Elimina*, *Unisci*,
+*Cancella disegni*, e le scorciatoie ai pannelli *Layer* (con *Sezioni* nel suo menu), a QGIS e a *Pubblica*. Ogni strumento è descritto in
 [Disegno e misure](drawing.md#la-barra-disegno).
 
 ## Le viste centrali

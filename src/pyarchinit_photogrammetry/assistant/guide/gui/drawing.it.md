@@ -17,18 +17,18 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/snap.png){ width=20 } | **Snap** | i punti sui vertici e sui segmenti dei layer visibili |
 | ![](../img/gui/icons/traccia-sezione.png){ width=20 } | **Sezione** | due clic: la sezione del modello lungo la traccia ([sotto](#sezioni)) |
 | ![](../img/gui/icons/misura-distanza.png){ width=20 } | **Misura** | distanza e dislivello |
-| ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Quota** | una quota per `pyarchinit_quote` ([sotto](#quote)) |
-| ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Punto** | un punto di misura: quota, temperatura, bande e indici |
+| ![](../img/gui/icons/quota-puntuale-pyarchinit-quote.png){ width=20 } | **Quota** | una quota per `pyarchinit_quote` ([sotto](#quote)); *Punto di misura* nel suo menu |
+| ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | *Punto di misura* (menu di **Quota**) | un punto di misura: quota, temperatura, bande e indici |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | un marker dove fai clic ([marker](photos-markers.md#marker)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Linee** | linee di rottura, linee morbide e contorni per il TIN e la modifica del DEM; il tipo nel suo menu ([TIN e linee di rottura](../tin.md#linee-di-rottura)) |
-| ![](../img/gui/icons/disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png){ width=20 } | **Disegno libero** | linee, poligoni e punti in layer tuoi, in 3D sul modello; il tipo, il layer e *Proprietà...* nel suo menu ([sotto](#disegni-liberi-2d-e-3d)) |
+| ![](../img/gui/icons/disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png){ width=20 } | **Libero** (*Disegno libero*) | linee, poligoni e punti in layer tuoi, in 3D sul modello; il tipo, il layer e *Proprietà...* nel suo menu ([sotto](#disegni-liberi-2d-e-3d)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | unità e pietre disegnate da Segment Anything ([sotto](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto o del prospetto mostrato ([patch](processing.md#patch-dellortofoto)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Elimina** | gli elementi selezionati (++delete++) |
 | ![](../img/gui/icons/unisci-selezionati.png){ width=20 } | **Unisci** | le unità selezionate in un solo poligono, o linee contigue |
 | ![](../img/gui/icons/cancella-disegni.png){ width=20 } | **Cancella disegni** | tutti i disegni del chunk |
-| ![](../img/gui/icons/layer.png){ width=20 } | **Layer** | il [pannello Layer](panes.md#layer) |
-| ![](../img/gui/icons/sezioni.png){ width=20 } | **Sezioni** | il [pannello Sezioni](panes.md#sezioni) |
+| ![](../img/gui/icons/layer.png){ width=20 } | **Layer** | il [pannello Layer](panes.md#layer); *Sezioni* nel suo menu |
+| ![](../img/gui/icons/sezioni.png){ width=20 } | *Sezioni* (menu di **Layer**) | il [pannello Sezioni](panes.md#sezioni) |
 | ![](../img/gui/icons/apri-in-qgis-collegamento-dal-vivo.png){ width=20 } | **QGIS** | apre i disegni in QGIS ([QGIS dal vivo](archaeology.md#qgis-dal-vivo)) |
 | ![](../img/gui/icons/pubblica.png){ width=20 } | **Pubblica** | scrive in PyArchInit le unità disegnate e le quote |
 
@@ -152,7 +152,7 @@ un punto](../img/free-3d.png)
   un vertice per spostarlo (si riprende sulla superficie dove lo lasci, mai a mezz'aria), Canc toglie il vertice scelto
   o, se nessuno è scelto, il disegno (un poligono tiene tre vertici, una linea due), un doppio clic apre la scheda.
 
-**Sulla pianta o su un prospetto** (*Disegno libero* nella barra Disegno, il suo menu per *Linea*, *Poligono*,
+**Sulla pianta o su un prospetto** (*Libero*, cioè *Disegno libero*, nella barra Disegno, il suo menu per *Linea*, *Poligono*,
 *Punto*, il layer e *Nuovo layer...*): clic sui vertici come con gli altri strumenti (con lo snap; un poligono anche a
 mano libera); sulla pianta ogni vertice prende la quota del DEM in quel punto, su un prospetto la profondità del suo
 rilievo, così il disegno è lo stesso elemento 3D. Un vertice senza valore prende quello interpolato lungo il disegno

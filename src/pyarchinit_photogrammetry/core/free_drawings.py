@@ -50,11 +50,16 @@ def _stored(chunk) -> list:
     return [f for f in _drawings(chunk).get("free") or [] if isinstance(f, dict)]
 
 
-def _say_broken(chunk) -> None:
-    """The records of ``chunk`` that are not free drawings written in the log, once each per session."""
+def _say_broken(chunk, records=None, valid=None) -> None:
+    """The records of ``chunk`` that are not free drawings written in the log, once each per session (``valid``: the
+    check of each of ``records`` already made)."""
     broken = []
-    for rec in _drawings(chunk).get("free") or []:
-        if isinstance(rec, dict) and _valid(rec):
+    if records is None:
+        records = _drawings(chunk).get("free") or []
+    if valid is None:
+        valid = [isinstance(rec, dict) and _valid(rec) for rec in records]
+    for rec, ok in zip(records, valid):
+        if ok:
             continue
         name = str(rec.get("id")) if isinstance(rec, dict) else repr(rec)[:80]
         key = (id(chunk), name)
@@ -94,12 +99,27 @@ def _valid(rec: dict) -> bool:
         return False
 
 
+def _copied(value):
+    """A copy of the JSON-like ``value`` (dicts, lists, scalars) several times faster than ``copy.deepcopy`` on the
+    thousands of drawings of a redraw; anything else deep-copied."""
+    if isinstance(value, dict):
+        return {k: _copied(v) for k, v in value.items()}
+    if isinstance(value, list):
+        if all(type(v) in (float, int) for v in value):
+            return value[:]
+        return [_copied(v) for v in value]
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    return copy.deepcopy(value)
+
+
 def features(chunk, layer: str | None = None) -> list[dict]:
     """The free drawings of ``chunk`` (copies), of ``layer`` only when given; a broken record is left out, said in
     the log once per record and session."""
-    _say_broken(chunk)
-    return [copy.deepcopy(rec) for rec in _stored(chunk)
-            if _valid(rec) and (layer is None or rec["layer"] == layer)]
+    records = _drawings(chunk).get("free") or []
+    valid = [isinstance(rec, dict) and _valid(rec) for rec in records]  # each record checked once
+    _say_broken(chunk, records, valid)
+    return [_copied(rec) for rec, ok in zip(records, valid) if ok and (layer is None or rec["layer"] == layer)]
 
 
 def layers(chunk) -> list[dict]:
@@ -112,7 +132,7 @@ def layers(chunk) -> list[dict]:
     out += [x for x in stored if x["name"] != DEFAULT_LAYER]
     for rec in _stored(chunk):
         name = rec.get("layer")
-        if _valid(rec) and name and name not in names and name != DEFAULT_LAYER:
+        if name and name not in names and name != DEFAULT_LAYER and _valid(rec):  # checked for a new name only
             names.add(name)
             out.append({"name": name, "colour": DEFAULT_COLOUR, "visible": True})
     for x in out:

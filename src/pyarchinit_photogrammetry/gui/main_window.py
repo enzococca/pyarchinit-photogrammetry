@@ -1537,7 +1537,7 @@ class MainWindow(QMainWindow):
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
                          (self.draw_actions["breakline"], "Linee"),
-                         (self.draw_actions["free"], "Disegno libero"),
+                         (self.draw_actions["free"], "Libero"),
                          (self.draw_actions["probe"], "Punto"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
@@ -1554,7 +1554,8 @@ class MainWindow(QMainWindow):
         for mode in ("pan", "select", "polygon", "vertices"):
             db.addAction(self.draw_actions[mode])
         # in the menus of their buttons, so that the bar keeps its texts on a wide screen: the freehand
-        # of Disegna US (as the digitizing techniques of QGIS) and Rimodella next to Vertici
+        # of Disegna US (as the digitizing techniques of QGIS), Rimodella next to Vertici, the measuring point
+        # next to the spot height (both a click that reads the point) and, further on, Sezioni next to Layer
         for mode, actions in (("select", [self.a_select_freehand, self.a_identify_units]),
                               ("polygon", [self.a_freehand]),
                               ("vertices", [self.draw_actions["vertices"], self.draw_actions["reshape"]])):
@@ -1568,8 +1569,14 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "breakline", "free", "probe", "marker", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "breakline", "free", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
+        button = db.widgetForAction(self.draw_actions["quota"])
+        if button is not None:  # Punto di misura in the menu of Quota
+            menu = QMenu(self)
+            menu.addActions([self.draw_actions["quota"], self.draw_actions["probe"]])
+            button.setMenu(menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         button = db.widgetForAction(self.draw_actions["breakline"])
         if button is not None:  # the kind of the lines in the menu of the button
             button.setMenu(self.breakline_menu)
@@ -1584,12 +1591,18 @@ class MainWindow(QMainWindow):
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
         db.addSeparator()
-        a = db.addAction(icon("slice"), "Layer")
-        a.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
-        a.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
-        a = db.addAction(icon("line"), tr("Sezioni"))
+        layers = db.addAction(icon("slice"), "Layer")
+        layers.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
+        layers.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
+        a = QAction(icon("line"), tr("Sezioni"), self)
         a.setToolTip(tr("Pannello delle sezioni"))
         a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
+        button = db.widgetForAction(layers)
+        if button is not None:  # the Sections pane in the menu of Layer
+            menu = QMenu(self)
+            menu.addActions([layers, a])
+            button.setMenu(menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         db.addAction(self.a_qgis_open)
         a = db.addAction(icon("publish"), tr("Pubblica"))
         a.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le quote "
@@ -9932,21 +9945,31 @@ class MainWindow(QMainWindow):
 
     def _draw_free(self) -> None:
         """The free drawings of the active chunk shown again in the 3D view and on the 2D view."""
-        self._draw_free_3d()
-        self._draw_free_2d()
+        from ..core import free_drawings
 
-    def _draw_free_3d(self) -> None:
+        ch = self.chunk
+        if ch is None:
+            self._draw_free_3d()
+            self._draw_free_2d()
+            return
+        read = (free_drawings.layers(ch), free_drawings.features(ch))  # read once for both views
+        self._draw_free_3d(read)
+        self._draw_free_2d(read)
+
+    def _draw_free_3d(self, read=None) -> None:
+        """``read``: the layers and the drawings of the active chunk already read (:meth:`_draw_free`)."""
         from ..core import free_drawings
 
         ch = self.chunk
         if ch is None or self.model_view.chunk is not ch:
             return
-        layers = free_drawings.layers(ch)  # once per redraw: reading them per drawing made a redraw quadratic
+        # once per redraw: reading them per drawing made a redraw quadratic
+        layers, feats = read or (free_drawings.layers(ch), free_drawings.features(ch))
         hidden = {x["name"] for x in layers if not x.get("visible", True)}
-        shown = [f for f in free_drawings.features(ch) if f["layer"] not in hidden]
+        shown = [f for f in feats if f["layer"] not in hidden]
         self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f, layers) for f in shown})
 
-    def _draw_free_2d(self) -> None:
+    def _draw_free_2d(self, read=None) -> None:
         """Per user layer a layer :data:`LAYER_PREFIX` + its name on the 2D view: on the plan the drawings by their x,
         y; on an elevation the (u, v) of the parts whose depth is within the elevation's depth (+- two cells)."""
         from ..core import free_drawings
@@ -9967,9 +9990,10 @@ class MainWindow(QMainWindow):
             lo, hi = entry.get("depth") or (-np.inf, np.inf)
             margin = 2.0 * float(entry.get("resolution") or 0.0)
             band = (float(lo) - margin, float(hi) + margin)
-        layers = free_drawings.layers(ch)  # the layers and the drawings read once per redraw
+        # the layers and the drawings read once per redraw (``read``: already read by :meth:`_draw_free`)
+        layers, feats = read or (free_drawings.layers(ch), free_drawings.features(ch))
         by_layer: dict[str, list] = {}
-        for rec in free_drawings.features(ch):
+        for rec in feats:
             by_layer.setdefault(rec["layer"], []).append(rec)
         with v.batch():
             for lay in layers:
