@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPat
                                QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
 import shiboken6
 
+from ..engine.multispectral import INDEX_PALETTES, index_colors, index_limits  # noqa: F401 (the ramps live with the indices)
 from .i18n import tr
 
 RELIEF_KINDS = ("svf", "openness_pos", "openness_neg", "slrm", "msrm", "multi_hillshade")  # archaeo.relief
@@ -72,47 +73,6 @@ def dem_colors(z: np.ndarray, res: float, limits: tuple[float, float] | None = N
     shade = np.sin(alt) * np.cos(slope) + np.cos(alt) * np.sin(slope) * np.cos(az - aspect)
     shade = np.clip(shade, 0, 1) * 0.7 + 0.3
     rgba[..., :3] = np.clip(col * shade[..., None], 0, 255).astype(np.uint8)
-    rgba[..., 3] = np.where(valid, 255, 0)
-    return rgba
-
-
-def index_limits(z: np.ndarray) -> tuple[float, float]:
-    """The ends of the colour ramp of a vegetation index: the 2nd and 98th percentiles, within
-    -1 and 1 for the normalised indices."""
-    valid = np.isfinite(z)
-    if not valid.any():
-        return -1.0, 1.0
-    lo, hi = np.percentile(z[valid], [2, 98])
-    if lo >= -1.0 and hi <= 1.0:
-        lo, hi = max(lo, -1.0), min(hi, 1.0)
-    return float(lo), float(hi) if hi > lo else float(lo) + 1e-6
-
-
-INDEX_PALETTES = [("rdylgn", "Rosso-giallo-verde"), ("grey", "Scala di grigi"), ("viridis", "Viridis"),
-                  ("turbo", "Turbo")]  # the colour ramps of a vegetation index (key, name)
-
-
-def index_colors(z: np.ndarray, limits: tuple[float, float] | None = None, palette: str = "rdylgn") -> np.ndarray:
-    """A vegetation index on a ``palette`` of :data:`INDEX_PALETTES`: ``rdylgn`` brown-red where
-    low, pale yellow in the middle, dark green where high (the ramp of the agronomic maps),
-    ``grey`` black to white, ``viridis`` and ``turbo`` OpenCV's; transparent where no data."""
-    valid = np.isfinite(z)
-    rgba = np.zeros(z.shape + (4,), np.uint8)
-    if not valid.any():
-        return rgba
-    lo, hi = limits if limits is not None else index_limits(z)
-    t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
-    if palette == "grey":
-        rgba[..., :3] = (t * 255).astype(np.uint8)[..., None]
-    elif palette in ("viridis", "turbo"):
-        import cv2
-
-        cmap = cv2.COLORMAP_VIRIDIS if palette == "viridis" else cv2.COLORMAP_TURBO
-        rgba[..., :3] = cv2.applyColorMap(np.ascontiguousarray((t * 255).astype(np.uint8)), cmap)[..., ::-1]
-    else:
-        stops = np.array([[0.0, 165, 0, 38], [0.25, 244, 109, 67], [0.5, 254, 224, 139], [0.75, 102, 189, 99],
-                          [1.0, 0, 104, 55]])
-        rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
     rgba[..., 3] = np.where(valid, 255, 0)
     return rgba
 

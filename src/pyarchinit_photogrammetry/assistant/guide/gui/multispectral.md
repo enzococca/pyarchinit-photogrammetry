@@ -55,6 +55,12 @@ and open from there; *Open in QGIS* makes the QGIS project with the reflectance 
 their ramp, the zones as raster and as polygons, besides the orthophoto, the DEM and the drawings. The details are in
 the [API](../api.md#multispectral-cameras), *Multispectral cameras*.
 
+**Exporting** them: right click on a product in the workspace > *Export...*, or *Export...* in the *Index* step for
+the chosen index. The reflectance goes out with all its bands, float32 values as they are and the band names (GeoTIFF
+or COG); an index as its values (GeoTIFF float32 or COG) or as a coloured image on the ramp chosen in the pane (RGBA
+GeoTIFF, or PNG with a world file); a zoning as the GeoPackage of its polygons or as the GeoTIFF of the classes.
+*File > Export > Orthophoto* exports the RGB orthophoto, which a chunk of multispectral captures does not have.
+
 ## Thermal
 
 ### The captures

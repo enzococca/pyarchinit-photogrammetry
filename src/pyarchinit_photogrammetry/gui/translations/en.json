@@ -2871,7 +2871,18 @@
   "u = lunghezza misurata lungo il muro (una torre ovale o un pozzo irregolare) invece dell'arco sul cilindro di riferimento": "u = the length measured along the wall (an oval tower, an irregular well) instead of the arc on the reference cylinder",
   "il punto in basso di una linea diritta della struttura parallela all'asse (una colonna, un fusto; non la scarpa di una torre: per quella si usa la cresta o la regione)": "the bottom point of a straight line of the structure parallel to its axis (a column, a shaft; not the batter of a tower: for that use the crest or the region)",
   "il punto in alto della stessa linea, sulla stessa verticale della struttura": "the top point of the same line, on the same upright of the structure",
-  "Non si può verificare che la linea dei due punti sia parallela alla torre: troppo pochi vertici del muro intorno al cerchio.": "Cannot check that the line of the two points is parallel to the tower: too few vertices of the wall around the circle."
+  "Non si può verificare che la linea dei due punti sia parallela alla torre: troppo pochi vertici del muro intorno al cerchio.": "Cannot check that the line of the two points is parallel to the tower: too few vertices of the wall around the circle.",
+  "L'indice scelto: GeoTIFF con i valori (32 bit), COG, o un'immagine colorata con la scala di colori scelta (GeoTIFF o PNG con world file)": "The chosen index: GeoTIFF with the values (32 bit), COG, or an image coloured with the chosen colour ramp (GeoTIFF or PNG with a world file)",
+  "Il file del prodotto non c'è più: costruiscilo di nuovo.": "The product's file is no longer there: build it again.",
+  "GeoTIFF, tutte le bande a 32 bit (*.tif)": "GeoTIFF, all the bands at 32 bit (*.tif)",
+  "COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)": "COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)",
+  "GeoTIFF con i valori dell'indice, 32 bit (*.tif)": "GeoTIFF with the index values, 32 bit (*.tif)",
+  "COG - Cloud Optimized GeoTIFF con i valori, ZSTD (*.tif)": "COG - Cloud Optimized GeoTIFF with the values, ZSTD (*.tif)",
+  "GeoTIFF colorato con la scala di colori scelta (*.tif)": "GeoTIFF coloured with the chosen colour ramp (*.tif)",
+  "PNG colorato con world file (*.png)": "Coloured PNG with a world file (*.png)",
+  "GeoPackage con i poligoni delle zone (*.gpkg)": "GeoPackage with the zone polygons (*.gpkg)",
+  "GeoTIFF delle classi (*.tif)": "GeoTIFF of the classes (*.tif)",
+  "L'ortofoto (RGB) di questo chunk non è costruita. Riflettanza, indici e zone si esportano dalle loro voci nell'Area di lavoro (tasto destro > Esporta...) o dal pannello Multispettrale; le temperature dal pannello Termico.": "The (RGB) orthophoto of this chunk is not built. Reflectance, indices and zones are exported from their items in the Workspace (right click > Export...) or from the Multispectral pane; the temperatures from the Thermal pane."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

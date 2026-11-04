@@ -59,6 +59,7 @@ class MultispectralPane(QWidget):
     index_requested = Signal(str, str)  # name, formula ("" = the known index)
     zoning_requested = Signal(str, int, str)  # index, classes, method
     qgis_requested = Signal()
+    export_requested = Signal(str, object)  # "reflectance", "index" or "zones" with the name of the index
     palette_requested = Signal(str)  # the ramp of the indices shown
     thermal_params_requested = Signal()
     sdk_requested = Signal()  # download DJI's Thermal SDK
@@ -143,7 +144,10 @@ class MultispectralPane(QWidget):
         self.c_palette.setToolTip(tr("Scala di colori degli indici"))
         for key, name in INDEX_PALETTES:
             self.c_palette.addItem(tr(name), key)
-        step(5, "index", tr("Indice di vegetazione"), [self.c_index, self.b_index, self.c_palette])
+        self.b_export_index = QPushButton(icon("export"), tr("Esporta..."))
+        self.b_export_index.setToolTip(tr("L'indice scelto: GeoTIFF con i valori (32 bit), COG, o un'immagine colorata "
+                                          "con la scala di colori scelta (GeoTIFF o PNG con world file)"))
+        step(5, "index", tr("Indice di vegetazione"), [self.c_index, self.b_index, self.c_palette, self.b_export_index])
         self.s_classes = QSpinBox()
         self.s_classes.setRange(2, 10)
         self.s_classes.setValue(3)
@@ -232,6 +236,7 @@ class MultispectralPane(QWidget):
         self.b_zoning.clicked.connect(lambda: self.zoning_requested.emit(self.index_name(), int(self.s_classes.value()),
                                                                          str(self.c_method.currentData())))
         self.b_qgis.clicked.connect(self.qgis_requested)
+        self.b_export_index.clicked.connect(lambda: self.export_requested.emit("index", self.index_name()))
         self.c_palette.currentIndexChanged.connect(lambda _i: self.palette_requested.emit(self.palette()))
         self.set_state(None)
 
@@ -369,6 +374,7 @@ class MultispectralPane(QWidget):
         self.b_index.setEnabled(has_refl)
         self.c_index.setEnabled(has_refl)
         self._offer_indices(ms.get("reflectance_bands") or ms.get("bands") or [])
+        self.b_export_index.setEnabled(bool(indices))
         if indices:
             self.states["index"].setText(tr("Calcolati: {0}", ", ".join(sorted(indices))))
         else:
