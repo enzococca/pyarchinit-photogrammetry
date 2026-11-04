@@ -228,6 +228,11 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "s_stones": ("Pietre", "Stones"),
     "s_proxies": ("Proxy US", "Unit proxies"),
     "s_sections": ("Sezioni", "Sections"),
+    "s_free": ("Disegni 3D", "3D drawings"),
+    "free_id": ("ID", "ID"),
+    "vertices": ("Vertici", "Vertices"),
+    "length_3d": ("Lunghezza 3D (m)", "3D length (m)"),
+    "area_3d": ("Area 3D (m²)", "3D area (m²)"),
     "field": ("Campo", "Field"),
     "value": ("Valore", "Value"),
     "label": ("Nome", "Label"),
@@ -838,6 +843,27 @@ def _sections(chunk, h: Labels) -> Sheet | None:
                  [None, None, 3, 3, 3, 3, 3, None, None])
 
 
+def _free(chunk, h: Labels) -> Sheet | None:
+    """The free drawings in 3D (:mod:`..core.free_drawings`): their lengths and areas computed, not stored."""
+    from ..archaeo.measures import feature_measures
+    from ..core import free_drawings
+
+    feats = free_drawings.features(chunk)
+    if not feats:
+        return None
+    rows = []
+    for rec in feats:
+        try:
+            m = feature_measures(rec)
+        except ValueError:
+            m = {}
+        length = m.get("length_3d", m.get("perimeter_3d"))
+        rows.append([rec["id"], rec["layer"], rec["kind"], rec.get("name") or "", len(rec["xyz"]), _num(length),
+                     _num(m.get("area_3d")), _num(m.get("area_plan"))])
+    return Sheet([h("free_id"), h("layer"), h("kind"), h("name"), h("vertices"), h("length_3d"), h("area_3d"),
+                  h("plan_area")], rows, [None, None, None, None, 0, 3, 3, 3])
+
+
 def project_tables(chunk, language: str | None = None, progress=None) -> dict[str, Sheet]:
     """Every table of ``chunk`` (see the module docstring), sheet name -> :class:`Sheet`, in the
     language of the headers (``it`` or ``en``; default: of the interface, else of the system).
@@ -863,7 +889,8 @@ def project_tables(chunk, language: str | None = None, progress=None) -> dict[st
                      ("s_thermal", lambda: _thermal(chunk, h))]
     builders += [("s_points", lambda: _points(chunk, h)), ("s_quote", lambda: _quote(chunk, h)),
                  ("s_units", lambda: _units(chunk, h)), ("s_stones", lambda: _stones(chunk, h)),
-                 ("s_proxies", lambda: _proxies(chunk, h)), ("s_sections", lambda: _sections(chunk, h))]
+                 ("s_proxies", lambda: _proxies(chunk, h)), ("s_sections", lambda: _sections(chunk, h)),
+                 ("s_free", lambda: _free(chunk, h))]
     out: dict[str, Sheet] = {}
     for i, (key, build) in enumerate(builders):
         progress(i / len(builders), f"Tables of {chunk.label}: {key[2:]}")

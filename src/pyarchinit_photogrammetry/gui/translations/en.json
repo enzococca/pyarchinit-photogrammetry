@@ -2966,7 +2966,15 @@
   "Linea": "Line",
   "Poligono": "Polygon",
   "Disegno libero: linee, poligoni e punti in layer propri, anche in 3D": "Free drawing: lines, polygons and points in layers of your own, in 3D too",
-  "#rrggbb (vuoto: il colore del layer)": "#rrggbb (empty: the layer colour)"
+  "#rrggbb (vuoto: il colore del layer)": "#rrggbb (empty: the layer colour)",
+  "Disegni 3D...": "3D drawings...",
+  "I disegni liberi (linee, poligoni, punti in 3D) in DXF 3D, GeoPackage con Z, GeoJSON o CSV dei vertici: il formato dall'estensione del file": "The free drawings (lines, polygons, points in 3D) as 3D DXF, GeoPackage with Z, GeoJSON or CSV of the vertices: the format from the suffix of the file",
+  "Linee, poligoni e punti da un GeoPackage o un GeoJSON come disegni liberi del chunk attivo; senza quote le prende dal DEM": "Lines, polygons and points from a GeoPackage or a GeoJSON as free drawings of the active chunk; without heights it takes them from the DEM",
+  "Nessun disegno libero: disegnali con Disegno libero (vista 2D) o Disegna (vista 3D).": "No free drawing: draw them with Free drawing (2D view) or Draw (3D view).",
+  "Esporta i disegni 3D": "Export the 3D drawings",
+  "Tutti i layer": "All the layers",
+  "Layer:": "Layer:",
+  "Importa disegni 3D": "Import 3D drawings"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3918,6 +3926,8 @@
   "{0} aggiunto al layer {1}": "{0} added to the layer {1}",
   "{0} eliminato": "{0} deleted",
   "Disegno non aggiunto: {0}": "Drawing not added: {0}",
-  "Disegno non modificato: {0}": "Drawing not changed: {0}"
+  "Disegno non modificato: {0}": "Drawing not changed: {0}",
+  "{0} disegni 3D esportati in {1}": "{0} 3D drawings exported to {1}",
+  "{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)": "{0} 3D drawings imported from {1} ({2} with the heights of the DEM, {3} skipped)"
  }
 }

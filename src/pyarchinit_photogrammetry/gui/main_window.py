@@ -901,6 +901,10 @@ class MainWindow(QMainWindow):
         self._act(exp, tr("Pacchetto QField (tablet in trincea)..."), self.export_qfield, processing=True,
                   icon_name="export", tip=tr("Ortofoto, DEM, unità e quote del chunk in una cartella per QField: si "
                                              "disegna sul tablet, poi File > Importa > Modifiche da QField"))
+        self.a_export_free = self._act(
+            exp, tr("Disegni 3D..."), self.export_free_drawings, icon_name="export",
+            tip=tr("I disegni liberi (linee, poligoni, punti in 3D) in DXF 3D, GeoPackage con Z, GeoJSON o CSV dei "
+                   "vertici: il formato dall'estensione del file"))
         exp.addSeparator()
         self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
@@ -912,6 +916,10 @@ class MainWindow(QMainWindow):
                   icon_name="model_textured",
                   tip=tr("Una mesh fatta con un altro programma come modello del chunk attivo o di un nuovo chunk, "
                          "con i colori e la texture; il modello di prima resta tra le versioni"))
+        self.a_import_free = self._act(
+            imp, tr("Disegni 3D..."), self.import_free_drawings, icon_name="open",
+            tip=tr("Linee, poligoni e punti da un GeoPackage o un GeoJSON come disegni liberi del chunk attivo; senza "
+                   "quote le prende dal DEM"))
         self._act(imp, tr("Progetto Metashape (.psx)..."), lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
         self._act(imp, tr("Modello e texture dal progetto Metashape (reimporta)..."), self.reimport_metashape_model,
@@ -10052,6 +10060,66 @@ class MainWindow(QMainWindow):
         self._draw_free()
         return True
 
+    def export_free_drawings(self) -> None:
+        """*File > Esporta > Disegni 3D...*: the free drawings of the active chunk (all, or one layer) into a DXF 3D, a
+        GeoPackage with Z, a GeoJSON or a CSV of the vertices, by the suffix of the file."""
+        if not self._need_chunk():
+            return
+        from ..core import free_drawings
+        from ..io import free_drawings as fio
+
+        if not free_drawings.features(self.chunk):
+            self._warn(tr("Nessun disegno libero: disegnali con Disegno libero (vista 2D) o Disegna (vista 3D)."))
+            return
+        path, _f = QFileDialog.getSaveFileName(
+            self, tr("Esporta i disegni 3D"), str(Path(self._last_dir()) / "disegni_3d.dxf"),
+            "DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson);;CSV (*.csv)")
+        if not path:
+            return
+        if Path(path).suffix.lower() not in fio.SUFFIXES:
+            path += ".dxf"
+        names = [x["name"] for x in free_drawings.layers(self.chunk) if free_drawings.features(self.chunk, x["name"])]
+        everything = tr("Tutti i layer")
+        layer = None
+        if len(names) > 1:
+            chosen, ok = QInputDialog.getItem(self, tr("Esporta i disegni 3D"), tr("Layer:"), [everything, *names], 0,
+                                              False)
+            if not ok:
+                return
+            layer = None if chosen == everything else chosen
+        try:
+            out = fio.export(self.chunk, path, layer=layer)
+        except Exception as exc:
+            self._exc("Esportazione dei disegni 3D non riuscita", exc)
+            return
+        n = len(free_drawings.features(self.chunk, layer))
+        self.log_pane.info(tr("{0} disegni 3D esportati in {1}", n, out))
+        self.statusBar().showMessage(tr("{0} disegni 3D esportati in {1}", n, out), 15000)
+
+    def import_free_drawings(self) -> None:
+        """*File > Importa > Disegni 3D...*: lines, polygons and points of a GeoPackage or a GeoJSON as free drawings of
+        the active chunk (z from the DEM when the file has none), one step of *Modifica > Annulla*."""
+        if not self._need_chunk():
+            return
+        from ..io import free_drawings as fio
+
+        path, _f = QFileDialog.getOpenFileName(self, tr("Importa disegni 3D"), self._last_dir(),
+                                               "GeoPackage, GeoJSON, DXF (*.gpkg *.geojson *.json *.dxf)")
+        if not path:
+            return
+        try:
+            got = fio.import_features(self.chunk, path)
+        except Exception as exc:
+            self._exc("Importazione dei disegni 3D non riuscita", exc)
+            return
+        if got["added"]:
+            self._dirty(True)
+            self._draw_free()
+        text = tr("{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)",
+                  got["added"], Path(path).name, got["dem_z"], got["skipped"])
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 15000)
+
     def _free_measures(self, fid: str) -> None:
         """*Misura area* on a selected free drawing: its measures in 3D (on the model too, for a polygon)."""
         from . import free_drawing_dialog as fdd
@@ -11122,12 +11190,15 @@ class MainWindow(QMainWindow):
                 if not _gpkg.is_geopackage(link.path) or link.stored_chunk() != self._chunk_key():
                     return {}
                 self._export_elevation_tables(link)
+                self._export_free_tables(link)
                 return {t: link.path for t in LIVE_TABLES}
             view = self.ortho_view
+            # the markers: the survey's control; the TIN: a product; the free drawings: their own 3D tables
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
-                      if name not in ("Marker", TIN_LAYER)}  # the markers: the survey's control; the TIN: a product
+                      if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
             files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
             self._export_elevation_tables(link)
+            self._export_free_tables(link)
             self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
             previous, self._live_previous = self._live_previous, None
             if previous is not None and previous is not link:
@@ -11178,6 +11249,16 @@ class MainWindow(QMainWindow):
             link.write_elevations(tables)
         except Exception as exc:  # noqa: BLE001 - the file held by QGIS a moment: the next write
             log.warning("Disegni dei prospetti non scritti per QGIS: %s", exc)
+
+    def _export_free_tables(self, link) -> None:
+        """The free drawings in 3D of the active chunk into the live GeoPackage (:meth:`.LiveLink.write_free`, three
+        tables with Z, one-way): QGIS and RustGIS show them with the plan."""
+        if self.chunk is None:
+            return
+        try:
+            link.write_free(self.chunk)
+        except Exception as exc:  # noqa: BLE001 - the file held by QGIS a moment: the next write
+            log.warning("Disegni 3D non scritti per QGIS: %s", exc)
 
     def _chunk_key(self) -> str | None:
         """The key of the active chunk as the live GeoPackage keeps it with its drawings."""
@@ -12090,6 +12171,11 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001 - a plugin must not stop the export
                 log.warning("QGIS: layer di un plugin saltati: %s", exc)
         extra_vectors += self._qgis_elevation_vectors(ch)
+        if ch is not None:
+            try:
+                extra_vectors += self._qgis_live_link().free_vectors()  # the free drawings in 3D
+            except Exception as exc:  # noqa: BLE001 - the project without them
+                log.warning("QGIS: disegni 3D saltati: %s", exc)
         return rasters, extra_vectors
 
     def _qgis_elevation_vectors(self, ch) -> list[dict]:
