@@ -106,8 +106,29 @@ def test_three_picks_fill_the_dialog_and_preview(win, qapp):
 
     from pyarchinit_photogrammetry.gui.model_view import AXES_COLOURS
 
+    # the x axis on the screen: its projected ends in the view, and a near-red pixel along it (the line is
+    # antialiased and, for some builds of the fixture's model, short: an exact colour is not always there)
+    canvas = win.model_view.canvas
+    origin, rows, size = canvas.sd.axes
+    ends = np.vstack([origin, np.asarray(origin) + size * np.asarray(rows)[0]])
+    w, h = canvas.width(), canvas.height()
+    px, py, _depth, ok = canvas.cam.project(ends, w, h)
+    assert ok.all(), "the x axis is not in the view"
+    length = float(np.hypot(px[1] - px[0], py[1] - py[0]))
+    assert length >= 3, length
     red = QColor(AXES_COLOURS[0])
-    found = any(shown.pixelColor(x, y) == red for x in range(0, shown.width(), 1) for y in range(0, shown.height(), 2))
+    ratio = shown.width() / w
+    found = False
+    for t in np.linspace(0.15, 0.85, 30):  # along the axis, away from the origin where y and z start too
+        cx, cy = px[0] + t * (px[1] - px[0]), py[0] + t * (py[1] - py[0])
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                ix, iy = int(round((cx + dx) * ratio)), int(round((cy + dy) * ratio))
+                if 0 <= ix < shown.width() and 0 <= iy < shown.height():
+                    c = shown.pixelColor(ix, iy)
+                    if abs(c.red() - red.red()) <= 40 and abs(c.green() - red.green()) <= 40 \
+                            and abs(c.blue() - red.blue()) <= 40:
+                        found = True
     assert found, "no pixel of the x axis"
     assert "°" in dlg.summary.text()
     assert dlg.b_apply.isEnabled()
