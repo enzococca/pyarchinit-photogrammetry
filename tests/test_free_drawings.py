@@ -245,3 +245,24 @@ def test_an_optimisation_that_fits_again_keeps_them_on_the_model(tmp_path, monke
     got = fd.features(ch)[0]["xyz"]
     assert not np.allclose(ch.transform, t_old)
     assert np.abs(_internal(ch.transform, got) - _internal(t_old, xyz)).max() < 1e-9
+
+
+def test_a_failed_chunk_alignment_puts_them_back(tmp_path, monkeypatch):
+    """align_chunks levels an unlevelled local reference (its drawings follow) and then fails: the transform comes back
+    and the drawings with it, their basis that transform."""
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.engine import chunks, meshing
+
+    doc, ref = _bare(tmp_path)
+    other = doc.add_chunk("B")
+    xyz = [[1.0, 0.0, 0.0], [3.0, 1.0, 0.5]]
+    fd.add(ref, "line", xyz)
+    t = np.radians(17.0)
+    monkeypatch.setattr(meshing, "up_vector_internal", lambda c: np.array([np.sin(t), 0.0, np.cos(t)]))
+    camera = types.SimpleNamespace(center=np.zeros(3))  # an aligned photo: the reference is levelled
+    monkeypatch.setattr(Chunk, "aligned_cameras", property(lambda self: [camera]))
+    with pytest.raises(ValueError, match="markers in common"):
+        chunks.align_chunks(doc, ref, [other], method="markers")
+    assert np.array_equal(ref.transform, np.eye(4)) and not ref.meta.get("levelled")
+    assert np.abs(np.array(fd.features(ref)[0]["xyz"]) - np.array(xyz)).max() < 1e-12
+    assert np.allclose(ref.meta["drawings"]["free_basis"]["transform"], ref.transform)

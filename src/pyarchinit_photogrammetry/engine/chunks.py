@@ -865,6 +865,9 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
             ref.meta.pop("levelled", None)
         else:
             ref.meta["levelled"] = saved[1]
+        from ..core import free_drawings
+
+        free_drawings.follow(ref)  # its free drawings, which followed the levelling, back with it
         raise
     for ch, T, info in results:
         if not crs_mod.is_local(ch.crs) and not crs_mod.is_local(ref.crs) and ch.crs != ref.crs:
