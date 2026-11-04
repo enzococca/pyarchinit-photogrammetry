@@ -849,6 +849,7 @@ MARKER_ACCURACY = 0.005
 BAR_ACCURACY = 0.001
 BAR_LABEL = "Orientamento A-B"
 SAMPLE = 50_000
+SAME_POINT = 0.001  # a re-orientation on A and B within a millimetre of the earlier ones keeps their typed bar
 FAR_PERCENTILE = 99.0  # "farthest": the 99th percentile, so that a stray point at the edge of the cloud is not taken
 
 
@@ -960,7 +961,9 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     ``chunk.meta["orientation"]`` set.
 
     Returns ``{"M", "describe", "markers": [keys], "cameras_replaced": [photo labels], "weak_markers": [labels of
-    markers estimated in fewer than two photos], "state", ...}`` with what :func:`apply` returns; ``state`` puts
+    markers estimated in fewer than two photos], "bar_dropped": None or {"distance", "accuracy"} of the earlier typed
+    bar when A and B are other points (re-created on the same points, either order, within :data:`SAME_POINT`),
+    "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
     everything is done and put back (the plugins listening are not told): ``describe`` and :func:`apply`'s result
     without ``state`` and ``markers``."""
@@ -972,6 +975,11 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     pts = _points_of(chunk, points, markers)
     own = _own_bars(chunk)
     kept_bar = own[0] if own and distance is None else None
+    old_ends = None
+    if kept_bar is not None:  # where the earlier A and B are now: the typed distance is theirs
+        ends = [chunk.marker_by_key(k) for k in (kept_bar.marker_a, kept_bar.marker_b)]
+        if all(e.position is not None for e in ends):
+            old_ends = chunk.to_world(np.array([e.position for e in ends], float))
     if distance is not None:
         others = [b for b in gcp.control_scalebars(chunk) if all(b is not o for o in own)]
         if others:
@@ -1015,6 +1023,15 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
         c = xyz[_far(np.linalg.norm(np.cross(xyz - a, ab), axis=1))]
     else:
         c = third_point(chunk, a, b)
+    dropped = None
+    if kept_bar is not None:
+        new_ends = np.array([a, b], float)
+        same = old_ends is not None and min(
+            float(np.max(np.linalg.norm(old_ends - new_ends, axis=1))),
+            float(np.max(np.linalg.norm(old_ends[::-1] - new_ends, axis=1)))) <= SAME_POINT
+        if not same:  # other points: the distance was of the earlier ones, dropped and said
+            dropped = {"distance": kept_bar.distance, "accuracy": kept_bar.accuracy}
+            kept_bar = None
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
     state = capture(moving, hg._sections_file(chunk))
@@ -1030,7 +1047,7 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
             mk.reference.accuracy = [MARKER_ACCURACY] * 3
         if distance is not None:
             chunk.add_scalebar(made[0], made[1], float(distance), BAR_ACCURACY, label=BAR_LABEL)
-        elif kept_bar is not None:  # the typed scale survives a re-orientation: on the new A and B
+        elif kept_bar is not None:  # the typed scale survives a re-orientation on the same A and B
             chunk.add_scalebar(made[0], made[1], kept_bar.distance, kept_bar.accuracy, label=kept_bar.label)
         chunk.meta["orientation"] = {"made": _now(), "method": method, "M": m.tolist(),
                                      "markers": [mk.key for mk in made], "describe": describe(m)}
@@ -1040,7 +1057,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     finally:
         if dry_run:
             _LISTENERS[:] = listeners
-    result.update(M=m.tolist(), describe=describe(m), method=method, cameras_replaced=replaced, weak_markers=weak)
+    result.update(M=m.tolist(), describe=describe(m), method=method, cameras_replaced=replaced, weak_markers=weak,
+                  bar_dropped=dropped)
     if dry_run:
         _restore(chunk, state, previous)
         return result

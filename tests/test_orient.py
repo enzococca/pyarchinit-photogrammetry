@@ -827,6 +827,15 @@ def test_reorient_replaces_the_markers(processed, tmp_path):
     bars = [sb for sb in ch.scalebars if sb.label == orient.BAR_LABEL]
     assert len(bars) == 1 and bars[0].distance == 3.0 and bars[0].accuracy == orient.BAR_ACCURACY
     assert {bars[0].marker_a, bars[0].marker_b} == {marks[0].key, marks[1].key}
+    assert again.get("bar_dropped") is None
+    # other points: the typed distance was of the earlier A and B, dropped and said
+    other = ch.to_world(internal[[2, 0, 1]])
+    result = orient.orient(ch, points=other)
+    assert not [sb for sb in ch.scalebars if sb.label == orient.BAR_LABEL]
+    assert result["bar_dropped"] == {"distance": 3.0, "accuracy": orient.BAR_ACCURACY}
+    oriented = np.array(ch.transform, float)
+    ch.update_transform()
+    assert np.abs(np.asarray(ch.transform) - oriented).max() < 1e-6
 
 
 def test_motion_from_a_plugin(processed, tmp_path):
