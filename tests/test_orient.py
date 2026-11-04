@@ -111,6 +111,19 @@ def test_nan_refused():
     assert e.value.reason == "plane_points"
 
 
+def test_plane_with_nan_a_b_or_toward_refused():
+    pts, _ = _floor(60, 5, outliers=0)
+    for kw in (
+        {"toward": [5, 5, np.nan]},
+        {"toward": [5, 5, 99], "a": [np.nan, 0, 0]},
+        {"toward": [5, 5, 99], "a": [0, 0, 0], "b": [1, np.inf, 0]},
+        {"toward": [5, 5, 99], "b": [np.nan, 0, 0]},
+    ):
+        with pytest.raises(orient.OrientRefused) as e:
+            orient.frame_from_plane(pts, **kw)
+        assert e.value.reason == "nan"
+
+
 def test_degenerate_point_sets_refused():
     rng = np.random.default_rng(5)
     t = rng.uniform(0, 3, 50)

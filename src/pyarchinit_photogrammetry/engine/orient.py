@@ -134,6 +134,9 @@ def fit_plane(xyz) -> tuple[np.ndarray, np.ndarray, float]:
 
 def frame_from_plane(xyz, toward, a=None, b=None, flip: bool = False) -> Frame:
     """The frame of a plane fitted to ``xyz``; z on the side of the point ``toward``."""
+    for given in (toward, a, b):
+        if given is not None and not np.all(np.isfinite(np.asarray(given, dtype=float))):
+            raise OrientRefused("nan", "a point has no valid coordinates")
     p = np.asarray(xyz, dtype=float).reshape(-1, 3)
     p = p[np.all(np.isfinite(p), axis=1)]
     if len(p) < MIN_PLANE_POINTS:
