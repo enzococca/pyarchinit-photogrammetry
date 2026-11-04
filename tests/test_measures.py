@@ -146,18 +146,23 @@ def test_area_of_a_tilted_square():
     assert measures.slope_aspect_of(flat)[1] == -1.0
 
 
+def _grid_mesh(a, b, n):
+    """A regular n x n grid of two-triangle cells; ``a``, ``b`` are the (n*n,) coordinates, to be mapped to 3D by the caller."""
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            k = i * n + j
+            faces += [[k, k + 1, k + n], [k + 1, k + n + 1, k + n]]
+    return np.array(faces)
+
+
 def _tilted_mesh(deg, n=6):
     import trimesh
 
     t = np.tan(np.radians(deg))
     xs, ys = np.meshgrid(np.linspace(0, 5, n), np.linspace(0, 5, n))
     v = np.column_stack([xs.ravel(), ys.ravel(), t * xs.ravel()])
-    faces = []
-    for i in range(n - 1):
-        for j in range(n - 1):
-            a = i * n + j
-            faces += [[a, a + 1, a + n], [a + 1, a + n + 1, a + n]]
-    return trimesh.Trimesh(v, faces, process=False)
+    return trimesh.Trimesh(v, _grid_mesh(xs, ys, n), process=False)
 
 
 def test_model_area_clipped_by_the_vertical_projection():
@@ -176,12 +181,7 @@ def test_wall_polygon_uses_its_plane():
     n = 5
     xs, zs = np.meshgrid(np.linspace(0, 4, n), np.linspace(0, 4, n))
     v = np.column_stack([xs.ravel(), np.zeros(n * n), zs.ravel()])
-    faces = []
-    for i in range(n - 1):
-        for j in range(n - 1):
-            a = i * n + j
-            faces += [[a, a + 1, a + n], [a + 1, a + n + 1, a + n]]
-    wall = trimesh.Trimesh(v, faces, process=False)
+    wall = trimesh.Trimesh(v, _grid_mesh(xs, zs, n), process=False)
     poly = np.array([[0.6, 0, 0.5], [3.3, 0, 1.1], [2.4, 0, 3.2], [1.0, 0, 2.7]])
     out = measures.model_area_inside(wall, poly)
     assert out["projection"] == "plane"
@@ -198,3 +198,44 @@ def test_feature_measures_keys():
     assert set(measures.feature_measures(poly)) == keys
     assert set(measures.feature_measures(poly, model=_tilted_mesh(20))) == keys | {"model_surface"}
     assert measures.feature_measures({"kind": "point", "xyz": [[1, 2, 3]]}) == {"z": 3.0}
+
+
+def test_a_closed_object_is_counted_once():
+    import trimesh
+
+    slab = trimesh.creation.box(extents=(4.0, 0.5, 3.0))
+    front = np.array([[-1, 0.25, -1], [1, 0.25, -1], [1, 0.25, 1], [-1, 0.25, 1]], float)
+    out = measures.model_area_inside(slab, front)
+    assert out["projection"] == "plane" and out["surface"] == pytest.approx(4.0, abs=1e-6)
+    assert out["coverage"] == pytest.approx(1.0, abs=1e-6)
+    back = front * [1, -1, 1]
+    assert measures.model_area_inside(slab, back)["surface"] == pytest.approx(4.0, abs=1e-6)
+    box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    top = np.array([[-0.5, -0.5, 1], [0.5, -0.5, 1], [0.5, 0.5, 1], [-0.5, 0.5, 1]], float)
+    out = measures.model_area_inside(box, top)
+    assert out["projection"] == "plan" and out["surface"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_large_coordinates_keep_their_precision():
+    sq = np.array([[0, 0, 0], [0.1, 0, 0], [0.1, 0.1, 0], [0, 0.1, 0]], float) + [500000.0, 4500000.0, 0]
+    assert measures.area_plan(sq) == pytest.approx(0.01, abs=1e-9)
+    import trimesh
+
+    m = trimesh.Trimesh(np.array([[-1, -1, 0], [2, -1, 0], [2, 2, 0], [-1, 2, 0]], float) + [500000.0, 4500000.0, 0],
+                        [[0, 1, 2], [0, 2, 3]], process=False)
+    assert measures.model_area_inside(m, sq)["surface"] == pytest.approx(0.01, abs=1e-9)
+
+
+def test_bowtie_and_degenerate_polygons():
+    bow = np.array([[0, 0, 0], [1, 1, 0], [1, 0, 0], [0, 1, 0]], float)
+    assert measures.area_plan(bow) == pytest.approx(0.5, abs=1e-9)
+    assert measures.area_3d(bow) == pytest.approx(0.5, abs=1e-9)
+    with pytest.raises(ValueError):
+        measures.area_3d(bow[:2])
+    with pytest.raises(ValueError):
+        measures.area_plan(bow[:2])
+    with pytest.raises(ValueError):
+        measures.slope_aspect_of(bow[:2])
+    assert measures.model_area_inside(_tilted_mesh(0), bow + [1, 1, 0])["coverage"] == pytest.approx(1.0)
+    out = measures.model_area_inside(_tilted_mesh(0), np.array([[4, 1, 0], [6, 1, 0], [6, 2, 0], [4, 2, 0]], float))
+    assert out["coverage"] == pytest.approx(0.5, abs=1e-9)

@@ -193,8 +193,11 @@ def ground_dem_at(path: str | Path, x: float, y: float) -> float | None:
 STEEP_COS = 0.5  # a polygon whose best plane has |n_z| below this is measured in its own plane
 
 
-def _pts(xyz) -> np.ndarray:
-    return np.asarray(xyz, float).reshape(-1, 3)
+def _pts(xyz, minimum: int = 0) -> np.ndarray:
+    p = np.asarray(xyz, float).reshape(-1, 3)
+    if len(p) < minimum:
+        raise ValueError(f"at least {minimum} points are needed, got {len(p)}")
+    return p
 
 
 def _segments(p: np.ndarray, closed: bool) -> np.ndarray:
@@ -212,8 +215,8 @@ def length_plan(xyz, closed: bool = False) -> float:
 
 
 def best_plane(xyz) -> tuple[np.ndarray, np.ndarray]:
-    """Centre and unit normal (z >= 0) of the least-squares plane through ``xyz``."""
-    p = _pts(xyz)
+    """Centre and unit normal (z >= 0) of the least-squares plane through ``xyz`` (at least 3 points)."""
+    p = _pts(xyz, 3)
     centre = p.mean(axis=0)
     n = np.linalg.svd(p - centre)[2][-1]
     if n[2] < 0 or (n[2] == 0 and (n[1] < 0 or (n[1] == 0 and n[0] < 0))):
@@ -221,9 +224,11 @@ def best_plane(xyz) -> tuple[np.ndarray, np.ndarray]:
     return centre, n / np.linalg.norm(n)
 
 
-def _shoelace(uv: np.ndarray) -> float:
-    x, y = uv[:, 0], uv[:, 1]
-    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+def _valid(uv: np.ndarray):
+    """The polygon through ``uv`` made valid (a bow-tie keeps both lobes), the one geometry every measure uses."""
+    import shapely
+
+    return shapely.make_valid(shapely.Polygon(uv))
 
 
 def _plane_frame(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -236,16 +241,17 @@ def _plane_frame(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def area_3d(xyz) -> float:
     """Area of the polygon in its best-fit plane."""
-    p = _pts(xyz)
+    p = _pts(xyz, 3)
     centre, n = best_plane(p)
     u, v = _plane_frame(n)
     d = p - centre
-    return _shoelace(np.column_stack([d @ u, d @ v]))
+    return float(_valid(np.column_stack([d @ u, d @ v])).area)
 
 
 def area_plan(xyz) -> float:
     """Area of the polygon projected on the horizontal plane."""
-    return _shoelace(_pts(xyz)[:, :2])
+    p = _pts(xyz, 3)
+    return float(_valid(p[:, :2] - p[:, :2].mean(axis=0)).area)
 
 
 def slope_aspect_of(xyz) -> tuple[float, float]:
@@ -257,44 +263,55 @@ def slope_aspect_of(xyz) -> tuple[float, float]:
 
 
 def model_area_inside(model, xyz) -> dict:
-    """Surface of the model's faces inside the polygon ``xyz``: the faces are clipped by the polygon's
-    vertical projection (per face, plan area / |n_z|); for a steep polygon (best plane with
-    |n_z| < STEEP_COS) the same in the polygon's own plane, said by ``"projection": "plane"``.
-    Returns ``surface``, ``plan`` (the projected area) and ``faces`` (faces touched)."""
+    """Surface of the model under the polygon ``xyz``, on the layer the polygon was drawn on.
+
+    The faces are clipped by the polygon's vertical projection (per face, plan area / |n_z|); for a steep
+    polygon (best plane with |n_z| < STEEP_COS) the same in the polygon's own plane, said by
+    ``"projection": "plane"``. Only faces whose centre is within max(0.10 m, the polygon's largest
+    distance from its best plane + 0.05 m) of the plane count, and of those the side (facing with or
+    against the plane's normal) that holds most of the area: a closed wall or box is counted once.
+    Returns ``surface``, ``plan`` (the clipped area in the projection used: horizontal, or the plane's),
+    ``coverage`` (``plan`` / the polygon's area in that projection) and ``faces`` (faces with a
+    non-empty clip)."""
     import shapely
 
-    p = _pts(xyz)
+    p = _pts(xyz, 3)
     centre, n = best_plane(p)
+    band = max(0.10, float(np.abs((p - centre) @ n).max()) + 0.05)
     tri = np.asarray(model.vertices, float)[np.asarray(model.faces, int)]
     cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
     norm = np.linalg.norm(cross, axis=1)
+    unit = cross / np.where(norm > 0, norm, 1.0)[:, None]
     if abs(n[2]) < STEEP_COS:
         mode = "plane"
         u, v = _plane_frame(n)
         proj = np.stack([(tri - centre) @ u, (tri - centre) @ v], axis=-1)
         poly_uv = np.column_stack([(p - centre) @ u, (p - centre) @ v])
-        cosine = np.abs(cross @ n) / np.where(norm > 0, norm, 1.0)
-        weight = np.where(cosine > 1e-6, 1.0 / np.where(cosine > 1e-6, cosine, 1.0), 0.0)
-        # weight is surface per projected area: 1 / |n_face . n_plane|
+        cosine = np.abs(unit @ n)
     else:
         mode = "plan"
-        proj = tri[:, :, :2]
-        poly_uv = p[:, :2]
-        nz = np.abs(cross[:, 2]) / np.where(norm > 0, norm, 1.0)
-        weight = np.where(nz > 1e-6, 1.0 / np.where(nz > 1e-6, nz, 1.0), 0.0)
-    out = {"surface": 0.0, "plan": 0.0, "faces": 0, "projection": mode}
-    poly = shapely.make_valid(shapely.Polygon(poly_uv))
+        proj = tri[:, :, :2] - centre[:2]
+        poly_uv = p[:, :2] - centre[:2]
+        cosine = np.abs(unit[:, 2])
+    weight = np.where(cosine > 1e-6, 1.0 / np.where(cosine > 1e-6, cosine, 1.0), 0.0)
+    out = {"surface": 0.0, "plan": 0.0, "coverage": 0.0, "faces": 0, "projection": mode}
+    poly = _valid(poly_uv)
     if poly.is_empty or poly.area == 0:
         return out
     x0, y0, x1, y1 = poly.bounds
+    depth = (tri.mean(axis=1) - centre) @ n
     keep = ((proj[:, :, 0].max(axis=1) >= x0) & (proj[:, :, 0].min(axis=1) <= x1)
-            & (proj[:, :, 1].max(axis=1) >= y0) & (proj[:, :, 1].min(axis=1) <= y1) & (weight > 0))
+            & (proj[:, :, 1].max(axis=1) >= y0) & (proj[:, :, 1].min(axis=1) <= y1)
+            & (weight > 0) & (np.abs(depth) <= band))
     if not keep.any():
         return out
-    tris = shapely.polygons(proj[keep])
-    area = shapely.area(shapely.intersection(shapely.make_valid(tris), poly))
-    hit = area > 0
-    out.update(surface=float((area * weight[keep]).sum()), plan=float(area.sum()), faces=int(hit.sum()))
+    area = shapely.area(shapely.intersection(shapely.make_valid(shapely.polygons(proj[keep])), poly))
+    side = (unit[keep] @ n) >= 0
+    chosen = side if area[side].sum() >= area[~side].sum() else ~side
+    area = np.where(chosen, area, 0.0)
+    w = weight[keep]
+    out.update(surface=float((area * w).sum()), plan=float(area.sum()), coverage=float(area.sum() / poly.area),
+               faces=int((area > 0).sum()))
     return out
 
 
