@@ -222,3 +222,87 @@ def test_rebuild_offered_after_the_orientation(win, qapp, monkeypatch):
     assert asked and asked[0][0] == "Ricostruisci i prodotti da rifare"
     assert rebuilt and rebuilt[0][0] is ch
     assert [s["product"] for s in rebuilt[0][1]][:2] == ["dem", "orthomosaic"]
+
+
+def _square(ch, half=0.6):
+    from orient_helpers import centre
+
+    x, y, _z = centre(ch)
+    return [(x - half, y - half), (x + half, y - half), (x + half, y + half), (x - half, y + half)]
+
+
+def test_tin_from_a_stale_dem_reads_stale(win):
+    import shapely
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    ch = win.chunk
+    T.build_tin(ch, source="dem", boundary=shapely.Polygon(_square(ch)))
+    assert not stamps.is_stale(ch, "tin")
+    saved = ch.meta["tin"]
+    assert saved["classes"] is None
+    assert np.allclose(np.asarray(saved["boundary"])[:, :2], _square(ch))  # the boundary it was built with, kept
+    ch.meta["built_in"]["dem"] = np.eye(4).tolist()  # the DEM of another system
+    T.build_tin(ch, source="dem")
+    assert stamps.is_stale(ch, "tin")  # in the DEM's coordinates: stale too
+    assert "boundary" not in ch.meta["tin"]
+
+
+def test_tin_left_by_hand_when_the_dem_stays_stale(win, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    ch = win.chunk
+    T.build_tin(ch, source="dem")
+    _orient(win, qapp)
+    assert {"dem", "tin"} <= {s["product"] for s in stamps.stale_products(ch)}
+    # the DEM from a TIN made from the DEM it replaced: neither can be rebuilt
+    ch.meta["dem"] = {"resolution": 0.05, "source": "tin", "classes": None}
+    steps, by_hand, _kept = win._rebuild_plan(ch)
+    assert not any(name in ("TIN", "DEM") for name, _fn in steps), [n for n, _f in steps]
+    assert any("DEM" in n for n in by_hand) and "TIN" in by_hand
+    # the DEM's own rebuild fails: the TIN on the DEM is not rebuilt on the old DEM
+    ch.meta["dem"] = {"resolution": 0.05, "source": "point_cloud", "classes": None}
+    built = []
+
+    def broken(*a, **k):
+        raise RuntimeError("prova")
+
+    monkeypatch.setattr(ch, "build_dem", broken)
+    monkeypatch.setattr(T, "build_tin", lambda *a, **k: built.append(k))
+    win.rebuild_stale(ch)
+    win.runner.wait()
+    qapp.processEvents()
+    assert built == []
+    text = next(t for kind, t in win.said if kind == "info")
+    assert "Non riusciti: DEM" in text
+    assert "Da rifare a mano: TIN" in text
+    assert stamps.is_stale(ch, "tin")
+
+
+def test_tin_rebuilt_with_its_boundary_and_classes(win, qapp, monkeypatch):
+    import shapely
+    from orient_helpers import motion, rotation
+
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    ch = win.chunk
+    square = _square(ch)
+    T.build_tin(ch, source="dem", boundary=shapely.Polygon(square))
+    ch.meta["tin"]["source"] = "cloud"
+    ch.meta["tin"]["classes"] = [2]
+    m = motion(rotation([0, 0, 1], 30.0), (2.0, -1.0, 0.3))  # a turn about the vertical: plan points move exactly
+    win.orient_chunk(ch, M=m)
+    qapp.processEvents()
+    seen = []
+    monkeypatch.setattr(T, "build_tin", lambda chunk, **k: seen.append(k))
+    for name, fn in win._rebuild_plan(ch)[0]:
+        if name == "TIN":
+            fn(lambda *a, **k: None)
+    assert len(seen) == 1
+    k = seen[0]
+    assert k["source"] == "cloud" and k["classes"] == [2]
+    want = np.asarray(square) @ m[:2, :2].T + m[:2, 3]
+    got = np.asarray(k["boundary"].exterior.coords)[:-1, :2]
+    assert np.allclose(got, want, atol=1e-6)

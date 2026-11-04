@@ -691,9 +691,15 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
     chunk._before_product_write("tin")  # a script that builds it again can be undone (core.versions.COPIED)
     path = tin.save(folder)
     chunk._set_product("tin", path)
-    stamps.stamp(chunk, "tin")
+    if source == "dem":
+        stamps.inherit(chunk, "tin", "dem")  # in the DEM's coordinates: from a stale DEM, stale too
+    else:
+        stamps.stamp(chunk, "tin")
     chunk.meta["tin"] = {"file": str(path.relative_to(chunk.data_dir)), "source": source, "made": tin.made,
-                         **{k: v for k, v in info.items() if k not in ("source",)}}
+                         **{k: v for k, v in info.items() if k not in ("source",)},
+                         "classes": None if classes is None else [int(c) for c in classes]}
+    if boundary is not None:  # as it was given, to build it again the same way (window: Ricostruisci i prodotti)
+        chunk.meta["tin"]["boundary"] = [[float(v) for v in xy] for xy in _polygon_coords(boundary)[:, :2]]
     progress(1.0, f"TIN: {tin.n_vertices} vertices, {tin.n_triangles} triangles, {len(con)} constrained edges")
     return tin
 

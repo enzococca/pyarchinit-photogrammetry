@@ -62,6 +62,11 @@ PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
+
+
+class _LeftByHand(Exception):
+    """A product of *Ricostruisci i prodotti da rifare* whose input is still stale: listed to be made by hand."""
+
 # the drawing tools refused on a raster built before the last change of the chunk's system (core.stamps): what they
 # draw would sit where the raster is, not where the model is; measuring, selecting and panning stay allowed
 STALE_REFUSED = ("polygon", "vertices", "reshape", "line", "quota", "marker", "breakline", "probe", "sam", "patch",
@@ -3718,7 +3723,7 @@ class MainWindow(QMainWindow):
             def same(p) -> bool:
                 return p is not None and Path(p).resolve() == shown
 
-            for name in (*stamps.GRID_PRODUCTS, "slope", "aspect"):
+            for name in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect"):  # the rasters
                 if same(ch.product_path(name)):
                     return stamps.is_stale(ch, name)
             for method, record in (ch.meta.get("relief") or {}).items():
@@ -3768,6 +3773,9 @@ class MainWindow(QMainWindow):
                 if product == "dem" and (ch.meta.get("dem") or {}).get("source") == "tin":
                     if (ch.meta.get("tin") or {}).get("source") == "dem":
                         by_hand.append(tr("{0} (dal TIN fatto dal DEM che ha sostituito)", name))
+                        if "tin" in {s.get("product") for s in items if s.get("kind") == "product"}:
+                            by_hand.append(tr("TIN"))  # on the DEM still in the old system: not rebuilt from it
+                        done_tin = True
                         continue
                     steps.append((tr("TIN"), lambda p, ch=ch: self._rebuild_tin(ch, p)))
                     done_tin = True
@@ -3835,11 +3843,45 @@ class MainWindow(QMainWindow):
         from ..engine import tin as T
 
         saved = ch.meta.get("tin") or {}
+        source = saved.get("source") or "dem"
+        if source == "dem" and stamps.is_stale(ch, "dem"):  # its DEM not rebuilt (by hand, or it failed)
+            raise _LeftByHand(tr("TIN"))
         lines = breaklines.for_tin([dict(r) for r in ch.meta.get("drawings", {}).get("lines") or []]) \
             if saved.get("n_breaklines") else None
-        max_error = saved.get("max_error") if saved.get("source", "dem") == "dem" else None
-        return T.build_tin(ch, source=saved.get("source") or "dem", max_error=max_error, breaklines=lines,
-                           spots=bool(saved.get("n_spots")), progress=p)
+        max_error = saved.get("max_error") if source == "dem" else None
+        classes = saved.get("classes")
+        return T.build_tin(ch, source=source, max_error=max_error, breaklines=lines,
+                           boundary=self._tin_boundary(ch, saved), spots=bool(saved.get("n_spots")),
+                           classes=list(classes) if classes else None, progress=p)
+
+    @staticmethod
+    def _tin_boundary(ch, saved: dict):
+        """The boundary the TIN of ``ch`` was built with (``meta["tin"]["boundary"]``, plan coordinates of the system
+        the TIN was built in) as a polygon in the chunk's system now: each vertex lifted onto the old TIN, carried
+        through the internal frame (the stamp of the TIN, then the chunk's transform) and laid on the plan again.
+        None when the TIN had no boundary."""
+        coords = saved.get("boundary")
+        if not coords:
+            return None
+        import shapely
+
+        xy = np.asarray(coords, float)[:, :2]
+        old = stamps.stamp_of(ch, "tin")
+        if old is None or stamps.same_transform(old, ch.transform):
+            return shapely.Polygon(xy)
+        from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+
+        from ..engine import tin as T
+
+        tin = T.chunk_tin(ch)
+        if tin is None:
+            raise RuntimeError("the TIN to rebuild is missing: its boundary cannot be carried to the new system")
+        vxy, vz = tin.world_xy, np.asarray(tin.world_xyz)[:, 2]
+        z = LinearNDInterpolator(vxy, vz)(xy)
+        z = np.where(np.isfinite(z), z, NearestNDInterpolator(vxy, vz)(xy))
+        world_old = np.column_stack([xy, z, np.ones(len(xy))])
+        m = np.asarray(ch.transform, float) @ np.linalg.inv(np.asarray(old, float).reshape(4, 4))
+        return shapely.Polygon((world_old @ m.T)[:, :2])
 
     def _rebuild_dem_from_tin(self, ch, p):
         from ..engine import tin as T
@@ -3921,6 +3963,8 @@ class MainWindow(QMainWindow):
                     rebuilt.append(name)
                 except Cancelled:
                     raise
+                except _LeftByHand as left:  # its input is still in the old system: never built on it
+                    by_hand.append(str(left))
                 except Exception as exc:  # noqa: BLE001 - one product failing does not stop the others
                     log.error("Ricostruzione di %s non riuscita: %s\n%s", name, exc, traceback.format_exc())
                     failed.append(f"{name} ({exc})")
