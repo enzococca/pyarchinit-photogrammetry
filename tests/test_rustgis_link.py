@@ -5568,3 +5568,45 @@ def test_the_free_drawings_go_to_rustgis_in_3d(tmp_path, monkeypatch):
     monkeypatch.setattr(link.RustGisLink, "refresh_free", refuse)
     assert rl2.start([])["layers"] == 7
     assert rl2.layers
+
+
+def test_layers_added_before_a_refusal_are_tracked_and_withdrawn(tmp_path, monkeypatch):
+    """RustGIS refuses the second layer of the free drawings: the first, already added, stays known to the link (and
+    goes with ``stop(withdraw=True)``); the same for the drawings of the elevations."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio 1")
+    ch.crs = GB
+    doc.save(tmp_path / "p.ppg")
+    fd.add(ch, "line", [[GX, GY, 100.0], [GX + 1, GY + 1, 100.5]])
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    live.write_free(ch)
+    live.write_elevations(_elevation_tables(1))
+    for attr, refresh in (("free_layers", "refresh_free"), ("elevation_layers", "refresh_elevations")):
+        fake = FakeEngine()
+        rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+        assert rl.start([])["layers"] == 7
+        getattr(rl, attr).clear()  # as if never loaded: the next refresh adds them again
+        setattr(rl, "_free_print" if attr == "free_layers" else "_elevation_print", None)
+        real, seen = rl._command, []
+
+        def command(name, params, real=real, seen=seen):
+            if name == "layer.addData":
+                seen.append(name)
+                if len(seen) == 2:
+                    raise link.RustGisRefused("no second layer")
+            return real(name, params)
+
+        monkeypatch.setattr(rl, "_command", command)
+        with pytest.raises(link.RustGisRefused):
+            getattr(rl, refresh)()
+        tracked = dict(getattr(rl, attr))
+        assert len(tracked) == 1
+        (lid,) = tracked.values()
+        assert any(layer["id"] == lid for layer in fake.layers)
+        monkeypatch.setattr(rl, "_command", real)
+        rl.stop(withdraw=True)
+        assert not any(layer["id"] == lid for layer in fake.layers)

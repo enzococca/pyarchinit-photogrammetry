@@ -3213,10 +3213,9 @@ class RustGisLink:
             except RustGisRefused:  # removed there already
                 pass
             self._elevation_group = None
-        added = {}
-        for table, title in tables:
+        added = self.elevation_layers = {}  # each layer kept as soon as RustGIS added it: a refusal of the next one
+        for table, title in tables:  # leaves those already there tracked (and withdrawn at the stop)
             added[table] = _added_layer(self._command("layer.addData", self._loading(table, title)))
-        self.elevation_layers = added
         if added:
             group = self._command("group.add", {"name": f"{self.chunk_label} - prospetti",
                                                 "layers": [_ref(i) for i in added.values()]})
@@ -3262,10 +3261,9 @@ class RustGisLink:
             except RustGisRefused:  # removed there already
                 pass
             self._free_group = None
-        added = {}
-        for table, title in tables:
+        added = self.free_layers = {}  # each layer kept as soon as RustGIS added it: a refusal of the next one
+        for table, title in tables:  # leaves those already there tracked (and withdrawn at the stop)
             added[table] = _added_layer(self._command("layer.addData", self._loading(table, title)))
-        self.free_layers = added
         if added:
             group = self._command("group.add", {"name": f"{self.chunk_label} - disegni 3D",
                                                 "layers": [_ref(i) for i in added.values()]})
