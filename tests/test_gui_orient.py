@@ -384,3 +384,57 @@ def test_axes_follow_the_exaggeration(win, qapp):
     assert np.allclose(shown[0], mv.sd.to_display(np.asarray(base[0])[None])[0])
     assert np.allclose(shown[1], base[1])
     mv.set_exaggeration(1.0)
+
+
+def _apply_orientation(win, qapp):
+    dlg = _open(win, qapp)
+    _pick_three(win, qapp, dlg)
+    dlg.b_apply.click()
+    win.runner.wait()
+    qapp.processEvents()
+    assert win.history.undo_text() == "Orienta il sistema locale"
+
+
+def test_undo_refused_after_the_stale_products_are_rebuilt(win, qapp):
+    """Orient, rebuild the DEM in the new frame, Annulla: the step is refused with a message and leaves the history;
+    the chunk stays as it is (the rebuilt DEM current in the oriented frame, not made current in the old one)."""
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    _apply_orientation(win, qapp)
+    assert stamps.is_stale(ch, "dem")
+    oriented = np.array(ch.transform, float)
+    items = [x for x in stamps.stale_products(ch) if x["product"] == "dem"]
+    assert win.rebuild_stale(ch, items)
+    win.runner.wait()
+    qapp.processEvents()
+    assert not stamps.is_stale(ch, "dem")
+    dem = ch.product_path("dem").read_bytes()
+    markers = [m.to_dict() for m in ch.markers]
+    assert win.history.can_undo()
+    win.undo()
+    qapp.processEvents()
+    assert np.abs(np.asarray(ch.transform) - oriented).max() == 0
+    assert ch.product_path("dem").read_bytes() == dem and not stamps.is_stale(ch, "dem")
+    assert [m.to_dict() for m in ch.markers] == markers
+    assert not win.history.can_undo() or win.history.undo_text() != "Orienta il sistema locale"
+    assert "orientamento non si può più annullare" in win.statusBar().currentMessage()
+
+
+def test_undo_refused_after_the_georeference_is_fitted_again(win, qapp):
+    """Orient, then a new alignment and *Aggiorna georeferenziazione* (the transform fitted again): Annulla is
+    refused and the chunk keeps the fitted transform."""
+    from orient_helpers import new_alignment
+
+    ch = win.chunk
+    _apply_orientation(win, qapp)
+    new_alignment(ch)
+    for m in ch.markers:
+        m.position = None
+    ch.update_transform()
+    fitted = np.array(ch.transform, float)
+    win.history.rebase()
+    win.undo()
+    qapp.processEvents()
+    assert np.abs(np.asarray(ch.transform) - fitted).max() == 0
+    assert "orientamento non si può più annullare" in win.statusBar().currentMessage()

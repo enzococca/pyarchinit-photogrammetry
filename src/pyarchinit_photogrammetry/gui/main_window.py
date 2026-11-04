@@ -5239,8 +5239,8 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.undo() if self.history is not None else None
-        except ScriptChanged:
-            self._script_changed()
+        except ScriptChanged as exc:
+            self._script_changed(exc)
             return
         except Exception as exc:  # noqa: BLE001 - a removal that cannot come back (its place is taken)
             self._exc(tr("Annulla non riuscito"), exc)
@@ -5254,8 +5254,8 @@ class MainWindow(QMainWindow):
             return
         try:
             text = self.history.redo() if self.history is not None else None
-        except ScriptChanged:
-            self._script_changed()
+        except ScriptChanged as exc:
+            self._script_changed(exc)
             return
         except Exception as exc:  # noqa: BLE001
             self._exc(tr("Ripeti non riuscito"), exc)
@@ -15853,10 +15853,15 @@ class MainWindow(QMainWindow):
             settle()
         return started
 
-    def _script_changed(self) -> None:
-        """The entry of a script left the history: the project changed after it (said in the status bar)."""
-        text = tr("Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in "
-                  "Modifica > Annulla. La voce è stata tolta.")
+    def _script_changed(self, exc=None) -> None:
+        """The entry of a script (or of an orientation) left the history: the project changed after it (said in the
+        status bar and in the log)."""
+        if getattr(exc, "orientation", False):
+            text = tr("L'orientamento non si può più annullare: il chunk è cambiato dopo (prodotti rifatti, nuovo "
+                      "allineamento, georeferenziazione o ottimizzazione). La voce è stata tolta.")
+        else:
+            text = tr("Lo script non si può più annullare: il progetto è cambiato dopo, con un passo che non è in "
+                      "Modifica > Annulla. La voce è stata tolta.")
         self.log_pane.warning(text)
         self.statusBar().showMessage(text, 12000)
 

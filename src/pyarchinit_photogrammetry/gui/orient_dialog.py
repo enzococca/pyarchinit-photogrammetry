@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDou
 
 from ..engine import orient
 from .i18n import decimal_comma, number, tr
+from .undo import ScriptChanged, first_difference
 
 log = logging.getLogger(__name__)
 
@@ -519,11 +520,48 @@ class OrientDialog(QDialog):
         super().done(r)
 
 
+class OrientChanged(ScriptChanged):
+    """The oriented chunks changed after the orientation (or its undo) with a step that is not in the history - the
+    stale products rebuilt, a new alignment, the georeference fitted again, the cameras optimised: putting back the
+    state taken before would undo half of it. The step leaves the history instead, nothing restored."""
+
+    orientation = True
+
+
+def _chunks_key(chunks) -> dict:
+    """What an orientation step expects to find in ``chunks`` when it is undone or done again: per chunk the transform,
+    the alignment, the markers' positions, the products, their stamps and the size and time of their files."""
+    import json
+
+    out = {}
+    for ch in chunks:
+        files = {}
+        for name in sorted(ch.products):
+            try:
+                st = ch.product_path(name).stat()
+            except (OSError, AttributeError):
+                files[name] = None
+            else:
+                files[name] = [st.st_size, st.st_mtime_ns]
+        out[str(ch.key)] = {
+            "transform": np.asarray(ch.transform, float).tolist(),
+            "alignment": ch.meta.get("alignment_id"),
+            "markers": {str(m.key): None if m.position is None else np.asarray(m.position, float).tolist()
+                        for m in ch.markers},
+            "built_in": json.loads(json.dumps(ch.meta.get("built_in") or {}, default=str)),
+            "products": dict(ch.products), "files": files}
+    return out
+
+
 class OrientStep:
     """An orientation (the ``result`` of :func:`..engine.orient.orient`) as one step of *Modifica > Annulla*: undone,
     the state it took before puts everything back and the listeners hear of the inverse motion; done again, the state
     taken at the first undo comes back and the listeners hear of the motion; the window reads its drawings, sections
-    and views again after each."""
+    and views again after each.
+
+    As :class:`.undo.ScriptAction`, undo and redo first check that the oriented chunks are as the step left them
+    (:func:`_chunks_key`); when processing changed them meanwhile they raise :class:`OrientChanged` and the history
+    drops the step: never a state of before put back on a chunk rebuilt or aligned since."""
 
     KEYS = ("orientation", "marker_excluded")  # chunk.meta kept beside the state (orient's ``previous``)
 
@@ -534,9 +572,16 @@ class OrientStep:
         self.after = None
         self.after_meta: dict = {}
         self.m = np.asarray(result["M"], float)
+        self.expected = _chunks_key(self._chunks())
 
     def _chunks(self) -> list:
         return [saved["chunk"] for saved in self.before.chunks]
+
+    def _check(self) -> None:
+        found = first_difference(self.expected, _chunks_key(self._chunks()))
+        if found:
+            log.info("Annulla dell'orientamento: il chunk è cambiato dopo (%s)", found)
+            raise OrientChanged(f"the oriented chunks changed after the orientation: {found}")
 
     def _meta(self, saved: dict) -> None:
         for k in self.KEYS:
@@ -546,6 +591,7 @@ class OrientStep:
                 self.chunk.meta.pop(k, None)
 
     def undo(self) -> None:
+        self._check()
         chunks = self._chunks()
         if self.after is None:  # the oriented state, to do it again
             self.after = orient.capture(chunks, self.before.sections)
@@ -556,15 +602,18 @@ class OrientStep:
         for ch in chunks:
             orient.fire(ch, inverse)
         self.window._orient_reload(self.chunk)
+        self.expected = _chunks_key(chunks)
 
     def redo(self) -> None:
         if self.after is None:
             return
+        self._check()
         orient.put_back(self.after)
         self._meta(self.after_meta)
         for ch in self._chunks():
             orient.fire(ch, self.m)
         self.window._orient_reload(self.chunk)
+        self.expected = _chunks_key(self._chunks())
 
     def drop(self) -> None:
         orient.drop(self.before)
