@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -858,6 +859,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         path = folder / "profile.json"
         path.write_text(json.dumps({"lines": [line.round(4).tolist() for line in lines]}))
         entry["profile"] = str(path.relative_to(chunk.data_dir))
+    stamps.stamp_entry(chunk, entry)  # the frame follows a rigid motion; stale with a scale (core.stamps)
     chunk.meta.setdefault("elevations", []).append(entry)
     progress(1.0, f"Elevation {w}x{h} px")
     return entry

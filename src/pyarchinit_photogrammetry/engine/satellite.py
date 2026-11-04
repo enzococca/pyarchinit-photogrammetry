@@ -48,6 +48,7 @@ import numpy as np
 
 from ..core import crs as crs_mod
 from ..core.progress import ProgressCallback, as_progress
+from ..core.stamps import stamp_entry
 from ..io.files import replace_file
 
 log = logging.getLogger(__name__)
@@ -1357,7 +1358,7 @@ def _folder(chunk) -> Path:
 
 
 def _record(chunk, kind: str, entry: dict) -> None:
-    chunk.meta.setdefault(FOLDER, {}).setdefault(kind, []).append(entry)
+    chunk.meta.setdefault(FOLDER, {}).setdefault(kind, []).append(stamp_entry(chunk, entry))
 
 
 def rgb_preview(src_path: Path, dst_path: Path, rgb: Sequence[int] | None = None, tile: int = 2048,
@@ -1427,6 +1428,7 @@ def _version_entry(chunk, product: str, file: Path, name: str, params: dict) -> 
     shutil.move(str(file), str(dst))
     entry = {"id": vid, "name": name[:80], "created": datetime.now().isoformat(timespec="seconds"),
              "params": params, "files": {product: str(dst.relative_to(chunk.data_dir))}}
+    stamp_entry(chunk, entry)
     chunk.meta.setdefault("versions", {}).setdefault(product, []).append(entry)
     return entry
 

@@ -30,6 +30,7 @@ from typing import NamedTuple
 import numpy as np
 
 from .. import _native
+from ..core import stamps
 from ..core.progress import Progress, as_progress
 
 log = logging.getLogger(__name__)
@@ -690,6 +691,7 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
     chunk._before_product_write("tin")  # a script that builds it again can be undone (core.versions.COPIED)
     path = tin.save(folder)
     chunk._set_product("tin", path)
+    stamps.stamp(chunk, "tin")
     chunk.meta["tin"] = {"file": str(path.relative_to(chunk.data_dir)), "source": source, "made": tin.made,
                          **{k: v for k, v in info.items() if k not in ("source",)}}
     progress(1.0, f"TIN: {tin.n_vertices} vertices, {tin.n_triangles} triangles, {len(con)} constrained edges")
@@ -885,6 +887,7 @@ def tin_to_dem(chunk, resolution: float | None = None, name: str | None = None,
         own = chunk.own_product_path("dem")
         tmp.replace(own)
         chunk._set_product("dem", own)
+        stamps.stamp(chunk, "dem")
     except BaseException:
         if kept is not None:
             versions.restore(chunk, "dem", kept)

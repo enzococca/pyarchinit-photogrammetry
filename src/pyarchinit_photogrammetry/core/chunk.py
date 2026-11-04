@@ -764,7 +764,9 @@ class Chunk:
                                    min_size=min_size, max_size=max_size, scaling=scaling,
                                    crs=None if crs_mod.is_local(self.crs) else self.crs, progress=as_progress(progress))
         self._set_product(method, out)
-        self.meta.setdefault("relief", {})[method] = {k: v for k, v in info.items() if k != "path"}
+        from .stamps import stamp_entry
+
+        self.meta.setdefault("relief", {})[method] = stamp_entry(self, {k: v for k, v in info.items() if k != "path"})
         return out
 
     @property

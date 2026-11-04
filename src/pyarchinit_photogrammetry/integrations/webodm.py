@@ -34,6 +34,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.stamps import stamp
+
 
 def _crs_from_coords(line: str) -> str | None:
     m = re.match(r"WGS84 UTM (\d+)([NS])", line.strip(), re.I)
@@ -320,6 +322,7 @@ def import_task(source: str | os.PathLike, project: str | os.PathLike, label: st
     for key in ("dem", "orthomosaic"):
         if info[key] is not None:
             ch._set_product(key, info[key].resolve())
+            stamp(ch, key)
     if cameras:
         ch.triangulate_markers()
         try:

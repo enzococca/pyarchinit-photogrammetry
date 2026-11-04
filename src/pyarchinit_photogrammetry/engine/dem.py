@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import crs as crs_mod
-from ..core import geometry
+from ..core import geometry, stamps
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
 from ..core.progress import Progress, as_progress
@@ -379,6 +379,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     chunk._before_product_write("dem")
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
+    stamps.stamp(chunk, "dem")
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path

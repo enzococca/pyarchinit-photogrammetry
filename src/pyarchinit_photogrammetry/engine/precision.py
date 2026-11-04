@@ -29,6 +29,7 @@ import datetime
 import numpy as np
 
 from ..core import crs as crs_mod
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -317,6 +318,7 @@ def dem_precision(chunk: Chunk, max_side: int = 1024, progress: Progress | None 
                        transform=transform, nodata=-9999.0, compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(out, 1)
     chunk._set_product("dem_precision", path)
+    stamps.stamp(chunk, "dem_precision")
     progress(1.0, f"Precision of the DEM: median sigma Z {np.median(out[valid]) * 1000:.1f} mm")
     return path
 

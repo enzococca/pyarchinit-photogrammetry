@@ -51,6 +51,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -1478,6 +1479,7 @@ def build_thermal(chunk: Chunk, resolution: float | None = None, balance: bool =
     part.unlink(missing_ok=True)
     v = t[np.isfinite(t)]
     meta["file"] = str(final.relative_to(chunk.data_dir))
+    stamps.stamp_entry(chunk, meta)  # meta["thermal"]["built_in"]: the temperature orthomosaic's (core.stamps)
     meta["resolution"] = float(resolution)
     meta["stats"] = ({"min": float(v.min()), "max": float(v.max()), "median": float(np.median(v)),
                       "p2": float(np.percentile(v, 2)), "p98": float(np.percentile(v, 98))} if v.size else {})
@@ -1519,7 +1521,8 @@ def anomalies(chunk: Chunk, radius_m: float = 2.0) -> Path:
         dst.set_band_description(1, f"temperature minus its surroundings within {radius_m:g} m (degrees)")
         dst.update_tags(units="degC", radius_m=str(radius_m))
     meta = chunk.meta.setdefault("thermal", {})
-    meta["anomaly"] = {"file": str(target.relative_to(chunk.data_dir)), "radius_m": float(radius_m)}
+    meta["anomaly"] = stamps.stamp_entry(chunk, {"file": str(target.relative_to(chunk.data_dir)),
+                                                 "radius_m": float(radius_m)})
     return target
 
 

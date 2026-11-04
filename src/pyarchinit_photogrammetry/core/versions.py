@@ -207,8 +207,12 @@ def _put_aside(chunk, product: str, vid: str, move: bool) -> dict | None:
     if "textured" in rel:  # the OBJ inside the folder
         obj = chunk.product_path("model_textured")
         rel["model_textured"] = str((folder / files["textured"].name / obj.name).relative_to(chunk.data_dir))
-    return {"id": vid, "name": info["name"], "created": info["created"],
-            "params": dict(chunk.meta.get(PARAMS[product]) or {}), "files": rel}
+    entry = {"id": vid, "name": info["name"], "created": info["created"],
+             "params": dict(chunk.meta.get(PARAMS[product]) or {}), "files": rel}
+    built_in = (chunk.meta.get("built_in") or {}).get(product)
+    if built_in is not None:  # the transform it was built in goes with it (core.stamps)
+        entry["built_in"] = [list(row) for row in built_in]
+    return entry
 
 
 def _forget_active(chunk, product: str) -> None:
@@ -281,10 +285,16 @@ def _activate_files(chunk, product: str, entry: dict, copy: bool = False) -> Non
     if entry.get("params"):
         chunk.meta[PARAMS[product]] = dict(entry["params"])
     chunk.meta.setdefault("active_versions", {})[product] = {"name": entry["name"], "created": entry["created"]}
+    if entry.get("built_in") is not None:  # its stamp is the active product's now; none: built before 1.7.2
+        chunk.meta.setdefault("built_in", {})[product] = [list(row) for row in entry["built_in"]]
+    elif product in (chunk.meta.get("built_in") or {}):
+        chunk.meta["built_in"].pop(product)
 
 
 def activate(chunk, product: str, vid: str) -> dict | None:
-    """Make a kept version the active one; the active one becomes a kept version (returned)."""
+    """Make a kept version the active one; the active one becomes a kept version (returned). When the version made
+    active was built in another transform of the chunk (``core.stamps``), the returned entry is a copy with
+    ``"stale": True`` (the window says it is da rifare; ``{"id": None, "stale": True}`` without a previous one)."""
     entry = _entry(chunk, product, vid)
     previous = keep_active(chunk, product, move=True)
     during = _script_runs(chunk)
@@ -294,6 +304,10 @@ def activate(chunk, product: str, vid: str) -> dict | None:
         _keep_folder(chunk, product, vid)
     else:
         shutil.rmtree(chunk.data_dir / "versions" / product / vid, ignore_errors=True)
+    from .stamps import is_stale
+
+    if is_stale(chunk, product):
+        return {**(previous or {"id": None}), "stale": True}
     return previous
 
 

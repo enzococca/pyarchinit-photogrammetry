@@ -40,6 +40,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core import stamps
 from ..core.progress import Progress, as_progress
 from ..io.files import replace_file
 
@@ -646,6 +647,7 @@ def calculate(chunk, formula: str, name: str, grid: str | None = None, resolutio
     entry = {"file": out.relative_to(chunk.data_dir).as_posix(), "formula": formula,
              "inputs": [f"{r.name}@{b}" for r, b in f.inputs], "grid": ref_raster.name, "resolution": res,
              "size": [int(width), int(height)], "stats": stats, "made": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    stamps.stamp_entry(chunk, entry)
     chunk.meta.setdefault(FOLDER, {})[name] = entry
     progress(1.0, f"Raster calculator: {name} ({stats.get('min', float('nan')):.4g} to "
                   f"{stats.get('max', float('nan')):.4g})")

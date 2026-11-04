@@ -19,6 +19,7 @@ import datetime
 import numpy as np
 
 from ..core import crs as crs_mod
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -141,6 +142,7 @@ def field_check(chunk: Chunk, min_photos: int = MIN_PHOTOS, resolution: float | 
                            nodata=-1, compress="deflate", BIGTIFF="IF_SAFER") as dst:
             dst.write(np.clip(counts, -1, 32767).astype(np.int16), 1)
         chunk._set_product("coverage", path)
+        stamps.stamp(chunk, "coverage")
         res = abs(transform.a)
         report.update({"resolution": res, "cells": int(area.sum()), "weak_cells": int(weak.sum()),
                        "weak_fraction": float(weak.sum() / max(area.sum(), 1)),
