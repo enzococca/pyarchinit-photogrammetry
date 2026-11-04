@@ -186,3 +186,129 @@ def ground_dem_at(path: str | Path, x: float, y: float) -> float | None:
             return None
         v = src.read(1, window=((int(row), int(row) + 1), (int(col), int(col) + 1)), masked=True)
     return None if np.ma.is_masked(v[0, 0]) else float(v[0, 0])
+
+
+# --- free drawings in 3D ----------------------------------------------------------------------
+
+STEEP_COS = 0.5  # a polygon whose best plane has |n_z| below this is measured in its own plane
+
+
+def _pts(xyz) -> np.ndarray:
+    return np.asarray(xyz, float).reshape(-1, 3)
+
+
+def _segments(p: np.ndarray, closed: bool) -> np.ndarray:
+    return np.diff(np.vstack([p, p[:1]]) if closed and len(p) > 1 else p, axis=0)
+
+
+def length_3d(xyz, closed: bool = False) -> float:
+    """Length of the straight segments through ``xyz`` (closed: back to the first vertex)."""
+    return float(np.linalg.norm(_segments(_pts(xyz), closed), axis=1).sum())
+
+
+def length_plan(xyz, closed: bool = False) -> float:
+    """The same length projected on the horizontal plane."""
+    return float(np.linalg.norm(_segments(_pts(xyz), closed)[:, :2], axis=1).sum())
+
+
+def best_plane(xyz) -> tuple[np.ndarray, np.ndarray]:
+    """Centre and unit normal (z >= 0) of the least-squares plane through ``xyz``."""
+    p = _pts(xyz)
+    centre = p.mean(axis=0)
+    n = np.linalg.svd(p - centre)[2][-1]
+    if n[2] < 0 or (n[2] == 0 and (n[1] < 0 or (n[1] == 0 and n[0] < 0))):
+        n = -n
+    return centre, n / np.linalg.norm(n)
+
+
+def _shoelace(uv: np.ndarray) -> float:
+    x, y = uv[:, 0], uv[:, 1]
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+
+
+def _plane_frame(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """u horizontal along the plane, v up the plane."""
+    u = np.cross([0.0, 0.0, 1.0], n)
+    norm = np.linalg.norm(u)
+    u = np.array([1.0, 0.0, 0.0]) if norm < 1e-12 else u / norm
+    return u, np.cross(n, u)
+
+
+def area_3d(xyz) -> float:
+    """Area of the polygon in its best-fit plane."""
+    p = _pts(xyz)
+    centre, n = best_plane(p)
+    u, v = _plane_frame(n)
+    d = p - centre
+    return _shoelace(np.column_stack([d @ u, d @ v]))
+
+
+def area_plan(xyz) -> float:
+    """Area of the polygon projected on the horizontal plane."""
+    return _shoelace(_pts(xyz)[:, :2])
+
+
+def slope_aspect_of(xyz) -> tuple[float, float]:
+    """Slope (degrees) and aspect (clockwise from north, downhill; -1 when flat) of the best plane."""
+    n = best_plane(xyz)[1]
+    slope = float(np.degrees(np.arccos(min(1.0, abs(n[2])))))
+    aspect = float((np.degrees(np.arctan2(n[0], n[1])) + 360.0) % 360.0) if slope > 1e-6 else -1.0
+    return slope, aspect
+
+
+def model_area_inside(model, xyz) -> dict:
+    """Surface of the model's faces inside the polygon ``xyz``: the faces are clipped by the polygon's
+    vertical projection (per face, plan area / |n_z|); for a steep polygon (best plane with
+    |n_z| < STEEP_COS) the same in the polygon's own plane, said by ``"projection": "plane"``.
+    Returns ``surface``, ``plan`` (the projected area) and ``faces`` (faces touched)."""
+    import shapely
+
+    p = _pts(xyz)
+    centre, n = best_plane(p)
+    tri = np.asarray(model.vertices, float)[np.asarray(model.faces, int)]
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    norm = np.linalg.norm(cross, axis=1)
+    if abs(n[2]) < STEEP_COS:
+        mode = "plane"
+        u, v = _plane_frame(n)
+        proj = np.stack([(tri - centre) @ u, (tri - centre) @ v], axis=-1)
+        poly_uv = np.column_stack([(p - centre) @ u, (p - centre) @ v])
+        cosine = np.abs(cross @ n) / np.where(norm > 0, norm, 1.0)
+        weight = np.where(cosine > 1e-6, 1.0 / np.where(cosine > 1e-6, cosine, 1.0), 0.0)
+        # weight is surface per projected area: 1 / |n_face . n_plane|
+    else:
+        mode = "plan"
+        proj = tri[:, :, :2]
+        poly_uv = p[:, :2]
+        nz = np.abs(cross[:, 2]) / np.where(norm > 0, norm, 1.0)
+        weight = np.where(nz > 1e-6, 1.0 / np.where(nz > 1e-6, nz, 1.0), 0.0)
+    out = {"surface": 0.0, "plan": 0.0, "faces": 0, "projection": mode}
+    poly = shapely.make_valid(shapely.Polygon(poly_uv))
+    if poly.is_empty or poly.area == 0:
+        return out
+    x0, y0, x1, y1 = poly.bounds
+    keep = ((proj[:, :, 0].max(axis=1) >= x0) & (proj[:, :, 0].min(axis=1) <= x1)
+            & (proj[:, :, 1].max(axis=1) >= y0) & (proj[:, :, 1].min(axis=1) <= y1) & (weight > 0))
+    if not keep.any():
+        return out
+    tris = shapely.polygons(proj[keep])
+    area = shapely.area(shapely.intersection(shapely.make_valid(tris), poly))
+    hit = area > 0
+    out.update(surface=float((area * weight[keep]).sum()), plan=float(area.sum()), faces=int(hit.sum()))
+    return out
+
+
+def feature_measures(rec: dict, model=None) -> dict:
+    """Measures of a free-drawing record (``kind`` line | polygon | point, ``xyz`` in chunk coordinates)."""
+    p = _pts(rec["xyz"])
+    kind = rec["kind"]
+    if kind == "line":
+        return {"length_3d": length_3d(p), "length_plan": length_plan(p), "dz": float(p[-1, 2] - p[0, 2])}
+    if kind == "polygon":
+        slope, aspect = slope_aspect_of(p)
+        out = {"perimeter_3d": length_3d(p, closed=True), "area_3d": area_3d(p), "area_plan": area_plan(p),
+               "slope": slope, "aspect": aspect}
+        if model is not None:
+            out["model_surface"] = model_area_inside(model, p)["surface"]
+        return out
+    return {"z": float(p[0, 2])}

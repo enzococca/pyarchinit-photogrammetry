@@ -120,3 +120,81 @@ def test_interface(processed, tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def _tilted_square(deg=30.0):
+    c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+    return np.array([[0, 0, 0], [c, 0, s], [c, 1, s], [0, 1, 0]], float)
+
+
+def test_lengths():
+    line = np.array([[0, 0, 0], [3, 4, 0], [3, 4, 12]], float)
+    assert measures.length_3d(line) == pytest.approx(17.0, abs=1e-12)
+    line = np.array([[0, 0, 0], [3, 4, 12]], float)
+    assert measures.length_3d(line) == pytest.approx(13.0, abs=1e-12)
+    assert measures.length_plan(line) == pytest.approx(5.0, abs=1e-12)
+    assert measures.length_3d(line, closed=True) == pytest.approx(26.0, abs=1e-12)
+
+
+def test_area_of_a_tilted_square():
+    sq = _tilted_square(30.0)
+    assert measures.area_3d(sq) == pytest.approx(1.0, abs=1e-9)
+    assert measures.area_plan(sq) == pytest.approx(np.cos(np.radians(30)), abs=1e-9)
+    slope, aspect = measures.slope_aspect_of(sq)
+    assert slope == pytest.approx(30.0, abs=1e-9) and aspect == pytest.approx(270.0, abs=1e-9)
+    flat = sq * [1, 1, 0]
+    assert measures.slope_aspect_of(flat)[1] == -1.0
+
+
+def _tilted_mesh(deg, n=6):
+    import trimesh
+
+    t = np.tan(np.radians(deg))
+    xs, ys = np.meshgrid(np.linspace(0, 5, n), np.linspace(0, 5, n))
+    v = np.column_stack([xs.ravel(), ys.ravel(), t * xs.ravel()])
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a = i * n + j
+            faces += [[a, a + 1, a + n], [a + 1, a + n + 1, a + n]]
+    return trimesh.Trimesh(v, faces, process=False)
+
+
+def test_model_area_clipped_by_the_vertical_projection():
+    t = np.tan(np.radians(20))
+    pts = np.array([[0.7, 0.6], [3.9, 1.3], [2.2, 3.7]])
+    poly = np.column_stack([pts, t * pts[:, 0]])
+    out = measures.model_area_inside(_tilted_mesh(20), poly)
+    assert out["projection"] == "plan" and out["faces"] > 2
+    assert out["surface"] == pytest.approx(measures.area_3d(poly), abs=1e-9)
+    assert out["plan"] == pytest.approx(measures.area_plan(poly), abs=1e-9)
+
+
+def test_wall_polygon_uses_its_plane():
+    import trimesh
+
+    n = 5
+    xs, zs = np.meshgrid(np.linspace(0, 4, n), np.linspace(0, 4, n))
+    v = np.column_stack([xs.ravel(), np.zeros(n * n), zs.ravel()])
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a = i * n + j
+            faces += [[a, a + 1, a + n], [a + 1, a + n + 1, a + n]]
+    wall = trimesh.Trimesh(v, faces, process=False)
+    poly = np.array([[0.6, 0, 0.5], [3.3, 0, 1.1], [2.4, 0, 3.2], [1.0, 0, 2.7]])
+    out = measures.model_area_inside(wall, poly)
+    assert out["projection"] == "plane"
+    assert out["surface"] == pytest.approx(measures.area_3d(poly), abs=1e-9)
+
+
+def test_feature_measures_keys():
+    line = {"kind": "line", "xyz": [[0, 0, 0], [3, 4, 12]]}
+    assert set(measures.feature_measures(line)) == {"length_3d", "length_plan", "dz"}
+    assert measures.feature_measures(line)["dz"] == pytest.approx(12.0)
+    sq = _tilted_square(20.0)
+    poly = {"kind": "polygon", "xyz": sq.tolist()}
+    keys = {"perimeter_3d", "area_3d", "area_plan", "slope", "aspect"}
+    assert set(measures.feature_measures(poly)) == keys
+    assert set(measures.feature_measures(poly, model=_tilted_mesh(20))) == keys | {"model_surface"}
+    assert measures.feature_measures({"kind": "point", "xyz": [[1, 2, 3]]}) == {"z": 3.0}
