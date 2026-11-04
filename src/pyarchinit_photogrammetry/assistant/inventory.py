@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 LIMIT = 1500  # characters of the block in the system prompt
 MAX_VERSIONS = 5  # version names listed for a product of the active chunk
 MAX_RASTERS = 15  # raster names listed for the active chunk
+MAX_STALE = 6  # names of the products to build again listed for a chunk
 DRAWINGS = ("units", "quote", "points", "lines", "stones")
 
 _WORDS = {
@@ -36,7 +37,8 @@ _WORDS = {
            "more": "... ({0} altri chunk)", "view2d": "Vista 2D", "view3d": "Vista 3D", "version": "versione",
            "elevation": "prospetto", "nothing": "niente", "selection": "Selezione", "polygon": "poligono di {0} m²",
            "no_polygon": "nessun poligono", "selected": "{0} foto selezionate", "filtered": "filtro delle foto: {0} foto",
-           "units": "US", "quote": "quote", "points": "punti di misura", "lines": "linee", "stones": "pietre"},
+           "units": "US", "quote": "quote", "points": "punti di misura", "lines": "linee", "stones": "pietre",
+           "oriented": "orientato a mano il {0}", "stale": "da rifare: {0}"},
     "en": {"title": "## The project now", "project": "Project", "site": "site", "active": "active chunk",
            "none_active": "no active chunk", "no_chunks": "the project has no chunk",
            "photos": "photos", "aligned": "aligned", "products": "products", "no_products": "no product",
@@ -46,7 +48,7 @@ _WORDS = {
            "elevation": "elevation", "nothing": "nothing", "selection": "Selection", "polygon": "polygon of {0} m²",
            "no_polygon": "no polygon", "selected": "{0} photos selected", "filtered": "photo filter: {0} photos",
            "units": "units", "quote": "spot heights", "points": "measuring points", "lines": "lines",
-           "stones": "stones"},
+           "stones": "stones", "oriented": "oriented by hand on {0}", "stale": "to rebuild: {0}"},
 }
 
 
@@ -148,7 +150,23 @@ def _chunk(chunk, live: dict | None = None, rasters: list | None = None) -> dict
             "rasters": list(rasters or []),
             "drawings": live if live is not None else _safe(lambda: _drawings(chunk), {}),
             "elevations": [{"id": str(e.get("id")), "name": str(e.get("name") or e.get("id")),
-                            "kind": e.get("kind")} for e in _elevations(chunk)]}
+                            "kind": e.get("kind")} for e in _elevations(chunk)],
+            "oriented": _safe(lambda: _oriented(chunk), None),
+            "stale": _safe(lambda: _stale(chunk), [])}
+
+
+def _oriented(chunk) -> str | None:
+    """The day (``YYYY-MM-DD``) the local system of ``chunk`` was oriented by hand, None if it never was."""
+    made = (chunk.meta.get("orientation") or {}).get("made")
+    return str(made)[:10] if made else None
+
+
+def _stale(chunk) -> list[str]:
+    """The names of the products made in an earlier system of the chunk, to be built again (in the order of a
+    rebuild, :func:`.core.stamps.stale_products`)."""
+    from ..core import stamps
+
+    return [str(item.get("name") or item.get("product")) for item in stamps.stale_products(chunk)]
 
 
 def _view(window, chunk, catalog: list) -> dict:
@@ -278,6 +296,10 @@ def _chunk_line(c: dict, lang: str, full: bool) -> str:
             if len(c["elevations"]) > MAX_VERSIONS:
                 names.append(f"+{len(c['elevations']) - MAX_VERSIONS}")
             bits.append(f"{w['elevations']}: {', '.join(names)}")
+    if c.get("oriented"):
+        bits.append(w["oriented"].format(c["oriented"]))
+    if c.get("stale"):
+        bits.append(w["stale"].format(_cap(list(c["stale"]), MAX_STALE)))
     if c.get("enabled") is False:
         bits.append(w["disabled"])
     return f"{head}: {'; '.join(bits)}"

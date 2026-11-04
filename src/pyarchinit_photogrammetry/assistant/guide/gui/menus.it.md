@@ -112,6 +112,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Ricollega foto (altra cartella)...** | ritrova le foto con lo stesso nome in un'altra cartella (spostata, su un altro disco, «solo online» su Dropbox) |
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
+| **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
+| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine |
 | **Unisci chunk...** | un nuovo chunk con foto, marker, punti, nuvole e modelli di chunk già allineati |
 | **Colori dalle foto (scansioni)...** | colora una scansione laser con le foto allineate di un altro chunk |
 

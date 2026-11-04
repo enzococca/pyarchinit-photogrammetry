@@ -285,6 +285,72 @@ centro, dimensioni e rotazione scritti a mano. Mappe di profondità, nuvola dens
 dentro di esso - il saggio e non il campo attorno, il vaso e non il tavolo - e così DEM e ortofoto. *Togli la
 regione* torna a tutto ciò che vedono le foto.
 
+## Orientare un sistema locale
+
+Un rilievo senza coordinate - niente punti di controllo, niente GPS utilizzabile - esce dall'allineamento in un
+sistema tutto suo: il saggio inclinato di qualche grado, un oggetto coricato su un fianco, l'origine da qualche
+parte nel mezzo. *Flusso di lavoro > Orienta il sistema locale...* mette quel sistema dove deve stare: un'origine,
+un asse x e un piano orizzontale scelti sul rilievo stesso. Il chunk resta LOCALE; nulla viene ricalcolato dalle
+foto.
+
+![La finestra Orienta il sistema locale](../img/orient-dialog.it.png)
+
+**Tre punti.** **A** è l'origine, **B** dà la direzione dell'asse x (*x lungo A→B*; senza la spunta l'asse x
+tiene la direzione di adesso), **C** è un terzo punto del piano orizzontale (senza C il piano resta com'è e
+cambiano solo la rotazione attorno alla verticale e l'origine). Ogni punto viene da:
+
+* **Nel 3D**: un clic sul modello o sulla nuvola della vista 3D;
+* **Sull'ortofoto**: un clic sul raster mostrato, con la quota letta dal DEM («Nessun DEM in quel punto» se manca);
+* l'**elenco dei marker**: un marker già collocato, nella sua posizione.
+
+**Piano adattato.** Il piano orizzontale adattato a un'area: *Seleziona l'area nel 3D (lazo)* o *Disegna l'area
+sull'ortofoto*. La finestra dice quanti punti ha preso e quanto stanno lontani dal piano (NMAD); A e B, se ci sono
+entrambi, danno comunque l'origine e l'asse x. Un pavimento, un mosaico, la cresta di un muro.
+
+![Gli assi in anteprima nella vista 3D](../img/orient-preview.it.png)
+
+Mentre si scelgono i punti, la vista 3D mostra i nuovi assi (x rosso, y verde, z blu, il piano orizzontale come
+un quadrato blu) e la finestra scrive l'inclinazione, la sua direzione, la rotazione e la traslazione. *Capovolgi*
+rovescia l'asse z - la finestra lo suggerisce quando z guarderebbe dalla parte opposta alle foto -; *Quota di A* e
+*X, Y di A* danno le coordinate dell'origine. **Distanza vera A-B** scala il rilievo perché A-B misuri quanto
+misurato sul campo: diventa una barra di scala di controllo «Orientamento A-B» sui marker di orientamento (spenta
+quando le barre di scala di controllo danno già la scala).
+
+**Cosa segue il chunk.** *Applica* sposta tutto ciò che è nelle coordinate del chunk: disegni della pianta e quote,
+linee di rottura, disegni liberi, pietre, sezioni e prospetti (con i loro disegni), patch dell'ortofoto, la regione
+di ricostruzione, i proxy US, i riferimenti dei marker e, con *Sposta anche i chunk allineati*, i chunk allineati a
+questo. Camere, punti di legame, nuvola densa e modello non vengono toccati: seguono da soli.
+
+**Cosa resta dov'era.** Le geometrie già mandate fuori - unità e quote scritte in PyArchInit, un progetto QField, i
+file esportati - tengono le coordinate di prima: la finestra del risultato le elenca, per mandarle di nuovo.
+
+**I marker di orientamento.** Tre marker, *Orientamento A*, *B* e *C*, compaiono nel pannello *Riferimenti* con le
+nuove coordinate. Lasciali lì: un nuovo allineamento, *Aggiorna georeferenziazione* o *Elabora tutto* (che allinea
+di nuovo, ed è sicuro) rimettono il sistema attraverso di loro. Cancellarli riporta, al prossimo allineamento, il
+sistema dell'allineamento. Un marker visto in meno di due foto viene segnalato come debole: dopo un nuovo
+allineamento non si può ritrovare.
+
+**Prodotti da rifare.** DEM, ortofoto e i raster fatti da essi (precisione, copertura, rilievi, pendenza,
+esposizione, TIN) sono griglie nella pianta di prima: risultano *da rifare*. La vista raster lo dice in una fascia
+gialla sopra l'immagine, e gli strumenti di disegno rifiutano di disegnarci sopra. *Flusso di lavoro > Ricostruisci
+i prodotti da rifare* (proposto anche dalla finestra del risultato) li rifà in ordine con i parametri che avevano,
+tenendo i disegni; ciò che non può rifare (raster calcolati, multispettrali, termici e satellitari, versioni
+conservate) viene elencato da rifare a mano. I prospetti senza scala restano validi: si spostano con il chunk.
+
+**Rifiuti.** La finestra non si apre, e dice perché, quando l'orientamento lo dà qualcos'altro: un chunk in un
+sistema di coordinate (lo danno i punti di controllo), tre marker di controllo con coordinate (cambia quelle), un
+chunk allineato a un altro (orienta il chunk di riferimento: gli altri lo seguono). La distanza vera viene
+rifiutata quando le barre di scala di controllo danno già la scala. Le posizioni GPS delle foto vengono sostituite
+dai marker di orientamento (il risultato dice quante).
+
+**Annulla.** L'intero orientamento è un solo passo di *Modifica > Annulla*.
+
+??? example "Riga di comando e API"
+    `ppg orient scavo.ppg --points "0.12,0.40,1.95;1.80,0.52,2.21;0.30,1.75,1.88" --dry-run` stampa inclinazione,
+    rotazione, traslazione e ciò che si sposterebbe, senza salvare; `--markers "1,2,3"`, `--plane-from area.wkt`,
+    `--quota`, `--origin X,Y`, `--distance L`, `--flip`, `--x-kept`, `--no-aligned`, `--chunk`. Un plugin chiama
+    `context.orient(points=[a, b, c], distance=2.0)`.
+
 ## Prospetti
 
 *Flusso di lavoro > Prospetto o sviluppo cilindrico...*, *Prospetto* nel pannello *Sezioni*, oppure il pulsante

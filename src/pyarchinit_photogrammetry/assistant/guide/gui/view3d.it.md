@@ -38,6 +38,14 @@ Il pulsante **Trackball** della barra, o *Vista > Trackball*, ha tre modi, ricor
 
 La sfera non finisce mai in un'immagine presa dalla vista (schermate, lazo, scelta dei punti).
 
+## Punti e assi dell'orientamento
+
+Mentre *Flusso di lavoro > Orienta il sistema locale...* è aperta, i suoi pulsanti **Nel 3D** aspettano un clic sul
+modello o sulla nuvola (il punto A, B o C; Esc rinuncia) e *Seleziona l'area nel 3D (lazo)* prende i punti di
+un'area per il piano adattato. I nuovi assi sono disegnati nella vista come saranno - x rosso, y verde, z blu, il
+piano orizzontale come un quadrato blu trasparente - e seguono ogni cambio dei punti; spariscono quando la finestra
+si chiude ([orientare un sistema locale](processing.md#orientare-un-sistema-locale)).
+
 ## Tasti
 
 Con la vista 3D attiva:

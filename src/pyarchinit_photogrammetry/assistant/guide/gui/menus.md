@@ -112,6 +112,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Relink photos (another folder)...** | finds the photos with the same names in another folder (moved, on another disk, "online only" on Dropbox) |
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds |
+| **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
+| **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order |
 | **Merge chunks...** | a new chunk with the photos, markers, points, clouds and models of chunks already aligned |
 | **Colours from the photos (scans)...** | colours a laser scan with the aligned photos of another chunk |
 

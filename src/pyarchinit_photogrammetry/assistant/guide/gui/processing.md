@@ -277,6 +277,71 @@ rotation. Depth maps, dense cloud and model built afterwards stay inside it - th
 around it, the pot and not the table - and so do DEM and orthophoto. *Clear the region* goes back to everything
 the photos see.
 
+## Orienting a local system
+
+A survey without coordinates - no control points, no GPS worth using - comes out of the alignment in a frame of
+its own: the trench leaning by some degrees, an object lying on its side, the origin somewhere in the middle.
+*Workflow > Orient the local system...* puts that frame where it belongs: an origin, an x axis and a horizontal
+plane chosen on the survey itself. The chunk stays LOCAL; nothing is re-computed from the photos.
+
+![The Orient the local system window](../img/orient-dialog.png)
+
+**Three points.** **A** is the origin, **B** gives the direction of the x axis (*x along A→B*; unticked, x keeps
+its present direction), **C** is a third point of the horizontal plane (without C the plane stays as it is and only
+the turn about the vertical and the origin change). Each point comes from:
+
+* **In 3D**: a click on the model or the cloud of the 3D view;
+* **On the orthophoto**: a click on the raster shown, its height read from the DEM ("No DEM at that point" when
+  there is none);
+* the **list of markers**: a marker already placed, at its position.
+
+**Fitted plane.** The horizontal plane fitted to an area: *Select the area in 3D (lasso)* or *Draw the area on the
+orthophoto*. The window says how many points it took and how far they lie from the plane (NMAD); A and B, when both
+are given, still set the origin and the x axis. A floor, a mosaic, the top of a wall.
+
+![The axes previewed in the 3D view](../img/orient-preview.png)
+
+While the points are chosen, the 3D view shows the new axes (x red, y green, z blue, the horizontal plane as a blue
+square) and the window writes the tilt, its direction, the turn and the translation. *Flip* turns z upside down -
+the window suggests it when z would point away from the photos -; *Height of A* and *X, Y of A* give the origin its
+coordinates. **True distance A-B** scales the survey so that A-B measures what was taped on site: it becomes a
+control scale bar "Orientamento A-B" on the orientation markers (off when control scale bars already give the scale).
+
+**What follows the chunk.** *Apply* moves everything kept in the coordinates of the chunk: drawings of the plan and
+spot heights, break lines, free drawings, stones, sections and elevations (their drawings with them), orthophoto
+patches, the reconstruction region, US proxies, the references of the markers and, with *Move the aligned chunks
+too*, the chunks aligned to this one. Cameras, tie points, dense cloud and model are not touched: they follow by
+themselves.
+
+**What stays where it was.** Geometries already sent out - units and spot heights written to PyArchInit, a QField
+project, files exported - keep the old coordinates: the result window lists them, to send them again.
+
+**The orientation markers.** Three markers, *Orientamento A*, *B* and *C*, appear in the *Reference* pane with
+their new coordinates. Leave them there: a new alignment, *Update georeference* or *Process everything* (which
+aligns again, and that is safe) put the frame back through them. Deleting them gives the alignment's own frame back
+at the next alignment. A marker seen in fewer than two photos is listed as weak: it cannot be found again after a
+new alignment.
+
+**Products to rebuild.** DEM, orthophoto and the rasters made from them (precision, coverage, reliefs, slope,
+aspect, TIN) are grids in the old plan: they read *to rebuild*. The raster view says so in a yellow band over the
+picture, and the drawing tools refuse to draw on it. *Workflow > Rebuild the stale products* (also offered by the
+result window) makes them again in order with the parameters they had, keeping the drawings; what it cannot remake
+(raster calculator, multispectral, thermal and satellite rasters, kept versions) is listed to be done by hand.
+Elevations without a scale stay valid: they move with the chunk.
+
+**Refused.** The window does not open, and says why, when something else gives the orientation: a chunk in a
+coordinate system (the control points do it), three control markers with coordinates (change those), a chunk
+aligned to another (orient the reference chunk: the others follow). A true distance is refused when control scale
+bars give the scale. Photos with GPS positions are replaced by the orientation markers (the result says how many).
+
+**Undo.** The whole orientation is one step of *Edit > Undo*.
+
+??? example "Command line and API"
+    `ppg orient scavo.ppg --points "0.12,0.40,1.95;1.80,0.52,2.21;0.30,1.75,1.88" --dry-run` prints tilt, turn,
+    translation and what would move, without saving; `--markers "1,2,3"`, `--plane-from area.wkt`, `--quota`,
+    `--origin X,Y`, `--distance L`, `--flip`, `--x-kept`, `--no-aligned`, `--chunk`. A plugin calls
+    `context.orient(points=[a, b, c], distance=2.0)`.
+
 ## Elevations
 
 *Workflow > Elevation or cylindrical development...*, *Elevation* in the *Sections* pane, or the **Elevation** button

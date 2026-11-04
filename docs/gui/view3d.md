@@ -37,6 +37,14 @@ The **Trackball** button of the bar, or *View > Trackball*, has three modes, rem
 
 The sphere is never in a picture taken from the view (screenshots, lasso, picks of points).
 
+## Points and axes of the orientation
+
+While *Workflow > Orient the local system...* is open, its **In 3D** buttons wait for a click on the model or the
+cloud (the point A, B or C; Esc gives up) and *Select the area in 3D (lasso)* takes the points of an area for the
+fitted plane. The new axes are drawn in the view as they would be - x red, y green, z blue, the horizontal plane
+as a translucent blue square - and follow every change of the points; they go when the window closes
+([orienting a local system](processing.md#orienting-a-local-system)).
+
 ## Keys
 
 With the 3D view focused:
