@@ -161,6 +161,9 @@ SNAP_DEPTH_SHARE = 0.02  # (2 % of the distance on a cloud, no model edges)
 SNAP_DEPTH_M = 0.01  # and at least 1 cm
 RUBBER_HEAVY_POINTS = 1_000_000  # VTK showing more points than this: the rubber end on the cloud picked ...
 RUBBER_HEAVY_FACTOR = 4  # ... this many times less often
+SELECT_PX = 6  # a click this close to a line, a polygon's edge or a point of a free drawing selects it
+HANDLE_PX = 8  # a press this close to a vertex of the selected drawing takes that vertex
+DRAPE_PX = 20  # draping: a point picked on the surface every this many screen pixels between two vertices
 DRAWING_COLOUR = "#00e5ff"  # the feature being drawn and its rubber band
 
 
@@ -1040,6 +1043,119 @@ class LassoOverlay(QWidget):
         self.finished.emit(pts if len(pts) >= 3 else None)
 
 
+class FreeEditOverlay(QWidget):
+    """A frozen frame of the 3D view with the vertices of the selected free drawing as handles: drag a handle to move
+    the vertex (picked again on the surface where it is let go), click a handle to choose it, Delete removes the
+    chosen vertex (or the drawing when none is chosen), a click away from the handles selects another drawing or none,
+    Esc goes back to the live view."""
+
+    moved = Signal(int, float, float)  # a handle let go at (x, y), widget pixels
+    delete_requested = Signal(int)  # the chosen handle, -1: none chosen
+    clicked = Signal(float, float)  # a click away from the handles
+    left = Signal()  # Esc
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.image: QImage | None = None
+        self.handles: list[QPointF] = []
+        self._origin: list[QPointF] = []
+        self.closed = False
+        self.current: int | None = None
+        self.text = ""
+        self._drag: int | None = None
+        self._press: QPointF | None = None
+
+    def start(self, image: QImage, handles, closed: bool, text: str) -> None:
+        self.image, self.closed, self.text = image, closed, text
+        self.set_handles(handles)
+        self.setFocus()
+
+    def set_handles(self, handles) -> None:
+        self.handles = [QPointF(float(x), float(y)) for x, y in handles]
+        self._origin = [QPointF(q) for q in self.handles]
+        self.current = self._drag = None
+        self.update()
+
+    def reset_handle(self, i: int) -> None:
+        """A handle back where it was (its vertex could not be moved there)."""
+        if 0 <= i < len(self.handles):
+            self.handles[i] = QPointF(self._origin[i])
+            self.update()
+
+    def accept_handle(self, i: int) -> None:
+        if 0 <= i < len(self.handles):
+            self._origin[i] = QPointF(self.handles[i])
+
+    def _handle_at(self, pos: QPointF) -> int | None:
+        best, best_d = None, HANDLE_PX ** 2
+        for i, q in enumerate(self.handles):
+            d = (q.x() - pos.x()) ** 2 + (q.y() - pos.y()) ** 2
+            if d <= best_d:
+                best, best_d = i, d
+        return best
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        if self.image is not None:
+            p.drawImage(self.rect(), self.image)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if len(self.handles) >= 2:  # one call for the outline (see image_views.polyline_path)
+            p.setPen(QPen(QColor(DRAWING_COLOUR), 2))
+            p.drawPolyline(QPolygonF(self.handles + ([self.handles[0]] if self.closed else [])))
+        if self.handles:
+            pen = QPen(QColor("white"), 9)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawPoints(QPolygonF(self.handles))
+        if self.current is not None and self.current < len(self.handles):
+            pen = QPen(QColor("#ff4040"), 13)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawPoints(QPolygonF([self.handles[self.current]]))
+        p.setPen(QColor("white"))
+        p.drawText(10, 20, self.text)
+        p.end()
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = ev.position()
+        self._press = QPointF(pos)
+        self._drag = self._handle_at(pos)
+        if self._drag is not None:
+            self.current = self._drag
+        self.update()
+
+    def mouseMoveEvent(self, ev) -> None:
+        if self._drag is not None and ev.buttons() & Qt.MouseButton.LeftButton:
+            self.handles[self._drag] = QPointF(ev.position())
+            self.update()
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if ev.button() != Qt.MouseButton.LeftButton or self._press is None:
+            return
+        pos, press, drag = ev.position(), self._press, self._drag
+        self._press = self._drag = None
+        far = np.hypot(pos.x() - press.x(), pos.y() - press.y()) > CLICK_PX
+        if drag is not None:
+            if far:
+                self.handles[drag] = QPointF(pos)
+                self.moved.emit(drag, pos.x(), pos.y())
+            else:
+                self.handles[drag] = QPointF(self._origin[drag])
+            self.update()
+        elif not far:
+            self.clicked.emit(pos.x(), pos.y())
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_requested.emit(-1 if self.current is None else self.current)
+        elif ev.key() == Qt.Key.Key_Escape:
+            self.left.emit()
+
+
 class PickOverlay(QWidget):
     """A frozen frame of the 3D view on which one point is clicked (a new marker); right click or
     Esc cancels."""
@@ -1176,6 +1292,10 @@ class ModelView(QWidget):
     orient_requested = Signal(str, object)
     # "axis" (2 points, internal): the axis of a cylindrical development
     free_drawn = Signal(str, object)  # a free drawing ended: kind (line, polygon, point), (N, 3) vertices (internal)
+    free_selected = Signal(str)  # the free drawing selected (id), "": none
+    free_vertex_moved = Signal(str, int, object)  # id, vertex index, new position on the surface (internal)
+    free_delete_requested = Signal(str, int)  # id, vertex index; -1: the whole drawing
+    free_drape_requested = Signal(str, object)  # id, the vertices with the surface points added (internal)
     CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
     def __init__(self, parent=None):
@@ -1300,9 +1420,8 @@ class ModelView(QWidget):
         draw_menu.addAction(tr("Poligono 3D"), lambda: self.start_drawing("polygon"))
         draw_menu.addAction(tr("Punto 3D"), lambda: self.start_drawing("point"))
         draw_menu.addSeparator()
-        self.a_free_select = draw_menu.addAction(tr("Seleziona e modifica"))
-        self.a_free_drape = draw_menu.addAction(tr("Drappeggia sul modello"))
-        self.a_free_select.setEnabled(False)
+        self.a_free_select = draw_menu.addAction(tr("Seleziona e modifica"), self.start_free_select)
+        self.a_free_drape = draw_menu.addAction(tr("Drappeggia sul modello"), self._drape_selected)
         self.a_free_drape.setEnabled(False)
         self.b_draw3d.setMenu(draw_menu)
         self.version_label = QLabel("")
@@ -1363,6 +1482,12 @@ class ModelView(QWidget):
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.lasso)
         self.stack.addWidget(self.picker)
+        self.editor = FreeEditOverlay(self)
+        self.editor.moved.connect(self._edit_moved)
+        self.editor.delete_requested.connect(self._edit_delete)
+        self.editor.clicked.connect(self._edit_clicked)
+        self.editor.left.connect(lambda: self.stack.setCurrentWidget(self.canvas))
+        self.stack.addWidget(self.editor)
         self.legend = ClassLegend()
         self.legend.visibility_changed.connect(lambda: self.refresh(reset=False))
         row = QHBoxLayout()
@@ -1381,6 +1506,9 @@ class ModelView(QWidget):
         self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
         self._free_inner: dict = {}  # their internal coordinates by id, converted once
         self._draw_mesh = None  # (key, centre, ray caster, median edge) of the model shown, kept between drawings
+        self._select_on = False  # Seleziona e modifica: a click selects a free drawing
+        self._selected_id: str | None = None
+        self._edit_project = None  # the projection of the frozen frame of the editor
         self._draw_kind: str | None = None  # the kind being drawn, None: not drawing
         self._draw_pts: list = []  # its vertices (internal)
         self._rubber = None  # the end of its rubber band (internal), None: nothing under the cursor
@@ -1476,8 +1604,11 @@ class ModelView(QWidget):
 
     def set_chunk(self, chunk, kind: str | None = None) -> None:
         self.stop_drawing()
+        self.stop_free_select()
         if chunk is not self.chunk:  # the drawings and the model of another chunk are not this one's
             self._free, self._free_inner, self._draw_mesh = [], {}, None
+            self._selected_id = None
+            self.a_free_drape.setEnabled(False)
         self._clear_version()
         self.highlight = None
         self.chunk = chunk
@@ -1582,6 +1713,7 @@ class ModelView(QWidget):
         if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
             return
         self.stop_drawing()
+        self.stop_free_select()
         image, self._project = self.canvas.snapshot()
         self._ray = self.canvas.view_ray
         self._purpose = purpose
@@ -1753,6 +1885,7 @@ class ModelView(QWidget):
         if self.kind not in ("point_cloud", "model") or self.chunk is None:
             return
         self.stop_drawing()
+        self.stop_free_select()
         self._lasso_purpose = purpose
         image, self._project = self.canvas.snapshot()
         self.lasso.start(image)
@@ -1920,6 +2053,7 @@ class ModelView(QWidget):
     def refresh(self, reset: bool = False) -> None:
         if self.kind not in self.PICK_KINDS or self.chunk is None:
             self.stop_drawing()
+            self.stop_free_select()
         self.canvas.show_cameras = self.cb_cams.isChecked()
         self.canvas.show_markers = self.cb_marks.isChecked()
         self.canvas.show_region = self.cb_region.isChecked()
@@ -1954,6 +2088,8 @@ class ModelView(QWidget):
         order of the features; the record's own ``colour`` or the default otherwise); ``selected`` an id or ids drawn
         thicker."""
         colours = colours if colours is not None else {}
+        if selected is None:  # the selection made in the view stays when the same drawing is still there
+            selected = self._selected_id
         chosen = {selected} if isinstance(selected, str) else set(selected or ())
         out = []
         for i, rec in enumerate(features_world):
@@ -1963,6 +2099,14 @@ class ModelView(QWidget):
                         colour or rec.get("colour") or FREE_COLOUR, fid in chosen))
         self._free = out
         self._free_inner = {}
+        ids = {f[0] for f in out}
+        if self._selected_id is not None and self._selected_id not in ids:
+            self._selected_id = None
+            if self.stack.currentWidget() is self.editor:
+                self.stack.setCurrentWidget(self.canvas)
+        elif len(chosen) == 1 and next(iter(chosen)) in ids:
+            self._selected_id = next(iter(chosen))
+        self._update_drape()
         self._put_free()
 
     @property
@@ -1985,17 +2129,22 @@ class ModelView(QWidget):
         to ``free_drawn`` and the tool stays on for the next one until Esc."""
         if kind not in FREE_KINDS or self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
             return
-        current = self.stack.currentWidget()  # a pick or a lasso on screen is given up
-        if current is self.picker:
-            self.picker.finished.emit(None)
-        elif current is self.lasso:
-            self.lasso.finished.emit(None)
+        self.stop_free_select()
+        self._end_overlays()
         self._draw_kind = kind
         self._draw_pts, self._rubber, self._press = [], None, None
         self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
         self._put_free()
         self._draw_target().setFocus()
         QTimer.singleShot(0, lambda: self._draw_kind is not None and self._draw_target().setFocus())  # after the menu
+
+    def _end_overlays(self) -> None:
+        """A pick or a lasso on screen given up (their own cancel: the orientation is told)."""
+        current = self.stack.currentWidget()
+        if current is self.picker:
+            self.picker.finished.emit(None)
+        elif current is self.lasso:
+            self.lasso.finished.emit(None)
 
     def stop_drawing(self) -> None:
         """The drawing given up (nothing emitted) and the tool off."""
@@ -2035,6 +2184,8 @@ class ModelView(QWidget):
             self.canvas.update_free()
 
     def eventFilter(self, obj, ev) -> bool:
+        if getattr(self, "_select_on", False) and obj is self._draw_target():
+            return self._select_event(ev) or super().eventFilter(obj, ev)
         if getattr(self, "_draw_kind", None) is None or obj is not self._draw_target():
             return super().eventFilter(obj, ev)
         kind = ev.type()
@@ -2070,23 +2221,24 @@ class ModelView(QWidget):
                 return True
         return super().eventFilter(obj, ev)
 
-    def _sight(self, x: float, y: float):
+    def _sight(self, x: float, y: float, ray=None):
         """The line of sight through (x, y) in internal coordinates: origin, unit direction, and the internal units of
         one metre of the chunk's coordinates (to give tolerances in metres)."""
         sd = self.sd
-        origin, direction, _pixel = self.canvas.view_ray(x, y)  # a line of the view is a line of the true scene too
+        origin, direction, _pixel = (ray or self.canvas.view_ray)(x, y)  # a line of the view is a line of the true scene too
         o, e = self.chunk.to_internal(sd.from_display(np.array([origin, origin + direction])) + sd.offset)
         d = (e - o) / np.linalg.norm(e - o)
         a, b = self.chunk.to_world(np.array([o, o + d]))
         metre = 1.0 / max(float(np.linalg.norm(b - a)), 1e-12)
         return o, d, metre
 
-    def _surface_at(self, x: float, y: float, project, refine: bool):
+    def _surface_at(self, x: float, y: float, project, refine: bool, ray=None):
         """The surface under (x, y), internal: on a model view the first hit of the line of sight with the model,
         else (or when it misses) ``pick_point`` (with the ray when ``refine``). None: nothing there."""
-        point = self._model_hit(x, y) if self.kind in ("model", "model_textured") else None
+        ray = ray or self.canvas.view_ray
+        point = self._model_hit(x, y, ray) if self.kind in ("model", "model_textured") else None
         if point is None:
-            point = self.pick_point(x, y, project, self.canvas.view_ray if refine else None)
+            point = self.pick_point(x, y, project, ray if refine else None)
         return point
 
     def _snap(self, x: float, y: float, project, surface=None):
@@ -2117,8 +2269,12 @@ class ModelView(QWidget):
             return None
         inner = np.vstack(inner)
         near = near[np.argsort(d2[near], kind="stable")]
-        if surface is None:  # nothing of the surface under the cursor: nothing hides them
-            return inner[near[0]]
+        if surface is None:  # nothing of the surface under the cursor: each one checked on its own line of sight
+            caster = self._caster() if self.kind in ("model", "model_textured") else None
+            for k in near:
+                if caster is None or not self._hidden_at_own_pixel(inner[k], px[k], py[k], caster):
+                    return inner[k]
+            return None
         o, d, metre = self._sight(x, y)
         edge = getattr(self, "_draw_mesh", None)
         edge = edge[3] if edge is not None and len(edge) > 3 and edge[3] else 0.0
@@ -2127,6 +2283,16 @@ class ModelView(QWidget):
         behind = (inner[near] - o) @ d > depth + tol
         keep = near[~behind]
         return inner[keep[0]] if len(keep) else None
+
+    def _hidden_at_own_pixel(self, point, x: float, y: float, caster) -> bool:
+        """True when the model hides ``point`` (internal) on the line of sight through its own pixel (x, y)."""
+        centre, rays, edge = caster
+        o, d, metre = self._sight(x, y)
+        t = float(rays.hit_distance((o - centre)[None], d[None])[0])
+        if not np.isfinite(t):
+            return False
+        tol = max(SNAP_DEPTH_EDGES * edge, SNAP_DEPTH_M * metre)
+        return float((np.asarray(point, np.float64) - o) @ d) > t + tol
 
     def _free_internal(self, fid: str, world: np.ndarray) -> np.ndarray:
         """The internal coordinates of a free drawing shown, converted once per :meth:`set_free`."""
@@ -2148,10 +2314,11 @@ class ModelView(QWidget):
                 return
         surface = self._surface_at(x, y, project, refine=True)
         point = self._snap(x, y, project, surface)
-        if (point is not None and self._draw_kind == "polygon" and len(self._draw_pts) >= 3
+        if (point is not None and self._draw_kind == "polygon" and self._draw_pts
                 and np.array_equal(point, self._draw_pts[0])):
-            self._finish()  # closed on its first vertex
-            return
+            if len(self._draw_pts) >= 3:
+                self._finish()  # closed on its first vertex
+            return  # with fewer than three: no vertex twice
         if point is None:
             point = surface
         if point is None:  # nothing of the model there
@@ -2163,10 +2330,11 @@ class ModelView(QWidget):
         else:
             self._put_free()
 
-    def _model_hit(self, x: float, y: float):
-        """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
-        the model cannot be read: a vertex drawn on the model lies on the model, not on the dense cloud near it. The
-        ray caster is kept for the model file shown (path and time) until another chunk is shown."""
+    def _caster(self):
+        """(centre, ray caster, median edge) of the model shown (internal coordinates minus centre), kept for the
+        model file (path and time) until another chunk is shown; None when there is no model to cast rays on."""
+        if self.chunk is None:
+            return None
         path = self.paths.get(self.kind) or self.paths.get("model") or self.chunk.product_path("model")
         if not path or not os.path.exists(path):
             return None
@@ -2188,10 +2356,17 @@ class ModelView(QWidget):
             except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
                 cached = (key, None, None, 0.0)
             self._draw_mesh = cached
-        _key, centre, caster, _edge = cached
-        if caster is None:
+        _key, centre, caster, edge = cached
+        return None if caster is None else (centre, caster, edge)
+
+    def _model_hit(self, x: float, y: float, ray=None):
+        """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
+        the model cannot be read: a vertex drawn on the model lies on the model, not on the dense cloud near it."""
+        cached = self._caster()
+        if cached is None:
             return None
-        o, d, _metre = self._sight(x, y)
+        centre, caster, _edge = cached
+        o, d, _metre = self._sight(x, y, ray)
         t = float(caster.hit_distance((o - centre)[None], d[None])[0])
         return o + t * d if np.isfinite(t) else None
 
@@ -2231,3 +2406,176 @@ class ModelView(QWidget):
             point = surface
         self._rubber = None if point is None else np.asarray(point, np.float64).reshape(3)
         self._put_free()
+
+    # ----------------------------------------------------------- free drawings: select, edit, drape
+    @property
+    def free_select_on(self) -> bool:
+        return self._select_on
+
+    @property
+    def selected_free(self) -> str | None:
+        return self._selected_id
+
+    def start_free_select(self) -> None:
+        """Seleziona e modifica: the view live, a click on a free drawing selects it and shows its vertices on the
+        frozen frame to move or delete them; a click away from every drawing selects none; Esc ends."""
+        if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
+            return
+        self.stop_drawing()
+        self._end_overlays()
+        self._select_on = True
+        self._press = None
+        self.canvas.set_hint(tr("Clic su un disegno per sceglierlo - Esc esce"))
+        self._draw_target().setFocus()
+        QTimer.singleShot(0, lambda: self._select_on and self._draw_target().setFocus())  # after the menu
+
+    def stop_free_select(self) -> None:
+        """The select mode ended (the selection stays drawn)."""
+        if not getattr(self, "_select_on", False):
+            return
+        self._select_on = False
+        self._press = None
+        if self.stack.currentWidget() is self.editor:
+            self.stack.setCurrentWidget(self.canvas)
+        self.canvas.set_hint("")
+
+    def _select_event(self, ev) -> bool:
+        kind = ev.type()
+        if kind == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+            self._press = (ev.position().x(), ev.position().y(), time.monotonic())
+        elif kind == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton:
+            press, self._press = self._press, None
+            x, y = ev.position().x(), ev.position().y()
+            if (press is not None and np.hypot(x - press[0], y - press[1]) <= CLICK_PX
+                    and (time.monotonic() - press[2]) * 1000 <= CLICK_MS):
+                self._select_at(x, y, self.canvas.projector())
+        elif kind == QEvent.Type.MouseButtonDblClick:
+            return True  # not the centre of rotation
+        elif kind == QEvent.Type.KeyPress:
+            if ev.key() == Qt.Key.Key_Escape:
+                self.stop_free_select()
+                return True
+            if ev.key() == Qt.Key.Key_Delete and self._selected_id is not None:
+                self.free_delete_requested.emit(self._selected_id, -1)
+                return True
+        return False
+
+    def free_at(self, x: float, y: float, project) -> str | None:
+        """The free drawing shown within ``SELECT_PX`` of (x, y): the nearest line, polygon edge or point."""
+        best, best_d = None, float(SELECT_PX)
+        for fid, kind, xyz, _colour, _sel in (self.sd.free if self.sd is not None else []):
+            pts = np.asarray(xyz, np.float64).reshape(-1, 3)
+            if kind == "polygon" and len(pts) >= 3:
+                pts = np.vstack([pts, pts[:1]])
+            px, py, _depth, ok = project(pts)
+            q = np.column_stack([px, py])
+            dist = [float(np.hypot(*(q[i] - (x, y)))) for i in range(len(q)) if ok[i]]
+            for i in range(len(q) - 1):
+                if not (ok[i] and ok[i + 1]):
+                    continue
+                a, b = q[i], q[i + 1]
+                ab = b - a
+                t = float(np.clip(((x, y) - a) @ ab / max(float(ab @ ab), 1e-12), 0.0, 1.0))
+                dist.append(float(np.hypot(*(a + t * ab - (x, y)))))
+            if dist and min(dist) <= best_d:
+                best, best_d = fid, min(dist)
+        return best
+
+    def _select(self, fid: str | None) -> None:
+        self._selected_id = fid
+        self._free = [(f, k, xyz, c, f == fid) for f, k, xyz, c, _s in self._free]
+        self._update_drape()
+        self._put_free()
+        self.free_selected.emit(fid or "")
+
+    def _update_drape(self) -> None:
+        rec = self._selected_record()
+        self.a_free_drape.setEnabled(rec is not None and rec[1] in ("line", "polygon"))
+
+    def _selected_record(self):
+        return next((f for f in self._free if f[0] == self._selected_id), None) if self._selected_id else None
+
+    def _select_at(self, x: float, y: float, project) -> None:
+        """A click in select mode (live view or editor): select the drawing there and edit its vertices, or none."""
+        fid = self.free_at(x, y, project)
+        if fid is None:
+            if self._selected_id is not None:
+                self._select(None)
+            self.stack.setCurrentWidget(self.canvas)
+            self._draw_target().setFocus()
+            return
+        if fid != self._selected_id:
+            self._select(fid)
+        self._open_editor()
+
+    def _open_editor(self) -> None:
+        rec = self._selected_record()
+        if rec is None or self.sd is None:
+            return
+        self.stack.setCurrentWidget(self.canvas)  # the frame grabbed with the selection drawn
+        image, project = self.canvas.snapshot()
+        self._edit_project = project
+        shown = self.sd.to_display(rec[2] - self.sd.offset)
+        px, py, _depth, _ok = project(shown)
+        self.editor.start(image, list(zip(px, py)), rec[1] == "polygon",
+                          tr("Trascina un vertice: si riprende sulla superficie - Canc toglie il vertice scelto "
+                             "(o il disegno) - Esc torna alla vista"))
+        self.stack.setCurrentWidget(self.editor)
+        self.editor.setFocus()
+
+    def _edit_clicked(self, x: float, y: float) -> None:
+        if self._edit_project is not None:
+            self._select_at(x, y, self._edit_project)
+
+    def _edit_moved(self, i: int, x: float, y: float) -> None:
+        """A vertex let go at (x, y) of the frozen frame: picked again on the surface there (the camera has not
+        moved), never left in the air: nothing there puts the handle back."""
+        rec = self._selected_record()
+        point = None if rec is None else self._surface_at(x, y, self._edit_project, refine=True)
+        if point is None or not 0 <= i < len(rec[2]):
+            self.editor.reset_handle(i)
+            return
+        self.editor.accept_handle(i)
+        world = rec[2].copy()
+        world[i] = self.chunk.to_world(np.asarray(point, np.float64)[None])[0]
+        self._free = [(f, k, world if f == rec[0] else xyz, c, s) for f, k, xyz, c, s in self._free]
+        self._free_inner.pop(rec[0], None)
+        self._put_free()
+        self.free_vertex_moved.emit(rec[0], i, np.asarray(point, np.float64))
+
+    def _edit_delete(self, i: int) -> None:
+        if self._selected_id is not None:
+            self.free_delete_requested.emit(self._selected_id, i)
+
+    def drape(self, xyz_internal, project, ray, every_px: float = DRAPE_PX, closed: bool = False) -> np.ndarray:
+        """``xyz_internal`` with, between each pair of vertices (and the last and the first when ``closed``), points
+        picked on the surface every ``every_px`` screen pixels with the line of sight (``ray``); the misses dropped,
+        the original vertices kept."""
+        pts = np.asarray(xyz_internal, np.float64).reshape(-1, 3)
+        if len(pts) < 2 or self.sd is None:
+            return pts.copy()
+        sd = self.sd
+        px, py, _depth, ok = project(sd.to_display(self.chunk.to_world(pts) - sd.offset))
+        n = len(pts)
+        pairs = [(i, i + 1) for i in range(n - 1)] + ([(n - 1, 0)] if closed and n >= 3 else [])
+        out = [pts[0]]
+        for i, j in pairs:
+            if ok[i] and ok[j]:
+                steps = int(np.ceil(np.hypot(px[j] - px[i], py[j] - py[i]) / every_px))
+                for m in range(1, steps):
+                    f = m / steps
+                    q = self._surface_at(px[i] + f * (px[j] - px[i]), py[i] + f * (py[j] - py[i]), project,
+                                         refine=True, ray=ray)
+                    if q is not None:
+                        out.append(np.asarray(q, np.float64).reshape(3))
+            if j != 0:
+                out.append(pts[j])
+        return np.array(out)
+
+    def _drape_selected(self) -> None:
+        rec = self._selected_record()
+        if rec is None or rec[1] not in ("line", "polygon") or self.chunk is None:
+            return
+        inner = self.chunk.to_internal(rec[2])
+        new = self.drape(inner, self.canvas.projector(), self.canvas.view_ray, closed=rec[1] == "polygon")
+        self.free_drape_requested.emit(rec[0], new)

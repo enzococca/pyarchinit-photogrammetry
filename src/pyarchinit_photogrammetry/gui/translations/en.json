@@ -2943,7 +2943,9 @@
   "Punto 3D": "3D point",
   "Seleziona e modifica": "Select and edit",
   "Drappeggia sul modello": "Drape on the model",
-  "Clic: vertice - trascina: ruota - Backspace, Invio, Esc": "Click: vertex - drag: rotate - Backspace, Enter, Esc"
+  "Clic: vertice - trascina: ruota - Backspace, Invio, Esc": "Click: vertex - drag: rotate - Backspace, Enter, Esc",
+  "Clic su un disegno per sceglierlo - Esc esce": "Click a drawing to select it - Esc leaves",
+  "Trascina un vertice: si riprende sulla superficie - Canc toglie il vertice scelto (o il disegno) - Esc torna alla vista": "Drag a vertex: it is picked again on the surface - Delete removes the chosen vertex (or the drawing) - Esc goes back to the view"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

@@ -1,6 +1,7 @@
 """Free drawings in the 3D view: lines, polygons and points clicked on the model with the view live between the
 clicks (a drag still rotates), the rubber band following the cursor, the snap to the vertices shown, Backspace,
-Enter and Esc; the features given shown by the view and kept through a vertical exaggeration."""
+Enter and Esc; the features given shown by the view and kept through a vertical exaggeration; a feature selected,
+its vertices dragged on the frozen view and picked again on the surface, deleted, draped on the model."""
 from __future__ import annotations
 
 import os
@@ -42,6 +43,7 @@ def view(processed, app, monkeypatch):
     mv.free_drawn.connect(lambda kind, xyz: mv.drawn.append((kind, np.asarray(xyz, float))))
     yield mv
     mv.stop_drawing()
+    mv.stop_free_select()
     mv.close()
 
 
@@ -238,3 +240,165 @@ def test_free_items_survive_exaggeration(view, app):
     view.set_exaggeration(1.0)
     view.set_free([], {})
     assert view.sd.free == []
+
+
+def _line(view, a, b, fid="f1"):
+    world = view.chunk.to_world(np.array([a, b]))
+    view.set_free([{"id": fid, "kind": "line", "xyz": world.tolist()}], {})
+    return world
+
+
+def _record(view):
+    got = {"selected": [], "moved": [], "deleted": [], "draped": []}
+    view.free_selected.connect(lambda fid: got["selected"].append(fid))
+    view.free_vertex_moved.connect(lambda fid, i, xyz: got["moved"].append((fid, i, np.asarray(xyz, float))))
+    view.free_delete_requested.connect(lambda fid, i: got["deleted"].append((fid, i)))
+    view.free_drape_requested.connect(lambda fid, xyz: got["draped"].append((fid, np.asarray(xyz, float))))
+    return got
+
+
+def _select_middle(view, a, b):
+    from free3d_helpers import click_at, screen_of
+
+    (xa, ya), (xb, yb) = screen_of(view, a), screen_of(view, b)
+    view.start_free_select()
+    click_at(view, (xa + xb) / 2 + 2, (ya + yb) / 2 + 3)  # beside the segment, within 6 px
+
+
+def test_click_selects_a_feature(view, app):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    a, b = _targets(view, 2)
+    _line(view, a, b)
+    got = _record(view)
+    view.start_drawing("line")
+    _select_middle(view, a, b)
+    assert view.drawing_kind is None  # selecting ended the drawing
+    assert got["selected"] == ["f1"]
+    assert view.sd.free[0][4] and view.base_sd.free[0][4]  # drawn thicker
+    assert view.stack.currentWidget() is view.editor and len(view.editor.handles) == 2
+    assert view.a_free_drape.isEnabled()
+    QTest.mouseClick(view.editor, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(3, 3))
+    assert got["selected"] == ["f1", ""] and not view.sd.free[0][4]
+    assert view.stack.currentWidget() is view.canvas
+    view.start_drawing("line")  # drawing ends the select mode
+    assert not view.free_select_on
+
+
+def _drag(widget, start, end):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    p0 = QPoint(int(round(start[0])), int(round(start[1])))
+    p1 = QPoint(int(round(end[0])), int(round(end[1])))
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p0)
+    for k in range(1, 6):
+        QTest.mouseMove(widget, p0 + (p1 - p0) * k / 5)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p1)
+
+
+def test_moved_vertex_is_picked_again_on_the_surface(view, app):
+    from free3d_helpers import distance_to_model, median_edge, screen_of
+
+    a, b, c = _targets(view, 3)
+    _line(view, a, b)
+    got = _record(view)
+    _select_middle(view, a, b)
+    ed = view.editor
+    _drag(ed, screen_of(view, a), screen_of(view, c))
+    assert len(got["moved"]) == 1
+    fid, i, xyz = got["moved"][0]
+    assert fid == "f1" and i == 0
+    assert distance_to_model(view.chunk, xyz[None])[0] < median_edge(view.chunk)
+    # the empty sky: no surface there, no signal, the handle back where it was
+    w, h = view.canvas.view_size()
+    project = view.canvas.projector()
+    sky = next(((x, y) for x, y in ((2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3))
+                if view._surface_at(x, y, project, refine=True) is None), None)
+    assert sky is not None
+    before = (ed.handles[1].x(), ed.handles[1].y())
+    _drag(ed, before, sky)
+    assert len(got["moved"]) == 1
+    assert (ed.handles[1].x(), ed.handles[1].y()) == before
+
+
+def test_delete_a_vertex_or_the_feature(view, app):
+    from free3d_helpers import screen_of
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    a, b = _targets(view, 2)
+    _line(view, a, b)
+    got = _record(view)
+    _select_middle(view, a, b)
+    ed = view.editor
+    QTest.keyClick(ed, Qt.Key.Key_Delete)  # no handle chosen: the feature
+    assert got["deleted"] == [("f1", -1)]
+    x, y = screen_of(view, b)
+    QTest.mouseClick(ed, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y)))
+    QTest.keyClick(ed, Qt.Key.Key_Delete)
+    assert got["deleted"] == [("f1", -1), ("f1", 1)]
+    QTest.keyClick(ed, Qt.Key.Key_Escape)
+    assert view.stack.currentWidget() is view.canvas
+
+
+def test_drape_adds_surface_points(view, app):
+    from free3d_helpers import distance_to_model, median_edge
+
+    chunk, sd = view.chunk, view.sd
+    v = np.asarray(chunk.model.vertices, np.float64)
+    project = view.canvas.projector()
+    x, y, _d, ok = project(sd.to_display(chunk.to_world(v) - sd.offset))
+    w, h = view.canvas.view_size()
+    ia = int(np.argmin(np.where(ok, (x - (w / 2 - 100)) ** 2 + (y - h / 2) ** 2, np.inf)))
+    ib = int(np.argmin(np.where(ok, (x - (x[ia] + 200)) ** 2 + (y - y[ia]) ** 2, np.inf)))
+    a, b = v[ia], v[ib]
+    assert abs(np.hypot(x[ib] - x[ia], y[ib] - y[ia]) - 200) < 5
+    out = view.drape(np.array([a, b]), project, view.canvas.view_ray)
+    assert 9 <= len(out) - 2 <= 11
+    assert np.allclose(out[0], a) and np.allclose(out[-1], b)
+    assert distance_to_model(chunk, out).max() < median_edge(chunk)
+    # from the menu, on the selected line
+    _line(view, a, b)
+    got = _record(view)
+    _select_middle(view, a, b)
+    view.a_free_drape.trigger()
+    assert len(got["draped"]) == 1 and got["draped"][0][0] == "f1"
+    assert 9 <= len(got["draped"][0][1]) - 2 <= 11
+
+
+def test_snap_off_the_model_checks_the_candidate_s_own_line_of_sight(view, app, monkeypatch):
+    from free3d_helpers import click_at, median_edge, screen_of
+
+    chunk = view.chunk
+    a, b = _targets(view, 2)
+    x, y = screen_of(view, a)
+    o, d, _metre = view._sight(x, y)
+    hidden = a + 6 * median_edge(chunk) * d  # behind the model at its own pixel
+    world = chunk.to_world(np.array([hidden, b]))
+    view.set_free([{"id": "under", "kind": "point", "xyz": world[:1].tolist()},
+                   {"id": "seen", "kind": "point", "xyz": world[1:].tolist()}], {})
+    monkeypatch.setattr(view, "_surface_at", lambda *a, **k: None)  # nothing under the cursor
+    view.start_drawing("point")
+    click_at(view, x + 3, y + 4)
+    assert view.drawn == []  # not the hidden point, and no surface: nothing
+    x, y = screen_of(view, b)
+    click_at(view, x + 3, y + 4)  # a vertex seen at its own pixel is still taken
+    assert len(view.drawn) == 1
+    assert np.allclose(view.drawn[0][1][0], chunk.to_internal(world[1:])[0], atol=1e-9, rtol=0)
+
+
+def test_a_polygon_s_first_vertex_again_before_three(view, app):
+    from free3d_helpers import click_at, click_vertex, screen_of
+
+    a, b, c = _targets(view, 3)
+    view.start_drawing("polygon")
+    click_vertex(view, a)
+    click_vertex(view, b)
+    x, y = screen_of(view, a)
+    click_at(view, x + 3, y + 4)  # snapped on the first vertex: nothing with two vertices
+    assert len(view.drawing_vertices()) == 2 and view.drawn == []
+    click_vertex(view, c)
+    click_at(view, x + 3, y + 4)  # with three: closes the polygon
+    assert len(view.drawn) == 1 and len(view.drawn[0][1]) == 3
