@@ -661,6 +661,35 @@ della trasformazione (`cameras_replaced`). I dati dei plugin in `chunk.meta` si 
 plugin in ascolto (`on_transform_changed` con le loro `keys`); gli altri sono elencati in
 `plugins_unaware`.
 
+## Disegni liberi
+
+Linee, poligoni e punti disegnati sul modello (nella vista 3D, oppure sulla pianta e sui prospetti
+della vista 2D con la quota del DEM o del rilievo) come elementi generici in layer dell'utente: non
+unità di PyArchInit. Restano in `chunk.meta["drawings"]` nelle coordinate del chunk e seguono ogni
+cambio della sua trasformazione fatto dentro il programma; lunghezze e aree si calcolano, non si
+salvano.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `core.free_drawings.features(chunk, layer=None)` | i disegni (copie): `id`, `layer`, `kind` (line, polygon, point), `name`, `xyz`, `attributes`, `created`, `modified`, `colour` quando ce l'ha |
+| `core.free_drawings.layers(chunk)` | i layer (`name`, `colour`, `visible`), prima "Disegni 3D" |
+| `core.free_drawings.add(chunk, kind, xyz, layer="Disegni 3D", name="", attributes=None, colour=None, id=None)` | un disegno nuovo; restituisce il suo record |
+| `core.free_drawings.update(chunk, fid, **fields)` | cambia `layer`, `name`, `xyz`, `attributes`, `colour` (None: quello del layer) |
+| `core.free_drawings.remove(chunk, fids)` | toglie dei disegni; restituisce quanti |
+| `core.free_drawings.set_layer(chunk, name, colour=None, visible=None, rename=None)` | un layer aggiunto, colorato, mostrato o nascosto, rinominato |
+| `archaeo.measures.feature_measures(rec, model=None, toward=None)` | linea: `length_3d`, `length_plan`, `dz`; poligono: `perimeter_3d`, `area_3d`, `area_plan`, `slope`, `aspect`, `model_surface` con un modello; punto: `z` |
+| `io.free_drawings.export(chunk, path, fmt=None, layer=None)` | DXF 3D, GeoPackage con Z, GeoJSON o CSV dei vertici (dall'estensione) |
+| `io.free_drawings.read(path)` | i disegni di un GeoPackage, GeoJSON o DXF |
+| `io.free_drawings.import_features(chunk, path, layer=None)` | aggiunti al chunk; restituisce `added`, `dem_z`, `skipped`, `holes_dropped` |
+| `ppg drawings3d progetto.ppg list [--layer L] [--chunk C]` | riga di comando: una riga per disegno (id, layer, tipo, nome, vertici, lunghezza 3D, area 3D) |
+| `ppg drawings3d progetto.ppg export --out FILE [--format dxf\|gpkg\|geojson\|csv] [--layer L] [--chunk C]` | i disegni scritti in un file; il progetto non si salva |
+| `ppg drawings3d progetto.ppg import FILE [--layer L] [--chunk C]` | un GeoPackage, GeoJSON o DXF importato; il progetto si salva |
+
+Un file senza quote le prende dal DEM (un vertice fuori dal DEM ha la quota interpolata lungo il
+disegno; un disegno senza nessun vertice sul DEM resta fuori); il layer viene da `--layer`,
+altrimenti dalla colonna `layer` del file, altrimenti dal nome del file; un'identità che il chunk
+ha già ne riceve una nuova. Un poligono tiene solo il contorno: i suoi buchi vengono contati.
+
 ## Prodotti da classi di punti scelte
 
 Le classi della nuvola densa (regole, lazo, classificatore addestrato o unità stratigrafiche)

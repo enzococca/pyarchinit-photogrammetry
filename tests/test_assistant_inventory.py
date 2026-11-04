@@ -95,7 +95,7 @@ def test_snapshot_of_the_demo_project(demo_doc, monkeypatch):
     assert first["products"]["dem"] == {"versions": ["DEM di Metashape"], "active": "DEM dalla nuvola"}
     assert "dem" in first["rasters"] and "orthomosaic" in first["rasters"]
     assert any(r.startswith("dem_") for r in first["rasters"])  # the kept version, by its calculator name
-    assert first["drawings"] == {"units": 2, "quote": 1, "points": 0, "lines": 1, "stones": 3}
+    assert first["drawings"] == {"units": 2, "quote": 1, "points": 0, "lines": 1, "stones": 3, "free": 0}
     assert first["elevations"] == [{"id": "e1", "name": "Prospetto nord", "kind": "plane"}]
     assert second["photos"] == 1 and second["products"] == {} and second["rasters"] == []
     assert snap["view"] == {"kind": None, "raster": None, "version": None, "elevation": None, "model": None}

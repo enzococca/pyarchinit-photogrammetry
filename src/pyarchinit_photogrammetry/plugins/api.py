@@ -472,6 +472,22 @@ class Context:
             self.mark_modified()
         return result
 
+    def free_drawings(self, chunk=None, layer: str | None = None) -> list[dict]:
+        """Since 1.7.2: the free drawings in 3D of ``chunk`` (the active one when None), of ``layer`` only when given:
+        records ``id``, ``layer``, ``kind`` (line, polygon, point), ``name``, ``xyz`` (the coordinates of the chunk,
+        a polygon open), ``attributes``, ``created``, ``modified`` and an optional ``colour`` - copies: changing them
+        changes nothing in the project (read only; their measures: ``archaeo.measures.feature_measures``)."""
+        from ..core import free_drawings
+
+        if chunk is None:
+            window = self.window
+            doc = getattr(window, "doc", None) if window is not None else None
+            doc = doc if doc is not None else self.app.document
+            chunk = getattr(doc, "chunk", None)
+            if chunk is None:
+                return []
+        return free_drawings.features(chunk, layer)
+
     def on_transform_changed(self, callback: Callable, keys=()) -> None:
         """Since 1.7.2: ``callback(chunk, M)`` after the transform of a chunk was changed by the motion ``M`` (a 4x4
         array: an orientation of its local system, its undo): data of the plugin kept in the coordinates of the

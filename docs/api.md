@@ -641,6 +641,35 @@ transform (`cameras_replaced`). Data of plugins in `chunk.meta` is moved only by
 that listen (`on_transform_changed` with their `keys`); the others are listed in
 `plugins_unaware`.
 
+## Free drawings
+
+Lines, polygons and points drawn on the model (in the 3D view, or on the plan and the elevations of
+the 2D view with the height of the DEM or of the relief) as general features in user layers: not
+units of PyArchInit. They are kept in `chunk.meta["drawings"]` in the coordinates of the chunk
+and follow every change of its transform made inside the program; lengths and areas are computed,
+not stored.
+
+| Call | Description |
+| --- | --- |
+| `core.free_drawings.features(chunk, layer=None)` | the drawings (copies): `id`, `layer`, `kind` (line, polygon, point), `name`, `xyz`, `attributes`, `created`, `modified`, `colour` when it has one |
+| `core.free_drawings.layers(chunk)` | the layers (`name`, `colour`, `visible`), "Disegni 3D" first |
+| `core.free_drawings.add(chunk, kind, xyz, layer="Disegni 3D", name="", attributes=None, colour=None, id=None)` | a new drawing; returns its record |
+| `core.free_drawings.update(chunk, fid, **fields)` | `layer`, `name`, `xyz`, `attributes`, `colour` (None: the layer's) changed |
+| `core.free_drawings.remove(chunk, fids)` | drawings taken away; returns how many |
+| `core.free_drawings.set_layer(chunk, name, colour=None, visible=None, rename=None)` | a layer added, coloured, shown or hidden, renamed |
+| `archaeo.measures.feature_measures(rec, model=None, toward=None)` | line: `length_3d`, `length_plan`, `dz`; polygon: `perimeter_3d`, `area_3d`, `area_plan`, `slope`, `aspect`, `model_surface` with a model; point: `z` |
+| `io.free_drawings.export(chunk, path, fmt=None, layer=None)` | DXF 3D, GeoPackage with Z, GeoJSON or CSV of the vertices (by the suffix) |
+| `io.free_drawings.read(path)` | the drawings of a GeoPackage, GeoJSON or DXF |
+| `io.free_drawings.import_features(chunk, path, layer=None)` | added to the chunk; returns `added`, `dem_z`, `skipped`, `holes_dropped` |
+| `ppg drawings3d project.ppg list [--layer L] [--chunk C]` | command line: one row per drawing (id, layer, kind, name, vertices, 3D length, 3D area) |
+| `ppg drawings3d project.ppg export --out FILE [--format dxf\|gpkg\|geojson\|csv] [--layer L] [--chunk C]` | the drawings written to a file; the project is not saved |
+| `ppg drawings3d project.ppg import FILE [--layer L] [--chunk C]` | a GeoPackage, GeoJSON or DXF imported; the project is saved |
+
+A file without heights takes them from the DEM (a vertex outside it the height interpolated
+along the drawing; a drawing with no vertex on the DEM is skipped); the layer comes from
+`--layer`, else from the file's `layer` column, else from the name of the file; an identity
+already in the chunk gets a new one. A polygon keeps its outline only: its holes are counted.
+
 ## Products from chosen point classes
 
 The classes of the dense cloud (rules, lasso, trained classifier or stratigraphic units)

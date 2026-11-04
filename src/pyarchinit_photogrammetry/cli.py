@@ -792,6 +792,71 @@ def orient(project: Path,
         typer.echo(f"    {line}")
 
 
+@app.command("drawings3d")
+def drawings3d(project: Path,
+               action: str = typer.Argument(..., help="list, export or import"),
+               file: Optional[Path] = typer.Argument(None, help="import: the GeoPackage, GeoJSON or DXF to read"),
+               out: Optional[Path] = typer.Option(None, help="export: the file to write"),
+               layer: Optional[str] = typer.Option(None, help="list/export: only this layer; import: the layer the "
+                                                              "drawings go in (default: the file's layer column, else "
+                                                              "the name of the file)"),
+               fmt: Optional[str] = typer.Option(None, "--format", help="export: dxf, gpkg, geojson or csv (default: "
+                                                                         "by the suffix of --out)"),
+               chunk: Optional[str] = None):
+    """The free drawings in 3D of a chunk (lines, polygons and points in user layers): list them (3D length or
+    area), export them (DXF 3D, GeoPackage with Z, GeoJSON, CSV of the vertices) or import a GeoPackage, GeoJSON or
+    DXF (features without Z take the heights of the DEM; the project is saved)."""
+    from .archaeo.measures import feature_measures
+    from .core import free_drawings as fd
+    from .io import free_drawings as fio
+
+    action = action.lower()
+    if action not in ("list", "export", "import"):
+        raise typer.BadParameter(f"the action is list, export or import, not {action!r}")
+    if fmt is not None and fmt.lower() not in fio.FORMATS:
+        raise typer.BadParameter(f"--format: one of {', '.join(fio.FORMATS)}")
+    doc, ch = _open(project, chunk)
+    if action == "list":
+        typer.echo("id\tlayer\tkind\tname\tvertices\tlength_3d\tarea_3d")
+        for rec in fd.features(ch, layer):
+            try:
+                m = feature_measures(rec)
+            except ValueError:
+                m = {}
+            length = m.get("length_3d", m.get("perimeter_3d"))
+            area = m.get("area_3d")
+            typer.echo("\t".join([rec["id"], rec["layer"], rec["kind"], rec.get("name") or "", str(len(rec["xyz"])),
+                                  "-" if length is None else f"{length:.3f}", "-" if area is None else f"{area:.3f}"]))
+        return
+    if action == "export":
+        if out is None:
+            raise typer.BadParameter("export needs --out FILE")
+        if fmt is None and out.suffix.lower() not in fio.SUFFIXES:
+            raise typer.BadParameter(f"--out: {out.suffix or 'no suffix'} is not one of {', '.join(fio.FORMATS)}: "
+                                     "give --format")
+        n = len(fd.features(ch, layer))
+        if not n:
+            typer.echo(f"{ch.label}: no free drawing" + (f" in the layer {layer}" if layer else ""), err=True)
+            raise typer.Exit(code=1)
+        written = fio.export(ch, out, fmt=fmt.lower() if fmt else None, layer=layer)
+        typer.echo(f"{ch.label}: {n} free drawings written to {written}")
+        return
+    if file is None:
+        raise typer.BadParameter("import needs the FILE to read")
+    if not file.exists():
+        raise typer.BadParameter(f"{file} does not exist")
+    try:
+        got = fio.import_features(ch, file, layer=layer)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    if got["added"]:
+        doc.save()
+    typer.echo(f"{ch.label}: {got['added']} free drawings imported from {file.name} ({got['dem_z']} with the heights "
+               f"of the DEM, {got['skipped']} skipped" + (f", {got['holes_dropped']} holes of polygons left out"
+                                                         if got.get("holes_dropped") else "") + ")")
+
+
 @app.command("us-proposal")
 def us_proposal(project: Path, first_us: Optional[int] = typer.Option(None, help="first number (default: after the "
                                                                                  "last US of the site and project)"),
