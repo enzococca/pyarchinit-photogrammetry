@@ -7,10 +7,10 @@ current coordinates into the new system.
 Angle conventions (degrees):
 
 * ``tilt_deg``: angle between the new z axis and the current z axis, 0..180.
-* ``tilt_direction_deg``: azimuth, clockwise from the current +y (north), of the steepest descent
-  of the new horizontal plane (the direction the new plane falls toward); 0 when untilted.
-* ``heading_deg``: angle of the new x axis in the current plan, counter-clockwise from the
-  current +x (so a pure rotation about z by theta has heading theta), in (-180, 180].
+* ``tilt_direction_deg``: azimuth, clockwise from the current +y (north), in [0, 360), of the
+  steepest descent of the new horizontal plane (where it falls toward); 0 when untilted.
+* ``heading_deg``: azimuth, clockwise from the current +y (north), in [0, 360), of the new x axis
+  in the current plan.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import numpy as np
 
 from ..core import geometry as geo
 
-REASONS = ("crs", "markers", "aligned_to", "scalebars", "collinear", "plane_points", "plane_rough")
+REASONS = ("crs", "markers", "aligned_to", "scalebars", "collinear", "plane_points", "plane_rough", "nan")
 COLLINEAR_SIN = 1e-3
 MIN_PLANE_POINTS = 30
 MAX_PLANE_NMAD = 0.10
@@ -39,8 +39,8 @@ class OrientRefused(ValueError):
 def _angles(axes: np.ndarray) -> tuple[float, float, float]:
     z, x = axes[2], axes[0]
     tilt = float(np.degrees(np.arccos(np.clip(z[2], -1.0, 1.0))))
-    direction = float(np.degrees(np.arctan2(z[0], z[1]))) if np.hypot(z[0], z[1]) > 1e-12 else 0.0
-    heading = float(np.degrees(np.arctan2(x[1], x[0])))
+    direction = float(np.degrees(np.arctan2(z[0], z[1])) % 360.0) if np.hypot(z[0], z[1]) > 1e-12 else 0.0
+    heading = float(np.degrees(np.arctan2(x[0], x[1])) % 360.0)
     return tilt, direction, heading
 
 
@@ -48,6 +48,7 @@ def _angles(axes: np.ndarray) -> tuple[float, float, float]:
 class Frame:
     origin: np.ndarray
     axes: np.ndarray  # rows x, y, z
+    note: str = ""  # a short English reason when a requested choice was replaced by a default
 
     @property
     def tilt_deg(self) -> float:
@@ -66,20 +67,22 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v)
 
 
-def _frame(origin, x_hint: np.ndarray, normal: np.ndarray) -> Frame:
+def _frame(origin, x_hint: np.ndarray, normal: np.ndarray, note: str = "") -> Frame:
     """x_hint projected on the plane of ``normal``; y = z x x (right-handed)."""
     n = _unit(normal)
     x = x_hint - (x_hint @ n) * n
-    if np.linalg.norm(x) < 1e-9 * max(np.linalg.norm(x_hint), 1e-300):
-        raise OrientRefused("collinear", "the x direction is perpendicular to the plane")
+    if np.linalg.norm(x) < COLLINEAR_SIN * np.linalg.norm(x_hint):
+        raise OrientRefused("collinear", "the x direction to keep is perpendicular to the plane")
     x = _unit(x)
     y = np.cross(n, x)
-    return Frame(np.asarray(origin, dtype=float).copy(), np.vstack([x, y, n]))
+    return Frame(np.asarray(origin, dtype=float).copy(), np.vstack([x, y, n]), note)
 
 
 def frame_from_points(a, b, c=None, x_along_ab: bool = True, flip: bool = False) -> Frame:
     """The frame set by points A, B (and C): A origin, x along A->B (or the current +x)."""
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and (c is None or np.all(np.isfinite(c)))):
+        raise OrientRefused("nan", "a point has no valid coordinates")
     ab = b - a
     if np.linalg.norm(ab) == 0:
         raise OrientRefused("collinear", "A and B coincide")
@@ -131,9 +134,13 @@ def fit_plane(xyz) -> tuple[np.ndarray, np.ndarray, float]:
 
 def frame_from_plane(xyz, toward, a=None, b=None, flip: bool = False) -> Frame:
     """The frame of a plane fitted to ``xyz``; z on the side of the point ``toward``."""
-    p = np.asarray(xyz, dtype=float)
+    p = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    p = p[np.all(np.isfinite(p), axis=1)]
     if len(p) < MIN_PLANE_POINTS:
         raise OrientRefused("plane_points", f"{len(p)} points: at least {MIN_PLANE_POINTS} are needed")
+    sv = np.linalg.svd(p - p.mean(0), compute_uv=False)
+    if sv[0] <= 0 or sv[1] < 0.05 * sv[0]:
+        raise OrientRefused("plane_points", "the region is too narrow to define a plane")
     centre, n, nmad = fit_plane(p)
     size = float(np.max(p.max(0) - p.min(0)))
     if nmad > MAX_PLANE_NMAD * size:
@@ -144,14 +151,19 @@ def frame_from_plane(xyz, toward, a=None, b=None, flip: bool = False) -> Frame:
         n = -n
     origin = centre
     x_hint = np.array([1.0, 0.0, 0.0])
+    note = ""
+    if b is not None and a is None:
+        note = "B ignored without A: x kept"
     if a is not None:
         a = np.asarray(a, dtype=float)
         origin = a - ((a - centre) @ n) * n
         if b is not None:
             hint = np.asarray(b, dtype=float) - a
-            if np.linalg.norm(hint - (hint @ n) * n) > 1e-12:
+            if np.linalg.norm(hint - (hint @ n) * n) > COLLINEAR_SIN * max(np.linalg.norm(hint), 1e-300):
                 x_hint = hint
-    return _frame(origin, x_hint, n)
+            else:
+                note = "A->B is along the normal: x kept"
+    return _frame(origin, x_hint, n, note)
 
 
 def motion(frame: Frame, quota: float = 0.0, origin_xy=(0.0, 0.0), scale: float = 1.0) -> np.ndarray:
