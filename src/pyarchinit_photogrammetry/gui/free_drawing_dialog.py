@@ -72,6 +72,26 @@ def measures_text(rec: dict, model=None, toward=None) -> str:
     return decimal_comma(text)
 
 
+def shown_number(value) -> str:
+    """A coordinate as the form shows it: three decimals, the decimal comma in Italian (no thousands separator, so
+    that a typed value reads back the same)."""
+    return decimal_comma(f"{float(value):.3f}")
+
+
+def parse_number(text: str) -> float:
+    """A number typed with a decimal point or a decimal comma (with both, the last one is the decimal separator and
+    the other separates the thousands). ValueError when it is not one."""
+    t = text.strip().replace(" ", "").replace("\u00a0", "")
+    if "," in t and "." in t:
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    else:
+        t = t.replace(",", ".")
+    return float(t)
+
+
 class FreeDrawingDialog(QDialog):
     """The form of the free drawing ``rec`` of ``chunk`` (a copy of the record: nothing is written here)."""
 
@@ -144,7 +164,7 @@ class FreeDrawingDialog(QDialog):
             r = self.vertices.rowCount()
             self.vertices.insertRow(r)
             for c, val in enumerate((x, y, z)):
-                item = QTableWidgetItem(repr(float(val)))
+                item = QTableWidgetItem(shown_number(val))
                 if c < 2:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.vertices.setItem(r, c, item)
@@ -192,9 +212,10 @@ class FreeDrawingDialog(QDialog):
                 attrs[k] = self.attributes.item(r, 1).text() if self.attributes.item(r, 1) else ""
         xyz = []
         for r, (x, y, _z) in enumerate(self.rec["xyz"]):
-            text = self.vertices.item(r, 2).text().strip().replace(",", ".")
+            text = self.vertices.item(r, 2).text().strip()
             try:
-                z = float(text)
+                # unchanged: the height as it is, not the 3 decimals shown
+                z = float(_z) if text == shown_number(_z) else parse_number(text)
             except ValueError:
                 raise ValueError(tr("La quota del vertice {0} non è un numero", r + 1)) from None
             if not np.isfinite(z):

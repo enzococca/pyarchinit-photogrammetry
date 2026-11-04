@@ -21,7 +21,7 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Punto** | un punto di misura: quota, temperatura, bande e indici |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | un marker dove fai clic ([marker](photos-markers.md#marker)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Linee** | linee di rottura, linee morbide e contorni per il TIN e la modifica del DEM; il tipo nel suo menu ([TIN e linee di rottura](../tin.md#linee-di-rottura)) |
-| ![](../img/gui/icons/disegno-libero.png){ width=20 } | **Disegno libero** | linee, poligoni e punti in layer tuoi, in 3D sul modello; il tipo, il layer e *Proprietà...* nel suo menu ([sotto](#disegni-liberi-2d-e-3d)) |
+| ![](../img/gui/icons/disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png){ width=20 } | **Disegno libero** | linee, poligoni e punti in layer tuoi, in 3D sul modello; il tipo, il layer e *Proprietà...* nel suo menu ([sotto](#disegni-liberi-2d-e-3d)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | unità e pietre disegnate da Segment Anything ([sotto](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto o del prospetto mostrato ([patch](processing.md#patch-dellortofoto)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Elimina** | gli elementi selezionati (++delete++) |

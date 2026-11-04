@@ -452,3 +452,30 @@ def test_name_in_the_layer_pane_and_colour_back_to_the_layer(win, qapp):
         mp.undo()
     rec = next(f for f in free_drawings.features(ch) if f["id"] == "f1")
     assert "colour" not in rec and free_drawings.colour_of(ch, rec) == free_drawings.DEFAULT_COLOUR
+
+
+def test_form_shows_the_vertices_in_the_interface_number_format(win, qapp):
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.gui import free_drawing_dialog as fdd
+    from pyarchinit_photogrammetry.gui import i18n
+
+    ch = win.chunk
+    rec = next(f for f in free_drawings.features(ch) if f["id"] == "f1")
+    x, y, z = rec["xyz"][0]
+    dlg = fdd.FreeDrawingDialog(win, ch, rec)
+    try:
+        texts = [dlg.vertices.item(0, c).text() for c in range(3)]
+        assert texts == [f"{v:.3f}".replace(".", ",") for v in (x, y, z)]  # Italian: decimal comma, 3 decimals
+        assert dlg.values()["xyz"] == rec["xyz"]  # nothing typed: the heights as they are, not rounded
+        for typed, want in (("99,5", 99.5), ("99.5", 99.5), ("1.234,5", 1234.5), ("1,234.5", 1234.5)):
+            dlg.vertices.item(0, 2).setText(typed)
+            assert dlg.values()["xyz"][0][2] == want, typed
+    finally:
+        dlg.close()
+    i18n.set_current("en")
+    try:
+        dlg = fdd.FreeDrawingDialog(win, ch, rec)
+        assert dlg.vertices.item(0, 2).text() == f"{z:.3f}"
+        dlg.close()
+    finally:
+        i18n.set_current("it")
