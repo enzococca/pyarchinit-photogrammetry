@@ -1070,7 +1070,7 @@ class ReferencePane(QWidget):
                     it.setToolTip(how)
                 if c == 1 and e.get("type") == "orientation":
                     it.setForeground(QColor(PALETTE["grey"]))
-                    it.setToolTip(tr("Orientamento, non usato: i punti di controllo (o il sistema scelto) collocano "
+                    it.setToolTip(tr("Orientamento, non usato: i punti di controllo (o le posizioni delle foto) collocano "
                                      "il rilievo; le coordinate del marker sono nel sistema orientato a mano"))
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
                     it.setForeground(QColor(PALETTE["red"]))

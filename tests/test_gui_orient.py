@@ -476,3 +476,18 @@ def test_raster_pick_refused_on_an_elevation(win, qapp):
     qapp.processEvents()
     assert win.ortho_view.mode != "orient_pick"
     assert "pianta" in dlg.status.text()
+
+
+def test_plane_area_refused_on_an_elevation(win, qapp):
+    """*Disegna l'area sull'ortofoto* of the fitted plane: on an elevation shown its u, v are not x, y: refused."""
+    dlg = _open(win, qapp)
+    entry = next(e for e in win.chunk.meta.get("elevations") or [])
+    win.show_elevation(entry)
+    qapp.processEvents()
+    dlg.plane_radio.setChecked(True)
+    qapp.processEvents()
+    assert dlg.b_area.isEnabled()
+    dlg.b_area.click()
+    qapp.processEvents()
+    assert not win.ortho_view.mode.startswith("req_")
+    assert "pianta" in dlg.status.text()

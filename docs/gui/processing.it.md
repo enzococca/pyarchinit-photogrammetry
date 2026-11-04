@@ -331,11 +331,12 @@ sistema dell'allineamento. Un marker visto in meno di due foto viene segnalato c
 allineamento non si può ritrovare.
 
 **Le coordinate di campo sostituiscono l'orientamento a mano.** Quando più tardi arriva il sistema dello scavo - tre
-o più marker di controllo con le coordinate della stazione totale o del GNSS, oppure un sistema scelto per il chunk -
-sono questi a collocare il rilievo e i marker di orientamento si fanno da parte: non entrano in *Aggiorna
-georeferenziazione*, il pannello *Riferimenti* li mostra in grigio come "orientamento, non usato" senza errore (le
-loro coordinate sono nel sistema orientato a mano), e un nuovo orientamento a mano viene rifiutato finché i punti di
-controllo ci sono.
+o più marker di controllo con le coordinate della stazione totale o del GNSS, oppure, in un sistema scelto per il
+chunk, tre o più posizioni delle foto - sono questi a collocare il rilievo e i marker di orientamento si fanno da
+parte: non entrano in *Aggiorna georeferenziazione*, il pannello *Riferimenti* li mostra in grigio come
+"orientamento, non usato" senza errore (le loro coordinate sono nel sistema orientato a mano), e un nuovo
+orientamento a mano viene rifiutato finché i punti di controllo ci sono. Un sistema scelto senza nient'altro che
+collochi il rilievo (A messo su X, Y e quota note) lascia ai marker di orientamento il compito di collocarlo.
 
 **Prodotti da rifare.** DEM, ortofoto e i raster fatti da essi (precisione, copertura, rilievi, pendenza,
 esposizione, TIN) sono griglie nella pianta di prima: risultano *da rifare*. La vista raster lo dice in una fascia

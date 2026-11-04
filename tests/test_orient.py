@@ -1009,15 +1009,63 @@ def test_control_points_typed_after_an_orientation_replace_it(processed, tmp_pat
     assert gcp.orientation_set_aside(ch)
     with pytest.raises(orient.OrientRefused):
         orient.check(ch)
+    # the optimisation holds the block on the field points only, never on the hand frame
+    from pyarchinit_photogrammetry.engine import sfm
+
+    assert set(sfm._control_markers(ch)) == {m.key for m in field}
+    assert {m.key for m in gcp.control_markers(ch)} == {m.key for m in field}
+    # the report's table names the type in both languages
+    from pyarchinit_photogrammetry.io import report_content as rc
+
+    for lang in ("it", "en"):
+        text = rc.Words(lang)("type_orientation")
+        assert text != "type_orientation" and "orient" in text
 
 
 def test_orientation_markers_step_aside_in_a_real_system(processed, tmp_path):
-    """A system chosen for the chunk (not LOCAL): the orientation markers, in the hand frame, take no part."""
+    """Oriented on a known point (X, Y and height of A, the taped A-B), then declared in a real system: nothing else
+    places it, so the orientation markers keep placing it - A stays on its reference, the system kept; with three
+    photo positions that the fit uses in that system, they step aside."""
     from pyarchinit_photogrammetry.markers import gcp
 
-    doc, ch, t0, internal, points, result = _oriented(processed, tmp_path)
-    ch.crs = "EPSG:32633"
-    assert gcp.orientation_set_aside(ch)
+    doc, ch, t0, internal, points, result = _oriented(processed, tmp_path, origin_xy=(2480010.0, 4500020.0),
+                                                      quota=100.0,
+                                                      distance=float(np.linalg.norm(points_ab(processed, tmp_path))))
+    ch.crs = "EPSG:3004"
+    assert not gcp.orientation_set_aside(ch)
     report = ch.update_transform()
-    assert report["method"] is None or "+orientation" not in report["method"]
-    assert all(e["type"] == "orientation" for e in report["markers"] if e["label"] in orient.MARKER_LABELS)
+    assert "+orientation" in report["method"]
+    assert ch.crs == "EPSG:3004"
+    a = next(m for m in ch.markers if m.label == orient.MARKER_LABELS[0])
+    assert np.abs(ch.to_world(a.position[None])[0] - [2480010.0, 4500020.0, 100.0]).max() < 1e-6
+    # photo positions in the system, spanning their accuracy: they place it, the hand frame steps aside
+    _referenced_photos(ch, n=len(ch.aligned_cameras))
+    assert gcp.orientation_set_aside(ch)
+    rows = ch.update_transform()["markers"]
+    assert all(e["type"] == "orientation" for e in rows if e["label"] in orient.MARKER_LABELS)
+
+
+def points_ab(processed, tmp_path):
+    """The distance A-B of :func:`_oriented`'s points (a scratch copy of the trench)."""
+    from orient_helpers import local_copy
+
+    (tmp_path / "ab").mkdir()
+    _doc, ch, _ = local_copy(processed, tmp_path / "ab")
+    p = ch.to_world(_surface_points(ch))
+    return p[1] - p[0]
+
+
+def test_a_real_system_keeps_the_frame_through_a_new_alignment(processed, tmp_path):
+    """Oriented by hand, declared in a real system, no bar: a new alignment and the fit put the frame back."""
+    from orient_helpers import new_alignment
+
+    doc, ch, t0, internal, points, result = _oriented(processed, tmp_path, origin_xy=(2480010.0, 4500020.0),
+                                                      quota=100.0)
+    ch.crs = "EPSG:3004"
+    oriented = np.array(ch.transform, float)
+    g = new_alignment(ch)
+    for m in ch.markers:
+        m.position = None
+    report = ch.update_transform()
+    assert "+orientation" in report["method"] and ch.crs == "EPSG:3004"
+    assert np.abs(np.asarray(ch.transform) - oriented @ np.linalg.inv(g)).max() < 1e-6

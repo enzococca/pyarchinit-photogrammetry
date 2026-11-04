@@ -5888,7 +5888,7 @@ class MainWindow(QMainWindow):
         from ..engine import sfm
         from ..markers import gcp
 
-        controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+        controls = gcp.control_markers(ch)
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
         bars = gcp.control_scalebars(ch)
         with_markers = sfm.fixed_points_hold(ch)  # the engine's own rule

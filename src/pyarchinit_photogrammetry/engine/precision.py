@@ -46,8 +46,7 @@ def _datum(chunk: Chunk):
     ``"control points"``, ``"camera positions"`` or ``"internal"`` (nothing: local coordinates)."""
     from ..markers import gcp
 
-    ctrl = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
-            and m.position is not None]
+    ctrl = [m for m in gcp.control_markers(chunk) if m.position is not None]
     if len(ctrl) >= 3:
         loc = np.array([m.reference.location for m in ctrl], float)
         if gcp._non_collinear(loc):

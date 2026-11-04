@@ -596,17 +596,32 @@ def control_scalebars(chunk) -> list:
 
 
 def orientation_set_aside(chunk) -> bool:
-    """True when the orientation markers of a hand orientation (:mod:`..engine.orient`) no longer place the chunk:
-    it is in a real system (not LOCAL), or three or more control markers with typed references that are not
-    orientation markers give it (the total station's or the GNSS points measured later replace the hand frame).
-    They then take no part in :func:`update_transform` and :func:`marker_errors` lists them as ``orientation``."""
+    """True when something else places the chunk, so the orientation markers of a hand orientation
+    (:mod:`..engine.orient`) no longer do: three or more control markers with typed references that are not
+    orientation markers (the total station's or the GNSS points measured later), or - in a real system, not LOCAL -
+    three or more photo positions that :func:`update_transform` would use (not an object scaled by control bars
+    with positions that do not span their accuracy). Otherwise they keep placing it, whatever the system's name.
+    Set aside, they take no part in :func:`update_transform` and :func:`marker_errors` lists them as ``orientation``."""
     if not any(getattr(m, "orientation", False) for m in chunk.markers):
         return False
-    if not crs_mod.is_local(chunk.crs):
-        return True
     others = [m for m in chunk.markers if not getattr(m, "orientation", False) and not m.checkpoint
               and m.reference.enabled and m.reference.location]
-    return len(others) >= 3
+    if len(others) >= 3:
+        return True
+    if crs_mod.is_local(chunk.crs):
+        return False
+    cams = [c for c in chunk.aligned_cameras if c.reference.enabled and c.reference.location]
+    if len(cams) < 3:
+        return False
+    return not (control_scalebars(chunk) and not cameras_span_their_accuracy(chunk))
+
+
+def control_markers(chunk) -> list:
+    """The control markers: enabled typed references, not check points, and not the orientation markers set aside
+    (:func:`orientation_set_aside`). What the fit, the optimisation and its fixed points count."""
+    aside = orientation_set_aside(chunk)
+    return [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
+            and not (aside and getattr(m, "orientation", False))]
 
 
 def _orientation_markers(chunk) -> list:

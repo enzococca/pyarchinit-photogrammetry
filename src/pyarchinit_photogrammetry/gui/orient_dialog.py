@@ -373,6 +373,10 @@ class OrientDialog(QDialog):
 
     def _area(self) -> None:
         self.plane_radio.setChecked(True)
+        if getattr(self.window_, "drawings_frame", None) is not None:  # an elevation's u, v are not x, y
+            self.status.setText(tr("L'area si disegna sulla pianta (ortofoto o DEM), non su un prospetto: mostra la "
+                                   "pianta o usa il lazo nella vista 3D"))
+            return
 
         def drawn(xy) -> None:
             import shapely
