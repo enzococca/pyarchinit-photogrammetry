@@ -55,6 +55,12 @@ zonizzazione) e si aprono da lì; *Apri in QGIS* fa il progetto QGIS con la rifl
 loro scala, le zone come raster e come poligoni, oltre all'ortofoto, al DEM e ai disegni. I dettagli sono nell'
 [API](../api.md#camere-multispettrali), *Camere multispettrali*.
 
+Per **esportarli**: tasto destro su un prodotto nell'area di lavoro > *Esporta...*, oppure *Esporta...* nel passo
+*Indice* per l'indice scelto. La riflettanza esce con tutte le bande, i valori float32 così come sono e i nomi delle
+bande (GeoTIFF o COG); un indice con i suoi valori (GeoTIFF float32 o COG) o come immagine colorata con la scala scelta
+nel pannello (GeoTIFF RGBA, o PNG con world file); una zonizzazione come GeoPackage dei poligoni o come GeoTIFF delle
+classi. *File > Esporta > Ortofoto* esporta l'ortofoto RGB, che un chunk di riprese multispettrali non ha.
+
 ## Termico
 
 ### Le riprese

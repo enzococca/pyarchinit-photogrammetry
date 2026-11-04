@@ -1913,6 +1913,47 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     return target
 
 
+def index_limits(z: np.ndarray) -> tuple[float, float]:
+    """The ends of the colour ramp of a vegetation index: the 2nd and 98th percentiles, within
+    -1 and 1 for the normalised indices."""
+    valid = np.isfinite(z)
+    if not valid.any():
+        return -1.0, 1.0
+    lo, hi = np.percentile(z[valid], [2, 98])
+    if lo >= -1.0 and hi <= 1.0:
+        lo, hi = max(lo, -1.0), min(hi, 1.0)
+    return float(lo), float(hi) if hi > lo else float(lo) + 1e-6
+
+
+INDEX_PALETTES = [("rdylgn", "Rosso-giallo-verde"), ("grey", "Scala di grigi"), ("viridis", "Viridis"),
+                  ("turbo", "Turbo")]  # the colour ramps of a vegetation index (key, name)
+
+
+def index_colors(z: np.ndarray, limits: tuple[float, float] | None = None, palette: str = "rdylgn") -> np.ndarray:
+    """A vegetation index on a ``palette`` of :data:`INDEX_PALETTES`: ``rdylgn`` brown-red where
+    low, pale yellow in the middle, dark green where high (the ramp of the agronomic maps),
+    ``grey`` black to white, ``viridis`` and ``turbo`` OpenCV's; transparent where no data."""
+    valid = np.isfinite(z)
+    rgba = np.zeros(z.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba
+    lo, hi = limits if limits is not None else index_limits(z)
+    t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
+    if palette == "grey":
+        rgba[..., :3] = (t * 255).astype(np.uint8)[..., None]
+    elif palette in ("viridis", "turbo"):
+        import cv2
+
+        cmap = cv2.COLORMAP_VIRIDIS if palette == "viridis" else cv2.COLORMAP_TURBO
+        rgba[..., :3] = cv2.applyColorMap(np.ascontiguousarray((t * 255).astype(np.uint8)), cmap)[..., ::-1]
+    else:
+        stops = np.array([[0.0, 165, 0, 38], [0.25, 244, 109, 67], [0.5, 254, 224, 139], [0.75, 102, 189, 99],
+                          [1.0, 0, 104, 55]])
+        rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
 ZONING_METHODS = ("quantiles", "equal", "jenks", "kmeans")
 ZONING_SAMPLE = 200_000  # cells drawn (fixed seed) when an index has more, for k-means and natural breaks
 JENKS_SAMPLE = 3000  # values the natural breaks are exact on (a table of n x n sums: 72 MB, 0.13 s for 10 classes)
@@ -2093,3 +2134,140 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
     ms.setdefault("zoning", {})[name] = stamps.inherit_entry(chunk, summary, info)  # the index's
     json.dumps(summary)  # serialisable
     return summary
+
+
+# ------------------------------------------------------------------------------ exports
+EXPORT_FORMATS = {  # product: the formats it can be written in (the first is the default)
+    "reflectance": ("tif", "cog"),
+    "index": ("tif", "cog", "colour_tif", "png"),
+    "zones": ("gpkg", "tif"),
+}
+
+
+def product_source(chunk: Chunk, kind: str, name: str | None = None) -> Path:
+    """The file of a multispectral product: the reflectance orthomosaic, the index ``name``, or
+    the zoning of the index ``name`` (its class raster; the polygons are in ``meta["zoning"][name]["file"]``)."""
+    ms = chunk.meta.get("multispectral") or {}
+    if kind == "reflectance":
+        rel = ms.get("reflectance")
+    elif kind == "index":
+        rel = ((ms.get("indices") or {}).get(name or "") or {}).get("file")
+    elif kind == "zones":
+        rel = ((ms.get("zoning") or {}).get(name or "") or {}).get("raster")
+    else:
+        raise ValueError(f"unknown multispectral product {kind!r}")
+    if not rel or not (chunk.data_dir / rel).exists():
+        raise RuntimeError(f"multispectral product {' '.join(x for x in (kind, name) if x)} not built yet")
+    return chunk.data_dir / rel
+
+
+def _format_of(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".gpkg":
+        return "gpkg"
+    if suffix == ".png":
+        return "png"
+    return "tif"
+
+
+def _world_file(png: Path, transform) -> None:
+    """The world file (``.pgw``: the size of a cell and the centre of the first one). The reference
+    system goes in the ``.aux.xml`` that GDAL writes beside the PNG."""
+    png.with_suffix(".pgw").write_text("\n".join(f"{v:.10f}" for v in (
+        transform.a, transform.d, transform.b, transform.e,
+        transform.c + transform.a / 2 + transform.b / 2, transform.f + transform.d / 2 + transform.e / 2)) + "\n")
+
+
+COLOUR_SAMPLE = 2048  # cells per side of the reduced read the limits of a coloured index come from
+COLOUR_BLOCK_CELLS = 4_000_000  # cells coloured at a time (a strip of whole rows)
+
+
+def _colour_limits(src) -> tuple[float, float]:
+    """The ends of the ramp from a reduced read (an overview when the file has one), as the view
+    does: the whole index is never in memory."""
+    from rasterio.enums import Resampling
+
+    k = max(1, int(np.ceil(max(src.height, src.width) / COLOUR_SAMPLE)))
+    shape = (max(1, src.height // k), max(1, src.width // k)) if k > 1 else (src.height, src.width)
+    return index_limits(src.read(1, out_shape=shape, resampling=Resampling.nearest).astype(np.float32, copy=False))
+
+
+def _write_colours(src, dst, limits, palette: str) -> None:
+    """The index of ``src`` coloured into the RGBA dataset ``dst``, a strip of rows at a time."""
+    from rasterio.windows import Window
+
+    rows = max(1, COLOUR_BLOCK_CELLS // max(src.width, 1))
+    for r in range(0, src.height, rows):
+        win = Window(0, r, src.width, min(rows, src.height - r))
+        z = src.read(1, window=win).astype(np.float32, copy=False)
+        dst.write(np.moveaxis(index_colors(z, limits, palette), -1, 0), window=win)
+
+
+def _export_colour(src: Path, dst: Path, fmt: str, name: str, palette: str) -> Path:
+    """An index as a coloured image on ``palette`` (:data:`INDEX_PALETTES`), between the 2nd and the
+    98th percentile as in the view: a georeferenced RGBA GeoTIFF, or a PNG with a world file. Coloured
+    by strips of rows: a large survey is never in memory at once."""
+    import rasterio
+    from rasterio.enums import ColorInterp
+
+    with rasterio.open(src) as s:
+        limits = _colour_limits(s)
+        tags = {"index": name, "palette": palette, "low": f"{limits[0]:.6g}", "high": f"{limits[1]:.6g}"}
+        profile = dict(driver="GTiff", height=s.height, width=s.width, count=4, dtype="uint8", transform=s.transform,
+                       crs=s.crs, photometric="RGB", compress="deflate", BIGTIFF="IF_SAFER")
+        if min(s.height, s.width) >= 256:
+            profile.update(tiled=True, blockxsize=256, blockysize=256)
+        target = dst if fmt == "colour_tif" else dst.with_name(f".{dst.name}.tmp.tif")
+        try:
+            with rasterio.open(target, "w", **profile) as out:
+                _write_colours(s, out, limits, palette)
+                out.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+                out.update_tags(**tags)
+            if fmt == "colour_tif":
+                return dst
+            from rasterio.shutil import copy as rio_copy
+
+            Path(str(dst) + ".aux.xml").unlink(missing_ok=True)  # GDAL writes a new one with the reference system
+            rio_copy(target, dst, driver="PNG")
+            _world_file(dst, s.transform)
+            return dst
+        finally:
+            if target != dst:
+                target.unlink(missing_ok=True)
+
+
+def export_product(chunk: Chunk, kind: str, name: str | None, path, fmt: str | None = None,
+                   palette: str = "rdylgn") -> Path:
+    """A multispectral product written to ``path`` in ``fmt`` (:data:`EXPORT_FORMATS`; ``None``:
+    from the suffix). ``reflectance``: every band as float32 values as they are, band names kept,
+    as a GeoTIFF (``tif``) or a Cloud Optimized GeoTIFF (``cog``, ZSTD). ``index`` (``name``): the
+    float32 values (``tif``, ``cog``), or an image coloured on ``palette`` (``colour_tif``: an RGBA
+    GeoTIFF; ``png`` with a world file). ``zones`` (the zoning of the index ``name``): the polygons
+    (``gpkg``) or the class raster (``tif``)."""
+    import shutil
+
+    path = Path(path)
+    fmt = fmt or _format_of(path)
+    allowed = EXPORT_FORMATS.get(kind)
+    if allowed is None:
+        raise ValueError(f"unknown multispectral product {kind!r}")
+    if fmt not in allowed:
+        raise ValueError(f"{kind}: format one of {', '.join(allowed)}")
+    src = product_source(chunk, kind, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "gpkg":
+        gp = Path(((chunk.meta.get("multispectral") or {}).get("zoning") or {})[name]["file"])
+        if not gp.exists():
+            raise RuntimeError(f"the GeoPackage of the zones {name} is missing: {gp}")
+        if gp.resolve() != path.resolve():
+            shutil.copy2(gp, path)
+        return path
+    if fmt == "tif":
+        if src.resolve() != path.resolve():
+            shutil.copy2(src, path)
+        return path
+    if fmt == "cog":
+        from ..io.web import export_cog
+
+        return export_cog(src, path, "zstd")
+    return _export_colour(src, path, fmt, name or "", palette)

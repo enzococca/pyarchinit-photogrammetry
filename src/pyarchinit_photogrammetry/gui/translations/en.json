@@ -2982,7 +2982,22 @@
   "Se hai già esportato file o un progetto QField, le loro geometrie restano dov'erano": "If you already exported files or a QField project, their geometries stay where they were",
   "I disegni del file non hanno quote e il DEM va rifatto prima di prenderle (Flusso di lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato": "The drawings of the file have no heights and the DEM is to be built again before they are taken from it (Workflow > Rebuild the stale products): no drawing imported",
   "L'area si disegna sulla pianta (ortofoto o DEM), non su un prospetto: mostra la pianta o usa il lazo nella vista 3D": "The area is drawn on the plan (orthophoto or DEM), not on an elevation: show the plan or use the lasso in the 3D view",
-  "Orientamento, non usato: i punti di controllo (o le posizioni delle foto) collocano il rilievo; le coordinate del marker sono nel sistema orientato a mano": "Orientation, not used: the control points (or the photo positions) place the survey; the marker's coordinates are in the frame oriented by hand"
+  "Orientamento, non usato: i punti di controllo (o le posizioni delle foto) collocano il rilievo; le coordinate del marker sono nel sistema orientato a mano": "Orientation, not used: the control points (or the photo positions) place the survey; the marker's coordinates are in the frame oriented by hand",
+  "L'indice scelto: GeoTIFF con i valori (32 bit), COG, o un'immagine colorata con la scala di colori scelta (GeoTIFF o PNG con world file)": "The chosen index: GeoTIFF with the values (32 bit), COG, or an image coloured with the chosen colour ramp (GeoTIFF or PNG with a world file)",
+  "Il file del prodotto non c'è più: costruiscilo di nuovo.": "The product's file is no longer there: build it again.",
+  "GeoTIFF, tutte le bande a 32 bit (*.tif)": "GeoTIFF, all the bands at 32 bit (*.tif)",
+  "COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)": "COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)",
+  "GeoTIFF con i valori dell'indice, 32 bit (*.tif)": "GeoTIFF with the index values, 32 bit (*.tif)",
+  "COG - Cloud Optimized GeoTIFF con i valori, ZSTD (*.tif)": "COG - Cloud Optimized GeoTIFF with the values, ZSTD (*.tif)",
+  "GeoTIFF colorato con la scala di colori scelta (*.tif)": "GeoTIFF coloured with the chosen colour ramp (*.tif)",
+  "PNG colorato con world file (*.png)": "Coloured PNG with a world file (*.png)",
+  "GeoPackage con i poligoni delle zone (*.gpkg)": "GeoPackage with the zone polygons (*.gpkg)",
+  "GeoTIFF delle classi (*.tif)": "GeoTIFF of the classes (*.tif)",
+  "L'ortofoto (RGB) di questo chunk non è costruita. Riflettanza, indici e zone si esportano dalle loro voci nell'Area di lavoro (tasto destro > Esporta...) o dal pannello Multispettrale; le temperature dal pannello Termico.": "The (RGB) orthophoto of this chunk is not built. Reflectance, indices and zones are exported from their items in the Workspace (right click > Export...) or from the Multispectral pane; the temperatures from the Thermal pane.",
+  "Questo prodotto non si esporta da qui.": "This product is not exported from here.",
+  "Esporta le anomalie termiche": "Export the thermal anomalies",
+  "GeoTIFF in gradi (32 bit) (*.tif);;CSV (*.csv)": "GeoTIFF in degrees (32 bit) (*.tif);;CSV (*.csv)",
+  "Anomalie termiche esportate": "Thermal anomalies exported"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

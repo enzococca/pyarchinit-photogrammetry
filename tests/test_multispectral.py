@@ -850,7 +850,7 @@ def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch)
 
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
-    qapp = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     from pyarchinit_photogrammetry.gui import image_views
     from pyarchinit_photogrammetry.gui import main_window as mwmod
 
@@ -928,6 +928,237 @@ def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch)
         assert rgba[..., 3].max() == 255 and len(np.unique(rgba[rgba[..., 3] > 0][:, :3], axis=0)) == 2
         rows = gpkg.read_table(tmp_path / "zone.gpkg", "zone")
         assert {r[1]["classe"] for r in rows} == {1, 2}
+    finally:
+        w_.setWindowModified(False)
+        w_.close()
+
+
+def _small_products(tmp_path):
+    """A chunk with only multispectral products (no RGB orthophoto, no DEM): reflectance, NDVI and
+    its zones, written here on a small grid."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    ch.crs = "EPSG:3004"
+    folder = ch.data_dir / "multispectral"
+    folder.mkdir(parents=True)
+    h, w = 60, 80
+    transform = from_origin(2480000.0, 4500000.0, 0.05, 0.05)
+    bands = ["Blue", "Green", "Red", "RedEdge", "NIR"]
+    data = np.random.default_rng(2).uniform(0.01, 0.1, (5, h, w)).astype(np.float32)
+    data[4, :, :40] += 0.4
+    data[:, 0, 0] = np.nan  # a cell without values
+    with rasterio.open(folder / "reflectance.tif", "w", driver="GTiff", height=h, width=w, count=5, dtype="float32",
+                       crs="EPSG:3004", transform=transform, nodata=float("nan")) as dst:
+        dst.write(data)
+        for i, b in enumerate(bands):
+            dst.set_band_description(i + 1, b)
+    ch.meta["multispectral"] = {"reference": "Red", "bands": bands, "captures": 12, "panel": None, "registration": {},
+                                "reflectance": "multispectral/reflectance.tif", "reflectance_bands": bands}
+    ms.index_raster(ch, "NDVI")
+    ms.export_zoning(ch, "NDVI", tmp_path / "zone.gpkg", classes=2, method="kmeans", min_cells=5)
+    doc.save()
+    return doc, ch, data, transform
+
+
+def test_multispectral_products_are_exported_in_every_format(tmp_path):
+    """Reflectance, an index and the zones written to files: the values as they are (float32, NaN
+    kept), the band names, the reference system and the grid; an index also coloured on the chosen
+    ramp, as a GeoTIFF or a PNG with its world file."""
+    import rasterio
+
+    from pyarchinit_photogrammetry.io import gpkg
+
+    _doc, ch, data, transform = _small_products(tmp_path)
+    out = tmp_path / "out"
+    for fmt in ("tif", "cog"):
+        p = ms.export_product(ch, "reflectance", None, out / f"riflettanza_{fmt}.tif", fmt)
+        with rasterio.open(p) as src:
+            assert src.count == 5 and src.dtypes[0] == "float32"
+            assert list(src.descriptions) == ["Blue", "Green", "Red", "RedEdge", "NIR"]
+            assert src.crs.to_epsg() == 3004 and src.transform.almost_equals(transform)
+            assert np.array_equal(src.read(), data, equal_nan=True) and np.isnan(src.nodata)
+    with rasterio.open(ch.data_dir / "multispectral" / "NDVI.tif") as src:
+        ndvi = src.read(1)
+    for fmt in ("tif", "cog"):
+        p = ms.export_product(ch, "index", "NDVI", out / f"ndvi_{fmt}.tif", fmt)
+        with rasterio.open(p) as src:
+            assert src.dtypes[0] == "float32" and src.crs.to_epsg() == 3004 and src.transform.almost_equals(transform)
+            assert np.array_equal(src.read(1), ndvi, equal_nan=True) and np.isnan(src.nodata)
+    p = ms.export_product(ch, "index", "NDVI", out / "ndvi_colori.tif", "colour_tif", palette="grey")
+    with rasterio.open(p) as src:
+        rgba = src.read()
+        assert src.count == 4 and src.dtypes[0] == "uint8" and src.crs.to_epsg() == 3004
+        assert src.transform.almost_equals(transform) and src.tags()["palette"] == "grey"
+    assert np.array_equal(rgba[0], rgba[1]) and rgba[3, 0, 0] == 0 and rgba[3, 1:].min() == 255
+    assert rgba[0, :, :40].mean() > rgba[0, :, 40:].mean() + 60  # vegetation light in grey
+    p = ms.export_product(ch, "index", "NDVI", out / "ndvi.png", palette="rdylgn")  # the format from the suffix
+    world = [float(v) for v in p.with_suffix(".pgw").read_text().split()]
+    assert world == pytest.approx([0.05, 0.0, 0.0, -0.05, 2480000.025, 4499999.975])
+    with rasterio.open(p) as src:
+        assert src.count == 4 and src.crs.to_epsg() == 3004 and src.transform.almost_equals(transform)
+        assert not np.array_equal(src.read(), rgba)  # another ramp
+    zone = ms.export_product(ch, "zones", "NDVI", out / "zone.gpkg", "gpkg")
+    assert {r[1]["classe"] for r in gpkg.read_table(zone, "zone")} == {1, 2}
+    p = ms.export_product(ch, "zones", "NDVI", out / "zone_classi.tif", "tif")
+    with rasterio.open(p) as src, rasterio.open(ch.data_dir / "multispectral" / "NDVI_zone.tif") as ref:
+        assert np.array_equal(src.read(), ref.read()) and src.crs == ref.crs and src.transform == ref.transform
+    with pytest.raises(ValueError):
+        ms.export_product(ch, "reflectance", None, out / "x.png", "png")
+    with pytest.raises(RuntimeError):
+        ms.export_product(ch, "index", "NDRE", out / "ndre.tif")
+
+
+def test_coloured_index_is_written_by_strips(tmp_path, monkeypatch):
+    """The coloured export never holds the whole index: the ramp's ends from a reduced read, the colours
+    a strip of rows at a time - and the image is the one the whole index coloured at once gives."""
+    import rasterio
+
+    _doc, ch, _data, _transform = _small_products(tmp_path)
+    with rasterio.open(ch.data_dir / "multispectral" / "NDVI.tif") as src:
+        ndvi = src.read(1)
+    whole = ms.index_colors(ndvi, ms.index_limits(ndvi), "rdylgn")
+    seen = []
+    colours = ms.index_colors
+
+    def counted(z, *a, **k):
+        seen.append(z.shape)
+        assert z.dtype == np.float32
+        return colours(z, *a, **k)
+
+    monkeypatch.setattr(ms, "index_colors", counted)
+    monkeypatch.setattr(ms, "COLOUR_BLOCK_CELLS", 80 * 7)  # strips of 7 rows of the 60 x 80 grid
+    for name, fmt in (("ndvi.tif", "colour_tif"), ("ndvi.png", "png")):
+        seen.clear()
+        p = ms.export_product(ch, "index", "NDVI", tmp_path / "out" / name, fmt)
+        assert seen and all(h * w <= 80 * 7 for h, w in seen) and sum(h for h, _w in seen) == 60
+        with rasterio.open(p) as src:
+            assert np.array_equal(np.moveaxis(src.read(), 0, -1), whole)
+    assert not list((tmp_path / "out").glob(".*tmp*"))  # the PNG's intermediate GeoTIFF taken away
+    # a large index: the ends of the ramp from a reduced read, near those of all the cells
+    monkeypatch.setattr(ms, "COLOUR_SAMPLE", 20)
+    with rasterio.open(ch.data_dir / "multispectral" / "NDVI.tif") as src:
+        lo, hi = ms._colour_limits(src)
+    full = ms.index_limits(ndvi)
+    assert abs(lo - full[0]) < 0.1 and abs(hi - full[1]) < 0.1
+
+
+def test_multispectral_exports_from_the_window(tmp_path, monkeypatch):
+    """*Esporta...* on the multispectral items of the workspace and in the pane's index step writes
+    the product in the format of the filter chosen; *File > Esporta > Ortofoto* (and DEM) on a chunk
+    with only multispectral products says where they are exported, without a traceback."""
+    pytest.importorskip("PySide6")
+    import os
+
+    import rasterio
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QPoint, QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    doc, ch, data, _transform = _small_products(tmp_path)
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    w_.runner.show_dialog = False
+    shown = []
+    monkeypatch.setattr(mwmod, "message", lambda _parent, kind, _title, text, *a, **k: shown.append((kind, text)))
+    monkeypatch.setattr(w_, "_error", lambda summary, *a, **k: shown.append(("error", summary)))
+    try:
+        assert w_.ms_pane.b_export_index.isEnabled()
+        # the right click on the reflectance: Esporta... with the COG filter
+        menus = []
+        class RecordedMenu(mwmod.QMenu):  # QMenu.exec cannot be replaced on the class: it would wait for a click
+            def exec(self, *a):
+                menus.append(self)
+
+        monkeypatch.setattr(mwmod, "QMenu", RecordedMenu)
+        out = tmp_path / "out" / "riflettanza.tif"
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(out), mwmod.tr("COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)")))
+        w_._workspace_menu("product", ch, "ms:reflectance", QPoint(0, 0))
+        action = next(a for a in menus[-1].actions() if a.text() == mwmod.tr("Esporta..."))
+        action.trigger()
+        w_.runner.wait()
+        with rasterio.open(out) as src:
+            assert src.count == 5 and np.array_equal(src.read(), data, equal_nan=True)
+        assert Path(str(out) + ".prov.jsonld").exists()
+        # the zones from their item: the GeoPackage
+        gp = tmp_path / "out" / "zone.gpkg"
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(gp), mwmod.tr("GeoPackage con i poligoni delle zone (*.gpkg)")))
+        w_._workspace_menu("product", ch, "ms:zones:NDVI", QPoint(0, 0))
+        next(a for a in menus[-1].actions() if a.text() == mwmod.tr("Esporta...")).trigger()
+        w_.runner.wait()
+        assert gp.exists()
+        # the pane: the index chosen, coloured as a PNG with the ramp of the pane (suffix put right)
+        w_.ms_pane.c_index.setCurrentIndex(w_.ms_pane.c_index.findData("NDVI"))
+        png = tmp_path / "out" / "ndvi"
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName",
+                            lambda *a, **k: (str(png), mwmod.tr("PNG colorato con world file (*.png)")))
+        w_.ms_pane.b_export_index.click()
+        w_.runner.wait()
+        assert png.with_suffix(".png").exists() and png.with_suffix(".pgw").exists()
+        # the other filters through the dialog: the reflectance as a GeoTIFF, the zones as the class raster
+        for payload, target, text in (
+                ("ms:reflectance", "riflettanza_32.tif", "GeoTIFF, tutte le bande a 32 bit (*.tif)"),
+                ("ms:zones:NDVI", "zone_classi.tif", "GeoTIFF delle classi (*.tif)")):
+            dest = tmp_path / "out" / target
+            monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName",
+                                lambda *a, d=dest, t=text, **k: (str(d), mwmod.tr(t)))
+            w_._workspace_menu("product", ch, payload, QPoint(0, 0))
+            next(a for a in menus[-1].actions() if a.text() == mwmod.tr("Esporta...")).trigger()
+            w_.runner.wait()
+            with rasterio.open(dest) as src:
+                assert src.count == (5 if payload == "ms:reflectance" else 1)
+                if payload == "ms:reflectance":
+                    assert np.array_equal(src.read(), data, equal_nan=True)
+        # the thermal items go to the export of the temperatures (no traceback)
+        with rasterio.open(ch.data_dir / "multispectral" / "reflectance.tif") as src:
+            profile = {**src.profile, "count": 1}
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
+        temps = np.full((60, 80), 21.5, np.float32)
+        for fname, values in (("thermal.tif", temps), ("thermal_anomaly.tif", temps - 21.0)):
+            with rasterio.open(ch.data_dir / "multispectral" / fname, "w", **profile) as dst:
+                dst.write(values, 1)
+        ch.meta["thermal"] = {"file": "multispectral/thermal.tif",
+                              "anomaly": {"file": "multispectral/thermal_anomaly.tif", "radius_m": 2.0}}
+        for payload, target, expected in (("ms:thermal", "temperatura_C.tif", 21.5),
+                                          ("ms:thermal_anomaly", "anomalie_termiche.tif", 0.5)):
+            dest = tmp_path / "out" / target
+            monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, d=dest, **k: (str(d), ""))
+            w_._workspace_menu("product", ch, payload, QPoint(0, 0))
+            entries = [a for a in menus[-1].actions() if a.text() in (mwmod.tr("Esporta..."), mwmod.tr("Esporta"))]
+            assert len(entries) == 1
+            action = entries[0].menu().actions()[0] if entries[0].menu() else entries[0]
+            action.trigger()
+            w_.runner.wait()
+            with rasterio.open(dest) as src:
+                assert src.read(1)[10, 10] == pytest.approx(expected)
+            w_.ms_export(payload[3:])  # the same from the pane's route
+            w_.runner.wait()
+        assert not any(k == "error" for k, _t in shown)
+        # an index not computed: a message, no file dialog
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, **k: pytest.fail("no dialog"))
+        w_.ms_export("index", "NDRE")
+        assert shown[-1][0] == "warning"
+        # File > Esporta > Ortofoto / DEM: no orthophoto, no DEM - a message, not a traceback
+        w_.export("ortho")
+        assert shown[-1][0] == "warning" and "Area di lavoro" in shown[-1][1] and "Esporta" in shown[-1][1]
+        w_.export("dem")
+        assert shown[-1] == ("warning", "Costruisci prima il DEM.")
+        ch.meta["multispectral"], ch.meta["thermal"] = {}, {}
+        w_.export("ortho")
+        assert shown[-1] == ("warning", "Costruisci prima l'ortofoto.")
+        assert not any(k == "error" for k, _t in shown)
     finally:
         w_.setWindowModified(False)
         w_.close()
