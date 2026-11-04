@@ -226,3 +226,22 @@ def test_versions_of_a_saved_script_are_kept_and_missing_ones_pruned(window, cap
         again = ppg.Document.open(w.doc.path)
     assert all(e["id"] != vid for e in versions.versions(again.chunk, "dem"))
     assert any(vid in m for m in caplog.messages)
+
+
+def test_undo_part_free(window):
+    """The free drawings are a part of the snapshots, "Disegni 3D": added, then undone and redone."""
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+
+    w, app = window
+    ch = w.chunk
+    w._dirty(True)
+    rec = fd.add(ch, "line", [[2480001.0, 4500001.0, 99.0], [2480002.0, 4500001.5, 99.2]], layer="Muri")
+    fd.set_layer(ch, "Muri", colour="#00ff00")
+    w._dirty(True)
+    assert w.a_undo.text() == "Annulla: Disegni 3D"
+    w.undo()
+    assert fd.features(ch) == [] and [x["name"] for x in fd.layers(ch)] == [fd.DEFAULT_LAYER]
+    w.redo()
+    assert [f["id"] for f in fd.features(ch)] == [rec["id"]] and fd.layers(ch)[1]["colour"] == "#00ff00"
+    w._store_drawings()  # the window writes its drawings into the chunk: the free ones stay
+    assert [f["id"] for f in fd.features(ch)] == [rec["id"]]

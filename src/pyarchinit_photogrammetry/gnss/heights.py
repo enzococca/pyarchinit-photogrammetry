@@ -988,11 +988,13 @@ PLAN_STONES_LEGACY = "elevation.tif"  # the key of the stones of every elevation
 
 
 def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None,
-           plan_stones: bool = False) -> tuple[dict, list | None]:
+           plan_stones: bool = False, free: bool = True) -> tuple[dict, list | None]:
     """What was drawn on the products of ``chunk``, carried by ``mover`` aside (nothing of the chunk changes; a
     conversion that cannot be made raises here): the new values of the keys of ``chunk.meta`` and the new sections of
     the project (None to leave them). The stones of the orthomosaic go with them; ``plan_stones``: those of every
-    raster of the plan (a motion of the local system: the rasters are built again where the model goes)."""
+    raster of the plan (a motion of the local system: the rasters are built again where the model goes). ``free``:
+    the free drawings in 3D carried too, their basis (:mod:`..core.free_drawings`) the transform of the chunk now -
+    False: left to the caller (:func:`..engine.orient.move_stores` moves them by the motion itself)."""
     import copy
 
     meta, values = chunk.meta, {}
@@ -1007,7 +1009,10 @@ def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None,
         _move_rows(_rows(drawings, "quote"), "quota_q", mover)
         _move_rows(_rows(drawings, "points"), "z", mover)
         _move_lines([r for r in drawings.get("lines") or [] if isinstance(r, dict)], mover)
-        _move_free([f for f in drawings.get("free") or [] if isinstance(f, dict)], mover)
+        if free and any(isinstance(f, dict) for f in drawings.get("free") or []):
+            _move_free([f for f in drawings.get("free") or [] if isinstance(f, dict)], mover)
+            drawings["free_basis"] = {"alignment": meta.get("alignment_id"),
+                                      "transform": np.asarray(chunk.transform, float).tolist()}
         values["drawings"] = drawings
     ortho = _ortho_name(chunk)
     keys = [k for k, rows in (meta.get("stones") or {}).items()

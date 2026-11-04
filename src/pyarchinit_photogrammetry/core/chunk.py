@@ -580,11 +580,15 @@ class Chunk:
         references. With scale bars and no control points the chunk stays in local coordinates
         (an object, a trench) unless the GPS of the photos covers a much larger area than its
         accuracy; ``use_cameras`` forces the choice. Returns an accuracy report (see
-        :func:`markers.gcp.update_transform`)."""
+        :func:`markers.gcp.update_transform`). The free drawings follow the new transform
+        (:func:`core.free_drawings.follow`; not after a new alignment)."""
         from ..markers import gcp
+        from . import free_drawings
 
         self.forget_precision()
-        return gcp.update_transform(self, use_cameras=use_cameras)
+        report = gcp.update_transform(self, use_cameras=use_cameras)
+        free_drawings.follow(self)
+        return report
 
     def orient(self, M=None, **kw) -> dict:
         """The local system of the chunk oriented by three points, a plane or a given motion ``M``, kept by three

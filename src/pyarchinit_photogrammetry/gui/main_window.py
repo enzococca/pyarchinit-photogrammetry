@@ -4900,7 +4900,9 @@ class MainWindow(QMainWindow):
                          excluded=ch.meta.get("marker_excluded"),
                          patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"),
                          frame_patches={e["id"]: e["patches"] for e in ch.meta.get("elevations") or []
-                                        if e.get("id") and e.get("patches")})
+                                        if e.get("id") and e.get("patches")},
+                         free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
+                               "layers": (ch.meta.get("drawings") or {}).get("free_layers") or []})
         return state
 
     @staticmethod
@@ -5073,11 +5075,27 @@ class MainWindow(QMainWindow):
             self._region_changed("Regione di ricostruzione come prima")
         if ch is not None and parts & {"patches", "frame_patches"}:
             self._undo_patches(state)
+        if ch is not None and "free" in state:
+            self._undo_free(ch, state["free"] or {})
         if products:
             self.workspace.populate(self.doc)
             if self.model_view.kind:
                 self.model_view.refresh(reset=False)
         self._dirty(True)
+
+    def _undo_free(self, ch, free: dict) -> None:
+        """The free drawings in 3D and their layers (part ``free``) as a snapshot has them, drawn again."""
+        drawings = ch.meta.setdefault("drawings", {})
+        for key, value in (("free", free.get("features")), ("free_layers", free.get("layers"))):
+            if value:
+                drawings[key] = [dict(x) for x in value]
+            else:
+                drawings.pop(key, None)
+        if not drawings:
+            ch.meta.pop("drawings", None)
+        draw = getattr(self, "_draw_free", None)  # the 3D and 2D views of the free drawings (since 1.7.2)
+        if draw is not None:
+            draw()
 
     def _undo_patches(self, state: dict) -> None:
         """The patches of the orthomosaic (part ``patches``) and of the elevations (``frame_patches``: elevation id ->
@@ -8814,17 +8832,20 @@ class MainWindow(QMainWindow):
         ``frame``: the id of the elevation they were drawn on (None: the plan), with its ``stones`` (``{key: [WKT]}``;
         None keeps those it has). ``lines``: the break lines (:mod:`..archaeo.breaklines` records, key ``lines``,
         only when there are some: a project without them is written as before); None keeps those it has. The drawings
-        of the other frames stay as they are."""
+        of the other frames stay as they are, the free drawings in 3D too (:mod:`..core.free_drawings`)."""
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in quote]
         points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in points]
+        from ..core import free_drawings
+
         data = ch.meta.get("drawings") or {}
         frames = dict(data.get("frames") or {})
         if frame is None:
             lines = [dict(r) for r in (data.get("lines") or [] if lines is None else lines)]
             new = {"units": units, "quote": quote, **({"points": points} if points else {}),
                    **({"lines": lines} if lines else {})} if units or quote or points or lines else {}
+            new.update({k: data[k] for k in free_drawings.KEYS if data.get(k)})  # the free drawings in 3D: theirs
         else:
             new = {k: v for k, v in data.items() if k != "frames"}
             if stones is None:

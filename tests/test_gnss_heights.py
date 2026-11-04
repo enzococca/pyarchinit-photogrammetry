@@ -1424,3 +1424,27 @@ def test_survey_crs_moves_break_lines_and_free_drawings(tmp_path):
     '''))
     assert out["moved"] and out["none"]
     assert out["tall"] < 0.001 and out["flat"] < 0.001 and out["free"] < 0.001
+
+
+def test_survey_crs_carries_them(tmp_path):
+    """The free drawings go with the change of the system once (the mover of the drawings), and their basis takes the
+    new georeference: following the transform after it moves nothing more."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        from pyarchinit_photogrammetry.core import free_drawings as fd
+
+        write_grid(value=40.0)
+        ch = surveyed()
+        x0, y0, _ = utm.mean(axis=0)
+        free = [[x0, y0, 55.0], [x0 + 2.0, y0 - 1.0, 57.0]]
+        fd.add(ch, "line", free)
+        old = ch.transform.copy()
+        heights.set_survey_crs(ch, "EPSG:32633+3855")
+        want = ch.to_world(geometry.apply(np.linalg.inv(old), np.asarray(free, float)))
+        got = np.array(fd.features(ch)[0]["xyz"])
+        basis = ch.meta["drawings"]["free_basis"]
+        print(json.dumps({"free": float(np.abs(got - want).max()), "moved": bool(np.abs(got - free).max() > 1.0),
+                          "basis": bool(np.allclose(basis["transform"], ch.transform)),
+                          "again": fd.follow(ch) is None,
+                          "same": float(np.abs(np.array(fd.features(ch)[0]["xyz"]) - got).max())}))
+    '''))
+    assert out["moved"] and out["free"] < 0.001 and out["basis"] and out["again"] and out["same"] == 0.0

@@ -879,6 +879,10 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
         ch.meta["chunk_alignment"] = {"reference": ref.label, "reference_key": ref.key, "method": info["method"],
                                       "rmse": info.get("rmse"), "correspondences": info.get("correspondences"),
                                       "fix_scale": bool(fix_scale)}
+    from ..core import free_drawings
+
+    for ch in [ref] + [ch for ch, _T, _info in results]:  # the reference too: levelled above
+        free_drawings.follow(ch)
     progress(1.0, f"{len(results)} chunks aligned to {ref.label}")
     return {"reference": {"key": ref.key, "label": ref.label}, "method": method, "fix_scale": bool(fix_scale),
             "crs": ref.crs, "levelled_reference": levelled, "chunks": [info for _, _, info in results]}

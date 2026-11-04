@@ -657,6 +657,7 @@ def move_stores(chunk, m, sections=None) -> dict:
     of each store moved."""
     import shapely
 
+    from ..core import free_drawings
     from ..gnss import heights as hg
 
     m = np.asarray(m, float).reshape(4, 4)
@@ -670,7 +671,7 @@ def move_stores(chunk, m, sections=None) -> dict:
         return hg._level(extent[0], before)
 
     mover = hg._Follow(m, hg._Ground(chunk.dem_path, chunk.crs, level))
-    values, moved_sections = hg._drawn(chunk, mover, sections, plan_stones=True)
+    values, moved_sections = hg._drawn(chunk, mover, sections, plan_stones=True, free=False)
     values.pop("elevations", None)  # the crs written in each entry: here the entries are moved below
     meta = chunk.meta
     drawings = values.get("drawings") or {}
@@ -678,7 +679,7 @@ def move_stores(chunk, m, sections=None) -> dict:
         "units": len(hg._units(drawings)), "quote": len(hg._rows(drawings, "quote")),
         "points": len(hg._rows(drawings, "points")),
         "lines": sum(1 for x in drawings.get("lines") or [] if isinstance(x, dict)),
-        "free": sum(1 for x in drawings.get("free") or [] if isinstance(x, dict)),
+        "free": len(free_drawings.features(chunk)),
         "stones": sum(len(v) for k, v in (values.get("stones") or {}).items()
                       if v and k != hg.PLAN_STONES_LEGACY),
         "patches": len((meta.get("orthomosaic") or {}).get("patches") or []),
@@ -727,6 +728,7 @@ def move_stores(chunk, m, sections=None) -> dict:
     for mk, reference in references + photos:
         mk.reference = reference
     meta.update(values)
+    free_drawings.move(chunk, m, transform=m @ before)  # by the motion itself; the basis: the transform after it
     return counts
 
 
