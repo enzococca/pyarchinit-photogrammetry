@@ -671,6 +671,127 @@ def coregister(project: Path,
     typer.echo(f"    {cg.summary(out)}")
 
 
+def _triples(text: str) -> list[list[float]]:
+    """``"xA,yA,zA;xB,yB,zB[;xC,yC,zC]"`` -> two or three points (``typer.BadParameter`` otherwise)."""
+    try:
+        points = [[float(v) for v in part.split(",")] for part in text.split(";") if part.strip()]
+    except ValueError as exc:
+        raise typer.BadParameter(f"--points: numbers x,y,z separated by ';': {text}") from exc
+    if len(points) not in (2, 3) or any(len(p) != 3 for p in points):
+        raise typer.BadParameter(f"--points: two or three points x,y,z separated by ';': {text}")
+    return points
+
+
+def _orient_lines(result: dict, dry_run: bool) -> list[str]:
+    """What ``ppg orient`` prints of the result of ``engine.orient.orient``."""
+    d = result["describe"]
+    t = d["translation"]
+    lines = [f"tilt {d['tilt_deg']:.1f}° towards {d['tilt_direction_deg']:.1f}°, heading {d['heading_deg']:.1f}°",
+             f"translation {t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}", f"scale {d['scale']:.6f}"]
+    moved = {k: n for k, n in (result.get("moved") or {}).items() if n}
+    if moved:
+        lines.append("moved: " + ", ".join(f"{k} {n}" for k, n in moved.items()))
+    if result.get("stale"):
+        lines.append("stale (to build again): " + ", ".join(str(x.get("name") or x.get("product"))
+                                                           for x in result["stale"]))
+    if result.get("aligned"):
+        lines.append("aligned chunks moved: " + ", ".join(result["aligned"]))
+    if result.get("aligned_left"):
+        lines.append("aligned chunks left: " + ", ".join(result["aligned_left"]))
+    for key, title in (("kept", "kept"), ("sent_out", "sent out")):
+        for item in result.get(key) or []:
+            names = item.get("names") or []
+            lines.append(f"{title}: {item['what']}" + (f" ({', '.join(names)})" if names else ""))
+    if result.get("weak_markers"):
+        lines.append("weak markers (seen in fewer than two photos): " + ", ".join(result["weak_markers"]))
+    if result.get("cameras_replaced"):
+        lines.append(f"photo positions replaced: {len(result['cameras_replaced'])}")
+    if result.get("bar_dropped"):
+        lines.append(f"typed distance dropped: {result['bar_dropped']['distance']} m (it was of other points)")
+    if result.get("plugins_unaware"):
+        lines.append("data of plugins not moved: " + ", ".join(result["plugins_unaware"]))
+    if dry_run:
+        lines.append("(dry run, nothing saved)")
+    return lines
+
+
+@app.command()
+def orient(project: Path,
+           points: Optional[str] = typer.Option(None, help="A, B[, C] in the coordinates of the chunk: "
+                                                           "'xA,yA,zA;xB,yB,zB[;xC,yC,zC]' (x along A->B, the plane "
+                                                           "of the three points horizontal)"),
+           markers: Optional[str] = typer.Option(None, help="the markers A,B[,C] (labels or keys of placed markers)"),
+           plane_from: Optional[str] = typer.Option(None, help="a plan polygon (WKT, GeoJSON or a file of them): the "
+                                                               "plane fitted to the points of the model inside it "
+                                                               "becomes horizontal; with --points of two points "
+                                                               "A->B sets x"),
+           x_kept: bool = typer.Option(False, "--x-kept", help="x as the current x (projected on the new "
+                                                                "horizontal), not along A->B"),
+           quota: float = typer.Option(0.0, help="the height of A (or of the plane) in the new system"),
+           origin: Optional[str] = typer.Option(None, help="X,Y of A (or of the plane) in the new system "
+                                                           "(default 0,0)"),
+           distance: Optional[float] = typer.Option(None, help="the length of A-B in the new system (a scale bar "
+                                                               "on the orientation markers)"),
+           flip: bool = typer.Option(False, "--flip", help="upside down: z on the other side of the plane"),
+           aligned: bool = typer.Option(True, "--aligned/--no-aligned", help="move the chunks aligned to this one "
+                                                                             "with it"),
+           chunk: Optional[str] = None,
+           dry_run: bool = typer.Option(False, "--dry-run", help="say what would happen, save nothing")):
+    """Orient the local system of a chunk (no coordinates of the world): level it on three points
+    or on a plane, set x, the height and the origin, optionally the scale. Everything drawn in
+    the chunk follows; DEM and orthomosaic are to be built again. Three orientation markers keep
+    the orientation through a new alignment."""
+    from .engine import orient as orient_mod
+
+    given = [x is not None for x in (points, markers, plane_from)]
+    if not any(given):
+        raise typer.BadParameter("give --points, --markers or --plane-from")
+    if markers is not None and (points is not None or plane_from is not None):
+        raise typer.BadParameter("--markers goes alone (not with --points or --plane-from)")
+    pts = _triples(points) if points is not None else None
+    if plane_from is not None and pts is not None and len(pts) != 2:
+        raise typer.BadParameter("with --plane-from, --points gives A and B (two points) to set x")
+    origin_xy = (0.0, 0.0)
+    if origin is not None:
+        try:
+            origin_xy = tuple(float(v) for v in origin.split(","))
+        except ValueError as exc:
+            raise typer.BadParameter(f"--origin: X,Y: {origin}") from exc
+        if len(origin_xy) != 2:
+            raise typer.BadParameter(f"--origin: X,Y: {origin}")
+    names = [v.strip() for v in markers.split(",") if v.strip()] if markers is not None else None
+    if names is not None and len(names) not in (2, 3):
+        raise typer.BadParameter("--markers: two or three markers A,B[,C]")
+    doc, ch = _open(project, chunk)
+    kw = dict(x_along_ab=not x_kept, quota=quota, origin_xy=origin_xy, distance=distance, flip=flip,
+              move_aligned=aligned, dry_run=dry_run)
+    try:
+        if names is not None:
+            kw["markers"] = names
+        if plane_from is not None:
+            orient_mod.check(ch, cameras=False)
+            xyz = orient_mod.points_in_plan(ch, _polygons([plane_from]))
+            kw.update(plane_xyz=xyz, toward=orient_mod.toward_cameras(ch, xyz), points=pts)
+        else:
+            kw["points"] = pts
+        try:
+            result = orient_mod.orient(ch, **kw)
+        except KeyError as exc:  # a marker that is not in the chunk
+            if names is None:
+                raise
+            raise typer.BadParameter(f"--markers: {exc.args[0] if exc.args else exc}") from exc
+    except orient_mod.OrientRefused as exc:
+        typer.echo(f"{exc.reason}: {exc}", err=True)
+        if exc.names:
+            typer.echo("    " + ", ".join(exc.names), err=True)
+        raise typer.Exit(code=1) from exc
+    if not dry_run:
+        doc.save()
+    typer.echo(f"{ch.label}: " + ("orientation (dry run)" if dry_run else "oriented"))
+    for line in _orient_lines(result, dry_run):
+        typer.echo(f"    {line}")
+
+
 @app.command("us-proposal")
 def us_proposal(project: Path, first_us: Optional[int] = typer.Option(None, help="first number (default: after the "
                                                                                  "last US of the site and project)"),

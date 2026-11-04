@@ -94,6 +94,7 @@ class Context:
         self.contributions = Contributions()
         self.log = logging.getLogger(f"pyarchinit_photogrammetry.plugins.{name}")
         self._panes: list = []  # widgets given to add_pane: out of the window with release()
+        self._stops: list = []  # the listeners of the transform (on_transform_changed): stopped with release()
 
     @property
     def app(self):
@@ -443,6 +444,43 @@ class Context:
         self.mark_modified()
         return len(units)
 
+    # ------------------------------------------------------------------ orientation (since 1.7.2)
+    def orient(self, chunk=None, **kw) -> dict:
+        """Since 1.7.2: the local system of ``chunk`` (the active one when None) oriented, as
+        ``engine.orient.orient(chunk, **kw)``: ``points`` (A, B[, C] in the coordinates of the chunk), ``markers``
+        (labels or keys), ``plane_xyz`` and ``toward``, ``x_along_ab``, ``quota``, ``origin_xy``, ``distance``,
+        ``flip``, ``M`` (a 4x4 similarity given as it is), ``move_aligned``, ``dry_run``. Everything kept in the
+        coordinates of the chunk follows; three orientation markers keep the frame through a new alignment. In the
+        window it is a step of *Modifica > Annulla* and the views are shown again; in the command line the plugin
+        saves the project. Refused with ``engine.orient.OrientRefused`` (``reason``, ``names``): a chunk in a
+        system of the world, markers or photos that give the orientation, a chunk aligned to another. Returns the
+        result of ``engine.orient.orient`` (``M``, ``describe``, ``moved``, ``stale``, ...)."""
+        from ..engine import orient as orient_mod
+
+        window = self.window
+        if chunk is None:
+            doc = getattr(window, "doc", None) if window is not None else None
+            doc = doc if doc is not None else self.app.document
+            chunk = getattr(doc, "chunk", None)
+            if chunk is None:
+                raise ValueError("no chunk to orient: open a project")
+        method = getattr(window, "orient_chunk", None)
+        if method is not None:
+            return method(chunk, **kw)
+        result = orient_mod.orient(chunk, **kw)
+        if not kw.get("dry_run"):
+            self.mark_modified()
+        return result
+
+    def on_transform_changed(self, callback: Callable, keys=()) -> None:
+        """Since 1.7.2: ``callback(chunk, M)`` after the transform of a chunk was changed by the motion ``M`` (a 4x4
+        array: an orientation of its local system, its undo): data of the plugin kept in the coordinates of the
+        chunk is moved by ``M`` there. ``keys``: the keys of ``chunk.meta`` the plugin moves itself (the others of
+        unknown plugins are said as not moved). Also in the command line; stopped when the plugin is disabled."""
+        from ..engine import orient as orient_mod
+
+        self._stops.append(orient_mod.on_transform_changed(callback, keys))
+
     # ------------------------------------------------------------------ panes (since 1.3.4)
     def add_pane(self, widget, title: str, icon=None, area: str = "right"):
         """Since 1.3.4: ``widget`` as a pane of the window, a dock of its own tabbed with the panes of
@@ -474,6 +512,9 @@ class Context:
             except (RuntimeError, TypeError):
                 pass
         self.contributions.connections.clear()
+        for stop in self._stops:
+            stop()
+        self._stops.clear()
         if self.contributions.rasters:
             from ..engine import rastercalc
 

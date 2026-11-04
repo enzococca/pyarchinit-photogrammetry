@@ -630,6 +630,37 @@ ha CRS, trasformazione e sistema interno del primo chunk, e contiene:
 DEM, ortofoto e texture non vengono uniti. `merged.meta["merge"]` elenca i chunk di origine, le
 foto trovate in più di un chunk e gli avvisi.
 
+## Orientare un chunk locale
+
+Un chunk in un sistema locale (senza coordinate del mondo: un oggetto, un rilievo senza GNSS né
+target) si può livellare e orientare a mano: tre punti o un piano diventano l'orizzontale, A->B
+(o la x attuale) l'asse x, A l'origine a una quota scelta, e una distanza A-B digitata la scala.
+Tutto ciò che è tenuto nelle coordinate del chunk segue il movimento (disegni, quote, sezioni,
+prospetti con i loro disegni, proxy, la regione, le patch, i riferimenti digitati di marker e
+foto); DEM, ortofoto e raster su griglia risultano da rifare. Tre marker di orientamento
+(*Orientamento A/B/C*, con i riferimenti nel sistema nuovo) tengono il sistema anche dopo un nuovo
+allineamento.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.orient.orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_along_ab=True, quota=0.0, origin_xy=(0, 0), distance=None, flip=False, M=None, move_aligned=True, dry_run=False)` | orienta `chunk`; restituisce `M`, `describe` (`tilt_deg`, `tilt_direction_deg`, `heading_deg`, `translation`, `scale`), `moved` (conteggi per archivio), `stale`, `aligned` / `aligned_left`, `kept`, `sent_out`, `weak_markers`, `cameras_replaced`, `bar_dropped`, `plugins_unaware` e `state` per annullarlo |
+| `chunk.orient(M=None, **kw)` | lo stesso sul chunk; con `M` (una similitudine 4x4, per esempio calcolata da un plugin) il movimento si applica così com'è e i marker di orientamento vanno su punti del modello (`engine.orient.third_point`) |
+| `engine.orient.undo(chunk, result)` | tutto rimesso com'era prima dell'orientamento, compresi i marker di orientamento precedenti |
+| `engine.orient.points_in_plan(chunk, polygon)` | i punti (nuvola densa, altrimenti vertici del modello, altrimenti punti di legame; coordinate del chunk) dentro un poligono in pianta: il `plane_xyz` di un piano |
+| `engine.orient.toward_cameras(chunk, xyz)` | la mediana dei centri delle foto allineate: il lato da cui si vede il piano (`toward`) |
+| `engine.orient.on_transform_changed(callback, keys=())` | `callback(chunk, M)` dopo ogni movimento di un chunk (e il suo annullamento); restituisce la funzione che lo ferma |
+| `ppg orient progetto.ppg --points "xA,yA,zA;xB,yB,zB[;xC,yC,zC]" \| --markers "A,B[,C]" \| --plane-from POLIGONO [--points "xA,yA,zA;xB,yB,zB"] [--x-kept] [--quota Z] [--origin X,Y] [--distance L] [--flip] [--no-aligned] [--chunk C] [--dry-run]` | riga di comando: scrive inclinazione, la sua direzione, orientamento di x, traslazione, scala, cosa si è mosso, i prodotti da rifare, i chunk allineati, cosa resta com'era e cosa è uscito dal programma; salva tranne con `--dry-run`; un rifiuto esce con codice 1 e il motivo |
+
+Rifiuti (`engine.orient.OrientRefused`, `reason`, `names`): `crs` (il chunk è in un sistema del
+mondo: usare marker con coordinate), `markers` (tre o più marker di controllo con coordinate
+digitate danno l'orientamento), `aligned_to` (orientare il chunk di riferimento: quelli allineati
+a lui lo seguono), `scalebars` (le barre di scala di controllo danno la scala), `points`,
+`collinear`, `plane_points`, `plane_rough`, `nan`. Le posizioni delle foto digitate nel sistema
+locale vengono portate dal movimento e i marker di orientamento prendono il loro posto nel calcolo
+della trasformazione (`cameras_replaced`). I dati dei plugin in `chunk.meta` si muovono solo con i
+plugin in ascolto (`on_transform_changed` con le loro `keys`); gli altri sono elencati in
+`plugins_unaware`.
+
 ## Prodotti da classi di punti scelte
 
 Le classi della nuvola densa (regole, lazo, classificatore addestrato o unità stratigrafiche)

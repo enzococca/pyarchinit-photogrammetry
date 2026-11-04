@@ -724,7 +724,7 @@ def move_stores(chunk, m, sections=None) -> dict:
     _write_proxies(meshes)
     if moved_sections is not None:
         hg._write_sections(hg._sections_file(chunk), moved_sections)
-    for mk, reference in references:
+    for mk, reference in references + photos:
         mk.reference = reference
     meta.update(values)
     return counts
@@ -915,6 +915,58 @@ def _two_points(chunk) -> tuple[np.ndarray, np.ndarray]:
     xyz = _cloud(chunk)
     a = xyz[int(np.argmin(np.linalg.norm(xyz - np.median(xyz, axis=0), axis=1)))]
     return a, xyz[_far(np.linalg.norm(xyz - a, axis=1))]
+
+
+PLAN_SAMPLE = 200_000
+MIN_PLAN_POINTS = 10
+
+
+def _model_points(chunk) -> np.ndarray | None:
+    """The points of the chunk in its internal frame for a plane: the dense cloud, else the model's vertices, else the
+    tie points (None without any)."""
+    cloud = chunk.point_cloud
+    if cloud is not None and len(cloud):
+        return np.asarray(cloud.xyz, float)
+    path = chunk.product_path("model")
+    if path is not None and path.exists():
+        from ..io.mesh_ply import read_mesh
+
+        xyz = np.asarray(read_mesh(path).xyz, float)
+        if len(xyz):
+            return xyz
+    tie = chunk.tie_points
+    if tie is not None and len(tie):
+        return np.asarray(tie.xyz, float)
+    return None
+
+
+def points_in_plan(chunk, polygon) -> np.ndarray:
+    """The points of ``chunk`` (chunk coordinates, ``(N, 3)``) whose plan position falls inside ``polygon`` (a shapely
+    polygon in the chunk's x, y): of the dense cloud (a sample of at most :data:`PLAN_SAMPLE` points), else of the
+    model's vertices, else of the tie points. Refused (``"points"``) with fewer than :data:`MIN_PLAN_POINTS` inside.
+    Since 1.7.2."""
+    import shapely
+
+    xyz = _model_points(chunk)
+    if xyz is None:
+        raise OrientRefused("points", "no dense cloud, model or tie points to fit the plane to")
+    xyz = xyz[:: max(1, -(-len(xyz) // PLAN_SAMPLE))]
+    world = chunk.to_world(xyz)
+    inside = shapely.contains_xy(polygon, world[:, 0], world[:, 1])
+    if int(inside.sum()) < MIN_PLAN_POINTS:
+        raise OrientRefused("points", f"{int(inside.sum())} points of the model inside the polygon: at least "
+                                      f"{MIN_PLAN_POINTS} are needed")
+    return world[inside]
+
+
+def toward_cameras(chunk, xyz=None):
+    """The side of a plane the photos see it from: the median of the aligned photos' centres (chunk coordinates),
+    else a metre above the centroid of ``xyz``."""
+    cams = [c for c in chunk.aligned_cameras if c.transform is not None]
+    if cams:
+        return np.median(chunk.to_world(np.array([c.center for c in cams], float)), axis=0)
+    p = np.asarray(xyz, float).reshape(-1, 3)
+    return p.mean(axis=0) + np.array([0.0, 0.0, 1.0])
 
 
 def orientation_markers(chunk) -> list:
