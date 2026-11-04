@@ -278,9 +278,29 @@ class OrientDialog(QDialog):
         self.status.setText("")
         self.set_point(label, self.chunk.to_world(np.asarray(internal, float).reshape(1, 3))[0])
 
+    def _raster_refusal(self) -> str | None:
+        """Why a point cannot be taken on the 2D view now (None: it can): only on the plan (an elevation's u, v are
+        not x, y), and not on a raster or a DEM built in another system of the chunk (to rebuild first, as the
+        drawing tools refuse it)."""
+        from ..core import stamps
+
+        w = self.window_
+        if getattr(w, "drawings_frame", None) is not None:
+            return tr("Il punto si prende sulla pianta (ortofoto o DEM), non su un prospetto: mostra la pianta o "
+                      "prendilo nella vista 3D")
+        stale = getattr(w, "_shown_raster_stale", None)
+        if (stale is not None and stale()) or (self.chunk.products.get("dem") and stamps.is_stale(self.chunk, "dem")):
+            return tr("Questo raster va rifatto prima di prenderci un punto (Flusso di lavoro > Ricostruisci i "
+                      "prodotti da rifare): prendilo nella vista 3D")
+        return None
+
     def _pick_raster(self, label: str) -> None:
         view = self.ortho_view
         if view.tr is None:
+            return
+        refused = self._raster_refusal()
+        if refused:
+            self.status.setText(refused)
             return
         self._pending_row = label
         for action in self.window_.draw_group.actions():  # no tool of the bar is the one drawing now
@@ -302,6 +322,10 @@ class OrientDialog(QDialog):
         if label is None:
             return
         self._end_raster_pick()
+        refused = self._raster_refusal()  # the view changed while the pick was armed
+        if refused:
+            self.status.setText(refused)
+            return
         from ..archaeo.measures import ground_dem_at
 
         z = None

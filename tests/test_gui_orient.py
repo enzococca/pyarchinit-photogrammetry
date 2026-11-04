@@ -438,3 +438,41 @@ def test_undo_refused_after_the_georeference_is_fitted_again(win, qapp):
     qapp.processEvents()
     assert np.abs(np.asarray(ch.transform) - fitted).max() == 0
     assert "orientamento non si può più annullare" in win.statusBar().currentMessage()
+
+
+def test_raster_pick_refused_on_a_stale_raster_or_an_elevation(win, qapp):
+    """Re-orienting before the rebuild: the orthophoto pick is refused on the DEM still in the old frame (the 3D pick
+    is the way), and on an elevation shown (its u, v are not the plan's x, y)."""
+    from orient_helpers import centre
+
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    _apply_orientation(win, qapp)
+    assert stamps.is_stale(ch, "dem")
+    win._show_raster("dem")
+    qapp.processEvents()
+    dlg = _open(win, qapp)
+    dlg.rows["A"]["b2d"].click()
+    qapp.processEvents()
+    assert win.ortho_view.mode != "orient_pick"
+    assert "va rifatto" in dlg.status.text()
+    # a click arriving anyway (the pick was armed before) takes no height from the stale DEM
+    dlg._pending_row = "A"
+    x, y, _z = centre(ch)
+    win.ortho_view.orient_clicked.emit(float(x), float(y))
+    qapp.processEvents()
+    assert dlg.point("A") is None and "va rifatto" in dlg.status.text()
+    dlg.close()
+
+
+def test_raster_pick_refused_on_an_elevation(win, qapp):
+    dlg = _open(win, qapp)
+    entry = next(e for e in win.chunk.meta.get("elevations") or [])
+    win.show_elevation(entry)
+    qapp.processEvents()
+    assert win.drawings_frame is not None
+    dlg.rows["A"]["b2d"].click()
+    qapp.processEvents()
+    assert win.ortho_view.mode != "orient_pick"
+    assert "pianta" in dlg.status.text()
