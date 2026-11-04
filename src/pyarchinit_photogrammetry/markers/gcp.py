@@ -601,11 +601,23 @@ def _orientation_markers(chunk) -> list:
             and not m.checkpoint]
 
 
-def _scaled_about_bars(chunk, bars, s: float) -> np.ndarray:
-    """``chunk.transform`` with the scale ``s``, rotation kept and the centre of the bars' ends where it is."""
-    ends = [chunk.marker_by_key(k).position for sb in bars for k in (sb.marker_a, sb.marker_b)
-            if chunk.marker_by_key(k).position is not None]
-    c = chunk.to_world(np.mean(ends, axis=0)[None])[0]
+def _orientation_origin(chunk) -> Marker | None:
+    """The orientation marker A (the origin of the frame): by its role - the first key of
+    ``meta["orientation"]["markers"]`` - not by its label (it may be renamed); else the first orientation marker."""
+    keys = (chunk.meta.get("orientation") or {}).get("markers") or []
+    marks = [m for m in chunk.markers if m.orientation]
+    return next((m for m in marks if keys and m.key == keys[0]), marks[0] if marks else None)
+
+
+def _scaled_about_bars(chunk, bars, s: float, centre=None) -> np.ndarray:
+    """``chunk.transform`` with the scale ``s``, rotation kept and ``centre`` (chunk coordinates; default the centre
+    of the bars' ends) where it is."""
+    if centre is None:
+        ends = [chunk.marker_by_key(k).position for sb in bars for k in (sb.marker_a, sb.marker_b)
+                if chunk.marker_by_key(k).position is not None]
+        c = chunk.to_world(np.mean(ends, axis=0)[None])[0]
+    else:
+        c = np.asarray(centre, float).reshape(3)
     k = s / chunk.scale
     about = np.eye(4)
     about[:3, :3] *= k
@@ -613,16 +625,14 @@ def _scaled_about_bars(chunk, bars, s: float) -> np.ndarray:
     return about @ chunk.transform
 
 
-def _orientation_fit(src, dst, weights, s: float, markers) -> np.ndarray:
+def _orientation_fit(src, dst, weights, s: float, markers, origin) -> np.ndarray:
     """The transform of a chunk placed by its orientation markers only, with the scale ``s`` of the control bars:
     the rotation of the rigid fit of the scaled positions on the references, the translation that puts the first
     orientation marker (the origin, *Orientamento A*) exactly on its reference (a weighted fit passes through no
     point: a later bar rescales the chunk about A)."""
-    from ..engine.orient import MARKER_LABELS
-
     rigid = geometry.umeyama(s * np.asarray(src, float), np.asarray(dst, float), with_scale=False, weights=weights)
     _, rot, t = geometry.decompose_similarity(rigid)
-    anchor = next((i for i, m in enumerate(markers) if m.label == MARKER_LABELS[0]), None)
+    anchor = next((i for i, m in enumerate(markers) if origin is not None and m.key == origin.key), None)
     if anchor is not None:
         t = np.asarray(dst[anchor], float) - s * rot @ np.asarray(src[anchor], float)
     return geometry.compose_similarity(s, rot, t)
@@ -641,8 +651,8 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
     errors.
 
     Orientation markers (a local system oriented by hand, :func:`..engine.orient.orient`): placed alone with control
-    bars they give rotation and translation (anchored on *Orientamento A*) and the bars the scale; with scale bars
-    alone the frame is kept and only the scale changes, about the bars' centre; a fit they took part in says
+    bars they give rotation and translation (anchored on A, the origin) and the bars the scale; with scale bars
+    alone the frame is kept and only the scale changes, about A; a fit they took part in says
     ``+orientation`` in ``method`` and sets ``meta["levelled"]``.
     """
     if crs_mod.is_geographic(chunk.crs):
@@ -671,7 +681,7 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
         s = _bar_scale(chunk, bars) if oriented and len(oriented) == len(ctrl) and not use_cameras else None
         if s:
             # the orientation markers keep the frame, the bars give the scale: the markers' distances do not
-            chunk.transform = _orientation_fit(src, dst, w, s, ctrl)
+            chunk.transform = _orientation_fit(src, dst, w, s, ctrl, _orientation_origin(chunk))
         else:
             chunk.transform = similarity_with_bars(src, dst, w, d, dist, wb)
         method = "markers+cameras" if use_cameras and len(ctrl) else ("cameras" if use_cameras else "markers")
@@ -688,9 +698,12 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
             chunk.transform = _scaled_about_bars(chunk, bars, s)
             method = "scalebars"
         elif s and _orientation_markers(chunk):
-            # oriented by hand (orientation markers that do not place it now): the frame kept, rotation and
-            # translation, the new scale about the bars' centre
-            chunk.transform = _scaled_about_bars(chunk, bars, s)
+            # oriented by hand (orientation markers that do not place it now): the frame kept, the new scale about
+            # A, the origin (where it is, else its reference), as the fit on the markers anchors it
+            a = _orientation_origin(chunk)
+            centre = (chunk.to_world(a.position[None])[0] if a.position is not None
+                      else np.asarray(a.reference.location, float)) if a is not None else None
+            chunk.transform = _scaled_about_bars(chunk, bars, s, centre)
             method = "scalebars+orientation"
             chunk.meta["levelled"] = True
         elif s:

@@ -718,19 +718,20 @@ def test_orient_from_three_points(processed, tmp_path):
 
 
 def test_orientation_survives_a_new_alignment(processed, tmp_path):
+    from orient_helpers import new_alignment
+
     doc, ch, t0, internal, points, result = _oriented(processed, tmp_path)
     oriented = np.array(ch.transform, float)
     marks = _orientation_markers(ch)
     before = [np.array(m.position, float) for m in marks]
-    ch.transform = np.eye(4)  # what a new alignment does
-    ch.meta.pop("levelled", None)
+    g = new_alignment(ch)  # the cameras and tie points in another internal frame, transform = I
     for m in marks:
         assert sum(not p.measured for p in m.projections.values()) >= 2
         m.position = None
     report = ch.update_transform()
-    for m, p in zip(marks, before):
-        assert np.linalg.norm(m.position - p) < 1e-3
-    assert np.abs(np.asarray(ch.transform) - oriented).max() < 1e-6
+    for m, p in zip(marks, before):  # triangulated in the new frame
+        assert np.linalg.norm(m.position - geo.apply(g, p[None])[0]) < 1e-3
+    assert np.abs(np.asarray(ch.transform) - oriented @ np.linalg.inv(g)).max() < 1e-6
     assert ch.meta.get("levelled") is True
     assert "+orientation" in report["method"]
 
@@ -740,6 +741,7 @@ def test_scale_bars_alone_keep_the_translation(processed, tmp_path):
 
     doc, ch, t0, internal, points, result = _oriented(processed, tmp_path)
     marks = _orientation_markers(ch)
+    a = marks[0]
     for m in marks[1:]:  # two orientation markers unplaced: the markers no longer fit the chunk
         m.position, m.projections = None, {}
     others = [m for m in ch.markers if not m.orientation and m.position is not None][:2]
@@ -750,15 +752,23 @@ def test_scale_bars_alone_keep_the_translation(processed, tmp_path):
     assert report["method"] == "scalebars+orientation"
     assert np.abs(np.asarray(ch.transform)[:3, 3] - t_before[:3, 3]).max() < 1e-9
     assert ch.scale == pytest.approx(gcp._bar_scale(ch, gcp.control_scalebars(ch)), rel=1e-12)
-    # a bar that asks for another scale: rotation kept, the bars' centre stays where it is
+    # a bar that asks for 1.2x the scale: rotation kept, A (the origin) stays where it is
     ch.add_scalebar(others[0], others[1], 1.2 * length, 0.001)
-    mid = ch.to_world(((others[0].position + others[1].position) / 2)[None])[0]
+    a_world = ch.to_world(a.position[None])[0]
     _, rot, _ = geo.decompose_similarity(ch.transform)
-    ch.update_transform()
+    report = ch.update_transform()
+    assert report["method"] == "scalebars+orientation"
     s, rot2, _ = geo.decompose_similarity(ch.transform)
+    assert s == pytest.approx(gcp._bar_scale(ch, gcp.control_scalebars(ch)), rel=1e-12)
     assert s == pytest.approx(1.2 * t_scale(t_before), rel=1e-9)
     assert np.allclose(rot2, rot, atol=1e-12)
-    assert np.allclose(ch.to_world(((others[0].position + others[1].position) / 2)[None])[0], mid, atol=1e-9)
+    assert np.allclose(ch.to_world(a.position[None])[0], a_world, atol=1e-9)
+    assert np.allclose(a_world, a.reference.location, atol=1e-9)
+    # A renamed: still the anchor (its role, not its label)
+    a.label = "origine"
+    ch.add_scalebar(others[0], others[1], 1.3 * length, 0.001)
+    ch.update_transform()
+    assert np.allclose(ch.to_world(a.position[None])[0], a_world, atol=1e-9)
 
 
 def t_scale(t):
@@ -812,6 +822,11 @@ def test_reorient_replaces_the_markers(processed, tmp_path):
     assert len(marks) == 3 and [m.key for m in marks] == again["markers"]
     assert len([sb for sb in ch.scalebars if sb.label == orient.BAR_LABEL]) == 1
     assert ch.scalebar(orient.BAR_LABEL).distance == 3.0
+    orient.orient(ch, points=ch.to_world(internal))  # no distance: the typed bar kept on the new A and B
+    marks = _orientation_markers(ch)
+    bars = [sb for sb in ch.scalebars if sb.label == orient.BAR_LABEL]
+    assert len(bars) == 1 and bars[0].distance == 3.0 and bars[0].accuracy == orient.BAR_ACCURACY
+    assert {bars[0].marker_a, bars[0].marker_b} == {marks[0].key, marks[1].key}
 
 
 def test_motion_from_a_plugin(processed, tmp_path):
@@ -851,3 +866,76 @@ def test_undo_puts_the_earlier_orientation_back(processed, tmp_path):
     orient.undo(ch, second)
     assert _project_bytes(doc) == before
     assert [m.key for m in _orientation_markers(ch)] == first["markers"]
+
+
+def _referenced_photos(ch, n=4):
+    from pyarchinit_photogrammetry.core.camera import Reference
+
+    cams = ch.aligned_cameras[:n]
+    for cam in cams:
+        cam.reference = Reference(location=list(ch.to_world(cam.center[None])[0]), accuracy=[0.01] * 3)
+    return [c.label for c in cams]
+
+
+def test_orient_replaces_the_photo_positions(processed, tmp_path):
+    from orient_helpers import local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    labels = _referenced_photos(ch)
+    with pytest.raises(orient.OrientRefused) as e:  # apply alone keeps the refusal
+        orient.apply(ch, np.eye(4))
+    assert e.value.reason == "cameras"
+    internal = _surface_points(ch)
+    before = _project_bytes(doc)
+    dry = orient.orient(ch, points=ch.to_world(internal), dry_run=True)
+    assert sorted(dry["cameras_replaced"]) == sorted(labels) and _project_bytes(doc) == before
+    result = orient.orient(ch, points=ch.to_world(internal))
+    assert sorted(result["cameras_replaced"]) == sorted(labels)
+    oriented = np.array(ch.transform, float)
+    report = ch.update_transform()
+    assert "cameras" not in report["method"]
+    assert np.abs(np.asarray(ch.transform) - oriented).max() < 1e-6
+    (tmp_path / "n").mkdir()
+    doc, ch, _ = local_copy(processed, tmp_path / "n")
+    assert orient.orient(ch, points=ch.to_world(_surface_points(ch)))["cameras_replaced"] == []
+
+
+def test_weak_markers_are_said(processed, tmp_path, monkeypatch):
+    from orient_helpers import local_copy
+
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    real = gcp.project_marker
+
+    def one_photo(chunk, marker, point=None, max_photos=60):
+        return real(chunk, marker, point, max_photos=1 if marker.label == orient.MARKER_LABELS[2] else max_photos)
+
+    monkeypatch.setattr(gcp, "project_marker", one_photo)
+    t = np.array(ch.transform, float)
+    result = orient.orient(ch, points=ch.to_world(_surface_points(ch)))
+    assert result["weak_markers"] == [orient.MARKER_LABELS[2]]
+    assert np.abs(np.asarray(ch.transform) - np.asarray(result["M"]) @ t).max() < 1e-12
+
+
+def test_cloud_sample_is_bounded(processed, tmp_path, monkeypatch):
+    from orient_helpers import local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    monkeypatch.setattr(orient, "SAMPLE", 1000)
+    assert len(orient._cloud(ch)) <= 1000
+
+
+def test_undo_tells_the_listeners(processed, tmp_path):
+    from orient_helpers import local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    seen = []
+    stop = orient.on_transform_changed(lambda c, m: seen.append(m))
+    try:
+        result = orient.orient(ch, points=ch.to_world(_surface_points(ch)))
+        orient.undo(ch, result)
+    finally:
+        stop()
+    assert len(seen) == 2
+    assert np.allclose(seen[1] @ seen[0], np.eye(4), atol=1e-12)

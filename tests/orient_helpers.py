@@ -78,6 +78,22 @@ def local_copy(processed, tmp_path, tilt=(12.0, 40.0), heading=35.0, name="local
     return doc, ch, t_bad
 
 
+def new_alignment(ch, g=None) -> np.ndarray:
+    """What a new alignment does to ``ch``: its cameras and tie points in another internal frame (the rigid motion
+    ``g``, default a turn and a shift), the transform reset to the identity and ``levelled`` dropped. Returns ``g``."""
+    g = motion(rotation([0.3, -0.2, 1.0], 25.0), (0.7, -1.1, 0.4)) if g is None else np.asarray(g, float)
+    for cam in ch.cameras:
+        if cam.transform is not None:
+            cam.transform = g @ np.asarray(cam.transform, float)
+    tie = ch.tie_points
+    if tie is not None:
+        tie.xyz = tie.xyz @ g[:3, :3].T + g[:3, 3]
+        ch.tie_points = tie
+    ch.transform = np.eye(4)
+    ch.meta.pop("levelled", None)
+    return g
+
+
 def centre(ch) -> np.ndarray:
     """The middle of the model, in the coordinates of the chunk."""
     from pyarchinit_photogrammetry.io.mesh_ply import read_mesh

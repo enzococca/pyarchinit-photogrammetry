@@ -275,21 +275,22 @@ def _referenced_cameras(chunk) -> list:
     return cams
 
 
-def check(chunk) -> None:
+def check(chunk, cameras: bool = True) -> None:
     """Refuses (:class:`OrientRefused`) the orientation of ``chunk`` when something else gives it: the world (a chunk
-    in a projected or geographic system), three or more control markers with typed coordinates, the reference chunk
-    it is aligned to."""
+    in a projected or geographic system), three or more control markers with typed coordinates, the positions of
+    the photos that place it (``cameras``: :func:`orient` leaves them out, its markers take their place), the
+    reference chunk it is aligned to."""
     if not crs_mod.is_local(chunk.crs):
         raise OrientRefused("crs", "the world gives the orientation: use markers with coordinates")
     controls = _control_markers(chunk)
     if len(controls) >= 3:
         raise OrientRefused("markers", "the orientation is given by the markers: change their coordinates",
                             [m.label for m in controls])
-    cameras = _referenced_cameras(chunk)
-    if cameras:
+    used = _referenced_cameras(chunk) if cameras else []
+    if used:
         raise OrientRefused("cameras", "the positions of the photos give the orientation (the next fit of the "
                             "transform would bring it back): remove their references or switch them off",
-                            [c.label for c in cameras])
+                            [c.label for c in used])
     alignment = chunk.meta.get("chunk_alignment")
     if alignment:
         doc = getattr(chunk, "document", None)
@@ -859,7 +860,7 @@ def _cloud(chunk) -> np.ndarray:
     xyz = gcp._SurfacePoints(chunk).xyz()
     if xyz is None or not len(xyz):
         raise OrientRefused("points", "no dense cloud or tie points to place the orientation markers on")
-    xyz = np.asarray(xyz[:: max(1, len(xyz) // SAMPLE)], float)
+    xyz = np.asarray(xyz[:: max(1, -(-len(xyz) // SAMPLE))], float)
     if chunk.meta.get("region"):
         from . import region as region_mod
 
@@ -903,24 +904,27 @@ def orientation_markers(chunk) -> list:
     return [m for m in chunk.markers if m.orientation]
 
 
-def write_markers(chunk, points_world, M) -> list:
+def write_markers(chunk, points_world, M) -> tuple[list, list[str]]:
     """The three orientation markers at ``points_world`` (A, B, C in the chunk coordinates now) with the references
     ``M @ p`` (identity when :func:`apply` is to carry them), :data:`MARKER_ACCURACY`, and estimated projections on
-    the photos that see them; the earlier orientation markers and their bar removed first."""
+    the photos that see them; the earlier orientation markers and their bar removed first. Returns ``(markers,
+    weak)``: ``weak`` the labels of those estimated in fewer than two photos (after a new alignment they cannot be
+    triangulated again and would keep a position of the old frame)."""
     from ..markers import gcp
 
     old = orientation_markers(chunk)
     if old:
         chunk.remove_markers(old)
     m = np.asarray(M, float).reshape(4, 4)
-    out = []
+    out, weak = [], []
     for label, p in zip(MARKER_LABELS, np.asarray(points_world, float).reshape(-1, 3)):
         mk = chunk.add_marker(label, position=chunk.to_internal(p[None])[0], reference=_point(m, p))
         mk.reference.accuracy = [MARKER_ACCURACY] * 3
         mk.orientation = True
-        gcp.project_marker(chunk, mk)
+        if gcp.project_marker(chunk, mk) < 2:
+            weak.append(label)
         out.append(mk)
-    return out
+    return out, weak
 
 
 def _own_bars(chunk) -> list:
@@ -951,19 +955,23 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     markers), from a plane fitted to ``plane_xyz`` (A and B, when given, set x), or a motion ``M`` given as it is
     (a plugin). ``distance``: the length of A-B in the new system - a control scale bar "Orientamento A-B" on the
     orientation markers -, refused (``"scalebars"``) when control bars already give the scale. Then :func:`apply`
-    (refusals as :func:`check`), the markers written before it with the current coordinates (carried by it) and
+    (refusals as :func:`check`, except the positions of the photos: the markers take their place, listed in
+    ``cameras_replaced``), the markers written before it with the current coordinates (carried by it) and
     ``chunk.meta["orientation"]`` set.
 
-    Returns ``{"M", "describe", "markers": [keys], "state", ...}`` with what :func:`apply` returns; ``state`` puts
+    Returns ``{"M", "describe", "markers": [keys], "cameras_replaced": [photo labels], "weak_markers": [labels of
+    markers estimated in fewer than two photos], "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
     everything is done and put back (the plugins listening are not told): ``describe`` and :func:`apply`'s result
     without ``state`` and ``markers``."""
     from ..gnss import heights as hg
     from ..markers import gcp
 
-    check(chunk)
+    check(chunk, cameras=False)
+    replaced = [c.label for c in _referenced_cameras(chunk)]
     pts = _points_of(chunk, points, markers)
     own = _own_bars(chunk)
+    kept_bar = own[0] if own and distance is None else None
     if distance is not None:
         others = [b for b in gcp.control_scalebars(chunk) if all(b is not o for o in own)]
         if others:
@@ -1015,15 +1023,15 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     if dry_run:
         _LISTENERS.clear()
     try:
-        made = write_markers(chunk, [a, b, c], np.eye(4))
-        if own:
-            chunk.scalebars = [x for x in chunk.scalebars if all(x is not o for o in own)]
+        made, weak = write_markers(chunk, [a, b, c], np.eye(4))
         result = apply(chunk, m, move_aligned=move_aligned)
         drop(result.pop("state"))  # ours (taken before the markers) puts back the earlier ones too
         for mk in made:  # apply scaled the accuracy with the references: the markers' own
             mk.reference.accuracy = [MARKER_ACCURACY] * 3
         if distance is not None:
             chunk.add_scalebar(made[0], made[1], float(distance), BAR_ACCURACY, label=BAR_LABEL)
+        elif kept_bar is not None:  # the typed scale survives a re-orientation: on the new A and B
+            chunk.add_scalebar(made[0], made[1], kept_bar.distance, kept_bar.accuracy, label=kept_bar.label)
         chunk.meta["orientation"] = {"made": _now(), "method": method, "M": m.tolist(),
                                      "markers": [mk.key for mk in made], "describe": describe(m)}
     except BaseException:
@@ -1032,7 +1040,7 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     finally:
         if dry_run:
             _LISTENERS[:] = listeners
-    result.update(M=m.tolist(), describe=describe(m), method=method)
+    result.update(M=m.tolist(), describe=describe(m), method=method, cameras_replaced=replaced, weak_markers=weak)
     if dry_run:
         _restore(chunk, state, previous)
         return result
@@ -1059,6 +1067,12 @@ def _restore(chunk, state: OrientState, previous: dict) -> None:
 def undo(chunk, result: dict) -> None:
     """The orientation :func:`orient` returned ``result`` for undone: the chunk, what it keeps, the chunks aligned to
     it and the markers and scale bars as they were (the earlier orientation markers back, the new ones and their bar
-    gone). The state was taken before the markers were written: putting it back is all (the new markers may have
-    the keys of the earlier ones, so nothing is removed by key)."""
-    _restore(chunk, result["state"], result.get("previous") or {})
+    gone); the listeners (:func:`on_transform_changed`) told of the inverse motion, as :func:`apply` tells them of
+    the motion. The state was taken before the markers were written: putting it back is all (the new markers may
+    have the keys of the earlier ones, so nothing is removed by key)."""
+    state = result["state"]
+    moved = [saved["chunk"] for saved in state.chunks]
+    _restore(chunk, state, result.get("previous") or {})
+    inverse = np.linalg.inv(np.asarray(result["M"], float))
+    for ch in moved:
+        fire(ch, inverse)
