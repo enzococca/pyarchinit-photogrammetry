@@ -402,3 +402,76 @@ def test_a_polygon_s_first_vertex_again_before_three(view, app):
     click_vertex(view, c)
     click_at(view, x + 3, y + 4)  # with three: closes the polygon
     assert len(view.drawn) == 1 and len(view.drawn[0][1]) == 3
+
+
+def test_the_editor_follows_the_selected_drawing(view, app):
+    from free3d_helpers import screen_of
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    chunk = view.chunk
+    a, b, c = _targets(view, 3)
+    world = chunk.to_world(np.array([a, b, c]))
+    view.set_free([{"id": "f1", "kind": "line", "xyz": world.tolist()}], {})
+    got = _record(view)
+    _select_middle(view, a, b)
+    ed = view.editor
+    assert len(ed.handles) == 3
+    x, y = screen_of(view, b)
+    QTest.mouseClick(ed, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y)))
+    QTest.keyClick(ed, Qt.Key.Key_Delete)
+    assert got["deleted"] == [("f1", 1)]
+    # the window answers with the drawing without that vertex: new handles, none chosen
+    view.set_free([{"id": "f1", "kind": "line", "xyz": world[[0, 2]].tolist()}], {})
+    assert view.stack.currentWidget() is ed and len(ed.handles) == 2 and ed.current is None
+    assert np.allclose([ed.handles[1].x(), ed.handles[1].y()], screen_of(view, c), atol=1e-6)
+    QTest.keyClick(ed, Qt.Key.Key_Delete)
+    assert got["deleted"][-1] == ("f1", -1)  # not a stale index
+    # a drape answered: the new vertices get handles too
+    view.a_free_drape.trigger()
+    new = got["draped"][-1][1]
+    view.set_free([{"id": "f1", "kind": "line", "xyz": chunk.to_world(new).tolist()}], {})
+    assert len(ed.handles) == len(new) > 2
+    # the same drawing given again: the editor stays as it is
+    ed.current = 1
+    view.set_free([{"id": "f1", "kind": "line", "xyz": chunk.to_world(new).tolist()}], {})
+    assert ed.current == 1
+    # gone (an undo of its creation): the editor closes; "" clears a selection
+    view.set_free([], {})
+    assert view.stack.currentWidget() is view.canvas and view.selected_free is None
+    view.set_free([{"id": "f1", "kind": "line", "xyz": world.tolist()}], {}, selected="f1")
+    assert view.selected_free == "f1"
+    view.set_free([{"id": "f1", "kind": "line", "xyz": world.tolist()}], {}, selected="")
+    assert view.selected_free is None and not view.a_free_drape.isEnabled()
+
+
+def test_select_skips_hidden_drawings_and_takes_backspace(view, app):
+    from free3d_helpers import click_at, median_edge, screen_of
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    chunk = view.chunk
+    a, b = _targets(view, 2)
+    x, y = screen_of(view, a)
+    o, d, _metre = view._sight(x, y)
+    hidden = a + 6 * median_edge(chunk) * d
+    world = chunk.to_world(np.array([hidden, b]))
+    view.set_free([{"id": "under", "kind": "point", "xyz": world[:1].tolist()},
+                   {"id": "seen", "kind": "point", "xyz": world[1:].tolist()}], {})
+    got = _record(view)
+    view.start_free_select()
+    click_at(view, x + 2, y + 2)
+    assert got["selected"] == [] and view.selected_free is None  # behind the model: not taken
+    x, y = screen_of(view, b)
+    click_at(view, x + 2, y + 2)
+    assert got["selected"] == ["seen"]
+    QTest.keyClick(view.editor, Qt.Key.Key_Escape)  # back to the live view, still selecting
+    assert view.stack.currentWidget() is view.canvas and view.free_select_on
+    QTest.keyClick(view.canvas, Qt.Key.Key_Backspace)  # the Mac "delete" key
+    assert got["deleted"] == [("seen", -1)]
+    view.start_free_select()
+    click_at(view, x + 2, y + 2)
+    assert view.stack.currentWidget() is view.editor
+    view.resize(700, 520)  # a resize: the frozen frame is of the old size, back to the live view
+    app.processEvents()
+    assert view.stack.currentWidget() is view.canvas

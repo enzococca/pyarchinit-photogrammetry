@@ -1294,7 +1294,9 @@ class ModelView(QWidget):
     free_drawn = Signal(str, object)  # a free drawing ended: kind (line, polygon, point), (N, 3) vertices (internal)
     free_selected = Signal(str)  # the free drawing selected (id), "": none
     free_vertex_moved = Signal(str, int, object)  # id, vertex index, new position on the surface (internal)
-    free_delete_requested = Signal(str, int)  # id, vertex index; -1: the whole drawing
+    # id, vertex index; -1: the whole drawing. The view does not check the minimum number of vertices: the window
+    # refuses a vertex that would leave a line under 2 or a polygon under 3 (or deletes the drawing)
+    free_delete_requested = Signal(str, int)
     free_drape_requested = Signal(str, object)  # id, the vertices with the surface points added (internal)
     CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
@@ -2086,11 +2088,17 @@ class ModelView(QWidget):
         """The free drawings shown: ``features_world`` records with ``id``, ``kind`` and ``xyz`` in the coordinates of
         the chunk (as :func:`core.free_drawings.features` gives them); ``colours`` id -> "#rrggbb" (or a list in the
         order of the features; the record's own ``colour`` or the default otherwise); ``selected`` an id or ids drawn
-        thicker."""
+        thicker: None keeps the view's own selection while that drawing is there, "" or [] selects none. When the
+        selected drawing changes under the vertex editor it is opened again on the new vertices (or closed when the
+        drawing is gone)."""
         colours = colours if colours is not None else {}
+        before = self._selected_record()
         if selected is None:  # the selection made in the view stays when the same drawing is still there
-            selected = self._selected_id
-        chosen = {selected} if isinstance(selected, str) else set(selected or ())
+            chosen = {self._selected_id} if self._selected_id else set()
+        elif isinstance(selected, str):
+            chosen = {selected} if selected else set()
+        else:
+            chosen = {str(f) for f in selected}
         out = []
         for i, rec in enumerate(features_world):
             fid = str(rec["id"])
@@ -2100,14 +2108,35 @@ class ModelView(QWidget):
         self._free = out
         self._free_inner = {}
         ids = {f[0] for f in out}
-        if self._selected_id is not None and self._selected_id not in ids:
+        alive = chosen & ids
+        if len(alive) == 1:
+            self._selected_id = next(iter(alive))
+        elif self._selected_id not in alive:
             self._selected_id = None
-            if self.stack.currentWidget() is self.editor:
-                self.stack.setCurrentWidget(self.canvas)
-        elif len(chosen) == 1 and next(iter(chosen)) in ids:
-            self._selected_id = next(iter(chosen))
         self._update_drape()
         self._put_free()
+        if self.stack.currentWidget() is self.editor:
+            after = self._selected_record()
+            if after is None:
+                self.stack.setCurrentWidget(self.canvas)
+            elif (before is None or before[0] != after[0] or before[1] != after[1]
+                  or before[2].shape != after[2].shape or not np.array_equal(before[2], after[2])):
+                self._open_editor()
+
+    def refresh_editor(self) -> None:
+        """The vertex editor opened again on the selected drawing as it is now (new frame, new handles, none chosen);
+        closed when nothing is selected. :meth:`set_free` does it by itself when the selected drawing changes."""
+        if self.stack.currentWidget() is not self.editor:
+            return
+        if self._selected_record() is None:
+            self.stack.setCurrentWidget(self.canvas)
+        else:
+            self._open_editor()
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        if getattr(self, "editor", None) is not None and self.stack.currentWidget() is self.editor:
+            self.stack.setCurrentWidget(self.canvas)  # the frozen frame and its handles are of the old size
 
     @property
     def drawing_kind(self) -> str | None:
@@ -2455,31 +2484,46 @@ class ModelView(QWidget):
             if ev.key() == Qt.Key.Key_Escape:
                 self.stop_free_select()
                 return True
-            if ev.key() == Qt.Key.Key_Delete and self._selected_id is not None:
+            if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected_id is not None:
                 self.free_delete_requested.emit(self._selected_id, -1)
                 return True
         return False
 
     def free_at(self, x: float, y: float, project) -> str | None:
-        """The free drawing shown within ``SELECT_PX`` of (x, y): the nearest line, polygon edge or point."""
-        best, best_d = None, float(SELECT_PX)
-        for fid, kind, xyz, _colour, _sel in (self.sd.free if self.sd is not None else []):
+        """The free drawing shown within ``SELECT_PX`` of (x, y): the nearest line, polygon edge or point that the
+        model does not hide at that place (on a model view); None when there is none."""
+        if self.sd is None or self.chunk is None:
+            return None
+        here = np.array([x, y], np.float64)
+        found = []  # (pixels, id, the nearest place of the drawing (internal), its pixel)
+        for (fid, kind, xyz, _colour, _sel), rec in zip(self.sd.free, self._free):
             pts = np.asarray(xyz, np.float64).reshape(-1, 3)
+            inner = self._free_internal(fid, rec[2])
             if kind == "polygon" and len(pts) >= 3:
-                pts = np.vstack([pts, pts[:1]])
+                pts, inner = np.vstack([pts, pts[:1]]), np.vstack([inner, inner[:1]])
             px, py, _depth, ok = project(pts)
             q = np.column_stack([px, py])
-            dist = [float(np.hypot(*(q[i] - (x, y)))) for i in range(len(q)) if ok[i]]
-            for i in range(len(q) - 1):
-                if not (ok[i] and ok[i + 1]):
-                    continue
-                a, b = q[i], q[i + 1]
-                ab = b - a
-                t = float(np.clip(((x, y) - a) @ ab / max(float(ab @ ab), 1e-12), 0.0, 1.0))
-                dist.append(float(np.hypot(*(a + t * ab - (x, y)))))
-            if dist and min(dist) <= best_d:
-                best, best_d = fid, min(dist)
-        return best
+            dv = np.hypot(px - x, py - y)
+            dv[~ok] = np.inf
+            k = int(np.argmin(dv))
+            best, at, pix = float(dv[k]), inner[k], q[k]
+            if len(q) >= 2:
+                a, ab = q[:-1], q[1:] - q[:-1]
+                t = np.clip(((here - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-12), 0.0, 1.0)
+                foot = a + t[:, None] * ab
+                ds = np.hypot(*(foot - here).T)
+                ds[~(ok[:-1] & ok[1:])] = np.inf
+                j = int(np.argmin(ds))
+                if ds[j] < best:
+                    best, pix = float(ds[j]), foot[j]
+                    at = inner[j] + t[j] * (inner[j + 1] - inner[j])
+            if best <= SELECT_PX:
+                found.append((best, fid, at, pix))
+        caster = self._caster() if self.kind in ("model", "model_textured") and found else None
+        for _d, fid, at, pix in sorted(found, key=lambda f: f[0]):
+            if caster is None or not self._hidden_at_own_pixel(at, pix[0], pix[1], caster):
+                return fid
+        return None
 
     def _select(self, fid: str | None) -> None:
         self._selected_id = fid
