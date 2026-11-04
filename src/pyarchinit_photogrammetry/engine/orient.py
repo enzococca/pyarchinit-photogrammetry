@@ -784,13 +784,15 @@ def _sections_said(sections: list | None, moved: bool, tilted: bool) -> list[dic
     return out
 
 
-def apply(chunk, m, move_aligned: bool = True) -> dict:
+def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
     """``chunk`` (in a local system) moved by the motion ``m``: its transform pre-multiplied (``m @ T``) and everything
     kept in its coordinates carried along (:func:`move_stores`), with the chunks aligned to it (``move_aligned``);
     the sections of the project moved when no other chunk of the project is in a local system (else kept);
     ``meta["levelled"]`` set (the levelling of the DEM must not undo it); the elevations moved with it stay current,
     the rasters on a grid are stale. The window stores its drawings into the chunk first. Refused as :func:`check`
-    says. On any error everything is put back and the error raised again.
+    says. On any error everything is put back and the error raised again. ``notify``: the listeners
+    (:func:`on_transform_changed`) told here (False: the caller tells them with :func:`fire`, e.g. the window from its
+    interface thread after a run in the background).
 
     Returns ``{"moved": {store: n}, "aligned": [labels moved], "aligned_left": [labels not moved], "stale":
     :func:`..core.stamps.stale_products`, "kept": [{"what", "names"}], "sent_out": [{"what", "names"}],
@@ -843,8 +845,9 @@ def apply(chunk, m, move_aligned: bool = True) -> dict:
         raise
     tilted = not np.allclose(r[2], [0.0, 0.0, 1.0], atol=1e-12)
     kept = _sections_said(sections, move_sections, tilted)
-    for ch in moving:
-        fire(ch, m)
+    if notify:
+        for ch in moving:
+            fire(ch, m)
     claimed = _claimed()
     unaware = sorted({k for ch in moving for k in ch.meta if k not in PROGRAM_KEYS and k not in claimed})
     return {"moved": moved, "aligned": [c.label for c in aligned] if move_aligned else [],
@@ -1017,7 +1020,7 @@ def _points_of(chunk, points, markers) -> np.ndarray | None:
 
 def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_along_ab: bool = True, quota: float = 0.0,
            origin_xy=(0.0, 0.0), distance=None, flip: bool = False, M=None, move_aligned: bool = True,
-           dry_run: bool = False) -> dict:
+           dry_run: bool = False, notify: bool = True) -> dict:
     """The local system of ``chunk`` oriented and kept by three orientation markers.
 
     The frame: from the points A, B[, C] (``points`` in chunk coordinates, or ``markers``: labels or keys of placed
@@ -1034,7 +1037,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
     everything is done and put back (the plugins listening are not told): ``describe`` and :func:`apply`'s result
-    without ``state`` and ``markers``."""
+    without ``state`` and ``markers``. ``notify`` False: the listeners are not told (the caller tells them with
+    :func:`fire` for each chunk of ``state``, with ``M``)."""
     from ..gnss import heights as hg
     from ..markers import gcp
 
@@ -1109,7 +1113,7 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
         _LISTENERS.clear()
     try:
         made, weak = write_markers(chunk, [a, b, c], np.eye(4))
-        result = apply(chunk, m, move_aligned=move_aligned)
+        result = apply(chunk, m, move_aligned=move_aligned, notify=notify)
         drop(result.pop("state"))  # ours (taken before the markers) puts back the earlier ones too
         for mk in made:  # apply scaled the accuracy with the references: the markers' own
             mk.reference.accuracy = [MARKER_ACCURACY] * 3

@@ -1572,6 +1572,7 @@ class MainWindow(QMainWindow):
     def set_document(self, doc: Document, progress=None) -> None:
         """Show a project. ``progress(fraction, text)`` follows the loading of the views."""
         step = progress or (lambda *_a, **_k: None)
+        self._close_orient_dialog()  # its points are of a chunk of the project left
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
             # RustGIS's last edits into its drawings first, then its layers go from RustGIS - not when the project left
@@ -3490,24 +3491,34 @@ class MainWindow(QMainWindow):
         except orient.OrientRefused as exc:
             self._warn(refusal_text(exc))
             return
-        old = getattr(self, "_orient_dialog", None)
-        if old is not None:
-            with contextlib.suppress(RuntimeError):  # already deleted
-                old.close()
+        self._close_orient_dialog()
         dlg = OrientDialog.ask(self, ch)
-        dlg.apply_requested.connect(self._orient_apply)
+        dlg.apply_requested.connect(lambda kwargs: self._orient_apply(kwargs, dlg.chunk))
         dlg.destroyed.connect(lambda *_a: setattr(self, "_orient_dialog", None)
                               if getattr(self, "_orient_dialog", None) is dlg else None)
         self._orient_dialog = dlg
 
-    def _orient_apply(self, kwargs: dict) -> None:
-        """The orientation of the active chunk (:func:`..engine.orient.orient` with ``kwargs``) in the background, as
-        the change of the survey's system: RustGIS's last edits read and the drawings and sections the window holds
-        stored first; then everything read again (:meth:`_orient_finish`) and one step of *Modifica > Annulla*."""
+    def _close_orient_dialog(self) -> None:
+        """The orientation dialog, when open, closed (its points are of the chunk it was opened for): its preview, its
+        pending pick or lasso and the raster's mode go with it."""
+        dlg = getattr(self, "_orient_dialog", None)
+        self._orient_dialog = None
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def _orient_apply(self, kwargs: dict, chunk=None) -> None:
+        """The orientation of ``chunk`` - the dialog's, which must still be the active one - (:func:`..engine.orient.
+        orient` with ``kwargs``) in the background, as the change of the survey's system: RustGIS's last edits read and
+        the drawings and sections the window holds stored first; then the plugins listening told in this thread,
+        everything read again (:meth:`_orient_finish`) and one step of *Modifica > Annulla*."""
         from ..engine import orient
 
-        ch = self.chunk
+        ch = self.chunk if chunk is None else chunk
         if ch is None:
+            return
+        if ch is not self.chunk:  # another chunk active meanwhile: the points are of the other one
+            self._warn(tr("Il chunk attivo è cambiato: riapri Orienta il sistema locale"))
             return
         self._rustgis_leave()
         self._store_drawings()
@@ -3516,7 +3527,7 @@ class MainWindow(QMainWindow):
         def run(progress):
             progress(0.0, tr("Orienta il sistema locale"))
             try:
-                return orient.orient(ch, **kwargs)
+                return orient.orient(ch, notify=False, **kwargs)  # the listeners are told from done, in this thread
             except orient.OrientRefused as exc:  # the engine checks again: said in the window's words
                 return exc
 
@@ -3526,24 +3537,43 @@ class MainWindow(QMainWindow):
             if isinstance(result, orient.OrientRefused):
                 self._warn(refusal_text(result))
                 return
+            for moved in [saved["chunk"] for saved in result["state"].chunks]:
+                orient.fire(moved, result["M"])
             self._orient_finish(ch, result)
 
         self.run_task("Orienta il sistema locale", run, done, refresh=False, save=False)
 
-    def _orient_read_again(self) -> None:
-        """The line layers of the old frame taken away (to draw again), the drawings and the sections read again."""
-        for name in sorted(self.line_layers):
+    def _drop_line_layers(self) -> list[str]:
+        """The line layers the window holds (contour lines, plan slices) taken away: they are in the frame the chunk
+        just left, to draw again. Returns their names."""
+        names = sorted(self.line_layers)
+        for name in names:
             self.ortho_view.remove_layer(name)
             self.line_layers.pop(name, None)
+        return names
+
+    def _orient_read_again(self) -> list[str]:
+        """The line layers of the old frame taken away, the drawings and the sections read again; the names of the
+        layers taken away."""
+        dropped = self._drop_line_layers()
         self._reload_drawings(redraw=False)
         self._load_sections()
+        return dropped
 
-    def _orient_reload(self, chunk) -> None:
-        """After ``chunk`` moved by the undo or the redo of an orientation: read again and shown again."""
-        self._orient_read_again()
+    def _orient_show(self) -> None:
+        """The views on the chunk in its new frame, and QGIS's GeoPackage when the live link is on."""
         self.refresh_all()
         if self._live_on():
             self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new frame at once
+
+    def _orient_reload(self, chunk) -> None:
+        """After ``chunk`` moved by the undo or the redo of an orientation: read again and shown again; the project
+        modified (the side files - sections, elevations, proxies - were written back, the .ppg was not)."""
+        dropped = self._orient_read_again()
+        self._orient_show()
+        self._dirty(True)
+        if dropped:
+            self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(dropped)))
 
     def _orient_finish(self, chunk, result: dict, said: bool = True) -> None:
         """The window after :func:`..engine.orient.orient` of ``chunk``: read again, the step pushed on *Modifica >
@@ -3551,7 +3581,7 @@ class MainWindow(QMainWindow):
         in a box (with *Ricostruisci i prodotti da rifare* when the window can do it)."""
         from .orient_dialog import OrientStep
 
-        self._orient_read_again()
+        dropped = self._orient_read_again()
         if self.history is not None and result.get("state") is not None:
             # a step of the chunk: another chunk active drops it (its clones live in the chunk's undo folder)
             self.history.push(tr("Orienta il sistema locale"), OrientStep(self, chunk, result), document=False)
@@ -3563,12 +3593,12 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001 - the orientation is made: the project stays to be saved
                 log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
         self._dirty(not saved)
-        self.refresh_all()
+        self._orient_show()
         if self.history is not None:
             self.history.rebase()
-        if self._live_on():
-            self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new frame at once
         text = self._orient_text(result)
+        if dropped:
+            text += "\n" + tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(dropped))
         head = text.splitlines()[0] if text else ""
         self.log_pane.info(tr("Sistema locale orientato: {0}", head))
         self.statusBar().showMessage(tr("Sistema locale orientato: {0}", head), 15000)
@@ -3629,7 +3659,8 @@ class MainWindow(QMainWindow):
         """:func:`..engine.orient.orient` of ``chunk`` for a plugin (``Context.orient``), in the interface thread:
         with ``dry_run`` as it is; otherwise the window's drawings stored first, then read again with one step of
         *Modifica > Annulla* and the project saved. The refusal (:class:`..engine.orient.OrientRefused`) goes on to
-        the caller."""
+        the caller. The step goes into the history of the ACTIVE chunk, also when ``chunk`` is another one: it is
+        undone from there and forgotten with it (when another chunk becomes the active one)."""
         from ..engine import orient
 
         if kw.get("dry_run"):
@@ -4208,9 +4239,7 @@ class MainWindow(QMainWindow):
                     failed.append(tr("{0}: {1}", what, exc))
                     return False
 
-            for name in redraw:  # in the old system: away, not drawn in the wrong place
-                self.ortho_view.remove_layer(name)
-                self.line_layers.pop(name, None)
+            self._drop_line_layers()  # in the old system (``redraw``): away, not drawn in the wrong place
             step(tr("poligoni US caricati da PyArchInit"), lambda: self._carry_pyarchinit_units(ch, old, result["crs"]))
             step(tr("disegni"), lambda: self._reload_drawings(redraw=False))  # converted by set_survey_crs
             step(tr("sezioni"), self._load_sections)
@@ -8590,6 +8619,7 @@ class MainWindow(QMainWindow):
         into it first (not when it has just gone out of the project: they went with it). RustGIS follows,
         as the GeoPackage of QGIS does: its edits not read yet go into the chunk left, its layers of it
         away, and the chunk now active comes there in the background."""
+        self._close_orient_dialog()  # its points are of the chunk left
         if store:
             self._rustgis_leave()
             self._store_drawings()

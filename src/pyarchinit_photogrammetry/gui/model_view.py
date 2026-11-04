@@ -306,6 +306,10 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         self._paint_trackball(p)
         p.end()
 
+    def update_axes(self) -> None:
+        """Only the axes drawn again: painted over the image, which stays."""
+        self.update()
+
     def _paint_axes(self, p: QPainter, w: int, h: int) -> None:
         """The previewed axes: the plane x-y a translucent square, then x, y, z from the origin."""
         origin, axes, size = axes_geometry(self.sd.axes)
@@ -705,18 +709,38 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
             lines = np.hstack([[2, a, b] for a, b in Region.EDGES])
             pl.add_mesh(pv.PolyData(np.asarray(sd.region, np.float64), lines=lines), color="#ffd200", line_width=2)
-        if sd.axes is not None:  # the axes of a new local system (Orienta il sistema locale)
-            origin, axes, size = axes_geometry(sd.axes)
-            pl.add_mesh(pv.PolyData(plane_corners(origin, axes, size), faces=np.array([4, 0, 1, 2, 3])),
-                        color=AXES_COLOURS[2], opacity=0.25, lighting=False)
-            for i in range(3):
-                pl.add_mesh(pv.PolyData(np.vstack([origin, origin + size * axes[i]]), lines=np.array([2, 0, 1])),
-                            color=AXES_COLOURS[i], line_width=2)
+        self._axes_actors = []
+        self._add_axes(sd)
         if sd.exaggeration != 1.0:
             pl.add_text(exaggeration_text(sd.exaggeration), position="lower_left", font_size=10, color="#c8c8c8")
         if reset:
             self.reset_view()
         pl.render()
+
+    def _add_axes(self, sd: SceneData) -> None:
+        """The axes of a new local system (Orienta il sistema locale), as actors of their own."""
+        import pyvista as pv
+
+        if sd.axes is None:
+            return
+        pl = self.plotter
+        origin, axes, size = axes_geometry(sd.axes)
+        self._axes_actors.append(pl.add_mesh(pv.PolyData(plane_corners(origin, axes, size),
+                                                         faces=np.array([4, 0, 1, 2, 3])),
+                                             color=AXES_COLOURS[2], opacity=0.25, lighting=False))
+        for i in range(3):
+            self._axes_actors.append(pl.add_mesh(pv.PolyData(np.vstack([origin, origin + size * axes[i]]),
+                                                             lines=np.array([2, 0, 1])),
+                                                 color=AXES_COLOURS[i], line_width=2))
+
+    def update_axes(self) -> None:
+        """Only the axes drawn again (``sd.axes`` changed): the rest of the scene stays."""
+        for actor in getattr(self, "_axes_actors", []):
+            self.plotter.remove_actor(actor, render=False)
+        self._axes_actors = []
+        if self.sd is not None:
+            self._add_axes(self.sd)
+        self.plotter.render()
 
     def reset_view(self) -> None:
         pl = self.plotter
@@ -994,8 +1018,9 @@ class ModelView(QWidget):
     move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
     cut_requested = Signal(str, object)  # cut the model: "horizontal" (1 point), "vertical" (2), "points" (3), "values"
     elevation_requested = Signal(str, object)  # an orthophoto on a plane: "view" (view_frame()), "points" (3, internal);
-    # Orienta il sistema locale: ("point", (label "A"/"B"/"C", internal xyz)); ("points" | "faces", (visible, inside))
-    # masks over the whole cloud or the faces of the model, from start_lasso("orient")
+    # Orienta il sistema locale: ("point", (label "A"/"B"/"C", internal xyz)); ("missed", label): no surface there;
+    # ("cancel", label or None): Esc on a pick or the lasso; ("points" | "faces", (visible, inside)) masks over the
+    # whole cloud or the faces of the model, from start_lasso("orient")
     orient_requested = Signal(str, object)
     # "axis" (2 points, internal): the axis of a cylindrical development
 
@@ -1398,6 +1423,8 @@ class ModelView(QWidget):
         self.stack.setCurrentWidget(self.canvas)
         purpose = getattr(self, "_purpose", "marker")
         if pos is None or self._project is None:
+            if purpose in ORIENT_PURPOSES:  # Esc: the row of the dialog stays as it was
+                self.orient_requested.emit("cancel", ORIENT_PURPOSES[purpose])
             if purpose.startswith("axis_p"):  # Esc: the cylinder waiting for its axis is given up
                 self._cut_points = []
                 self.elevation_requested.emit("axis_cancel", None)
@@ -1419,6 +1446,8 @@ class ModelView(QWidget):
         elif purpose in ORIENT_PURPOSES:  # one point for a row of the dialog: no chain
             if point is not None:
                 self.orient_requested.emit("point", (ORIENT_PURPOSES[purpose], point))
+            else:  # nothing of the model there
+                self.orient_requested.emit("missed", ORIENT_PURPOSES[purpose])
         elif purpose.startswith("elev_p"):
             if point is None:
                 return
@@ -1541,10 +1570,24 @@ class ModelView(QWidget):
         self.lasso.start(image)
         self.stack.setCurrentWidget(self.lasso)
 
+    def cancel_orient(self) -> None:
+        """A pick or a lasso of *Orienta il sistema locale* still on screen given up (the dialog closed): the view
+        back to the canvas, nothing emitted; the next pick or lasso is the user's own."""
+        current = self.stack.currentWidget()
+        if current is self.picker and getattr(self, "_purpose", "") in ORIENT_PURPOSES:
+            self._purpose = "marker"
+            self.stack.setCurrentWidget(self.canvas)
+        if getattr(self, "_lasso_purpose", "") == "orient":
+            self._lasso_purpose = ""
+            if current is self.lasso:
+                self.stack.setCurrentWidget(self.canvas)
+
     def _lasso_finished(self, pts) -> None:
         self.stack.setCurrentWidget(self.canvas)
         purpose, self._lasso_purpose = getattr(self, "_lasso_purpose", ""), ""
         if pts is None or self._project is None or self.sd is None:
+            if purpose == "orient":
+                self.orient_requested.emit("cancel", None)
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -1624,13 +1667,20 @@ class ModelView(QWidget):
 
     # ----------------------------------------------------------- the axes of a new local system
     def axes_size(self) -> float:
-        """The length of the axes previewed: 15 % of the extent of what is shown (the largest side), at least 5 cm."""
+        """The length of the axes previewed: 15 % of the largest side of what is shown, at least 5 cm (computed once
+        per scene)."""
         sd = self.base_sd if self.base_sd is not None else self.sd
-        arrs = [np.asarray(a, np.float64) for a in ((sd.points, sd.mesh_vertices) if sd is not None else ())
-                if a is not None and len(a)]
-        if not arrs:
-            return 0.05
-        return max(0.05, 0.15 * float(np.max(np.ptp(np.vstack(arrs), axis=0))))
+        cached = getattr(self, "_axes_size", None)
+        if cached is not None and cached[0] is sd:
+            return cached[1]
+        arrs = [a for a in ((sd.points, sd.mesh_vertices) if sd is not None else ()) if a is not None and len(a)]
+        size = 0.05
+        if arrs:
+            lo = np.min([np.asarray(a).min(axis=0) for a in arrs], axis=0)
+            hi = np.max([np.asarray(a).max(axis=0) for a in arrs], axis=0)
+            size = max(0.05, 0.15 * float(np.max(hi - lo)))
+        self._axes_size = (sd, size)
+        return size
 
     def show_axes(self, origin_world, axes, size: float) -> None:
         """The axes of a new local system drawn from ``origin_world`` (coordinates of the chunk): ``axes`` (3, 3) rows
@@ -1657,12 +1707,8 @@ class ModelView(QWidget):
             return
         scene = self._scene_axes(self.sd)
         self.sd.axes = None if scene is None else (self.sd.to_display(scene[0][None])[0], scene[1], scene[2])
-        if self.canvas is None:
-            return
-        if isinstance(self.canvas, SoftwareCanvas):  # drawn over the image: no new image
-            self.canvas.update()
-        else:
-            self.canvas.set_scene(self.sd, reset=False)
+        if self.canvas is not None:
+            self.canvas.update_axes()
 
     def set_exaggeration(self, factor: float) -> None:
         """Heights of what is shown multiplied by ``factor`` around the centre of the scene (1: as

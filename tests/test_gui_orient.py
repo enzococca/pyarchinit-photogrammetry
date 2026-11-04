@@ -248,3 +248,106 @@ def test_lasso_plane(win, qapp, monkeypatch):
     assert ch.meta["orientation"]["method"] == "plane"
     _c, n, _nmad = orient.fit_plane(ch.to_world(xyz[floor]))  # the floor is now the horizontal
     assert abs(abs(n[2]) - 1.0) < 1e-6
+
+
+def test_undo_and_redo_mark_the_project_modified(win, qapp):
+    """Undo and redo write the side files back (sections, elevations, proxies) while the saved .ppg stays as it was:
+    the project is to be saved again; the proxies' files follow every step."""
+    ch = win.chunk
+    proxy = ch.data_dir / ch.meta["proxies"][0]["file"]
+    proxy_before = proxy.read_bytes()
+    dlg = _open(win, qapp)
+    _pick_three(win, qapp, dlg)
+    dlg.b_apply.click()
+    win.runner.wait()
+    qapp.processEvents()
+    assert not win.isWindowModified()  # saved right after the orientation
+    proxy_after = proxy.read_bytes()
+    assert proxy_after != proxy_before
+    win.history.undo()
+    assert win.isWindowModified()
+    assert proxy.read_bytes() == proxy_before
+    assert win.save_document()
+    assert not win.isWindowModified()
+    win.history.redo()
+    assert win.isWindowModified()
+    assert proxy.read_bytes() == proxy_after
+    win.history.undo()
+    assert proxy.read_bytes() == proxy_before
+
+
+def test_dialog_closed_when_another_chunk_is_active(win, qapp):
+    dlg = _open(win, qapp)
+    _pick_three(win, qapp, dlg)
+    assert win.model_view.sd.axes is not None
+    other = win.doc.add_chunk("altro")
+    win._activate_chunk(other)
+    qapp.processEvents()
+    assert win._orient_dialog is None
+    assert win.model_view._axes is None
+    # a request still on its way for the chunk left is refused, the active chunk untouched
+    t = np.array(other.transform, float)
+    win._orient_apply({"points": [[0, 0, 0], [1, 0, 0]]}, dlg.chunk)
+    win.runner.wait()
+    assert np.array_equal(np.asarray(other.transform, float), t)
+    assert any(kind == "warn" and "chunk attivo" in text for kind, text in win.said)
+
+
+def test_closing_ends_a_pending_pick_or_lasso(win, qapp):
+    mv = win.model_view
+    dlg = _open(win, qapp)
+    assert dlg.rows["A"]["b3d"].isEnabled()
+    dlg.rows["A"]["b3d"].click()
+    assert mv.stack.currentWidget() is mv.picker
+    mv._pick_finished(None)  # Esc: nothing filled, the status line cleared
+    assert dlg.point("A") is None and dlg.status.text() == ""
+    dlg.rows["A"]["b3d"].click()
+    dlg.reject()
+    qapp.processEvents()
+    assert mv.stack.currentWidget() is mv.canvas
+    assert mv._purpose not in ("orient_p", "orient_p2", "orient_p3")
+    mv.set_chunk(win.chunk, "point_cloud")
+    dlg = _open(win, qapp)
+    dlg.plane_radio.setChecked(True)
+    dlg.b_lasso.click()
+    assert mv.stack.currentWidget() is mv.lasso
+    dlg.reject()
+    qapp.processEvents()
+    assert mv.stack.currentWidget() is mv.canvas
+    assert mv._lasso_purpose == ""
+    mv.start_lasso()  # the user's own lasso afterwards goes to the selection, not to the closed dialog
+    assert mv._lasso_purpose == ""
+
+
+def test_listeners_told_once_in_the_interface_thread(win, qapp):
+    import threading
+
+    from pyarchinit_photogrammetry.engine import orient
+
+    seen = []
+    stop = orient.on_transform_changed(lambda chunk, m: seen.append((chunk, threading.current_thread())))
+    try:
+        dlg = _open(win, qapp)
+        _pick_three(win, qapp, dlg)
+        dlg.b_apply.click()
+        win.runner.wait()
+        qapp.processEvents()
+        assert len(seen) == 1 and seen[0][0] is win.chunk
+        assert seen[0][1] is threading.main_thread()
+        win.history.undo()
+        assert len(seen) == 2 and seen[1][1] is threading.main_thread()
+    finally:
+        stop()
+
+
+def test_axes_follow_the_exaggeration(win, qapp):
+    mv = win.model_view
+    dlg = _open(win, qapp)
+    _pick_three(win, qapp, dlg)
+    base = mv.base_sd.axes
+    mv.set_exaggeration(3.0)
+    shown = mv.sd.axes
+    assert shown is not None
+    assert np.allclose(shown[0], mv.sd.to_display(np.asarray(base[0])[None])[0])
+    assert np.allclose(shown[1], base[1])
+    mv.set_exaggeration(1.0)

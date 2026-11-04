@@ -60,7 +60,8 @@ def _coords(p) -> str:
 
 class OrientDialog(QDialog):
     """The dialog of the orientation of ``chunk``: :meth:`ask` shows it (patchable in tests); ``apply_requested``
-    gives the keyword arguments of :func:`..engine.orient.orient`."""
+    gives the keyword arguments of :func:`..engine.orient.orient` for ``chunk`` (the window closes the dialog when
+    another chunk becomes the active one: its points are of this chunk)."""
 
     apply_requested = Signal(dict)
 
@@ -253,6 +254,13 @@ class OrientDialog(QDialog):
         self.model_view.start_pick(PURPOSES[label])
 
     def _picked(self, kind: str, payload) -> None:
+        if kind == "cancel":  # Esc on a pick or the lasso: the rows and the area stay as they were
+            self._lasso_waiting = False
+            self.status.setText("")
+            return
+        if kind == "missed":
+            self.status.setText(tr("Nessun punto del modello o della nuvola sotto il cursore"))
+            return
         if payload is None:
             return
         if kind == "points":
@@ -486,6 +494,10 @@ class OrientDialog(QDialog):
     def _apply(self) -> None:
         if not self.b_apply.isEnabled():
             return
+        runner = getattr(self.window_, "runner", None)
+        if runner is not None and runner.busy:  # the task would be refused: the dialog and its points stay
+            self.status.setText(tr("Un'elaborazione è già in corso"))
+            return
         kwargs = self.kwargs()
         self.accept()
         self.apply_requested.emit(kwargs)
@@ -500,6 +512,7 @@ class OrientDialog(QDialog):
                     signal.disconnect(slot)
                 except (RuntimeError, TypeError):
                     pass
+            self.model_view.cancel_orient()  # a pick or a lasso still on screen: given up
             self.model_view.hide_axes()
             self._end_raster_pick()
             self._lasso_waiting = False

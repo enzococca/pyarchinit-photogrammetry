@@ -2924,7 +2924,8 @@
   "A→B è perpendicolare al piano: l'asse x resta com'è": "A→B is perpendicular to the plane: the x axis stays as it is",
   "il punto A, origine": "point A, the origin",
   "il punto B, sull'asse x": "point B, on the x axis",
-  "il punto C, sul piano orizzontale": "point C, on the horizontal plane"
+  "il punto C, sul piano orizzontale": "point C, on the horizontal plane",
+  "Il chunk attivo è cambiato: riapri Orienta il sistema locale": "The active chunk has changed: open Orient the local system again"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
