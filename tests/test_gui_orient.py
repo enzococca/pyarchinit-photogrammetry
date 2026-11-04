@@ -116,9 +116,19 @@ def test_three_picks_fill_the_dialog_and_preview(win, qapp):
     assert ok.all(), "the x axis is not in the view"
     length = float(np.hypot(px[1] - px[0], py[1] - py[0]))
     assert length >= 3, length
+    # y and z are painted after x: where one of them lies on the screen over x the red is covered, and the
+    # projected-ends checks above are all that can be seen
+    tips = np.asarray(origin) + size * np.asarray(rows)
+    tx, ty, _td, _tok = canvas.cam.project(np.vstack([origin, tips]), w, h)
+    along = np.array([tx[1] - tx[0], ty[1] - ty[0]], float)
+    covered = False
+    for k in (2, 3):
+        d = np.array([tx[k] - tx[0], ty[k] - ty[0]], float)
+        if np.hypot(*d) > 1e-9 and abs(float(along @ d)) / (np.hypot(*along) * np.hypot(*d)) > np.cos(np.radians(5)):
+            covered = True
     red = QColor(AXES_COLOURS[0])
     ratio = shown.width() / w
-    found = False
+    found = covered
     for t in np.linspace(0.15, 0.85, 30):  # along the axis, away from the origin where y and z start too
         cx, cy = px[0] + t * (px[1] - px[0]), py[0] + t * (py[1] - py[0])
         for dx in range(-3, 4):
