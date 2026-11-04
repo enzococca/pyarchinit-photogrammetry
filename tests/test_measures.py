@@ -271,7 +271,7 @@ def _battered_tower(radius=4.0, batter_deg=8.0, height=6.0, segments=720, rings=
     return trimesh.Trimesh(np.vstack([v, centres]), np.concatenate(faces), process=False)
 
 
-@pytest.mark.parametrize("half", [0.25, 0.5])
+@pytest.mark.parametrize("half", [0.25, 0.5, 0.75])
 def test_a_curved_wall_drawn_by_its_four_corners(half):
     radius, batter, z0, z1 = 4.0, np.radians(8.0), 1.0, 3.5
     tower = _battered_tower(radius, 8.0)
@@ -338,11 +338,11 @@ def test_model_area_is_fast_on_a_large_mesh():
 
     n = 317  # 199,712 faces
     xs = np.linspace(0, 100, n)
-    mesh = _heightfield(xs, xs, lambda x, y: 0.2 * np.sin(x / 7) * np.cos(y / 5))  # within the front margin
+    mesh = _heightfield(xs, xs, lambda x, y: 0.5 * np.sin(x / 7) * np.cos(y / 5))
     assert len(mesh.faces) >= 199_000
     side = 100 * np.sqrt(0.1)
     xy = np.array([[20, 20], [20 + side, 20], [20 + side, 20 + side], [20, 20 + side]], float)
-    poly = np.column_stack([xy, 0.2 * np.sin(xy[:, 0] / 7) * np.cos(xy[:, 1] / 5)])
+    poly = np.column_stack([xy, 0.5 * np.sin(xy[:, 0] / 7) * np.cos(xy[:, 1] / 5)])
     start = time.perf_counter()
     out = measures.model_area_inside(mesh, poly)
     assert time.perf_counter() - start < 2.0

@@ -192,6 +192,7 @@ def ground_dem_at(path: str | Path, x: float, y: float) -> float | None:
 
 STEEP_COS = 0.5  # a polygon whose best plane has |n_z| below this is measured in its own plane
 FRONT_MARGIN = 0.5  # metres in front of the drawing (or the vertices' spread, if more) where the model is looked at
+DIAMETER_SHARE = 0.25  # ... or this share of the polygon's diameter in the view plane, if more
 MIN_CELL = 1e-3  # metres: the smallest piece a partly hidden face is split into
 
 
@@ -324,16 +325,18 @@ def model_area_inside(model, xyz, toward=None) -> dict:
     plane, said by ``"projection": "plane"``, looked at along the plane's normal from the side of
     ``toward`` (a point, e.g. the cameras' centre) or, without it, from the side whose front-most surface
     lies closest to the polygon's vertices. The look starts just in front of the drawing: faces more than
-    max(FRONT_MARGIN, the vertices' spread along the viewing axis) in front of the front-most vertex are
-    neither measured nor in the way (a shelter roof over the floor, a scaffold before a wall; a screen
-    nearer than that is the first surface and is measured). A face counts for the share of it that nothing
-    in front hides, tested at the centres of its 9 sub-triangles inside the polygon and at a point of its
-    clipped part; a face whose points disagree, or that faces in front overlap without hiding all of it, is
-    split in 4 and tested again, down to a third of the median edge (at least MIN_CELL); where the faces
-    over a piece lie wholly in front of it (or at that cell), the piece's hidden part is their projection. The back of a closed wall, box or tower, the ground under a stone, are never
-    counted; a curved wall bulging between the drawn corners is, while its bulge is within the margin.
-    Exactly vertical faces count 0 in plan mode (from above they are not seen): measure them with a wall
-    polygon.
+    max(FRONT_MARGIN, the vertices' spread along the viewing axis, DIAMETER_SHARE x the polygon's diameter
+    in the view plane) in front of the front-most vertex are neither measured nor in the way (a shelter roof
+    over the floor, a scaffold before a wall; a screen nearer than that is the first surface and is
+    measured). A face counts for the share of it that nothing in front hides, tested at the centres of its
+    9 sub-triangles inside the polygon and at a point of its clipped part; a face whose points disagree, or
+    that faces in front overlap without hiding all of it, is split in 4 and tested again, down to a third
+    of the median edge (at least MIN_CELL); where the faces over a piece lie wholly in front of it (or at
+    that cell), the piece's hidden part is their projection. The back of a closed wall, box or tower, the
+    ground under a stone, are never counted; a curved wall bulging between the drawn corners is, while its
+    bulge is within the margin (a quarter of the diameter covers a cylinder drawn by its corners up to about
+    +-0.9 rad from the middle, more for a tall patch). Exactly vertical faces count 0 in plan mode (from
+    above they are not seen): measure them with a wall polygon.
     Returns ``surface``, ``plan`` (the clipped visible area in the projection used: horizontal, or the
     plane's), ``coverage`` (``plan`` / the polygon's area in that projection, at most 1), ``faces`` (faces with a
     non-empty visible clip) and ``projection``."""
@@ -386,7 +389,8 @@ def model_area_inside(model, xyz, toward=None) -> dict:
     # look from just in front of the drawing: anything farther in front than this is neither measured nor
     # in the way (a shelter over the floor, a scaffold before the wall)
     hp = side * (pc @ axes[2])
-    limit = float(hp.max() + max(FRONT_MARGIN, float(np.ptp(hp))))
+    diameter = float(np.linalg.norm(poly_ab[:, None] - poly_ab[None], axis=2).max())
+    limit = float(hp.max() + max(FRONT_MARGIN, float(np.ptp(hp)), DIAMETER_SHARE * diameter))
     edges = np.linalg.norm(a2 - np.roll(a2, 1, axis=1), axis=2)
     cell = max(float(np.median(edges)) / 3.0, MIN_CELL)
     tol = max(1e-9, 1e-9 * float(np.abs(loc[keep]).max()))
