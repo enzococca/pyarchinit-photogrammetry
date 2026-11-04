@@ -31,6 +31,7 @@ from ..core import free_drawings
 
 log = logging.getLogger(__name__)
 
+# table and geometry (with Z); ``gpkg_geometry_columns`` holds the base type (LINESTRING...) with z = 1
 TABLES = {"line": ("disegni_3d_linee", "LINESTRINGZ"), "polygon": ("disegni_3d_poligoni", "POLYGONZ"),
           "point": ("disegni_3d_punti", "POINTZ")}
 TITLES = {"line": "Disegni 3D - linee (ppg)", "polygon": "Disegni 3D - poligoni (ppg)",
@@ -39,7 +40,7 @@ FREE_PREFIX = "disegni_3d_"
 FORMATS = ("dxf", "gpkg", "geojson", "csv")
 SUFFIXES = {".dxf": "dxf", ".gpkg": "gpkg", ".geojson": "geojson", ".json": "geojson", ".csv": "csv"}
 COLUMN_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
-BASE_COLUMNS = ("ppg_id", "layer", "name", "attributes")
+BASE_COLUMNS = ("ppg_id", "layer", "name", "attributes", "colour")
 RESERVED = {"fid", "geom", *BASE_COLUMNS, "kind"}
 XDATA_APP = "PPG"
 XDATA_PIECE = 240  # characters of each XDATA string (DXF strings hold 255)
@@ -78,10 +79,15 @@ def attribute_columns(feats: list[dict]) -> list[str]:
 def _row(rec: dict, columns: list[str]) -> dict:
     attrs = rec.get("attributes") or {}
     values = {"ppg_id": rec["id"], "layer": rec["layer"], "name": rec.get("name") or "",
-              "attributes": json.dumps(attrs, ensure_ascii=False, sort_keys=True)}
+              "attributes": json.dumps(attrs, ensure_ascii=False, sort_keys=True), "colour": rec.get("colour")}
     for c in columns:
         v = attrs.get(c)
-        values[c] = None if v is None else (v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v))
+        if v is None or isinstance(v, str):
+            values[c] = v
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            values[c] = v
+        else:  # lists, objects, true/false: as JSON, as the attributes column has them
+            values[c] = json.dumps(v, ensure_ascii=False, sort_keys=True)
     return values
 
 
@@ -98,7 +104,9 @@ def write_tables(con, chunk, srs_id: int, layer: str | None = None, kinds=None) 
             continue
         mine = [r for r in feats if r["kind"] == kind]
         extra = attribute_columns(mine)
-        cols = gpkg.ensure_table(con, table, gtype, {**{c: "TEXT" for c in BASE_COLUMNS}, **{c: "TEXT" for c in extra}},
+        # the base type in gpkg_geometry_columns (LINESTRING...), z = 1: the standard's way, as the elevations' tables
+        cols = gpkg.ensure_table(con, table, gtype.removesuffix("Z"),
+                                 {**{c: "TEXT" for c in BASE_COLUMNS}, **{c: "TEXT" for c in extra}},
                                  srs_id, identifier=TITLES[kind], recreate=True, z=True)
         gpkg.replace_rows(con, table, cols, [(_geometry(r), _row(r, extra)) for r in mine], srs_id, z=True)
         written.append(table)
@@ -252,7 +260,8 @@ def _parts(geom) -> list:
 
 
 def _coords(geom) -> tuple[str, list, bool] | None:
-    """``(kind, [[x, y, z or None], ...], has_z)`` of a single geometry; a polygon's exterior ring open."""
+    """``(kind, [[x, y, z or None], ...], has_z)`` of a single geometry; a polygon's exterior ring open (its holes are
+    counted by :func:`read` as ``holes``)."""
     kind = _KIND_OF.get(geom.geom_type)
     if kind is None:
         return None
@@ -264,10 +273,15 @@ def _coords(geom) -> tuple[str, list, bool] | None:
     return kind, [[float(p[0]), float(p[1]), float(p[2]) if has_z and len(p) > 2 else None] for p in pts], has_z
 
 
-def _record(kind, xyz, has_z, props: dict, attributes) -> dict:
+def _record(kind, xyz, has_z, props: dict, attributes, holes: int = 0) -> dict:
     return {"id": str(props.get("ppg_id") or props.get("id") or "") or None, "kind": kind,
             "layer": props.get("layer") or None, "name": str(props.get("name") or ""),
-            "attributes": attributes, "colour": props.get("colour") or None, "xyz": xyz, "has_z": has_z}
+            "attributes": attributes, "colour": props.get("colour") or None, "xyz": xyz, "has_z": has_z,
+            "holes": holes}
+
+
+def _holes(geom) -> int:
+    return len(geom.interiors) if geom.geom_type == "Polygon" else 0
 
 
 def _attributes_of(values: dict, skip=RESERVED | {"colour", "ppg_sig", "ppg_parte"}) -> dict:
@@ -302,7 +316,7 @@ def _read_gpkg(path: Path) -> list[dict]:
             for part in _parts(geom):
                 got = _coords(part)
                 if got is not None:
-                    out.append(_record(*got, values, _attributes_of(values)))
+                    out.append(_record(*got, values, _attributes_of(values), _holes(part)))
     return out
 
 
@@ -320,7 +334,7 @@ def _read_geojson(path: Path) -> list[dict]:
         for part in _parts(shapely.geometry.shape(f["geometry"])):
             got = _coords(part)
             if got is not None:
-                out.append(_record(*got, props, dict(attrs)))
+                out.append(_record(*got, props, dict(attrs), _holes(part)))
     return out
 
 
@@ -337,19 +351,24 @@ def _read_dxf(path: Path) -> list[dict]:
                 props = json.loads(text) if text else {}
             except ValueError:
                 props = {}
-        props.setdefault("layer", e.dxf.layer)
+        if e.dxf.layer != "0":  # the default layer of a CAD drawing is no layer of the user's: the file's name
+            props.setdefault("layer", e.dxf.layer)
         kind = e.dxftype()
         if kind == "POINT":
             p = e.dxf.location
             xyz, k = [[float(p.x), float(p.y), float(p.z)]], "point"
         elif kind == "POLYLINE":
-            xyz = [[float(v.dxf.location.x), float(v.dxf.location.y), float(v.dxf.location.z)] for v in e.vertices]
+            flat = e.is_2d_polyline  # a 2D polyline of a CAD drawing: its elevation is not a height of the survey
+            xyz = [[float(v.dxf.location.x), float(v.dxf.location.y), None if flat else float(v.dxf.location.z)]
+                   for v in e.vertices]
             k = "polygon" if e.is_closed else "line"
         elif kind == "LWPOLYLINE":
             xyz = [[float(x), float(y), None] for x, y, *_rest in e.get_points()]
             k = "polygon" if e.closed else "line"
         else:
             continue
+        if not e.has_xdata(XDATA_APP) and all(p[2] == 0.0 for p in xyz):  # a flat CAD drawing at 0: no heights
+            xyz = [[p[0], p[1], None] for p in xyz]
         has_z = all(p[2] is not None for p in xyz)
         attrs = props.get("attributes") if isinstance(props.get("attributes"), dict) else {}
         out.append(_record(props.get("kind") or k, xyz, has_z, props, dict(attrs)))
@@ -400,10 +419,11 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
     """The drawings of ``path`` (:func:`read`) added to ``chunk``: in ``layer``, else the file's ``layer`` column,
     else the name of the file; a feature without Z gets the heights of the DEM (:func:`fill_missing` along the drawing;
     skipped when no vertex has one); a new identity when the one it has is in the chunk already. Returns
-    ``{"added", "dem_z" (of those added, how many took the DEM's heights), "skipped"}``."""
+    ``{"added", "dem_z" (of those added, how many took the DEM's heights), "skipped", "holes_dropped" (the holes of
+    polygons left out: a free drawing has one ring)}``."""
     path = Path(path)
     have = {r["id"] for r in free_drawings.features(chunk)}
-    added = dem_z = skipped = 0
+    added = dem_z = skipped = holes = 0
     for rec in read(path):
         xyz = rec["xyz"]
         took_dem = False
@@ -417,24 +437,23 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
                 continue
             xyz = [[p[0], p[1], z] for p, z in zip(xyz, zs)]
             took_dem = True
-        try:
+        wanted = rec.get("id")
+        try:  # the identity of the file kept when it is new to the chunk
             new = free_drawings.add(chunk, rec["kind"], xyz, layer=layer or rec.get("layer") or path.stem,
                                     name=rec.get("name") or "", attributes=rec.get("attributes") or {},
-                                    colour=rec.get("colour"))
+                                    colour=rec.get("colour"), id=wanted if wanted and wanted not in have else None)
         except ValueError as exc:
             log.warning("Disegno non importato da %s: %s", path.name, exc)
             skipped += 1
             continue
-        wanted = rec.get("id")
-        if wanted and wanted not in have:  # the identity of the file kept when it is new to the chunk
-            stored = next(r for r in chunk.meta["drawings"]["free"] if r.get("id") == new["id"])
-            stored["id"] = wanted
-            have.add(wanted)
-        else:
-            have.add(new["id"])
+        have.add(new["id"])
         added += 1
         dem_z += took_dem
-    return {"added": added, "dem_z": dem_z, "skipped": skipped}
+        holes += int(rec.get("holes") or 0)
+    if holes:
+        log.warning("Disegni importati da %s: %d buchi di poligoni lasciati fuori (un disegno libero ha un solo "
+                    "contorno)", path.name, holes)
+    return {"added": added, "dem_z": dem_z, "skipped": skipped, "holes_dropped": holes}
 
 
 __all__ = ["TABLES", "TITLES", "FREE_PREFIX", "FORMATS", "write_tables", "write_gpkg", "write_geojson", "write_dxf",

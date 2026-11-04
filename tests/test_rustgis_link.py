@@ -5511,3 +5511,60 @@ def test_the_drawings_of_the_elevations_go_to_rustgis_in_3d(tmp_path):
     # an elevation gone: its tables go from the file
     live.write_elevations({})
     assert live.elevation_tables() == []
+
+
+def test_the_free_drawings_go_to_rustgis_in_3d(tmp_path, monkeypatch):
+    """The free drawings in 3D (``disegni_3d_*`` of the live GeoPackage): RustGIS gets them as layers of a group
+    "<chunk> - disegni 3D" at the start, again after a change, and they go when the drawings are gone; a refusal of
+    them at the start leaves the plan's link up."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+    from pyarchinit_photogrammetry.io import free_drawings as fio
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio 1")
+    ch.crs = GB
+    doc.save(tmp_path / "p.ppg")
+    fd.add(ch, "line", [[GX, GY, 100.0], [GX + 1, GY + 1, 100.5]])
+    fd.add(ch, "point", [[GX + 2, GY, 100.2]])
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    assert sorted(live.write_free(ch)) == sorted(t for t, _g in fio.TABLES.values())
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    assert rl.start([])["layers"] == 7  # the plan's tables, as before
+    assert sorted(rl.free_layers) == sorted(t for t, _g in fio.TABLES.values())
+    group = next(g for g in fake.groups if g["name"] == "Saggio 1 - disegni 3D")
+    assert sorted(group["layers"]) == sorted(rl.free_layers.values())
+    first = dict(rl.free_layers)
+    points = next(layer for layer in fake.layers if layer["id"] == first["disegni_3d_punti"])
+    assert len(points["features"]) == 1
+    # a point more: the next send loads them again, the old layers go
+    fd.add(ch, "point", [[GX + 3, GY, 100.4]])
+    assert live.write_free(ch)
+    assert rl.pending
+    rl.push()
+    assert set(rl.free_layers.values()).isdisjoint(first.values())
+    points = next(layer for layer in fake.layers if layer["id"] == rl.free_layers["disegni_3d_punti"])
+    assert len(points["features"]) == 2
+    assert [g["name"] for g in fake.groups].count("Saggio 1 - disegni 3D") == 1
+    # the drawings gone: their tables leave the file, their layers and group leave RustGIS
+    for rec in fd.features(ch):
+        fd.remove(ch, rec["id"])
+    live.write_free(ch)
+    assert live.free_tables() == []
+    rl.push()
+    assert rl.free_layers == {}
+    assert not any(g["name"] == "Saggio 1 - disegni 3D" for g in fake.groups)
+    rl.stop()
+    # refused at the start: the link is up all the same, said in the log
+    fd.add(ch, "point", [[GX + 2, GY, 100.2]])
+    live.write_free(ch)
+    rl2 = link.RustGisLink(live, FakeEngine(), "Saggio 1", GB)
+
+    def refuse(self):
+        raise link.RustGisRefused("no 3D layers here")
+
+    monkeypatch.setattr(link.RustGisLink, "refresh_free", refuse)
+    assert rl2.start([])["layers"] == 7
+    assert rl2.layers

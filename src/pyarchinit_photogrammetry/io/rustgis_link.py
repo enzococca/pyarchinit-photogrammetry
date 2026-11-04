@@ -2249,7 +2249,10 @@ class RustGisLink:
             self._group = group.get("group") if isinstance(group, dict) else None
             self._show(given)
             self.refresh_elevations()  # the drawings of the elevations, in 3D on the survey
-            self.refresh_free()  # the free drawings in 3D
+            try:
+                self.refresh_free()  # the free drawings in 3D
+            except (RustGisRefused, sqlite3.Error, ValueError) as exc:  # the plan's link goes on: at the next send
+                log.warning("RustGIS link: the free drawings in 3D were not given: %s", exc)
             self._clean_copies()
             self._remove_stale_tiles()
             self._status = _status_key(self._command("edit.status", {}))

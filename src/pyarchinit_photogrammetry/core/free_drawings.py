@@ -128,12 +128,18 @@ def _basis(chunk, transform=None) -> None:
 
 
 def add(chunk, kind: str, xyz, layer: str = DEFAULT_LAYER, name: str = "", attributes: dict | None = None,
-        colour: str | None = None) -> dict:
+        colour: str | None = None, id: str | None = None) -> dict:  # noqa: A002 - the record's own key
     """A new free drawing of ``chunk`` (``xyz`` in its coordinates); without a ``name`` "Linea N", "Poligono N" or
     "Punto N"; the basis set to the transform of the chunk now (the drawings already there brought to it first,
-    :func:`follow`). Returns a copy of the record. ``ValueError`` for an unknown kind, too few vertices, numbers that are
-    not finite."""
+    :func:`follow`). ``id``: the identity to give it (an import keeping the file's; a new uuid4 hex when None).
+    Returns a copy of the record. ``ValueError`` for an unknown kind, too few vertices, numbers that are not finite, an
+    ``id`` that is empty or already in the chunk."""
     xyz = _xyz(kind, xyz)
+    if id is not None:
+        if not isinstance(id, str) or not id:
+            raise ValueError("an id is a non-empty text")
+        if any(f.get("id") == id for f in _stored(chunk)):
+            raise ValueError(f"the id {id} is in the chunk already")
     if not isinstance(layer, str) or not layer:
         raise ValueError("a layer needs a name")
     stored = _stored(chunk)
@@ -144,7 +150,7 @@ def add(chunk, kind: str, xyz, layer: str = DEFAULT_LAYER, name: str = "", attri
             n += 1
         name = f"{_NAMES[kind]} {n}"
     now = _now()
-    rec = {"id": uuid.uuid4().hex, "layer": layer, "kind": kind, "name": str(name), "xyz": xyz,
+    rec = {"id": id or uuid.uuid4().hex, "layer": layer, "kind": kind, "name": str(name), "xyz": xyz,
            "attributes": dict(attributes or {}), "created": now, "modified": now}
     if colour:
         rec["colour"] = str(colour)

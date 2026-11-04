@@ -62,8 +62,9 @@ def test_round_trip_dxf_gpkg_geojson_keeps_z(tmp_path, fmt):
         rows = {r[0]: (r[1], r[2]) for r in con.execute(
             "SELECT table_name, geometry_type_name, z FROM gpkg_geometry_columns")}
         con.close()
-        assert rows == {"disegni_3d_linee": ("LINESTRINGZ", 1), "disegni_3d_poligoni": ("POLYGONZ", 1),
-                        "disegni_3d_punti": ("POINTZ", 1)}
+        # the base types with z = 1 (GeoPackage, Annex E), as the elevations' 3D tables
+        assert rows == {"disegni_3d_linee": ("LINESTRING", 1), "disegni_3d_poligoni": ("POLYGON", 1),
+                        "disegni_3d_punti": ("POINT", 1)}
         con = sqlite3.connect(out)
         cols = [r[1] for r in con.execute('PRAGMA table_info("disegni_3d_poligoni")')]
         con.close()
@@ -113,7 +114,7 @@ def test_import_without_z_takes_the_dem(tmp_path):
     path = tmp_path / "scavo_2024.geojson"
     path.write_text(json.dumps(feats), encoding="utf-8")
     got = fio.import_features(ch, path)
-    assert got == {"added": 2, "dem_z": 1, "skipped": 1}
+    assert got == {"added": 2, "dem_z": 1, "skipped": 1, "holes_dropped": 0}
     recs = {r["name"]: r for r in fd.features(ch)}
     line = recs["senza quota"]
     assert line["layer"] == "scavo_2024" and line["attributes"] == {"tipo": "muro"}
@@ -231,3 +232,44 @@ def qapp_env():
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])
+
+
+def test_import_counts_holes_reads_flat_cad_and_keeps_new_ids(tmp_path, caplog):
+    import ezdxf
+
+    _doc, ch = _chunk(tmp_path)
+    ring = [[X0, Y0, 1.0], [X0 + 4, Y0, 1.0], [X0 + 4, Y0 + 4, 1.0], [X0, Y0 + 4, 1.0], [X0, Y0, 1.0]]
+    hole = [[X0 + 1, Y0 + 1, 1.0], [X0 + 2, Y0 + 1, 1.0], [X0 + 2, Y0 + 2, 1.0], [X0 + 1, Y0 + 1, 1.0]]
+    path = tmp_path / "muro.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"ppg_id": "abc", "name": "con buco"},
+         "geometry": {"type": "Polygon", "coordinates": [ring, hole]}}]}), encoding="utf-8")
+    got = fio.import_features(ch, path)
+    assert got["added"] == 1 and got["holes_dropped"] == 1
+    assert any("buchi" in r.getMessage() for r in caplog.records)
+    assert fd.features(ch)[0]["id"] == "abc"  # new to the chunk: the file's identity kept
+    with pytest.raises(ValueError):
+        fd.add(ch, "point", [[0, 0, 0]], id="abc")
+    # a flat CAD drawing: a 2D polyline and points at 0 m in layer "0" take no height from the file
+    dxf = ezdxf.new("R2010")
+    msp = dxf.modelspace()
+    msp.add_polyline2d([(X0, Y0), (X0 + 1, Y0 + 1)])
+    msp.add_point((X0 + 2, Y0 + 2, 0.0))
+    cad = tmp_path / "rilievo_cad.dxf"
+    dxf.saveas(cad)
+    recs = fio.read(cad)
+    assert len(recs) == 2 and not any(r["has_z"] for r in recs)
+    assert all(r["layer"] is None for r in recs)  # the layer "0" is no user layer: the file's name
+    assert fio.import_features(ch, cad)["skipped"] == 2  # no DEM: nothing to take the heights from
+
+
+def test_gpkg_keeps_the_own_colour_and_json_attributes(tmp_path):
+    _doc, ch = _chunk(tmp_path)
+    rec = fd.add(ch, "point", [[X0, Y0, 1.0]], colour="#123456", attributes={"lista": [1, 2], "ok": True})
+    out = fio.export(ch, tmp_path / "c.gpkg")
+    got = fio.read(out)[0]
+    assert got["colour"] == "#123456" and got["attributes"] == rec["attributes"]
+    con = sqlite3.connect(out)
+    (lista, ok), = con.execute('SELECT lista, ok FROM "disegni_3d_punti"').fetchall()
+    con.close()
+    assert json.loads(lista) == [1, 2] and json.loads(ok) is True

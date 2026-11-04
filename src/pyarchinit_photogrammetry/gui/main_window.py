@@ -10107,8 +10107,17 @@ class MainWindow(QMainWindow):
                                                "GeoPackage, GeoJSON, DXF (*.gpkg *.geojson *.json *.dxf)")
         if not path:
             return
+        from ..core import free_drawings
+
+        from_file = tr("Dal file (colonna layer, altrimenti il nome del file)")
+        names = [x["name"] for x in free_drawings.layers(self.chunk)]
+        chosen, ok = QInputDialog.getItem(self, tr("Importa disegni 3D"), tr("Layer:"), [from_file, *names], 0, True)
+        if not ok:
+            return
+        chosen = str(chosen or "").strip()
+        layer = None if not chosen or chosen == from_file else chosen
         try:
-            got = fio.import_features(self.chunk, path)
+            got = fio.import_features(self.chunk, path, layer=layer)
         except Exception as exc:
             self._exc("Importazione dei disegni 3D non riuscita", exc)
             return
@@ -10117,6 +10126,9 @@ class MainWindow(QMainWindow):
             self._draw_free()
         text = tr("{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)",
                   got["added"], Path(path).name, got["dem_z"], got["skipped"])
+        if got.get("holes_dropped"):
+            text += tr("; {0} buchi di poligoni lasciati fuori (un disegno libero ha un solo contorno)",
+                       got["holes_dropped"])
         self.log_pane.info(text)
         self.statusBar().showMessage(text, 15000)
 
