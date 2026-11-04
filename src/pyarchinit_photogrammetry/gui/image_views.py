@@ -460,10 +460,12 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
-                  "req_polygon", "req_line", "req_point", "reshape", "breakline", "orient_pick")
+                  "req_polygon", "req_line", "req_point", "reshape", "breakline", "orient_pick", "free_line",
+                  "free_polygon", "free_point")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
     REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
-    LINE_MODES = ("req_line", "reshape", "breakline")  # click the vertices, double click or Enter to end
+    LINE_MODES = ("req_line", "reshape", "breakline", "free_line")  # click the vertices, double click or Enter to end
+    FREE_MODES = ("free_line", "free_polygon", "free_point")  # free drawings (core.free_drawings): free_finished
     VERTEX_PX = 7.0  # vertex editing: how near (screen pixels) a press grabs a vertex or the middle of a side
     SAM_TOOLS = ("tap", "box", "area")
 
@@ -488,6 +490,10 @@ class RasterView(_ZoomView):
     vertices_edited = Signal(str, object, object)  # layer, attributes of the unit part (the dict itself), outline (N,2)
     reshape_finished = Signal(object)  # (N,2) world XY: the line of a reshape
     breakline_finished = Signal(object)  # (N,2) world XY: a break line drawn (its kind is the window's)
+    # a free drawing (core.free_drawings): kind line | polygon | point, (N, 2) coordinates of the view (the plan's x, y
+    # or the (u, v) of the elevation shown)
+    free_finished = Signal(str, object)
+    feature_double_clicked = Signal(str, dict)  # layer, attributes: a double click on a feature (pan or select)
     raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
@@ -1380,8 +1386,12 @@ class RasterView(_ZoomView):
             tol = 0.5 / max(self.transform().m11(), 1e-12) * abs(self.tr.a)
             simple = np.asarray(LineString(xy).simplify(tol, preserve_topology=False).coords)
             if len(simple) >= 3:
-                self.set_mode("polygon")
-                self.polygon_finished.emit(simple)
+                mode = self.mode
+                self.set_mode(mode)
+                if mode == "free_polygon":
+                    self.free_finished.emit("polygon", simple)
+                else:
+                    self.polygon_finished.emit(simple)
                 return
         self.set_mode(self.mode)
 
@@ -1597,7 +1607,7 @@ class RasterView(_ZoomView):
             if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._vedit["current"] is not None:
                 self.remove_vertex(self._vedit["current"])
                 return
-        if self.mode in (*self.REQUEST_MODES, "reshape", "breakline"):
+        if self.mode in (*self.REQUEST_MODES, "reshape", "breakline", "free_line", "free_polygon"):
             if ev.key() == Qt.Key.Key_Escape:
                 mode = self.mode
                 self.set_mode(mode)
@@ -1805,13 +1815,17 @@ class RasterView(_ZoomView):
                 {"quota": self.quota_clicked, "marker": self.marker_clicked, "probe": self.probe_clicked,
                  "orient_pick": self.orient_clicked}[self.mode].emit(*xy)
             return
+        if self.mode == "free_point":
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self.free_finished.emit("point", np.array([[float(xy[0]), float(xy[1])]]))
+            return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
             return
         if self.mode in self.AREA_MODES and not self._clicks:  # drag a box, or click the first vertex of a polygon
             self._band_origin, self._press_mods, self._crop_press_xy = sp, ev.modifiers(), xy
             return
-        if self.mode == "polygon" and self.freehand:  # start a stroke; release closes it
+        if self.mode in ("polygon", "free_polygon") and self.freehand:  # start a stroke; release closes it
             self._clicks, self._click_xy = [sp], [xy]
             self._stroking = True
             self._update_rubber()
@@ -1841,11 +1855,20 @@ class RasterView(_ZoomView):
         if self.mode in self.LINE_MODES:
             self._finish_request()
             return
-        if self.mode in ("polygon", *self.AREA_MODES) and len(self._click_xy) >= 3:
+        if self.mode in ("polygon", "free_polygon", *self.AREA_MODES) and len(self._click_xy) >= 3:
             xy = np.array(self._click_xy)
             mode = self.mode
             self.set_mode(mode)
-            (self.polygon_finished if mode == "polygon" else self._area_signal(mode)).emit(xy)
+            if mode == "free_polygon":
+                self.free_finished.emit("polygon", xy)
+            else:
+                (self.polygon_finished if mode == "polygon" else self._area_signal(mode)).emit(xy)
+        elif self.mode in ("pan", "select") and self.tr is not None and ev.button() == Qt.MouseButton.LeftButton:
+            hit = self.feature_at(self.mapToScene(ev.position().toPoint()))
+            if hit is not None:
+                self.feature_double_clicked.emit(*hit)
+            else:
+                super().mouseDoubleClickEvent(ev)
         else:
             super().mouseDoubleClickEvent(ev)
 
@@ -1856,7 +1879,8 @@ class RasterView(_ZoomView):
     def _finish_request(self) -> None:
         """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1); a
         vertex clicked again on the same screen pixel (a slow double click) counts once."""
-        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2, "breakline": 2}[self.mode]
+        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2, "breakline": 2, "free_line": 2,
+                "free_polygon": 3}[self.mode]
         # one screen pixel in world units: a relative tolerance would join vertices metres apart in UTM
         pixel = abs(self.tr.a) / max(self.transform().m11(), 1e-12) if self.tr is not None else 0.0
         xy = [p for i, p in enumerate(self._click_xy)
@@ -1865,6 +1889,9 @@ class RasterView(_ZoomView):
             return
         mode = self.mode
         self.set_mode(mode)
+        if mode in ("free_line", "free_polygon"):
+            self.free_finished.emit(mode[5:], np.array(xy, float))
+            return
         {"reshape": self.reshape_finished, "breakline": self.breakline_finished}.get(
             mode, self.request_finished).emit(np.array(xy, float))
 

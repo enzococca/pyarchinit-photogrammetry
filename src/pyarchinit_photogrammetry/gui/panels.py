@@ -1906,6 +1906,7 @@ class LayersPane(QWidget):
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
     us_form_requested = Signal(str, int)  # layer, feature index
+    visibility_changed = Signal(str, bool)  # layer, shown: by its box or by Tutti / Nessuno (the window may keep it)
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
 
@@ -2015,13 +2016,16 @@ class LayersPane(QWidget):
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data[1] == -1:
-            self.view.set_layer_visible(data[0], item.checkState(0) == Qt.CheckState.Checked)
+            visible = item.checkState(0) == Qt.CheckState.Checked
+            self.view.set_layer_visible(data[0], visible)
+            self.visibility_changed.emit(data[0], visible)
 
     def _set_all(self, visible: bool) -> None:
         if self.view is None:
             return
-        for name in self.view.layer_order:
+        for name in list(self.view.layer_order):
             self.view.set_layer_visible(name, visible)
+            self.visibility_changed.emit(name, visible)
         self.rebuild()
 
     def _zoom_item(self, item) -> None:

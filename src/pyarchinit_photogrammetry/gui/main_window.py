@@ -62,6 +62,8 @@ PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
+LAYER_PREFIX = "Disegni 3D: "  # the layers of the 2D view that show the free drawings of a user layer (core.free_drawings)
+FREE_KINDS = (("line", "Linea"), ("polygon", "Poligono"), ("point", "Punto"))  # the kinds of Disegno libero
 
 
 class _LeftByHand(Exception):
@@ -323,6 +325,57 @@ class _CallThread:
         return not self._thread.is_alive()
 
 
+class _FreeDoubleClick(QObject):
+    """A double click in the 3D view on the free drawing it has selected: the drawing's form
+    (:meth:`MainWindow.free_properties`)."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt's name
+        from PySide6.QtCore import QEvent
+
+        if ev.type() == QEvent.Type.MouseButtonDblClick and ev.button() == Qt.MouseButton.LeftButton:
+            fid = self.window.model_view.selected_free
+            if fid:
+                QTimer.singleShot(0, lambda: self.window.free_properties(fid))
+        return False
+
+
+def _runs(mask, closed: bool = False) -> list:
+    """The runs of consecutive True of ``mask`` as index arrays; ``closed``: the last and the first are neighbours
+    (a run across the end joined)."""
+    mask = np.asarray(mask, bool)
+    n = len(mask)
+    runs, cur = [], []
+    for i in range(n):
+        if mask[i]:
+            cur.append(i)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    if closed and len(runs) > 1 and runs[0][0] == 0 and runs[-1][-1] == n - 1:
+        runs = [runs[-1] + runs[0]] + runs[1:-1]
+    return [np.array(r) for r in runs]
+
+
+def _fill_missing(values: list, xy) -> list | None:
+    """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` from
+    their neighbours (the nearest known value beyond the ends); None when no vertex has a value."""
+    known = [i for i, v in enumerate(values) if v is not None]
+    if not known:
+        return None
+    if len(known) == len(values):
+        return [float(v) for v in values]
+    xy = np.asarray(xy, float)
+    t = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy[:, :2], axis=0).T))]) if len(xy) > 1 else np.zeros(1)
+    filled = np.interp(t, t[known], [float(values[i]) for i in known])
+    return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
+
+
 class _GuiCalls(QObject):
     """Runs functions in the interface thread: emitted from any thread, received there (queued)."""
 
@@ -546,6 +599,15 @@ class MainWindow(QMainWindow):
             setattr(self, "_axis_pending", None) if kind == "axis_cancel" else self.build_elevation(points=data))
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
+        self.model_view.free_drawn.connect(self._free_from_3d)
+        self.model_view.free_selected.connect(self._free_selected_in_3d)
+        self.model_view.free_vertex_moved.connect(self._free_vertex_moved)
+        self.model_view.free_delete_requested.connect(self._free_delete_requested)
+        self.model_view.free_drape_requested.connect(self._free_draped)
+        self._free_selected = ""  # the free drawing selected in the 3D view
+        self._free_dbl = _FreeDoubleClick(self)  # a double click on the drawing selected in 3D: its form
+        for w in (self.model_view.canvas, self.model_view.editor):
+            w.installEventFilter(self._free_dbl)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
@@ -589,6 +651,9 @@ class MainWindow(QMainWindow):
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
         self.ortho_view.breakline_finished.connect(self._breakline_drawn)
+        self.ortho_view.free_finished.connect(self._free_from_2d)
+        self.ortho_view.feature_double_clicked.connect(self._feature_double_clicked)
+        self.ortho_view.raster_loaded.connect(self._draw_free_2d)
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -656,6 +721,7 @@ class MainWindow(QMainWindow):
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
+        self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
         self.ortho_view.labels_changed.connect(self._labels_changed)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
         self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
@@ -1034,6 +1100,8 @@ class MainWindow(QMainWindow):
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
                                 ("breakline", "Linea di rottura (per il TIN e la modifica del DEM)", "breakline"),
+                                ("free", "Disegno libero: linee, poligoni e punti in layer propri, anche in 3D",
+                                 "freehand"),
                                 ("probe", "Punto di misura: quota, temperatura, bande e indici nel punto", "probe"),
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
@@ -1063,6 +1131,8 @@ class MainWindow(QMainWindow):
             kinds.addAction(a)
             self.breakline_kind_actions[key] = a
         dm.addMenu(self.breakline_menu)
+        self._build_free_menu()
+        dm.addMenu(self.free_menu)
         self.a_select_freehand = QAction(icon("freehand"), tr("Selezione a mano libera (lazo)"), self, checkable=True)
         self.a_select_freehand.setChecked(self.settings.value("draw/select_freehand", "false") in ("true", True))
         self.a_select_freehand.toggled.connect(self._selection_shape_changed)
@@ -1477,6 +1547,7 @@ class MainWindow(QMainWindow):
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
                          (self.draw_actions["breakline"], "Linee"),
+                         (self.draw_actions["free"], "Disegno libero"),
                          (self.draw_actions["probe"], "Punto"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
@@ -1507,12 +1578,15 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "breakline", "probe", "marker", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "breakline", "free", "probe", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
         button = db.widgetForAction(self.draw_actions["breakline"])
         if button is not None:  # the kind of the lines in the menu of the button
             button.setMenu(self.breakline_menu)
-        for mode in ("sam", "line", "breakline"):
+        button = db.widgetForAction(self.draw_actions["free"])
+        if button is not None:  # line, polygon or point, the layer they go in
+            button.setMenu(self.free_menu)
+        for mode in ("sam", "line", "breakline", "free"):
             button = db.widgetForAction(self.draw_actions[mode])
             if button is not None:
                 button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -1678,6 +1752,7 @@ class MainWindow(QMainWindow):
         step(0.25, tr("Vista 3D"))
         self.model_view.set_chunk(self.chunk) if reset_views else self.model_view.set_chunk(self.chunk,
                                                                                              self.model_view.kind)
+        self._draw_free_3d()
         step(0.6, tr("Ortofoto e DEM"))
         self._load_raster()
         self._update_stack()
@@ -3587,6 +3662,7 @@ class MainWindow(QMainWindow):
     def _orient_show(self) -> None:
         """The views on the chunk in its new frame, and QGIS's GeoPackage when the live link is on."""
         self.refresh_all()
+        self._draw_free()  # carried by the orientation (core.free_drawings.move)
         if self._live_on():
             self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new frame at once
 
@@ -6975,6 +7051,10 @@ class MainWindow(QMainWindow):
         self.measure_area(Polygon(xy).buffer(0))
 
     def _area_selected(self) -> None:
+        free = [a for _l, _i, a in self.ortho_view.selected_features() if a.get("_free")]
+        if len(free) == 1 and self.chunk is not None:  # a free polygon: its measures in 3D
+            self._free_measures(str(free[0].get(ID_FIELD)))
+            return
         geom = self._plan_selection()
         if geom is None:
             self._warn("Seleziona un poligono, oppure disegna l'area con lo strumento Misura area.")
@@ -8734,6 +8814,8 @@ class MainWindow(QMainWindow):
             self.set_draw_mode("polygon")  # refresh the hint
 
     def set_draw_mode(self, mode: str) -> None:
+        if mode == "free":  # the button Disegno libero: the kind chosen last in its menu
+            mode = "free_" + self.free_kind
         if mode != "pan" and self.ortho_view.tr is None:
             self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
@@ -8758,7 +8840,7 @@ class MainWindow(QMainWindow):
             self.ortho_view.set_mode("pan")
             return
         self.ortho_view.set_mode(mode)
-        self.draw_actions[mode].setChecked(True)
+        self.draw_actions["free" if mode in self.ortho_view.FREE_MODES else mode].setChecked(True)
         self.show_view(self.ortho_view)
         hints = {"pan": "Trascina per spostare, rotella per lo zoom, clic su un elemento per i suoi attributi",
                  "select": ("Traccia a mano libera per selezionare; Maiusc/Cmd aggiunge, Alt sottrae; "
@@ -8783,6 +8865,14 @@ class MainWindow(QMainWindow):
                  "breakline": tr("{0}: clic per i vertici, doppio clic o Invio per finire, Backspace toglie l'ultimo "
                                  "vertice, Esc annulla; il tipo si sceglie dal menu del pulsante Linee",
                                  tr(_bl_label(self.breakline_kind))),
+                 "free_line": tr("Disegno libero nel layer {0}: clic per i vertici, doppio clic o Invio per finire, "
+                                 "Backspace toglie l'ultimo vertice, Esc annulla; la quota dal DEM (o dal rilievo del "
+                                 "prospetto)", self.free_layer),
+                 "free_polygon": tr("Disegno libero nel layer {0}: clic per i vertici, doppio clic o Invio per "
+                                    "chiudere, Esc annulla; la quota dal DEM (o dal rilievo del prospetto)",
+                                    self.free_layer),
+                 "free_point": tr("Disegno libero nel layer {0}: clic sul punto; la quota dal DEM (o dal rilievo del "
+                                  "prospetto)", self.free_layer),
                  "probe": "Clic su un punto: un punto di misura con coordinate, quota del DEM, temperatura, bande e "
                           "indici letti lì a piena risoluzione (layer Punti di misura, esportabile e in QGIS)",
                  "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "
@@ -9643,6 +9733,345 @@ class MainWindow(QMainWindow):
         except Exception:
             return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
 
+    # ---------------------------------------------------------------- free drawings (core.free_drawings, since 1.7.2)
+    def _build_free_menu(self) -> None:
+        """The menu of *Disegno libero*: the kind drawn next, the layer it goes in, a new layer, the form."""
+        from ..core import free_drawings
+
+        self.free_menu = QMenu(tr("Disegno libero"), self)
+        kinds = QActionGroup(self)
+        current = self.settings.value("draw/free_kind", "line")
+        self.free_kind = current if current in ("line", "polygon", "point") else "line"
+        self.free_kind_actions: dict[str, QAction] = {}
+        for key, label in FREE_KINDS:
+            a = self.free_menu.addAction(tr(label))
+            a.setCheckable(True)
+            a.setChecked(key == self.free_kind)
+            a.triggered.connect(lambda _=False, k=key: self.set_free_kind(k))
+            kinds.addAction(a)
+            self.free_kind_actions[key] = a
+        self.free_menu.addSeparator()
+        self.free_layer = str(self.settings.value("draw/free_layer", free_drawings.DEFAULT_LAYER)
+                              or free_drawings.DEFAULT_LAYER)
+        self.free_layer_menu = self.free_menu.addMenu(tr("Layer"))
+        self.free_layer_menu.aboutToShow.connect(self._fill_free_layer_menu)
+        self._act(self.free_menu, tr("Nuovo layer..."), self._new_free_layer)
+        self.free_menu.addSeparator()
+        self.a_free_props = self._act(self.free_menu, tr("Proprietà..."), lambda: self.free_properties())
+        self.a_free_props.setToolTip(tr("Nome, layer, colore, attributi, quote e misure del disegno libero selezionato "
+                                        "(nella vista 2D o nella vista 3D)"))
+
+    def _fill_free_layer_menu(self) -> None:
+        from ..core import free_drawings
+
+        self.free_layer_menu.clear()
+        names = [x["name"] for x in free_drawings.layers(self.chunk)] if self.chunk is not None else []
+        if self.free_layer not in names:
+            names.append(self.free_layer)
+        group = QActionGroup(self.free_layer_menu)
+        for name in names:
+            a = self.free_layer_menu.addAction(name)
+            a.setCheckable(True)
+            a.setChecked(name == self.free_layer)
+            a.setProperty("ppg_no_translate", True)
+            a.triggered.connect(lambda _=False, n=name: self.set_free_layer(n))
+            group.addAction(a)
+
+    def set_free_kind(self, kind: str) -> None:
+        """The kind of the free drawings drawn next in 2D (line, polygon, point); the tool is taken up."""
+        if kind not in ("line", "polygon", "point"):
+            return
+        self.free_kind = kind
+        self.settings.setValue("draw/free_kind", kind)
+        a = self.free_kind_actions.get(kind)
+        if a is not None and not a.isChecked():
+            a.setChecked(True)
+        if self.ortho_view.tr is not None:
+            self.set_draw_mode("free_" + kind)
+
+    def set_free_layer(self, name: str) -> None:
+        """The layer the next free drawings go in (2D and 3D), remembered between sessions."""
+        name = str(name or "").strip()
+        if not name:
+            return
+        self.free_layer = name
+        self.settings.setValue("draw/free_layer", name)
+        self.statusBar().showMessage(tr("I disegni liberi vanno nel layer {0}", name), 10000)
+
+    def _new_free_layer(self) -> None:
+        name, ok = QInputDialog.getText(self, tr("Nuovo layer"), tr("Nome del layer dei disegni liberi:"))
+        if ok and name.strip():
+            if self.chunk is not None:
+                from ..core import free_drawings
+
+                if name.strip() not in {x["name"] for x in free_drawings.layers(self.chunk)}:
+                    free_drawings.set_layer(self.chunk, name.strip())
+                    self._dirty(True)
+            self.set_free_layer(name.strip())
+
+    def _free_record(self, fid: str) -> dict | None:
+        from ..core import free_drawings
+
+        if self.chunk is None or not fid:
+            return None
+        return next((f for f in free_drawings.features(self.chunk) if f["id"] == fid), None)
+
+    def _free_add(self, kind: str, xyz) -> dict | None:
+        """A free drawing of ``kind`` with the vertices ``xyz`` (chunk coordinates) in the current layer, one step of
+        *Modifica > Annulla*, drawn in both views."""
+        from ..core import free_drawings
+
+        ch = self.chunk
+        if ch is None:
+            return None
+        try:
+            rec = free_drawings.add(ch, kind, np.asarray(xyz, float).tolist(), layer=self.free_layer)
+        except ValueError as exc:
+            self.statusBar().showMessage(tr("Disegno non aggiunto: {0}", str(exc)), 15000)
+            return None
+        self._dirty(True)
+        self._draw_free()
+        self.log_pane.info(tr("{0} aggiunto al layer {1}", rec["name"], rec["layer"]))
+        return rec
+
+    def _free_from_3d(self, kind: str, internal) -> None:
+        """A free drawing ended in the 3D view: its vertices (internal) in the chunk's coordinates."""
+        if self.chunk is None:
+            return
+        self._free_add(kind, self.chunk.to_world(np.asarray(internal, float).reshape(-1, 3)))
+
+    def _free_from_2d(self, kind: str, coords) -> None:
+        """A free drawing ended on the 2D view: on the plan each vertex takes the height of the DEM there, on an
+        elevation its (u, v) goes to the chunk's coordinates at the depth of the relief there; a vertex without a value
+        takes the one interpolated along the drawing from its neighbours; none at all: refused."""
+        ch = self.chunk
+        if ch is None:
+            return
+        xy = np.asarray(coords, float).reshape(-1, 2)
+        if self._shown_raster_stale():
+            self._warn(tr("Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i "
+                          "prodotti da rifare)"))
+            return
+        entry = self._frame_entry()
+        if entry is None:
+            zs = _fill_missing(self._dem_values(xy), xy)
+            if zs is None:
+                self._warn(tr("Il disegno libero prende le quote dal DEM: serve il DEM sotto almeno un vertice"))
+                return
+            xyz = np.column_stack([xy, zs])
+        else:
+            from ..engine import elevation as E
+
+            ds = _fill_missing([E.relief_at(ch, entry, u, v) for u, v in xy], xy)
+            if ds is None:
+                self._warn(tr("Il disegno libero prende la profondità dal rilievo del prospetto: serve il rilievo "
+                              "sotto almeno un vertice"))
+                return
+            xyz = np.array([E.world_of(entry, u, v, d) for (u, v), d in zip(xy, ds)], float)
+        self._free_add(kind, xyz)
+
+    def _free_selected_in_3d(self, fid: str) -> None:
+        self._free_selected = fid or ""
+
+    def _free_vertex_moved(self, fid: str, index: int, internal) -> None:
+        from ..core import free_drawings
+
+        rec = self._free_record(fid)
+        if rec is None or not 0 <= index < len(rec["xyz"]):
+            return
+        xyz = [list(p) for p in rec["xyz"]]
+        xyz[index] = [float(v) for v in self.chunk.to_world(np.asarray(internal, float).reshape(1, 3))[0]]
+        free_drawings.update(self.chunk, fid, xyz=xyz)
+        self._dirty(True)
+        self._draw_free()
+
+    def _free_delete_requested(self, fid: str, index: int) -> None:
+        """Delete from the 3D view: the drawing (``index`` -1) or one vertex, refused when a polygon would keep fewer
+        than three vertices or a line fewer than two (the drawing is deleted whole instead)."""
+        from ..core import free_drawings
+
+        rec = self._free_record(fid)
+        if rec is None:
+            return
+        if index < 0 or rec["kind"] == "point":
+            free_drawings.remove(self.chunk, fid)
+            self._dirty(True)
+            self._draw_free()
+            self.log_pane.info(tr("{0} eliminato", rec["name"]))
+            return
+        if not 0 <= index < len(rec["xyz"]):
+            return
+        if len(rec["xyz"]) - 1 < free_drawings.MIN_VERTICES[rec["kind"]]:
+            self.statusBar().showMessage(
+                tr("Un poligono ha almeno tre vertici: elimina il disegno intero") if rec["kind"] == "polygon" else
+                tr("Una linea ha almeno due vertici: elimina il disegno intero"), 15000)
+            return
+        xyz = [p for i, p in enumerate(rec["xyz"]) if i != index]
+        free_drawings.update(self.chunk, fid, xyz=xyz)
+        self._dirty(True)
+        self._draw_free()
+
+    def _free_draped(self, fid: str, internal) -> None:
+        from ..core import free_drawings
+
+        if self._free_record(fid) is None:
+            return
+        xyz = self.chunk.to_world(np.asarray(internal, float).reshape(-1, 3))
+        free_drawings.update(self.chunk, fid, xyz=xyz.tolist())
+        self._dirty(True)
+        self._draw_free()
+
+    def _draw_free(self) -> None:
+        """The free drawings of the active chunk shown again in the 3D view and on the 2D view."""
+        self._draw_free_3d()
+        self._draw_free_2d()
+
+    def _draw_free_3d(self) -> None:
+        from ..core import free_drawings
+
+        ch = self.chunk
+        if ch is None or self.model_view.chunk is not ch:
+            return
+        hidden = {x["name"] for x in free_drawings.layers(ch) if not x.get("visible", True)}
+        shown = [f for f in free_drawings.features(ch) if f["layer"] not in hidden]
+        self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f) for f in shown})
+
+    def _draw_free_2d(self) -> None:
+        """Per user layer a layer :data:`LAYER_PREFIX` + its name on the 2D view: on the plan the drawings by their x,
+        y; on an elevation the (u, v) of the parts whose depth is within the elevation's depth (+- two cells)."""
+        from ..core import free_drawings
+
+        v, ch = self.ortho_view, self.chunk
+        if not hasattr(self, "free_layer"):  # the window is being built
+            return
+        for name in [n for n in v.layer_order if n.startswith(LAYER_PREFIX)]:
+            v.remove_layer(name)
+        if ch is None or v.tr is None:
+            return
+        entry = self._frame_entry()
+        frame, band = None, None
+        if entry is not None:
+            from ..engine.elevation import frame_from_dict
+
+            frame = frame_from_dict(entry["frame"])
+            lo, hi = entry.get("depth") or (-np.inf, np.inf)
+            margin = 2.0 * float(entry.get("resolution") or 0.0)
+            band = (float(lo) - margin, float(hi) + margin)
+        layers = free_drawings.layers(ch)
+        with v.batch():
+            for lay in layers:
+                feats = free_drawings.features(ch, lay["name"])
+                if not feats:
+                    continue
+                name = LAYER_PREFIX + lay["name"]
+                for rec in feats:
+                    colour = free_drawings.colour_of(ch, rec)
+                    attrs = {ID_FIELD: rec["id"], "_free": True, "name": rec["name"]}
+                    xyz = np.asarray(rec["xyz"], float)
+                    if frame is None:
+                        self._add_free_part(name, rec["kind"], xyz[:, :2], colour, rec["name"], attrs, closed=True)
+                        continue
+                    uvd = frame.coords(xyz)
+                    inside = (uvd[:, 2] >= band[0]) & (uvd[:, 2] <= band[1])
+                    if inside.all():
+                        self._add_free_part(name, rec["kind"], uvd[:, :2], colour, rec["name"], attrs, closed=True)
+                        continue
+                    if rec["kind"] == "point" or not inside.any():
+                        continue
+                    for run in _runs(inside, closed=rec["kind"] == "polygon"):  # the parts on the face: lines
+                        if len(run) >= 2:
+                            self._add_free_part(name, "line", uvd[run, :2], colour, rec["name"], attrs, closed=False)
+                if name in v.layers and not lay.get("visible", True):
+                    v.set_layer_visible(name, False)
+
+    def _add_free_part(self, layer: str, kind: str, xy, colour: str, label: str, attrs: dict, closed: bool) -> None:
+        v = self.ortho_view
+        if kind == "point":
+            v.add_point(float(xy[0][0]), float(xy[0][1]), colour, label, layer=layer, attrs=dict(attrs))
+        elif kind == "polygon" and closed:
+            v.add_polygon(xy, label, colour, fill_alpha=40, layer=layer, attrs=dict(attrs))
+        else:
+            v.add_line(xy, colour, label, layer=layer, attrs=dict(attrs), width=2.0)
+
+    def _layer_visibility_changed(self, name: str, visible: bool) -> None:
+        """A layer of the free drawings shown or hidden in the Layer pane: kept in the chunk, the 3D view follows."""
+        if not name.startswith(LAYER_PREFIX) or self.chunk is None:
+            return
+        from ..core import free_drawings
+
+        layer = name[len(LAYER_PREFIX):]
+        if next((x for x in free_drawings.layers(self.chunk) if x["name"] == layer), {}).get("visible", True) == visible:
+            return
+        free_drawings.set_layer(self.chunk, layer, visible=visible)
+        self._draw_free_3d()
+        if not getattr(self, "_free_vis_pending", False):  # Tutti / Nessuno: one step of Modifica > Annulla
+            self._free_vis_pending = True
+            QTimer.singleShot(0, self._free_visibility_done)
+
+    def _free_visibility_done(self) -> None:
+        self._free_vis_pending = False
+        self._dirty(True)
+
+    def _feature_double_clicked(self, layer: str, attrs: dict) -> None:
+        if attrs.get("_free") and attrs.get(ID_FIELD):
+            self.free_properties(str(attrs[ID_FIELD]))
+
+    def _selected_free_id(self) -> str:
+        """The free drawing selected: in the 2D view (one), else in the 3D view."""
+        free = [a for _l, _i, a in self.ortho_view.selected_features() if a.get("_free")]
+        if len(free) == 1:
+            return str(free[0].get(ID_FIELD))
+        return self.model_view.selected_free or self._free_selected or ""
+
+    def free_properties(self, fid: str | None = None) -> bool:
+        """The form of the free drawing ``fid`` (default: the one selected in 2D or 3D); its changes written as one
+        step of *Modifica > Annulla*. Whether something changed."""
+        from ..core import free_drawings
+        from . import free_drawing_dialog as fdd
+
+        fid = fid or self._selected_free_id()
+        rec = self._free_record(fid)
+        if rec is None:
+            self.statusBar().showMessage(tr("Seleziona un disegno libero (nella vista 2D o 3D)"), 10000)
+            return False
+        values = fdd.FreeDrawingDialog.ask(self, self.chunk, rec)
+        if not values:
+            return False
+        ch = self.chunk
+        names = {x["name"] for x in free_drawings.layers(ch)}
+        if values["layer"] not in names:
+            free_drawings.set_layer(ch, values["layer"])
+        fields = {k: values[k] for k in ("name", "layer", "attributes", "xyz")}
+        if values.get("colour"):
+            fields["colour"] = values["colour"]
+        try:
+            free_drawings.update(ch, fid, **fields)
+        except ValueError as exc:
+            self._warn(tr("Disegno non modificato: {0}", str(exc)))
+            return False
+        self._dirty(True)
+        self._draw_free()
+        return True
+
+    def _free_measures(self, fid: str) -> None:
+        """*Misura area* on a selected free drawing: its measures in 3D (on the model too, for a polygon)."""
+        from . import free_drawing_dialog as fdd
+
+        rec = self._free_record(fid)
+        if rec is None:
+            return
+        model = None
+        if rec["kind"] == "polygon":
+            try:
+                model = fdd.model_in_chunk(self.chunk)
+            except Exception as exc:  # noqa: BLE001 - the drawing's own measures
+                log.warning("Modello non letto per le misure: %s", exc)
+        from ..engine.orient import toward_cameras
+
+        text = fdd.measures_text(rec, model, toward_cameras(self.chunk, np.asarray(rec["xyz"], float)))
+        self.log_pane.info(f"{rec['name']}: {text}")
+        self._info(tr("Misure del disegno libero"), f"{rec['name']}\n{text}")
+
     # ---------------------------------------------------------------- break lines (archaeo.breaklines)
     @property
     def shown_lines(self) -> list:
@@ -10086,10 +10515,12 @@ class MainWindow(QMainWindow):
             return 0
         parts: dict[int, set[int]] = {}
         sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
-        probe_gone, lines_gone = set(), set()
+        probe_gone, lines_gone, free_gone = set(), set(), set()
         frame_patches: dict[str, set] = {}  # patches of elevations: elevation id -> patch ids
         for layer, idx, attrs in sel:
-            if layer == PROBE_LAYER and "_probe" in attrs:
+            if attrs.get("_free") and attrs.get(ID_FIELD):
+                free_gone.add(str(attrs[ID_FIELD]))
+            elif layer == PROBE_LAYER and "_probe" in attrs:
                 probe_gone.add(int(attrs["_probe"]))
             elif layer == LINES_LAYER and "_bline" in attrs:
                 lines_gone.add(int(attrs["_bline"]))
@@ -10151,6 +10582,11 @@ class MainWindow(QMainWindow):
             self.shown_points = [q for i, q in enumerate(self.shown_points) if i not in probe_gone]
         if lines_gone:
             self.shown_lines = [r for i, r in enumerate(self.shown_lines) if i not in lines_gone]
+        if free_gone and self.chunk is not None:
+            from ..core import free_drawings
+
+            free_drawings.remove(self.chunk, sorted(free_gone))
+            self._draw_free_3d()
         if stones_gone and self.ortho_view.path is not None:
             key = self._stones_key()
             self.shown_stones[key] = [s for i, s in enumerate(self.shown_stones.get(key, [])) if i not in stones_gone]
@@ -10306,7 +10742,7 @@ class MainWindow(QMainWindow):
         others = []
         for name in order:
             lay = v.layers[name]
-            if name in modelled or any("_unit" in f[2] for f in lay["features"]):
+            if name in modelled or name.startswith(LAYER_PREFIX) or any("_unit" in f[2] for f in lay["features"]):
                 continue
             for item, _label, attrs in lay["features"]:
                 if id(attrs) in skip:
@@ -10334,6 +10770,7 @@ class MainWindow(QMainWindow):
             self._draw_markers_on_raster()
         self._draw_lines()
         self._draw_stones()
+        self._draw_free_2d()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
             label = attrs.get("etichetta", "")
