@@ -69,11 +69,24 @@ def test_add_update_remove_and_layers(tmp_path, caplog):
         fd.update(ch, line["id"], xyz=[[0, 0, 0]])
     with pytest.raises(KeyError):
         fd.update(ch, "nope", name="x")
+    with pytest.raises(ValueError):
+        fd.update(ch, line["id"], name="")
+    with pytest.raises(ValueError):
+        fd.set_layer(ch, fd.DEFAULT_LAYER, rename="")
     # a broken record is left out, said in the log
     ch.meta["drawings"]["free"].append({"id": "broken", "kind": "line", "xyz": "no"})
+    ch.meta["drawings"]["free"].append("not a record")
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         assert "broken" not in {f["id"] for f in fd.features(ch)}
-    assert "broken" in caplog.text
+        assert "broken" in caplog.text and "not a record" in caplog.text
+        caplog.clear()
+        fd.features(ch)
+        assert "broken" not in caplog.text  # once per record
+    assert "x" not in [x["name"] for x in fd.layers(ch)]
+    ch.meta["drawings"]["free"].append({"id": 5, "layer": "x", "kind": "line", "xyz": [[0, 0, 0], [1, 1, 1]]})
+    assert "x" not in [x["name"] for x in fd.layers(ch)]  # the layer of a broken record is not listed
+    ch.meta["drawings"]["free"] = [f for f in ch.meta["drawings"]["free"] if f != "not a record"
+                                   and not (isinstance(f, dict) and f.get("id") == 5)]
     # remove
     assert fd.remove(ch, [line["id"], "broken"]) == 2
     assert fd.remove(ch, point["id"]) == 1
@@ -136,8 +149,7 @@ def test_free_drawings_follow_transform_changes_not_realignment(tmp_path):
         assert not np.allclose(ch.transform, t_old)
         got = fd.features(ch)[0]["xyz"]
         assert np.abs(_internal(ch.transform, got) - _internal(t_old, xyz)).max() < 1e-9
-        assert len(seen) == 1 and seen[0][0] is ch
-        assert np.allclose(seen[0][1], ch.transform @ np.linalg.inv(t_old))
+        assert seen == []  # the listeners are told of the motions that carry the stores (an orientation) only
         assert fd.follow(ch) is None  # nothing more: once
         # a new alignment: the drawings stay in the coordinates of the chunk, the basis takes it
         ch.meta["alignment_id"] = "new"
@@ -186,3 +198,50 @@ def test_orientation_moves_them_once(tmp_path):
     assert np.abs(_internal(ch.transform, got) - _internal(t_old, xyz)).max() < 1e-9
     assert np.allclose(ch.meta["drawings"]["free_basis"]["transform"], ch.transform)
     assert fd.follow(ch) is None
+
+
+def test_a_singular_basis_is_not_followed(tmp_path):
+    _doc, ch = _bare(tmp_path)
+    fd.add(ch, "point", [[1.0, 2.0, 3.0]])
+    bad = np.eye(4)
+    bad[2, 2] = 1e-14  # nearly singular: no motion from it, the basis taken again
+    ch.meta["drawings"]["free_basis"]["transform"] = bad.tolist()
+    ch.transform = geo.identity()
+    ch.transform[:3, 3] = [1.0, 0.0, 0.0]
+    assert fd.follow(ch) is None
+    assert fd.features(ch)[0]["xyz"] == [[1.0, 2.0, 3.0]]
+    assert np.allclose(ch.meta["drawings"]["free_basis"]["transform"], ch.transform)
+
+
+def test_levelling_keeps_them_on_the_model(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.engine import dem, meshing
+
+    _doc, ch = _bare(tmp_path)
+    xyz = [[1.0, 0.0, 0.0], [3.0, 1.0, 0.5]]
+    fd.add(ch, "line", xyz)
+    t = np.radians(17.0)
+    monkeypatch.setattr(meshing, "up_vector_internal", lambda c: np.array([np.sin(t), 0.0, np.cos(t)]))
+    dem.ensure_level(ch)
+    assert not np.allclose(ch.transform, np.eye(4))
+    got = fd.features(ch)[0]["xyz"]
+    assert np.abs(_internal(ch.transform, got) - np.array(xyz)).max() < 1e-9
+
+
+def test_an_optimisation_that_fits_again_keeps_them_on_the_model(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.engine import sfm
+
+    _doc, ch = _georeferenced(tmp_path)
+    xyz = [[100.0, 201.0, 10.5], [102.0, 203.0, 9.5]]
+    fd.add(ch, "line", xyz)
+    t_old = ch.transform.copy()
+
+    def adjusted(chunk, *args, **kw):  # the adjustment: the georeference fitted again on a moved block
+        chunk.transform = chunk.transform @ np.array(
+            [[1, 0, 0, 0.05], [0, 1, 0, -0.02], [0, 0, 1, 0.03], [0, 0, 0, 1]], float)
+        return 0.5
+
+    monkeypatch.setattr(sfm, "_optimize_colmap", adjusted)
+    assert ch.optimize_cameras() == 0.5
+    got = fd.features(ch)[0]["xyz"]
+    assert not np.allclose(ch.transform, t_old)
+    assert np.abs(_internal(ch.transform, got) - _internal(t_old, xyz)).max() < 1e-9

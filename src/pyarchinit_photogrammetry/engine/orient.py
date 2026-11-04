@@ -300,9 +300,11 @@ def check(chunk, cameras: bool = True) -> None:
 
 
 def on_transform_changed(callback, keys=()):
-    """Registers ``callback(chunk, M)``, called after the transform of a chunk was changed by ``M`` (an orientation);
-    ``keys``: the keys of ``chunk.meta`` it moves itself (a plugin's data). Returns the function that unregisters it.
-    Since 1.7.2."""
+    """Registers ``callback(chunk, M)``, called after the transform of a chunk was changed by ``M`` by a motion that
+    carries everything kept in the chunk's coordinates (an orientation, its undo and redo); not after the georeference
+    fitted again, an optimisation, the levelling of a local chunk, chunks aligned or a new system of the survey (the
+    free drawings follow those by themselves). ``keys``: the keys of ``chunk.meta`` it moves itself (a plugin's data).
+    Returns the function that unregisters it. Since 1.7.2."""
     item = (callback, tuple(keys or ()))
     _LISTENERS.append(item)
 

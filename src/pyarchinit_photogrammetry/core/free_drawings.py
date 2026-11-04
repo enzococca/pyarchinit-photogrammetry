@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 import uuid
 from datetime import datetime, timezone
 
@@ -32,6 +31,8 @@ DEFAULT_COLOUR = "#ffb000"
 KEYS = ("free", "free_layers", "free_basis")  # the keys of ``meta["drawings"]`` kept here
 _NAMES = {"line": "Linea", "polygon": "Poligono", "point": "Punto"}
 _FIELDS = ("layer", "name", "xyz", "attributes", "colour")
+SINGULAR_COND = 1e12  # a basis transform whose linear part is worse conditioned than this: no motion from it
+_said: set = set()  # the broken records already written in the log (once per record and session)
 
 
 def _now() -> str:
@@ -47,6 +48,21 @@ def _drawings(chunk, create: bool = False) -> dict:
 
 def _stored(chunk) -> list:
     return [f for f in _drawings(chunk).get("free") or [] if isinstance(f, dict)]
+
+
+def _say_broken(chunk) -> None:
+    """The records of ``chunk`` that are not free drawings written in the log, once each per session."""
+    broken = []
+    for rec in _drawings(chunk).get("free") or []:
+        if isinstance(rec, dict) and _valid(rec):
+            continue
+        name = str(rec.get("id")) if isinstance(rec, dict) else repr(rec)[:80]
+        key = (id(chunk), name)
+        if key not in _said:
+            _said.add(key)
+            broken.append(name)
+    if broken:
+        log.warning("Disegni 3D non letti dal progetto: %s", ", ".join(broken))
 
 
 def _xyz(kind: str, xyz) -> list[list[float]]:
@@ -80,17 +96,10 @@ def _valid(rec: dict) -> bool:
 
 def features(chunk, layer: str | None = None) -> list[dict]:
     """The free drawings of ``chunk`` (copies), of ``layer`` only when given; a broken record is left out, said in
-    the log."""
-    out, broken = [], []
-    for rec in _stored(chunk):
-        if not _valid(rec):
-            broken.append(str(rec.get("id")))
-            continue
-        if layer is None or rec["layer"] == layer:
-            out.append(copy.deepcopy(rec))
-    if broken:
-        log.warning("Disegni 3D non letti dal progetto: %s", ", ".join(broken))
-    return out
+    the log once per record and session."""
+    _say_broken(chunk)
+    return [copy.deepcopy(rec) for rec in _stored(chunk)
+            if _valid(rec) and (layer is None or rec["layer"] == layer)]
 
 
 def layers(chunk) -> list[dict]:
@@ -103,7 +112,7 @@ def layers(chunk) -> list[dict]:
     out += [x for x in stored if x["name"] != DEFAULT_LAYER]
     for rec in _stored(chunk):
         name = rec.get("layer")
-        if isinstance(name, str) and name and name not in names and name != DEFAULT_LAYER:
+        if _valid(rec) and name and name not in names and name != DEFAULT_LAYER:
             names.add(name)
             out.append({"name": name, "colour": DEFAULT_COLOUR, "visible": True})
     for x in out:
@@ -165,6 +174,8 @@ def update(chunk, fid: str, **fields) -> dict:
         new["xyz"] = _xyz(rec.get("kind"), new["xyz"])
     if "layer" in new and (not isinstance(new["layer"], str) or not new["layer"]):
         raise ValueError("a layer needs a name")
+    if "name" in new and (not isinstance(new["name"], str) or not new["name"].strip()):
+        raise ValueError("a free drawing needs a name")
     if "attributes" in new:
         new["attributes"] = dict(new["attributes"] or {})
     if "colour" in new and not new["colour"]:
@@ -193,6 +204,8 @@ def set_layer(chunk, name: str, colour: str | None = None, visible: bool | None 
     if not isinstance(name, str) or not name:
         raise ValueError("a layer needs a name")
     current = layers(chunk)
+    if rename is not None and (not isinstance(rename, str) or not rename.strip()):
+        raise ValueError("a layer needs a name")
     if rename is not None and rename != name and any(x["name"] == rename for x in current):
         raise ValueError(f"a layer named {rename!r} exists already")
     entry = next((x for x in current if x["name"] == name), None)
@@ -240,13 +253,13 @@ def move(chunk, M, transform=None) -> int:
 
 
 def follow(chunk) -> np.ndarray | None:
-    """The free drawings of ``chunk`` after a change of its transform made inside the program: in the alignment of
-    their basis and with another transform, carried by ``M = T_now inv(T_basis)`` (they stay where they were on the
-    model), the listeners of :func:`..engine.orient.on_transform_changed` told; returns ``M``. In another alignment
-    (a new one: its own frame) they stay in the coordinates of the chunk and the basis takes it (the orientation
-    markers put the chunk back in its frame), said in the log. None when nothing moved."""
-    from ..engine import orient
-
+    """The free drawings of ``chunk`` after a change of its transform made inside the program (the georeference
+    fitted again, an optimisation, the levelling of a local chunk, chunks aligned): in the alignment of their basis and
+    with another transform, carried by ``M = T_now inv(T_basis)`` - they stay where they were on the model -; returns
+    ``M``. In another alignment (a new one: its own frame) they stay in the coordinates of the chunk and the basis
+    takes it (the orientation markers put the chunk back in its frame), said in the log. None when nothing moved. The
+    listeners of :func:`..engine.orient.on_transform_changed` are not told here: they hear of the motions that carry
+    the stores of the chunk (an orientation, its undo)."""
     from . import stamps
 
     if not _stored(chunk):
@@ -256,8 +269,7 @@ def follow(chunk) -> np.ndarray | None:
     if not basis.get("transform"):
         _basis(chunk)
         return None
-    alignment = chunk.meta.get("alignment_id")
-    if basis.get("alignment") != alignment:
+    if basis.get("alignment") != chunk.meta.get("alignment_id"):
         _basis(chunk)
         log.info("Disegni 3D lasciati nelle coordinate del chunk %s: nuovo allineamento", getattr(chunk, "label", ""))
         return None
@@ -266,12 +278,11 @@ def follow(chunk) -> np.ndarray | None:
     except (TypeError, ValueError):
         _basis(chunk)
         return None
-    if not np.all(np.isfinite(before)) or math.isclose(float(np.linalg.det(before[:3, :3])), 0.0, abs_tol=1e-300):
-        _basis(chunk)
+    if not np.all(np.isfinite(before)) or not np.linalg.cond(before[:3, :3]) < SINGULAR_COND:
+        _basis(chunk)  # no motion from a basis that is not a transform: taken again
         return None
     if stamps.same_transform(now, before):
         return None
     m = now @ np.linalg.inv(before)
     move(chunk, m)
-    orient.fire(chunk, m)
     return m

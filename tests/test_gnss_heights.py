@@ -905,7 +905,7 @@ def test_set_survey_crs_converts_what_was_drawn_on_the_chunk(tmp_path):
     assert result["crs"] == "EPSG:32632" and result["updated"] is True and result["method"] == "cameras"
     assert result["heights_unchanged"] is False and result["drawings"] == "follow"
     assert result["rebuild"] == ["dem", "orthomosaic"]
-    assert result["converted"] == {"markers": 0, "units": 1, "quote": 1, "points": 1, "stones": 1, "sections": 1,
+    assert result["converted"] == {"markers": 0, "units": 1, "quote": 1, "points": 1, "free": 0, "stones": 1, "sections": 1,
                                    "patches": 1, "texture_patches": 1, "region": 1, "colour_chart": 1}
     kept = {k["what"]: k["names"] for k in result["kept"]}
     assert kept == {"versions": ["dem: DEM del 30/09"], "elevations": ["Prospetto nord"],
@@ -964,7 +964,7 @@ def test_set_survey_crs_says_when_heights_pass_as_they_are(tmp_path):
     assert out["lift"] == pytest.approx([0.0, 0.0], abs=1e-4)  # the model kept its heights: so did the drawings
     assert out["quote"] == pytest.approx(99.5, abs=1e-6) and out["point"] == pytest.approx(98.25, abs=1e-6)
     assert out["unit"][0] is True and out["unit"][1] == pytest.approx([99.0, 99.2, 99.4], abs=1e-6)
-    assert out["converted"] == {"markers": 1, "units": 1, "quote": 1, "points": 1, "stones": 0, "sections": 0,
+    assert out["converted"] == {"markers": 1, "units": 1, "quote": 1, "points": 1, "free": 0, "stones": 0, "sections": 0,
                                 "patches": 0, "texture_patches": 0, "region": 0, "colour_chart": 0}
 
 
@@ -1445,6 +1445,8 @@ def test_survey_crs_carries_them(tmp_path):
         print(json.dumps({"free": float(np.abs(got - want).max()), "moved": bool(np.abs(got - free).max() > 1.0),
                           "basis": bool(np.allclose(basis["transform"], ch.transform)),
                           "again": fd.follow(ch) is None,
-                          "same": float(np.abs(np.array(fd.features(ch)[0]["xyz"]) - got).max())}))
+                          "same": float(np.abs(np.array(fd.features(ch)[0]["xyz"]) - got).max()),
+                          "counted": heights.survey_crs_changes(ch, "EPSG:32633")["convert"]["free"]}))
     '''))
     assert out["moved"] and out["free"] < 0.001 and out["basis"] and out["again"] and out["same"] == 0.0
+    assert out["counted"] == 1  # said in the preview

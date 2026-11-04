@@ -4902,7 +4902,8 @@ class MainWindow(QMainWindow):
                          frame_patches={e["id"]: e["patches"] for e in ch.meta.get("elevations") or []
                                         if e.get("id") and e.get("patches")},
                          free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
-                               "layers": (ch.meta.get("drawings") or {}).get("free_layers") or []})
+                               "layers": (ch.meta.get("drawings") or {}).get("free_layers") or [],
+                               "basis": (ch.meta.get("drawings") or {}).get("free_basis")})
         return state
 
     @staticmethod
@@ -5084,15 +5085,22 @@ class MainWindow(QMainWindow):
         self._dirty(True)
 
     def _undo_free(self, ch, free: dict) -> None:
-        """The free drawings in 3D and their layers (part ``free``) as a snapshot has them, drawn again."""
+        """The free drawings in 3D, their layers and the basis they were written in (part ``free``) as a snapshot has
+        them, then carried to the transform of now (:func:`..core.free_drawings.follow`: the transform may have changed
+        since, by processing that is not in the history), drawn again."""
+        from ..core import free_drawings
+
         drawings = ch.meta.setdefault("drawings", {})
         for key, value in (("free", free.get("features")), ("free_layers", free.get("layers"))):
             if value:
                 drawings[key] = [dict(x) for x in value]
             else:
                 drawings.pop(key, None)
+        if free.get("basis"):
+            drawings["free_basis"] = dict(free["basis"])
         if not drawings:
             ch.meta.pop("drawings", None)
+        free_drawings.follow(ch)
         draw = getattr(self, "_draw_free", None)  # the 3D and 2D views of the free drawings (since 1.7.2)
         if draw is not None:
             draw()

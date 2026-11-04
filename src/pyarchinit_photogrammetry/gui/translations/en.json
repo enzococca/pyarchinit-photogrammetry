@@ -2575,6 +2575,7 @@
   "disattivate": "disabled",
   "disattivato": "disabled",
   "disegni": "drawings",
+  "disegni 3D": "3D drawings",
   "disegni delle sezioni (SVG, DXF)": "drawings of the sections (SVG, DXF)",
   "disegni e marker, che restano dove sono (il chunk era in coordinate locali)": "drawings and markers, which stay where they are (the chunk was in local coordinates)",
   "elementi rimossi": "removed items",

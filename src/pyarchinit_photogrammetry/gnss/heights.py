@@ -558,7 +558,7 @@ EUROPE = (
 )
 NOT_EUROPE = (((19.5, 54.43), (22.8, 54.36), (22.95, 54.75), (21.4, 55.27), (20.95, 55.27), (19.6, 54.95)),)  # Kaliningrad
 # what set_survey_crs converts into the new system, and what it lists as kept in the old one
-CONVERTED = ("markers", "units", "quote", "points", "stones", "sections", "patches", "texture_patches", "region",
+CONVERTED = ("markers", "units", "quote", "points", "free", "stones", "sections", "patches", "texture_patches", "region",
              "colour_chart")
 KEPT = ("versions", "elevations", "multispectral", "thermal", "satellite", "relief", "calculator", "proxies", "stones",
         "sections", "section_drawings", "drawn")
@@ -914,6 +914,7 @@ def _counts(chunk, georeferenced: bool, moves: bool, sections: list | None, fate
     counts["units"] = len(_units(drawings))
     counts["quote"] = len(_rows(drawings, "quote"))
     counts["points"] = len(_rows(drawings, "points"))
+    counts["free"] = sum(1 for f in drawings.get("free") or [] if isinstance(f, dict) and f.get("xyz"))
     counts["stones"] = len((meta.get("stones") or {}).get(_ortho_name(chunk)) or [])
     counts["sections"] = len(sections) if fate == "convert" and sections else 0
     counts["patches"] = len((meta.get("orthomosaic") or {}).get("patches") or [])

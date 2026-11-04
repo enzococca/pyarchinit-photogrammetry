@@ -2540,6 +2540,11 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     finally:
         if kept is not None:
             shutil.rmtree(kept["model"], ignore_errors=True)
+        # the georeference fitted again on the adjusted block (or put back by the safety net): the free drawings stay
+        # on the model - once, by the whole change of the transform
+        from ..core import free_drawings
+
+        free_drawings.follow(chunk)
     return err
 
 
