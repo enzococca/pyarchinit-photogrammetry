@@ -421,6 +421,120 @@ Limiti dei disegni: fasce strette o più serrette che finiscono alla stessa x po
 attraversa la linea di chiglia è nominata all'estremità alta; un legno di chiglia misurato non ha il riquadro sul
 profilo; i nomi delle stazioni del piano di costruzione possono sovrapporsi.
 
+## Ricostruzione (ipotesi)
+
+Il passo 9 del pannello, **Ricostruzione (ipotesi)** (versione 0.4.0), completa ciò che il relitto ha perso. Ogni sua
+parte è un'ipotesi costruita da ciò che è stato ricalcato e misurato: campita nei disegni, più chiara e trasparente
+(`_ric`) nei file 3D, con uno stato suo nelle tabelle; il catalogo dei legni misurati non cambia mai. Servono il rilievo
+dello scafo e i legni ricalcati sopra (passo 8); la carenatura vuole anche le stazioni e le loro sezioni (passi 2 e 3).
+
+| Pulsante | Che cosa fa |
+|---|---|
+| *Prua e poppa...* | Fin dove la ricostruzione può andare oltre la lunghezza rilevata: una x della nave per la prua, per la poppa, o nessuna. |
+| *Ricostruisci...* | Simmetria, prolungamento delle fasce, ordinate al passo misurato e carenatura, ognuna facoltativa, in una costruzione sola. |
+| *Usa il sistema nave di...* | Il sistema della nave (e le stazioni) di un altro chunk dello stesso relitto; le sezioni rifatte su questo modello. |
+| *Tabella...* | Ciò che è misurato e ciò che è ricostruito, legno per legno: `tabella.csv` e `.xlsx`. |
+| *Esporta 3D...* | I legni in 3D con la ricostruzione (OBJ, GLB, IFC), e la tabella accanto. |
+| *Pianta con ricostruzione...* | La pianta del relitto con la ricostruzione campita. |
+
+Altrove la ricostruzione è disegnata o esportata solo quando la si chiede: *Disegni* (passo 5), *Pianta del relitto* ed
+*Esporta 3D* (passo 8) hanno la casella **Con la ricostruzione (ipotesi)**, spenta di partenza (i disegni e i file della
+0.3.0); dalla riga di comando `drawings`, `plan` ed `export3d` accettano `--reconstruction`. Il piano di costruzione e
+il profilo si disegnano senza la carenatura se la casella non è spuntata.
+
+**Da ricostruire.** La ricostruzione ricorda da che cosa è stata costruita: il sistema della nave, il catalogo, la
+chiglia data e il rilievo di questo chunk e degli altri chunk letti, la prua e la poppa date. Quando uno di questi cambia
+dopo la costruzione (una fascia corretta, la prua scambiata, il rilievo rifatto...), lo stato del passo 9, le note sotto
+i suoi pulsanti e l'albero (*Ricostruzione (n, ipotesi, da rifare)*) dicono **da ricostruire** e perché; la tabella
+segna le righe ricostruite (colonna `stale`, il titolo della cartella di lavoro), la pianta disegnata con la
+ricostruzione porta una nota e l'esportazione 3D lo dice. Costruita in un altro sistema della nave, i suoi legni in 3D
+starebbero altrove: l'esportazione 3D li rifiuta finché non ricostruisci, e la pianta lascia fuori la carenatura.
+
+Ogni costruzione, e ogni modifica di prua e poppa, è un passo di *Modifica > Annulla*: annullare una costruzione
+riporta la ricostruzione di prima, record e file. Per questo la cartella della ricostruzione è copiata una volta per
+costruzione in `shipwreck/reconstruction.undo/` (tolta alla sessione successiva); le copie sono collegamenti fisici e
+non occupano quasi nulla, ma su un disco senza collegamenti fisici (FAT, exFAT, alcune condivisioni di rete) ognuna è
+una copia intera della cartella. L'albero dell'area di lavoro mostra *Ricostruzione (n, ipotesi)*;
+mentre il rilievo è mostrato, il layer *Ricostruzione (ipotesi)* disegna sopra i legni ricostruiti campiti e a trattini
+(non si modificano a mano: eliminarli lì è rifiutato, con l'indicazione di come toglierli).
+
+![La ricostruzione dello scafo sintetico sulla pianta del relitto](../img/plugins/shipwreck/shipwreck-reconstruction-plan.png)
+
+### Che cosa viene ricostruito, e i limiti
+
+- **Simmetria.** Un legno del lato conservato è riflesso rispetto al piano di chiglia dove l'altro lato non ha né il
+  modello né un record del suo tipo: così come il relitto giace, quindi uno scafo torto o schiacciato è riflesso torto.
+  Dove entrambi i lati sono misurati non si riflette niente e la differenza è elencata (la tabella dei disaccordi dei
+  due lati, stazione per stazione): un relitto deformato dà disaccordi, non pezzi riflessi. Pezzi più piccoli di
+  25 cm², più stretti di 5 cm (a meno che il legno stesso sia stretto) o sopra il modello non sono riflessi.
+- **Prolungamento delle fasce.** Una fascia ricalcata su una parte dello scafo continua lungo i suoi due comenti:
+  entro la lunghezza rilevata (il rilievo dei chunk) e oltre solo fino a una prua o a una poppa date. I comenti seguono
+  le linee dei gradini delle sezioni (passo 7) dove ci sono, altrimenti la curvatura dei loro punti per un metro al
+  massimo, poi tenuti dritti: quei pezzi sono segnati `uncertain` (incerti). Un pezzo prolungato è tagliato dove si
+  allarga oltre 1,5 volte la larghezza misurata della fascia, o dove il suo bordo esterno supera di più di quella
+  larghezza la mezza larghezza dello scafo a quella x (la cella più lontana del rilievo da quel lato; dove quel lato è
+  perso, quella dell'altro lato alla stessa x, come assume la simmetria): linee dei gradini rumorose non aprono più una fascia a ventaglio fuori dal relitto.
+  Un pezzo tagliato è `uncertain` e nominato negli avvisi.
+- **Ordinate al passo misurato.** Dove lo spazio fra due ordinate ricalcate supera di 1,5 volte lo spazio mediano del
+  loro lato, le ordinate mancanti sono rimesse a quel passo, in piedi sullo scafo (dal rilievo, dai solidi riflessi o
+  dalla carenatura) alte quanto le due vicine.
+- **Carenatura.** Una superficie per le sezioni alle stazioni (una mezza sezione con pochi punti prende quella
+  dell'altro lato), tenuta solo dove il relitto non mostra niente. Oltre l'ultima stazione si stringe fino
+  all'estremità data con una quadratica dalla larghezza e dalla pendenza dell'ultima stazione, con l'altezza
+  dell'ultima sezione: un'ipotesi della sola larghezza. Senza prua o poppa date quell'estremità resta aperta all'ultima
+  stazione (la pianta scrive *carenatura aperta*). I legni non ricalcati sul fasciame entrano nelle sezioni:
+  ricalcali (il paramezzale prima di tutto), altrimenti lo scafo passa sopra di loro.
+- **La chiglia** data al passo 8 resta un solido suo; non entra mai nella carenatura.
+- **Il profilo** non mostra l'orlo su un tratto perso da entrambi i lati: il bordo alto della carenatura non è
+  disegnato come orlo.
+- **Senza la simmetria** (la casella spenta, `--no-mirror`) il prolungamento lascia comunque alla simmetria i tratti
+  dove un lato è perso e l'altro conservato: lì è ricostruita solo la carenatura, e la costruzione lo dice.
+
+### Più chunk dello stesso relitto
+
+Altre campagne o altre parti del relitto in altri chunk entrano nella ricostruzione del chunk attivo quando sono
+compatibili: allineati a lui (*Flusso di lavoro > Allinea chunk*) con lo stesso sistema della nave (*Usa il sistema
+nave di...* lo copia), oppure con un sistema della nave preso da marker degli stessi nomi. Ognuno ha bisogno del suo
+rilievo e dei suoi legni ricalcati; le ordinate devono avere i numeri del cantiere (*Nomi da tabella...*). I record
+dello stesso tipo, lato e nome sono uniti nella pianta della nave, con il contorno del chunk misurato meglio dove
+entrambi hanno rilevato; ordinate numerate in modo diverso sono unite per posizione; le quote vengono da un rilievo
+unito, ogni cella dal chunk più fine che la rileva (un modello ravvicinato della prua vince sul relitto intero
+rilevato più largo; fra chunk della stessa cella, quello che copre di più); la carenatura passa per le stazioni di tutti
+i chunk. I chunk esclusi sono
+elencati con il motivo (`chunks` dalla riga di comando) e gli avvisi dell'unione sono detti dopo la costruzione. Si
+scrivono solo i file del chunk attivo.
+
+### La tabella
+
+`tabella.csv` (codici) e `tabella.xlsx` (titoli): una riga per record misurato, poi per record ricostruito, poi la
+carenatura, con `id`, `name`, `kind`, `side`, `status`, `measured_length`, `measured_area` (un record misurato),
+`reconstructed_length`, `reconstructed_area` (ogni altro), `length_kind`: `3D` per una linea misurata lungo il modello,
+`pianta` per una lunghezza nella pianta della nave (il lato lungo di un poligono, un record unito da più chunk, la
+ricostruzione), `stale` (perché la ricostruzione è da rifare, sulle sue righe; vuota finché è attuale). Le aree sono
+nella pianta della nave. Con più chunk la tabella elenca i record uniti, come li usano la costruzione e i file. Il
+totale ricostruito (nei totali della tabella e sulla pianta, «ricostruito: x m² senza la carenatura») è l'area
+dell'unione dei legni ricostruiti: la carenatura, che sta sotto di loro, è data a parte nella sua riga, e dove due legni
+ricostruiti si sovrappongono (un'ordinata riflessa sopra una fascia riflessa) l'area è contata una volta sola.
+
+### Campiture e file 3D
+
+Sulla pianta, una campitura per modo di ricostruire: righe oblique `////` per la simmetria (e per la chiglia data e le
+fasce delle sezioni), righe oblique contrarie `\\\\` per il prolungamento, righe incrociate `xxxx` per le ordinate al
+passo, righe orizzontali `----` per le tavole importate dal Clinker Boat Tool; la carenatura è solo il contorno a
+trattini. Il DXF ha i layer `RICOSTRUZIONE_<TIPO>` con le campiture ANSI31, ANSI32, ANSI37 e ANSI33 e
+`RICOSTRUZIONE_HULL`. Nei file 3D ogni oggetto ricostruito finisce in `_ric`, più chiaro e trasparente; nell'IFC il suo
+stato è nel Pset, e una mesh non chiusa (la carenatura) è scritta con `Closed=False`.
+
+![I legni dello scafo sintetico in 3D con la ricostruzione (più chiara, a righe)](../img/plugins/shipwreck/shipwreck-reconstruction-3d.png)
+
+Sullo scafo sintetico (lo scafo a clinker con ordinate dei test, il babordo perso da metà nave a poppa ed entrambi i
+lati su 0,9 m): i contorni delle fasce riflesse stanno entro 1,1 mm (mediana; p95 4,3 mm) dalle fasce ricalcate sullo
+scafo intero, il 99 % entro 1 cm, le loro facce entro 4 mm (p95 8 mm) dalla sua superficie; fasce ricalcate su x 2-9
+prolungate fino alle estremità rilevate con i bordi entro 1 mm (p95 3 mm) di traverso e 1 mm (p95 7 mm) in quota dai
+comenti veri; le quattro ordinate mancanti rimesse dov'erano; la carenatura entro 0,6 mm (p95) dalla sezione vera; una
+costruzione di tutta la ricostruzione 1,4 s, il suo IFC (68 elementi, 33 `_ric`) 7 s. Due chunk dello stesso scafo
+(0-7 m e 6-12 m) danno una ricostruzione sola su tutta la lunghezza rilevata.
+
 ## Riga di comando
 
 ```bash
@@ -449,10 +563,18 @@ ppg plugin shipwreck solids PROGETTO.ppg [--thickness MM]
 ppg plugin shipwreck export3d PROGETTO.ppg --out FILE.obj|.glb|.ifc [--world] [--no-tables]
 ppg plugin shipwreck plan PROGETTO.ppg [--background relief|ortho|none] [--scale N] [--out CARTELLA]
 ppg plugin shipwreck status PROGETTO.ppg                               # con i conteggi dei legni 3D
+ppg plugin shipwreck ends PROGETTO.ppg [--stem X] [--stern X]          # oppure --none: solo entro la lunghezza rilevata
+ppg plugin shipwreck frame-of PROGETTO.ppg CHUNK [--chunk QUESTO]      # il sistema della nave di un altro chunk
+ppg plugin shipwreck chunks PROGETTO.ppg                               # i chunk della ricostruzione, e perché no gli altri
+ppg plugin shipwreck reconstruct PROGETTO.ppg [--no-mirror] [--no-extension] [--no-frames] [--no-loft]
+ppg plugin shipwreck reconstruct table PROGETTO.ppg [--out CARTELLA]   # tabella.csv e .xlsx
+ppg plugin shipwreck export3d PROGETTO.ppg --out FILE.obj|.glb|.ifc --reconstruction
+ppg plugin shipwreck plan PROGETTO.ppg --reconstruction [--out CARTELLA]
+ppg plugin shipwreck drawings PROGETTO.ppg --reconstruction [--out CARTELLA]   # piano e profilo con la carenatura
 ```
 
 ## Che cosa non fa
 
-Ricostruzione dello scafo, lati specchiati, superfici lofted, idrostatica, sviluppo del fasciame, riconoscimento automatico dei legni oltre alle proposte lette sul rilievo, che accetti o scarti a mano, rifrazione
+Idrostatica, sviluppo del fasciame, riconoscimento automatico dei legni oltre alle proposte lette sul rilievo, che accetti o scarti a mano, rifrazione
 oltre l'approssimazione nadirale, unione di più giornate. Tutto quello che scrive sta in `<dati del chunk>/shipwreck/`, salvo quello che esporti; la
 trasformazione, il modello e i prodotti del chunk non cambiano mai.
