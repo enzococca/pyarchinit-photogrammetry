@@ -155,7 +155,12 @@ def plane_corners(origin, axes, size: float) -> np.ndarray:
 CLICK_PX = 4  # a press and a release this close (screen pixels) ...
 CLICK_MS = 300  # ... and this quick are a click (a vertex); otherwise a drag of the trackball
 RUBBER_MS = 30  # the end of the rubber band picked again at most this often while the mouse moves
-SNAP_PX = 10  # a click this close to a vertex of a drawing shown or to a marker takes its exact position
+SNAP_PX = 10  # a click this close to a vertex of a drawing shown or to a marker takes its exact position ...
+SNAP_DEPTH_EDGES = 2.0  # ... unless it lies behind the surface under the cursor by more than 2 model edges
+SNAP_DEPTH_SHARE = 0.02  # (2 % of the distance on a cloud, no model edges)
+SNAP_DEPTH_M = 0.01  # and at least 1 cm
+RUBBER_HEAVY_POINTS = 1_000_000  # VTK showing more points than this: the rubber end on the cloud picked ...
+RUBBER_HEAVY_FACTOR = 4  # ... this many times less often
 DRAWING_COLOUR = "#00e5ff"  # the feature being drawn and its rubber band
 
 
@@ -1374,6 +1379,8 @@ class ModelView(QWidget):
         self._project = None
         self._filling = False
         self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
+        self._free_inner: dict = {}  # their internal coordinates by id, converted once
+        self._draw_mesh = None  # (key, centre, ray caster, median edge) of the model shown, kept between drawings
         self._draw_kind: str | None = None  # the kind being drawn, None: not drawing
         self._draw_pts: list = []  # its vertices (internal)
         self._rubber = None  # the end of its rubber band (internal), None: nothing under the cursor
@@ -1469,6 +1476,8 @@ class ModelView(QWidget):
 
     def set_chunk(self, chunk, kind: str | None = None) -> None:
         self.stop_drawing()
+        if chunk is not self.chunk:  # the drawings and the model of another chunk are not this one's
+            self._free, self._free_inner, self._draw_mesh = [], {}, None
         self._clear_version()
         self.highlight = None
         self.chunk = chunk
@@ -1953,6 +1962,7 @@ class ModelView(QWidget):
             out.append((fid, str(rec["kind"]), np.asarray(rec["xyz"], np.float64).reshape(-1, 3),
                         colour or rec.get("colour") or FREE_COLOUR, fid in chosen))
         self._free = out
+        self._free_inner = {}
         self._put_free()
 
     @property
@@ -1985,6 +1995,7 @@ class ModelView(QWidget):
         self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
         self._put_free()
         self._draw_target().setFocus()
+        QTimer.singleShot(0, lambda: self._draw_kind is not None and self._draw_target().setFocus())  # after the menu
 
     def stop_drawing(self) -> None:
         """The drawing given up (nothing emitted) and the tool off."""
@@ -1992,7 +2003,6 @@ class ModelView(QWidget):
             return
         self._draw_kind = None
         self._draw_pts, self._rubber, self._press = [], None, None
-        self._draw_mesh = None
         self._rubber_timer.stop()
         self.canvas.set_hint("")
         self._put_free()
@@ -2029,7 +2039,9 @@ class ModelView(QWidget):
             return super().eventFilter(obj, ev)
         kind = ev.type()
         if kind == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
-            self._press = (ev.position().x(), ev.position().y(), time.monotonic())
+            # Shift + left drag pans: never a vertex
+            shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._press = None if shift else (ev.position().x(), ev.position().y(), time.monotonic())
         elif kind == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton:
             press, self._press = self._press, None
             x, y = ev.position().x(), ev.position().y()
@@ -2058,14 +2070,39 @@ class ModelView(QWidget):
                 return True
         return super().eventFilter(obj, ev)
 
-    def _snap(self, x: float, y: float, project):
-        """The exact position (internal) of the vertex of a drawing shown or of the marker within ``SNAP_PX`` of
-        the pixel (x, y), the nearest one; None when there is none."""
+    def _sight(self, x: float, y: float):
+        """The line of sight through (x, y) in internal coordinates: origin, unit direction, and the internal units of
+        one metre of the chunk's coordinates (to give tolerances in metres)."""
+        sd = self.sd
+        origin, direction, _pixel = self.canvas.view_ray(x, y)  # a line of the view is a line of the true scene too
+        o, e = self.chunk.to_internal(sd.from_display(np.array([origin, origin + direction])) + sd.offset)
+        d = (e - o) / np.linalg.norm(e - o)
+        a, b = self.chunk.to_world(np.array([o, o + d]))
+        metre = 1.0 / max(float(np.linalg.norm(b - a)), 1e-12)
+        return o, d, metre
+
+    def _surface_at(self, x: float, y: float, project, refine: bool):
+        """The surface under (x, y), internal: on a model view the first hit of the line of sight with the model,
+        else (or when it misses) ``pick_point`` (with the ray when ``refine``). None: nothing there."""
+        point = self._model_hit(x, y) if self.kind in ("model", "model_textured") else None
+        if point is None:
+            point = self.pick_point(x, y, project, self.canvas.view_ray if refine else None)
+        return point
+
+    def _snap(self, x: float, y: float, project, surface=None):
+        """The exact position (internal) of the vertex of a drawing shown, of the drawing in progress (not its last
+        vertex) or of a marker within ``SNAP_PX`` of the pixel (x, y), the nearest one that is not behind the
+        ``surface`` under the cursor (by more than ``SNAP_DEPTH_EDGES`` model edges, at least ``SNAP_DEPTH_M``);
+        None when there is none."""
         sd, chunk = self.sd, self.chunk
         shown, inner = [], []
-        for _fid, _kind, world, _colour, _sel in self._free:
-            shown.append(sd.to_display(world - sd.offset))
-            inner.append(chunk.to_internal(world))
+        for (_fid, _kind, xyz, _colour, _sel), world in zip(sd.free, self._free):
+            shown.append(np.asarray(xyz, np.float64).reshape(-1, 3))
+            inner.append(self._free_internal(world[0], world[2]))
+        if len(self._draw_pts) > 1:
+            own = np.asarray(self._draw_pts[:-1], np.float64)
+            shown.append(sd.to_display(chunk.to_world(own) - sd.offset))
+            inner.append(own)
         if sd.markers:
             marks = np.array([m[1] for m in sd.markers], np.float64)
             shown.append(marks)
@@ -2075,25 +2112,48 @@ class ModelView(QWidget):
         px, py, _depth, ok = project(np.vstack(shown))
         d2 = (px - x) ** 2 + (py - y) ** 2
         d2[~ok] = np.inf
-        k = int(np.argmin(d2))
-        return np.vstack(inner)[k] if d2[k] <= SNAP_PX ** 2 else None
+        near = np.nonzero(d2 <= SNAP_PX ** 2)[0]
+        if not len(near):
+            return None
+        inner = np.vstack(inner)
+        near = near[np.argsort(d2[near], kind="stable")]
+        if surface is None:  # nothing of the surface under the cursor: nothing hides them
+            return inner[near[0]]
+        o, d, metre = self._sight(x, y)
+        edge = getattr(self, "_draw_mesh", None)
+        edge = edge[3] if edge is not None and len(edge) > 3 and edge[3] else 0.0
+        depth = float((np.asarray(surface, np.float64) - o) @ d)
+        tol = max(SNAP_DEPTH_EDGES * edge if edge else SNAP_DEPTH_SHARE * abs(depth), SNAP_DEPTH_M * metre)
+        behind = (inner[near] - o) @ d > depth + tol
+        keep = near[~behind]
+        return inner[keep[0]] if len(keep) else None
+
+    def _free_internal(self, fid: str, world: np.ndarray) -> np.ndarray:
+        """The internal coordinates of a free drawing shown, converted once per :meth:`set_free`."""
+        cache = self._free_inner
+        if fid not in cache:
+            cache[fid] = self.chunk.to_internal(np.asarray(world, np.float64).reshape(-1, 3))
+        return cache[fid]
 
     def _click(self, x: float, y: float) -> None:
         """A click while drawing: a vertex on the surface under it (or snapped); the same place clicked again
-        (the second click of a double click) adds nothing."""
+        (the second click of a double click) adds nothing; a polygon's first vertex clicked again ends it."""
         if self.chunk is None or self.sd is None:
             return
-        _image, project = self.canvas.snapshot()
+        project = self.canvas.projector()
         if self._draw_pts:
             last = self.sd.to_display(self.chunk.to_world(np.asarray(self._draw_pts[-1])[None]) - self.sd.offset)
             lx, ly, _d, ok = project(last)
             if ok[0] and np.hypot(lx[0] - x, ly[0] - y) <= CLICK_PX:
                 return
-        point = self._snap(x, y, project)
-        if point is None and self.kind in ("model", "model_textured"):
-            point = self._model_hit(x, y)
+        surface = self._surface_at(x, y, project, refine=True)
+        point = self._snap(x, y, project, surface)
+        if (point is not None and self._draw_kind == "polygon" and len(self._draw_pts) >= 3
+                and np.array_equal(point, self._draw_pts[0])):
+            self._finish()  # closed on its first vertex
+            return
         if point is None:
-            point = self.pick_point(x, y, project, self.canvas.view_ray)
+            point = surface
         if point is None:  # nothing of the model there
             return
         self._draw_pts.append(np.asarray(point, np.float64).reshape(3))
@@ -2105,7 +2165,8 @@ class ModelView(QWidget):
 
     def _model_hit(self, x: float, y: float):
         """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
-        the model cannot be read: a vertex drawn on the model lies on the model, not on the dense cloud near it."""
+        the model cannot be read: a vertex drawn on the model lies on the model, not on the dense cloud near it. The
+        ray caster is kept for the model file shown (path and time) until another chunk is shown."""
         path = self.paths.get(self.kind) or self.paths.get("model") or self.chunk.product_path("model")
         if not path or not os.path.exists(path):
             return None
@@ -2118,18 +2179,19 @@ class ModelView(QWidget):
 
                 mesh = read_mesh(path)
                 xyz = np.asarray(mesh.xyz, np.float64)
+                faces = np.asarray(mesh.faces, np.int64)
                 centre = xyz.mean(axis=0) if len(xyz) else np.zeros(3)
-                cached = (key, centre, Raycaster(xyz - centre, np.asarray(mesh.faces, np.int64)))
+                sample = faces[:: max(1, len(faces) // 200_000)]
+                edge = float(np.median(np.linalg.norm(xyz[sample[:, 0]] - xyz[sample[:, 1]], axis=1))) \
+                    if len(sample) else 0.0
+                cached = (key, centre, Raycaster(xyz - centre, faces), edge)
             except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
-                cached = (key, None, None)
+                cached = (key, None, None, 0.0)
             self._draw_mesh = cached
-        _key, centre, caster = cached
+        _key, centre, caster, _edge = cached
         if caster is None:
             return None
-        sd = self.sd
-        origin, direction, _pixel = self.canvas.view_ray(x, y)  # a line of the view is a line of the true scene too
-        o, e = self.chunk.to_internal(sd.from_display(np.array([origin, origin + direction])) + sd.offset)
-        d = (e - o) / np.linalg.norm(e - o)
+        o, d, _metre = self._sight(x, y)
         t = float(caster.hit_distance((o - centre)[None], d[None])[0])
         return o + t * d if np.isfinite(t) else None
 
@@ -2149,7 +2211,9 @@ class ModelView(QWidget):
         if not self._draw_pts or self._draw_kind == "point":
             return
         self._rubber_pos = (x, y)
-        wait = RUBBER_MS - (time.monotonic() - self._rubber_last) * 1000
+        shown = sum(len(a) for a in (self.sd.points, self.sd.mesh_vertices) if a is not None) if self.sd else 0
+        heavy = self.backend == "vtk" and shown > RUBBER_HEAVY_POINTS and self.kind not in ("model", "model_textured")
+        wait = RUBBER_MS * (RUBBER_HEAVY_FACTOR if heavy else 1) - (time.monotonic() - self._rubber_last) * 1000
         if wait <= 0:
             self._rubber_tick()
         elif not self._rubber_timer.isActive():
@@ -2161,8 +2225,9 @@ class ModelView(QWidget):
         self._rubber_last = time.monotonic()
         x, y = self._rubber_pos
         project = self.canvas.projector()
-        point = self._snap(x, y, project)
+        surface = self._surface_at(x, y, project, refine=False)  # no refinement on the cloud: fast while moving
+        point = self._snap(x, y, project, surface)
         if point is None:
-            point = self.pick_point(x, y, project)  # no refinement on the surface: fast while moving
+            point = surface
         self._rubber = None if point is None else np.asarray(point, np.float64).reshape(3)
         self._put_free()

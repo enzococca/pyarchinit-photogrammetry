@@ -30,6 +30,23 @@ def click_vertex(view, internal_xyz) -> tuple[float, float]:
     return x, y
 
 
+def double_click_at(view, x: float, y: float) -> None:
+    """A double click as a real mouse sends it: Press, Release, Press, DblClick, Release (``QTest.mouseDClick`` sends
+    the DblClick alone)."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    left, none = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+    pos = QPointF(float(round(x)), float(round(y)))
+    glob = view.canvas.mapToGlobal(pos)
+    for kind, buttons in ((QEvent.Type.MouseButtonPress, left), (QEvent.Type.MouseButtonRelease, none),
+                          (QEvent.Type.MouseButtonPress, left), (QEvent.Type.MouseButtonDblClick, left),
+                          (QEvent.Type.MouseButtonRelease, none)):
+        ev = QMouseEvent(kind, pos, glob, left, buttons, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(view.canvas, ev)
+
+
 def median_edge(chunk) -> float:
     """The median length of the edges of the model (internal units)."""
     m = chunk.model

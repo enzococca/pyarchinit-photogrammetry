@@ -71,9 +71,8 @@ def _key(view, key):
 
 
 def test_clicked_vertices_lie_on_the_model(view, app):
-    from free3d_helpers import click_vertex, distance_to_model, median_edge, screen_of
-    from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtTest import QTest
+    from free3d_helpers import click_vertex, distance_to_model, double_click_at, median_edge, screen_of
+    from PySide6.QtCore import Qt
 
     chunk = view.chunk
     tol = median_edge(chunk)
@@ -94,11 +93,10 @@ def test_clicked_vertices_lie_on_the_model(view, app):
     for p in targets[:5]:
         click_vertex(view, p)
     x, y = screen_of(view, targets[5])
-    QTest.mouseDClick(view.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
-                      QPoint(int(round(x)), int(round(y))))
+    double_click_at(view, x, y)  # its first click adds the sixth vertex, the second ends
     assert len(view.drawn) == 2
     kind, xyz = view.drawn[1]
-    assert kind == "polygon" and 5 <= len(xyz) <= 6
+    assert kind == "polygon" and len(xyz) == 6
     assert len(np.unique(np.round(xyz, 9), axis=0)) == len(xyz)  # no vertex twice from the double click
     assert distance_to_model(chunk, xyz).max() < tol
 
@@ -168,6 +166,29 @@ def test_snap_to_an_existing_vertex(view, app):
     assert len(view.drawn) == 1
     # the feature's own vertex, as the view converts it (not a point of the surface 5 px away)
     assert np.allclose(view.drawn[0][1][0], chunk.to_internal(world)[0], atol=1e-9, rtol=0)
+
+
+def test_snap_never_takes_a_vertex_behind_the_surface(view, app):
+    from free3d_helpers import click_at, distance_to_model, median_edge, screen_of
+
+    chunk = view.chunk
+    a, b = _targets(view, 2)
+    x, y = screen_of(view, a)
+    o, d, _metre = view._sight(x, y)
+    depth = 6 * median_edge(chunk)
+    hidden = a + depth * d  # on the line of sight through a, under the surface
+    world = chunk.to_world(np.array([hidden, b]))
+    view.set_free([{"id": "under", "kind": "point", "xyz": world[:1].tolist()},
+                   {"id": "seen", "kind": "point", "xyz": world[1:].tolist()}], {})
+    view.start_drawing("point")
+    click_at(view, x + 3, y + 4)  # 5 px from where the hidden point projects: the surface, not the point
+    assert len(view.drawn) == 1
+    got = view.drawn[0][1][0]
+    assert np.linalg.norm(got - hidden) > 3 * median_edge(chunk)
+    assert distance_to_model(chunk, got[None])[0] < median_edge(chunk)
+    x, y = screen_of(view, b)
+    click_at(view, x + 3, y + 4)  # a visible vertex: snapped exactly
+    assert np.allclose(view.drawn[1][1][0], chunk.to_internal(world[1:])[0], atol=1e-9, rtol=0)
 
 
 def test_rubber_band_follows_the_cursor(view, app):
