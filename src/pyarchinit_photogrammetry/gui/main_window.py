@@ -1255,9 +1255,7 @@ class MainWindow(QMainWindow):
                   processing=True, icon_name="run",
                   tip=tr("La temperatura meno quella dei dintorni: i muri e i fossati sepolti cambiano il suolo sopra di loro"))
         ex_menu = th_menu.addMenu(icon("export"), tr("Esporta le temperature"))
-        for fmt, text in (("tif", tr("GeoTIFF in gradi Celsius (32 bit)")), ("tif16", tr("GeoTIFF in centikelvin (16 bit)")),
-                          ("csv", tr("CSV (x, y, temperatura)")),
-                          ("flir", tr("JPEG radiometrico FLIR (un file; tasselli oltre 8,4 milioni di pixel)"))):
+        for fmt, text in self._thermal_formats():
             self._act(ex_menu, text + "...", lambda _c=False, f=fmt: self.ms_thermal_export(f))
         th_menu.addSeparator()
         self._act(th_menu, tr("Punto di misura"), lambda: self.set_draw_mode("probe"), icon_name="probe",
@@ -2094,14 +2092,37 @@ class MainWindow(QMainWindow):
                       lambda path: (self._dirty(True), self._capture_states(), self.ms_show("thermal_anomaly")),
                       refresh=True)
 
-    def ms_thermal_export(self, fmt: str = "tif") -> None:
+    @staticmethod
+    def _thermal_formats() -> list[tuple[str, str]]:
+        """The formats the temperatures are exported in, with their names."""
+        return [("tif", tr("GeoTIFF in gradi Celsius (32 bit)")), ("tif16", tr("GeoTIFF in centikelvin (16 bit)")),
+                ("csv", tr("CSV (x, y, temperatura)")),
+                ("flir", tr("JPEG radiometrico FLIR (un file; tasselli oltre 8,4 milioni di pixel)"))]
+
+    def ms_thermal_export(self, fmt: str = "tif", anomaly: bool = False) -> None:
         """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV, FLIR JPEGs).
         An orthomosaic that does not fit in one FLIR file asks first: one file with larger cells, or tiles
-        at full resolution."""
+        at full resolution. ``anomaly``: the thermal anomalies instead (degrees around zero: GeoTIFF or CSV)."""
         if not self._need_chunk():
             return
         from ..engine import thermal as th
 
+        if anomaly:
+            rel = ((self.chunk.meta.get("thermal") or {}).get("anomaly") or {}).get("file")
+            if not rel or not (self.chunk.data_dir / rel).exists():
+                self._warn("Calcola prima le anomalie termiche.")
+                return
+            fmt = fmt if fmt in ("tif", "csv") else "tif"
+            source = self.chunk.data_dir / rel
+            start = str(Path(self._last_dir()) / ("anomalie_termiche" + (".csv" if fmt == "csv" else ".tif")))
+            path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta le anomalie termiche"), start,
+                                                       tr("GeoTIFF in gradi (32 bit) (*.tif);;CSV (*.csv)"))
+            if not path:
+                return
+            fmt = "csv" if path.lower().endswith(".csv") or chosen.startswith("CSV") else "tif"
+            self.run_task("Esporta le anomalie termiche", lambda p: th.export(self.chunk, path, fmt, source=source),
+                          lambda out: self._info(tr("Anomalie termiche esportate"), str(out)))
+            return
         source = th.thermal_path(self.chunk)
         if source is None:
             self._warn("Costruisci prima l'ortofoto termica.")
@@ -2397,20 +2418,17 @@ class MainWindow(QMainWindow):
             return
         from ..engine import multispectral as ms_mod
 
-        ms = self._ms_meta()
-        if kind == "reflectance" and not ms.get("reflectance"):
-            self._warn("Costruisci prima l'ortofoto di riflettanza.")
+        if kind in ("thermal", "thermal_anomaly"):  # the temperatures keep their own export
+            self.ms_thermal_export("tif", anomaly=kind == "thermal_anomaly")
             return
-        if kind == "index" and (name or "") not in (ms.get("indices") or {}):
-            self._warn("Calcola prima l'indice scelto.")
-            return
-        if kind == "zones" and (name or "") not in (ms.get("zoning") or {}):
-            self._warn("Fai prima la zonizzazione.")
+        if kind not in ms_mod.EXPORT_FORMATS:
+            self._warn("Questo prodotto non si esporta da qui.")
             return
         try:
             ms_mod.product_source(self.chunk, kind, name)
-        except RuntimeError:
-            self._warn("Il file del prodotto non c'è più: costruiscilo di nuovo.")
+        except Exception:  # noqa: BLE001 - not built, or its file gone: one message per product
+            self._warn({"reflectance": "Costruisci prima l'ortofoto di riflettanza.",
+                        "index": "Calcola prima l'indice scelto.", "zones": "Fai prima la zonizzazione."}[kind])
             return
         filters = {
             "reflectance": [("tif", "GeoTIFF, tutte le bande a 32 bit (*.tif)"),
@@ -13251,7 +13269,13 @@ class MainWindow(QMainWindow):
                 menu.addAction(icon("volume"), tr("Volume dal TIN..."), on(self.tin_volume))
                 menu.addAction(icon("dem"), tr("DEM dal TIN"), on(self.tin_to_dem))
                 menu.addAction(icon("export"), tr("Esporta TIN..."), on(self.export_tin))
-            if isinstance(payload, str) and payload.startswith("ms:") and present:
+            if payload == "ms:thermal" and present:  # the temperatures: the formats of the thermal export
+                sub = menu.addMenu(icon("export"), tr("Esporta"))
+                for fmt, text in self._thermal_formats():
+                    sub.addAction(text + "...", on(lambda f=fmt: self.ms_thermal_export(f)))
+            elif payload == "ms:thermal_anomaly" and present:
+                menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.ms_thermal_export("tif", anomaly=True)))
+            elif isinstance(payload, str) and payload.startswith("ms:") and present:
                 parts = payload.split(":", 2)
                 menu.addAction(icon("export"), tr("Esporta..."),
                                on(lambda: self.ms_export(parts[1], parts[2] if len(parts) > 2 else None)))

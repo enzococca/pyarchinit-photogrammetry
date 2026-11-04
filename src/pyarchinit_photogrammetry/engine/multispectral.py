@@ -2166,51 +2166,70 @@ def _format_of(path: Path) -> str:
     return "tif"
 
 
-def _georeference_png(png: Path, transform, crs) -> None:
-    """The world file (``.pgw``: the size of a cell and the centre of the first one) and, when the
-    image has a reference system, the ``.aux.xml`` that tells it to GDAL and QGIS."""
+def _world_file(png: Path, transform) -> None:
+    """The world file (``.pgw``: the size of a cell and the centre of the first one). The reference
+    system goes in the ``.aux.xml`` that GDAL writes beside the PNG."""
     png.with_suffix(".pgw").write_text("\n".join(f"{v:.10f}" for v in (
         transform.a, transform.d, transform.b, transform.e,
         transform.c + transform.a / 2 + transform.b / 2, transform.f + transform.d / 2 + transform.e / 2)) + "\n")
-    aux = Path(str(png) + ".aux.xml")
-    if crs is not None and not aux.exists():
-        from xml.sax.saxutils import escape
 
-        aux.write_text(f"<PAMDataset>\n  <SRS>{escape(crs.to_wkt())}</SRS>\n</PAMDataset>\n")
+
+COLOUR_SAMPLE = 2048  # cells per side of the reduced read the limits of a coloured index come from
+COLOUR_BLOCK_CELLS = 4_000_000  # cells coloured at a time (a strip of whole rows)
+
+
+def _colour_limits(src) -> tuple[float, float]:
+    """The ends of the ramp from a reduced read (an overview when the file has one), as the view
+    does: the whole index is never in memory."""
+    from rasterio.enums import Resampling
+
+    k = max(1, int(np.ceil(max(src.height, src.width) / COLOUR_SAMPLE)))
+    shape = (max(1, src.height // k), max(1, src.width // k)) if k > 1 else (src.height, src.width)
+    return index_limits(src.read(1, out_shape=shape, resampling=Resampling.nearest).astype(np.float32, copy=False))
+
+
+def _write_colours(src, dst, limits, palette: str) -> None:
+    """The index of ``src`` coloured into the RGBA dataset ``dst``, a strip of rows at a time."""
+    from rasterio.windows import Window
+
+    rows = max(1, COLOUR_BLOCK_CELLS // max(src.width, 1))
+    for r in range(0, src.height, rows):
+        win = Window(0, r, src.width, min(rows, src.height - r))
+        z = src.read(1, window=win).astype(np.float32, copy=False)
+        dst.write(np.moveaxis(index_colors(z, limits, palette), -1, 0), window=win)
 
 
 def _export_colour(src: Path, dst: Path, fmt: str, name: str, palette: str) -> Path:
     """An index as a coloured image on ``palette`` (:data:`INDEX_PALETTES`), between the 2nd and the
-    98th percentile as in the view: a georeferenced RGBA GeoTIFF, or a PNG with a world file."""
+    98th percentile as in the view: a georeferenced RGBA GeoTIFF, or a PNG with a world file. Coloured
+    by strips of rows: a large survey is never in memory at once."""
     import rasterio
+    from rasterio.enums import ColorInterp
 
     with rasterio.open(src) as s:
-        values = s.read(1).astype(np.float32)
-        transform, crs = s.transform, s.crs
-    limits = index_limits(values)
-    rgba = index_colors(values, limits, palette)
-    tags = {"index": name, "palette": palette, "low": f"{limits[0]:.6g}", "high": f"{limits[1]:.6g}"}
-    profile = dict(driver="GTiff", height=rgba.shape[0], width=rgba.shape[1], count=4, dtype="uint8",
-                   transform=transform, crs=crs, photometric="RGB", compress="deflate", BIGTIFF="IF_SAFER")
-    if fmt == "colour_tif":
-        with rasterio.open(dst, "w", **profile) as out:
-            out.write(np.moveaxis(rgba, -1, 0))
-            out.colorinterp = [rasterio.enums.ColorInterp.red, rasterio.enums.ColorInterp.green,
-                               rasterio.enums.ColorInterp.blue, rasterio.enums.ColorInterp.alpha]
-            out.update_tags(**tags)
-        return dst
-    from rasterio.io import MemoryFile
-    from rasterio.shutil import copy as rio_copy
+        limits = _colour_limits(s)
+        tags = {"index": name, "palette": palette, "low": f"{limits[0]:.6g}", "high": f"{limits[1]:.6g}"}
+        profile = dict(driver="GTiff", height=s.height, width=s.width, count=4, dtype="uint8", transform=s.transform,
+                       crs=s.crs, photometric="RGB", compress="deflate", BIGTIFF="IF_SAFER")
+        if min(s.height, s.width) >= 256:
+            profile.update(tiled=True, blockxsize=256, blockysize=256)
+        target = dst if fmt == "colour_tif" else dst.with_name(f".{dst.name}.tmp.tif")
+        try:
+            with rasterio.open(target, "w", **profile) as out:
+                _write_colours(s, out, limits, palette)
+                out.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+                out.update_tags(**tags)
+            if fmt == "colour_tif":
+                return dst
+            from rasterio.shutil import copy as rio_copy
 
-    profile.pop("BIGTIFF")
-    profile.pop("compress")
-    with MemoryFile() as mem:
-        with mem.open(**profile) as tmp:
-            tmp.write(np.moveaxis(rgba, -1, 0))
-        with mem.open() as tmp:
-            rio_copy(tmp, dst, driver="PNG")
-    _georeference_png(dst, transform, crs)
-    return dst
+            Path(str(dst) + ".aux.xml").unlink(missing_ok=True)  # GDAL writes a new one with the reference system
+            rio_copy(target, dst, driver="PNG")
+            _world_file(dst, s.transform)
+            return dst
+        finally:
+            if target != dst:
+                target.unlink(missing_ok=True)
 
 
 def export_product(chunk: Chunk, kind: str, name: str | None, path, fmt: str | None = None,
