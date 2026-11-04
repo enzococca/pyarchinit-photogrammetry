@@ -405,8 +405,7 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
         pb.free_intrinsics.append([k for k in range(n) if (fit_principal_point or k not in principal) and k not in focal])
     marker_keys = []
     if use_markers:
-        controls = {m.key: m for m in chunk.markers if not m.checkpoint and m.reference.enabled
-                    and m.reference.location}
+        controls = {m.key: m for m in gcp.control_markers(chunk)}
         bars = gcp.control_scalebars(chunk)
         wanted = set(controls) | {k for sb in bars for k in (sb.marker_a, sb.marker_b)}
         mi, mm, mxy, positions = [], [], [], []

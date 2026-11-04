@@ -95,7 +95,7 @@ def test_snapshot_of_the_demo_project(demo_doc, monkeypatch):
     assert first["products"]["dem"] == {"versions": ["DEM di Metashape"], "active": "DEM dalla nuvola"}
     assert "dem" in first["rasters"] and "orthomosaic" in first["rasters"]
     assert any(r.startswith("dem_") for r in first["rasters"])  # the kept version, by its calculator name
-    assert first["drawings"] == {"units": 2, "quote": 1, "points": 0, "lines": 1, "stones": 3}
+    assert first["drawings"] == {"units": 2, "quote": 1, "points": 0, "lines": 1, "stones": 3, "free": 0}
     assert first["elevations"] == [{"id": "e1", "name": "Prospetto nord", "kind": "plane"}]
     assert second["photos"] == 1 and second["products"] == {} and second["rasters"] == []
     assert snap["view"] == {"kind": None, "raster": None, "version": None, "elevation": None, "model": None}
@@ -353,3 +353,29 @@ def test_the_overview_and_the_examples_cover_the_window(lang):
                            "show_raster")):
         found = F.run_tool("scripting_api", {"topic": topic, "lang": lang}, None, index)
         assert any(wanted in p.get("text", "") for p in found["passages"]), (topic, found)
+
+
+def test_inventory_says_orientation_and_stale(processed, tmp_path):
+    """A chunk oriented by hand: its line says so with the date, and the products to build again by name."""
+    from orient_helpers import centre, local_copy
+
+    from pyarchinit_photogrammetry.engine import orient
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    a = centre(ch)
+    orient.orient(ch, points=[a, a + np.array([1.5, 0.2, 0.1]), a + np.array([0.1, 1.0, -0.05])])
+    made = ch.meta["orientation"]["made"][:10]
+    snap = I.snapshot(doc)
+    line = next(c for c in snap["chunks"] if c["key"] == ch.key)
+    assert line["oriented"] == made
+    assert "DEM" in line["stale"] and "Ortofoto" in line["stale"]
+    it = I.text(snap, "it")
+    en = I.text(snap, "en")
+    assert f"orientato a mano il {made}" in it and "da rifare: DEM, Ortofoto" in it
+    assert f"oriented by hand on {made}" in en and "to rebuild: DEM, Ortofoto" in en
+    # at most six names, then the count
+    many = dict(line, stale=[f"p{i}" for i in range(9)])
+    assert "p5, +3" in I._chunk_line(many, "en", full=True)
+    # a chunk never oriented says nothing of it
+    plain = I._chunk_line(dict(line, oriented=None, stale=[]), "it", full=True)
+    assert "orientato" not in plain and "da rifare" not in plain

@@ -107,9 +107,9 @@ disabled.
 ![The drawing bar](../img/gui/toolbar-drawing.png)
 
 Always visible under the workflow: the drawing modes (*Move*, *Select*, *Draw US* with *Freehand* in its
-menu, *Vertices* with *Reshape* in its menu, *Snap*, *Section*, *Measure*, *Height*, *Measuring point*,
-*Marker*, *SAM*), *Patch*, *Delete*, *Merge*, *Clear drawings*, and shortcuts to the *Layer* and *Sections*
-panes, to QGIS and to *Publish*. Each tool is described in [Drawing and measures](drawing.md#the-drawing-bar).
+menu, *Vertices* with *Reshape* in its menu, *Snap*, *Section*, *Measure*, *Height* with
+*Measuring point* in its menu, *Lines*, *Free* (*Free drawing*), *Marker*, *SAM*), *Patch*, *Delete*, *Merge*,
+*Clear drawings*, and shortcuts to the *Layer* pane (with *Sections* in its menu), to QGIS and to *Publish*. Each tool is described in [Drawing and measures](drawing.md#the-drawing-bar).
 
 ## The central views
 

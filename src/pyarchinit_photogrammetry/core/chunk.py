@@ -8,6 +8,7 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from . import crs as crs_mod
-from . import geometry
+from . import geometry, stamps
 from .camera import Camera, Reference, Sensor
 from .marker import Marker, Projection, ScaleBar
 from .pointcloud import PointCloud
@@ -337,6 +338,7 @@ class Chunk:
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
                               ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
+        self.meta["alignment_id"] = uuid.uuid4().hex  # a new frame: what was kept in the old one knows it
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()
@@ -390,6 +392,7 @@ class Chunk:
             c.meta.pop("precision", None)
 
     def reset_alignment(self) -> None:
+        self.meta["alignment_id"] = uuid.uuid4().hex
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         for c in self.cameras:
@@ -577,11 +580,22 @@ class Chunk:
         references. With scale bars and no control points the chunk stays in local coordinates
         (an object, a trench) unless the GPS of the photos covers a much larger area than its
         accuracy; ``use_cameras`` forces the choice. Returns an accuracy report (see
-        :func:`markers.gcp.update_transform`)."""
+        :func:`markers.gcp.update_transform`). The free drawings follow the new transform
+        (:func:`core.free_drawings.follow`; not after a new alignment)."""
         from ..markers import gcp
+        from . import free_drawings
 
         self.forget_precision()
-        return gcp.update_transform(self, use_cameras=use_cameras)
+        report = gcp.update_transform(self, use_cameras=use_cameras)
+        free_drawings.follow(self)
+        return report
+
+    def orient(self, M=None, **kw) -> dict:
+        """The local system of the chunk oriented by three points, a plane or a given motion ``M``, kept by three
+        orientation markers (see :func:`engine.orient.orient`). Since 1.7.2."""
+        from ..engine import orient
+
+        return orient.orient(self, M=M, **kw)
 
     def reference_errors(self) -> list[dict]:
         from ..markers import gcp
@@ -764,7 +778,8 @@ class Chunk:
                                    min_size=min_size, max_size=max_size, scaling=scaling,
                                    crs=None if crs_mod.is_local(self.crs) else self.crs, progress=as_progress(progress))
         self._set_product(method, out)
-        self.meta.setdefault("relief", {})[method] = {k: v for k, v in info.items() if k != "path"}
+        record = {k: v for k, v in info.items() if k != "path"}
+        self.meta.setdefault("relief", {})[method] = stamps.inherit_entry(self, record, "dem")  # in the DEM's coordinates
         return out
 
     @property

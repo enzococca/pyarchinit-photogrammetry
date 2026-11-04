@@ -1068,6 +1068,10 @@ class ReferencePane(QWidget):
                     it.setToolTip(tr("Coordinata stimata: {0}", how))
                 if c in (1, 11):
                     it.setToolTip(how)
+                if c == 1 and e.get("type") == "orientation":
+                    it.setForeground(QColor(PALETTE["grey"]))
+                    it.setToolTip(tr("Orientamento, non usato: i punti di controllo (o le posizioni delle foto) collocano "
+                                     "il rilievo; le coordinate del marker sono nel sistema orientato a mano"))
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
                     it.setForeground(QColor(PALETTE["red"]))
                 self.table.setItem(r, c, it)
@@ -1133,6 +1137,9 @@ class ReferencePane(QWidget):
         for key, name in (("scalebar_control_rmse", "RMSE barre"), ("scalebar_check_rmse", "RMSE barre check")):
             if rep.get(key) is not None:
                 parts.append(f"{tr(name)}: <b>{rep[key] * 1000:.1f} mm</b>")
+        aside = [e["label"] for e in errs.values() if e.get("type") == "orientation"]
+        if aside:
+            parts.append(tr("orientamento a mano non usato ({0}): lo danno i punti di controllo", ", ".join(aside)))
         if rep.get("method") == "scalebars":
             parts.append(tr("scala dalle barre, coordinate locali"))
         elif str(rep.get("method", "")).endswith("+scalebars"):
@@ -1906,6 +1913,7 @@ class LayersPane(QWidget):
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
     us_form_requested = Signal(str, int)  # layer, feature index
+    visibility_changed = Signal(str, bool)  # layer, shown: by its box or by Tutti / Nessuno (the window may keep it)
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
 
@@ -2015,13 +2023,16 @@ class LayersPane(QWidget):
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data[1] == -1:
-            self.view.set_layer_visible(data[0], item.checkState(0) == Qt.CheckState.Checked)
+            visible = item.checkState(0) == Qt.CheckState.Checked
+            self.view.set_layer_visible(data[0], visible)
+            self.visibility_changed.emit(data[0], visible)
 
     def _set_all(self, visible: bool) -> None:
         if self.view is None:
             return
-        for name in self.view.layer_order:
+        for name in list(self.view.layer_order):
             self.view.set_layer_visible(name, visible)
+            self.visibility_changed.emit(name, visible)
         self.rebuild()
 
     def _zoom_item(self, item) -> None:

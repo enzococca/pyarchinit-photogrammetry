@@ -671,6 +671,198 @@ def coregister(project: Path,
     typer.echo(f"    {cg.summary(out)}")
 
 
+def _triples(text: str) -> list[list[float]]:
+    """``"xA,yA,zA;xB,yB,zB[;xC,yC,zC]"`` -> two or three points (``typer.BadParameter`` otherwise)."""
+    try:
+        points = [[float(v) for v in part.split(",")] for part in text.split(";") if part.strip()]
+    except ValueError as exc:
+        raise typer.BadParameter(f"--points: numbers x,y,z separated by ';': {text}") from exc
+    if len(points) not in (2, 3) or any(len(p) != 3 for p in points):
+        raise typer.BadParameter(f"--points: two or three points x,y,z separated by ';': {text}")
+    return points
+
+
+def _orient_lines(result: dict, dry_run: bool) -> list[str]:
+    """What ``ppg orient`` prints of the result of ``engine.orient.orient``."""
+    d = result["describe"]
+    t = d["translation"]
+    lines = [f"tilt {d['tilt_deg']:.1f}° towards {d['tilt_direction_deg']:.1f}°, heading {d['heading_deg']:.1f}°",
+             f"translation {t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}", f"scale {d['scale']:.6f}"]
+    moved = {k: n for k, n in (result.get("moved") or {}).items() if n}
+    if moved:
+        lines.append("moved: " + ", ".join(f"{k} {n}" for k, n in moved.items()))
+    if result.get("stale"):
+        lines.append("stale (to build again): " + ", ".join(str(x.get("name") or x.get("product"))
+                                                           for x in result["stale"]))
+    if result.get("aligned"):
+        lines.append("aligned chunks moved: " + ", ".join(result["aligned"]))
+    if result.get("aligned_left"):
+        lines.append("aligned chunks left: " + ", ".join(result["aligned_left"]))
+    for key, title in (("kept", "kept"), ("sent_out", "sent out")):
+        for item in result.get(key) or []:
+            names = item.get("names") or []
+            if key == "sent_out" and item["what"] in ("qfield", "exports"):
+                title_ = "if already sent out (not recorded by the project)"
+            else:
+                title_ = title
+            lines.append(f"{title_}: {item['what']}" + (f" ({', '.join(names)})" if names else ""))
+    if result.get("weak_markers"):
+        lines.append("weak markers (seen in fewer than two photos): " + ", ".join(result["weak_markers"]))
+    if result.get("cameras_replaced"):
+        lines.append(f"photo positions replaced: {len(result['cameras_replaced'])}")
+    if result.get("bar_dropped"):
+        lines.append(f"typed distance dropped: {result['bar_dropped']['distance']} m (it was of other points)")
+    if result.get("plugins_unaware"):
+        lines.append("data of plugins not moved: " + ", ".join(result["plugins_unaware"]))
+    if dry_run:
+        lines.append("(dry run, nothing saved)")
+    return lines
+
+
+@app.command()
+def orient(project: Path,
+           points: Optional[str] = typer.Option(None, help="A, B[, C] in the coordinates of the chunk: "
+                                                           "'xA,yA,zA;xB,yB,zB[;xC,yC,zC]' (x along A->B, the plane "
+                                                           "of the three points horizontal)"),
+           markers: Optional[str] = typer.Option(None, help="the markers A,B[,C] (labels or keys of placed markers)"),
+           plane_from: Optional[str] = typer.Option(None, help="a plan polygon (WKT, GeoJSON or a file of them): the "
+                                                               "plane fitted to the points of the model inside it "
+                                                               "becomes horizontal; with --points of two points "
+                                                               "A->B sets x"),
+           x_kept: bool = typer.Option(False, "--x-kept", help="x as the current x (projected on the new "
+                                                                "horizontal), not along A->B"),
+           quota: float = typer.Option(0.0, help="the height of A (or of the plane) in the new system"),
+           origin: Optional[str] = typer.Option(None, help="X,Y of A (or of the plane) in the new system "
+                                                           "(default 0,0)"),
+           distance: Optional[float] = typer.Option(None, help="the length of A-B in the new system (a scale bar "
+                                                               "on the orientation markers)"),
+           flip: bool = typer.Option(False, "--flip", help="upside down: z on the other side of the plane"),
+           aligned: bool = typer.Option(True, "--aligned/--no-aligned", help="move the chunks aligned to this one "
+                                                                             "with it"),
+           chunk: Optional[str] = None,
+           dry_run: bool = typer.Option(False, "--dry-run", help="say what would happen, save nothing")):
+    """Orient the local system of a chunk (no coordinates of the world): level it on three points
+    or on a plane, set x, the height and the origin, optionally the scale. Everything drawn in
+    the chunk follows; DEM and orthomosaic are to be built again. Three orientation markers keep
+    the orientation through a new alignment."""
+    from .engine import orient as orient_mod
+
+    given = [x is not None for x in (points, markers, plane_from)]
+    if not any(given):
+        raise typer.BadParameter("give --points, --markers or --plane-from")
+    if markers is not None and (points is not None or plane_from is not None):
+        raise typer.BadParameter("--markers goes alone (not with --points or --plane-from)")
+    pts = _triples(points) if points is not None else None
+    if plane_from is not None and pts is not None and len(pts) != 2:
+        raise typer.BadParameter("with --plane-from, --points gives A and B (two points) to set x")
+    origin_xy = (0.0, 0.0)
+    if origin is not None:
+        try:
+            origin_xy = tuple(float(v) for v in origin.split(","))
+        except ValueError as exc:
+            raise typer.BadParameter(f"--origin: X,Y: {origin}") from exc
+        if len(origin_xy) != 2:
+            raise typer.BadParameter(f"--origin: X,Y: {origin}")
+    names = [v.strip() for v in markers.split(",") if v.strip()] if markers is not None else None
+    if names is not None and len(names) not in (2, 3):
+        raise typer.BadParameter("--markers: two or three markers A,B[,C]")
+    doc, ch = _open(project, chunk)
+    kw = dict(x_along_ab=not x_kept, quota=quota, origin_xy=origin_xy, distance=distance, flip=flip,
+              move_aligned=aligned, dry_run=dry_run)
+    try:
+        if names is not None:
+            kw["markers"] = names
+        if plane_from is not None:
+            orient_mod.check(ch, cameras=False)
+            xyz = orient_mod.points_in_plan(ch, _polygons([plane_from]))
+            kw.update(plane_xyz=xyz, toward=orient_mod.toward_cameras(ch, xyz), points=pts)
+        else:
+            kw["points"] = pts
+        try:
+            result = orient_mod.orient(ch, **kw)
+        except KeyError as exc:  # a marker that is not in the chunk
+            if names is None:
+                raise
+            raise typer.BadParameter(f"--markers: {exc.args[0] if exc.args else exc}") from exc
+    except orient_mod.OrientRefused as exc:
+        typer.echo(f"{exc.reason}: {exc}", err=True)
+        if exc.names:
+            typer.echo("    " + ", ".join(exc.names), err=True)
+        raise typer.Exit(code=1) from exc
+    if not dry_run:
+        doc.save()
+        if result.get("state") is not None:  # nothing will undo it from here: its copies go
+            orient_mod.drop(result["state"])
+    typer.echo(f"{ch.label}: " + ("orientation (dry run)" if dry_run else "oriented"))
+    for line in _orient_lines(result, dry_run):
+        typer.echo(f"    {line}")
+
+
+@app.command("drawings3d")
+def drawings3d(project: Path,
+               action: str = typer.Argument(..., help="list, export or import"),
+               file: Optional[Path] = typer.Argument(None, help="import: the GeoPackage, GeoJSON or DXF to read"),
+               out: Optional[Path] = typer.Option(None, help="export: the file to write"),
+               layer: Optional[str] = typer.Option(None, help="list/export: only this layer; import: the layer the "
+                                                              "drawings go in (default: the file's layer column, else "
+                                                              "the name of the file)"),
+               fmt: Optional[str] = typer.Option(None, "--format", help="export: dxf, gpkg, geojson or csv (default: "
+                                                                         "by the suffix of --out)"),
+               chunk: Optional[str] = None):
+    """The free drawings in 3D of a chunk (lines, polygons and points in user layers): list them (3D length or
+    area), export them (DXF 3D, GeoPackage with Z, GeoJSON, CSV of the vertices) or import a GeoPackage, GeoJSON or
+    DXF (features without Z take the heights of the DEM; the project is saved)."""
+    from .archaeo.measures import feature_measures
+    from .core import free_drawings as fd
+    from .io import free_drawings as fio
+
+    action = action.lower()
+    if action not in ("list", "export", "import"):
+        raise typer.BadParameter(f"the action is list, export or import, not {action!r}")
+    if fmt is not None and fmt.lower() not in fio.FORMATS:
+        raise typer.BadParameter(f"--format: one of {', '.join(fio.FORMATS)}")
+    doc, ch = _open(project, chunk)
+    if action == "list":
+        typer.echo("id\tlayer\tkind\tname\tvertices\tlength_3d\tarea_3d")
+        for rec in fd.features(ch, layer):
+            try:
+                m = feature_measures(rec)
+            except ValueError:
+                m = {}
+            length = m.get("length_3d", m.get("perimeter_3d"))
+            area = m.get("area_3d")
+            typer.echo("\t".join([rec["id"], rec["layer"], rec["kind"], rec.get("name") or "", str(len(rec["xyz"])),
+                                  "-" if length is None else f"{length:.3f}", "-" if area is None else f"{area:.3f}"]))
+        return
+    if action == "export":
+        if out is None:
+            raise typer.BadParameter("export needs --out FILE")
+        if fmt is None and out.suffix.lower() not in fio.SUFFIXES:
+            raise typer.BadParameter(f"--out: {out.suffix or 'no suffix'} is not one of {', '.join(fio.FORMATS)}: "
+                                     "give --format")
+        n = len(fd.features(ch, layer))
+        if not n:
+            typer.echo(f"{ch.label}: no free drawing" + (f" in the layer {layer}" if layer else ""), err=True)
+            raise typer.Exit(code=1)
+        written = fio.export(ch, out, fmt=fmt.lower() if fmt else None, layer=layer)
+        typer.echo(f"{ch.label}: {n} free drawings written to {written}")
+        return
+    if file is None:
+        raise typer.BadParameter("import needs the FILE to read")
+    if not file.exists():
+        raise typer.BadParameter(f"{file} does not exist")
+    try:
+        got = fio.import_features(ch, file, layer=layer)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    if got["added"]:
+        doc.save()
+    typer.echo(f"{ch.label}: {got['added']} free drawings imported from {file.name} ({got['dem_z']} with the heights "
+               f"of the DEM, {got['skipped']} skipped" + (f", {got['holes_dropped']} holes of polygons left out"
+                                                         if got.get("holes_dropped") else "") + ")")
+
+
 @app.command("us-proposal")
 def us_proposal(project: Path, first_us: Optional[int] = typer.Option(None, help="first number (default: after the "
                                                                                  "last US of the site and project)"),

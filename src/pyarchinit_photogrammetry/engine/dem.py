@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import crs as crs_mod
-from ..core import geometry
+from ..core import geometry, stamps
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
 from ..core.progress import Progress, as_progress
@@ -16,7 +16,8 @@ NODATA = -32767.0
 
 def ensure_level(chunk: Chunk) -> None:
     """A local, non-georeferenced chunk is rotated so that its estimated "up"
-    becomes +Z (the scale and the internal products are untouched)."""
+    becomes +Z (the scale and the internal products are untouched); the free drawings follow it
+    (:func:`..core.free_drawings.follow`)."""
     s, rot, t = geometry.decompose_similarity(chunk.transform)
     if not crs_mod.is_local(chunk.crs) or not np.allclose(rot, np.eye(3)) or chunk.meta.get("levelled"):
         return
@@ -33,6 +34,9 @@ def ensure_level(chunk: Chunk) -> None:
         r = np.eye(3) + vx + vx @ vx * (1 / (1 + c))
     chunk.transform = geometry.compose_similarity(s, r, t)
     chunk.meta["levelled"] = True
+    from ..core import free_drawings
+
+    free_drawings.follow(chunk)
 
 
 def estimate_gsd(chunk: Chunk) -> float:
@@ -247,7 +251,9 @@ def covered_ground(mask: np.ndarray, coarse: int = COARSE) -> np.ndarray:
     occupied &= neighbours - 1 >= 2
     occupied = ndimage.binary_fill_holes(ndimage.binary_closing(occupied, iterations=2))
     inner = ndimage.binary_erosion(occupied)
-    up = lambda a: np.repeat(np.repeat(a[pad:-pad, pad:-pad], coarse, axis=0), coarse, axis=1)[:h, :w]
+    def up(a):
+        return np.repeat(np.repeat(a[pad:-pad, pad:-pad], coarse, axis=0), coarse, axis=1)[:h, :w]
+
     near = ndimage.binary_dilation(mask, iterations=coarse)
     return up(inner) | (up(occupied) & near)
 
@@ -379,6 +385,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     chunk._before_product_write("dem")
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
+    stamps.stamp(chunk, "dem")
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path

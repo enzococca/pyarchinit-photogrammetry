@@ -905,7 +905,7 @@ def test_set_survey_crs_converts_what_was_drawn_on_the_chunk(tmp_path):
     assert result["crs"] == "EPSG:32632" and result["updated"] is True and result["method"] == "cameras"
     assert result["heights_unchanged"] is False and result["drawings"] == "follow"
     assert result["rebuild"] == ["dem", "orthomosaic"]
-    assert result["converted"] == {"markers": 0, "units": 1, "quote": 1, "points": 1, "stones": 1, "sections": 1,
+    assert result["converted"] == {"markers": 0, "units": 1, "quote": 1, "points": 1, "free": 0, "stones": 1, "sections": 1,
                                    "patches": 1, "texture_patches": 1, "region": 1, "colour_chart": 1}
     kept = {k["what"]: k["names"] for k in result["kept"]}
     assert kept == {"versions": ["dem: DEM del 30/09"], "elevations": ["Prospetto nord"],
@@ -964,7 +964,7 @@ def test_set_survey_crs_says_when_heights_pass_as_they_are(tmp_path):
     assert out["lift"] == pytest.approx([0.0, 0.0], abs=1e-4)  # the model kept its heights: so did the drawings
     assert out["quote"] == pytest.approx(99.5, abs=1e-6) and out["point"] == pytest.approx(98.25, abs=1e-6)
     assert out["unit"][0] is True and out["unit"][1] == pytest.approx([99.0, 99.2, 99.4], abs=1e-6)
-    assert out["converted"] == {"markers": 1, "units": 1, "quote": 1, "points": 1, "stones": 0, "sections": 0,
+    assert out["converted"] == {"markers": 1, "units": 1, "quote": 1, "points": 1, "free": 0, "stones": 0, "sections": 0,
                                 "patches": 0, "texture_patches": 0, "region": 0, "colour_chart": 0}
 
 
@@ -1390,3 +1390,63 @@ def test_set_survey_crs_converts_the_georeference_of_a_chunk_without_photos(tmp_
     preview, applied, unchanged = out["huge"]
     assert "similarity" in preview and "in plan" in preview and "m across" in preview
     assert preview == applied and unchanged
+
+
+def test_survey_crs_moves_break_lines_and_free_drawings(tmp_path):
+    """The break lines of the plan and the free drawings follow the change of the system as the other drawings: a
+    vertex with a height on the model, one without a height at the height of the ground there (and without a height
+    again), a free drawing in 3D."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        write_grid(value=lambda lon, lat: 40.0 + 100.0 * (lon - 12.0))
+        ch = surveyed()
+        x0, y0, _ = utm.mean(axis=0)
+        ground = 50.0
+        dem = dem_mod.write_geotiff(ch.data_dir / "dem.tif", np.full((60, 60), ground, np.float32),
+                                    (x0 - 150.0, y0 + 150.0), 5.0, ch.crs, nodata=dem_mod.NODATA)
+        ch._set_product("dem", dem)
+        line = [[x0 + 1.0, y0 + 2.0, 60.0], [x0 + 5.0, y0 + 3.0, None]]
+        free = [[x0, y0, 55.0], [x0 + 2.0, y0 - 1.0, 57.0]]
+        ch.meta["drawings"] = {"lines": [{"id": "l", "kind": "breakline", "coords": copy.deepcopy(line)}],
+                               "free": [{"id": "f", "kind": "line", "xyz": copy.deepcopy(free)}]}
+        old = ch.transform.copy()
+        heights.set_survey_crs(ch, "EPSG:32633+3855")
+
+        def follows(xyz):
+            return ch.to_world(geometry.apply(np.linalg.inv(old), np.asarray(xyz, float).reshape(-1, 3)))
+
+        d = ch.meta["drawings"]
+        got = d["lines"][0]["coords"]
+        print(json.dumps({"tall": float(np.abs(np.array(got[0]) - follows(line[0])).max()),
+                          "flat": float(np.abs(np.array(got[1][:2]) - follows([*line[1][:2], ground])[0, :2]).max()),
+                          "none": got[1][2] is None,
+                          "free": float(np.abs(np.array(d["free"][0]["xyz"]) - follows(free)).max()),
+                          "moved": got[0] != line[0]}))
+    '''))
+    assert out["moved"] and out["none"]
+    assert out["tall"] < 0.001 and out["flat"] < 0.001 and out["free"] < 0.001
+
+
+def test_survey_crs_carries_them(tmp_path):
+    """The free drawings go with the change of the system once (the mover of the drawings), and their basis takes the
+    new georeference: following the transform after it moves nothing more."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        from pyarchinit_photogrammetry.core import free_drawings as fd
+
+        write_grid(value=40.0)
+        ch = surveyed()
+        x0, y0, _ = utm.mean(axis=0)
+        free = [[x0, y0, 55.0], [x0 + 2.0, y0 - 1.0, 57.0]]
+        fd.add(ch, "line", free)
+        old = ch.transform.copy()
+        heights.set_survey_crs(ch, "EPSG:32633+3855")
+        want = ch.to_world(geometry.apply(np.linalg.inv(old), np.asarray(free, float)))
+        got = np.array(fd.features(ch)[0]["xyz"])
+        basis = ch.meta["drawings"]["free_basis"]
+        print(json.dumps({"free": float(np.abs(got - want).max()), "moved": bool(np.abs(got - free).max() > 1.0),
+                          "basis": bool(np.allclose(basis["transform"], ch.transform)),
+                          "again": fd.follow(ch) is None,
+                          "same": float(np.abs(np.array(fd.features(ch)[0]["xyz"]) - got).max()),
+                          "counted": heights.survey_crs_changes(ch, "EPSG:32633")["convert"]["free"]}))
+    '''))
+    assert out["moved"] and out["free"] < 0.001 and out["basis"] and out["again"] and out["same"] == 0.0
+    assert out["counted"] == 1  # said in the preview

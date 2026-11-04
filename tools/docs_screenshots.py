@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SIZE = (1400, 860)  # the size of the screenshots of the tutorial
+ORIENT_OUT = ROOT / "docs" / "img"  # the pictures of the orientation of a local system (docs/gui/processing.md)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,9 +90,9 @@ def _worker(args) -> int:
     def wanted(name: str) -> bool:
         return not only or name in only
 
-    def save(image, name: str) -> None:
+    def save(image, name: str, folder: Path | None = None) -> None:
         img = image.toImage() if hasattr(image, "toImage") else image
-        path = out / (f"{name}.png" if lang == "en" else f"{name}.{lang}.png")
+        path = (folder or out) / (f"{name}.png" if lang == "en" else f"{name}.{lang}.png")
         img.save(str(path), "PNG")
         _shrink(path, flat=not name.startswith("window"))
         print(f"  {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}  {img.width()}x{img.height()}")
@@ -457,10 +458,236 @@ def _worker(args) -> int:
         save(w.stack.grab(r.intersected(w.stack.rect())), "start-page")
         for d in docks:
             d.show()
+    # ---- Orienta il sistema locale: a clone of the demo made LOCAL and tilted, next to the demo, deleted after
+    if wanted("orient-dialog") or wanted("orient-preview"):
+        _orient_shots(w, args.demo, pump, lambda img, name: save(img, name, ORIENT_OUT), wanted)
+    # ---- free drawings in 3D: a clone of the demo with a few of them, deleted after
+    if wanted("free-3d") or wanted("free-plan") or wanted("free-form"):
+        _free_shots(w, args.demo, pump, lambda img, name: save(img, name, ORIENT_OUT), wanted)
+
     guard.stop()
     w.setWindowModified(False)
     w.close()
     return 0
+
+
+def _clone(demo: Path, name: str) -> Path:
+    """A copy of the demo project in ``demo/<name>`` (an APFS clone when the disk allows it). Returns its folder."""
+    import shutil
+
+    folder = demo / name
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir()
+    for part in ("scavo.ppg", "scavo.ppg.files", "scavo"):
+        source = demo / part
+        if subprocess.run(["cp", "-cRp", str(source), str(folder / part)], capture_output=True).returncode != 0:
+            if source.is_dir():
+                shutil.copytree(source, folder / part)
+            else:
+                shutil.copy2(source, folder / part)
+    return folder
+
+
+def _free_shots(w, demo: Path, pump, save, wanted) -> None:
+    """Free drawings on a clone of the demo: a line over the wall stub of the trench (its heights from the DEM every
+    2 cm, as *Drappeggia sul modello* puts vertices on the surface), the outline of the top of the wall in a layer
+    "Muri", a polygon on the floor and a point; then the 3D view, the plan with the Layer pane, the form of the
+    polygon. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import numpy as np
+    import rasterio
+
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+    from pyarchinit_photogrammetry.core.document import Document
+
+    folder = _clone(demo, "free_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        w.set_document(doc)
+        pump(1500)
+        ch = w.chunk
+        ox, oy = 2480000.0, 4500000.0  # the origin of the synthetic trench (testing.synthetic.make_scene)
+
+        def on_dem(xy):
+            with rasterio.open(ch.dem_path) as src:
+                return [[x, y, float(v[0])] for (x, y), v in zip(xy, src.sample([(x, y) for x, y in xy]))]
+
+        across = [(ox + 2.0, oy + y) for y in np.linspace(1.0, 1.8, 41)]
+        fd.add(ch, "line", on_dem(across), name="Sezione sul muro")
+        fd.set_layer(ch, "Muri", colour="#e53935")
+        top = [(ox + 1.72, oy + 1.32), (ox + 2.28, oy + 1.32), (ox + 2.28, oy + 1.48), (ox + 1.72, oy + 1.48)]
+        fd.add(ch, "polygon", on_dem(top), layer="Muri", name="USM 2", attributes={"materiale": "pietra"})
+        floor = [(ox + 1.2, oy + 1.0), (ox + 1.6, oy + 1.0), (ox + 1.6, oy + 1.25), (ox + 1.2, oy + 1.25)]
+        polygon = fd.add(ch, "polygon", on_dem(floor), name="Piano di calpestio")
+        fd.add(ch, "point", on_dem([(ox + 2.6, oy + 1.8)]), name="Moneta")
+        w._draw_free()
+        pump(500)
+        if wanted("free-3d"):
+            from PySide6.QtWidgets import QDockWidget
+
+            docks = [d for d in w.findChildren(QDockWidget) if d.isVisible()]
+            for d in docks:
+                d.hide()
+            w._show_model("model_textured")
+            w.model_view.cb_cams.setChecked(False)
+            w.model_view.set_trackball_mode("never")
+            w._draw_free_3d()
+            pump(800)
+            from PySide6.QtCore import Qt
+
+            for _ in range(4):  # closer: the drawings in the trench fill the view
+                w.model_view.canvas.view_key(Qt.Key.Key_Plus)
+            pump(1500)
+            save(w.stack.grab(), "free-3d")
+            w.model_view.set_trackball_mode("auto")
+            w.model_view.cb_cams.setChecked(True)
+            for d in docks:
+                d.show()
+        if wanted("free-plan"):
+            w._show_raster("ortho")
+            pump(800)
+            w._show_pane(w.left_tabs, w.layers_pane)
+            from PySide6.QtWidgets import QDockWidget
+
+            layers_dock = next(d for d in w.findChildren(QDockWidget) if d.isAncestorOf(w.layers_pane))
+            others = [d for d in w.findChildren(QDockWidget) if d.isVisible() and d is not layers_dock]
+            for d in others:  # the Layer pane beside the plan, nothing else (the panes below show folders)
+                d.hide()
+            view = w.ortho_view
+            rect = None
+            for name in [n for n in view.layer_order if n.startswith("Disegni 3D: ")]:
+                r = view.layer_rect(name)
+                rect = r if rect is None else rect.united(r)
+            pump(800)  # the view laid out beside the pane first, then the zoom on the drawings
+            view.zoom_to(rect, margin=0.4)
+            pump(1500)
+            save(w.grab(), "free-plan")
+            for d in others:
+                d.show()
+        if wanted("free-form"):
+            from pyarchinit_photogrammetry.gui.free_drawing_dialog import FreeDrawingDialog
+
+            dlg = FreeDrawingDialog(w, ch, polygon)
+            dlg.show()
+            pump(800)
+            save(dlg.grab(), "free-form")
+            dlg.close()
+        w.setWindowModified(False)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _orient_clone(demo: Path) -> Path:
+    """A copy of the demo project in ``demo/orient_clone`` (an APFS clone when the disk allows it), made LOCAL and
+    tilted by 12 degrees as a survey without coordinates comes out of the alignment. Returns the project file."""
+    import shutil
+
+    import numpy as np
+
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+    from pyarchinit_photogrammetry.core.camera import Reference
+    from pyarchinit_photogrammetry.core.document import Document
+
+    folder = demo / "orient_clone"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir()
+    for name in ("scavo.ppg", "scavo.ppg.files", "scavo"):
+        source = demo / name
+        if subprocess.run(["cp", "-cRp", str(source), str(folder / name)], capture_output=True).returncode != 0:
+            if source.is_dir():
+                shutil.copytree(source, folder / name)
+            else:
+                shutil.copy2(source, folder / name)
+    doc = Document.open(folder / "scavo.ppg")
+    ch = doc.chunk
+    for m in ch.markers:  # no coordinates: the markers stay where the photos put them
+        m.reference = Reference()
+    for c in ch.cameras:
+        c.reference = Reference()
+    ch.crs = crs_mod.LOCAL
+    t0 = np.array(ch.transform, float)
+    t0[:3, 3] -= np.floor(t0[:3, 3] / 1000.0) * 1000.0
+    t0[2, 3] -= np.floor(t0[2, 3] / 100.0) * 100.0
+
+    def turn(axis, deg):
+        a = np.asarray(axis, float) / np.linalg.norm(axis)
+        t = np.radians(deg)
+        k = np.array([[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]])
+        return np.eye(3) + np.sin(t) * k + (1 - np.cos(t)) * k @ k
+
+    bad = np.eye(4)  # 12 degrees of tilt towards 40, turned by 35 about z, and a few metres off
+    bad[:3, :3] = turn([np.cos(np.radians(40)), -np.sin(np.radians(40)), 0.0], 12.0) @ turn([0, 0, 1], 35.0)
+    bad[:3, 3] = (3.0, -2.0, 1.5)
+    ch.transform = bad @ t0
+    doc.save()
+    return folder / "scavo.ppg"
+
+
+def _orient_shots(w, demo: Path, pump, save, wanted) -> None:
+    """*Orienta il sistema locale* on the tilted clone: the dialog with A, B and C taken on the floor of the trench and
+    its summary, then the 3D view with the axes it previews. The clone is deleted after."""
+    import shutil
+
+    import numpy as np
+
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    project = _orient_clone(demo)
+    try:
+        doc = Document.open(project)
+        w.set_document(doc)
+        pump(1500)
+        ch = w.chunk
+        xyz = ch.to_world(read_mesh(ch.product_path("model")).xyz)
+        centre = xyz.mean(axis=0)
+        _u, _s, vt = np.linalg.svd(xyz - centre, full_matrices=False)
+        reach = np.percentile(np.abs((xyz - centre) @ vt[:2].T), 80, axis=0)
+
+        def on_model(p):  # the vertex of the model nearest to p
+            return xyz[int(np.argmin(np.linalg.norm(xyz - p, axis=1)))]
+
+        a = on_model(centre)
+        b = on_model(centre + reach[0] * vt[0])
+        c = on_model(centre + reach[1] * vt[1])
+        w._show_model("model_textured")
+        pump(800)
+        w.orient_local()
+        pump(600)
+        dlg = w._orient_dialog
+        for label, p in (("A", a), ("B", b), ("C", c)):
+            dlg.set_point(label, p)
+        pump(800)
+        if wanted("orient-dialog"):
+            dlg.adjustSize()
+            pump(300)
+            save(dlg.grab(), "orient-dialog")
+        if wanted("orient-preview"):  # the view alone and large, without the cameras: the axes in sight
+            from PySide6.QtWidgets import QDockWidget
+
+            docks = [d for d in w.findChildren(QDockWidget) if d.isVisible()]
+            for d in docks:
+                d.hide()
+            dlg.move(w.geometry().right() + 40, w.geometry().top())  # out of the picture
+            w.model_view.cb_cams.setChecked(False)
+            pump(600)
+            from PySide6.QtCore import Qt
+
+            w.model_view.set_trackball_mode("never")  # the sphere would hide the axes
+            for _ in range(3):  # closer: the trench and the axes fill the view
+                w.model_view.canvas.view_key(Qt.Key.Key_Plus)
+            pump(1500)
+            save(w.stack.grab(), "orient-preview")
+            w.model_view.set_trackball_mode("auto")
+            w.model_view.cb_cams.setChecked(True)
+            for d in docks:
+                d.show()
+        w._close_orient_dialog()
+        pump(300)
+        w.setWindowModified(False)
+    finally:
+        shutil.rmtree(project.parent, ignore_errors=True)
 
 
 def _pdf_page(path: Path, words: tuple[str, ...], QSize):

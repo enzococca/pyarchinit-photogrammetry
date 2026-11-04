@@ -25,7 +25,9 @@ log = logging.getLogger(__name__)
 LIMIT = 1500  # characters of the block in the system prompt
 MAX_VERSIONS = 5  # version names listed for a product of the active chunk
 MAX_RASTERS = 15  # raster names listed for the active chunk
-DRAWINGS = ("units", "quote", "points", "lines", "stones")
+MAX_STALE = 6  # names of the products to build again listed for a chunk
+DRAWINGS = ("units", "quote", "points", "lines", "stones", "free")
+FREE_KINDS = ("line", "polygon", "point")
 
 _WORDS = {
     "it": {"title": "## Il progetto adesso", "project": "Progetto", "site": "sito", "active": "chunk attivo",
@@ -36,7 +38,10 @@ _WORDS = {
            "more": "... ({0} altri chunk)", "view2d": "Vista 2D", "view3d": "Vista 3D", "version": "versione",
            "elevation": "prospetto", "nothing": "niente", "selection": "Selezione", "polygon": "poligono di {0} m²",
            "no_polygon": "nessun poligono", "selected": "{0} foto selezionate", "filtered": "filtro delle foto: {0} foto",
-           "units": "US", "quote": "quote", "points": "punti di misura", "lines": "linee", "stones": "pietre"},
+           "units": "US", "quote": "quote", "points": "punti di misura", "lines": "linee", "stones": "pietre",
+           "oriented": "orientato a mano il {0}", "stale": "da rifare: {0}", "free": "disegni 3D",
+           "free_layers": "layer dei disegni 3D", "free_line": "linee", "free_polygon": "poligoni",
+           "free_point": "punti"},
     "en": {"title": "## The project now", "project": "Project", "site": "site", "active": "active chunk",
            "none_active": "no active chunk", "no_chunks": "the project has no chunk",
            "photos": "photos", "aligned": "aligned", "products": "products", "no_products": "no product",
@@ -46,7 +51,9 @@ _WORDS = {
            "elevation": "elevation", "nothing": "nothing", "selection": "Selection", "polygon": "polygon of {0} m²",
            "no_polygon": "no polygon", "selected": "{0} photos selected", "filtered": "photo filter: {0} photos",
            "units": "units", "quote": "spot heights", "points": "measuring points", "lines": "lines",
-           "stones": "stones"},
+           "stones": "stones", "oriented": "oriented by hand on {0}", "stale": "to rebuild: {0}", "free": "3D drawings",
+           "free_layers": "3D drawing layers", "free_line": "lines", "free_polygon": "polygons",
+           "free_point": "points"},
 }
 
 
@@ -126,7 +133,28 @@ def _drawings(chunk) -> dict:
     stones = chunk.meta.get("stones") or {}
     return {"units": len(d.get("units") or []), "quote": len(d.get("quote") or []),
             "points": len(d.get("points") or []), "lines": len(d.get("lines") or []),
-            "stones": sum(len(v or []) for v in stones.values()) if isinstance(stones, dict) else 0}
+            "stones": sum(len(v or []) for v in stones.values()) if isinstance(stones, dict) else 0,
+            "free": _free_count(chunk)}
+
+
+def _free_count(chunk) -> int:
+    from ..core import free_drawings
+
+    return len(free_drawings.features(chunk))
+
+
+def _free_layers(chunk) -> list[dict]:
+    """The layers of the free drawings in 3D that hold some, with their counts per kind (names only: no
+    coordinates)."""
+    from ..core import free_drawings
+
+    feats = free_drawings.features(chunk)
+    out = []
+    for lay in free_drawings.layers(chunk):
+        mine = [f for f in feats if f["layer"] == lay["name"]]
+        if mine:
+            out.append({"name": lay["name"], **{k: sum(1 for f in mine if f["kind"] == k) for k in FREE_KINDS}})
+    return out
 
 
 def _window_drawings(window) -> dict | None:
@@ -146,9 +174,27 @@ def _chunk(chunk, live: dict | None = None, rasters: list | None = None) -> dict
             "enabled": bool(chunk.enabled), "aligned": sum(1 for c in cameras if c.aligned),
             "products": _safe(lambda: _products(chunk), {}),
             "rasters": list(rasters or []),
-            "drawings": live if live is not None else _safe(lambda: _drawings(chunk), {}),
+            "drawings": ({**live, "free": _safe(lambda: _free_count(chunk), 0)} if live is not None
+                         else _safe(lambda: _drawings(chunk), {})),
+            "free_layers": _safe(lambda: _free_layers(chunk), []),
             "elevations": [{"id": str(e.get("id")), "name": str(e.get("name") or e.get("id")),
-                            "kind": e.get("kind")} for e in _elevations(chunk)]}
+                            "kind": e.get("kind")} for e in _elevations(chunk)],
+            "oriented": _safe(lambda: _oriented(chunk), None),
+            "stale": _safe(lambda: _stale(chunk), [])}
+
+
+def _oriented(chunk) -> str | None:
+    """The day (``YYYY-MM-DD``) the local system of ``chunk`` was oriented by hand, None if it never was."""
+    made = (chunk.meta.get("orientation") or {}).get("made")
+    return str(made)[:10] if made else None
+
+
+def _stale(chunk) -> list[str]:
+    """The names of the products made in an earlier system of the chunk, to be built again (in the order of a
+    rebuild, :func:`.core.stamps.stale_products`)."""
+    from ..core import stamps
+
+    return [str(item.get("name") or item.get("product")) for item in stamps.stale_products(chunk)]
 
 
 def _view(window, chunk, catalog: list) -> dict:
@@ -273,11 +319,21 @@ def _chunk_line(c: dict, lang: str, full: bool) -> str:
         drawings = [f"{n} {w[k]}" for k, n in (c.get("drawings") or {}).items() if k in DRAWINGS and n]
         if drawings:
             bits.append(f"{w['drawings']}: {', '.join(drawings)}")
+        free = []
+        for lay in c.get("free_layers") or []:
+            counts = [f"{lay.get(k)} {w['free_' + k]}" for k in FREE_KINDS if lay.get(k)]
+            free.append(f"{_quoted(lay.get('name'))}: {', '.join(counts)}")
+        if free:
+            bits.append(f"{w['free_layers']}: {_cap(free, MAX_VERSIONS)}")
         if c.get("elevations"):
             names = [f"{_quoted(e.get('name'))} ({e.get('kind')})" for e in c["elevations"][:MAX_VERSIONS]]
             if len(c["elevations"]) > MAX_VERSIONS:
                 names.append(f"+{len(c['elevations']) - MAX_VERSIONS}")
             bits.append(f"{w['elevations']}: {', '.join(names)}")
+    if c.get("oriented"):
+        bits.append(w["oriented"].format(c["oriented"]))
+    if c.get("stale"):
+        bits.append(w["stale"].format(_cap(list(c["stale"]), MAX_STALE)))
     if c.get("enabled") is False:
         bits.append(w["disabled"])
     return f"{head}: {'; '.join(bits)}"

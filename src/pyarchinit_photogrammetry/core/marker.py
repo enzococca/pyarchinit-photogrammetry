@@ -45,14 +45,18 @@ class Marker:
     position: np.ndarray | None = None
     reference: Reference = field(default_factory=Reference)
     checkpoint: bool = False  # used only to assess accuracy, not for georeferencing
+    orientation: bool = False  # one of the three markers that keep the orientation of a local system
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "key": self.key, "label": self.label, "code": self.code, "target_type": self.target_type,
             "projections": {str(k): p.to_list() for k, p in self.projections.items()},
             "position": None if self.position is None else np.asarray(self.position).tolist(),
             "reference": self.reference.to_dict(), "checkpoint": self.checkpoint,
         }
+        if self.orientation:  # written only when set: the files of the markers before 1.7.2 unchanged
+            d["orientation"] = True
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Marker":
@@ -62,6 +66,7 @@ class Marker:
             projections={int(k): Projection(*v) for k, v in d.get("projections", {}).items()},
             position=None if pos is None else np.asarray(pos, float),
             reference=Reference.from_dict(d.get("reference")), checkpoint=d.get("checkpoint", False),
+            orientation=bool(d.get("orientation", False)),
         )
 
 

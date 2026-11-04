@@ -54,6 +54,7 @@ appear.
 | **Tables (Excel)...** | every table of the chunk in one Excel file, a sheet each ([details](exports.md#excel-tables)) |
 | **PDF report...** | the processing report to print or hand over ([details](exports.md#pdf-report)) |
 | **QField package (tablet in the trench)...** | orthophoto, DEM, units and spot heights to draw on the tablet ([QField](archaeology.md#qfield-in-the-trench)) |
+| **3D drawings...** | the free drawings as DXF 3D, GeoPackage with Z, GeoJSON or CSV of the vertices ([3D drawings](exports.md#3d-drawings)) |
 | **Cropped by a polygon or a box...** | DEM, orthophoto, model and cloud cut to an area ([Crop](processing.md#crop)) |
 
 !!! note
@@ -69,6 +70,7 @@ appear.
 | --- | --- |
 | **Laser scans (E57, PTX)...** | one or more scans as the dense cloud of a new chunk |
 | **3D model (OBJ, PLY, GLB)...** | a mesh made with another program as the model of a chunk; the previous one stays among the versions |
+| **3D drawings...** | lines, polygons and points of a GeoPackage, GeoJSON or DXF as free drawings; heights from the DEM when the file has none ([3D drawings](exports.md#3d-drawings)) |
 | **Metashape project (.psx)...** | cameras, markers, scale bars and products of Metashape ([integrations](../integrations.md)) |
 | **Model and texture from the Metashape project (reimport)...** | reads the model of the `.psx` again with colours, confidence and texture |
 | **WebODM / ODM project (folder or all.zip)...** | cameras, GCPs and products of WebODM |
@@ -112,6 +114,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Relink photos (another folder)...** | finds the photos with the same names in another folder (moved, on another disk, "online only" on Dropbox) |
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds |
+| **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
+| **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order |
 | **Merge chunks...** | a new chunk with the photos, markers, points, clouds and models of chunks already aligned |
 | **Colours from the photos (scans)...** | colours a laser scan with the aligned photos of another chunk |
 

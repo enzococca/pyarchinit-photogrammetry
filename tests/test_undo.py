@@ -226,3 +226,53 @@ def test_versions_of_a_saved_script_are_kept_and_missing_ones_pruned(window, cap
         again = ppg.Document.open(w.doc.path)
     assert all(e["id"] != vid for e in versions.versions(again.chunk, "dem"))
     assert any(vid in m for m in caplog.messages)
+
+
+def test_undo_part_free(window):
+    """The free drawings are a part of the snapshots, "Disegni 3D": added, then undone and redone."""
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+
+    w, app = window
+    ch = w.chunk
+    w._dirty(True)
+    rec = fd.add(ch, "line", [[2480001.0, 4500001.0, 99.0], [2480002.0, 4500001.5, 99.2]], layer="Muri")
+    fd.set_layer(ch, "Muri", colour="#00ff00")
+    w._dirty(True)
+    assert w.a_undo.text() == "Annulla: Disegni 3D"
+    w.undo()
+    assert fd.features(ch) == [] and [x["name"] for x in fd.layers(ch)] == [fd.DEFAULT_LAYER]
+    w.redo()
+    assert [f["id"] for f in fd.features(ch)] == [rec["id"]] and fd.layers(ch)[1]["colour"] == "#00ff00"
+    w._store_drawings()  # the window writes its drawings into the chunk: the free ones stay
+    assert [f["id"] for f in fd.features(ch)] == [rec["id"]]
+
+
+def test_undo_across_a_follow_keeps_them_on_the_model(window):
+    """Edited, then the transform changes (the drawings follow it), then the edit undone: the drawing comes back with
+    the basis it was written in and follows the transform of now - on the model, not where the old numbers are."""
+    from pyarchinit_photogrammetry.core import free_drawings as fd
+
+    w, app = window
+    ch = w.chunk
+    w._dirty(True)
+    xyz = [[2480001.0, 4500001.0, 99.0], [2480002.0, 4500001.5, 99.2]]
+    rec = fd.add(ch, "line", xyz)
+    w._dirty(True)
+    inside = geometry_internal(ch.transform, xyz)
+    fd.update(ch, rec["id"], name="asse")
+    w._dirty(True)
+    shift = np.eye(4)
+    shift[:3, 3] = [0.05, -0.04, 0.03]  # the georeference fitted again (7.7 cm)
+    ch.transform = shift @ ch.transform
+    fd.follow(ch)
+    w.history.rebase()  # processing, not an edit
+    w.undo()  # the name back
+    got = fd.features(ch)[0]
+    assert got["name"] != "asse"
+    assert np.abs(geometry_internal(ch.transform, got["xyz"]) - inside).max() < 1e-6
+
+
+def geometry_internal(transform, xyz):
+    from pyarchinit_photogrammetry.core import geometry as geo
+
+    return geo.apply(np.linalg.inv(np.asarray(transform, float)), np.asarray(xyz, float).reshape(-1, 3))

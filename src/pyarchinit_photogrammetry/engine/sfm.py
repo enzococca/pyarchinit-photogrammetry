@@ -1991,12 +1991,12 @@ def _drop_stale_points(rec, max_px: float, skip=()) -> int:
 
 
 def _control_markers(chunk: Chunk) -> dict:
-    """Markers with an enabled reference (not check points) -> their reference in the internal frame."""
-    out = {}
-    for m in chunk.markers:
-        if not m.checkpoint and m.reference.enabled and m.reference.location:
-            out[m.key] = chunk.to_internal(np.asarray([m.reference.location], float))[0]
-    return out
+    """Markers with an enabled reference (not check points, not orientation markers set aside) -> their reference
+    in the internal frame."""
+    from ..markers import gcp
+
+    return {m.key: chunk.to_internal(np.asarray([m.reference.location], float))[0]
+            for m in gcp.control_markers(chunk)}
 
 
 def _control_points(chunk: Chunk, rec, copies: int) -> list[int]:
@@ -2146,7 +2146,7 @@ def fixed_points_hold(chunk: Chunk, use_markers: bool = True) -> bool:
 
     if not use_markers:
         return False
-    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    controls = gcp.control_markers(chunk)
     return len(controls) >= 3 or len(gcp.control_scalebars(chunk)) >= 2
 
 
@@ -2417,7 +2417,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
 
     rec = load_reconstruction(chunk)
     drop_missing_points(rec)
-    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    controls = gcp.control_markers(chunk)
     bars = gcp.control_scalebars(chunk) if use_markers else []
     referenced = (use_markers and (len(controls) >= 3 or bars)) or gnss != "off"
     if referenced:
@@ -2540,6 +2540,11 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     finally:
         if kept is not None:
             shutil.rmtree(kept["model"], ignore_errors=True)
+        # the georeference fitted again on the adjusted block (or put back by the safety net): the free drawings stay
+        # on the model - once, by the whole change of the transform
+        from ..core import free_drawings
+
+        free_drawings.follow(chunk)
     return err
 
 
@@ -2564,7 +2569,7 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
             out[f"scalebar_{kind}"] = float(np.sqrt(np.mean(np.square(e)))) if e else None
         return out
 
-    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    controls = gcp.control_markers(chunk)
     bars = gcp.control_scalebars(chunk) if use_markers else []
     with_gcps = use_markers and len(controls) >= 3
     constrained = fixed_points_hold(chunk, use_markers)  # fewer control points do not place the chunk

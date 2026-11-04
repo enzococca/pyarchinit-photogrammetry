@@ -558,7 +558,7 @@ EUROPE = (
 )
 NOT_EUROPE = (((19.5, 54.43), (22.8, 54.36), (22.95, 54.75), (21.4, 55.27), (20.95, 55.27), (19.6, 54.95)),)  # Kaliningrad
 # what set_survey_crs converts into the new system, and what it lists as kept in the old one
-CONVERTED = ("markers", "units", "quote", "points", "stones", "sections", "patches", "texture_patches", "region",
+CONVERTED = ("markers", "units", "quote", "points", "free", "stones", "sections", "patches", "texture_patches", "region",
              "colour_chart")
 KEPT = ("versions", "elevations", "multispectral", "thermal", "satellite", "relief", "calculator", "proxies", "stones",
         "sections", "section_drawings", "drawn")
@@ -914,6 +914,7 @@ def _counts(chunk, georeferenced: bool, moves: bool, sections: list | None, fate
     counts["units"] = len(_units(drawings))
     counts["quote"] = len(_rows(drawings, "quote"))
     counts["points"] = len(_rows(drawings, "points"))
+    counts["free"] = sum(1 for f in drawings.get("free") or [] if isinstance(f, dict) and f.get("xyz"))
     counts["stones"] = len((meta.get("stones") or {}).get(_ortho_name(chunk)) or [])
     counts["sections"] = len(sections) if fate == "convert" and sections else 0
     counts["patches"] = len((meta.get("orthomosaic") or {}).get("patches") or [])
@@ -959,10 +960,42 @@ def _kept(chunk, georeferenced: bool, sections: list | None, fate: str) -> list[
     return kept
 
 
-def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None) -> tuple[dict, list | None]:
+def _move_lines(lines: list[dict], mover) -> None:
+    """Break lines (:mod:`..archaeo.breaklines` records, ``coords`` ``[x, y, z or None]``) carried by ``mover``, in
+    place: a vertex with a height as it is, one without at the height of the ground there - and without a height
+    again after (the TIN reads it from the DEM)."""
+    for line in lines:
+        coords = line.get("coords") or []
+        tall = [i for i, c in enumerate(coords) if len(c) > 2 and _finite(c[2])]
+        flat = [i for i, c in enumerate(coords) if not (len(c) > 2 and _finite(c[2]))]
+        if tall:
+            xyz = mover.tall([[float(coords[i][0]), float(coords[i][1]), float(coords[i][2])] for i in tall])
+            for i, (x, y, z) in zip(tall, xyz.tolist()):
+                coords[i] = [x, y, z]
+        if flat:
+            for i, (x, y) in zip(flat, mover.flat([[float(coords[i][0]), float(coords[i][1])] for i in flat]).tolist()):
+                coords[i] = [x, y, None]
+
+
+def _move_free(features: list[dict], mover) -> None:
+    """Free drawings (``{"xyz": [[x, y, z], ...]}``, three-dimensional, on the model) carried by ``mover``, in place."""
+    for feature in features:
+        xyz = feature.get("xyz")
+        if xyz:
+            feature["xyz"] = mover.tall(np.asarray(xyz, float).reshape(-1, 3)).tolist()
+
+
+PLAN_STONES_LEGACY = "elevation.tif"  # the key of the stones of every elevation before 1.7.0: not of the plan
+
+
+def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None,
+           plan_stones: bool = False, free: bool = True) -> tuple[dict, list | None]:
     """What was drawn on the products of ``chunk``, carried by ``mover`` aside (nothing of the chunk changes; a
     conversion that cannot be made raises here): the new values of the keys of ``chunk.meta`` and the new sections of
-    the project (None to leave them)."""
+    the project (None to leave them). The stones of the orthomosaic go with them; ``plan_stones``: those of every
+    raster of the plan (a motion of the local system: the rasters are built again where the model goes). ``free``:
+    the free drawings in 3D carried too, their basis (:mod:`..core.free_drawings`) the transform of the chunk now -
+    False: left to the caller (:func:`..engine.orient.move_stores` moves them by the motion itself)."""
     import copy
 
     meta, values = chunk.meta, {}
@@ -976,11 +1009,19 @@ def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None) -> t
             unit["wkt"] = _wkt(unit["wkt"], mover)
         _move_rows(_rows(drawings, "quote"), "quota_q", mover)
         _move_rows(_rows(drawings, "points"), "z", mover)
+        _move_lines([r for r in drawings.get("lines") or [] if isinstance(r, dict)], mover)
+        if free and any(isinstance(f, dict) for f in drawings.get("free") or []):
+            _move_free([f for f in drawings.get("free") or [] if isinstance(f, dict)], mover)
+            drawings["free_basis"] = {"alignment": meta.get("alignment_id"),
+                                      "transform": np.asarray(chunk.transform, float).tolist()}
         values["drawings"] = drawings
     ortho = _ortho_name(chunk)
-    if (meta.get("stones") or {}).get(ortho):
+    keys = [k for k, rows in (meta.get("stones") or {}).items()
+            if rows and (k == ortho or (plan_stones and k != PLAN_STONES_LEGACY))]
+    if keys:
         stones = copy.deepcopy(meta["stones"])
-        stones[ortho] = [_wkt(w, mover) for w in stones[ortho]]
+        for key in keys:
+            stones[key] = [_wkt(w, mover) for w in stones[key]]
         values["stones"] = stones
     for key, lists in (("orthomosaic", ("patches", "applied_patches")), ("texture", ("patches",))):
         if any((meta.get(key) or {}).get(name) for name in lists):

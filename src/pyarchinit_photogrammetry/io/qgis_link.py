@@ -479,6 +479,61 @@ class LiveLink:
             "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
             "table_name", (ELEVATION_PREFIX + "*",))]
 
+    def write_free(self, chunk) -> list[str]:
+        """The free drawings in 3D of ``chunk`` (:mod:`..core.free_drawings`) as the three tables ``disegni_3d_*`` of the
+        GeoPackage (:data:`.free_drawings.TABLES`, with Z, in the chunk's system). One-way: what QGIS or RustGIS edit
+        there does not come back; a chunk without free drawings has none of those tables. Nothing is written when they
+        did not change since the last write, nor before the window made the file. Returns the tables written."""
+        from ..core import free_drawings as fd
+        from . import free_drawings as fio
+        from . import gpkg
+
+        sig = hash((str(self.crs), json.dumps(fd.features(chunk), sort_keys=True, default=str)))
+        if not gpkg.is_geopackage(self.path) or sig == self._signatures.get(fio.FREE_PREFIX):
+            return []
+        con = self._connection()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            srs = gpkg.srs_of(self.crs)
+            gpkg.create(con, srs)
+            if fd.features(chunk):
+                written = fio.write_tables(con, chunk, srs[0])
+            else:  # none (left): no tables, so that QGIS and RustGIS have no empty layers of them
+                written = []
+                for (table,) in con.execute("SELECT table_name FROM gpkg_contents WHERE table_name GLOB ?",
+                                            (fio.FREE_PREFIX + "*",)).fetchall():
+                    gpkg.drop_table(con, table)
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        self._signatures[fio.FREE_PREFIX] = sig
+        return written
+
+    def free_tables(self) -> list[tuple[str, str]]:
+        """``(table, geometry type)`` of the tables of the free drawings the GeoPackage holds (:meth:`write_free`)."""
+        from . import gpkg
+        from .free_drawings import FREE_PREFIX
+
+        if not gpkg.is_geopackage(self.path):
+            return []
+        con = self._connection()
+        return [(r[0], r[1]) for r in con.execute(
+            "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
+            "table_name", (FREE_PREFIX + "*",))]
+
+    def free_vectors(self) -> list[dict]:
+        """The layers of the free drawings for a QGIS project (``extra_vectors`` of :func:`build_project`): lines,
+        polygons, points, labelled by their name."""
+        from .free_drawings import TABLES, TITLES
+
+        have = {t for t, _g in self.free_tables()}
+        colours = {"line": "#ffb000", "polygon": "#ff8c00", "point": "#ffd000"}
+        return [{"name": TITLES[kind], "path": str(self.path), "table": table, "geometry": gtype.rstrip("Z"),
+                 "color": colours[kind], "label": "name"}
+                for kind, (table, gtype) in TABLES.items() if table in have]
+
     def _wanted(self, table: str, feats: list, cols: list[str], types: dict) -> list[_Wanted]:
         import shapely
 
@@ -1028,7 +1083,9 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
                         "label": label, "label_color": label_color})
     for v in extra_vectors or []:
         if v.get("path") and Path(v["path"]).exists():
-            vectors.append({"label": "", "label_color": "#202020", **v})
+            # the style by the 2D type: the 3D tables of the free drawings (LINESTRINGZ...) are drawn as the others
+            vectors.append({"label": "", "label_color": "#202020", **v,
+                            "geometry": str(v.get("geometry") or "").upper().removesuffix("Z")})
     cfg = {"project": str(project_path), "crs": project_crs(crs),
            "vectors": vectors, "rasters": [r for r in rasters if r.get("path") and Path(r["path"]).exists()],
            "title": title, "refresh_ms": refresh_ms}

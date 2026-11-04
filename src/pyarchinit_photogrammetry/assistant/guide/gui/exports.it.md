@@ -77,6 +77,17 @@ dall'Extended Matrix.
 
 ## Importazioni
 
+### Disegni 3D
+
+*File > Esporta > Disegni 3D...* scrive i [disegni liberi](drawing.md#disegni-liberi-2d-e-3d) del chunk attivo (tutti, o
+un layer) secondo l'estensione del file: **DXF** (polilinee 3D e punti, un layer DXF per layer, nome e attributi
+conservati nei dati degli elementi), **GeoPackage** con Z (tabelle `disegni_3d_linee`, `disegni_3d_poligoni`,
+`disegni_3d_punti`, gli attributi come colonne e come JSON), **GeoJSON** (con il sistema del chunk quando ha un codice
+EPSG) o **CSV** dei vertici. *File > Importa > Disegni 3D...* legge un GeoPackage, un GeoJSON o un DXF in un layer
+scelto, o nella colonna `layer` del file, o in un layer con il nome del file: un elemento senza quote - anche un disegno
+CAD piatto - le prende dal DEM; i buchi dei poligoni restano fuori e vengono contati (un disegno libero ha un solo
+contorno); un'importazione è un passo di *Modifica > Annulla*.
+
 ### Modelli 3D di altri programmi
 
 *File > Importa > Modello 3D (OBJ, PLY, GLB)*: una mesh fatta altrove (OBJ con il suo MTL e le texture, PLY con colori e

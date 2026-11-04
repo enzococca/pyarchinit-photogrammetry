@@ -54,6 +54,7 @@ nell'ordine in cui compaiono.
 | **Tabelle (Excel)...** | tutte le tabelle del chunk in un file Excel, un foglio ciascuna ([dettagli](exports.md#tabelle-excel)) |
 | **Rapporto PDF...** | il rapporto di elaborazione da stampare o consegnare ([dettagli](exports.md#rapporto-pdf)) |
 | **Pacchetto QField (tablet in trincea)...** | ortofoto, DEM, unità e quote per disegnare sul tablet ([QField](archaeology.md#qfield-in-trincea)) |
+| **Disegni 3D...** | i disegni liberi in DXF 3D, GeoPackage con Z, GeoJSON o CSV dei vertici ([Disegni 3D](exports.md#disegni-3d)) |
 | **Ritagliati con un poligono o un riquadro...** | DEM, ortofoto, modello e nuvola tagliati su un'area ([Ritaglio](processing.md#ritaglio)) |
 
 !!! note
@@ -69,6 +70,7 @@ nell'ordine in cui compaiono.
 | --- | --- |
 | **Scansioni laser (E57, PTX)...** | una o più scansioni come nuvola densa di un nuovo chunk |
 | **Modello 3D (OBJ, PLY, GLB)...** | una mesh fatta con un altro programma come modello di un chunk; quello di prima resta tra le versioni |
+| **Disegni 3D...** | linee, poligoni e punti di un GeoPackage, GeoJSON o DXF come disegni liberi; quote dal DEM quando il file non le ha ([Disegni 3D](exports.md#disegni-3d)) |
 | **Progetto Metashape (.psx)...** | camere, marker, barre di scala e prodotti di Metashape ([integrazioni](../integrations.md)) |
 | **Modello e texture dal progetto Metashape (reimporta)...** | rilegge dal `.psx` il modello con colori, confidenza e texture |
 | **Progetto WebODM / ODM (cartella o all.zip)...** | camere, GCP e prodotti di WebODM |
@@ -112,6 +114,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Ricollega foto (altra cartella)...** | ritrova le foto con lo stesso nome in un'altra cartella (spostata, su un altro disco, «solo online» su Dropbox) |
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
+| **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
+| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine |
 | **Unisci chunk...** | un nuovo chunk con foto, marker, punti, nuvole e modelli di chunk già allineati |
 | **Colori dalle foto (scansioni)...** | colora una scansione laser con le foto allineate di un altro chunk |
 

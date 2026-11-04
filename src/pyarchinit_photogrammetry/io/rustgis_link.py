@@ -1856,6 +1856,10 @@ class RustGisLink:
         self.elevation_layers: dict[str, int] = {}
         self._elevation_print: str | None = None
         self._elevation_group = None
+        # the free drawings in 3D (``disegni_3d_*``, one-way), as the elevations' (:meth:`refresh_free`)
+        self.free_layers: dict[str, int] = {}
+        self._free_print: str | None = None
+        self._free_group = None
         # per table, (ppg_id, ppg_parte) -> (geometry, values) of the row as RustGIS last had it, after normalize():
         # compared only within TOLERANCE_M (matches_baseline)
         self.baseline: dict[str, dict[tuple, tuple]] = {}
@@ -2245,6 +2249,10 @@ class RustGisLink:
             self._group = group.get("group") if isinstance(group, dict) else None
             self._show(given)
             self.refresh_elevations()  # the drawings of the elevations, in 3D on the survey
+            try:
+                self.refresh_free()  # the free drawings in 3D
+            except (RustGisRefused, sqlite3.Error, ValueError) as exc:  # the plan's link goes on: at the next send
+                log.warning("RustGIS link: the free drawings in 3D were not given: %s", exc)
             self._clean_copies()
             self._remove_stale_tiles()
             self._status = _status_key(self._command("edit.status", {}))
@@ -2294,6 +2302,10 @@ class RustGisLink:
             self.refresh_elevations()
         except RustGisError as exc:  # the plan's drawings go all the same; the elevations at the next send
             log.warning("RustGIS link: the drawings of the elevations were not given again: %s", exc)
+        try:
+            self.refresh_free()
+        except RustGisError as exc:  # likewise the free drawings in 3D
+            log.warning("RustGIS link: the free drawings in 3D were not given again: %s", exc)
         try:
             fields, skipped = self._linked()
             for _ in range(RETRIES):
@@ -2522,6 +2534,7 @@ class RustGisLink:
                 server.close()
             self.layers, self.baseline, self.drawn, self.rasters, self.extras = {}, {}, {}, [], {}
             self.elevation_layers, self._elevation_print, self._elevation_group = {}, None, None
+            self.free_layers, self._free_print, self._free_group = {}, None, None
             self._group = self._status = self._pushed_at = self._seen = None
             self._owed, self._unsure, self._discard, self._digests = False, {}, {}, {}
             self.aside, self._partners, self._held, self.in_flight, self._waits = {}, {}, {}, {}, set()
@@ -2540,7 +2553,7 @@ class RustGisLink:
             return
         ids = [int(lid) for table, lid in self.layers.items() if self._ours(layers.get(lid), table)]
         ids += [int(r.layer) for r in self.rasters if r.layer and self._raster_ours(layers.get(r.layer), r)]
-        ids += [int(lid) for lid in self.elevation_layers.values()
+        ids += [int(lid) for lid in [*self.elevation_layers.values(), *self.free_layers.values()]
                 if _same_file((layers.get(str(lid)) or {}).get("source"), self.live.path)]
         lines = [_line("layer.remove", {"layer": ids})] if ids else []
         group = next((g for g in groups if self._group is not None and g.get("id") == self._group), None)
@@ -3070,7 +3083,7 @@ class RustGisLink:
     def _listing(self) -> tuple[dict, list]:
         """RustGIS's layers by id (as text) and its groups, from ``list_layers``."""
         listing = self.transport.call("list_layers", {})
-        layers = {str(l.get("id")): l for l in listing.get("layers") or [] if isinstance(l, dict)}
+        layers = {str(x.get("id")): x for x in listing.get("layers") or [] if isinstance(x, dict)}
         return layers, [g for g in listing.get("groups") or [] if isinstance(g, dict)]
 
     def _ours(self, layer, table: str) -> bool:
@@ -3200,15 +3213,62 @@ class RustGisLink:
             except RustGisRefused:  # removed there already
                 pass
             self._elevation_group = None
-        added = {}
-        for table, title in tables:
+        added = self.elevation_layers = {}  # each layer kept as soon as RustGIS added it: a refusal of the next one
+        for table, title in tables:  # leaves those already there tracked (and withdrawn at the stop)
             added[table] = _added_layer(self._command("layer.addData", self._loading(table, title)))
-        self.elevation_layers = added
         if added:
             group = self._command("group.add", {"name": f"{self.chunk_label} - prospetti",
                                                 "layers": [_ref(i) for i in added.values()]})
             self._elevation_group = group.get("group") if isinstance(group, dict) else None
         self._elevation_print = printed
+        return True
+
+    def _free_print_now(self) -> tuple[str, list[tuple[str, str]]]:
+        """A fingerprint of the tables of the free drawings in the live GeoPackage, and those tables with their titles."""
+        from .free_drawings import FREE_PREFIX, TABLES, TITLES
+
+        if not gpkg.is_geopackage(self.live.path):
+            return "", []
+        titles = {table: TITLES[kind] for kind, (table, _g) in TABLES.items()}
+        con = _read_only(self.live.path)
+        try:
+            tables = [r[0] for r in con.execute(
+                "SELECT table_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY table_name",
+                (FREE_PREFIX + "*",))]
+            if not tables:
+                return "", []
+            h = hashlib.sha1()
+            for table in tables:
+                h.update(table.encode() + _digest(con, table).encode())
+        finally:
+            con.close()
+        return h.hexdigest(), [(t, titles.get(t, t)) for t in tables]
+
+    def refresh_free(self) -> bool:
+        """The free drawings in 3D (the tables ``disegni_3d_*`` of the live GeoPackage) as layers of RustGIS, in a group
+        "<chunk> - disegni 3D": loaded again, whole, when the program wrote them again since (one-way, as
+        :meth:`refresh_elevations`). Returns whether RustGIS was asked."""
+        printed, tables = self._free_print_now()
+        if printed == (self._free_print or "") and (bool(tables) == bool(self.free_layers)):
+            return False
+        old = list(self.free_layers.values())
+        if old:
+            self._command("layer.remove", {"layer": [_ref(i) for i in old]})
+            self.free_layers = {}
+        if self._free_group is not None:
+            try:
+                self._command("group.remove", {"group": self._free_group})
+            except RustGisRefused:  # removed there already
+                pass
+            self._free_group = None
+        added = self.free_layers = {}  # each layer kept as soon as RustGIS added it: a refusal of the next one
+        for table, title in tables:  # leaves those already there tracked (and withdrawn at the stop)
+            added[table] = _added_layer(self._command("layer.addData", self._loading(table, title)))
+        if added:
+            group = self._command("group.add", {"name": f"{self.chunk_label} - disegni 3D",
+                                                "layers": [_ref(i) for i in added.values()]})
+            self._free_group = group.get("group") if isinstance(group, dict) else None
+        self._free_print = printed
         return True
 
     def _loading(self, table: str, title: str) -> dict:

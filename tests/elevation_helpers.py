@@ -42,6 +42,14 @@ def surface_cell(ch, entry):
     with rasterio.open(E.elevation_paths(ch, entry)[1]) as src:
         d = src.read(1)
         t = src.transform
+    from scipy.ndimage import distance_transform_edt
+
     rows, cols = np.nonzero(np.isfinite(d))
     k = len(rows) // 2
-    return t.c + (cols[k] + 0.5) * t.a, t.f + (rows[k] + 0.5) * t.e
+    # among the cells farthest from the edge of the relief (an area drawn around the cell stays on the surface, whatever
+    # the mesh of the run: the middle cell in row order could lie at the top or the bottom of the wall) the nearest
+    # to the middle one
+    depth = distance_transform_edt(np.pad(np.isfinite(d), 1))[1:-1, 1:-1]
+    deep = np.argwhere(depth >= 0.9 * depth.max())
+    r, c = deep[np.argmin(np.hypot(deep[:, 0] - rows[k], deep[:, 1] - cols[k]))]
+    return t.c + (c + 0.5) * t.a, t.f + (r + 0.5) * t.e

@@ -19,6 +19,7 @@ import datetime
 import numpy as np
 
 from ..core import crs as crs_mod
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -26,10 +27,11 @@ MIN_PHOTOS = 3
 CELLS = 400  # cells along the longer side by default
 
 
-def _surface(chunk: Chunk, gx: np.ndarray, gy: np.ndarray, xyz: np.ndarray, bounds) -> np.ndarray:
+def _surface(chunk: Chunk, gx: np.ndarray, gy: np.ndarray, xyz: np.ndarray, bounds, used: list | None = None) -> np.ndarray:
     """Heights (world) of the grid cells: from the DEM when there is one, else the median of
     the tie points in each cell, the empty cells interpolated inside the area of the points
-    (NaN outside). ``bounds``: left, bottom, right, top of the grid."""
+    (NaN outside). ``bounds``: left, bottom, right, top of the grid. ``used`` gets "dem" when the
+    heights are the DEM's."""
     from scipy.interpolate import LinearNDInterpolator
     from scipy.stats import binned_statistic_2d
 
@@ -45,6 +47,8 @@ def _surface(chunk: Chunk, gx: np.ndarray, gy: np.ndarray, xyz: np.ndarray, boun
             z = src.read(1, window=window, out_shape=(h, w), boundless=True, masked=True,
                          resampling=Resampling.average).astype(np.float64).filled(np.nan)
         if np.isfinite(z).mean() > 0.2:
+            if used is not None:
+                used.append("dem")
             return z
     step_x, step_y = gx[0, 1] - gx[0, 0], gy[1, 0] - gy[0, 0]
     xe = np.r_[gx[0] - step_x / 2, gx[0, -1] + step_x / 2]
@@ -60,9 +64,11 @@ def _surface(chunk: Chunk, gx: np.ndarray, gy: np.ndarray, xyz: np.ndarray, boun
     return z
 
 
-def coverage(chunk: Chunk, resolution: float | None = None, progress: Progress | None = None):
+def coverage(chunk: Chunk, resolution: float | None = None, progress: Progress | None = None,
+             used: list | None = None):
     """Count of aligned photos framing every cell of a grid over the tie points (see the module
-    docstring). Returns ``(counts (h, w) int, transform, heights)``; counts -1 outside the area."""
+    docstring). Returns ``(counts (h, w) int, transform, heights)``; counts -1 outside the area.
+    ``used`` gets "dem" when the heights of the cells came from the DEM."""
     from rasterio.transform import from_origin
 
     from .visibility import project_valid
@@ -80,7 +86,7 @@ def coverage(chunk: Chunk, resolution: float | None = None, progress: Progress |
     transform = from_origin(lo[0], hi[1], res, res)  # rows go down from the top edge
     cols, rows = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
     gx, gy = lo[0] + cols * res, hi[1] - rows * res
-    z = _surface(chunk, gx, gy, xyz, (lo[0], lo[1], lo[0] + w * res, hi[1]))
+    z = _surface(chunk, gx, gy, xyz, (lo[0], lo[1], lo[0] + w * res, hi[1]), used)
     inside = np.isfinite(z)
     pts = chunk.to_internal(np.column_stack([gx[inside], gy[inside], z[inside]]))
     counts = np.zeros(int(inside.sum()), np.int32)
@@ -130,7 +136,8 @@ def field_check(chunk: Chunk, min_photos: int = MIN_PHOTOS, resolution: float | 
     if conf is not None and len(conf):
         report["tie_points_weak"] = float(np.mean(np.asarray(conf) < min_photos))
     if chunk.aligned_cameras and tp is not None and len(tp) >= 10:
-        counts, transform, _z = coverage(chunk, resolution, progress=progress.sub(0.3, 0.65))
+        used: list = []
+        counts, transform, _z = coverage(chunk, resolution, progress=progress.sub(0.3, 0.65), used=used)
         area = counts >= 0
         weak = area & (counts < min_photos)
         folder = chunk.data_dir / "fieldcheck"
@@ -141,6 +148,10 @@ def field_check(chunk: Chunk, min_photos: int = MIN_PHOTOS, resolution: float | 
                            nodata=-1, compress="deflate", BIGTIFF="IF_SAFER") as dst:
             dst.write(np.clip(counts, -1, 32767).astype(np.int16), 1)
         chunk._set_product("coverage", path)
+        if "dem" in used:  # the heights of its cells from the DEM: from a stale DEM, stale too
+            stamps.inherit(chunk, "coverage", "dem")
+        else:
+            stamps.stamp(chunk, "coverage")
         res = abs(transform.a)
         report.update({"resolution": res, "cells": int(area.sum()), "weak_cells": int(weak.sum()),
                        "weak_fraction": float(weak.sum() / max(area.sum(), 1)),

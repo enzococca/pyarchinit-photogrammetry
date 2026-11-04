@@ -37,6 +37,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -1840,6 +1841,8 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
     for _group, path in parts:
         path.unlink(missing_ok=True)
     ms["reflectance"] = str(final.relative_to(chunk.data_dir))
+    # meta["multispectral"]["built_in"]: the reflectance's, on the DEM when there is one (core.stamps)
+    stamps.inherit_entry(chunk, ms, *(("dem",) if chunk.dem_path is not None else ()))
     ms["reflectance_bands"] = bands
     progress(1.0, f"Reflectance orthomosaic: {len(bands)} bands")
     return final
@@ -1905,7 +1908,8 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     with rasterio.open(target, "w", **profile) as dst:
         dst.write(out, 1)
         dst.set_band_description(1, name)
-    ms.setdefault("indices", {})[name] = {"file": str(target.relative_to(chunk.data_dir)), "formula": formula}
+    ms.setdefault("indices", {})[name] = stamps.inherit_entry(chunk, {"file": str(target.relative_to(chunk.data_dir)),
+                                                                        "formula": formula}, ms)  # the reflectance's
     return target
 
 
@@ -2086,6 +2090,6 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
     summary = {"index": name, "classes": classes, "method": method, "breaks": [round(b, 4) for b in breaks],
                "polygons": len(polys), "area_m2": areas, "file": str(path),
                "raster": str((chunk.data_dir / "multispectral" / f"{name}_zone.tif").relative_to(chunk.data_dir))}
-    ms.setdefault("zoning", {})[name] = summary
+    ms.setdefault("zoning", {})[name] = stamps.inherit_entry(chunk, summary, info)  # the index's
     json.dumps(summary)  # serialisable
     return summary

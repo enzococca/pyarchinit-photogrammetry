@@ -33,6 +33,7 @@ def test_alignment_with_square_pixels(processed):
 
 def test_checkpoints(processed):
     doc, ch, _ = processed
+    before = np.array(ch.transform, float)
     # use two targets as independent check points
     for label in ("target 4", "target 5"):
         ch.marker(label).checkpoint = True
@@ -41,6 +42,9 @@ def test_checkpoints(processed):
     for m in ch.markers:
         m.checkpoint = False
     ch.update_transform()
+    # the shared project as it was: tests before this one may have triangulated its markers again, and a fit that
+    # moves the chunk by a few hundredths of a millimetre leaves its DEM and orthomosaic to rebuild (stamps)
+    ch.transform = before
 
 
 def test_dem_accuracy(processed, scene):

@@ -110,7 +110,9 @@ def test_window_in_english(qapp, tmp_path, english):
         qapp.processEvents()
         titles = [a.text() for a in w.menuBar().actions()]
         assert i18n.tr("&Modifica") in titles and i18n.tr("&Strumenti") in titles
-        left = [a.text() for m in w.menuBar().findChildren(QMenu) for a in m.actions() if a.text() in cat]
+        # an entry the same in both languages ("Layer") is translated as itself, as for the widgets below
+        left = [a.text() for m in w.menuBar().findChildren(QMenu) for a in m.actions()
+                if a.text() in cat and cat[a.text()] != a.text()]
         assert not left, left
         for wd in w.findChildren(QWidget):
             if not wd.isVisible():

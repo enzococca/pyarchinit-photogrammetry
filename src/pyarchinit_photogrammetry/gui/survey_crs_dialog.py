@@ -27,7 +27,7 @@ def with_geoid(crs: str) -> str:
 # what survey_crs_changes counts, converts and keeps, as the window says it
 def _converted_names() -> dict[str, str]:
     return {"markers": tr("marker"), "units": tr("unità disegnate"), "quote": tr("quote"),
-            "points": tr("punti di misura"), "stones": tr("pietre"), "sections": tr("sezioni"),
+            "points": tr("punti di misura"), "free": tr("disegni 3D"), "stones": tr("pietre"), "sections": tr("sezioni"),
             "patches": tr("patch dell'ortofoto"), "texture_patches": tr("patch della texture"),
             "region": tr("regione della ricostruzione"), "colour_chart": tr("carta dei colori")}
 
@@ -64,7 +64,7 @@ def relief_text(changes: dict) -> str | None:
 
 
 # what survey_crs_changes counts of what was drawn on the products of a chunk
-DRAWN = ("units", "quote", "points", "stones", "sections", "patches", "texture_patches", "colour_chart")
+DRAWN = ("units", "quote", "points", "free", "stones", "sections", "patches", "texture_patches", "colour_chart")
 
 
 def _signed(value: float) -> str:

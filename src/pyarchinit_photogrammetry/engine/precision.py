@@ -29,6 +29,7 @@ import datetime
 import numpy as np
 
 from ..core import crs as crs_mod
+from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
@@ -45,8 +46,7 @@ def _datum(chunk: Chunk):
     ``"control points"``, ``"camera positions"`` or ``"internal"`` (nothing: local coordinates)."""
     from ..markers import gcp
 
-    ctrl = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
-            and m.position is not None]
+    ctrl = [m for m in gcp.control_markers(chunk) if m.position is not None]
     if len(ctrl) >= 3:
         loc = np.array([m.reference.location for m in ctrl], float)
         if gcp._non_collinear(loc):
@@ -317,6 +317,7 @@ def dem_precision(chunk: Chunk, max_side: int = 1024, progress: Progress | None 
                        transform=transform, nodata=-9999.0, compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(out, 1)
     chunk._set_product("dem_precision", path)
+    stamps.inherit(chunk, "dem_precision", "dem")  # on the DEM's grid: from a stale DEM, stale too
     progress(1.0, f"Precision of the DEM: median sigma Z {np.median(out[valid]) * 1000:.1f} mm")
     return path
 

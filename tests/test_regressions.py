@@ -248,7 +248,9 @@ def test_adjust_towards_reaches_distant_fixed_points(processed):
     sfm.drop_missing_points(rec)
     rec.update_point_3d_errors()
     err0 = rec.compute_mean_reprojection_error()
+    before = np.array(ch.transform, float)
     gcp.update_transform(ch)  # the markers triangulated in the internal frame
+    ch.transform = before  # the shared project as it was (its DEM and orthomosaic stamped in it)
     controls = [m for m in ch.markers if m.reference.location and not m.checkpoint and m.position is not None]
     shift = np.array([0.5, -0.3, 0.2]) / ch.scale  # half a metre, in internal units
     points = [(m, np.asarray(m.position, float) + shift) for m in controls]

@@ -40,6 +40,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.stamps import stamp
+
 log = logging.getLogger(__name__)
 
 
@@ -1053,6 +1055,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                     warnings.append(f"{mc.label}: {path.name} non copre l'area del progetto, non collegato")
                     continue
                 ch._set_product(key, path)
+                stamp(ch, key)  # in the transform read from the project (core.stamps)
                 if key == "dem":
                     dem_source = f"esportato da Metashape ({path.name})"
         for p in empty_exports:
@@ -1069,6 +1072,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                     warnings.append(f"{mc.label}: DEM interno di Metashape non letto ({exc})")
                 else:
                     ch._set_product("dem", out_dem)
+                    stamp(ch, "dem")
                     dem_source = "DEM interno del progetto Metashape"
                     pts = ch.tie_points
                     off = _dem_offset(out_dem, ch.to_world(pts.xyz[:: max(1, len(pts) // 5000)])) \

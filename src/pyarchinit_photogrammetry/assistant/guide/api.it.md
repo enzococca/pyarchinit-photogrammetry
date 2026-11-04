@@ -630,6 +630,66 @@ ha CRS, trasformazione e sistema interno del primo chunk, e contiene:
 DEM, ortofoto e texture non vengono uniti. `merged.meta["merge"]` elenca i chunk di origine, le
 foto trovate in più di un chunk e gli avvisi.
 
+## Orientare un chunk locale
+
+Un chunk in un sistema locale (senza coordinate del mondo: un oggetto, un rilievo senza GNSS né
+target) si può livellare e orientare a mano: tre punti o un piano diventano l'orizzontale, A->B
+(o la x attuale) l'asse x, A l'origine a una quota scelta, e una distanza A-B digitata la scala.
+Tutto ciò che è tenuto nelle coordinate del chunk segue il movimento (disegni, quote, sezioni,
+prospetti con i loro disegni, proxy, la regione, le patch, i riferimenti digitati di marker e
+foto); DEM, ortofoto e raster su griglia risultano da rifare. Tre marker di orientamento
+(*Orientamento A/B/C*, con i riferimenti nel sistema nuovo) tengono il sistema anche dopo un nuovo
+allineamento.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.orient.orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_along_ab=True, quota=0.0, origin_xy=(0, 0), distance=None, flip=False, M=None, move_aligned=True, dry_run=False)` | orienta `chunk`; restituisce `M`, `describe` (`tilt_deg`, `tilt_direction_deg`, `heading_deg`, `translation`, `scale`), `moved` (conteggi per archivio), `stale`, `aligned` / `aligned_left`, `kept`, `sent_out`, `weak_markers`, `cameras_replaced`, `bar_dropped`, `plugins_unaware` e `state` per annullarlo |
+| `chunk.orient(M=None, **kw)` | lo stesso sul chunk; con `M` (una similitudine 4x4, per esempio calcolata da un plugin) il movimento si applica così com'è e i marker di orientamento vanno su punti del modello (`engine.orient.third_point`) |
+| `engine.orient.undo(chunk, result)` | tutto rimesso com'era prima dell'orientamento, compresi i marker di orientamento precedenti |
+| `engine.orient.points_in_plan(chunk, polygon)` | i punti (nuvola densa, altrimenti vertici del modello, altrimenti punti di legame; coordinate del chunk) dentro un poligono in pianta: il `plane_xyz` di un piano |
+| `engine.orient.toward_cameras(chunk, xyz)` | la mediana dei centri delle foto allineate: il lato da cui si vede il piano (`toward`) |
+| `engine.orient.on_transform_changed(callback, keys=())` | `callback(chunk, M)` dopo ogni movimento di un chunk (e il suo annullamento); restituisce la funzione che lo ferma |
+| `ppg orient progetto.ppg --points "xA,yA,zA;xB,yB,zB[;xC,yC,zC]" \| --markers "A,B[,C]" \| --plane-from POLIGONO [--points "xA,yA,zA;xB,yB,zB"] [--x-kept] [--quota Z] [--origin X,Y] [--distance L] [--flip] [--no-aligned] [--chunk C] [--dry-run]` | riga di comando: scrive inclinazione, la sua direzione, orientamento di x, traslazione, scala, cosa si è mosso, i prodotti da rifare, i chunk allineati, cosa resta com'era e cosa è uscito dal programma; salva tranne con `--dry-run`; un rifiuto esce con codice 1 e il motivo |
+
+Rifiuti (`engine.orient.OrientRefused`, `reason`, `names`): `crs` (il chunk è in un sistema del
+mondo: usare marker con coordinate), `markers` (tre o più marker di controllo con coordinate
+digitate danno l'orientamento), `aligned_to` (orientare il chunk di riferimento: quelli allineati
+a lui lo seguono), `scalebars` (le barre di scala di controllo danno la scala), `points`,
+`collinear`, `plane_points`, `plane_rough`, `nan`. Le posizioni delle foto digitate nel sistema
+locale vengono portate dal movimento e i marker di orientamento prendono il loro posto nel calcolo
+della trasformazione (`cameras_replaced`). I dati dei plugin in `chunk.meta` si muovono solo con i
+plugin in ascolto (`on_transform_changed` con le loro `keys`); gli altri sono elencati in
+`plugins_unaware`.
+
+## Disegni liberi
+
+Linee, poligoni e punti disegnati sul modello (nella vista 3D, oppure sulla pianta e sui prospetti
+della vista 2D con la quota del DEM o del rilievo) come elementi generici in layer dell'utente: non
+unità di PyArchInit. Restano in `chunk.meta["drawings"]` nelle coordinate del chunk e seguono ogni
+cambio della sua trasformazione fatto dentro il programma; lunghezze e aree si calcolano, non si
+salvano.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `core.free_drawings.features(chunk, layer=None)` | i disegni (copie): `id`, `layer`, `kind` (line, polygon, point), `name`, `xyz`, `attributes`, `created`, `modified`, `colour` quando ce l'ha |
+| `core.free_drawings.layers(chunk)` | i layer (`name`, `colour`, `visible`), prima "Disegni 3D" |
+| `core.free_drawings.add(chunk, kind, xyz, layer="Disegni 3D", name="", attributes=None, colour=None, id=None)` | un disegno nuovo; restituisce il suo record |
+| `core.free_drawings.update(chunk, fid, **fields)` | cambia `layer`, `name`, `xyz`, `attributes`, `colour` (None: quello del layer) |
+| `core.free_drawings.remove(chunk, fids)` | toglie dei disegni; restituisce quanti |
+| `core.free_drawings.set_layer(chunk, name, colour=None, visible=None, rename=None)` | un layer aggiunto, colorato, mostrato o nascosto, rinominato |
+| `archaeo.measures.feature_measures(rec, model=None, toward=None)` | linea: `length_3d`, `length_plan`, `dz`; poligono: `perimeter_3d`, `area_3d`, `area_plan`, `slope`, `aspect`, `model_surface` con un modello; punto: `z` |
+| `io.free_drawings.export(chunk, path, fmt=None, layer=None)` | DXF 3D, GeoPackage con Z, GeoJSON o CSV dei vertici (dall'estensione) |
+| `io.free_drawings.read(path)` | i disegni di un GeoPackage, GeoJSON o DXF |
+| `io.free_drawings.import_features(chunk, path, layer=None)` | aggiunti al chunk; restituisce `added`, `dem_z`, `skipped`, `holes_dropped` |
+| `ppg drawings3d progetto.ppg list [--layer L] [--chunk C]` | riga di comando: una riga per disegno (id, layer, tipo, nome, vertici, lunghezza 3D, area 3D) |
+| `ppg drawings3d progetto.ppg export --out FILE [--format dxf\|gpkg\|geojson\|csv] [--layer L] [--chunk C]` | i disegni scritti in un file; il progetto non si salva |
+| `ppg drawings3d progetto.ppg import FILE [--layer L] [--chunk C]` | un GeoPackage, GeoJSON o DXF importato; il progetto si salva |
+
+Un file senza quote le prende dal DEM (un vertice fuori dal DEM ha la quota interpolata lungo il
+disegno; un disegno senza nessun vertice sul DEM resta fuori); il layer viene da `--layer`,
+altrimenti dalla colonna `layer` del file, altrimenti dal nome del file; un'identità che il chunk
+ha già ne riceve una nuova. Un poligono tiene solo il contorno: i suoi buchi vengono contati.
+
 ## Prodotti da classi di punti scelte
 
 Le classi della nuvola densa (regole, lazo, classificatore addestrato o unità stratigrafiche)
@@ -1768,7 +1828,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | Modulo | Funzioni principali |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
-| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
+| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
 | `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |

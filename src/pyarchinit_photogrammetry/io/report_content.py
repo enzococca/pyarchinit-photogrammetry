@@ -119,6 +119,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "h_error_m": ("Errore (m)", "Error (m)"),
     "type_control": ("controllo", "control"),
     "type_check": ("verifica", "check"),
+    "type_orientation": ("orientamento (non usato)", "orientation (not used)"),
     "rmse_title": ("Errori quadratici medi", "Root mean square errors"),
     "h_points": ("Punti", "Points"),
     "h_count": ("Numero", "Count"),
