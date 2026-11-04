@@ -45,6 +45,14 @@ fitted plane. The new axes are drawn in the view as they would be - x red, y gre
 as a translucent blue square - and follow every change of the points; they go when the window closes
 ([orienting a local system](processing.md#orienting-a-local-system)).
 
+## Free drawings
+
+*Draw* in the bar of the view draws lines, polygons and points on the model (*3D line*, *3D polygon*, *3D point*):
+the view stays live between the clicks - a click is a vertex, a drag still turns the scene, a double click ends the
+drawing instead of moving the centre of rotation. *Select and edit* chooses a drawing and shows its vertices to drag
+or delete; *Drape on the model* adds vertices on the surface every 20 pixels. The drawings of the visible layers are
+drawn in their colours, the selected one thicker. See [free drawings](drawing.md#free-drawings-2d-and-3d).
+
 ## Keys
 
 With the 3D view focused:

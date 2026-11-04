@@ -21,6 +21,7 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Punto** | un punto di misura: quota, temperatura, bande e indici |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | un marker dove fai clic ([marker](photos-markers.md#marker)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Linee** | linee di rottura, linee morbide e contorni per il TIN e la modifica del DEM; il tipo nel suo menu ([TIN e linee di rottura](../tin.md#linee-di-rottura)) |
+| ![](../img/gui/icons/disegno-libero.png){ width=20 } | **Disegno libero** | linee, poligoni e punti in layer tuoi, in 3D sul modello; il tipo, il layer e *Proprietà...* nel suo menu ([sotto](#disegni-liberi-2d-e-3d)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | unità e pietre disegnate da Segment Anything ([sotto](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | la foto da usare in un'area dell'ortofoto o del prospetto mostrato ([patch](processing.md#patch-dellortofoto)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Elimina** | gli elementi selezionati (++delete++) |
@@ -124,6 +125,69 @@ vanno nel layer *Quote*, si salvano nel progetto e si scrivono con *Pubblica*.
 la sua anomalia, la riflettanza di ogni banda e gli indici. I punti vanno nel layer *Punti di misura*, si salvano
 con il progetto, arrivano in QGIS con gli altri layer e si esportano come GeoPackage, CSV o GeoJSON (*Esporta i
 punti di misura...*). Vedi [Multispettrale e termico](multispectral.md).
+
+## Disegni liberi (2D e 3D)
+
+I disegni liberi sono linee, poligoni e punti posati sul modello in **layer tuoi** (uno predefinito, *Disegni 3D*): il
+contorno di un muro, una crepa, un reperto, un profilo, tutto ciò che non è un'unità stratigrafica. Ogni vertice ha la
+sua quota sulla superficie; si salvano con il progetto, si vedono nella vista 3D, sulla pianta e sui prospetti, si
+misurano in 3D, si esportano e si importano. Niente diventa da sé una US o una scheda di PyArchInit: un poligono
+libero può diventare una US più tardi con lo strumento *US*.
+
+![Disegni liberi nella vista 3D: una linea sul muretto, la cresta del muro nel layer "Muri", un poligono sul piano e
+un punto](../img/free-3d.png)
+
+**Nella vista 3D** (*Disegna* nella sua barra: *Linea 3D*, *Poligono 3D*, *Punto 3D*):
+
+* ogni clic mette un vertice sulla superficie sotto il cursore (il modello mostrato; senza modello il punto della
+  nuvola densa che la linea di vista incontra: il ripiego dei punti scelti); trascinare fra un clic e l'altro fa
+  ancora ruotare la vista, che resta viva, con un elastico fino al cursore;
+* un vertice si aggancia ai vertici dei disegni liberi e ai marker entro pochi pixel, mai a uno nascosto dietro la
+  superficie;
+* **Backspace** toglie l'ultimo vertice, **Invio** o un doppio clic finisce la linea o chiude il poligono, **Esc**
+  rinuncia; lo strumento resta attivo per il disegno successivo fino a Esc;
+* i segmenti sono dritti fra i vertici: **Drappeggia sul modello** aggiunge vertici sulla superficie ogni 20 pixel
+  dello schermo, così una linea segue il terreno o un muro;
+* **Seleziona e modifica**: un clic sceglie un disegno (più spesso) e mostra i suoi vertici sulla vista ferma; trascina
+  un vertice per spostarlo (si riprende sulla superficie dove lo lasci, mai a mezz'aria), Canc toglie il vertice scelto
+  o, se nessuno è scelto, il disegno (un poligono tiene tre vertici, una linea due), un doppio clic apre la scheda.
+
+**Sulla pianta o su un prospetto** (*Disegno libero* nella barra Disegno, il suo menu per *Linea*, *Poligono*,
+*Punto*, il layer e *Nuovo layer...*): clic sui vertici come con gli altri strumenti (con lo snap; un poligono anche a
+mano libera); sulla pianta ogni vertice prende la quota del DEM in quel punto, su un prospetto la profondità del suo
+rilievo, così il disegno è lo stesso elemento 3D. Un vertice senza valore prende quello interpolato lungo il disegno
+dai vicini; un disegno senza nessun vertice sul DEM (o sul rilievo) viene rifiutato. Su un raster fatto prima
+dell'ultimo cambio del sistema del chunk (*da rifare*) lo strumento è rifiutato, come gli altri strumenti di disegno.
+
+![I disegni liberi sulla pianta, con i loro layer nel pannello Layer](../img/free-plan.png)
+
+**Layer e viste.** Ogni layer tuo è un layer *Disegni 3D: <nome>* della vista 2D, con il suo colore, nel
+[pannello Layer](panes.md#layer); nasconderlo lì lo nasconde anche nella vista 3D. Sulla pianta i disegni si vedono per
+x, y; su un prospetto quelli che stanno sulla sua faccia (entro la sua profondità, più due celle): un disegno solo in
+parte dentro mostra le sue parti dentro, come linee. Seleziona e ++delete++ in 2D eliminano i disegni; ogni modifica è
+un passo di *Modifica > Annulla*. I disegni seguono il chunk quando il suo sistema cambia dentro il programma (un
+orientamento, il sistema del rilievo, chunk allineati, la georeferenziazione rifatta), non un nuovo allineamento da
+solo (i suoi marker riportano il chunk nello stesso sistema).
+
+**La scheda** (doppio clic su un disegno in 2D o in 3D, o *Disegno libero > Proprietà...*): nome, layer (anche nuovo),
+colore (vuoto: quello del layer), attributi come righe campo/valore, i vertici con la quota che si può scrivere, e le
+misure.
+
+![La scheda di un disegno libero](../img/free-form.png)
+
+**Misure.** Una linea: lunghezza 3D, lunghezza in pianta, dislivello. Un poligono: perimetro 3D, area nel suo piano
+medio (vale anche sui muri) e in pianta, pendenza ed esposizione, e la **superficie del modello** al suo interno: la
+superficie continua su cui il poligono è stato disegnato, vista dal suo lato (un oggetto con una mesh a sé - una cassa
+posata sul terreno, un'isola in una buca - si misura disegnandoci sopra); le facce esattamente verticali in pianta non
+contano, i lati verticali dentro il contorno contano la loro area; una copertura sotto 1 dice che il modello non copre
+tutto il contorno. *Misura area* su un poligono libero selezionato mostra le stesse misure.
+
+**Fuori e di nuovo dentro.** *File > Esporta > Disegni 3D...* li scrive tutti, o un layer, in DXF 3D (un layer DXF per
+layer), GeoPackage con Z, GeoJSON o un CSV dei vertici; *File > Importa > Disegni 3D...* legge un GeoPackage, un
+GeoJSON o un DXF ([esportazioni](exports.md#disegni-3d)). Con il collegamento dal vivo arrivano in QGIS e in RustGIS
+come tre layer *Disegni 3D - linee / poligoni / punti (ppg)*, in un solo verso ([QGIS dal vivo](archaeology.md#qgis-dal-vivo));
+i disegni fatti dopo aver creato il progetto QGIS chiedono di crearlo di nuovo (*QGIS > Apri in QGIS*), come per i
+prospetti. Dalla riga di comando: `ppg drawings3d progetto.ppg list | export --out FILE | import FILE`.
 
 ## Sezioni
 

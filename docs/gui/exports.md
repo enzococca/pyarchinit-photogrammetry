@@ -78,6 +78,17 @@ Matrix.
 
 ## Imports
 
+### 3D drawings
+
+*File > Export > 3D drawings...* writes the [free drawings](drawing.md#free-drawings-2d-and-3d) of the active chunk
+(all, or one layer) by the suffix of the file: **DXF** (3D polylines and points, a DXF layer per user layer, name and
+attributes kept in the entities' data), **GeoPackage** with Z (tables `disegni_3d_linee`, `disegni_3d_poligoni`,
+`disegni_3d_punti`, the attributes as columns and as JSON), **GeoJSON** (with the system of the chunk when it has an
+EPSG code) or **CSV** of the vertices. *File > Import > 3D drawings...* reads a GeoPackage, a GeoJSON or a DXF into a
+layer chosen, or the file's `layer` column, or a layer named after the file: a feature without heights - a flat CAD
+drawing included - takes them from the DEM; the holes of polygons are left out and counted (a free drawing has one
+outline); an import is one step of *Edit > Undo*.
+
 ### 3D models of other programs
 
 *File > Import > 3D model (OBJ, PLY, GLB)*: a mesh made elsewhere (OBJ with its MTL and textures, PLY with colours and

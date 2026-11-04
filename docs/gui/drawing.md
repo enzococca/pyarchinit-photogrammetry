@@ -21,6 +21,7 @@ project, reaches QGIS through the live link and goes into PyArchInit with *Publi
 | ![](../img/gui/icons/punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png){ width=20 } | **Point** | a measuring point: elevation, temperature, bands and indices |
 | ![](../img/gui/icons/marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png){ width=20 } | **Marker** | a marker where you click ([markers](photos-markers.md#markers)) |
 | ![](../img/gui/icons/linea-di-rottura-per-il-tin-e-la-modifica-del-dem.png){ width=20 } | **Lines** | break lines, soft lines and boundaries for the TIN and the DEM edit; the kind in its menu ([TIN and break lines](../tin.md#break-lines)) |
+| ![](../img/gui/icons/disegno-libero.png){ width=20 } | **Free drawing** | lines, polygons and points in layers of your own, in 3D on the model; the kind, the layer and *Properties...* in its menu ([below](#free-drawings-2d-and-3d)) |
 | ![](../img/gui/icons/segment-anything-sam.png){ width=20 } | **SAM** | units and stones drawn by Segment Anything ([below](#segment-anything)) |
 | ![](../img/gui/icons/patch-dell-ortofoto-assegna-le-immagini-a-un-area.png){ width=20 } | **Patch** | the photo to use in an area of the orthophoto or of the elevation shown ([patches](processing.md#orthophoto-patches)) |
 | ![](../img/gui/icons/elimina-selezionati.png){ width=20 } | **Delete** | the selected features (++delete++) |
@@ -124,6 +125,69 @@ pane), which asks before deleting.
 temperature and its anomaly, the reflectance of every band and the indices. The points go into the layer
 *Measuring points*, are saved with the project, reach QGIS with the other layers and are exported as GeoPackage,
 CSV or GeoJSON (*Export the measuring points...*). See [Multispectral and thermal](multispectral.md).
+
+## Free drawings (2D and 3D)
+
+Free drawings are lines, polygons and points placed on the model in **layers of your own** (a default layer
+*Disegni 3D*): the outline of a wall, a crack, a find, a profile, anything that is not a stratigraphic unit. Every
+vertex has its height on the surface; they are saved with the project, shown in the 3D view, on the plan and on the
+elevations, measured in 3D, exported and imported. Nothing becomes a US or a record of PyArchInit by itself: a free
+polygon can become a US later with the *US* tool.
+
+![Free drawings in the 3D view: a line over the wall stub, the top of the wall in the layer "Muri", a polygon on the
+floor and a point](../img/free-3d.png)
+
+**In the 3D view** (*Draw* in its bar: *3D line*, *3D polygon*, *3D point*):
+
+* each click puts a vertex on the surface under the cursor (the model as shown; without a model the point of the
+  dense cloud the line of sight meets - the fallback of the picks); a drag between the clicks still turns the view,
+  which stays live, with a rubber band to the cursor;
+* a vertex snaps to the vertices of the free drawings and to the markers within a few pixels, never to one hidden
+  behind the surface;
+* **Backspace** removes the last vertex, **Enter** or a double click ends the line or closes the polygon, **Esc** gives
+  up; the tool stays on for the next drawing until Esc;
+* the segments are straight between the vertices: **Drape on the model** adds vertices on the surface every 20 pixels
+  of the screen, so that a line follows the ground or a wall;
+* **Select and edit**: a click chooses a drawing (drawn thicker) and shows its vertices on the frozen view; drag one to
+  move it (it is picked again on the surface where you let go, never left in the air), Delete removes the chosen
+  vertex or, with none chosen, the drawing (a polygon keeps three vertices, a line two), a double click opens the form.
+
+**On the plan or on an elevation** (*Free drawing* in the drawing bar, its menu for *Line*, *Polygon*, *Point*, the
+layer and *New layer...*): click the vertices as with the other tools (snap included; a polygon also freehand);
+on the plan each vertex takes the height of the DEM there, on an elevation the depth of its relief, so the drawing
+is the same 3D feature. A vertex without a value takes the one interpolated along the drawing from its neighbours; a
+drawing with no vertex on the DEM (or the relief) is refused. On a raster made before the last change of the chunk's
+system (*to rebuild*) the tool is refused, as the other drawing tools.
+
+![The free drawings on the plan, with their layers in the Layer pane](../img/free-plan.png)
+
+**Layers and views.** Each user layer is a layer *Disegni 3D: <name>* of the 2D view, with its colour, in the
+[Layer pane](panes.md#layer); hiding it there hides it in the 3D view too. On the plan the drawings are shown by their
+x, y; on an elevation those lying on its face (within its depth, plus two cells): a drawing only partly within it
+shows its parts within it, as lines. Select and ++delete++ in 2D delete the drawings; every change is one step of
+*Edit > Undo*. The drawings follow the chunk when its system changes inside the program (an orientation, the system
+of the survey, chunks aligned, the georeference fitted again), not a new alignment by itself (its markers bring the
+chunk back to the same frame).
+
+**The form** (double click on a drawing in 2D or 3D, or *Free drawing > Properties...*): name, layer (also a new
+one), colour (empty: the layer's), attributes as field/value rows, the vertices with their height that can be typed,
+and the measures.
+
+![The form of a free drawing](../img/free-form.png)
+
+**Measures.** A line: 3D length, length in plan, height difference. A polygon: 3D perimeter, area in its best plane
+(it works on walls) and in plan, slope and aspect, and the **surface of the model** inside it: the connected surface
+the polygon was drawn on, seen from its side (an object meshed apart - a box resting on the ground, an island in a
+hole - is measured by drawing on it); exactly vertical faces count nothing in plan, vertical sides inside the outline
+count their area; a coverage below 1 says the model did not cover the whole outline. *Measure area* on a selected free
+polygon shows the same measures.
+
+**Out and back in.** *File > Export > 3D drawings...* writes them all, or one layer, as DXF 3D (a DXF layer per
+layer), GeoPackage with Z, GeoJSON or a CSV of the vertices; *File > Import > 3D drawings...* reads a GeoPackage,
+GeoJSON or DXF ([exports](exports.md#3d-drawings)). With the live link they reach QGIS and RustGIS as three layers
+*Disegni 3D - lines / polygons / points (ppg)*, one-way ([QGIS, live](archaeology.md#qgis-live)); drawings made after
+the QGIS project was built need it built again (*QGIS > Open in QGIS*), as for the elevations. From the command
+line: `ppg drawings3d project.ppg list | export --out FILE | import FILE`.
 
 ## Sections
 
