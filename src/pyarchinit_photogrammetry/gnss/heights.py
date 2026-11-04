@@ -959,10 +959,40 @@ def _kept(chunk, georeferenced: bool, sections: list | None, fate: str) -> list[
     return kept
 
 
-def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None) -> tuple[dict, list | None]:
+def _move_lines(lines: list[dict], mover) -> None:
+    """Break lines (:mod:`..archaeo.breaklines` records, ``coords`` ``[x, y, z or None]``) carried by ``mover``, in
+    place: a vertex with a height as it is, one without at the height of the ground there - and without a height
+    again after (the TIN reads it from the DEM)."""
+    for line in lines:
+        coords = line.get("coords") or []
+        tall = [i for i, c in enumerate(coords) if len(c) > 2 and _finite(c[2])]
+        flat = [i for i, c in enumerate(coords) if not (len(c) > 2 and _finite(c[2]))]
+        if tall:
+            xyz = mover.tall([[float(coords[i][0]), float(coords[i][1]), float(coords[i][2])] for i in tall])
+            for i, (x, y, z) in zip(tall, xyz.tolist()):
+                coords[i] = [x, y, z]
+        if flat:
+            for i, (x, y) in zip(flat, mover.flat([[float(coords[i][0]), float(coords[i][1])] for i in flat]).tolist()):
+                coords[i] = [x, y, None]
+
+
+def _move_free(features: list[dict], mover) -> None:
+    """Free drawings (``{"xyz": [[x, y, z], ...]}``, three-dimensional, on the model) carried by ``mover``, in place."""
+    for feature in features:
+        xyz = feature.get("xyz")
+        if xyz:
+            feature["xyz"] = mover.tall(np.asarray(xyz, float).reshape(-1, 3)).tolist()
+
+
+PLAN_STONES_LEGACY = "elevation.tif"  # the key of the stones of every elevation before 1.7.0: not of the plan
+
+
+def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None,
+           plan_stones: bool = False) -> tuple[dict, list | None]:
     """What was drawn on the products of ``chunk``, carried by ``mover`` aside (nothing of the chunk changes; a
     conversion that cannot be made raises here): the new values of the keys of ``chunk.meta`` and the new sections of
-    the project (None to leave them)."""
+    the project (None to leave them). The stones of the orthomosaic go with them; ``plan_stones``: those of every
+    raster of the plan (a motion of the local system: the rasters are built again where the model goes)."""
     import copy
 
     meta, values = chunk.meta, {}
@@ -976,11 +1006,16 @@ def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None) -> t
             unit["wkt"] = _wkt(unit["wkt"], mover)
         _move_rows(_rows(drawings, "quote"), "quota_q", mover)
         _move_rows(_rows(drawings, "points"), "z", mover)
+        _move_lines([r for r in drawings.get("lines") or [] if isinstance(r, dict)], mover)
+        _move_free([f for f in drawings.get("free") or [] if isinstance(f, dict)], mover)
         values["drawings"] = drawings
     ortho = _ortho_name(chunk)
-    if (meta.get("stones") or {}).get(ortho):
+    keys = [k for k, rows in (meta.get("stones") or {}).items()
+            if rows and (k == ortho or (plan_stones and k != PLAN_STONES_LEGACY))]
+    if keys:
         stones = copy.deepcopy(meta["stones"])
-        stones[ortho] = [_wkt(w, mover) for w in stones[ortho]]
+        for key in keys:
+            stones[key] = [_wkt(w, mover) for w in stones[key]]
         values["stones"] = stones
     for key, lists in (("orthomosaic", ("patches", "applied_patches")), ("texture", ("patches",))):
         if any((meta.get(key) or {}).get(name) for name in lists):

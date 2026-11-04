@@ -1390,3 +1390,37 @@ def test_set_survey_crs_converts_the_georeference_of_a_chunk_without_photos(tmp_
     preview, applied, unchanged = out["huge"]
     assert "similarity" in preview and "in plan" in preview and "m across" in preview
     assert preview == applied and unchanged
+
+
+def test_survey_crs_moves_break_lines_and_free_drawings(tmp_path):
+    """The break lines of the plan and the free drawings follow the change of the system as the other drawings: a
+    vertex with a height on the model, one without a height at the height of the ground there (and without a height
+    again), a free drawing in 3D."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        write_grid(value=lambda lon, lat: 40.0 + 100.0 * (lon - 12.0))
+        ch = surveyed()
+        x0, y0, _ = utm.mean(axis=0)
+        ground = 50.0
+        dem = dem_mod.write_geotiff(ch.data_dir / "dem.tif", np.full((60, 60), ground, np.float32),
+                                    (x0 - 150.0, y0 + 150.0), 5.0, ch.crs, nodata=dem_mod.NODATA)
+        ch._set_product("dem", dem)
+        line = [[x0 + 1.0, y0 + 2.0, 60.0], [x0 + 5.0, y0 + 3.0, None]]
+        free = [[x0, y0, 55.0], [x0 + 2.0, y0 - 1.0, 57.0]]
+        ch.meta["drawings"] = {"lines": [{"id": "l", "kind": "breakline", "coords": copy.deepcopy(line)}],
+                               "free": [{"id": "f", "kind": "line", "xyz": copy.deepcopy(free)}]}
+        old = ch.transform.copy()
+        heights.set_survey_crs(ch, "EPSG:32633+3855")
+
+        def follows(xyz):
+            return ch.to_world(geometry.apply(np.linalg.inv(old), np.asarray(xyz, float).reshape(-1, 3)))
+
+        d = ch.meta["drawings"]
+        got = d["lines"][0]["coords"]
+        print(json.dumps({"tall": float(np.abs(np.array(got[0]) - follows(line[0])).max()),
+                          "flat": float(np.abs(np.array(got[1][:2]) - follows([*line[1][:2], ground])[0, :2]).max()),
+                          "none": got[1][2] is None,
+                          "free": float(np.abs(np.array(d["free"][0]["xyz"]) - follows(free)).max()),
+                          "moved": got[0] != line[0]}))
+    '''))
+    assert out["moved"] and out["none"]
+    assert out["tall"] < 0.001 and out["flat"] < 0.001 and out["free"] < 0.001

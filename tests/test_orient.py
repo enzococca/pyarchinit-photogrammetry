@@ -209,3 +209,324 @@ def test_quota_origin_and_scale():
     assert orient.scale_for(a, b, np.linalg.norm(b - a) * 2) == pytest.approx(2.0)
     with pytest.raises(ValueError):
         orient.scale_for(a, b, 0)
+
+
+# ---------------------------------------------------------------- a motion applied to a chunk and what it keeps
+
+def _internal(transform, xyz):
+    return geo.apply(np.linalg.inv(np.asarray(transform, float)), np.asarray(xyz, float).reshape(-1, 3))
+
+
+def _same_inside(old_t, old_xyz, new_t, new_xyz, tol=1e-6):
+    got, want = _internal(new_t, new_xyz), _internal(old_t, old_xyz)
+    assert np.abs(got - want).max() < tol, np.abs(got - want).max()
+
+
+def _bare(tmp_path, crs="LOCAL", label="A"):
+    """A saved document with one chunk and nothing in it but its transform (fast: no processing)."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    ch = doc.add_chunk(label)
+    ch.crs = crs
+    ch.transform = np.array(motion_of(rotation_of([0, 0, 1], 20), (5.0, -3.0, 2.0)))
+    doc.save(tmp_path / "bare.ppg")
+    return doc, ch
+
+
+def rotation_of(axis, deg):
+    from orient_helpers import rotation
+
+    return rotation(axis, deg)
+
+
+def motion_of(r=None, t=(0.0, 0.0, 0.0), s=1.0):
+    from orient_helpers import motion
+
+    return motion(r, t, s)
+
+
+def _typed(ch, n, checkpoint=False):
+    from pyarchinit_photogrammetry.core.camera import Reference
+
+    out = []
+    for i in range(n):
+        m = ch.add_marker(f"M{i}")
+        m.position = np.array([float(i), 2.0 * i, 0.5])
+        m.reference = Reference(location=[10.0 + i, 20.0 - i, 3.0 + 0.1 * i], accuracy=[0.01] * 3)
+        m.checkpoint = checkpoint
+        out.append(m)
+    return out
+
+
+def test_every_store_follows_the_motion(processed, tmp_path):
+    import json
+
+    import shapely
+    from orient_helpers import dem_at, drawn, local_copy, tilt_motion
+
+    from pyarchinit_photogrammetry.engine import elevation
+    from pyarchinit_photogrammetry.engine.region import Region
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    doc, ch, _t_bad = local_copy(processed, tmp_path)
+    made = drawn(ch)
+    t_old = ch.transform.copy()
+    before = json.loads(json.dumps(ch.meta))
+    markers = {m.label: list(m.reference.location) for m in ch.markers if m.reference.location}
+    ply = ch.data_dir / made["proxy"]["file"]
+    ply_old = read_mesh(ply).xyz
+    sections_old = json.loads((doc.path.parent / "sezioni" / "sezioni.json").read_text())
+    m = tilt_motion((7.0, 200.0), 50.0, (-4.0, 6.0, 0.7))
+    result = orient.apply(ch, m)
+    t_new = ch.transform
+    assert np.allclose(t_new, m @ t_old, atol=1e-12)
+    assert ch.meta["levelled"] is True
+    d0, d1 = before["drawings"], ch.meta["drawings"]
+    # 3D items: the same point of the model
+    q0, q1 = d0["quote"][0], d1["quote"][0]
+    _same_inside(t_old, [q0["x"], q0["y"], q0["quota_q"]], t_new, [q1["x"], q1["y"], q1["quota_q"]])
+    p0, p1 = d0["points"][0], d1["points"][0]
+    _same_inside(t_old, [p0["x"], p0["y"], p0["z"]], t_new, [p1["x"], p1["y"], p1["z"]])
+    _same_inside(t_old, d0["free"][0]["xyz"], t_new, d1["free"][0]["xyz"])
+    a0, a1 = d0["lines"][0]["coords"], d1["lines"][0]["coords"]
+    _same_inside(t_old, a0[0], t_new, a1[0])
+    assert a1[1][2] is None  # without a height again; its plan where the ground there goes
+    ground = dem_at(ch, a0[1][0], a0[1][1])
+    assert np.allclose(a1[1][:2], geo.apply(m, np.array([[a0[1][0], a0[1][1], ground]]))[0, :2], atol=1e-9)
+    assert made["markers"]
+    for label in made["markers"]:
+        mk = ch.marker(label)
+        _same_inside(t_old, markers[label], t_new, mk.reference.location)
+    # plan units: their vertices at the height of the DEM there, moved, the height dropped
+    xy0 = np.asarray(shapely.from_wkt(d0["units"][0]["wkt"]).exterior.coords)
+    xy1 = np.asarray(shapely.from_wkt(d1["units"][0]["wkt"]).exterior.coords)
+    want = geo.apply(m, np.column_stack([xy0, [dem_at(ch, x, y) for x, y in xy0]]))[:, :2]
+    assert np.abs(xy1 - want).max() < 1e-9
+    ortho = [k for k in before["stones"] if k != "dem_locale.tif"][0]
+    for key in (ortho, "dem_locale.tif"):  # the stones of every raster of the plan
+        assert before["stones"][key] != ch.meta["stones"][key]
+    assert before["orthomosaic"]["patches"][0]["polygon"] != ch.meta["orthomosaic"]["patches"][0]["polygon"]
+    assert before["texture"]["patches"][0]["polygon"] != ch.meta["texture"]["patches"][0]["polygon"]
+    assert before["colour_chart"]["bounds"] != ch.meta["colour_chart"]["bounds"]
+    r0, r1 = Region.from_dict(before["region"]), Region.from_dict(ch.meta["region"])
+    _same_inside(t_old, r0.corners(), t_new, r1.corners())
+    # the section of the project and the elevation: the frame follows, the drawings kept in (u, v)
+    sections_new = json.loads((doc.path.parent / "sezioni" / "sezioni.json").read_text())
+    assert sections_new[0]["p1"] != sections_old[0]["p1"]
+    e0 = made["plane"]
+    e1 = [e for e in ch.meta["elevations"] if e["id"] == e0["id"]][0]
+    f0, f1 = d0["frames"][e0["id"]], d1["frames"][e0["id"]]
+    assert e1["v_is_height"] is False  # tilted: v is no longer the height
+    for (u0, v0), (u1, v1) in zip(shapely.from_wkt(f0["units"][0]["wkt"]).exterior.coords,
+                                  shapely.from_wkt(f1["units"][0]["wkt"]).exterior.coords):
+        for dd in (0.0, -0.2):
+            _same_inside(t_old, elevation.world_of(e0, u0, v0, dd), t_new, elevation.world_of(e1, u1, v1, dd),
+                         tol=1e-9)
+    fq0, fq1 = f0["quote"][0], f1["quote"][0]
+    _same_inside(t_old, [fq0["x"], fq0["y"], fq0["quota_q"]], t_new, [fq1["x"], fq1["y"], fq1["quota_q"]])
+    saved = json.loads((ch.data_dir / "elevations" / e0["id"] / "frame.json").read_text())
+    assert saved["frame"] == e1["frame"] and saved["bounds"] == e1["bounds"]
+    import rasterio
+
+    with rasterio.open(ch.data_dir / e1["relief"]) as src:
+        assert json.loads(src.tags()["ppg_frame"]) == e1["frame"]
+        assert np.isclose(src.transform.f, e1["bounds"][3])
+    # the proxy: its PLY and its record
+    _same_inside(t_old, ply_old, t_new, read_mesh(ply).xyz)
+    p1 = ch.meta["proxies"][0]
+    assert p1["volume_m3"] == pytest.approx(made["proxy"]["volume_m3"], rel=1e-9)
+    # what the window says
+    moved = result["moved"]
+    for store in ("units", "quote", "points", "lines", "free", "stones", "patches", "texture_patches",
+                  "colour_chart", "region", "elevations", "sections", "proxies", "markers"):
+        assert moved.get(store), (store, moved)
+    assert {s["product"] for s in result["stale"]} >= {"dem", "orthomosaic"}
+    assert not any(s["kind"] == "elevation" for s in result["stale"])  # moved with it: current
+    whats = {k["what"] for k in result["kept"]}
+    assert "section_drawings" in whats and "vertical_sections" in whats
+    sent = {s["what"]: s["names"] for s in result["sent_out"]}
+    assert sent["pyarchinit"] and "qfield" in sent and "exports" in sent
+    orient.drop(result["state"])
+
+
+def test_elevation_heights_with_a_turn_about_z(processed, tmp_path):
+    import json
+
+    import shapely
+    from orient_helpers import centre, local_copy, plane_elevation
+
+    from pyarchinit_photogrammetry.engine import elevation
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    e0 = plane_elevation(ch, centre(ch))
+    f0 = json.loads(json.dumps(ch.meta["drawings"]["frames"][e0["id"]]))
+    t_old = ch.transform.copy()
+    m = motion_of(rotation_of([0, 0, 1], 30.0), (0.0, 0.0, 2.0))
+    orient.drop(orient.apply(ch, m)["state"])
+    e1 = ch.meta["elevations"][0]
+    f1 = ch.meta["drawings"]["frames"][e0["id"]]
+    frame = elevation.frame_from_dict(e1["frame"])
+    assert e1["v_is_height"] is True and elevation.heights_measured(frame)
+    shifts = []
+    for (u0, v0), (u1, v1) in zip(shapely.from_wkt(f0["units"][0]["wkt"]).exterior.coords,
+                                  shapely.from_wkt(f1["units"][0]["wkt"]).exterior.coords):
+        assert u1 == pytest.approx(u0, abs=1e-12)
+        shifts.append(v1 - v0)
+        _same_inside(t_old, elevation.world_of(e0, u0, v0, 0.1), ch.transform, elevation.world_of(e1, u1, v1, 0.1),
+                     tol=1e-9)
+    shifts += [f1["lines"][0]["coords"][0][1] - f0["lines"][0]["coords"][0][1],
+               f1["quote"][0]["v"] - f0["quote"][0]["v"], e1["bounds"][1] - e0["bounds"][1]]
+    assert np.allclose(shifts, 2.0, atol=1e-9)
+    assert f1["quote"][0]["quota_q"] == pytest.approx(f0["quote"][0]["quota_q"] + 2.0, abs=1e-9)
+
+
+def test_cylinder_frame_follows(processed, tmp_path):
+    from orient_helpers import centre, cylinder_elevation, local_copy, tilt_motion
+
+    from pyarchinit_photogrammetry.engine import elevation
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    e0 = cylinder_elevation(ch, centre(ch))
+    t_old = ch.transform.copy()
+    m = tilt_motion((9.0, 120.0), 70.0, (1.0, 2.0, -0.5))
+    orient.drop(orient.apply(ch, m)["state"])
+    e1 = ch.meta["elevations"][0]
+    frame = elevation.frame_from_dict(e1["frame"])
+    assert frame.kind == "cylinder" and frame.u_map is not None
+    assert e1["tilt"] == e1["frame"]["tilt"]
+    assert np.allclose(e1["frame"]["tilt"]["centre"], geo.apply(m, np.array([e0["frame"]["tilt"]["centre"]], float))[0])
+    axis = np.asarray(e1["frame"]["axis"])
+    assert e1["frame"]["tilt"]["tilt_deg"] == pytest.approx(np.degrees(np.arccos(axis[2])), abs=1e-9)
+    for u, v, d in ((0.5, 0.2, 0.0), (3.0, -0.5, 0.1), (8.2, 0.7, -0.2)):
+        _same_inside(t_old, elevation.world_of(e0, u, v, d), ch.transform, elevation.world_of(e1, u, v, d),
+                     tol=1e-9)
+
+
+def test_aligned_chunks_move_with_it(tmp_path):
+    doc, ch = _bare(tmp_path)
+    other = doc.add_chunk("B")
+    other.transform = motion_of(rotation_of([1, 1, 0], 3), (0.2, 0.1, -0.3))
+    other.meta["chunk_alignment"] = {"reference": ch.label, "reference_key": ch.key, "method": "markers"}
+    assert orient.aligned_to(ch) == [other]
+    t2 = other.transform.copy()
+    m = motion_of(rotation_of([0, 1, 0], 10), (1.0, 2.0, 3.0))
+    result = orient.apply(ch, m)
+    assert np.abs(other.transform - m @ t2).max() < 1e-12
+    assert result["aligned"] == ["B"] and result["aligned_left"] == []
+    orient.put_back(result["state"])
+    assert np.array_equal(other.transform, t2)
+    result = orient.apply(ch, m, move_aligned=False)
+    assert np.array_equal(other.transform, t2)
+    assert result["aligned"] == [] and result["aligned_left"] == ["B"]
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.check(other)
+    assert e.value.reason == "aligned_to" and e.value.names == ["A"]
+
+
+def test_sections_kept_with_another_local_chunk(tmp_path):
+    import json
+
+    doc, ch = _bare(tmp_path)
+    doc.add_chunk("altro")  # LOCAL too, not aligned to this one
+    folder = doc.path.parent / "sezioni"
+    folder.mkdir()
+    text = json.dumps([{"label": "S1", "p1": [0.0, 0.0], "p2": [2.0, 1.0], "length": 2.236, "kind": "vertical"}])
+    (folder / "sezioni.json").write_text(text, encoding="utf-8")
+    result = orient.apply(ch, motion_of(rotation_of([0, 0, 1], 15), (1.0, 0.0, 0.0)))
+    assert (folder / "sezioni.json").read_text(encoding="utf-8") == text
+    assert {"what": "sections", "names": ["S1"]} in result["kept"]
+    assert not result["moved"].get("sections")
+
+
+def test_refusals(tmp_path):
+    doc, ch = _bare(tmp_path, crs="EPSG:3004")
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.apply(ch, np.eye(4))
+    assert e.value.reason == "crs"
+    (tmp_path / "b").mkdir()
+    doc, ch = _bare(tmp_path / "b")
+    _typed(ch, 3)
+    _typed(ch, 2, checkpoint=True)  # check markers do not give the orientation
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.check(ch)
+    assert e.value.reason == "markers" and e.value.names == ["M0", "M1", "M2"]
+    # two control markers: their typed references converted by M
+    (tmp_path / "c").mkdir()
+    doc, ch = _bare(tmp_path / "c")
+    typed = _typed(ch, 2)
+    before = [list(mk.reference.location) for mk in typed]
+    m = motion_of(rotation_of([1, 0, 0], 8), (0.5, -1.0, 2.0))
+    result = orient.apply(ch, m)
+    for mk, loc in zip(typed, before):
+        assert np.allclose(mk.reference.location, geo.apply(m, np.array([loc], float))[0], atol=1e-12)
+    assert result["moved"]["markers"] == 2
+    # aligned to another chunk: the reference is to be oriented
+    other = doc.add_chunk("B")
+    other.meta["chunk_alignment"] = {"reference": ch.label, "reference_key": ch.key}
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.apply(other, np.eye(4))
+    assert e.value.reason == "aligned_to" and e.value.names == [ch.label]
+
+
+def _project_bytes(doc):
+    import json
+
+    return json.dumps([c.to_dict() for c in doc.chunks])
+
+
+def test_put_back_restores_byte_for_byte(processed, tmp_path):
+    from orient_helpers import drawn, local_copy, tilt_motion
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    made = drawn(ch)
+    sections = doc.path.parent / "sezioni" / "sezioni.json"
+    frames = sorted((ch.data_dir / "elevations").glob("*/frame.json"))
+    ply = ch.data_dir / made["proxy"]["file"]
+    before = (_project_bytes(doc), sections.read_bytes(), [f.read_bytes() for f in frames], ply.read_bytes())
+    t_object = ch.transform
+    result = orient.apply(ch, tilt_motion((5.0, 10.0), 20.0))
+    assert _project_bytes(doc) != before[0] and ply.read_bytes() != before[3]
+    orient.put_back(result["state"])
+    after = (_project_bytes(doc), sections.read_bytes(), [f.read_bytes() for f in frames], ply.read_bytes())
+    assert after == before
+    assert ch.transform is t_object  # the same array: who holds it sees the old values
+    clones = list(result["state"].folders)
+    assert clones and all(p.exists() for p in clones)
+    orient.drop(result["state"])
+    assert not any(p.exists() for p in clones)
+
+
+def test_failure_puts_everything_back(processed, tmp_path, monkeypatch):
+    from orient_helpers import drawn, local_copy, tilt_motion
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    drawn(ch)
+    before = _project_bytes(doc)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(orient, "_write_proxies", broken)
+    with pytest.raises(RuntimeError):
+        orient.apply(ch, tilt_motion())
+    assert _project_bytes(doc) == before
+
+
+def test_listener_and_unaware_plugin_keys(tmp_path):
+    doc, ch = _bare(tmp_path)
+    ch.meta["shipwreck"] = {"frame": [1, 2, 3]}
+    m = motion_of(rotation_of([0, 0, 1], 5))
+    calls = []
+    result = orient.apply(ch, m)
+    assert result["plugins_unaware"] == ["shipwreck"]
+    orient.put_back(result["state"])
+    stop = orient.on_transform_changed(lambda c, mm: calls.append((c, mm)), keys=("shipwreck",))
+    try:
+        result = orient.apply(ch, m)
+    finally:
+        stop()
+    assert len(calls) == 1 and calls[0][0] is ch and np.array_equal(calls[0][1], m)
+    assert result["plugins_unaware"] == []
+    orient.apply(ch, m)
+    assert len(calls) == 1  # unregistered
