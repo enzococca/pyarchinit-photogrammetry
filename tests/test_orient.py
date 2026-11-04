@@ -360,6 +360,11 @@ def test_elevation_heights_with_a_turn_about_z(processed, tmp_path):
 
     doc, ch, _ = local_copy(processed, tmp_path)
     e0 = plane_elevation(ch, centre(ch))
+    v = e0["bounds"][1] + 0.5
+    patch = {"id": "p1", "polygon": [[0.5, v], [1.5, v], [1.0, v + 0.4]], "photos": [], "mode": "assign",
+             "surface": "dem"}
+    e0["patches"], e0["applied_patches"] = [dict(patch)], [json.loads(json.dumps(patch))]
+    e0 = json.loads(json.dumps(e0))
     f0 = json.loads(json.dumps(ch.meta["drawings"]["frames"][e0["id"]]))
     t_old = ch.transform.copy()
     m = motion_of(rotation_of([0, 0, 1], 30.0), (0.0, 0.0, 2.0))
@@ -377,6 +382,11 @@ def test_elevation_heights_with_a_turn_about_z(processed, tmp_path):
                      tol=1e-9)
     shifts += [f1["lines"][0]["coords"][0][1] - f0["lines"][0]["coords"][0][1],
                f1["quote"][0]["v"] - f0["quote"][0]["v"], e1["bounds"][1] - e0["bounds"][1]]
+    for key in ("patches", "applied_patches"):  # the patches of the elevation with its (u, v)
+        for (u0, v0), (u1, v1) in zip(e0[key][0]["polygon"], e1[key][0]["polygon"]):
+            shifts.append(v1 - v0)
+            _same_inside(t_old, elevation.world_of(e0, u0, v0, 0.0), ch.transform,
+                         elevation.world_of(e1, u1, v1, 0.0), tol=1e-9)
     assert np.allclose(shifts, 2.0, atol=1e-9)
     assert f1["quote"][0]["quota_q"] == pytest.approx(f0["quote"][0]["quota_q"] + 2.0, abs=1e-9)
 
@@ -497,20 +507,52 @@ def test_put_back_restores_byte_for_byte(processed, tmp_path):
     assert not any(p.exists() for p in clones)
 
 
+def _files_state(doc, ch, made):
+    """The bytes of the sections, the elevations' frame.json, the proxy PLY, and the tags and grids of the
+    elevations' rasters."""
+    import rasterio
+
+    sections = doc.path.parent / "sezioni" / "sezioni.json"
+    frames = sorted((ch.data_dir / "elevations").glob("*/frame.json"))
+    rasters = []
+    for path in sorted((ch.data_dir / "elevations").glob("*/*.tif")):
+        with rasterio.open(path) as src:
+            rasters.append((dict(src.tags()), tuple(src.transform)))
+    return (sections.read_bytes(), [f.read_bytes() for f in frames], (ch.data_dir / made["proxy"]["file"]).read_bytes(),
+            rasters)
+
+
 def test_failure_puts_everything_back(processed, tmp_path, monkeypatch):
     from orient_helpers import drawn, local_copy, tilt_motion
 
     doc, ch, _ = local_copy(processed, tmp_path)
-    drawn(ch)
-    before = _project_bytes(doc)
+    made = drawn(ch)
+    before, files = _project_bytes(doc), _files_state(doc, ch, made)
 
     def broken(*_a, **_k):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(orient, "_write_proxies", broken)
-    with pytest.raises(RuntimeError):
+    with monkeypatch.context() as patch:
+        patch.setattr(orient, "_write_proxies", broken)
+        with pytest.raises(RuntimeError):
+            orient.apply(ch, tilt_motion())
+    assert _project_bytes(doc) == before and _files_state(doc, ch, made) == files
+    # a failure on the second chunk (one aligned to it): the first, already moved, comes back too
+    other = doc.add_chunk("B")
+    other.meta["chunk_alignment"] = {"reference": ch.label, "reference_key": ch.key}
+    before = _project_bytes(doc)
+    real = orient.move_stores
+
+    def second_fails(chunk, m, sections=None):
+        if chunk is other:
+            raise RuntimeError("second chunk")
+        return real(chunk, m, sections)
+
+    monkeypatch.setattr(orient, "move_stores", second_fails)
+    with pytest.raises(RuntimeError, match="second chunk"):
         orient.apply(ch, tilt_motion())
-    assert _project_bytes(doc) == before
+    assert _project_bytes(doc) == before and _files_state(doc, ch, made) == files
+    assert not list((ch.data_dir / "undo").glob("orient-*"))
 
 
 def test_listener_and_unaware_plugin_keys(tmp_path):
@@ -530,3 +572,95 @@ def test_listener_and_unaware_plugin_keys(tmp_path):
     assert result["plugins_unaware"] == []
     orient.apply(ch, m)
     assert len(calls) == 1  # unregistered
+
+
+def test_chunks_aligned_to_an_aligned_chunk_move_too(tmp_path):
+    doc, a = _bare(tmp_path)
+    b, c = doc.add_chunk("B"), doc.add_chunk("C")
+    b.meta["chunk_alignment"] = {"reference": "A", "reference_key": a.key}
+    c.meta["chunk_alignment"] = {"reference": "B", "reference_key": b.key}
+    assert orient.aligned_to(a) == [b, c]
+    tb, tc = b.transform.copy(), c.transform.copy()
+    m = motion_of(rotation_of([0, 0, 1], 12), (1.0, 0.0, 0.5))
+    result = orient.apply(a, m)
+    assert result["aligned"] == ["B", "C"]
+    assert np.abs(b.transform - m @ tb).max() < 1e-12 and np.abs(c.transform - m @ tc).max() < 1e-12
+    orient.put_back(result["state"])
+    result = orient.apply(a, m, move_aligned=False)
+    assert result["aligned_left"] == ["B", "C"] and np.array_equal(c.transform, tc)
+    b.meta["chunk_alignment"]["reference_key"] = c.key  # a cycle B <- C <- B: each chunk once
+    a2 = orient.aligned_to(c)
+    assert a2 == [b]
+
+
+def test_photo_positions_that_place_the_chunk_are_refused(tmp_path):
+    from pyarchinit_photogrammetry.core.camera import Camera, Reference
+    from pyarchinit_photogrammetry.core.marker import ScaleBar
+
+    doc, ch = _bare(tmp_path)
+    for k in range(3):
+        cam = Camera(key=k, label=f"c{k}", path=f"c{k}.jpg", sensor_key=0)
+        cam.transform = np.eye(4)
+        cam.transform[:3, 3] = [k * 5.0, k * 2.0, 10.0]
+        cam.reference = Reference(location=[100.0 + 5 * k, 50.0 + 2 * k, 10.0], accuracy=[0.05] * 3)
+        ch.cameras.append(cam)
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.check(ch)
+    assert e.value.reason == "cameras" and e.value.names == ["c0", "c1", "c2"]
+    for cam in ch.cameras:  # a real system (GPS kept in a shifted LOCAL chunk): refused too
+        cam.meta["reference_crs"] = "EPSG:4326"
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.check(ch)
+    assert e.value.reason == "cameras"
+    ch.cameras[0].reference.enabled = False  # two left: they do not fit the transform
+    orient.check(ch)
+    ch.cameras[0].reference.enabled = True
+    _typed(ch, 1)  # a control marker with a typed reference: the photos are left out of the fit
+    orient.check(ch)
+    # a scale with control scale bars: the bars give it
+    a, b = ch.markers[0], ch.add_marker("N")
+    ch.scalebars.append(ScaleBar(key=0, label="A-B", marker_a=a.key, marker_b=b.key, distance=1.0))
+    with pytest.raises(orient.OrientRefused) as e:
+        orient.apply(ch, motion_of(s=2.0))
+    assert e.value.reason == "scalebars"
+    orient.drop(orient.apply(ch, motion_of(rotation_of([0, 0, 1], 10)))["state"])  # rigid: allowed
+
+
+def test_unstamped_elevation_is_stale_after_a_scale(processed, tmp_path):
+    from orient_helpers import centre, local_copy, plane_elevation
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    entry = plane_elevation(ch, centre(ch))
+    entry.pop("built_in")
+    ch.meta.pop("built_in", None)
+    result = orient.apply(ch, motion_of(s=2.0))
+    stale = {(x["kind"], x["id"]) for x in result["stale"]}
+    assert ("elevation", entry["id"]) in stale
+    orient.put_back(result["state"])
+    orient.drop(result["state"])
+    result = orient.apply(ch, motion_of(rotation_of([0, 0, 1], 10)))  # rigid: moved with it, current
+    assert not any(x["kind"] == "elevation" for x in result["stale"])
+    orient.drop(result["state"])
+
+
+# keys written on objects that are not chunks (photos, the document)
+NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "rolling_shutter"}
+
+
+def test_every_chunk_meta_key_of_the_program_is_known():
+    import re
+    from pathlib import Path
+
+    import pyarchinit_photogrammetry
+
+    root = Path(pyarchinit_photogrammetry.__file__).parent
+    pattern = re.compile(r'\b(\w+)\.meta(?:\["(\w+)"\]\s*=(?!=)|\.setdefault\("(\w+)"|\.get\("(\w+)")')
+    unknown = {}
+    for path in root.rglob("*.py"):
+        for m in pattern.finditer(path.read_text(encoding="utf-8")):
+            if m.group(4) and m.group(1) not in ("chunk", "ch"):
+                continue
+            key = m.group(2) or m.group(3) or m.group(4)
+            if key not in orient.PROGRAM_KEYS and key not in NOT_CHUNK_KEYS:
+                unknown.setdefault(key, []).append(str(path.relative_to(root)))
+    assert not unknown, unknown

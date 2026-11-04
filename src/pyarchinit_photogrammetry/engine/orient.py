@@ -32,7 +32,7 @@ from ..core import stamps
 
 _log = _logging.getLogger(__name__)
 
-REASONS = ("crs", "markers", "aligned_to", "scalebars", "collinear", "plane_points", "plane_rough", "nan")
+REASONS = ("crs", "markers", "cameras", "aligned_to", "scalebars", "collinear", "plane_points", "plane_rough", "nan")
 COLLINEAR_SIN = 1e-3
 MIN_PLANE_POINTS = 30
 MAX_PLANE_NMAD = 0.10
@@ -224,7 +224,7 @@ MOVED_KEYS = ("drawings", "stones", "orthomosaic", "texture", "colour_chart", "r
               "levelled", "built_in", "versions", "relief", "calculator", "multispectral", "thermal", "satellite")
 # the keys of chunk.meta the program knows; the others are the data of plugins
 PROGRAM_KEYS = frozenset((
-    "active_versions", "built_in", "calculator", "chunk_alignment", "classes", "colour_chart", "confidence", "coverage",
+    "active_versions", "built_in", "calculator", "chunk_alignment", "classes", "colour", "colour_chart", "confidence", "coverage",
     "date", "dem", "dem_edits", "dem_precision", "dense", "drawings", "elevations", "field_check", "gnss",
     "gnss_only_fix", "import", "layer_labels", "levelled", "live_links", "marker_excluded", "marker_frames", "merge",
     "metric", "model", "multispectral", "normal_map", "optimize", "orientation", "orthomosaic", "panorama",
@@ -236,16 +236,42 @@ _LISTENERS: list[tuple] = []  # (callback, keys)
 
 
 def aligned_to(chunk) -> list:
-    """The chunks of the project aligned to ``chunk`` (*Allinea chunk*): their transforms are in its frame."""
+    """The chunks of the project aligned to ``chunk`` (*Allinea chunk*), and those aligned to them, and so on (a
+    reference may itself be aligned): their transforms are all in its frame. Breadth first, each chunk once."""
     doc = getattr(chunk, "document", None)
-    return [c for c in getattr(doc, "chunks", []) or []
-            if c is not chunk and (c.meta.get("chunk_alignment") or {}).get("reference_key") == chunk.key]
+    chunks = [c for c in getattr(doc, "chunks", []) or []]
+    out, queue, seen = [], [chunk], {id(chunk)}
+    while queue:
+        ref = queue.pop(0)
+        for c in chunks:
+            if id(c) not in seen and (c.meta.get("chunk_alignment") or {}).get("reference_key") == ref.key:
+                seen.add(id(c))
+                out.append(c)
+                queue.append(c)
+    return out
 
 
 def _control_markers(chunk) -> list:
     """The control markers with typed references that are not orientation markers: they give the orientation."""
     return [m for m in chunk.markers if m.reference.location and m.reference.enabled and not m.checkpoint
             and not getattr(m, "orientation", False)]
+
+
+def _referenced_cameras(chunk) -> list:
+    """The aligned photos whose positions (enabled references, in a local or a real system) take part in the fit of
+    the chunk's transform (:func:`..markers.gcp.update_transform`): three or more, no control marker with a typed
+    reference (orientation markers included: they take the place of the photos), and not an object scaled by control
+    scale bars with positions that do not span their accuracy. Empty when they do not."""
+    from ..markers import gcp
+
+    cams = [c for c in chunk.aligned_cameras if c.reference.enabled and c.reference.location]
+    if len(cams) < 3:
+        return []
+    if any(m.reference.location and m.reference.enabled and not m.checkpoint for m in chunk.markers):
+        return []
+    if gcp.control_scalebars(chunk) and not gcp.cameras_span_their_accuracy(chunk):
+        return []
+    return cams
 
 
 def check(chunk) -> None:
@@ -258,6 +284,11 @@ def check(chunk) -> None:
     if len(controls) >= 3:
         raise OrientRefused("markers", "the orientation is given by the markers: change their coordinates",
                             [m.label for m in controls])
+    cameras = _referenced_cameras(chunk)
+    if cameras:
+        raise OrientRefused("cameras", "the positions of the photos give the orientation (the next fit of the "
+                            "transform would bring it back): remove their references or switch them off",
+                            [c.label for c in cameras])
     alignment = chunk.meta.get("chunk_alignment")
     if alignment:
         doc = getattr(chunk, "document", None)
@@ -519,6 +550,12 @@ def _elevations(chunk, m, s, r, mover, drawings: dict | None, shapely):
         if e.get("bounds"):
             u0, v0, u1, v1 = (float(v) for v in e["bounds"])
             new["bounds"] = [u0 * s, v0 * s + c, u1 * s, v1 * s + c]
+        if s != 1.0 or c != 0.0:  # the patches of the elevation (1.7.1), in its (u, v)
+            f = _uv(s, c)
+            for key in ("patches", "applied_patches"):
+                for patch in new.get(key) or []:
+                    if isinstance(patch, dict) and patch.get("polygon"):
+                        patch["polygon"] = f(np.asarray(patch["polygon"], float)[:, :2]).tolist()
         if frame_json.exists():
             saved = _json.loads(frame_json.read_text(encoding="utf-8"))
             for key in ("frame", "depth", "resolution", "bounds", "v_is_height"):
@@ -606,7 +643,8 @@ def _write_rasters(rasters: dict) -> None:
 
 def move_stores(chunk, m, sections=None) -> dict:
     """Everything kept in the coordinates of ``chunk`` carried by the motion ``m`` (the chunk's transform is not
-    changed here: the caller pre-multiplies it). The new values are built aside and written only when all of them are
+    changed here: the caller pre-multiplies it). Call it through :func:`apply`: the files are written before
+    ``chunk.meta`` with no rollback of their own, :func:`apply` puts everything back on a failure. The new values are built aside and written only when all of them are
     built; the files (the elevations' ``frame.json``, ``profile.json``, tags and grids of their rasters, the proxies'
     PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``. Returns how many
     of each store moved."""
@@ -676,7 +714,8 @@ def move_stores(chunk, m, sections=None) -> dict:
 
 def _stamp_unstamped(chunk) -> None:
     """The products built before 1.7.2 (no stamp: read as current) stamped with the transform of the chunk now, before
-    it changes: after the motion they read as stale. The elevations are moved with it: not here."""
+    it changes: after the motion they read as stale. The elevations too: moved with a rigid motion they are stamped
+    again after it (current), with a scale they stay stale (their relief is in the old units)."""
     meta, products = chunk.meta, chunk.products or {}
     built = meta.get("built_in") or {}
     for name in (*stamps.GRID_PRODUCTS, "slope", "aspect"):
@@ -694,6 +733,7 @@ def _stamp_unstamped(chunk) -> None:
         records.append(th["anomaly"])
     records += [x for kind in ("scenes", "stereo") for x in (meta.get("satellite") or {}).get(kind) or []]
     records += [x for name in ("dem", "orthomosaic") for x in (meta.get("versions") or {}).get(name) or []]
+    records += list(meta.get("elevations") or [])
     for record in records:
         if isinstance(record, dict) and record.get("built_in") is None:
             stamps.stamp_entry(chunk, record)
@@ -739,11 +779,16 @@ def apply(chunk, m, move_aligned: bool = True) -> dict:
     "plugins_unaware": [keys of chunk.meta of plugins not listening], "state": the :class:`OrientState` to undo it}``."""
     from ..gnss import heights as hg
 
+    from ..markers import gcp
+
     check(chunk)
     m = np.asarray(m, float).reshape(4, 4)
     if not np.all(np.isfinite(m)):
         raise OrientRefused("nan", "the motion has no valid numbers")
     s, r, _t = geo.decompose_similarity(m)
+    if not np.isclose(s, 1.0, rtol=stamps.STAMP_RTOL, atol=0.0) and gcp.control_scalebars(chunk):
+        raise OrientRefused("scalebars", "the scale bars give the scale: change their distances",
+                            [b.label for b in gcp.control_scalebars(chunk)])
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
     doc = getattr(chunk, "document", None)

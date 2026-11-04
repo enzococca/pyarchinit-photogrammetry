@@ -64,7 +64,8 @@ def local_copy(processed, tmp_path, tilt=(12.0, 40.0), heading=35.0, name="local
     c = centre(ch)
     n = 200
     res = 0.05
-    x0, y0 = c[0] - n * res / 2, c[1] + n * res / 2
+    # a quarter of a cell off the round offsets the drawings use: no vertex on the edge of two cells
+    x0, y0 = c[0] - n * res / 2 + res / 4, c[1] + n * res / 2 + res / 4
     xs = x0 + (np.arange(n) + 0.5) * res
     ys = y0 - (np.arange(n) + 0.5) * res
     gx, gy = np.meshgrid(xs, ys)
