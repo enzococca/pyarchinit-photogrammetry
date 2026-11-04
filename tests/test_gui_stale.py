@@ -4,6 +4,7 @@ built with, and a kept version made in another system says so when it becomes th
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -181,7 +182,7 @@ def test_rebuild_order_and_parameters(win, qapp, monkeypatch):
     ids = [x["id"] for x in ch.meta["elevations"]]
     assert ids.count("el000001") == 1 and "nuovo001" not in ids  # the same id, in its place
     new = next(x for x in ch.meta["elevations"] if x["id"] == "el000001")
-    assert new["orthophoto"] == "elevations/el000001/elevation.tif"
+    assert Path(new["orthophoto"]).as_posix() == "elevations/el000001/elevation.tif"  # the separator of the system
     assert (ch.data_dir / new["orthophoto"]).exists()
     assert not (ch.data_dir / "elevations" / "nuovo001").exists()
     assert not stamps.entry_stale(ch, new)

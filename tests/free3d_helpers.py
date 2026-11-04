@@ -47,6 +47,33 @@ def double_click_at(view, x: float, y: float) -> None:
         QApplication.sendEvent(view.canvas, ev)
 
 
+def move_to(view, x: float, y: float) -> None:
+    """The mouse moved over the canvas with no button pressed, sent to the canvas itself (``QTest.mouseMove`` goes
+    through the platform's cursor and, offscreen on Linux and Windows, may deliver nothing)."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    pos = QPointF(float(round(x)), float(round(y)))
+    ev = QMouseEvent(QEvent.Type.MouseMove, pos, view.canvas.mapToGlobal(pos), Qt.MouseButton.NoButton,
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(view.canvas, ev)
+
+
+def wait_for(condition, ms: int = 5000) -> bool:
+    """Events processed until ``condition()`` holds or ``ms`` milliseconds pass (PySide6 has no ``qWaitFor``)."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    end = time.monotonic() + ms / 1000.0
+    while not condition():
+        if time.monotonic() > end:
+            return False
+        QTest.qWait(10)
+    return True
+
+
 def median_edge(chunk) -> float:
     """The median length of the edges of the model (internal units)."""
     m = chunk.model

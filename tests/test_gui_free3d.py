@@ -194,22 +194,22 @@ def test_snap_never_takes_a_vertex_behind_the_surface(view, app):
 
 
 def test_rubber_band_follows_the_cursor(view, app):
-    from free3d_helpers import click_vertex, screen_of
-    from PySide6.QtCore import QPoint
-    from PySide6.QtTest import QTest
+    from free3d_helpers import click_vertex, move_to, screen_of, wait_for
+
+    def drawn(n):
+        d = view.sd.drawing
+        return d is not None and len(d) == n
 
     targets = _targets(view, 3)
     view.start_drawing("line")
     click_vertex(view, targets[0])
     x, y = screen_of(view, targets[1])
-    QTest.qWait(40)
-    QTest.mouseMove(view.canvas, QPoint(int(x), int(y)))
-    QTest.qWait(60)
+    move_to(view, x, y)
+    assert wait_for(lambda: drawn(2))  # picked now or by the throttle's timer
     first = view.sd.drawing
-    assert first is not None and len(first) == 2
     x, y = screen_of(view, targets[2])
-    QTest.mouseMove(view.canvas, QPoint(int(x), int(y)))
-    QTest.qWait(60)
+    move_to(view, x, y)
+    assert wait_for(lambda: drawn(2) and not np.allclose(view.sd.drawing[-1], first[-1]))
     second = view.sd.drawing
     assert second is not None and len(second) == 2
     assert np.allclose(second[0], first[0])
