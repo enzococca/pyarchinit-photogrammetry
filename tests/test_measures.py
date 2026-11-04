@@ -286,9 +286,10 @@ def test_a_curved_wall_drawn_by_its_four_corners(half):
     out = measures.model_area_inside(tower, poly)
     assert out["projection"] == "plane"
     assert out["surface"] == pytest.approx(true, rel=0.01)
-    # seen from the cameras outside: the same; seen from inside the tower, the inner side of the far wall
+    # seen from the cameras outside: the same; from inside the tower the same wall too (the far side of the
+    # tower is beyond the margin in front of the drawing)
     assert measures.model_area_inside(tower, poly, toward=[20.0, 0, 2])["surface"] == pytest.approx(out["surface"])
-    assert measures.model_area_inside(tower, poly, toward=[0.0, 0, 2])["surface"] != pytest.approx(out["surface"])
+    assert measures.model_area_inside(tower, poly, toward=[0.0, 0, 2])["surface"] == pytest.approx(out["surface"])
 
 
 def test_a_block_inside_an_outline_drawn_on_the_ground():
@@ -337,12 +338,68 @@ def test_model_area_is_fast_on_a_large_mesh():
 
     n = 317  # 199,712 faces
     xs = np.linspace(0, 100, n)
-    mesh = _heightfield(xs, xs, lambda x, y: 0.5 * np.sin(x / 7) * np.cos(y / 5))
+    mesh = _heightfield(xs, xs, lambda x, y: 0.2 * np.sin(x / 7) * np.cos(y / 5))  # within the front margin
     assert len(mesh.faces) >= 199_000
     side = 100 * np.sqrt(0.1)
     xy = np.array([[20, 20], [20 + side, 20], [20 + side, 20 + side], [20, 20 + side]], float)
-    poly = np.column_stack([xy, 0.5 * np.sin(xy[:, 0] / 7) * np.cos(xy[:, 1] / 5)])
+    poly = np.column_stack([xy, 0.2 * np.sin(xy[:, 0] / 7) * np.cos(xy[:, 1] / 5)])
     start = time.perf_counter()
     out = measures.model_area_inside(mesh, poly)
     assert time.perf_counter() - start < 2.0
     assert out["coverage"] == pytest.approx(1.0, abs=1e-9) and out["surface"] > out["plan"]
+
+
+def _merge(*meshes):
+    import trimesh
+
+    return trimesh.util.concatenate(list(meshes))
+
+
+def test_a_roof_far_above_the_floor_is_ignored():
+    """A pitched roof strip 2.5-3.5 m above the floor: beyond max(0.5 m, the vertices' spread), not the floor's layer."""
+    import trimesh
+
+    xs = np.linspace(-2, 2, 41)
+    floor = _heightfield(xs, xs, lambda x, y: 0.0 * x)
+    roof = trimesh.Trimesh(np.array([[-1, -2, 2.5], [1, -2, 3.5], [1, 2, 3.5], [-1, 2, 2.5]], float), [[0, 1, 2], [0, 2, 3]],
+                           process=False)
+    poly = np.array([[-1.5, -1.5, 0], [1.5, -1.5, 0], [1.5, 1.5, 0], [-1.5, 1.5, 0]], float)
+    out = measures.model_area_inside(_merge(floor, roof), poly)
+    assert out["surface"] == pytest.approx(9.0, rel=0.01) and out["coverage"] <= 1.0
+
+
+@pytest.mark.parametrize("gap", [0.3, 1.0, 3.0])
+def test_a_screen_in_front_of_a_wall(gap):
+    """A bumpy screen ``gap`` m in front of a wall, the cameras beyond it: within max(0.5 m, the vertices'
+    spread) of the drawing the screen is the first surface seen and is measured, farther it is ignored."""
+    import trimesh
+
+    slab = trimesh.creation.box(extents=(4.0, 0.5, 3.0))
+    xs, zs = np.linspace(-2, 2, 41), np.linspace(-1.5, 1.5, 31)
+    X, Z = np.meshgrid(xs, zs, indexing="ij")
+    Y = 0.25 + gap + 0.1 * np.sin(3 * X) * np.cos(3 * Z)
+    screen = trimesh.Trimesh(np.column_stack([X.ravel(), Y.ravel(), Z.ravel()]), _grid_mesh(len(xs), len(zs)),
+                             process=False)
+    front = np.array([[-1, 0.25, -1], [1, 0.25, -1], [1, 0.25, 1], [-1, 0.25, 1]], float)
+    out = measures.model_area_inside(_merge(slab, screen), front, toward=[0, 10, 0])
+    if gap < 0.5:
+        alone = measures.model_area_inside(screen, front, toward=[0, 10, 0])["surface"]
+        assert alone > 4.05 and out["surface"] == pytest.approx(alone, rel=1e-6)
+    else:
+        assert out["surface"] == pytest.approx(4.0, rel=0.01)
+
+
+@pytest.mark.parametrize("size,at", [(1.0, (0.0, 0.0)), (1.0, (1.0, 0.5)), (2.0, (0.0, 0.0))])
+def test_a_box_on_a_coarse_ground(size, at):
+    """Ground of two 10 x 10 m triangles with a closed 0.15 m box on it: the ground under the box is hidden;
+    the box's sides are exactly vertical and count 0 in plan, so the surface is the outline's 9 m2."""
+    import trimesh
+
+    ground = trimesh.Trimesh(np.array([[-5, -5, 0], [5, -5, 0], [5, 5, 0], [-5, 5, 0]], float), [[0, 1, 2], [0, 2, 3]],
+                             process=False)
+    box = trimesh.creation.box(extents=(size, size, 0.15))
+    box.apply_translation([at[0], at[1], 0.075])
+    poly = np.array([[-1.5, -1.5, 0], [1.5, -1.5, 0], [1.5, 1.5, 0], [-1.5, 1.5, 0]], float)
+    out = measures.model_area_inside(_merge(ground, box), poly)
+    assert out["surface"] == pytest.approx(9.0, rel=0.01)
+    assert out["coverage"] <= 1.0
