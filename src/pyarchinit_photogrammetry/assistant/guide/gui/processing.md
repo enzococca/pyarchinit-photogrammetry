@@ -322,6 +322,12 @@ aligns again, and that is safe) put the frame back through them. Deleting them g
 at the next alignment. A marker seen in fewer than two photos is listed as weak: it cannot be found again after a
 new alignment.
 
+**Field coordinates replace the hand orientation.** When the site grid arrives later - three or more control markers
+with coordinates from the total station or the GNSS, or a system chosen for the chunk - those place the survey and
+the orientation markers step aside: they take no part in *Update georeference*, the *Reference* pane shows them in
+grey as "orientation, not used" with no error (their coordinates are in the hand frame), and a new hand orientation
+is refused while the control points are there.
+
 **Products to rebuild.** DEM, orthophoto and the rasters made from them (precision, coverage, reliefs, slope,
 aspect, TIN) are grids in the old plan: they read *to rebuild*. The raster view says so in a yellow band over the
 picture, and the drawing tools refuse to draw on it. *Workflow > Rebuild the stale products* (also offered by the

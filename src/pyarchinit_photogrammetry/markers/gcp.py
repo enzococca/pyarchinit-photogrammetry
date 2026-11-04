@@ -595,8 +595,25 @@ def control_scalebars(chunk) -> list:
     return [sb for sb in chunk.scalebars if sb.enabled and not sb.checkpoint]
 
 
+def orientation_set_aside(chunk) -> bool:
+    """True when the orientation markers of a hand orientation (:mod:`..engine.orient`) no longer place the chunk:
+    it is in a real system (not LOCAL), or three or more control markers with typed references that are not
+    orientation markers give it (the total station's or the GNSS points measured later replace the hand frame).
+    They then take no part in :func:`update_transform` and :func:`marker_errors` lists them as ``orientation``."""
+    if not any(getattr(m, "orientation", False) for m in chunk.markers):
+        return False
+    if not crs_mod.is_local(chunk.crs):
+        return True
+    others = [m for m in chunk.markers if not getattr(m, "orientation", False) and not m.checkpoint
+              and m.reference.enabled and m.reference.location]
+    return len(others) >= 3
+
+
 def _orientation_markers(chunk) -> list:
-    """The orientation markers of a local system (:mod:`..engine.orient`) with their typed references."""
+    """The orientation markers of a local system (:mod:`..engine.orient`) with their typed references (none when
+    they are set aside, :func:`orientation_set_aside`)."""
+    if orientation_set_aside(chunk):
+        return []
     return [m for m in chunk.markers if m.orientation and m.reference.enabled and m.reference.location
             and not m.checkpoint]
 
@@ -653,13 +670,16 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
     Orientation markers (a local system oriented by hand, :func:`..engine.orient.orient`): placed alone with control
     bars they give rotation and translation (anchored on A, the origin) and the bars the scale; with scale bars
     alone the frame is kept and only the scale changes, about A; a fit they took part in says
-    ``+orientation`` in ``method`` and sets ``meta["levelled"]``.
+    ``+orientation`` in ``method`` and sets ``meta["levelled"]``. In a real system, or with three or more other
+    control markers, they step aside (:func:`orientation_set_aside`): left out of the fit, listed in
+    ``orientation_not_used``.
     """
     if crs_mod.is_geographic(chunk.crs):
         raise ValueError(f"chunk CRS {chunk.crs} is geographic; use a projected CRS (e.g. the UTM zone)")
     chunk.triangulate_markers()
+    aside = orientation_set_aside(chunk)
     ctrl = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
-            and m.position is not None]
+            and m.position is not None and not (aside and m.orientation)]
     src = np.array([m.position for m in ctrl]).reshape(-1, 3)
     dst = np.array([m.reference.location for m in ctrl], float).reshape(-1, 3)
     acc = np.array([np.mean(m.reference.accuracy) for m in ctrl], float)
@@ -713,7 +733,8 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
             if not crs_mod.is_local(chunk.crs):  # a scale alone does not place the chunk in a CRS
                 chunk.crs = crs_mod.LOCAL
     report = {"method": method, "crs": chunk.crs, "markers": marker_errors(chunk),
-              "scalebars": scalebar_errors(chunk), "scale": float(chunk.scale)}
+              "scalebars": scalebar_errors(chunk), "scale": float(chunk.scale),
+              "orientation_not_used": [m.label for m in chunk.markers if aside and m.orientation]}
     for kind in ("control", "check"):
         errs = [e["error"] for e in report["markers"] if e["type"] == kind and e["error"] is not None]
         report[f"{kind}_rmse"] = float(np.sqrt(np.mean(np.square(errs)))) if errs else None
@@ -723,15 +744,23 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
 
 
 def marker_errors(chunk) -> list[dict]:
+    """Per marker its type (``control``, ``check``, or ``orientation`` for the orientation markers set aside,
+    :func:`orientation_set_aside`: their references are in the hand frame, so no error), the difference from its
+    reference, its projections and its error in the photos."""
     out = []
+    aside = orientation_set_aside(chunk)
     for m in chunk.markers:
-        e = {"label": m.label, "type": "check" if m.checkpoint else "control", "error": None,
+        if aside and m.orientation:
+            kind = "orientation"
+        else:
+            kind = "check" if m.checkpoint else "control"
+        e = {"label": m.label, "type": kind, "error": None,
              "dx": None, "dy": None, "dz": None, "projections": sum(p.measured for p in m.projections.values()),
              "estimated": sum(not p.measured for p in m.projections.values()), "pixel_error": None}
         px = marker_reprojection_errors(chunk, m)
         if px:
             e["pixel_error"] = float(np.sqrt(np.mean(np.square(list(px.values())))))
-        if m.position is not None and m.reference.location:
+        if m.position is not None and m.reference.location and kind != "orientation":
             d = chunk.to_world(m.position) - np.asarray(m.reference.location, float)
             e.update(dx=float(d[0]), dy=float(d[1]), dz=float(d[2]), error=float(np.linalg.norm(d)))
         out.append(e)

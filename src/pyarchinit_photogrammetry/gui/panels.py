@@ -1068,6 +1068,10 @@ class ReferencePane(QWidget):
                     it.setToolTip(tr("Coordinata stimata: {0}", how))
                 if c in (1, 11):
                     it.setToolTip(how)
+                if c == 1 and e.get("type") == "orientation":
+                    it.setForeground(QColor(PALETTE["grey"]))
+                    it.setToolTip(tr("Orientamento, non usato: i punti di controllo (o il sistema scelto) collocano "
+                                     "il rilievo; le coordinate del marker sono nel sistema orientato a mano"))
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
                     it.setForeground(QColor(PALETTE["red"]))
                 self.table.setItem(r, c, it)
@@ -1133,6 +1137,9 @@ class ReferencePane(QWidget):
         for key, name in (("scalebar_control_rmse", "RMSE barre"), ("scalebar_check_rmse", "RMSE barre check")):
             if rep.get(key) is not None:
                 parts.append(f"{tr(name)}: <b>{rep[key] * 1000:.1f} mm</b>")
+        aside = [e["label"] for e in errs.values() if e.get("type") == "orientation"]
+        if aside:
+            parts.append(tr("orientamento a mano non usato ({0}): lo danno i punti di controllo", ", ".join(aside)))
         if rep.get("method") == "scalebars":
             parts.append(tr("scala dalle barre, coordinate locali"))
         elif str(rep.get("method", "")).endswith("+scalebars"):

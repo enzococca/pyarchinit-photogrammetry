@@ -981,3 +981,43 @@ def test_photo_positions_are_carried_by_the_motion(processed, tmp_path):
     for cam in cams:
         assert np.allclose(cam.reference.location, old[cam.key], atol=0)
         assert cam.reference.accuracy == old_accuracy[cam.key]
+
+
+def test_control_points_typed_after_an_orientation_replace_it(processed, tmp_path):
+    """The total station's points arrive after a hand orientation: four control markers in the site grid (turned by
+    0.5 rad and shifted by kilometres) place the chunk; the orientation markers step aside (not in the fit, listed as
+    ``orientation``, no error in another frame) and a new hand orientation stays refused."""
+    from pyarchinit_photogrammetry.core.camera import Reference
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, ch, t0, internal, points, result = _oriented(processed, tmp_path)
+    grid = motion_of(rotation_of([0, 0, 1], np.degrees(0.5)), (1000.0, 2000.0, 50.0))
+    field = [m for m in ch.markers if not m.orientation and m.position is not None][:4]
+    assert len(field) == 4
+    for m in field:
+        m.reference = Reference(location=geo.apply(grid, ch.to_world(m.position[None]))[0].tolist(),
+                                accuracy=[0.005] * 3)
+    want = grid @ np.asarray(ch.transform, float)
+    report = ch.update_transform()
+    assert report["control_rmse"] < 0.005, report["control_rmse"]
+    assert "+orientation" not in report["method"]
+    assert np.abs(np.asarray(ch.transform) - want).max() < 1e-3
+    rows = {e["label"]: e for e in report["markers"]}
+    for m in _orientation_markers(ch):
+        assert rows[m.label]["type"] == "orientation" and rows[m.label]["error"] is None
+    assert sorted(report["orientation_not_used"]) == sorted(m.label for m in _orientation_markers(ch))
+    assert gcp.orientation_set_aside(ch)
+    with pytest.raises(orient.OrientRefused):
+        orient.check(ch)
+
+
+def test_orientation_markers_step_aside_in_a_real_system(processed, tmp_path):
+    """A system chosen for the chunk (not LOCAL): the orientation markers, in the hand frame, take no part."""
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, ch, t0, internal, points, result = _oriented(processed, tmp_path)
+    ch.crs = "EPSG:32633"
+    assert gcp.orientation_set_aside(ch)
+    report = ch.update_transform()
+    assert report["method"] is None or "+orientation" not in report["method"]
+    assert all(e["type"] == "orientation" for e in report["markers"] if e["label"] in orient.MARKER_LABELS)
