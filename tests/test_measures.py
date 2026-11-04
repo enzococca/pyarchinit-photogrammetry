@@ -146,14 +146,12 @@ def test_area_of_a_tilted_square():
     assert measures.slope_aspect_of(flat)[1] == -1.0
 
 
-def _grid_mesh(a, b, n):
-    """A regular n x n grid of two-triangle cells; ``a``, ``b`` are the (n*n,) coordinates, to be mapped to 3D by the caller."""
-    faces = []
-    for i in range(n - 1):
-        for j in range(n - 1):
-            k = i * n + j
-            faces += [[k, k + 1, k + n], [k + 1, k + n + 1, k + n]]
-    return np.array(faces)
+def _grid_mesh(n, m=None):
+    """The faces of a regular n x m grid of vertices (row-major, m per row) in two-triangle cells."""
+    m = n if m is None else m
+    i, j = np.meshgrid(np.arange(n - 1), np.arange(m - 1), indexing="ij")
+    k = (i * m + j).ravel()
+    return np.concatenate([np.column_stack([k, k + 1, k + m]), np.column_stack([k + 1, k + m + 1, k + m])])
 
 
 def _tilted_mesh(deg, n=6):
@@ -162,7 +160,7 @@ def _tilted_mesh(deg, n=6):
     t = np.tan(np.radians(deg))
     xs, ys = np.meshgrid(np.linspace(0, 5, n), np.linspace(0, 5, n))
     v = np.column_stack([xs.ravel(), ys.ravel(), t * xs.ravel()])
-    return trimesh.Trimesh(v, _grid_mesh(xs, ys, n), process=False)
+    return trimesh.Trimesh(v, _grid_mesh(n), process=False)
 
 
 def test_model_area_clipped_by_the_vertical_projection():
@@ -181,7 +179,7 @@ def test_wall_polygon_uses_its_plane():
     n = 5
     xs, zs = np.meshgrid(np.linspace(0, 4, n), np.linspace(0, 4, n))
     v = np.column_stack([xs.ravel(), np.zeros(n * n), zs.ravel()])
-    wall = trimesh.Trimesh(v, _grid_mesh(xs, zs, n), process=False)
+    wall = trimesh.Trimesh(v, _grid_mesh(n), process=False)
     poly = np.array([[0.6, 0, 0.5], [3.3, 0, 1.1], [2.4, 0, 3.2], [1.0, 0, 2.7]])
     out = measures.model_area_inside(wall, poly)
     assert out["projection"] == "plane"
@@ -239,3 +237,112 @@ def test_bowtie_and_degenerate_polygons():
     assert measures.model_area_inside(_tilted_mesh(0), bow + [1, 1, 0])["coverage"] == pytest.approx(1.0)
     out = measures.model_area_inside(_tilted_mesh(0), np.array([[4, 1, 0], [6, 1, 0], [6, 2, 0], [4, 2, 0]], float))
     assert out["coverage"] == pytest.approx(0.5, abs=1e-9)
+
+
+def _heightfield(xs, ys, height):
+    """A grid mesh over ``xs`` x ``ys`` (sorted) with z = height(x, y)."""
+    import trimesh
+
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    v = np.column_stack([X.ravel(), Y.ravel(), height(X, Y).ravel()])
+    return trimesh.Trimesh(v, _grid_mesh(len(xs), len(ys)), process=False)
+
+
+def _battered_tower(radius=4.0, batter_deg=8.0, height=6.0, segments=720, rings=25):
+    """A closed tower: a cone frustum leaning in by ``batter_deg``, with its two caps."""
+    import trimesh
+
+    t = np.tan(np.radians(batter_deg))
+    zs = np.linspace(0.0, height, rings)
+    th = np.linspace(0.0, 2 * np.pi, segments, endpoint=False)
+    Z, T = np.meshgrid(zs, th, indexing="ij")
+    R = radius - t * Z
+    v = np.column_stack([(R * np.cos(T)).ravel(), (R * np.sin(T)).ravel(), Z.ravel()])
+    k = np.arange(segments)
+    faces = []
+    for r in range(rings - 1):
+        a, b = r * segments + k, r * segments + (k + 1) % segments
+        faces += [np.column_stack([a, b, a + segments]), np.column_stack([b, b + segments, a + segments])]
+    centres = np.array([[0, 0, 0], [0, 0, height]], float)
+    c0, c1 = len(v), len(v) + 1
+    top = (rings - 1) * segments
+    faces += [np.column_stack([np.full(segments, c0), (k + 1) % segments, k]),
+              np.column_stack([np.full(segments, c1), top + k, top + (k + 1) % segments])]
+    return trimesh.Trimesh(np.vstack([v, centres]), np.concatenate(faces), process=False)
+
+
+@pytest.mark.parametrize("half", [0.25, 0.5])
+def test_a_curved_wall_drawn_by_its_four_corners(half):
+    radius, batter, z0, z1 = 4.0, np.radians(8.0), 1.0, 3.5
+    tower = _battered_tower(radius, 8.0)
+
+    def corner(theta, z):
+        r = radius - np.tan(batter) * z
+        return [r * np.cos(theta), r * np.sin(theta), z]
+
+    poly = np.array([corner(-half, z0), corner(half, z0), corner(half, z1), corner(-half, z1)])
+    # the cone between the two angles and the two heights, measured along its slant
+    true = 2 * half * (radius * (z1 - z0) - np.tan(batter) * (z1 ** 2 - z0 ** 2) / 2) / np.cos(batter)
+    out = measures.model_area_inside(tower, poly)
+    assert out["projection"] == "plane"
+    assert out["surface"] == pytest.approx(true, rel=0.01)
+    # seen from the cameras outside: the same; seen from inside the tower, the inner side of the far wall
+    assert measures.model_area_inside(tower, poly, toward=[20.0, 0, 2])["surface"] == pytest.approx(out["surface"])
+    assert measures.model_area_inside(tower, poly, toward=[0.0, 0, 2])["surface"] != pytest.approx(out["surface"])
+
+
+def test_a_block_inside_an_outline_drawn_on_the_ground():
+    eps = 1e-3  # the block's sides: nearly vertical faces
+    xs = np.unique(np.concatenate([np.linspace(-2, 2, 41), [-0.5 - eps, 0.5 + eps]]))
+    mesh = _heightfield(xs, xs, lambda x, y: np.where((np.abs(x) <= 0.5) & (np.abs(y) <= 0.5), 0.15, 0.0))
+    poly = np.array([[-1.5, -1.5, 0], [1.5, -1.5, 0], [1.5, 1.5, 0], [-1.5, 1.5, 0]], float)
+    out = measures.model_area_inside(mesh, poly)
+    assert out["projection"] == "plan" and out["coverage"] == pytest.approx(1.0, abs=1e-9)
+    assert out["surface"] == pytest.approx(9.0 + 4 * 0.15, rel=0.01)
+
+
+def test_a_step_crossing_the_outline():
+    eps, h = 1e-3, 0.15
+    xs = np.unique(np.concatenate([np.linspace(-2, 2, 41), [eps]]))
+    mesh = _heightfield(xs, xs, lambda x, y: np.where(x >= eps, h, 0.0))
+    poly = np.array([[-1.5, -1.5, 0], [1.5, -1.5, h], [1.5, 1.5, h], [-1.5, 1.5, 0]], float)
+    out = measures.model_area_inside(mesh, poly)
+    assert out["projection"] == "plan"
+    assert out["surface"] == pytest.approx(9.0 + 3 * h, rel=0.01)
+
+
+def test_feature_measures_pass_the_viewer_on():
+    tower = _battered_tower()
+    r0, r1 = 4.0 - np.tan(np.radians(8)) * 1.0, 4.0 - np.tan(np.radians(8)) * 3.5
+    poly = [[r0 * np.cos(-0.3), r0 * np.sin(-0.3), 1.0], [r0 * np.cos(0.3), r0 * np.sin(0.3), 1.0],
+            [r1 * np.cos(0.3), r1 * np.sin(0.3), 3.5], [r1 * np.cos(-0.3), r1 * np.sin(-0.3), 3.5]]
+    rec = {"kind": "polygon", "xyz": poly}
+    for toward in (None, [20.0, 0, 2], [0.0, 0, 2]):
+        expected = measures.model_area_inside(tower, poly, toward=toward)["surface"]
+        assert measures.feature_measures(rec, model=tower, toward=toward)["model_surface"] == pytest.approx(expected)
+
+
+def test_degenerate_lines_and_collinear_polygons():
+    collinear = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]], float)
+    with pytest.raises(ValueError):
+        measures.slope_aspect_of(collinear)
+    with pytest.raises(ValueError):
+        measures.area_3d(collinear)
+    with pytest.raises(ValueError):
+        measures.feature_measures({"kind": "line", "xyz": []})
+
+
+def test_model_area_is_fast_on_a_large_mesh():
+    import time
+
+    n = 317  # 199,712 faces
+    xs = np.linspace(0, 100, n)
+    mesh = _heightfield(xs, xs, lambda x, y: 0.5 * np.sin(x / 7) * np.cos(y / 5))
+    assert len(mesh.faces) >= 199_000
+    side = 100 * np.sqrt(0.1)
+    xy = np.array([[20, 20], [20 + side, 20], [20 + side, 20 + side], [20, 20 + side]], float)
+    poly = np.column_stack([xy, 0.5 * np.sin(xy[:, 0] / 7) * np.cos(xy[:, 1] / 5)])
+    start = time.perf_counter()
+    out = measures.model_area_inside(mesh, poly)
+    assert time.perf_counter() - start < 2.0
+    assert out["coverage"] == pytest.approx(1.0, abs=1e-9) and out["surface"] > out["plan"]

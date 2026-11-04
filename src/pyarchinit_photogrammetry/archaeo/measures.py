@@ -215,10 +215,14 @@ def length_plan(xyz, closed: bool = False) -> float:
 
 
 def best_plane(xyz) -> tuple[np.ndarray, np.ndarray]:
-    """Centre and unit normal (z >= 0) of the least-squares plane through ``xyz`` (at least 3 points)."""
+    """Centre and unit normal (z >= 0) of the least-squares plane through ``xyz`` (at least 3 points
+    not on one line: ValueError otherwise)."""
     p = _pts(xyz, 3)
     centre = p.mean(axis=0)
-    n = np.linalg.svd(p - centre)[2][-1]
+    _, sv, vt = np.linalg.svd(p - centre)
+    if sv[1] <= 1e-12 * max(sv[0], 1e-300):
+        raise ValueError("the points lie on one line: no plane through them")
+    n = vt[-1]
     if n[2] < 0 or (n[2] == 0 and (n[1] < 0 or (n[1] == 0 and n[0] < 0))):
         n = -n
     return centre, n / np.linalg.norm(n)
@@ -262,63 +266,155 @@ def slope_aspect_of(xyz) -> tuple[float, float]:
     return slope, aspect
 
 
-def model_area_inside(model, xyz) -> dict:
-    """Surface of the model under the polygon ``xyz``, on the layer the polygon was drawn on.
+SAMPLES = np.array([(i + 1 / 3, j + 1 / 3) if up else (i + 2 / 3, j + 2 / 3)
+                    for i in range(3) for j in range(3 - i) for up in (True, False) if up or i + j < 2]) / 3
+"""Barycentric (b1, b2) of the centres of the 9 equal sub-triangles of a face: where its visibility is tested."""
 
-    The faces are clipped by the polygon's vertical projection (per face, plan area / |n_z|); for a steep
-    polygon (best plane with |n_z| < STEEP_COS) the same in the polygon's own plane, said by
-    ``"projection": "plane"``. Only faces whose centre is within max(0.10 m, the polygon's largest
-    distance from its best plane + 0.05 m) of the plane count, and of those the side (facing with or
-    against the plane's normal) that holds most of the area: a closed wall or box is counted once.
-    Returns ``surface``, ``plan`` (the clipped area in the projection used: horizontal, or the plane's),
-    ``coverage`` (``plan`` / the polygon's area in that projection) and ``faces`` (faces with a
-    non-empty clip)."""
+
+def _covering(a2, h, pts, exclude=None, eps=1e-9):
+    """For the projected faces ``a2`` (F, 3, 2) with heights ``h`` (F, 3) and the points ``pts`` (P, 2):
+    the pairs (point, face) whose face contains the point (strictly with ``eps`` > 0, its edges too
+    with ``eps`` < 0), and the face's height there. ``exclude`` (P,): a face never paired with that point.
+    The faces are binned on a grid of about their edge length, so each point is tested against a few."""
+    lo, hi = a2.min(axis=1), a2.max(axis=1)
+    edges = np.linalg.norm(a2 - np.roll(a2, 1, axis=1), axis=2)
+    span_lo, span_hi = np.minimum(lo.min(0), pts.min(0)), np.maximum(hi.max(0), pts.max(0))
+    extent = np.maximum(span_hi - span_lo, 1e-12)
+    cell = max(float(np.median(edges)), float(np.sqrt(extent.prod() / (4.0 * len(a2)))), 1e-12)
+    nx, ny = (np.floor(extent / cell).astype(int) + 1).tolist()
+    i0, j0 = np.floor((lo - span_lo) / cell).astype(int).T
+    i1, j1 = np.minimum(np.floor((hi - span_lo) / cell).astype(int), [nx - 1, ny - 1]).T
+    wi, wj = i1 - i0 + 1, j1 - j0 + 1
+    count = wi * wj
+    face = np.repeat(np.arange(len(a2)), count)
+    local = np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count)
+    cells = (i0[face] + local // wj[face]) * ny + j0[face] + local % wj[face]
+    order = np.argsort(cells, kind="stable")
+    cells, face = cells[order], face[order]
+    pi, pj = np.minimum(np.floor((pts - span_lo) / cell).astype(int), [nx - 1, ny - 1]).T
+    pcell = pi * ny + pj
+    start = np.searchsorted(cells, pcell, "left")
+    many = np.searchsorted(cells, pcell, "right") - start
+    point = np.repeat(np.arange(len(pts)), many)
+    cand = face[np.repeat(start, many) + np.arange(many.sum()) - np.repeat(np.cumsum(many) - many, many)]
+    if exclude is not None:
+        other = cand != exclude[point]
+        point, cand = point[other], cand[other]
+    t = a2[cand]
+    q = pts[point] - t[:, 0]
+    e1, e2 = t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    ok = np.abs(det) > 0
+    det = np.where(ok, det, 1.0)
+    b1 = (q[:, 0] * e2[:, 1] - q[:, 1] * e2[:, 0]) / det
+    b2 = (e1[:, 0] * q[:, 1] - e1[:, 1] * q[:, 0]) / det
+    inside = ok & (b1 > eps) & (b2 > eps) & (b1 + b2 < 1 - eps)
+    hh = h[cand]
+    height = hh[:, 0] + b1 * (hh[:, 1] - hh[:, 0]) + b2 * (hh[:, 2] - hh[:, 0])
+    return point[inside], cand[inside], height[inside]
+
+
+def model_area_inside(model, xyz, toward=None) -> dict:
+    """Surface of the model under the polygon ``xyz``: the first layer met looking at the drawing.
+
+    The faces are clipped by the polygon's vertical projection (per face, plan area / |n_z|) and seen from
+    above; for a steep polygon (best plane with |n_z| < STEEP_COS, a wall) the same in the polygon's own
+    plane, said by ``"projection": "plane"``, looked at along the plane's normal from the side of
+    ``toward`` (a point, e.g. the cameras' centre) or, without it, from the side whose front-most surface
+    lies closest to the polygon's vertices. A face counts for the share of it that nothing in front hides
+    (tested at the centres of its 9 sub-triangles inside the polygon and at a point of its clipped part):
+    the back of a closed wall, box or tower, a block's
+    hidden foot, are never counted; a curved wall bulging between the drawn corners is.
+    Returns ``surface``, ``plan`` (the clipped visible area in the projection used: horizontal, or the
+    plane's), ``coverage`` (``plan`` / the polygon's area in that projection), ``faces`` (faces with a
+    non-empty visible clip) and ``projection``."""
     import shapely
 
     p = _pts(xyz, 3)
     centre, n = best_plane(p)
-    band = max(0.10, float(np.abs((p - centre) @ n).max()) + 0.05)
-    tri = np.asarray(model.vertices, float)[np.asarray(model.faces, int)]
-    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    norm = np.linalg.norm(cross, axis=1)
-    unit = cross / np.where(norm > 0, norm, 1.0)[:, None]
+    tri = np.asarray(model.vertices, float)[np.asarray(model.faces, int)] - centre
+    pc = p - centre
     if abs(n[2]) < STEEP_COS:
         mode = "plane"
         u, v = _plane_frame(n)
-        proj = np.stack([(tri - centre) @ u, (tri - centre) @ v], axis=-1)
-        poly_uv = np.column_stack([(p - centre) @ u, (p - centre) @ v])
-        cosine = np.abs(unit @ n)
+        axes = np.stack([u, v, n])
     else:
         mode = "plan"
-        proj = tri[:, :, :2] - centre[:2]
-        poly_uv = p[:, :2] - centre[:2]
-        cosine = np.abs(unit[:, 2])
-    weight = np.where(cosine > 1e-6, 1.0 / np.where(cosine > 1e-6, cosine, 1.0), 0.0)
+        axes = np.eye(3)
+    loc = tri @ axes.T  # (F, 3, 3): a, b, height along the axis
+    poly_ab = pc @ axes[:2].T
     out = {"surface": 0.0, "plan": 0.0, "coverage": 0.0, "faces": 0, "projection": mode}
-    poly = _valid(poly_uv)
+    poly = _valid(poly_ab)
     if poly.is_empty or poly.area == 0:
         return out
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    norm = np.linalg.norm(cross, axis=1)
+    cosine = np.abs(cross @ axes[2]) / np.where(norm > 0, norm, 1.0)
     x0, y0, x1, y1 = poly.bounds
-    depth = (tri.mean(axis=1) - centre) @ n
-    keep = ((proj[:, :, 0].max(axis=1) >= x0) & (proj[:, :, 0].min(axis=1) <= x1)
-            & (proj[:, :, 1].max(axis=1) >= y0) & (proj[:, :, 1].min(axis=1) <= y1)
-            & (weight > 0) & (np.abs(depth) <= band))
-    if not keep.any():
+    a2 = loc[:, :, :2]
+    keep = np.flatnonzero((a2[:, :, 0].max(axis=1) >= x0) & (a2[:, :, 0].min(axis=1) <= x1)
+                          & (a2[:, :, 1].max(axis=1) >= y0) & (a2[:, :, 1].min(axis=1) <= y1)
+                          & (norm > 0) & (cosine > 1e-6))
+    if not len(keep):
         return out
-    area = shapely.area(shapely.intersection(shapely.make_valid(shapely.polygons(proj[keep])), poly))
-    side = (unit[keep] @ n) >= 0
-    chosen = side if area[side].sum() >= area[~side].sum() else ~side
-    area = np.where(chosen, area, 0.0)
-    w = weight[keep]
+    a2, h = a2[keep], loc[keep, :, 2]
+    if mode == "plane":
+        if toward is not None:
+            side = 1.0 if (np.asarray(toward, float).reshape(3) - centre) @ n >= 0 else -1.0
+        else:
+            pt, _, hv = _covering(a2, h, poly_ab, eps=-1e-9)
+            hp = pc @ n
+            near = []
+            for s in (1.0, -1.0):
+                front = np.full(len(p), -np.inf)
+                np.maximum.at(front, pt, s * hv)
+                seen = np.isfinite(front)
+                near.append(np.median(np.abs(front[seen] - s * hp[seen])) if seen.any() else np.inf)
+            side = 1.0 if near[0] <= near[1] else -1.0
+        h = side * h
+    # the faces' parts inside the polygon; a face counts for the share of the points tested inside it
+    # (the 9 sub-triangle centres, those inside the polygon on a face crossing its outline, plus a point
+    # of the clipped part) that no other face covers from closer to the viewer
+    shapes = shapely.make_valid(shapely.polygons(a2))
+    clip_area = shapely.area(shapely.intersection(shapes, poly))
+    counted = np.flatnonzero(clip_area > 0)
+    if not len(counted):
+        return out
+    border = counted[clip_area[counted] < shapely.area(shapes[counted]) * (1 - 1e-9)]
+    bary = np.column_stack([1 - SAMPLES.sum(axis=1), SAMPLES])  # (9, 3)
+    pts = np.einsum("sk,fkd->fsd", bary, a2[counted]).reshape(-1, 2)
+    own = np.repeat(counted, len(bary))
+    use = np.ones(len(pts), bool)
+    on_border = np.isin(own, border)
+    use[on_border] = shapely.contains_xy(poly, pts[on_border, 0], pts[on_border, 1])
+    extra = shapely.get_coordinates(shapely.point_on_surface(shapely.intersection(shapes[border], poly)))
+    pts, own = np.vstack([pts[use], extra]), np.concatenate([own[use], border])
+    t = a2[own]
+    e1, e2, q = t[:, 1] - t[:, 0], t[:, 2] - t[:, 0], pts - t[:, 0]
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    b1 = (q[:, 0] * e2[:, 1] - q[:, 1] * e2[:, 0]) / det
+    b2 = (e1[:, 0] * q[:, 1] - e1[:, 1] * q[:, 0]) / det
+    hh = h[own]
+    pts_h = hh[:, 0] + b1 * (hh[:, 1] - hh[:, 0]) + b2 * (hh[:, 2] - hh[:, 0])
+    tol = max(1e-9, 1e-9 * float(np.abs(loc[keep]).max()))
+    pt, _, hv = _covering(a2, h, pts, exclude=own, eps=-1e-9)
+    hidden = np.zeros(len(pts), bool)
+    hidden[pt[hv > pts_h[pt] + tol]] = True
+    tested = np.bincount(own, minlength=len(keep))
+    seen = np.bincount(own, weights=~hidden, minlength=len(keep)) / np.maximum(tested, 1)
+    area = clip_area * seen
+    w = 1.0 / cosine[keep]
     out.update(surface=float((area * w).sum()), plan=float(area.sum()), coverage=float(area.sum() / poly.area),
                faces=int((area > 0).sum()))
     return out
 
 
-def feature_measures(rec: dict, model=None) -> dict:
-    """Measures of a free-drawing record (``kind`` line | polygon | point, ``xyz`` in chunk coordinates)."""
-    p = _pts(rec["xyz"])
+def feature_measures(rec: dict, model=None, toward=None) -> dict:
+    """Measures of a free-drawing record (``kind`` line | polygon | point, ``xyz`` in chunk coordinates);
+    ``toward`` (a point on the viewer's side, e.g. the cameras' centre) goes to :func:`model_area_inside`.
+    ValueError for a line under 2 points, a polygon under 3 or on one line, a point without one."""
     kind = rec["kind"]
+    p = _pts(rec["xyz"], {"line": 2, "polygon": 3}.get(kind, 1))
     if kind == "line":
         return {"length_3d": length_3d(p), "length_plan": length_plan(p), "dz": float(p[-1, 2] - p[0, 2])}
     if kind == "polygon":
@@ -326,6 +422,6 @@ def feature_measures(rec: dict, model=None) -> dict:
         out = {"perimeter_3d": length_3d(p, closed=True), "area_3d": area_3d(p), "area_plan": area_plan(p),
                "slope": slope, "aspect": aspect}
         if model is not None:
-            out["model_surface"] = model_area_inside(model, p)["surface"]
+            out["model_surface"] = model_area_inside(model, p, toward=toward)["surface"]
         return out
     return {"z": float(p[0, 2])}
