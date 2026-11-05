@@ -106,6 +106,26 @@ QLabel#sectionTitle {{ font-size: 12px; font-weight: 700; color: {text_dim}; let
 QPlainTextEdit#tracebackBox, QPlainTextEdit#consoleOut {{ background: {code_bg}; font-family: Menlo, Consolas, monospace; }}
 QFrame#card {{ background: {panel}; border: 1px solid {border}; border-radius: 10px; }}
 QTableWidget#logTable {{ gridline-color: {border}; }}
+/* the top bar: the menu of the workflow steps, the search of the commands */
+QToolButton#workflowButton {{ padding-right: 20px; }}
+QToolButton#workflowButton::menu-indicator {{ subcontrol-origin: padding; subcontrol-position: center right; right: 5px; }}
+QLineEdit#commandSearch {{ border-radius: 12px; padding: 3px 8px; }}
+/* the tool rail of the 2D and 3D views and its flyout */
+QWidget#toolRail {{ background: {panel_alt}; border-right: 1px solid {border}; }}
+QToolButton#railGroup {{ padding: 5px 3px; border-radius: 6px; font-size: 11px; }}
+QToolButton#railGroup[active="true"] {{ background: {hover}; border-color: {accent}; }}
+QToolButton#railGroup:checked {{ background: {selected}; border-color: {accent}; }}
+QFrame#railFlyout {{ background: {panel}; border: 1px solid {border}; border-radius: 8px; }}
+QFrame#railFlyout QScrollArea, QFrame#railFlyout QStackedWidget, QFrame#railFlyout QWidget#railPage,
+QFrame#railFlyout QWidget#qt_scrollarea_viewport {{ background: transparent; border: none; }}
+QLabel#railTitle {{ font-size: 12px; font-weight: 700; color: {text_dim}; letter-spacing: 1px; }}
+QToolButton#railItem {{ text-align: left; padding: 5px 8px; }}
+QToolButton#railItem[popupMode="1"] {{ padding-right: 22px; }}
+QToolButton#railItem::menu-button {{ border: none; background: transparent; width: 18px; }}
+QToolButton#railItem::menu-button:hover {{ background: {hover}; border-radius: 4px; }}
+QFrame#railSeparator {{ background: {border}; border: none; margin: 3px 4px; }}
+QToolButton#railPin {{ padding: 2px; }}
+QFrame#railFlyout QPushButton {{ text-align: left; padding: 5px 10px; }}
 """
 
 
