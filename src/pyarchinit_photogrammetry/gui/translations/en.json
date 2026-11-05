@@ -3954,6 +3954,8 @@
   "{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)": "{0} 3D drawings imported from {1} ({2} with the heights of the DEM, {3} skipped)",
   "; {0} buchi di poligoni lasciati fuori (un disegno libero ha un solo contorno)": "; {0} holes of polygons left out (a free drawing has one outline)",
   "orientamento a mano non usato ({0}): lo danno i punti di controllo": "hand orientation not used ({0}): the control points give it",
-  "Geometrie già inviate a PyArchInit, restano dov'erano: {0}": "Geometries already sent to PyArchInit stay where they were: {0}"
+  "Geometrie già inviate a PyArchInit, restano dov'erano: {0}": "Geometries already sent to PyArchInit stay where they were: {0}",
+  "I disegni del file sono in {0} e il chunk è in un sistema locale: nessun disegno importato": "The drawings of the file are in {0} and the chunk is in a local system: no drawing imported",
+  "Il file non dice in quale sistema di riferimento sono i disegni e il chunk è in {0}: nessun disegno importato": "The file does not say which coordinate system its drawings are in and the chunk is in {0}: no drawing imported"
  }
 }

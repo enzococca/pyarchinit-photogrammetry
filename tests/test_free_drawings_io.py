@@ -102,7 +102,7 @@ def test_import_without_z_takes_the_dem(tmp_path):
     dem = dem_mod.write_geotiff(ch.data_dir / "dem.tif", ground, (X0, Y0 + n * res), res, ch.crs,
                                 nodata=dem_mod.NODATA)
     ch._set_product("dem", dem)
-    feats = {"type": "FeatureCollection", "features": [
+    feats = {"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}}, "features": [
         {"type": "Feature", "properties": {"name": "senza quota", "tipo": "muro"},
          "geometry": {"type": "LineString", "coordinates": [[X0 + 0.55, Y0 + 0.55], [X0 + 1e4, Y0 + 1.0],
                                                             [X0 + 2.05, Y0 + 2.05]]}},
@@ -153,14 +153,16 @@ def test_import_refused_when_the_heights_would_come_from_a_dem_to_rebuild(tmp_pa
     ch.transform = t @ np.asarray(ch.transform, float)
     assert stamps.is_stale(ch, "dem")
     flat = tmp_path / "piatti.geojson"
-    flat.write_text(json.dumps({"type": "FeatureCollection", "features": [
+    flat.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}},
+                                "features": [
         {"type": "Feature", "properties": {"name": "senza quota"},
          "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5]}}]}), encoding="utf-8")
     with pytest.raises(fio.StaleDem):
         fio.import_features(ch, flat)
     assert not fd.features(ch)
     with_z = tmp_path / "quote.geojson"
-    with_z.write_text(json.dumps({"type": "FeatureCollection", "features": [
+    with_z.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}},
+                                "features": [
         {"type": "Feature", "properties": {"name": "con quota"},
          "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5, 99.0]}}]}), encoding="utf-8")
     assert fio.import_features(ch, with_z)["added"] == 1
@@ -270,7 +272,7 @@ def test_import_counts_holes_reads_flat_cad_and_keeps_new_ids(tmp_path, caplog):
     ring = [[X0, Y0, 1.0], [X0 + 4, Y0, 1.0], [X0 + 4, Y0 + 4, 1.0], [X0, Y0 + 4, 1.0], [X0, Y0, 1.0]]
     hole = [[X0 + 1, Y0 + 1, 1.0], [X0 + 2, Y0 + 1, 1.0], [X0 + 2, Y0 + 2, 1.0], [X0 + 1, Y0 + 1, 1.0]]
     path = tmp_path / "muro.geojson"
-    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+    path.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}}, "features": [
         {"type": "Feature", "properties": {"ppg_id": "abc", "name": "con buco"},
          "geometry": {"type": "Polygon", "coordinates": [ring, hole]}}]}), encoding="utf-8")
     got = fio.import_features(ch, path)
@@ -302,3 +304,72 @@ def test_gpkg_keeps_the_own_colour_and_json_attributes(tmp_path):
     (lista, ok), = con.execute('SELECT lista, ok FROM "disegni_3d_punti"').fetchall()
     con.close()
     assert json.loads(lista) == [1, 2] and json.loads(ok) is True
+
+
+# ---------------------------------------------------------------- the system of the file and the chunk's
+
+def _geojson(path, coords, crs=None):
+    data = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"name": "P"}, "geometry": {"type": "Point", "coordinates": coords}}]}
+    if crs:
+        data["crs"] = {"type": "name", "properties": {"name": crs}}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_a_file_in_another_system_is_reprojected(tmp_path):
+    from pyproj import Transformer
+
+    _doc, ch = _chunk(tmp_path, crs="EPSG:32633")
+    lon, lat = 14.266, 41.134
+    path = _geojson(tmp_path / "wgs.geojson", [lon, lat, 12.5], "urn:ogc:def:crs:OGC:1.3:CRS84")
+    assert fio.read(path)[0]["crs"] is not None
+    assert fio.import_features(ch, path)["added"] == 1
+    want = Transformer.from_crs("EPSG:4326", "EPSG:32633", always_xy=True).transform(lon, lat)
+    got = fd.features(ch)[0]["xyz"][0]
+    assert abs(got[0] - want[0]) < 1e-3 and abs(got[1] - want[1]) < 1e-3 and got[2] == pytest.approx(12.5)
+    # a GeoPackage of a chunk in Monte Mario / Italy 1 into one in UTM 33N
+    (tmp_path / "b").mkdir()
+    _doc2, src = _chunk(tmp_path / "b", crs="EPSG:3004")
+    fd.add(src, "line", [[X0, Y0, 100.0], [X0 + 10.0, Y0 + 5.0, 101.0]], name="L")
+    out = fio.export(src, tmp_path / "mm.gpkg")
+    assert fio.import_features(ch, out)["added"] == 1
+    line = next(r for r in fd.features(ch) if r["name"] == "L")
+    want = Transformer.from_crs("EPSG:3004", "EPSG:32633", always_xy=True).transform([X0, X0 + 10.0], [Y0, Y0 + 5.0])
+    assert np.abs(np.array(line["xyz"])[:, :2] - np.column_stack(want)).max() < 1e-3
+    assert [p[2] for p in line["xyz"]] == [100.0, 101.0]
+
+
+def test_the_same_system_is_kept_as_it_is(tmp_path):
+    _doc, ch = _chunk(tmp_path, crs="EPSG:3004")
+    fd.add(ch, "point", [[X0 + 0.123456789, Y0, 1.0]], name="P")
+    out = fio.export(ch, tmp_path / "same.gpkg")
+    (tmp_path / "b").mkdir()
+    _doc2, other = _chunk(tmp_path / "b", crs="EPSG:3004")
+    fio.import_features(other, out)
+    assert fd.features(other)[0]["xyz"] == fd.features(ch)[0]["xyz"]
+
+
+def test_an_unknown_system_against_a_real_one_is_refused(tmp_path):
+    _doc, ch = _chunk(tmp_path, crs="EPSG:3004")
+    path = _geojson(tmp_path / "senza.geojson", [X0, Y0, 1.0])
+    with pytest.raises(fio.ForeignCrs) as e:
+        fio.import_features(ch, path)
+    assert e.value.reason == "file_unknown" and "EPSG:3004" in str(e.value)
+    assert fd.features(ch) == []
+    # a file in a real system into a local chunk
+    (tmp_path / "l").mkdir()
+    _doc2, local = _chunk(tmp_path / "l", crs="LOCAL")
+    path = _geojson(tmp_path / "reale.geojson", [X0, Y0, 1.0], "urn:ogc:def:crs:EPSG::3004")
+    with pytest.raises(fio.ForeignCrs) as e:
+        fio.import_features(local, path)
+    assert e.value.reason == "chunk_local"
+    assert fd.features(local) == []
+    # a local chunk and a file without a system: as it is
+    path = _geojson(tmp_path / "locale.geojson", [1.0, 2.0, 3.0])
+    assert fio.import_features(local, path)["added"] == 1
+    assert fd.features(local)[0]["xyz"] == [[1.0, 2.0, 3.0]]
+    # a GeoPackage of a local chunk (srs -1) into a real one: refused too
+    out = fio.export(local, tmp_path / "locale.gpkg")
+    with pytest.raises(fio.ForeignCrs):
+        fio.import_features(ch, out)

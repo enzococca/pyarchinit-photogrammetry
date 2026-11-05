@@ -10252,6 +10252,14 @@ class MainWindow(QMainWindow):
             self._warn(tr("I disegni del file non hanno quote e il DEM va rifatto prima di prenderle (Flusso di "
                           "lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato"))
             return
+        except fio.ForeignCrs as exc:
+            if exc.reason == "chunk_local":
+                self._warn(tr("I disegni del file sono in {0} e il chunk è in un sistema locale: nessun disegno "
+                              "importato", str(exc.file_crs)))
+            else:
+                self._warn(tr("Il file non dice in quale sistema di riferimento sono i disegni e il chunk è in {0}: "
+                              "nessun disegno importato", str(exc.chunk_crs)))
+            return
         except Exception as exc:
             self._exc("Importazione dei disegni 3D non riuscita", exc)
             return
