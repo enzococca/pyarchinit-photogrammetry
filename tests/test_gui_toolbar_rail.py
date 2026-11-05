@@ -230,3 +230,148 @@ def test_top_bar_fits_a_narrow_window(window, qapp):
         assert w.command_search.isVisible()
         assert tb.sizeHint().width() <= max(width, w.minimumSizeHint().width())
     assert w.command_search.width() >= 150
+
+
+def _click(widget, x, y):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+
+
+def test_the_click_that_closes_the_flyout_does_not_draw(window, qapp):
+    """2D: in Disegna US with one vertex placed, a click on the view with a flyout open closes it and adds nothing."""
+    from PySide6.QtTest import QTest
+
+    w = window
+    w.show_view(w.ortho_view)
+    rail = w.raster_rail
+    rail.set_pinned(False)
+    w.set_draw_mode("polygon")
+    _pump(qapp)
+    vp = w.ortho_view.viewport()
+    _click(vp, 200, 200)
+    QTest.qWait(500)  # never a double click with the next one
+    assert len(w.ortho_view._clicks) == 1
+    rail.open("measure")
+    _click(vp, 260, 240)
+    _pump(qapp)
+    assert not rail.is_open()
+    assert len(w.ortho_view._clicks) == 1  # the press closed the flyout only
+    QTest.qWait(500)
+    _click(vp, 260, 240)  # the next click draws again
+    assert len(w.ortho_view._clicks) == 2
+    w.set_draw_mode("pan")
+
+
+def test_3d_flyout_closes_first_on_press_and_esc(window, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    mv = window.model_view
+    window.show_view(mv)
+    _pump(qapp)
+    rail = mv.rail
+    rail.set_pinned(False)
+    mv.start_drawing("line")
+    _pump(qapp)
+    assert mv._draw_kind == "line"
+    target = mv._draw_target()
+    rail.open("view")
+    _pump(qapp)
+    QTest.mousePress(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, target.rect().center())
+    assert not rail.is_open() and mv._press is None  # the press closed the flyout and never reached the drawing
+    QTest.mouseRelease(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, target.rect().center())
+    assert mv._draw_pts == []
+    rail.open("view")
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # first Esc: the flyout, as in the 2D view
+    assert not rail.is_open() and mv._draw_kind == "line"
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # second Esc: the drawing
+    assert mv._draw_kind is None
+
+
+def test_a_toggle_keeps_the_flyout_open(window, qapp):
+    w = window
+    rail = w.raster_rail
+    rail.set_pinned(False)
+    w.show_view(w.ortho_view)
+    rail.open("draw")
+    snap = next(b for b in rail.groups["draw"].widgets if getattr(b, "action", None) is w.a_snap)
+    was = w.a_snap.isChecked()
+    snap.click()
+    assert w.a_snap.isChecked() is not was and rail.current() == "draw"  # an option: the flyout stays
+    snap.click()
+    rail.close()
+
+
+def test_ripristina_keeps_the_choice_of_the_drawing_bar(window, qapp):
+    w = window
+    w.show_view(w.ortho_view)
+    for classic in (True, False):
+        w.a_classic_bar.setChecked(classic)
+        _pump(qapp)
+        w.panes.reset()  # Vista > Pannelli > Ripristina la disposizione dei pannelli
+        _pump(qapp)
+        assert w.a_classic_bar.isChecked() is classic
+        assert w.drawing_toolbar.isHidden() is not classic
+        assert w.raster_rail.isHidden() is classic
+
+
+def _stray_tab_bars(w):
+    from PySide6.QtWidgets import QTabBar
+
+    docked = [d for d in w.panes.docks if not d.isHidden() and not d.isFloating()]
+    areas = {w.dockWidgetArea(d) for d in docked}
+    groups = 0
+    for area in areas:  # a tab bar for each group of more than one pane in an area
+        here = [d for d in docked if w.dockWidgetArea(d) == area]
+        seen = set()
+        for d in here:
+            if d in seen:
+                continue
+            together = {d, *[t for t in w.tabifiedDockWidgets(d) if t in here]}
+            seen |= together
+            groups += len(together) > 1
+    bars = [b for b in w.findChildren(QTabBar) if b.parent() is w
+            and b.metaObject().className() == "QMainWindowTabBar" and b.isVisible()]
+    return bars, groups
+
+
+def test_no_stray_tab_bars_of_the_panes(window, qapp):
+    """Qt 6.12 leaves a second, unused tab bar when panes are tabbed in a second area: it showed through as a
+    second row of Foto | Sezioni at laptop sizes. Only the tab bars of the groups of panes are visible."""
+    w = window
+    w.resize(1000, 700)
+    _pump(qapp, 5)
+    bars, groups = _stray_tab_bars(w)
+    assert len(bars) == groups, [[b.tabText(i) for i in range(b.count())] for b in bars]
+    w.panes.reset()
+    _pump(qapp, 5)
+    bars, groups = _stray_tab_bars(w)
+    assert len(bars) == groups, [[b.tabText(i) for i in range(b.count())] for b in bars]
+
+
+def test_command_search_shortcut_is_of_the_window(window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QShortcut
+
+    keys = [s for s in window.findChildren(QShortcut) if s.key().toString() == "Ctrl+K"]
+    assert len(keys) == 1 and keys[0].context() == Qt.ShortcutContext.WindowShortcut
+
+
+def test_flyout_scrolls_sideways_when_the_view_is_narrow(window, qapp):
+    from PySide6.QtCore import Qt
+
+    w = window
+    w.show_view(w.ortho_view)
+    w.resize(560, 600)
+    _pump(qapp, 5)
+    rail = w.raster_rail
+    rail.open("draw")
+    _pump(qapp)
+    fly = rail.flyout
+    assert fly.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    if fly.width() < fly.wanted_size().width():  # cut by the view: the rest reachable by scrolling
+        assert fly.scroll.horizontalScrollBar().maximum() > 0
+    rail.close()

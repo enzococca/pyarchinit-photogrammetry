@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QFrame, QMainWindow, QMenu, QScrollArea,
                                QTabBar, QTabWidget, QWidget)
@@ -283,6 +283,8 @@ class Panes(QObject):
     """The panes of a main window: adding and removing them, bringing one to the front, the menu
     *Vista > Pannelli*, the default layout and the one saved with the window."""
 
+    restored = Signal()  # a whole layout put back (the last session's, or the default by Ripristina)
+
     def __init__(self, window: QMainWindow):
         super().__init__(window)
         self.window = window
@@ -445,6 +447,7 @@ class Panes(QObject):
         self.front()
         self._default = self.window.saveState(STATE_VERSION)
         self._default_names = {d.objectName() for d in self.docks}
+        self._restore_state(self._default)  # the same layout, without the stray tab bars of its building
 
     def save(self) -> QByteArray:
         return self.window.saveState(STATE_VERSION)
@@ -455,7 +458,7 @@ class Panes(QObject):
         ok = False
         if state:
             try:
-                ok = bool(self.window.restoreState(state, STATE_VERSION))
+                ok = self._restore_state(state)
             except (TypeError, ValueError):
                 ok = False
         self._restored = ok
@@ -463,12 +466,13 @@ class Panes(QObject):
             if dock.fixed and dock.isHidden():  # never closed, whatever the saved layout says
                 dock.show()
         self.decorate_later()
+        self.restored.emit()
         return ok
 
     def reset(self) -> None:
         """Every pane back in its group, all open, Area di lavoro and Foto in front."""
         if self._default is not None:
-            self.window.restoreState(self._default, STATE_VERSION)
+            self._restore_state(self._default)
         for dock in self.docks:
             if self._default is None or dock.objectName() not in self._default_names:
                 self._place(dock)
@@ -476,6 +480,7 @@ class Panes(QObject):
                 dock.show()
         self.front()
         self.decorate_later()
+        self.restored.emit()
 
     # ------------------------------------------------------------------ menu and navigation
     def build_menu(self, parent: QMenu) -> QMenu:
@@ -572,6 +577,24 @@ class Panes(QObject):
                 ic = icons.get(bar.tabData(i))
                 if ic is not None and not ic.isNull() and bar.tabIcon(i).cacheKey() != ic.cacheKey():
                     bar.setTabIcon(i, ic)
+
+    def _window_tab_bars(self) -> list[QTabBar]:
+        return [b for b in self.window.children()
+                if isinstance(b, QTabBar) and b.metaObject().className() == "QMainWindowTabBar"]
+
+    def _restore_state(self, state) -> bool:
+        """``restoreState`` with the tab bars of the panes made anew: the old ones hidden first. Qt (6.12) leaves
+        a second tab bar, which no group uses, when panes are tabbed in a second area (two rows of *Foto | Sezioni*
+        on a laptop screen); a restored layout has only the bars it uses, and the old ones, deleted later by Qt,
+        would stay visible until then."""
+        shown = [b for b in self._window_tab_bars() if not b.isHidden()]
+        for bar in shown:
+            bar.hide()
+        ok = bool(self.window.restoreState(state, STATE_VERSION))
+        if not ok:  # a state of another version: Qt changed nothing, the bars stay in use
+            for bar in shown:
+                bar.show()
+        return ok
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt name
         if obj is self.window and event.type() in (QEvent.Type.ChildAdded, QEvent.Type.LayoutRequest):

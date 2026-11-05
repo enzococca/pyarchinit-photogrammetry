@@ -1475,6 +1475,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._build_raster_rail()
         self.set_classic_bar(self.a_classic_bar.isChecked(), save=False)
         self.a_classic_bar.toggled.connect(self.set_classic_bar)
+        # a layout put back (the last session's, Ripristina) holds the drawing bar as it was then: the choice again
+        self.panes.restored.connect(lambda: self.set_classic_bar(self.a_classic_bar.isChecked(), save=False))
         self._refresh_recent()
         self._apply_draw_options()
 
@@ -1746,9 +1748,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def restore_layout(self, state) -> bool:
         """The panes as the last session left them (``state`` saved when the window closed)."""
-        ok = self.panes.restore(state)
-        self.set_classic_bar(self.a_classic_bar.isChecked(), save=False)  # a state may hold an old drawing bar
-        return ok
+        return self.panes.restore(state)  # then panes.restored: the drawing bar as chosen again
 
     def show_view(self, widget: QWidget) -> None:
         self.stack.setCurrentWidget(self.tabs)
