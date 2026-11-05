@@ -144,7 +144,7 @@ PyArchInit, section traces, contour lines, plan slices, spot heights, markers, m
 stones, patches.
 
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
-  *All* and *None* tick every layer.
+  *All* and *None* tick every layer (one step of *Edit > Undo*).
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,

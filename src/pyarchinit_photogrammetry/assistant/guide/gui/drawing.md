@@ -167,7 +167,9 @@ x, y; on an elevation those lying on its face (within its depth, plus two cells)
 shows its parts within it, as lines. Select and ++delete++ in 2D delete the drawings; every change is one step of
 *Edit > Undo*. The drawings follow the chunk when its system changes inside the program (an orientation, the system
 of the survey, chunks aligned, the georeference fitted again), not a new alignment by itself (its markers bring the
-chunk back to the same frame).
+chunk back to the same frame). After a new alignment the drawings made before do not move at the first fit of the
+georeference (*Update georeference*), which adopts them into the new alignment: from then on they follow the later
+fits. Those drawn after the new alignment follow the first one already.
 
 **The form** (double click on a drawing in 2D or 3D, or *Free drawing > Properties...*): name, layer (also a new
 one), colour (empty: the layer's), attributes as field/value rows, the vertices with their height that can be typed,

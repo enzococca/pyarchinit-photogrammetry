@@ -167,7 +167,10 @@ x, y; su un prospetto quelli che stanno sulla sua faccia (entro la sua profondit
 parte dentro mostra le sue parti dentro, come linee. Seleziona e ++delete++ in 2D eliminano i disegni; ogni modifica è
 un passo di *Modifica > Annulla*. I disegni seguono il chunk quando il suo sistema cambia dentro il programma (un
 orientamento, il sistema del rilievo, chunk allineati, la georeferenziazione rifatta), non un nuovo allineamento da
-solo (i suoi marker riportano il chunk nello stesso sistema).
+solo (i suoi marker riportano il chunk nello stesso sistema). Dopo un nuovo allineamento i disegni fatti prima non si
+spostano al primo adattamento della georeferenziazione (*Aggiorna georeferenziazione*), che li adotta nel nuovo
+allineamento: da lì seguono gli adattamenti successivi. Quelli disegnati dopo il nuovo allineamento seguono già il
+primo.
 
 **La scheda** (doppio clic su un disegno in 2D o in 3D, o *Disegno libero > Proprietà...*): nome, layer (anche nuovo),
 colore (vuoto: quello del layer), attributi come righe campo/valore, i vertici con la quota che si può scrivere, e le

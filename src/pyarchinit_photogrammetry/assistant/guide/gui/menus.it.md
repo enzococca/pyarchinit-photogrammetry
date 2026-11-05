@@ -115,7 +115,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
-| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine |
+| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
+| **Ricostruendo, conserva DEM e ortofoto attivi come versioni** | un interruttore (spento di solito): la ricostruzione lascia fra le versioni il DEM e l'ortofoto di prima |
 | **Unisci chunk...** | un nuovo chunk con foto, marker, punti, nuvole e modelli di chunk già allineati |
 | **Colori dalle foto (scansioni)...** | colora una scansione laser con le foto allineate di un altro chunk |
 

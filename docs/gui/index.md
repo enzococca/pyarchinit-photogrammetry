@@ -182,8 +182,11 @@ what the workspace removes. The menu names what will be undone.
 * What comes back from QGIS through the live link is one entry per save made there (*From QGIS: ...*), and
   the proxies of the units follow their polygons when it is undone.
 * Processing steps (alignment, dense cloud...) are not undone: use the [versions](processing.md#versions).
+* The data a plugin keeps in the chunk (when the plugin says the project changed) is undone too, as "Plugin data".
+* *All* / *None* in the Layer pane are one step for all the layers they show or hide.
 * The history starts again when another project is opened; when another chunk becomes the active one it
-  keeps only the removals (the other edits belong to their chunk).
+  keeps only the removals (the other edits belong to their chunk). The copies kept for undo (in the `undo` folder
+  of each chunk) are deleted when the program closes.
 
 ## Language and theme
 

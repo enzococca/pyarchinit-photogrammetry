@@ -185,8 +185,12 @@ l'area di lavoro rimuove. Il menu dice cosa verrà annullato.
   e annullandolo i proxy delle unità seguono i loro poligoni.
 * I passi di elaborazione (allineamento, nuvola densa...) non si annullano: si usano le
   [versioni](processing.md#versioni).
+* Si annullano anche i dati che un plugin tiene nel chunk (quando il plugin dice che il progetto è cambiato), come
+  "Dati dei plugin".
+* *Tutti* / *Nessuno* nel pannello Layer sono un solo passo per tutti i layer che mostrano o nascondono.
 * La cronologia riparte quando si apre un altro progetto; quando un altro chunk diventa attivo tiene solo le
-  rimozioni (le altre modifiche appartengono al loro chunk).
+  rimozioni (le altre modifiche appartengono al loro chunk). Le copie tenute per l'annullamento (nella cartella
+  `undo` di ogni chunk) vengono cancellate quando il programma si chiude.
 
 ## Lingua e tema
 

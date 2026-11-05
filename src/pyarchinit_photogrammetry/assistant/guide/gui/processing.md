@@ -329,12 +329,21 @@ georeference*, the *Reference* pane shows them in grey as "orientation, not used
 are in the hand frame), and a new hand orientation is refused while the control points are there. A system chosen
 with nothing else to place the survey (A set on known X, Y and height) keeps the orientation markers placing it.
 
+**A block of photos with GPS.** When the photos have GPS positions (in a real system, as those of the EXIF), after a
+hand orientation the next alignment returns the survey to the GPS frame: the photo positions place it and the
+orientation markers step aside, as they do for control points. To keep the hand orientation switch the photos'
+references off (*Reference* pane) before aligning again.
+
 **Products to rebuild.** DEM, orthophoto and the rasters made from them (precision, coverage, reliefs, slope,
 aspect, TIN) are grids in the old plan: they read *to rebuild*. The raster view says so in a yellow band over the
 picture, and the drawing tools refuse to draw on it. *Workflow > Rebuild the stale products* (also offered by the
 result window) makes them again in order with the parameters they had, keeping the drawings; what it cannot remake
 (raster calculator, multispectral, thermal and satellite rasters, kept versions) is listed to be done by hand.
-Elevations without a scale stay valid: they move with the chunk.
+Elevations without a scale stay valid: they move with the chunk. The rebuild is one step of *Edit > Undo* (all the
+products come back together as they were). The DEM and orthophoto of before stay among the versions only when
+*When rebuilding, keep the active DEM and orthomosaic as versions* is ticked in the *Workflow* menu (off by default:
+they are in the old frame, they cannot be compared pixel by pixel with the rebuilt ones, and on a large survey they
+take GBs).
 
 **Refused.** The window does not open, and says why, when something else gives the orientation: a chunk in a
 coordinate system (the control points do it), three control markers with coordinates (change those), a chunk
@@ -473,8 +482,9 @@ where it was made.
   thumbnails written again at every save and the US added since linked to them.
 * The **live link** with QGIS or RustGIS carries, beside the drawings of the plan, those of every elevation with
   drawings in 3D on the survey (tables `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; in RustGIS
-  in the group "<chunk> - prospetti"), one-way: what is edited there in those layers does not come back. The **QField**
-  package carries the plan only.
+  in the group "<chunk> - prospetti"), one-way: what is edited there in those layers does not come back. An elevation
+  made after the QGIS project was built is not in it until the project is built again (*QGIS > Open in QGIS*). The
+  **QField** package carries the plan only.
 * The drawings of the plan stay loaded whatever is shown: the features that work on the plan (proxies, volumes,
   classes, IFC, US proposal, PyArchInit, timeline, report) always use the plan's drawings.
 

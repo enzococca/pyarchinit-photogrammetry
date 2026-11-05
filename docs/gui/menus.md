@@ -115,7 +115,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds |
 | **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
-| **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order |
+| **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order; one step of *Edit > Undo* |
+| **When rebuilding, keep the active DEM and orthomosaic as versions** | a toggle (off by default): the rebuild leaves the DEM and orthophoto of before among the versions |
 | **Merge chunks...** | a new chunk with the photos, markers, points, clouds and models of chunks already aligned |
 | **Colours from the photos (scans)...** | colours a laser scan with the aligned photos of another chunk |
 

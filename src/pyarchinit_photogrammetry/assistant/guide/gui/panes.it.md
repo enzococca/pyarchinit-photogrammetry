@@ -147,7 +147,7 @@ PyArchInit, tracce di sezione, curve di livello, piante a quota, quote, marker, 
 patch.
 
 * La spunta mostra o nasconde un layer, il doppio clic ingrandisce su di esso (un layer o un singolo
-  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer.
+  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer (un solo passo di *Modifica > Annulla*).
 * In modalità *Sposta / interroga* un clic su un elemento mostra i suoi attributi (US, area, m2, quota di una
   curva...) qui e nella barra di stato.
 * **Modificare gli attributi**: doppio clic su un valore sotto *Attributi* per cambiarlo (US, area, tipo,

@@ -88,6 +88,15 @@ scelto, o nella colonna `layer` del file, o in un layer con il nome del file: un
 CAD piatto - le prende dal DEM; i buchi dei poligoni restano fuori e vengono contati (un disegno libero ha un solo
 contorno); un'importazione è un passo di *Modifica > Annulla*.
 
+Il sistema del file viene confrontato con quello del chunk: un GeoPackage porta il suo sistema di riferimento, un
+GeoJSON il membro `crs`; quando sono diversi i disegni vengono riproiettati, e le quote passano dall'ellissoide al
+geoide del chunk (o viceversa) quando i due sistemi dicono che tipo di quote hanno (senza la griglia del geoide il
+programma offre di scaricarla). Un **GeoJSON senza `crs`** con coordinate in longitudine e latitudine viene letto come
+WGS 84 con quote sull'ellissoide (RFC 7946); con coordinate proiettate, in un chunk con un sistema, viene rifiutato:
+esportalo con il sistema o importalo in un chunk locale. Un **DXF** non porta un sistema: è letto nel sistema del
+chunk. Un file con un sistema in un chunk locale (o un file senza sistema, non WGS 84, in un chunk con un sistema)
+viene rifiutato con un messaggio. Un GeoPackage in EPSG:4326 è letto come quote sull'ellissoide.
+
 ### Modelli 3D di altri programmi
 
 *File > Importa > Modello 3D (OBJ, PLY, GLB)*: una mesh fatta altrove (OBJ con il suo MTL e le texture, PLY con colori e

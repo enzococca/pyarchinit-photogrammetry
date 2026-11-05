@@ -89,6 +89,15 @@ layer chosen, or the file's `layer` column, or a layer named after the file: a f
 drawing included - takes them from the DEM; the holes of polygons are left out and counted (a free drawing has one
 outline); an import is one step of *Edit > Undo*.
 
+The system of the file is compared with the chunk's: a GeoPackage carries its spatial reference system, a GeoJSON its
+`crs` member; when they differ the drawings are reprojected, and the heights go from the ellipsoid to the chunk's
+geoid (or back) when both systems say what kind of heights they have (without the geoid grid the program offers to
+download it). A **GeoJSON without `crs`** whose coordinates are longitude and latitude is read as WGS 84 with heights
+on the ellipsoid (RFC 7946); with projected coordinates, into a chunk with a system, it is refused: export it with its
+system or import it into a local chunk. A **DXF** carries no system: it is read in the chunk's system. A file with a
+system into a local chunk (or a file without a system, not WGS 84, into a chunk with one) is refused with a message.
+A GeoPackage in EPSG:4326 is read as heights on the ellipsoid.
+
 ### 3D models of other programs
 
 *File > Import > 3D model (OBJ, PLY, GLB)*: a mesh made elsewhere (OBJ with its MTL and textures, PLY with colours and

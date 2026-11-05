@@ -338,12 +338,21 @@ parte: non entrano in *Aggiorna georeferenziazione*, il pannello *Riferimenti* l
 orientamento a mano viene rifiutato finché i punti di controllo ci sono. Un sistema scelto senza nient'altro che
 collochi il rilievo (A messo su X, Y e quota note) lascia ai marker di orientamento il compito di collocarlo.
 
+**Un blocco di foto con il GPS.** Quando le foto hanno posizioni GPS (in un sistema vero, come quelle dell'EXIF), dopo
+un orientamento a mano il prossimo allineamento rimette il rilievo nel sistema del GPS: le posizioni delle foto lo
+collocano e i marker di orientamento si fanno da parte, come davanti ai punti di controllo. Per tenere l'orientamento
+a mano spegni i riferimenti delle foto (pannello *Riferimenti*) prima di allineare di nuovo.
+
 **Prodotti da rifare.** DEM, ortofoto e i raster fatti da essi (precisione, copertura, rilievi, pendenza,
 esposizione, TIN) sono griglie nella pianta di prima: risultano *da rifare*. La vista raster lo dice in una fascia
 gialla sopra l'immagine, e gli strumenti di disegno rifiutano di disegnarci sopra. *Flusso di lavoro > Ricostruisci
 i prodotti da rifare* (proposto anche dalla finestra del risultato) li rifà in ordine con i parametri che avevano,
 tenendo i disegni; ciò che non può rifare (raster calcolati, multispettrali, termici e satellitari, versioni
 conservate) viene elencato da rifare a mano. I prospetti senza scala restano validi: si spostano con il chunk.
+La ricostruzione è un solo passo di *Modifica > Annulla* (tutti i prodotti tornano insieme come erano). Il DEM e
+l'ortofoto di prima restano fra le versioni solo se nel menu *Flusso di lavoro* è spuntato *Ricostruendo, conserva DEM
+e ortofoto attivi come versioni* (spento di solito: sono nel sistema di prima, non si confrontano pixel per pixel con
+quelli rifatti, e su un rilievo grande occupano GB).
 
 **Rifiuti.** La finestra non si apre, e dice perché, quando l'orientamento lo dà qualcos'altro: un chunk in un
 sistema di coordinate (lo danno i punti di controllo), tre marker di controllo con coordinate (cambia quelle), un
@@ -486,8 +495,9 @@ una modifica sul prospetto in cui è stata fatta.
   le miniature riscritti a ogni salvataggio e le US aggiunte nel frattempo collegate.
 * Il **collegamento dal vivo** con QGIS o RustGIS porta, oltre ai disegni della pianta, quelli di ogni prospetto con
   disegni, in 3D sul rilievo (tabelle `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; in RustGIS
-  nel gruppo "<chunk> - prospetti"), in un solo senso: ciò che si modifica lì in quei layer non torna. Il pacchetto
-  **QField** porta solo la pianta.
+  nel gruppo "<chunk> - prospetti"), in un solo senso: ciò che si modifica lì in quei layer non torna. Un prospetto
+  fatto dopo aver creato il progetto QGIS non c'è finché il progetto non viene creato di nuovo (*QGIS > Apri in
+  QGIS*). Il pacchetto **QField** porta solo la pianta.
 * I disegni della pianta restano caricati qualunque cosa sia mostrata: le funzioni che lavorano sulla pianta
   (proxy, volumi, classi, IFC, proposta di US, PyArchInit, fasi, rapporto) usano sempre i disegni della pianta.
 
