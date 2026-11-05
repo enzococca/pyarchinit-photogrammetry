@@ -412,3 +412,45 @@ def test_an_unreadable_crs_is_said_as_unreadable(tmp_path):
         fio.import_features(ch, path)
     assert e.value.reason == "unreadable" and "nonsense:crs" in str(e.value)
     assert fd.features(ch) == []
+
+
+def test_heights_of_a_wgs84_file_go_through_the_geoid(tmp_path):
+    """The heights of an RFC 7946 GeoJSON are above the WGS 84 ellipsoid: into a chunk with heights above EGM2008 they
+    are converted with the grid of the geoid (a synthetic one of 40 m), refused without it (nothing added); into a chunk
+    whose system has no heights of its own they are taken as they are (said in the log)."""
+    from test_gnss_heights import _run
+
+    out = _run(tmp_path, '''
+        import logging
+        import pyarchinit_photogrammetry as ppg
+        from pyarchinit_photogrammetry.core import free_drawings as fd
+        from pyarchinit_photogrammetry.io import free_drawings as fio
+
+        said = []
+        handler = logging.Handler()
+        handler.emit = lambda record: said.append(record.getMessage())
+        logging.getLogger("pyarchinit_photogrammetry.io.free_drawings").addHandler(handler)
+        logging.getLogger("pyarchinit_photogrammetry.io.free_drawings").setLevel(logging.INFO)
+        base = Path(sys.argv[1])
+        doc = ppg.Document()
+        ch = doc.add_chunk("A")
+        ch.crs = "EPSG:32633+3855"
+        doc.save(base / "p.ppg")
+        path = base / "rfc.geojson"
+        path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"name": "P"},
+             "geometry": {"type": "Point", "coordinates": [12.4964, 41.9028, 100.0]}}]}))
+        out = {"before": refused(lambda: fio.import_features(ch, path)), "n_before": len(fd.features(ch))}
+        write_grid(value=40.0)
+        got = fio.import_features(ch, path)
+        out.update(z=fd.features(ch)[0]["xyz"][0][2], rfc=got["rfc7946"])
+        plain = doc.add_chunk("B")
+        plain.crs = "EPSG:32633"
+        fio.import_features(plain, path)
+        out.update(plain=fd.features(plain)[0]["xyz"][0][2], said=said)
+        print(json.dumps(out))
+    ''', str(tmp_path))
+    assert out["before"] is not None and "us_nga_egm08_25" in out["before"] and out["n_before"] == 0
+    assert out["rfc"] is True and out["z"] == pytest.approx(60.0, abs=1e-6)
+    assert out["plain"] == pytest.approx(100.0)
+    assert any("così come sono" in m for m in out["said"])

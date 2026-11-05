@@ -514,16 +514,53 @@ def _systems(chunk, path: Path, records: list) -> bool:
                              f"{path.name}: the drawings are in {source} and the chunk is in a local system")
     if crs_mod.is_local(target):
         return assumed
-    dst = crs_mod.horizontal(target)  # the heights of a drawing go as they are (a file of features is 2D in plan)
+    plan = crs_mod.horizontal(target)
+    as_they_are: set = set()
     for rec in records:
         source = rec.get("crs") if rec.get("crs_in_file") else None
         if source is None or _same_system(source, target):
             continue
+        heights = [p[2] is not None for p in rec["xyz"]]
         pts = np.array([[p[0], p[1], 0.0 if p[2] is None else p[2]] for p in rec["xyz"]], float)
-        moved = crs_mod.transform_points(pts, source, dst, legacy=frames.Legacy(DRAWN, chunk))
+        legacy = frames.Legacy(DRAWN, chunk)
+        moved = crs_mod.transform_points(pts, source, plan, legacy=legacy)  # the plan; the heights as they are
+        if any(heights):
+            src3, kind = _heights_of(source)
+            if kind is not None and _height_kind(target) is not None:
+                # both systems say what their heights are (above the ellipsoid, above a geoid): converted with them,
+                # through the grid of the geoid where the kinds differ - a GridMissing (the import refused) without it
+                full = crs_mod.transform_points(pts[heights], src3, target, legacy=legacy)
+                moved[heights, 2] = full[:, 2]
+            else:
+                as_they_are.add(source)
         rec["xyz"] = [[float(q[0]), float(q[1]), None if p[2] is None else float(q[2])]
                       for p, q in zip(rec["xyz"], moved)]
+    if as_they_are:
+        log.info("%s: quote dei disegni prese così come sono (sistema delle quote non noto: %s, chunk %s)", path.name,
+                 ", ".join(sorted(as_they_are)), target)
     return assumed
+
+
+WGS84_2D = ("OGC:CRS84", "EPSG:4326")  # longitude and latitude on WGS 84: GeoJSON heights are above its ellipsoid
+
+
+def _height_kind(crs: str) -> str | None:
+    """``"ellipsoidal"`` or ``"orthometric"`` heights of ``crs`` (:func:`..gnss.heights.height_kind`), None when the
+    system has no heights of its own (2D: what its numbers are is not said)."""
+    from ..gnss import heights as hg
+
+    kind = hg.height_kind(crs)
+    return None if kind == hg.NONE else kind
+
+
+def _heights_of(source: str) -> tuple[str, str | None]:
+    """The system the heights of a file in ``source`` are converted from, and their kind: longitude and latitude on WGS
+    84 (RFC 7946, ``EPSG:4326``) have heights above the ellipsoid (``EPSG:4979``); another system its own kind."""
+    from ..gnss import heights as hg
+
+    if source in WGS84_2D:
+        return "EPSG:4979", hg.ELLIPSOIDAL
+    return source, _height_kind(source)
 
 
 RFC7946 = "OGC:CRS84"  # the system of a GeoJSON without a crs member (RFC 7946): WGS 84, longitude first
@@ -553,7 +590,9 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
     skipped when no vertex has one); a new identity when the one it has is in the chunk already. Returns
     ``{"added", "dem_z" (of those added, how many took the DEM's heights), "skipped", "holes_dropped" (the holes of
     polygons left out: a free drawing has one ring), "rfc7946" (True: a GeoJSON without a system read as WGS 84 and
-    reprojected)}``. :class:`StaleDem` (nothing added) when heights are wanted
+    reprojected)}``. The heights are converted when both systems say what they are (above the ellipsoid - a GeoJSON on
+    WGS 84 -, above a geoid): :class:`..gnss.heights.GridMissing` (nothing added) when the grid of the geoid is missing;
+    else taken as they are, said in the log. :class:`StaleDem` (nothing added) when heights are wanted
     from a DEM to rebuild (:mod:`..core.stamps`); :class:`ForeignCrs` (nothing added) when the system of the file
     cannot be put in the chunk's (reprojected when both are known and differ)."""
     from ..core import stamps

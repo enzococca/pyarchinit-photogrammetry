@@ -10231,8 +10231,6 @@ class MainWindow(QMainWindow):
         the active chunk (z from the DEM when the file has none), one step of *Modifica > Annulla*."""
         if not self._need_chunk():
             return
-        from ..io import free_drawings as fio
-
         path, _f = QFileDialog.getOpenFileName(self, tr("Importa disegni 3D"), self._last_dir(),
                                                "GeoPackage, GeoJSON, DXF (*.gpkg *.geojson *.json *.dxf)")
         if not path:
@@ -10245,9 +10243,19 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         chosen = str(chosen or "").strip()
-        layer = None if not chosen or chosen == from_file else chosen
+        self._import_free_file(path, None if not chosen or chosen == from_file else chosen)
+
+    def _import_free_file(self, path, layer) -> None:
+        """The free drawings of ``path`` imported into the active chunk in ``layer`` (None: the file's), said in the
+        log; a missing grid of the geoid offered for download, then the import again."""
+        from ..gnss import heights
+        from ..io import free_drawings as fio
+
         try:
             got = fio.import_features(self.chunk, path, layer=layer)
+        except heights.GridMissing as exc:
+            self._grid_missing(exc, tr("Importa disegni 3D"), retry=lambda: self._import_free_file(path, layer))
+            return
         except fio.StaleDem:
             self._warn(tr("I disegni del file non hanno quote e il DEM va rifatto prima di prenderle (Flusso di "
                           "lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato"))
