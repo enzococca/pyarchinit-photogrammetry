@@ -586,6 +586,7 @@ class MainWindow(QMainWindow):
         self.model_view.free_vertex_moved.connect(self._free_vertex_moved)
         self.model_view.free_delete_requested.connect(self._free_delete_requested)
         self.model_view.free_drape_requested.connect(self._free_draped)
+        self.model_view.busy_message.connect(self._model_busy_message)
         self._free_selected = ""  # the free drawing selected in the 3D view
         # a double click on the drawing selected in 3D: its form, once the mouse events of the view are over
         self.model_view.free_properties_requested.connect(
@@ -10158,6 +10159,13 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         self._draw_free()
 
+    def _model_busy_message(self, text: str) -> None:
+        """A line of the 3D view for the status bar (the model being prepared for drawing); "": cleared."""
+        if text:
+            self.statusBar().showMessage(text, 15000)
+        else:
+            self.statusBar().clearMessage()
+
     def _free_draped(self, fid: str, internal) -> None:
         from ..core import free_drawings
 
@@ -10415,23 +10423,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text, 15000)
 
     def _free_measures(self, fid: str) -> None:
-        """*Misura area* on a selected free drawing: its measures in 3D (on the model too, for a polygon)."""
+        """*Misura area* on a selected free drawing: its measures in 3D (on the model too, for a polygon: taken in the
+        background, the model read and let go, the result shown when it is ready)."""
         from . import free_drawing_dialog as fdd
 
         rec = self._free_record(fid)
         if rec is None:
             return
-        model = None
-        if rec["kind"] == "polygon":
-            try:
-                model = fdd.model_in_chunk(self.chunk)
-            except Exception as exc:  # noqa: BLE001 - the drawing's own measures
-                log.warning("Modello non letto per le misure: %s", exc)
         from ..engine.orient import toward_cameras
 
-        text = fdd.measures_text(rec, model, toward_cameras(self.chunk, np.asarray(rec["xyz"], float)))
-        self.log_pane.info(f"{rec['name']}: {text}")
-        self._info(tr("Misure del disegno libero"), f"{rec['name']}\n{text}")
+        def show(text: str) -> None:
+            self.log_pane.info(f"{rec['name']}: {text}")
+            self._info(tr("Misure del disegno libero"), f"{rec['name']}\n{text}")
+
+        if fdd.measure_later(self, self.chunk, rec, toward_cameras(self.chunk, np.asarray(rec["xyz"], float)), show):
+            self.statusBar().showMessage(tr("Misure di {0} in calcolo...", rec["name"]), 10000)
 
     # ---------------------------------------------------------------- break lines (archaeo.breaklines)
     @property

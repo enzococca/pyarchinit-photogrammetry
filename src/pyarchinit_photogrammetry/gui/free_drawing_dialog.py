@@ -2,12 +2,15 @@
 one), colour, attributes (key / value rows) and vertices (x, y read-only, z typed by the user), with its measures from
 :func:`..archaeo.measures.feature_measures` (read-only). Opened by a double click on the drawing in the 2D or the 3D
 view and by *Proprietà...*; :meth:`FreeDrawingDialog.ask` gives the values to the window, which writes them as one
-step of *Modifica > Annulla*. Since 1.7.2."""
+step of *Modifica > Annulla*. Since 1.7.2. The measures of a polygon on the model are taken in a worker thread that reads
+the model and lets it go (:func:`measure_later`, since 1.7.3): no copy of the model is kept."""
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QTableWidget,
@@ -19,44 +22,41 @@ from .i18n import decimal_comma, tr
 log = logging.getLogger(__name__)
 
 
-_MODEL_CACHE: dict = {}  # (path, mtime, transform) -> the trimesh of the last model read
-
-
 def model_in_chunk(chunk):
-    """The model of ``chunk`` as a trimesh in the chunk's coordinates (as the free drawings are), None without one;
-    kept while its file and the chunk's transform stay the same (one model)."""
+    """The model of ``chunk`` as a trimesh in the chunk's coordinates (as the free drawings are), None without one.
+    Read each time and not kept: the caller lets it go when the measures are taken."""
     path = chunk.product_path("model") if chunk is not None else None
     if path is None or not path.exists():
         return None
-    key = (str(path), path.stat().st_mtime_ns, np.asarray(chunk.transform, np.float64).tobytes())
-    if key in _MODEL_CACHE:
-        return _MODEL_CACHE[key]
     import trimesh
 
     from ..io.mesh_ply import read_mesh
 
     m = read_mesh(path)
-    mesh = trimesh.Trimesh(chunk.to_world(np.asarray(m.xyz, np.float64)), m.faces, process=False)
-    _MODEL_CACHE.clear()
-    _MODEL_CACHE[key] = mesh
-    return mesh
+    return trimesh.Trimesh(chunk.to_world(np.asarray(m.xyz, np.float64)), m.faces, process=False)
 
 
-def measures_text(rec: dict, model=None, toward=None) -> str:
-    """The measures of the free drawing ``rec`` in words; "-" when they cannot be taken (too few vertices, all on one
-    line)."""
+def _measures(rec: dict, model=None, toward=None):
+    """The measures of ``rec`` (:func:`..archaeo.measures.feature_measures`), on the model when it can; None when they
+    cannot be taken (too few vertices, all on one line)."""
     from ..archaeo.measures import feature_measures
 
     try:
-        m = feature_measures(rec, model=model, toward=toward)
+        return feature_measures(rec, model=model, toward=toward)
     except ValueError:
-        return "-"
+        return None
     except Exception as exc:  # noqa: BLE001 - a model that cannot be measured: the drawing's own measures
         log.warning("Misure sul modello non riuscite: %s", exc)
         try:
-            m = feature_measures(rec)
+            return feature_measures(rec)
         except ValueError:
-            return "-"
+            return None
+
+
+def measures_words(rec: dict, m) -> str:
+    """The measures ``m`` of ``rec`` in words; "-" for None."""
+    if m is None:
+        return "-"
     if rec["kind"] == "line":
         text = tr("Lunghezza 3D {0} m, in pianta {1} m, dislivello {2} m", f"{m['length_3d']:.3f}",
                   f"{m['length_plan']:.3f}", f"{m['dz']:+.3f}")
@@ -70,6 +70,54 @@ def measures_text(rec: dict, model=None, toward=None) -> str:
     else:
         text = tr("Quota {0} m", f"{m['z']:.3f}")
     return decimal_comma(text)
+
+
+def measures_text(rec: dict, model=None, toward=None) -> str:
+    """The measures of the free drawing ``rec`` in words; "-" when they cannot be taken (too few vertices, all on one
+    line)."""
+    return measures_words(rec, _measures(rec, model, toward))
+
+
+class _MeasuresRelay(QObject):
+    """Hands the measures taken in a worker thread to the interface thread (queued)."""
+
+    ready = Signal(object)
+
+    def __init__(self, parent, rec: dict, done):
+        super().__init__(parent)
+        self._rec, self._done = rec, done
+        self.ready.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
+
+    def _deliver(self, m) -> None:
+        self._done(measures_words(self._rec, m))
+        self.deleteLater()
+
+
+def measure_later(parent, chunk, rec: dict, toward, done) -> bool:
+    """The measures of ``rec`` in words given to ``done(text)`` in the interface thread. A polygon of a chunk with a
+    model is measured on it in a worker thread that reads the model and lets it go (True: ``done`` comes later, never
+    if ``parent`` is closed first); otherwise at once, without the model (False)."""
+    path = chunk.product_path("model") if chunk is not None and rec.get("kind") == "polygon" else None
+    if path is None or not path.exists():
+        done(measures_text(rec, None, toward))
+        return False
+    relay = _MeasuresRelay(parent, rec, done)
+
+    def work():
+        try:
+            model = model_in_chunk(chunk)
+        except Exception as exc:  # noqa: BLE001 - the measures without the model
+            log.warning("Modello non letto per le misure: %s", exc)
+            model = None
+        m = _measures(rec, model, toward)
+        del model  # the model let go before the interface gets the measures
+        try:
+            relay.ready.emit(m)
+        except RuntimeError:  # the form closed meanwhile
+            pass
+
+    threading.Thread(target=work, name="ppg-free-measures", daemon=True).start()
+    return True
 
 
 def shown_number(value) -> str:
@@ -96,14 +144,10 @@ class FreeDrawingDialog(QDialog):
     """The form of the free drawing ``rec`` of ``chunk`` (a copy of the record: nothing is written here)."""
 
     def __init__(self, window, chunk, rec: dict, model=None, toward=None):
-        """``model`` (a trimesh in the chunk's coordinates) and ``toward`` (the viewer's side) for the measures: read
-        from the chunk when not given (the model, the median of the aligned photos' centres)."""
+        """``model`` (a trimesh in the chunk's coordinates) and ``toward`` (the viewer's side) for the measures: when
+        no model is given, a polygon is measured on the chunk's model in the background (:func:`measure_later`);
+        ``toward`` read from the chunk when not given (the median of the aligned photos' centres)."""
         super().__init__(window)
-        if model is None and rec.get("kind") == "polygon":
-            try:
-                model = model_in_chunk(chunk)
-            except Exception as exc:  # noqa: BLE001 - the measures without the model
-                log.warning("Modello non letto per le misure: %s", exc)
         if toward is None and chunk is not None:
             from ..engine.orient import toward_cameras
 
@@ -158,8 +202,6 @@ class FreeDrawingDialog(QDialog):
         self.vertices.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                       | QAbstractItemView.EditTrigger.EditKeyPressed
                                       | QAbstractItemView.EditTrigger.AnyKeyPressed)
-        from PySide6.QtCore import Qt
-
         for x, y, z in rec["xyz"]:
             r = self.vertices.rowCount()
             self.vertices.insertRow(r)
@@ -170,10 +212,14 @@ class FreeDrawingDialog(QDialog):
                 self.vertices.setItem(r, c, item)
         lay.addWidget(self.vertices)
         lay.addWidget(QLabel(tr("Misure")))
-        self.measures = QLabel(measures_text(rec, model, toward))
+        self.measures = QLabel(tr("Misure in calcolo..."))
         self.measures.setWordWrap(True)
         self.measures.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.measures)
+        if model is not None:
+            self.measures.setText(measures_text(rec, model, toward))
+        else:
+            measure_later(self, chunk, rec, toward, self.measures.setText)
         self.status = QLabel("")
         self.status.setWordWrap(True)
         lay.addWidget(self.status)

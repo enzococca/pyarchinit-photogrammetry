@@ -209,7 +209,49 @@ def test_measure_area_of_a_selected_free_polygon(win, qapp):
     win.ortho_view.select_items([item])
     win.said.clear()
     win._area_selected()
-    assert any(k == "info" and "m²" in t for k, t in win.said), win.said
+    from free3d_helpers import wait_for
+
+    assert wait_for(lambda: any(k == "info" and "m²" in t for k, t in win.said), 60000), win.said  # measured in the background
+
+
+def test_form_measures_a_polygon_in_the_background_and_keeps_no_model(win, qapp, monkeypatch):
+    """The form of a polygon opens at once: the model is read and measured in a worker thread, the text comes when it
+    is ready and nothing keeps the model afterwards."""
+    import gc
+    import threading
+    import weakref
+
+    from free3d_helpers import wait_for
+    from orient_helpers import centre
+
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.gui import free_drawing_dialog as fdd
+
+    ch = win.chunk
+    x, y, z = centre(ch)
+    rec = free_drawings.add(ch, "polygon", [[x - 0.3, y - 0.2, z], [x + 0.4, y - 0.25, z], [x + 0.35, y + 0.3, z]])
+    gate, read = threading.Event(), []
+    real = fdd.model_in_chunk
+
+    def slow(chunk):
+        gate.wait(20)
+        model = real(chunk)
+        read.append((threading.current_thread(), weakref.ref(model)))
+        return model
+
+    monkeypatch.setattr(fdd, "model_in_chunk", slow)
+    dlg = fdd.FreeDrawingDialog(win, ch, rec)  # does not wait for the model
+    try:
+        assert dlg.measures.text() == "Misure in calcolo..."
+        gate.set()
+        assert wait_for(lambda: "superficie del modello" in dlg.measures.text(), 60000), dlg.measures.text()
+        thread, model = read[0]
+        assert thread is not threading.main_thread()
+        gc.collect()
+        assert model() is None  # let go once measured
+        assert not hasattr(fdd, "_MODEL_CACHE")
+    finally:
+        dlg.close()
 
 
 def test_layer_visibility_hides_2d_and_3d(win, qapp):

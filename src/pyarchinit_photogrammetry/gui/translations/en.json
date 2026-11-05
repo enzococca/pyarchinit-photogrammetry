@@ -3000,7 +3000,11 @@
   "Anomalie termiche esportate": "Thermal anomalies exported",
   "Ricostruendo, conserva DEM e ortofoto attivi come versioni": "When rebuilding, keep the active DEM and orthomosaic as versions",
   "Come «Conservala per confrontarla» nei dialoghi di costruzione: il DEM e l'ortofoto rifatti da Ricostruisci i prodotti da rifare lasciano quelli di prima fra le versioni": "As «Keep it to compare it» in the build dialogs: the DEM and the orthomosaic rebuilt by Rebuild the stale products leave the previous ones among the versions",
-  "Ricostruzione interrotta: quello che è stato rifatto resta (Modifica > Annulla lo riporta indietro)": "Rebuild stopped: what was rebuilt stays (Edit > Undo takes it back)"
+  "Ricostruzione interrotta: quello che è stato rifatto resta (Modifica > Annulla lo riporta indietro)": "Rebuild stopped: what was rebuilt stays (Edit > Undo takes it back)",
+  "Preparazione del modello per il disegno...": "Preparing the model for drawing...",
+  "Modello pronto per il disegno": "Model ready for drawing",
+  "Modello pronto: la vista è cambiata, clicca di nuovo": "Model ready: the view has changed, click again",
+  "Misure in calcolo...": "Computing the measures..."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3961,6 +3965,7 @@
   "I disegni del file sono in {0} e il chunk è in un sistema locale: nessun disegno importato": "The drawings of the file are in {0} and the chunk is in a local system: no drawing imported",
   "Il file non dice in quale sistema di riferimento sono i disegni e il chunk è in {0}: nessun disegno importato": "The file does not say which coordinate system its drawings are in and the chunk is in {0}: no drawing imported",
   "Il file nomina un sistema di riferimento che non si riesce a leggere ({0}): nessun disegno importato": "The file names a coordinate system that cannot be read ({0}): no drawing imported",
-  "; GeoJSON senza sistema letto come WGS 84 (RFC 7946) e convertito in {0}": "; GeoJSON without a system read as WGS 84 (RFC 7946) and converted to {0}"
+  "; GeoJSON senza sistema letto come WGS 84 (RFC 7946) e convertito in {0}": "; GeoJSON without a system read as WGS 84 (RFC 7946) and converted to {0}",
+  "Misure di {0} in calcolo...": "Computing the measures of {0}..."
  }
 }
