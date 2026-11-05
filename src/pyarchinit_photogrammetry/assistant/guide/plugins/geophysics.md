@@ -244,7 +244,7 @@ are the first check: a value of thousands in a magnetometry survey is a dummy or
 The window says how large the grid is (*The grid is in local metres with the origin at the lower-left
 corner (30 x 40 m)*); the fields of the methods not chosen are ignored.
 
-* **Grid corners = markers.** Show the orthophoto, take the *Marker* tool of the *Drawing* bar and click
+* **Grid corners = markers.** Show the orthophoto, take the *Marker* tool of the tool rail (group *Measurements*) and click
   each corner peg: the markers are called *point 1*, *point 2*... (rename them in the *Reference* pane
   if you like). In the window, choose the marker of each corner. A marker with coordinates typed in the
   *Reference* pane gives those coordinates, the others the position estimated by the survey.
@@ -344,7 +344,7 @@ selected grid:
    the last vertex back, a right click starts the polygon again. The drawing is the program's own, lent to
    the plugin.
 3. Double click, or press Enter, to close it; Esc cancels, and so does choosing another tool of the
-   *Drawing* bar.
+   tool rail of the 2D view.
 4. A window asks for a *Label* (A1, A2... by default) and a *Note*, the interpretation (*wall*, *pit*,
    *kiln?*).
 

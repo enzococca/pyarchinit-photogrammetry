@@ -44,7 +44,7 @@ pannello e nella finestra di pubblicazione) crea il record; pubblicare in un sit
 | Comando | Cosa scrive |
 | --- | --- |
 | *PyArchInit > Pubblica ortofoto / DEM / modello...* | scegli il sito, il nome del documento e le US da collegare: i raster vengono copiati accanto alla cartella dei media di PyArchInit, con le miniature e un record in `documentazione_table` |
-| *Pubblica unita' e quote disegnate* (*Pubblica* nella barra Disegno) | le unità in `pyunitastratigrafiche`, le quote in `pyarchinit_quote` |
+| *Pubblica unita' e quote disegnate* (*Pubblica in PyArchInit* nella barra laterale) | le unità in `pyunitastratigrafiche`, le quote in `pyarchinit_quote` |
 | *Salva modifiche in PyArchInit* (pannello *Layer*) | le modifiche alle unità caricate da PyArchInit, per il loro `gid` |
 | *Pubblica in PyArchInit* (pannello *Sezioni*) | le tracce di sezione in `pyarchinit_sezioni` |
 

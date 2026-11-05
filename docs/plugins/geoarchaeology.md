@@ -571,7 +571,7 @@ the cells where a contact was lowered are red, those where it was raised blue, t
 
 * *Draw a section*: click the vertices of the trace on the orthophoto or the DEM - two or more - and
   double click or press Enter to end it (the drawing of the program, lent to the plugin); Backspace takes
-  the last vertex back, Esc or another tool of the *Drawing* bar cancels. The program's own line tool
+  the last vertex back, Esc or another tool of the tool rail cancels. The program's own line tool
   keeps drawing the program's sections.
 * *Section through the boreholes*: select two or more boreholes in the *Boreholes* tab (with Ctrl, or
   Cmd on the Mac); the trace joins them in the order you picked them (a range picked with Shift comes

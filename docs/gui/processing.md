@@ -542,7 +542,7 @@ volumes.
 The orthophoto takes every cell from the best photo; a patch chooses the photo by hand in an area (a tree crown
 over a wall, a person in the trench, a shadow).
 
-1. *Patch* in the drawing bar (or *Tools > Orthophoto patch*): drag a box or click the vertices of a polygon and
+1. *Patch* in the tool rail (group *Automatic*) (or *Tools > Orthophoto patch*): drag a box or click the vertices of a polygon and
    double click; or select a polygon (a unit) and choose *Assign images to this area* from its menu.
 2. The window shows the area now and, for the photo chosen in the list, the area as it would come out. The list
    has the photos that frame the area, best first (framed share x closeness, verticality and centrality), with

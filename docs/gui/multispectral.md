@@ -92,7 +92,7 @@ Under the mouse the status bar reads the products at full resolution: on the the
 temperature and its anomaly (`Z 158.231  T 18.34 °C  ΔT +0.42 °C`), on the reflectance every band, on an index its
 value, on the orthophoto and the DEM the temperature too when there is one.
 
-The **Measuring point** tool (in the drawing bar, in both tabs and in the menus) places a point where you click with
+The **Measuring point** tool (in the menu of *Height* in the tool rail, in both tabs and in the menus) places a point where you click with
 its coordinates, the elevation of the DEM, the temperature and its anomaly, the reflectance of every band and the
 indices. The points go into the layer *Measuring points*, are saved with the project, reach QGIS with the other layers
 and are exported as GeoPackage, CSV or GeoJSON (*Export the measuring points...*).

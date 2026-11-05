@@ -556,7 +556,7 @@ Le [fasi dello scavo](archaeology.md#fasi-dello-scavo) coregistrano così i loro
 L'ortofoto prende ogni cella dalla foto migliore; una patch sceglie la foto a mano in un'area (la chioma di un
 albero sopra un muro, una persona nel saggio, un'ombra).
 
-1. *Patch* nella barra Disegno (o *Strumenti > Patch dell'ortofoto*): trascina un riquadro o fai clic sui vertici
+1. *Patch* nella barra laterale (gruppo *Automatico*) (o *Strumenti > Patch dell'ortofoto*): trascina un riquadro o fai clic sui vertici
    di un poligono e doppio clic; oppure seleziona un poligono (un'unità) e scegli *Assegna immagini a quest'area*
    dal suo menu.
 2. La finestra mostra l'area com'è ora e, per la foto scelta nell'elenco, l'area come verrebbe. L'elenco ha le foto

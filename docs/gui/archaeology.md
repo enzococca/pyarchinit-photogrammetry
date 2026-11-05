@@ -44,7 +44,7 @@ and in the publish window) creates the record; publishing to a site that does no
 | Command | What it writes |
 | --- | --- |
 | *PyArchInit > Publish orthophoto / DEM / model...* | choose the site, the document name and the US to link: the rasters are copied next to PyArchInit's media folder, with thumbnails and a `documentazione_table` record |
-| *Publish the drawn units and spot heights* (*Publish* in the drawing bar) | the units in `pyunitastratigrafiche`, the spot heights in `pyarchinit_quote` |
+| *Publish the drawn units and spot heights* (*Publish in PyArchInit* in the tool rail) | the units in `pyunitastratigrafiche`, the spot heights in `pyarchinit_quote` |
 | *Save changes in PyArchInit* (*Layer* pane) | the edits of units loaded from PyArchInit, by their `gid` |
 | *Publish in PyArchInit* (*Sections* pane) | the section traces in `pyarchinit_sezioni` |
 
