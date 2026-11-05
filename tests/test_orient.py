@@ -646,23 +646,95 @@ def test_unstamped_elevation_is_stale_after_a_scale(processed, tmp_path):
 
 
 # keys written on objects that are not chunks (photos, the document)
-NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "rolling_shutter"}
+NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "rolling_shutter", "face"}
+
+
+def _meta_writes(tree) -> set:
+    """The keys written in a ``.meta`` of ``tree`` (a module's AST): ``x.meta["k"] = ...`` (spaces inside the
+    brackets too), ``x.meta.setdefault("k", ...)``, ``x.meta.update(k=..., **{"k": ...})`` / ``update({"k": ...})``,
+    and the same through a name the function took the meta in (``meta = chunk.meta``, ``meta, v = chunk.meta, {}``)."""
+    import ast
+
+    def is_meta(node) -> bool:
+        return isinstance(node, ast.Attribute) and node.attr == "meta"
+
+    def text(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    keys = set()
+    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))]
+    for scope in [tree, *scopes]:
+        aliases = set()
+        if scope is not tree:
+            for n in ast.walk(scope):
+                if isinstance(n, (ast.Assign, ast.AnnAssign)):
+                    targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                    for t in targets:
+                        if isinstance(t, ast.Name) and is_meta(n.value):
+                            aliases.add(t.id)
+                        elif isinstance(t, ast.Tuple) and isinstance(n.value, ast.Tuple):
+                            aliases |= {a.id for a, b in zip(t.elts, n.value.elts)
+                                        if isinstance(a, ast.Name) and is_meta(b)}
+
+        def target(node) -> bool:
+            return is_meta(node) or (isinstance(node, ast.Name) and node.id in aliases)
+
+        for n in ast.walk(scope):
+            if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and target(n.value):
+                keys.add(text(n.slice))
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and target(n.func.value):
+                if n.func.attr == "setdefault" and n.args:
+                    keys.add(text(n.args[0]))
+                elif n.func.attr == "update":
+                    keys |= {k.arg for k in n.keywords if k.arg}
+                    for d in [a for a in n.args if isinstance(a, ast.Dict)] + [
+                            k.value for k in n.keywords if k.arg is None and isinstance(k.value, ast.Dict)]:
+                        keys |= {text(k) for k in d.keys if k is not None}
+    keys.discard(None)
+    return keys
+
+
+def test_the_scan_of_the_meta_keys_sees_aliases_updates_and_spaces():
+    import ast
+
+    code = """
+def f(chunk, cam):
+    meta = chunk.meta
+    meta["alias_key"] = 1
+    meta, other = chunk.meta, {}
+    meta.setdefault("tuple_alias_key", {})
+    chunk.meta.update(keyword_key=1, **{"star_key": 2})
+    chunk.meta.update({"dict_key": 3})
+    chunk.meta[ "spaced_key" ] = 4
+    other["not_meta"] = 5
+
+def g():
+    meta = {}
+    meta["plain_dict"] = 1
+"""
+    assert _meta_writes(ast.parse(code)) == {"alias_key", "tuple_alias_key", "keyword_key", "star_key", "dict_key",
+                                             "spaced_key"}
 
 
 def test_every_chunk_meta_key_of_the_program_is_known():
+    import ast
     import re
     from pathlib import Path
 
     import pyarchinit_photogrammetry
 
     root = Path(pyarchinit_photogrammetry.__file__).parent
-    pattern = re.compile(r'\b(\w+)\.meta(?:\["(\w+)"\]\s*=(?!=)|\.setdefault\("(\w+)"|\.get\("(\w+)")')
+    pattern = re.compile(r'\b(\w+)\.meta(?:\[\s*"(\w+)"\s*\]\s*=(?!=)|\.setdefault\(\s*"(\w+)"|\.get\(\s*"(\w+)")')
     unknown = {}
     for path in root.rglob("*.py"):
-        for m in pattern.finditer(path.read_text(encoding="utf-8")):
+        source = path.read_text(encoding="utf-8")
+        keys = set()
+        for m in pattern.finditer(source):
             if m.group(4) and m.group(1) not in ("chunk", "ch"):
                 continue
-            key = m.group(2) or m.group(3) or m.group(4)
+            keys.add(m.group(2) or m.group(3) or m.group(4))
+        keys |= _meta_writes(ast.parse(source))
+        for key in keys:
             if key not in orient.PROGRAM_KEYS and key not in NOT_CHUNK_KEYS:
                 unknown.setdefault(key, []).append(str(path.relative_to(root)))
     assert not unknown, unknown
