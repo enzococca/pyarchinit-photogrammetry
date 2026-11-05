@@ -8,7 +8,6 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMenu
 
@@ -39,6 +38,32 @@ def _runs(mask, closed: bool = False) -> list:
         runs = [runs[-1] + runs[0]] + runs[1:-1]
     return [np.array(r) for r in runs]
 
+
+
+class LayersShown:
+    """The step of Modifica > Annulla of *Tutti* / *Nessuno*: the layers of the 2D view it changed shown as they were
+    (undo) or as it left them (redo) - the free drawings' layers in the chunk too."""
+
+    def __init__(self, window, changed: dict):
+        self.window, self.changed = window, dict(changed)
+
+    def _apply(self, which: int) -> None:
+        w = self.window
+        free = False
+        for name, states in self.changed.items():
+            shown = bool(states[which])
+            w.ortho_view.set_layer_visible(name, shown)
+            free = w._set_free_layer_shown(name, shown) or free
+        if free:
+            w._draw_free_3d()
+            w.setWindowModified(True)
+        w.layers_pane.rebuild()
+
+    def undo(self) -> None:
+        self._apply(0)
+
+    def redo(self) -> None:
+        self._apply(1)
 
 class FreeDrawingActions:
     """The free-drawing methods of the main window (it provides ``chunk``, ``settings``, ``model_view``,
@@ -338,22 +363,34 @@ class FreeDrawingActions:
 
     def _layer_visibility_changed(self, name: str, visible: bool) -> None:
         """A layer of the free drawings shown or hidden in the Layer pane: kept in the chunk, the 3D view follows."""
+        if self._set_free_layer_shown(name, visible):
+            self._draw_free_3d()
+            self._dirty(True)
+
+    def _set_free_layer_shown(self, name: str, visible: bool) -> bool:
+        """The layer ``name`` of the view, if it is one of the free drawings, shown or hidden in the chunk; whether it
+        changed."""
         if not name.startswith(LAYER_PREFIX) or self.chunk is None:
-            return
+            return False
         from ..core import free_drawings
 
         layer = name[len(LAYER_PREFIX):]
         if next((x for x in free_drawings.layers(self.chunk) if x["name"] == layer), {}).get("visible", True) == visible:
-            return
+            return False
         free_drawings.set_layer(self.chunk, layer, visible=visible)
-        self._draw_free_3d()
-        if not getattr(self, "_free_vis_pending", False):  # Tutti / Nessuno: one step of Modifica > Annulla
-            self._free_vis_pending = True
-            QTimer.singleShot(0, self._free_visibility_done)
+        return True
 
-    def _free_visibility_done(self) -> None:
-        self._free_vis_pending = False
-        self._dirty(True)
+    def _layers_visibility_set(self, changed: dict) -> None:
+        """*Tutti* / *Nessuno* in the Layer pane (``{layer: (before, now)}``): the free drawings' layers kept in the
+        chunk, and ONE step of Modifica > Annulla for all the layers changed, free or not."""
+        free = False
+        for name, (_before, now) in changed.items():
+            free = self._set_free_layer_shown(name, now) or free
+        if free:
+            self._draw_free_3d()
+            self.setWindowModified(True)
+        if self.history is not None and changed and not self.history.applying:
+            self.history.push(tr("Visibilità dei layer"), LayersShown(self, changed), document=False)
 
     def _feature_double_clicked(self, layer: str, attrs: dict) -> None:
         if attrs.get("_free") and attrs.get(ID_FIELD):
@@ -505,7 +542,12 @@ class FreeDrawingActions:
             return
         from ..engine.orient import toward_cameras
 
+        doc, chunk = self.doc, self.chunk
+
         def show(text: str) -> None:
+            if self.doc is not doc or self.chunk is not chunk:  # another project or chunk meanwhile: not its measures
+                log.info("Misure di %s lasciate: il chunk misurato non è più quello attivo", rec["name"])
+                return
             self.log_pane.info(f"{rec['name']}: {text}")
             self._info(tr("Misure del disegno libero"), f"{rec['name']}\n{text}")
 

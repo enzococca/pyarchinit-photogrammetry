@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
@@ -34,6 +35,25 @@ def model_in_chunk(chunk):
 
     m = read_mesh(path)
     return trimesh.Trimesh(chunk.to_world(np.asarray(m.xyz, np.float64)), m.faces, process=False)
+
+
+class ModelSource:
+    """The model file and the transform of a chunk taken at once (in the interface thread): what a worker reads with
+    :func:`model_in_chunk` instead of the chunk, which the window may change meanwhile (an orientation applied, the
+    model rebuilt)."""
+
+    def __init__(self, chunk):
+        path = chunk.product_path("model") if chunk is not None else None
+        self.path = Path(path) if path is not None else None
+        self.transform = np.array(chunk.transform, float, copy=True) if chunk is not None else np.eye(4)
+
+    def product_path(self, name: str):
+        return self.path if name == "model" else None
+
+    def to_world(self, points) -> np.ndarray:
+        from ..core import geometry
+
+        return geometry.apply(self.transform, points)
 
 
 def _measures(rec: dict, model=None, toward=None):
@@ -102,10 +122,11 @@ def measure_later(parent, chunk, rec: dict, toward, done) -> bool:
         done(measures_text(rec, None, toward))
         return False
     relay = _MeasuresRelay(parent, rec, done)
+    source = ModelSource(chunk)  # the path and the transform of now, not read from the chunk in the worker
 
     def work():
         try:
-            model = model_in_chunk(chunk)
+            model = model_in_chunk(source)
         except Exception as exc:  # noqa: BLE001 - the measures without the model
             log.warning("Modello non letto per le misure: %s", exc)
             model = None

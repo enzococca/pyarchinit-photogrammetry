@@ -672,6 +672,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
+        self.layers_pane.visibility_set.connect(self._layers_visibility_set)
         self.ortho_view.labels_changed.connect(self._labels_changed)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
         self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
@@ -1692,7 +1693,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._capture_states()
         if self.history is None:
             self.history = UndoHistory(self._undo_state, self._undo_apply, lambda: self.chunk,
-                                       on_change=self._undo_actions)
+                                       on_change=self._undo_actions, defer=lambda f: QTimer.singleShot(0, f))
         else:
             self.history.reset()
         if doc.path:
@@ -1791,7 +1792,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def mark_modified(self) -> None:
         """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
         shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
-        take it back."""
+        take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
+        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). A plugin that pushes its own step
+        (``history.push``) before calling this gets no second entry for the same change."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:
@@ -3032,6 +3035,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._rustgis_close(withdraw=took and not self.isWindowModified())
         self._say_waiting_steps()
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
+        if self.history is not None:  # nothing can be undone after the session: the copies of its steps go
+            self.history.close(self.doc.chunks)
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
         if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
             self.settings.remove("updates_last_check")
@@ -5170,8 +5175,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                         if e.get("id") and e.get("patches")},
                          free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
                                "layers": (ch.meta.get("drawings") or {}).get("free_layers") or [],
-                               "basis": (ch.meta.get("drawings") or {}).get("free_basis")})
+                               "basis": (ch.meta.get("drawings") or {}).get("free_basis")},
+                         plugins=self._plugin_meta(ch))
         return state
+
+    @staticmethod
+    def _plugin_meta(ch) -> dict:
+        """The keys of ``chunk.meta`` that are not the program's: the data of the plugins (part ``plugins``)."""
+        from ..engine.orient import PROGRAM_KEYS
+
+        return {k: v for k, v in ch.meta.items() if k not in PROGRAM_KEYS}
 
     @staticmethod
     def _undo_units(units) -> list:
@@ -5345,11 +5358,27 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._undo_patches(state)
         if ch is not None and "free" in state:
             self._undo_free(ch, state["free"] or {})
+        if ch is not None and "plugins" in state:
+            self._undo_plugins(ch, state["plugins"] or {})
         if products:
             self.workspace.populate(self.doc)
             if self.model_view.kind:
                 self.model_view.refresh(reset=False)
         self._dirty(True)
+
+    def _undo_plugins(self, ch, data: dict) -> None:
+        """The plugins' keys of ``chunk.meta`` as a snapshot has them (those it has not, gone); the workspace and the
+        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``)."""
+        import copy
+
+        from ..engine.orient import PROGRAM_KEYS
+
+        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data]:
+            del ch.meta[k]
+        for k, v in data.items():
+            ch.meta[k] = copy.deepcopy(v)
+        self.workspace.populate(self.doc)
+        self.refreshed.emit()
 
     def _undo_free(self, ch, free: dict) -> None:
         """The free drawings in 3D, their layers and the basis they were written in (part ``free``) as a snapshot has

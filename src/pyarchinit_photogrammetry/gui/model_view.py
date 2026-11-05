@@ -1548,7 +1548,10 @@ class ModelView(QWidget):
         self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
         self._free_inner: dict = {}  # their internal coordinates by id, converted once
         self._draw_mesh = None  # (key, centre, ray caster, median edge) of the model shown, kept between drawings
-        self._caster_building = None  # the key of the model whose ray caster is being built in the background
+        # the keys of the models whose ray casters are being built in the background: one build per model file, also
+        # across a switch of chunk and back (a big model is not read twice at once); a result no longer of the model
+        # shown (rewritten, another chunk) is let go when it arrives
+        self._caster_running: set = set()
         self._kept_clicks: list = []  # clicks while it is built: (x, y, line of sight), placed when it is ready
         self._caster_relay = _CasterRelay(self)
         self._caster_relay.ready.connect(self._caster_built, Qt.ConnectionType.QueuedConnection)
@@ -1653,7 +1656,6 @@ class ModelView(QWidget):
         self.stop_free_select()
         if chunk is not self.chunk:  # the drawings and the model of another chunk are not this one's
             self._free, self._free_inner, self._draw_mesh = [], {}, None
-            self._caster_building = None
             self._selected_id = None
             self.a_free_drape.setEnabled(False)
         self._clear_version()
@@ -2427,7 +2429,8 @@ class ModelView(QWidget):
     @property
     def caster_preparing(self) -> bool:
         """True while the ray caster of the model shown is being built in the background."""
-        return self._caster_building is not None and self._caster_building == self._caster_key()[0]
+        key = self._caster_key()[0]
+        return key is not None and key in self._caster_running
 
     def _caster(self):
         """(centre, ray caster, median edge) of the model shown (internal coordinates minus centre), kept for the
@@ -2439,7 +2442,7 @@ class ModelView(QWidget):
             return None
         cached = self._draw_mesh
         if cached is None or cached[0] != key:
-            if self._caster_building == key:
+            if key in self._caster_running:
                 return None
             from ..io.mesh_ply import face_count
 
@@ -2457,7 +2460,7 @@ class ModelView(QWidget):
 
     def _start_caster(self, key, path) -> None:
         """The ray caster of ``path`` built in a worker thread, handed back through the relay (queued)."""
-        self._caster_building = key
+        self._caster_running.add(key)
         relay = self._caster_relay
 
         def work():
@@ -2479,10 +2482,10 @@ class ModelView(QWidget):
     def _caster_built(self, key, parts) -> None:
         """The ray caster built in the background (interface thread): kept when it is still the model shown; the
         clicks kept meanwhile placed when the view has not moved, otherwise the user asked to click again."""
-        if self._caster_building == key:
-            self._caster_building = None
+        self._caster_running.discard(key)
         if key != self._caster_key()[0]:
-            return  # another chunk or another model meanwhile
+            del parts  # stale: another chunk or the model rewritten meanwhile - not kept
+            return
         self._draw_mesh = (key, *parts)
         kept, self._kept_clicks = self._kept_clicks, []
         if self._draw_kind is None:

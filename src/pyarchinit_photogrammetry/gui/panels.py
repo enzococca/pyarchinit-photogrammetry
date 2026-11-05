@@ -1913,7 +1913,8 @@ class LayersPane(QWidget):
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
     us_form_requested = Signal(str, int)  # layer, feature index
-    visibility_changed = Signal(str, bool)  # layer, shown: by its box or by Tutti / Nessuno (the window may keep it)
+    visibility_changed = Signal(str, bool)  # layer, shown: by its box (the window may keep it)
+    visibility_set = Signal(dict)  # by Tutti / Nessuno: {layer: (shown before, shown now)} of the layers it changed
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
 
@@ -2028,11 +2029,18 @@ class LayersPane(QWidget):
             self.visibility_changed.emit(data[0], visible)
 
     def _set_all(self, visible: bool) -> None:
+        """*Tutti* / *Nessuno*: every layer shown or hidden; the window told once, with the layers that changed (one
+        step of Modifica > Annulla for all of them)."""
         if self.view is None:
             return
+        changed = {}
         for name in list(self.view.layer_order):
-            self.view.set_layer_visible(name, visible)
-            self.visibility_changed.emit(name, visible)
+            before = bool(self.view.layers[name].get("visible", True))
+            if before != visible:
+                self.view.set_layer_visible(name, visible)
+                changed[name] = (before, visible)
+        if changed:
+            self.visibility_set.emit(changed)
         self.rebuild()
 
     def _zoom_item(self, item) -> None:

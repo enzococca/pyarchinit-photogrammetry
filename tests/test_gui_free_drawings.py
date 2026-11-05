@@ -284,6 +284,82 @@ def test_layer_visibility_hides_2d_and_3d(win, qapp):
     assert "f1" in {f[0] for f in win.model_view._free}
 
 
+def test_all_and_none_are_one_undo_step_for_every_layer(win, qapp):
+    """*Nessuno* hides the free drawings' layers and the others in one step of Modifica > Annulla; *Annulla* shows them
+    all again, *Ripeti* hides them again; *Tutti* the same the other way."""
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    ch = win.chunk
+    win._show_raster("dem")
+    win._draw_free()
+    view = win.ortho_view
+    free = PREFIX + "Disegni 3D"
+    view.add_line(np.array([[0.0, 0.0], [1.0, 1.0]]), "#ff0000", "prova", layer="Altro layer")
+    assert free in view.layers and view.layers["Altro layer"]["visible"]
+    win.history.rebase()
+    entries = len(win.history.entries)
+
+    def shown():
+        return {n: view.layers[n]["visible"] for n in (free, "Altro layer")}
+
+    def free_shown():
+        return next(x for x in free_drawings.layers(ch) if x["name"] == "Disegni 3D")["visible"]
+
+    win.layers_pane.b_none.click()
+    qapp.processEvents()
+    assert shown() == {free: False, "Altro layer": False} and not free_shown()
+    assert len(win.history.entries) == entries + 1 and win.a_undo.text() == "Annulla: Visibilità dei layer"
+    win.undo()
+    assert shown() == {free: True, "Altro layer": True} and free_shown()
+    assert "f1" in {f[0] for f in win.model_view._free}
+    win.redo()
+    assert shown() == {free: False, "Altro layer": False} and not free_shown()
+    win.layers_pane.b_all.click()
+    qapp.processEvents()
+    assert shown() == {free: True, "Altro layer": True} and len(win.history.entries) == entries + 2
+    win.layers_pane.b_all.click()  # nothing to change: no step
+    assert len(win.history.entries) == entries + 2
+
+
+def test_measures_of_a_chunk_left_meanwhile_are_dropped(win, qapp, monkeypatch):
+    """*Misura area* on a free polygon measured in the background: when another chunk became the active one before the
+    result came, no box opens; the worker reads the model path and transform taken before it started."""
+    import threading
+
+    from free3d_helpers import wait_for
+    from orient_helpers import centre
+
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.gui import free_drawing_dialog as fdd
+
+    ch = win.chunk
+    x, y, z = centre(ch)
+    rec = free_drawings.add(ch, "polygon", [[x - 0.3, y - 0.2, z], [x + 0.4, y - 0.25, z], [x + 0.35, y + 0.3, z]])
+    gate, seen = threading.Event(), []
+    real = fdd.model_in_chunk
+
+    def slow(source):
+        gate.wait(20)
+        seen.append(source)
+        return real(source)
+
+    monkeypatch.setattr(fdd, "model_in_chunk", slow)
+    win.said.clear()
+    win._free_measures(rec["id"])
+    original = np.array(ch.transform, float).copy()
+    ch.transform = ch.transform.copy()
+    ch.transform[:3, 3] += 5.0  # the transform changed after the start: the worker keeps the one it was given
+    other = win.doc.add_chunk("altro")
+    win._activate_chunk(other)
+    gate.set()
+    assert wait_for(lambda: bool(seen), 30000)
+    qapp.processEvents()
+    wait_for(lambda: False, 300)
+    assert not any(k == "info" for k, _t in win.said), win.said
+    assert seen[0] is not ch and np.allclose(seen[0].transform, original)
+    ch.transform = original
+
+
 def test_undo_redo_of_add_move_delete(win, qapp):
     from pyarchinit_photogrammetry.core import free_drawings
 
