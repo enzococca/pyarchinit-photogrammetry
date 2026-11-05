@@ -359,9 +359,10 @@ def _elevation_files(chunk):
         yield e, folder / "frame.json", profile, rasters
 
 
-def capture(chunks, project_sections=None) -> OrientState:
+def capture(chunks, project_sections=None, files: bool = True) -> OrientState:
     """The state of ``chunks`` and of the file of the sections ``project_sections`` (a path, or None) before an
-    orientation."""
+    orientation. ``files`` False: the chunks only (a dry run writes no file: nothing of them to put back, and no clone
+    of the proxies made)."""
     import rasterio
 
     state = OrientState()
@@ -371,6 +372,8 @@ def capture(chunks, project_sections=None) -> OrientState:
             "meta": {k: _copy.deepcopy(ch.meta[k]) for k in MOVED_KEYS if k in ch.meta},
             "markers": [m.to_dict() for m in ch.markers], "scalebars": [s.to_dict() for s in ch.scalebars],
             "cameras": [(cam, _copy.deepcopy(cam.reference.to_dict())) for cam in ch.cameras]})
+        if not files:
+            continue
         for _e, frame_json, profile, rasters in _elevation_files(ch):
             for path in (frame_json, profile):
                 if path is not None and path.exists():
@@ -650,13 +653,13 @@ def _write_rasters(rasters: dict) -> None:
             dst.transform = Affine(*grid)
 
 
-def move_stores(chunk, m, sections=None) -> dict:
+def move_stores(chunk, m, sections=None, write: bool = True) -> dict:
     """Everything kept in the coordinates of ``chunk`` carried by the motion ``m`` (the chunk's transform is not
     changed here: the caller pre-multiplies it). Call it through :func:`apply`: the files are written before
     ``chunk.meta`` with no rollback of their own, :func:`apply` puts everything back on a failure. The new values are built aside and written only when all of them are
     built; the files (the elevations' ``frame.json``, ``profile.json``, tags and grids of their rasters, the proxies'
-    PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``. Returns how many
-    of each store moved."""
+    PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``; ``write`` False
+    (a dry run): no file written, ``chunk.meta`` changed as with them. Returns how many of each store moved."""
     import shapely
 
     from ..core import free_drawings
@@ -721,12 +724,13 @@ def move_stores(chunk, m, sections=None) -> dict:
                                           enabled=cam.reference.enabled)))
     counts["camera_references"] = len(photos)
     # written: the files first, then the chunk
-    for path, text in texts.items():
-        path.write_text(text, encoding="utf-8")
-    _write_rasters(rasters)
-    _write_proxies(meshes)
-    if moved_sections is not None:
-        hg._write_sections(hg._sections_file(chunk), moved_sections)
+    if write:
+        for path, text in texts.items():
+            path.write_text(text, encoding="utf-8")
+        _write_rasters(rasters)
+        _write_proxies(meshes)
+        if moved_sections is not None:
+            hg._write_sections(hg._sections_file(chunk), moved_sections)
     for mk, reference in references + photos:
         mk.reference = reference
     meta.update(values)
@@ -788,7 +792,7 @@ def _sections_said(sections: list | None, moved: bool, tilted: bool) -> list[dic
     return out
 
 
-def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
+def apply(chunk, m, move_aligned: bool = True, notify: bool = True, dry_run: bool = False) -> dict:
     """``chunk`` (in a local system) moved by the motion ``m``: its transform pre-multiplied (``m @ T``) and everything
     kept in its coordinates carried along (:func:`move_stores`), with the chunks aligned to it (``move_aligned``);
     the sections of the project moved when no other chunk of the project is in a local system (else kept);
@@ -796,7 +800,8 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
     the rasters on a grid are stale. The window stores its drawings into the chunk first. Refused as :func:`check`
     says. On any error everything is put back and the error raised again. ``notify``: the listeners
     (:func:`on_transform_changed`) told here (False: the caller tells them with :func:`fire`, e.g. the window from its
-    interface thread after a run in the background).
+    interface thread after a run in the background). ``dry_run``: no file written (the chunks changed in memory: the
+    caller puts them back with the state).
 
     Returns ``{"moved": {store: n}, "aligned": [labels moved], "aligned_left": [labels not moved], "stale":
     :func:`..core.stamps.stale_products`, "kept": [{"what", "names"}], "sent_out": [{"what", "names"}],
@@ -826,14 +831,15 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
     others = [c for c in getattr(doc, "chunks", []) or [] if all(c is not x for x in moving)
               and crs_mod.is_local(c.crs)]
     move_sections = bool(sections) and not others
-    state = capture(moving, path)
+    state = capture(moving, None if dry_run else path, files=not dry_run)
     moved: dict = {}
     try:
         for ch in moving:
             current = [e for e in ch.meta.get("elevations") or [] if isinstance(e, dict)
                        and not stamps.entry_stale(ch, e)]
             _stamp_unstamped(ch)
-            counts = move_stores(ch, m, sections if (ch is chunk and move_sections) else None)
+            counts = move_stores(ch, m, sections if (ch is chunk and move_sections) else None,
+                                 **({"write": False} if dry_run else {}))
             for key, n in counts.items():
                 moved[key] = moved.get(key, 0) + n
             ch.transform = m @ np.asarray(ch.transform, float)
@@ -1040,8 +1046,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     bar when A and B are other points (re-created on the same points, either order, within :data:`SAME_POINT`),
     "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
-    everything is done and put back (the plugins listening are not told): ``describe`` and :func:`apply`'s result
-    without ``state`` and ``markers``. ``notify`` False: the listeners are not told (the caller tells them with
+    everything is computed in memory and put back, no file written (the plugins listening are not told):
+    ``describe`` and :func:`apply`'s result without ``state`` and ``markers``. ``notify`` False: the listeners are not told (the caller tells them with
     :func:`fire` for each chunk of ``state``, with ``M``)."""
     from ..gnss import heights as hg
     from ..markers import gcp
@@ -1110,12 +1116,12 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
             kept_bar = None
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
-    state = capture(moving, hg._sections_file(chunk))
+    state = capture(moving, None if dry_run else hg._sections_file(chunk), files=not dry_run)
     previous = {k: _copy.deepcopy(chunk.meta[k]) for k in ("orientation", "marker_excluded") if k in chunk.meta}
     try:
         made, weak = write_markers(chunk, [a, b, c], np.eye(4))
         # a dry run tells nobody, but the listeners stay registered: their keys are not said unaware
-        result = apply(chunk, m, move_aligned=move_aligned, notify=notify and not dry_run)
+        result = apply(chunk, m, move_aligned=move_aligned, notify=notify and not dry_run, dry_run=dry_run)
         drop(result.pop("state"))  # ours (taken before the markers) puts back the earlier ones too
         for mk in made:  # apply scaled the accuracy with the references: the markers' own
             mk.reference.accuracy = [MARKER_ACCURACY] * 3

@@ -1,6 +1,8 @@
 """The frame of a local system and the motion that sets it (pure numpy)."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -1069,3 +1071,36 @@ def test_a_real_system_keeps_the_frame_through_a_new_alignment(processed, tmp_pa
     report = ch.update_transform()
     assert "+orientation" in report["method"] and ch.crs == "EPSG:3004"
     assert np.abs(np.asarray(ch.transform) - oriented @ np.linalg.inv(g)).max() < 1e-6
+
+
+def _files_under(folder):
+    import hashlib
+    from pathlib import Path
+
+    out = {}
+    for path in sorted(Path(folder).rglob("*")):
+        if path.is_file():
+            st = path.stat()
+            out[str(path.relative_to(folder))] = (st.st_mtime_ns, st.st_size,
+                                                  hashlib.sha1(path.read_bytes()).hexdigest())
+    return out
+
+
+def test_a_dry_run_touches_no_file(processed, tmp_path):
+    """Sections, the elevations' frame.json and rasters, the proxies: computed, never written (not even put back)."""
+    from orient_helpers import drawn, local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    drawn(ch)
+    doc.save()
+    folder = doc.path.parent
+    before = _files_under(folder)
+    assert any(k.endswith("frame.json") for k in before) and any(k.endswith(".ply") for k in before)
+    internal = _surface_points(ch)
+    dry = orient.orient(ch, points=ch.to_world(internal), distance=2.0, dry_run=True)
+    assert _files_under(folder) == before
+    # the result is the one of the orientation made
+    made = orient.orient(ch, points=ch.to_world(internal), distance=2.0)
+    for key in ("M", "describe", "moved", "stale", "kept", "cameras_replaced", "weak_markers", "bar_dropped"):
+        assert json.dumps(dry[key], sort_keys=True, default=str) == json.dumps(made[key], sort_keys=True, default=str)
+    orient.undo(ch, made)
