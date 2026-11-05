@@ -39,7 +39,7 @@ layer *TIN*, the constrained ones thicker.
 
 ## Break lines
 
-The **Lines** tool of the drawing bar (or *Tools > TIN and break lines > Draw break lines*) draws them on the
+The **Break lines** tool of the tool rail of the 2D view (group *Drawing*) (or *Tools > TIN and break lines > Draw break lines*) draws them on the
 orthophoto or the DEM: a click for each vertex, double click or ++enter++ to finish, ++backspace++ removes the last
 vertex, ++esc++ cancels. The menu of the button chooses the kind of the next lines:
 

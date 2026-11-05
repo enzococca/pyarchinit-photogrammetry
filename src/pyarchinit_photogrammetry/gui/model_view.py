@@ -1357,9 +1357,9 @@ class ModelView(QWidget):
         self.cb_cams.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
-        b_reset = QPushButton(tr("Vista iniziale"))
+        self.b_reset = b_reset = QPushButton(_icon("home_view"), tr("Vista iniziale"))
         b_reset.setToolTip(tr("La vista iniziale di tutta la scena (tasto Home)"))
-        b_top = QPushButton(tr("Dall'alto"))
+        self.b_top = b_top = QPushButton(_icon("top_view"), tr("Dall'alto"))
         b_top.setToolTip(tr("La vista dall'alto (tasto T); F di fronte (verso +y), L da sinistra (verso +x)"))
         self.b_center = QPushButton(tr("Centra la vista sul punto"))
         self.b_center.setToolTip(tr("Porta al centro della vista il centro di rotazione (doppio clic su un punto "
@@ -1417,26 +1417,26 @@ class ModelView(QWidget):
         self.point_spin.setSuffix(" px")
         self.point_spin.setToolTip(tr("Dimensione dei punti sullo schermo"))
         self.point_label = QLabel(tr("Punti:"))
-        self.b_lasso = QPushButton(tr("Lazo"))
+        self.b_lasso = QPushButton(_icon("select"), tr("Lazo"))
         self.b_lasso.setToolTip(tr("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
                                    "modello (elimina, tieni)"))
         self.b_lasso.clicked.connect(self.start_lasso)
-        self.b_marker = QPushButton("Marker")
+        self.b_marker = QPushButton(_icon("marker"), "Marker")
         self.b_marker.setToolTip(tr("Aggiungi un marker: clic su un punto del modello o della nuvola, come in "
                                     "Metashape. "
                                     "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala"))
         self.b_marker.clicked.connect(lambda: self.start_pick("marker"))
-        self.b_photos = QPushButton(tr("Foto del punto"))
+        self.b_photos = QPushButton(_icon("view_photo"), tr("Foto del punto"))
         self.b_photos.setToolTip(tr("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
                                     "Photos by Point di Metashape"))
         self.b_photos.clicked.connect(lambda: self.start_pick("photos"))
-        self.b_section = QPushButton(tr("Sezione"))
+        self.b_section = QPushButton(_icon("line"), tr("Sezione"))
         self.b_section.setToolTip(tr("Traccia di una sezione: clic su due punti del modello o della nuvola"))
         self.b_section.clicked.connect(lambda: self.start_pick("section"))
-        self.b_slice = QPushButton(tr("Pianta a quota"))
+        self.b_slice = QPushButton(_icon("slice"), tr("Pianta a quota"))
         self.b_slice.setToolTip(tr("Clic su un punto: la pianta del modello tagliato a quella quota"))
         self.b_slice.clicked.connect(lambda: self.start_pick("slice"))
-        self.b_cut = QPushButton(tr("Taglia"))
+        self.b_cut = QPushButton(_icon("rail_cut"), tr("Taglia"))
         self.b_cut.setToolTip(tr("Taglia il modello con un piano: tieni una parte, una fetta, o salva le due parti "
                                  "o una serie di fette"))
         cut_menu = QMenu(self.b_cut)
@@ -1445,14 +1445,14 @@ class ModelView(QWidget):
         cut_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("cut_p"))
         cut_menu.addAction(tr("Con i valori..."), lambda: self.cut_requested.emit("values", []))
         self.b_cut.setMenu(cut_menu)
-        self.b_elevation = QPushButton(tr("Prospetto"))
+        self.b_elevation = QPushButton(_icon("elevation"), tr("Prospetto"))
         self.b_elevation.setToolTip(tr("Ortofoto e rilievo del modello su un piano: quello della vista com'è ora, o "
                                        "quello di tre punti cliccati; un prospetto o una sezione"))
         elev_menu = QMenu(self.b_elevation)
         elev_menu.addAction(tr("Ortofoto da questa vista"), self._elevation_from_view)
         elev_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("elev_p"))
         self.b_elevation.setMenu(elev_menu)
-        self.b_draw3d = QPushButton(tr("Disegna"))
+        self.b_draw3d = QPushButton(_icon("freehand"), tr("Disegna"))
         self.b_draw3d.setToolTip(tr("Linee, poligoni e punti disegnati sul modello o sulla nuvola nei layer dei disegni: "
                                     "clic per i vertici, trascina per ruotare la vista fra un clic e l'altro, "
                                     "Backspace toglie l'ultimo vertice, Invio o doppio clic finisce, Esc annulla"))
@@ -1479,28 +1479,24 @@ class ModelView(QWidget):
         bar.addWidget(self.point_label)
         bar.addWidget(self.point_spin)
         bar.addWidget(self.info_label)
-        bar.addWidget(self.b_lasso)
-        bar.addWidget(self.b_marker)
-        bar.addWidget(self.b_photos)
-        bar.addWidget(self.b_section)
-        bar.addWidget(self.b_slice)
-        bar.addWidget(self.b_cut)
-        bar.addWidget(self.b_elevation)
-        bar.addWidget(self.b_draw3d)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
+        lay.addLayout(bar)  # one row above the canvas: what is shown and how; the tools in the rail beside it
         exag = QWidget()  # the label never on another row than its value
         exag_row = QHBoxLayout(exag)
         exag_row.setContentsMargins(0, 0, 0, 0)
         exag_row.addWidget(QLabel(tr("Esagerazione verticale:")))
         exag_row.addWidget(self.exag_spin)
-        bar.addWidget(exag)
-        bar.addWidget(b_top)
-        bar.addWidget(b_reset)
-        bar.addWidget(self.b_center)
-        bar.addWidget(self.b_trackball)
-        lay.addLayout(bar)
+        from .tool_rail import ToolRail
+
+        self.rail = ToolRail("3d")
+        self.rail.add_group("view", tr("Vista"), "rail_view",
+                            [b_top, b_reset, self.b_center, self.b_trackball, None, exag])
+        self.rail.add_group("points", tr("Punti"), "rail_points", [self.b_marker, self.b_photos, self.b_lasso])
+        self.rail.add_group("cut", tr("Taglia e prospetti"), "rail_cut",
+                            [self.b_section, self.b_slice, self.b_cut, self.b_elevation])
+        self.rail.add_group("draw", tr("Disegna"), "rail_draw3d", [self.b_draw3d])
         self.canvas = None
         if _vtk_usable():
             try:
@@ -1533,9 +1529,11 @@ class ModelView(QWidget):
         self.legend = ClassLegend()
         self.legend.visibility_changed.connect(lambda: self.refresh(reset=False))
         row = QHBoxLayout()
+        row.setSpacing(2)
         row.addWidget(holder, 1)
         row.addWidget(self.legend)
         lay.addLayout(row, 1)
+        self.rail.place_in(row, self.canvas)
         self.chunk = None
         self.kind = None
         self.sd = None  # what is shown (heights exaggerated)
@@ -1568,6 +1566,8 @@ class ModelView(QWidget):
         self._rubber_timer.setSingleShot(True)
         self._rubber_timer.timeout.connect(self._rubber_tick)
         self._draw_target().installEventFilter(self)
+        for widget in (self._draw_target(), self.lasso, self.picker, self.editor):  # the rail's filter first: the
+            self.rail.watch(widget)  # press or the Esc that closes its flyout reach no drawing, pick or lasso
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
 

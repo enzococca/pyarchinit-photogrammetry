@@ -11,74 +11,19 @@
    "file": "salva.png"
   },
   "3": {
-   "en": "Add photos to the chunk",
-   "it": "Aggiungi foto al chunk",
-   "file": "foto.png"
-  },
-  "4": {
-   "en": "Detect the coded targets",
-   "it": "Rileva i target codificati",
-   "file": "marker.png"
+   "en": "The steps in order, with the state of the active chunk: green tick = done, empty circle = to do",
+   "it": "I passi in ordine, con lo stato del chunk attivo: segno verde = fatto, cerchio vuoto = da fare",
+   "file": "flusso-di-lavoro.png"
   },
   "5": {
-   "en": "Align the photos (SfM)",
-   "it": "Allinea le foto (SfM)",
-   "file": "allinea.png"
-  },
-  "6": {
-   "en": "Import the coordinates of the markers",
-   "it": "Importa le coordinate dei marker",
-   "file": "riferimenti.png"
-  },
-  "8": {
-   "en": "Depth maps and dense cloud",
-   "it": "Depth map e nuvola densa",
-   "file": "nuvola-densa.png"
-  },
-  "9": {
-   "en": "Mesh 3D",
-   "it": "Mesh 3D",
-   "file": "modello.png"
-  },
-  "10": {
-   "en": "Model texture",
-   "it": "Texture del modello",
-   "file": "texture.png"
-  },
-  "11": {
-   "en": "Digital elevation model",
-   "it": "Modello digitale di elevazione",
-   "file": "dem.png"
-  },
-  "12": {
-   "en": "Orthophoto (true ortho)",
-   "it": "Ortofoto (true ortho)",
-   "file": "ortofoto.png"
-  },
-  "14": {
    "en": "All the steps in sequence (Ctrl+R)",
    "it": "Tutti i passi in sequenza (Ctrl+R)",
    "file": "elabora-tutto.png"
   },
-  "16": {
+  "6": {
    "en": "Publish in PyArchInit",
    "it": "Pubblica in PyArchInit",
    "file": "pyarchinit.png"
-  },
-  "18": {
-   "en": "Contour lines",
-   "it": "Curve di livello",
-   "file": "curve-di-livello.png"
-  },
-  "19": {
-   "en": "Cut / fill volume",
-   "it": "Volume scavo / riporto",
-   "file": "volume-scavo-riporto.png"
-  },
-  "20": {
-   "en": "Plan slice (horizontal slice)",
-   "it": "Pianta a quota (slice orizzontale)",
-   "file": "pianta-a-quota-slice-orizzontale.png"
   }
  },
  "drawing_toolbar": {
@@ -133,59 +78,105 @@
    "file": "disegno-libero-linee-poligoni-e-punti-in-layer-propri-anche-in-3d.png"
   },
   "11": {
-   "en": "Measuring point: elevation, temperature, bands and indices at the point",
-   "it": "Punto di misura: quota, temperatura, bande e indici nel punto",
-   "file": "punto-di-misura-quota-temperatura-bande-e-indici-nel-punto.png"
-  },
-  "12": {
    "en": "Marker: click a point, projected on the photos that see it",
    "it": "Marker: clic su un punto, proiettato sulle foto che lo vedono",
    "file": "marker-clic-su-un-punto-proiettato-sulle-foto-che-lo-vedono.png"
   },
-  "13": {
+  "12": {
    "en": "Segment Anything 2.1: click on an object (touch), a box for one object or for all the units of an area; from the menu also the whole orthophoto",
    "it": "Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un oggetto o per tutte le unità di un'area; dal menu anche tutta l'ortofoto",
    "file": "segment-anything-sam.png"
   },
-  "14": {
+  "13": {
    "en": "Orthophoto patch: assign the images to an area",
    "it": "Patch dell'ortofoto: assegna le immagini a un'area",
    "file": "patch-dell-ortofoto-assegna-le-immagini-a-un-area.png"
   },
-  "15": {
+  "14": {
    "en": "Delete the selected items (Delete key in Select mode)",
    "it": "Elimina gli elementi selezionati (tasto Canc nella modalità Seleziona)",
    "file": "elimina-selezionati.png"
   },
-  "16": {
+  "15": {
    "en": "Merges the selected units into one polygon, or contiguous lines of the same layer",
    "it": "Unisce le unità selezionate in un solo poligono, o linee contigue dello stesso layer",
    "file": "unisci-selezionati.png"
   },
-  "17": {
+  "16": {
    "en": "Clear drawings",
    "it": "Cancella disegni",
    "file": "cancella-disegni.png"
   },
   "19": {
-   "en": "Layers pane: show, hide, zoom, attributes",
-   "it": "Pannello dei layer: mostra, nascondi, zoom, attributi",
-   "file": "layer.png"
-  },
-  "20": {
-   "en": "Sections pane",
-   "it": "Pannello delle sezioni",
-   "file": "sezioni.png"
-  },
-  "21": {
    "en": "Open in QGIS (live link)",
    "it": "Apri in QGIS (collegamento dal vivo)",
    "file": "apri-in-qgis-collegamento-dal-vivo.png"
   },
-  "22": {
+  "20": {
    "en": "Writes the drawn units (pyunitastratigrafiche) and the spot heights (pyarchinit_quote) in PyArchInit",
    "it": "Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le quote (pyarchinit_quote)",
    "file": "pubblica.png"
+  },
+  "18": {
+   "en": "Layers pane: show, hide, zoom, attributes",
+   "it": "Pannello dei layer: mostra, nascondi, zoom, attributi",
+   "file": "layer.png"
+  }
+ },
+ "top": {
+  "search": {
+   "en": "Search a command... (Ctrl+K)",
+   "it": "Cerca un comando... (Ctrl+K)",
+   "file": "search.png"
+  }
+ },
+ "workflow_menu": {
+  "step_done": {
+   "en": "step done",
+   "it": "passo fatto",
+   "file": "passo-fatto.png"
+  },
+  "step_todo": {
+   "en": "step to do",
+   "it": "passo da fare",
+   "file": "passo-da-fare.png"
+  }
+ },
+ "rail_2d": {
+  "navigate": {
+   "en": "Navigate",
+   "it": "Naviga",
+   "file": "rail-navigate.png"
+  },
+  "draw": {
+   "en": "Drawing",
+   "it": "Disegno",
+   "file": "rail-draw.png"
+  },
+  "measure": {
+   "en": "Measurements",
+   "it": "Misure",
+   "file": "rail-measure.png"
+  },
+  "analysis": {
+   "en": "Sections and analyses",
+   "it": "Sezioni e analisi",
+   "file": "rail-analysis.png"
+  },
+  "auto": {
+   "en": "Automatic",
+   "it": "Automatico",
+   "file": "rail-auto.png"
+  },
+  "edit": {
+   "en": "Edit",
+   "it": "Modifica",
+   "file": "rail-edit.png"
+  },
+  "layers": {
+   "en": "Layers and outputs",
+   "it": "Layer e uscite",
+   "file": "rail-layers.png"
   }
  }
 }

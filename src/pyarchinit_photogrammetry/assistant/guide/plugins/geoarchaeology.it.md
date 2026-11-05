@@ -577,7 +577,7 @@ la sovrapposizione; se ne vede una alla volta.
 
 * *Traccia una sezione*: clicca i vertici della traccia sull'ortofoto o sul DEM - due o più - e finiscila
   con un doppio clic o con Invio (il disegno del programma, prestato al plugin); Backspace toglie l'ultimo
-  vertice, Esc o un altro strumento della barra *Disegno* annulla. Lo strumento linea del programma
+  vertice, Esc o un altro strumento della barra laterale annulla. Lo strumento linea del programma
   continua a disegnare le sezioni del programma.
 * *Sezione per i sondaggi*: seleziona due o più sondaggi nella scheda *Sondaggi* (con Ctrl, o Cmd sul Mac);
   la traccia li unisce nell'ordine in cui li hai scelti (un intervallo di righe scelto con Maiusc viene

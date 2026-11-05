@@ -92,7 +92,7 @@ Sotto il mouse la barra di stato legge i prodotti a piena risoluzione: sull'orto
 la sua anomalia (`Z 158.231  T 18.34 °C  ΔT +0.42 °C`), sulla riflettanza ogni banda, su un indice il suo valore,
 sull'ortofoto e sul DEM anche la temperatura quando c'è.
 
-Lo strumento **Punto di misura** (nella barra Disegno, in entrambe le schede e nei menu) mette un punto dove fai clic
+Lo strumento **Punto di misura** (nel menu di *Quota* nella barra laterale, in entrambe le schede e nei menu) mette un punto dove fai clic
 con le sue coordinate, la quota del DEM, la temperatura e la sua anomalia, la riflettanza di ogni banda e gli indici. I
 punti vanno nel layer *Punti di misura*, si salvano con il progetto, arrivano in QGIS con gli altri layer e si esportano
 come GeoPackage, CSV o GeoJSON (*Esporta i punti di misura...*).

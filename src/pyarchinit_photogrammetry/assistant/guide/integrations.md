@@ -2,7 +2,7 @@
 
 ## QGIS, live
 
-*QGIS > Apri in QGIS (collegamento dal vivo)* (or the QGIS button in the drawing toolbar)
+*QGIS > Apri in QGIS (collegamento dal vivo)* (or the QGIS button in the group *Layers and outputs* of the tool rail)
 writes a QGIS project next to the `.ppg` (`<name>_qgis/<name>_ppg.qgs`) and opens it:
 
 * rasters: the orthomosaic, the DEM (hillshade, hidden at first) and the DEM values;

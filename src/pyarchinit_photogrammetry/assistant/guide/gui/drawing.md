@@ -4,9 +4,15 @@ On the orthophoto and the DEM you draw the stratigraphic units, the section trac
 measure distances, areas and volumes, and SAM draws units and stones for you. What you draw is saved with the
 project, reaches QGIS through the live link and goes into PyArchInit with *Publish*.
 
-## The drawing bar
+## The drawing tools
 
-![The drawing bar](../img/gui/toolbar-drawing.png)
+![The tool rail with the group Drawing open](../img/gui/toolbar-drawing.png)
+
+The tools are in the rail on the left of the orthophoto and the DEM, in groups: *Navigate*, *Drawing*,
+*Measurements*, *Sections and analyses*, *Automatic*, *Edit*, *Layers and outputs*. A click on a group opens its
+panel with the tools; choosing a tool, ++esc++ or a click on the view close it, the pin keeps it open (see
+[the tool rail](index.md#the-tool-rail-of-the-2d-view)). *View > Bars > Classic drawing bar* puts them back in a
+horizontal bar.
 
 | | Tool | What it does |
 | --- | --- | --- |
@@ -32,8 +38,8 @@ project, reaches QGIS through the live link and goes into PyArchInit with *Publi
 | ![](../img/gui/icons/apri-in-qgis-collegamento-dal-vivo.png){ width=20 } | **QGIS** | opens the drawings in QGIS ([QGIS, live](archaeology.md#qgis-live)) |
 | ![](../img/gui/icons/pubblica.png){ width=20 } | **Publish** | writes the drawn units and spot heights in PyArchInit |
 
-*Tools > Drawing on the orthophoto* has the same tools and a few more that work on an area: *Measure area and 3D
-surface*, *Crop*, *Edit DEM*, *Crop or export with the selected polygon*.
+*Tools > Drawing on the orthophoto* has the same tools and a few more that work on an area: *Crop*, *Edit DEM*,
+*Crop or export with the selected polygon*. *Area and 3D surface* (group *Measurements*) measures an area.
 
 ## Stratigraphic units
 
@@ -137,7 +143,7 @@ polygon can become a US later with the *US* tool.
 ![Free drawings in the 3D view: a line over the wall stub, the top of the wall in the layer "Muri", a polygon on the
 floor and a point](../img/free-3d.png)
 
-**In the 3D view** (*Draw* in its bar: *3D line*, *3D polygon*, *3D point*):
+**In the 3D view** (*Draw* in its tool rail: *3D line*, *3D polygon*, *3D point*):
 
 * each click puts a vertex on the surface under the cursor (the model as shown; without a model the point of the
   dense cloud the line of sight meets - the fallback of the picks); a drag between the clicks still turns the view,
@@ -152,7 +158,7 @@ floor and a point](../img/free-3d.png)
   move it (it is picked again on the surface where you let go, never left in the air), Delete removes the chosen
   vertex or, with none chosen, the drawing (a polygon keeps three vertices, a line two), a double click opens the form.
 
-**On the plan or on an elevation** (*Free*, that is *Free drawing*, in the drawing bar, its menu for *Line*, *Polygon*, *Point*, the
+**On the plan or on an elevation** (*Free drawing* in the tool rail, its menu for *Line*, *Polygon*, *Point*, the
 layer and *New layer...*): click the vertices as with the other tools (snap included; a polygon also freehand);
 on the plan each vertex takes the height of the DEM there, on an elevation the depth of its relief, so the drawing
 is the same 3D feature. A vertex without a value takes the one interpolated along the drawing from its neighbours; a
@@ -213,7 +219,7 @@ into its own layer, with the same choice.
 ## Measures
 
 * **Measure**: distance and height difference between two clicks.
-* **Measure area and 3D surface** (*Tools > Drawing on the orthophoto*: drag a box or click a polygon; or *Measure
+* **Measure area and 3D surface** (*Area and 3D surface* in the group *Measurements*, or *Tools > Drawing on the orthophoto*: drag a box or click a polygon; or *Measure
   the area and the surface* on a selected polygon): the area in plan and of the surface from the DEM and the model,
   the mean slope and the heights; the outline stays in the *Measurements* layer. It also gives the **Munsell colour** of
   the orthophoto inside: the median of its pixels without the darkest and the brightest tenth (shadows, pebbles,
@@ -228,7 +234,7 @@ into its own layer, with the same choice.
 
 ![The Contour lines window](../img/gui/dialog-contours.png)
 
-**Contour lines** (*Tools > Contour lines...*, also in the workflow bar) draws the lines as a layer to query
+**Contour lines** (*Tools > Contour lines...*, also in the tool rail) draws the lines as a layer to query
 (elevation, index line), which stays when you switch between DEM and orthophoto, and exports them as DXF, GeoJSON
 or GeoPackage.
 
@@ -256,7 +262,7 @@ SAM 2.1...*) in its own environment, with the PyTorch build for the graphics car
 the installer on Windows and Linux), Apple's GPU through MPS on the Mac (about 3.5 times faster than the CPU on an M4
 Pro). The window at the end of the installation says which one is used.
 
-**SAM** in the drawing bar works in the way chosen from its menu:
+**SAM** in the tool rail works in the way chosen from its menu:
 
 | Way | What you do |
 | --- | --- |

@@ -1,8 +1,9 @@
 # Menus
 
-Every command of the program is in the menus at the top; the [toolbars](index.md#the-toolbars) and the
-[panes](panes.md) repeat the ones used most. This page describes the menus one by one, in the order they
-appear.
+Every command of the program is in the menus at the top; the [top bar](index.md#the-toolbars), the tool rails of
+the views and the [panes](panes.md) repeat the ones used most. The search field of the top bar finds any command of
+the menus by a part of its name (++ctrl+k++, ++cmd+k++ on macOS). This page describes the menus one by one, in the
+order they appear.
 
 | Menu | What it is for |
 | --- | --- |
@@ -197,7 +198,7 @@ thermal and satellite captures, plugins.
 | **Calibrate the colours of the photos...** | exposure of every photo and vignetting of the lenses, corrected in orthophoto and texture |
 | **Diagnostics of the alignment** | why an alignment fails: [see below](#tools-diagnostics-of-the-alignment) |
 | **Masks of the photos** | the parts of the photos not to use: [see below](#tools-masks-of-the-photos) |
-| **Drawing on the orthophoto** | the tools of the *Drawing* bar: [see below](#tools-drawing-on-the-orthophoto) |
+| **Drawing on the orthophoto** | the tools of the tool rail of the 2D view: [see below](#tools-drawing-on-the-orthophoto) |
 | **Orthophoto patch (assign images)** | which photo to use in an area of the orthophoto: [see below](#tools-orthophoto-patch) |
 | **Contour lines...** | the contours of the DEM, as a layer to query and export |
 | **Cut / fill volume...** | the volume removed and added against a plane or a DEM of before |
@@ -268,7 +269,7 @@ texture.
 
 ![The Drawing on the orthophoto submenu](../img/gui/menu-tools-drawing.png)
 
-These are the tools of the *Drawing* bar, described with their windows in [Drawing and measures](drawing.md).
+These are the tools of the tool rail of the 2D view, described with their windows in [Drawing and measures](drawing.md).
 
 | Item | What it is for |
 | --- | --- |
@@ -409,6 +410,7 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | **Assistant** | *Open the assistant*; **Actions**: *Always ask*, *Quick ones at once* (default), *Run everything (scripts and exports ask)* - when the assistant's actions run ([Actions](assistant.md#actions)) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
 | **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
+| **Bars** | *Classic drawing bar*: the old horizontal bar of the drawing tools under the top bar, instead of the [tool rail](index.md#the-tool-rail-of-the-2d-view) of the 2D view; remembered |
 | **Theme** | light or dark, remembered |
 | **Lingua / Language** | Italian or English, at the next start (*Restart now* opens the project again at once) |
 

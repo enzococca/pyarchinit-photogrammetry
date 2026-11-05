@@ -61,8 +61,8 @@ Without a project the centre of the window shows the start page:
 | | Area | What it holds |
 | --- | --- | --- |
 | **1** | Menu bar | every command: see [Menus](menus.md) |
-| **2** | Workflow bar | the steps from the photos to the products, in order: see [below](#the-toolbars) |
-| **3** | Drawing bar | the tools that draw and measure on the orthophoto and the DEM: see [Drawing and measures](drawing.md) |
+| **2** | Top bar | open, save, the *Workflow* menu of the steps, *Process everything*, PyArchInit and the search of the commands: see [below](#the-toolbars) |
+| **3** | Tool rail | beside the orthophoto and the DEM, the tools that draw and measure, in groups that open a panel: see [below](#the-tool-rail-of-the-2d-view) |
 | **4** | Panes on the left | *Workspace*, *Reference*, *Layer*: the project, its markers, what is drawn ([Panes](panes.md)) |
 | **5** | Central views | *Model* (3D), *Orthophoto / DEM*, *Photos*: see [below](#the-central-views) |
 | **6** | Panes at the bottom | *Photos* (thumbnails), *Sections*, *Python console*, *Log* |
@@ -71,45 +71,69 @@ Without a project the centre of the window shows the start page:
 
 Every pane can be moved, floated or closed, and *View > Panes* brings it back: see
 [Moving the panes](panes.md#moving-the-panes). The window fits a laptop screen, down to about 1000 x 650
-pixels: buttons wrap onto more lines, a pane too short for its content scrolls, a toolbar that does not fit
-drops its texts first (the tooltips keep the names).
+pixels: buttons wrap onto more lines, a pane too short for its content scrolls, the top bar drops its texts first
+when it does not fit (the tooltips keep the names).
 
 ## The toolbars
 
-### The workflow bar
+### The top bar
 
-![The workflow bar](../img/gui/toolbar-workflow.png)
+![The top bar](../img/gui/toolbar-workflow.png)
 
-The buttons follow the order of the work, from left to right. While a step runs, the processing buttons are
-disabled.
+One slim bar above the views. While a step runs, the processing buttons are disabled.
 
 | | Button | What it does |
 | --- | --- | --- |
-| ![](../img/gui/icons/apri.png){ width=20 } | Open a project | as *File > Open...* |
-| ![](../img/gui/icons/salva.png){ width=20 } | Save the project | as *File > Save* |
-| ![](../img/gui/icons/foto.png){ width=20 } | Add photos to the chunk | photos into the active chunk |
-| ![](../img/gui/icons/marker.png){ width=20 } | Detect the coded targets | finds the printed targets in the photos |
-| ![](../img/gui/icons/allinea.png){ width=20 } | Align the photos (SfM) | positions and orientations of the cameras |
-| ![](../img/gui/icons/riferimenti.png){ width=20 } | Import the coordinates of the markers | the control points from a CSV |
-| ![](../img/gui/icons/nuvola-densa.png){ width=20 } | Depth maps and dense cloud | the dense cloud |
-| ![](../img/gui/icons/modello.png){ width=20 } | Mesh 3D | the model |
-| ![](../img/gui/icons/texture.png){ width=20 } | Model texture | the texture of the model |
-| ![](../img/gui/icons/dem.png){ width=20 } | Digital elevation model | the DEM |
-| ![](../img/gui/icons/ortofoto.png){ width=20 } | Orthophoto (true ortho) | the orthophoto |
-| ![](../img/gui/icons/elabora-tutto.png){ width=20 } | All the steps in sequence | *Process everything* (++ctrl+r++) |
-| ![](../img/gui/icons/pyarchinit.png){ width=20 } | Publish in PyArchInit | orthophoto, DEM and model in the media of PyArchInit |
-| ![](../img/gui/icons/curve-di-livello.png){ width=20 } | Contour lines | the contours of the DEM |
-| ![](../img/gui/icons/volume-scavo-riporto.png){ width=20 } | Cut / fill volume | the volume removed and added |
-| ![](../img/gui/icons/pianta-a-quota-slice-orizzontale.png){ width=20 } | Plan slice | a plan of the model at a height |
+| ![](../img/gui/icons/apri.png){ width=20 } | Open | as *File > Open...* |
+| ![](../img/gui/icons/salva.png){ width=20 } | Save | as *File > Save* |
+| ![](../img/gui/icons/flusso-di-lavoro.png){ width=20 } | Workflow | a menu with the steps in order (below), each with the state of the active chunk |
+| ![](../img/gui/icons/elabora-tutto.png){ width=20 } | Process everything | all the steps in sequence (++ctrl+r++) |
+| ![](../img/gui/icons/pyarchinit.png){ width=20 } | PyArchInit | orthophoto, DEM and model in the media of PyArchInit |
+| ![](../img/gui/icons/search.png){ width=20 } | Search a command | type a part of the name of any command of the menus and press ++enter++; ++ctrl+k++ (++cmd+k++ on macOS) puts the cursor there |
 
-### The drawing bar
+The **Workflow** menu lists the steps from the photos to the products, each with the state of the active chunk
+in place of its icon: ![](../img/gui/icons/passo-fatto.png){ width=20 } done,
+![](../img/gui/icons/passo-da-fare.png){ width=20 } still to do. A click runs the step, as the commands of the
+menu *Workflow*:
 
-![The drawing bar](../img/gui/toolbar-drawing.png)
+| Step | What it does |
+| --- | --- |
+| 1. Add photos | photos into the active chunk |
+| 2. Marker | finds the printed coded targets in the photos |
+| 3. Align | positions and orientations of the cameras (SfM) |
+| 4. Reference | the coordinates of the markers from a CSV (done when a marker has surveyed coordinates or the chunk is aligned in a coordinate system) |
+| 5. Dense cloud | depth maps and dense cloud |
+| 6. Model | the 3D mesh |
+| 7. Texture | the texture of the model |
+| 8. DEM | the digital elevation model |
+| 9. Orthophoto | the orthophoto (true ortho) |
 
-Always visible under the workflow: the drawing modes (*Move*, *Select*, *Draw US* with *Freehand* in its
-menu, *Vertices* with *Reshape* in its menu, *Snap*, *Section*, *Measure*, *Height* with
-*Measuring point* in its menu, *Lines*, *Free* (*Free drawing*), *Marker*, *SAM*), *Patch*, *Delete*, *Merge*,
-*Clear drawings*, and shortcuts to the *Layer* pane (with *Sections* in its menu), to QGIS and to *Publish*. Each tool is described in [Drawing and measures](drawing.md#the-drawing-bar).
+*Contour lines*, *Cut / fill volume* and *Plan slice* are in the group *Sections and analyses* of the rail of
+the 2D view and in the menu *Tools*.
+
+### The tool rail of the 2D view
+
+![The tool rail with the group Drawing open](../img/gui/toolbar-drawing.png)
+
+On the left of the orthophoto and the DEM a narrow column holds the drawing tools in groups. A click on a
+group opens its panel beside the rail, over the view, with the tools as buttons with icon and name; a small
+arrow beside a button opens its menu. The panel closes when you choose a tool (an option such as *Snap* leaves it open), click the same group again,
+press ++esc++ or click the view; the pin in its header keeps it open while you work. The group of the tool in
+use is highlighted. A right click on the rail chooses *Icons only* or *Icons and text* (the names of the groups
+under their icons).
+
+| | Group | Tools |
+| --- | --- | --- |
+| ![](../img/gui/icons/rail-navigate.png){ width=20 } | Navigate | *Pan / query*, *Select* (*Freehand selection* and *Identify and group units* in its menu) |
+| ![](../img/gui/icons/rail-draw.png){ width=20 } | Drawing | *Draw US* (*Freehand* in its menu), *Vertices* (*Reshape* in its menu), *Reshape*, *Free drawing*, *Break lines* (the kind in its menu), *Snap* |
+| ![](../img/gui/icons/rail-measure.png){ width=20 } | Measurements | *Measure distance*, *Area and 3D surface*, *Height* (*Measuring point* in its menu), *Marker* |
+| ![](../img/gui/icons/rail-analysis.png){ width=20 } | Sections and analyses | *Section* (the options and the *Sections* pane in its menu), *Contour lines*, *Cut / fill volume*, *Plan slice* |
+| ![](../img/gui/icons/rail-auto.png){ width=20 } | Automatic | *Segment Anything (SAM)* (its ways and its model in its menu), *Orthophoto patches* |
+| ![](../img/gui/icons/rail-edit.png){ width=20 } | Edit | *Delete selected*, *Merge selected*, *Clear drawings* |
+| ![](../img/gui/icons/rail-layers.png){ width=20 } | Layers and outputs | *Layer* (the *Sections* pane in its menu), *QGIS*, *Publish in PyArchInit* |
+
+Each tool is described in [Drawing and measures](drawing.md#the-drawing-tools). *View > Bars > Classic
+drawing bar* shows the old horizontal bar with the same tools under the top bar instead of the rail.
 
 ## The central views
 
@@ -130,7 +154,11 @@ them (in the workspace ++f2++ renames instead).
     left drag turns the scene with the trackball, right or middle drag pans, the wheel zooms toward the cursor, a
     double click sets the centre of rotation: see [3D view and trackball](view3d.md).
 
-    The bar above the view has the tools that work in 3D:
+    Above the view one row chooses what is shown and how (*Show*, the colours, the size of the points, *Cameras*,
+    *Marker*, *Region*); the tools that work in 3D are in the rail on its left, in four groups that open a panel
+    as in the 2D view: *View* (*From above*, *Home view*, *Centre the view on the point*, *Trackball*, *Vertical
+    exaggeration*), *Points* (*Marker*, *Photos of the point*, *Lasso*), *Cuts and elevations* (*Section*, *Plan
+    slice*, *Cut*, *Elevation*) and *Draw*:
 
     * **Marker**: click a point of the model or the cloud to add a marker there;
     * **Photos of the point**: the photos that see the point clicked;

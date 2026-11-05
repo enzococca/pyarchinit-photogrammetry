@@ -4,9 +4,15 @@ Sull'ortofoto e sul DEM si disegnano le unità stratigrafiche, le tracce di sezi
 distanze, aree e volumi, e SAM disegna unità e pietre al posto tuo. Ciò che disegni si salva con il progetto,
 arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 
-## La barra Disegno
+## Gli strumenti di disegno
 
-![La barra Disegno](../img/gui/toolbar-drawing.png)
+![La barra laterale con il gruppo Disegno aperto](../img/gui/toolbar-drawing.png)
+
+Gli strumenti sono nella barra laterale a sinistra dell'ortofoto e del DEM, in gruppi: *Naviga*, *Disegno*,
+*Misure*, *Sezioni e analisi*, *Automatico*, *Modifica*, *Layer e uscite*. Un clic su un gruppo apre il suo
+pannello con gli strumenti; la scelta di uno strumento, ++esc++ o un clic sulla vista lo chiudono, la puntina lo
+tiene aperto (vedi [la barra laterale](index.md#la-barra-laterale-della-vista-2d)). *Vista > Barre > Barra di
+disegno classica* li rimette in una barra orizzontale.
 
 | | Strumento | Cosa fa |
 | --- | --- | --- |
@@ -32,8 +38,9 @@ arriva in QGIS con il collegamento dal vivo e va in PyArchInit con *Pubblica*.
 | ![](../img/gui/icons/apri-in-qgis-collegamento-dal-vivo.png){ width=20 } | **QGIS** | apre i disegni in QGIS ([QGIS dal vivo](archaeology.md#qgis-dal-vivo)) |
 | ![](../img/gui/icons/pubblica.png){ width=20 } | **Pubblica** | scrive in PyArchInit le unità disegnate e le quote |
 
-*Strumenti > Disegno su ortofoto* ha gli stessi strumenti e qualcuno in più che lavora su un'area: *Misura area e
-superficie 3D*, *Ritaglio*, *Modifica DEM*, *Ritaglia o esporta con il poligono selezionato*.
+*Strumenti > Disegno su ortofoto* ha gli stessi strumenti e qualcuno in più che lavora su un'area: *Ritaglio*,
+*Modifica DEM*, *Ritaglia o esporta con il poligono selezionato*. *Area e superficie 3D* (gruppo *Misure*) misura
+un'area.
 
 ## Unità stratigrafiche
 
@@ -137,7 +144,7 @@ libero può diventare una US più tardi con lo strumento *US*.
 ![Disegni liberi nella vista 3D: una linea sul muretto, la cresta del muro nel layer "Muri", un poligono sul piano e
 un punto](../img/free-3d.png)
 
-**Nella vista 3D** (*Disegna* nella sua barra: *Linea 3D*, *Poligono 3D*, *Punto 3D*):
+**Nella vista 3D** (*Disegna* nella sua barra laterale: *Linea 3D*, *Poligono 3D*, *Punto 3D*):
 
 * ogni clic mette un vertice sulla superficie sotto il cursore (il modello mostrato; senza modello il punto della
   nuvola densa che la linea di vista incontra: il ripiego dei punti scelti); trascinare fra un clic e l'altro fa
@@ -152,7 +159,7 @@ un punto](../img/free-3d.png)
   un vertice per spostarlo (si riprende sulla superficie dove lo lasci, mai a mezz'aria), Canc toglie il vertice scelto
   o, se nessuno è scelto, il disegno (un poligono tiene tre vertici, una linea due), un doppio clic apre la scheda.
 
-**Sulla pianta o su un prospetto** (*Libero*, cioè *Disegno libero*, nella barra Disegno, il suo menu per *Linea*, *Poligono*,
+**Sulla pianta o su un prospetto** (*Disegno libero* nella barra laterale, il suo menu per *Linea*, *Poligono*,
 *Punto*, il layer e *Nuovo layer...*): clic sui vertici come con gli altri strumenti (con lo snap; un poligono anche a
 mano libera); sulla pianta ogni vertice prende la quota del DEM in quel punto, su un prospetto la profondità del suo
 rilievo, così il disegno è lo stesso elemento 3D. Un vertice senza valore prende quello interpolato lungo il disegno
@@ -214,7 +221,7 @@ orizzontale in un suo layer, con la stessa scelta.
 ## Misure
 
 * **Misura**: distanza e dislivello tra due clic.
-* **Misura area e superficie 3D** (*Strumenti > Disegno su ortofoto*: trascina un riquadro o fai clic su un
+* **Misura area e superficie 3D** (*Area e superficie 3D* nel gruppo *Misure*, o *Strumenti > Disegno su ortofoto*: trascina un riquadro o fai clic su un
   poligono; oppure *Misura l'area e la superficie* su un poligono selezionato): l'area in pianta e quella della
   superficie dal DEM e dal modello, la pendenza media e le quote; il contorno resta nel layer *Misure*. Dà anche il
   **colore Munsell** dell'ortofoto all'interno: la mediana dei suoi pixel senza il decimo più scuro e quello più
@@ -229,7 +236,7 @@ orizzontale in un suo layer, con la stessa scelta.
 
 ![La finestra Curve di livello](../img/gui/dialog-contours.png)
 
-**Curve di livello** (*Strumenti > Curve di livello...*, anche nella barra del flusso di lavoro) disegna le linee
+**Curve di livello** (*Strumenti > Curve di livello...*, anche nella barra laterale) disegna le linee
 come un layer da interrogare (quota, curva direttrice), che resta quando passi tra DEM e ortofoto, e le esporta come
 DXF, GeoJSON o GeoPackage.
 
@@ -257,7 +264,7 @@ SAM 2.1...*) nel suo ambiente, con la versione di PyTorch per la scheda grafica:
 dall'installatore su Windows e Linux), la GPU di Apple con MPS sul Mac (circa 3,5 volte più veloce della CPU su un
 M4 Pro). La finestra alla fine dell'installazione dice quale si usa.
 
-**SAM** nella barra Disegno lavora nel modo scelto dal suo menu:
+**SAM** nella barra laterale lavora nel modo scelto dal suo menu:
 
 | Modo | Cosa fai |
 | --- | --- |

@@ -3006,7 +3006,24 @@
   "Preparazione del modello per il disegno...": "Preparing the model for drawing...",
   "Modello pronto per il disegno": "Model ready for drawing",
   "Modello pronto: la vista è cambiata, clicca di nuovo": "Model ready: the view has changed, click again",
-  "Misure in calcolo...": "Computing the measures..."
+  "Misure in calcolo...": "Computing the measures...",
+  "Barre": "Bars",
+  "Barra di disegno classica": "Classic drawing bar",
+  "La barra orizzontale degli strumenti di disegno al posto della barra laterale della vista 2D": "The horizontal bar of the drawing tools instead of the side rail of the 2D view",
+  "I passi in ordine, con lo stato del chunk attivo: segno verde = fatto, cerchio vuoto = da fare": "The steps in order, with the state of the active chunk: green tick = done, empty circle = to do",
+  "Naviga": "Navigate",
+  "Disegno": "Drawing",
+  "Sezioni e analisi": "Sections and analyses",
+  "Layer e uscite": "Layers and outputs",
+  "Area e superficie 3D": "Area and 3D surface",
+  "Volume scavo / riporto": "Cut / fill volume",
+  "Vista": "View",
+  "Taglia e prospetti": "Cuts and elevations",
+  "Solo icone": "Icons only",
+  "Icone e testo": "Icons and text",
+  "Fissato: resta aperto finché non lo chiudi": "Pinned: stays open until you close it",
+  "Fissa il pannello: resta aperto mentre lavori sulla vista": "Pin the panel: it stays open while you work on the view",
+  "Aggiungi foto": "Add photos"
  },
  "formats": {
   "Indice {0} dalle bande di riflettanza": "Index {0} from the reflectance bands",
@@ -3969,6 +3986,8 @@
   "Il file non dice in quale sistema di riferimento sono i disegni e il chunk è in {0}: nessun disegno importato": "The file does not say which coordinate system its drawings are in and the chunk is in {0}: no drawing imported",
   "Il file nomina un sistema di riferimento che non si riesce a leggere ({0}): nessun disegno importato": "The file names a coordinate system that cannot be read ({0}): no drawing imported",
   "; GeoJSON senza sistema letto come WGS 84 (RFC 7946) e convertito in {0}": "; GeoJSON without a system read as WGS 84 (RFC 7946) and converted to {0}",
-  "Misure di {0} in calcolo...": "Computing the measures of {0}..."
+  "Misure di {0} in calcolo...": "Computing the measures of {0}...",
+  "Cerca un comando... ({0})": "Search a command... ({0})",
+  "Scrivi una parte del nome di un comando dei menu e premi Invio ({0})": "Type a part of the name of a menu command and press Enter ({0})"
  }
 }
