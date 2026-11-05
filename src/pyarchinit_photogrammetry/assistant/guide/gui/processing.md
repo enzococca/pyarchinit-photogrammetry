@@ -329,10 +329,11 @@ georeference*, the *Reference* pane shows them in grey as "orientation, not used
 are in the hand frame), and a new hand orientation is refused while the control points are there. A system chosen
 with nothing else to place the survey (A set on known X, Y and height) keeps the orientation markers placing it.
 
-**A block of photos with GPS.** When the photos have GPS positions (in a real system, as those of the EXIF), after a
-hand orientation the next alignment returns the survey to the GPS frame: the photo positions place it and the
-orientation markers step aside, as they do for control points. To keep the hand orientation switch the photos'
-references off (*Reference* pane) before aligning again.
+**A block of photos with GPS.** Even when the photos have GPS positions (in a real system, as those of the EXIF),
+after a hand orientation the next alignment keeps the hand orientation: the orientation markers place the chunk, which
+stays LOCAL, and the photos' GPS is not used to place it while they are there. The GPS places the survey again when you
+remove the orientation markers (the next alignment puts the chunk in the GPS system), when you choose a real system for
+the chunk, or when three or more other control points are measured.
 
 **Products to rebuild.** DEM, orthophoto and the rasters made from them (precision, coverage, reliefs, slope,
 aspect, TIN) are grids in the old plan: they read *to rebuild*. The raster view says so in a yellow band over the

@@ -338,10 +338,11 @@ parte: non entrano in *Aggiorna georeferenziazione*, il pannello *Riferimenti* l
 orientamento a mano viene rifiutato finché i punti di controllo ci sono. Un sistema scelto senza nient'altro che
 collochi il rilievo (A messo su X, Y e quota note) lascia ai marker di orientamento il compito di collocarlo.
 
-**Un blocco di foto con il GPS.** Quando le foto hanno posizioni GPS (in un sistema vero, come quelle dell'EXIF), dopo
-un orientamento a mano il prossimo allineamento rimette il rilievo nel sistema del GPS: le posizioni delle foto lo
-collocano e i marker di orientamento si fanno da parte, come davanti ai punti di controllo. Per tenere l'orientamento
-a mano spegni i riferimenti delle foto (pannello *Riferimenti*) prima di allineare di nuovo.
+**Un blocco di foto con il GPS.** Anche quando le foto hanno posizioni GPS (in un sistema vero, come quelle
+dell'EXIF), dopo un orientamento a mano il prossimo allineamento tiene l'orientamento a mano: sono i marker di
+orientamento a collocare il chunk, che resta LOCALE, e il GPS delle foto non viene usato per collocarlo finché ci sono.
+Il GPS torna a collocare il rilievo quando togli i marker di orientamento (il prossimo allineamento mette il chunk nel
+sistema del GPS), quando scegli per il chunk un sistema vero, o quando misuri tre o più altri punti di controllo.
 
 **Prodotti da rifare.** DEM, ortofoto e i raster fatti da essi (precisione, copertura, rilievi, pendenza,
 esposizione, TIN) sono griglie nella pianta di prima: risultano *da rifare*. La vista raster lo dice in una fascia
@@ -351,7 +352,7 @@ tenendo i disegni; ciò che non può rifare (raster calcolati, multispettrali, t
 conservate) viene elencato da rifare a mano. I prospetti senza scala restano validi: si spostano con il chunk.
 La ricostruzione è un solo passo di *Modifica > Annulla* (tutti i prodotti tornano insieme come erano). Il DEM e
 l'ortofoto di prima restano fra le versioni solo se nel menu *Flusso di lavoro* è spuntato *Ricostruendo, conserva DEM
-e ortofoto attivi come versioni* (spento di solito: sono nel sistema di prima, non si confrontano pixel per pixel con
+e ortofoto attivi come versioni* (spento per impostazione predefinita: sono nel sistema di prima, non si confrontano pixel per pixel con
 quelli rifatti, e su un rilievo grande occupano GB).
 
 **Rifiuti.** La finestra non si apre, e dice perché, quando l'orientamento lo dà qualcos'altro: un chunk in un

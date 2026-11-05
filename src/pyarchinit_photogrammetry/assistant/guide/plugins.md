@@ -183,7 +183,7 @@ the next start (`ppg plugin` lists its command at once).
 | `on_raster_loaded(callback)` | since 1.3.2: `callback()` each time the 2D view shows another raster, an empty frame or nothing: draw your layers and overlays again there (disconnected by itself when the plugin goes away) |
 | `on_refresh(callback)` | since 1.3.3: `callback()` each time the window shows the project again (another project, another active chunk, a processing step done, an undo): a pane of the plugin follows the active chunk there (disconnected by itself when the plugin goes away) |
 | `show_frame(bounds, resolution, text="")` | since 1.3.2: an empty frame on the 2D view (`xmin, ymin, xmax, ymax` in the coordinates of the chunk, metres per pixel) to draw on when the chunk has no orthophoto or DEM |
-| `mark_modified()` | since 1.3.2: the project has changes to save (`chunk.meta` or the plugin's files changed) |
+| `mark_modified()` | since 1.3.2: the project has changes to save (`chunk.meta` or the plugin's files changed); since 1.7.3 *Edit > Undo* takes back the plugin's keys of `chunk.meta` (see below) |
 | `call_in_gui(function, *args)` | since 1.3.2: `function(*args)` in the interface thread, from the function given to `run` or from an exporter |
 | `activate_chunk(chunk)` | since 1.3.4: `chunk` becomes the active one, as when the user picks it in the workspace (the drawings stay with their chunk, the views show the new one, the `on_refresh` callbacks are called); in the command line, the active chunk of its project |
 | `show_raster(kind=None, chunk=None, path=None)` | since 1.3.4: the orthophoto (`"ortho"`) or the DEM (`"dem"`) of `chunk` (the active one, or it becomes the active one) in the 2D view with the drawings of the window, as the window shows them; `None`: the orthophoto, else the DEM; `path`: another GeoTIFF of that kind (a kept version, a raster of the plugin); `False` when there is nothing of that kind (the view stays as it was) and in the command line |
@@ -214,6 +214,14 @@ switches the view back to the plan: after it, the requests and `add_units` work 
 often in long loops. Widgets are touched only in the callbacks of actions and in `done`, never in
 the function given to `run` (it runs in another thread). `deactivate()` releases what `activate`
 took beyond its registrations (open files, timers).
+
+**Undo of the plugin's data.** Since 1.7.3 the keys of `chunk.meta` that are not the program's are a part of the
+snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. A plugin that
+pushes its own step (`window.history.push(text, step, document=False)`) and then calls `mark_modified()` gets no
+second entry for the same change - but only within the same turn of the event loop: the step stays "fresh" until a
+zero-time timer fires. A `mark_modified()` called after that (from a later callback, a timer, the end of a background
+task) records the plugin's data again as a separate entry, so one action reads as two steps of *Undo*. Call
+`mark_modified()` right after the push, in the same callback.
 
 ### Compatibility
 
