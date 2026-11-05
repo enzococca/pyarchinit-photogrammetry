@@ -92,7 +92,8 @@ def _frame(origin, x_hint: np.ndarray, normal: np.ndarray, note: str = "") -> Fr
 
 
 def frame_from_points(a, b, c=None, x_along_ab: bool = True, flip: bool = False) -> Frame:
-    """The frame set by points A, B (and C): A origin, x along A->B (or the current +x)."""
+    """The frame set by points A, B (and C): A origin, x along A->B (or the current +x). Without C the plane stays
+    the current horizontal through A; with ``x_along_ab`` False x is then the current x: only the origin moves."""
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and (c is None or np.all(np.isfinite(c)))):
         raise OrientRefused("nan", "a point has no valid coordinates")
@@ -100,10 +101,13 @@ def frame_from_points(a, b, c=None, x_along_ab: bool = True, flip: bool = False)
     if np.linalg.norm(ab) == 0:
         raise OrientRefused("collinear", "A and B coincide")
     if c is None:
+        up = np.array([0.0, 0.0, -1.0 if flip else 1.0])
+        if not x_along_ab:  # the current x on the current horizontal: A-B gives no direction
+            return _frame(a, np.array([1.0, 0.0, 0.0]), up)
         plan = np.array([ab[0], ab[1], 0.0])
         if np.linalg.norm(plan) < COLLINEAR_SIN * np.linalg.norm(ab):
             raise OrientRefused("collinear", "A-B is vertical: it gives no direction in plan")
-        return _frame(a, plan, np.array([0.0, 0.0, -1.0 if flip else 1.0]))
+        return _frame(a, plan, up)
     c = np.asarray(c, dtype=float)
     ac = c - a
     cross = np.cross(ab, ac)

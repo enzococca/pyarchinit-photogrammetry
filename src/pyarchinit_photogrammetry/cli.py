@@ -737,7 +737,9 @@ def orient(project: Path,
                                                                "A->B sets x"),
            x_kept: bool = typer.Option(False, "--x-kept", help="x as the current x (projected on the new "
                                                                 "horizontal), not along A->B"),
-           quota: float = typer.Option(0.0, help="the height of A (or of the plane) in the new system"),
+           quota: float = typer.Option(0.0, help="the height of the new origin: A with --points or --markers; with "
+                                                 "--plane-from the plane, at A's foot on it (or at the plane's "
+                                                 "centre without A): A itself keeps its height above the plane"),
            origin: Optional[str] = typer.Option(None, help="X,Y of A (or of the plane) in the new system "
                                                            "(default 0,0)"),
            distance: Optional[float] = typer.Option(None, help="the length of A-B in the new system (a scale bar "

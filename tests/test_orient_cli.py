@@ -229,3 +229,31 @@ def test_cli_markers_errors(processed, tmp_path, monkeypatch):
     monkeypatch.setattr(orient, "orient", broken)
     r = _run(doc.path, "--markers", ",".join(placed), "--dry-run")
     assert isinstance(r.exception, KeyError) and r.exit_code == 1, r.output
+
+
+def test_two_points_with_x_kept_move_only_the_origin(processed, tmp_path):
+    """Two points without C and x not along A->B: the plane stays the current horizontal and x the current x - the
+    engine's frame, the command line (``--x-kept``) and the dialog (the box unticked) all honour it."""
+    import pyarchinit_photogrammetry as ppg
+    from orient_helpers import centre, local_copy
+
+    a = np.array([10.0, 20.0, 3.0])
+    b = a + [0.3, 1.0, 0.2]
+    f = orient.frame_from_points(a, b, x_along_ab=False)
+    assert np.allclose(f.axes, np.eye(3)) and np.allclose(f.origin, a)
+    f = orient.frame_from_points(a, a + [0.0, 0.0, 1.0], x_along_ab=False)  # A-B vertical: no matter
+    assert np.allclose(f.axes, np.eye(3))
+    assert np.allclose(orient.frame_from_points(a, b, x_along_ab=False, flip=True).axes[2], [0.0, 0.0, -1.0])
+    along = orient.frame_from_points(a, b).axes[0]
+    assert abs(along[1]) > 0.9  # along A->B as before when asked
+    for kept in (False, True):
+        doc, ch, _ = local_copy(processed, tmp_path, name=f"due_{kept}")
+        p = centre(ch)
+        r = _run(doc.path, "--points", _text([p, p + [0.3, 1.0, 0.2]]), "--quota", "5", *(["--x-kept"] if kept else []))
+        assert r.exit_code == 0, r.output
+        m = np.asarray(ppg.Document.open(doc.path).chunk.meta["orientation"]["M"], float)
+        if kept:
+            assert np.allclose(m[:3, :3], np.eye(3), atol=1e-9)
+            assert np.allclose(m[:3, :3] @ p + m[:3, 3], [0.0, 0.0, 5.0], atol=1e-6)
+        else:
+            assert abs(m[0, 1]) > 0.9

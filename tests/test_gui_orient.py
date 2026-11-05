@@ -514,3 +514,24 @@ def test_plane_area_refused_on_an_elevation(win, qapp):
     qapp.processEvents()
     assert not win.ortho_view.mode.startswith("req_")
     assert "pianta" in dlg.status.text()
+
+
+def test_two_points_with_the_box_unticked_keep_x(win, qapp):
+    """A and B only, *x lungo A→B* unticked: the frame the dialog previews and applies keeps the current axes."""
+    dlg = _open(win, qapp)
+    internal = _surface_points(win.chunk)
+    for label, p in zip("AB", internal[:2]):
+        win.model_view.orient_requested.emit("point", (label, p))
+    qapp.processEvents()
+    assert dlg.x_along.isEnabled()
+    dlg.x_along.setChecked(False)
+    qapp.processEvents()
+    frame, missing = dlg._frame()
+    assert missing is None and np.allclose(frame.axes, np.eye(3))
+    a = win.chunk.to_world(internal[:1])[0]
+    assert np.allclose(frame.origin, a)
+    dlg.x_along.setChecked(True)
+    frame, _ = dlg._frame()
+    ab = win.chunk.to_world(internal[1:2])[0] - a
+    assert np.allclose(frame.axes[0][:2] / np.linalg.norm(frame.axes[0][:2]), ab[:2] / np.linalg.norm(ab[:2]))
+    assert not np.allclose(frame.axes, np.eye(3))

@@ -772,8 +772,15 @@ def test_markers_sheet_shows_the_orientation_markers(processed, tmp_path):
 
     _doc, ch, _ = local_copy(processed, tmp_path)
     a = centre(ch)
-    orient.orient(ch, points=[a, a + [1.0, 0.2, 0.1], a + [0.1, 1.0, 0.0]])
+    ab = np.linalg.norm([1.0, 0.2, 0.1])
+    orient.orient(ch, points=[a, a + [1.0, 0.2, 0.1], a + [0.1, 1.0, 0.0]], distance=ab)
     labels = set(orient.MARKER_LABELS)
+
+    def bar_types(language):
+        sheet = project_tables(ch, language=language)["Barre di scala" if language == "it" else "Scale bars"]
+        col = sheet.headers.index("Tipo" if language == "it" else "Type")
+        own = {orient.MARKER_LABELS[0], orient.MARKER_LABELS[1]}
+        return [r[col] for r in sheet.rows if {r[1], r[2]} == own]
 
     def types(language):
         sheet = project_tables(ch, language=language)["Marker" if language == "it" else "Markers"]
@@ -785,6 +792,7 @@ def test_markers_sheet_shows_the_orientation_markers(processed, tmp_path):
         assert {t[x] for x in labels} == {word}
         assert {t[m.label] for m in ch.markers if m.label not in labels} <= {
             "controllo", "verifica"} | {"control", "check"}
+        assert bar_types(language) == [word]  # the bar of the typed distance A-B, too
     others = [m for m in ch.markers if not m.orientation and m.position is not None][:3]
     for m in others:
         m.reference.location = [float(v) for v in ch.to_world(np.asarray(m.position, float)[None])[0]]
@@ -795,6 +803,7 @@ def test_markers_sheet_shows_the_orientation_markers(processed, tmp_path):
         t = types(language)
         assert {t[x] for x in labels} == {word}
         assert {t[m.label] for m in others} == {"controllo" if language == "it" else "control"}
+        assert bar_types(language) == [word]
 
 
 def test_tables_of_multispectral_and_thermal_products(tmp_path):

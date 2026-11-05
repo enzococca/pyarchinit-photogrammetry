@@ -530,10 +530,18 @@ def _markers(chunk, h: Labels) -> Sheet | None:
 def _scalebars(chunk, h: Labels) -> Sheet | None:
     if not chunk.scalebars:
         return None
-    from ..markers.gcp import scalebar_errors
+    from ..markers.gcp import orientation_set_aside, scalebar_errors
 
-    rows = [[e["label"], e["marker_a"], e["marker_b"], e["distance"], e["accuracy"], h(e["type"]), bool(e["enabled"]),
-             e.get("estimated"), e.get("error")] for e in scalebar_errors(chunk)]
+    own = {m.key for m in chunk.markers if getattr(m, "orientation", False)}  # the bar of a hand orientation
+    aside = orientation_set_aside(chunk)
+
+    def kind(sb, e) -> str:
+        if sb.marker_a in own and sb.marker_b in own:
+            return h("orientation_aside") if aside else h("orientation")
+        return h(e["type"])
+
+    rows = [[e["label"], e["marker_a"], e["marker_b"], e["distance"], e["accuracy"], kind(sb, e), bool(e["enabled"]),
+             e.get("estimated"), e.get("error")] for sb, e in zip(chunk.scalebars, scalebar_errors(chunk))]
     return Sheet([h("bar"), h("marker_a"), h("marker_b"), h("distance"), h("accuracy"), h("type"), h("used"),
                   h("estimated"), h("error_m")], rows, [None, None, None, 4, 4, None, None, 4, 4])
 
