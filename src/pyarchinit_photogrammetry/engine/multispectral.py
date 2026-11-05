@@ -1886,7 +1886,7 @@ def index_values(formula: str, bands: dict[str, np.ndarray]) -> np.ndarray:
     return out
 
 
-def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
+def index_raster(chunk: Chunk, name: str, formula: str | None = None, progress: Progress | None = None) -> Path:
     """The index ``name`` (one of :data:`INDICES`, or any ``formula`` over the band names) from
     the reflectance orthomosaic: ``<data>/multispectral/<name>.tif``."""
     import rasterio
@@ -1896,10 +1896,18 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     if not path:
         raise RuntimeError("build the reflectance orthomosaic first")
     formula = formula or INDICES[name][0]
+    progress = as_progress(progress)
+    bands = {}
     with rasterio.open(chunk.data_dir / path) as src:
-        bands = {src.descriptions[i] or f"b{i + 1}": src.read(i + 1) for i in range(src.count)}
+        for i in range(src.count):
+            band = src.descriptions[i] or f"b{i + 1}"
+            progress(0.6 * i / src.count, f"Index {name}: reading the band {band}")
+            bands[band] = src.read(i + 1)
         profile = src.profile.copy()
+    progress(0.6, f"Index {name}: {formula}")
     out = index_values(formula, bands)
+    del bands
+    progress(0.8, f"Index {name}: writing")
     profile.update(count=1, dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     if not profile.get("tiled"):
         profile.pop("blockxsize", None)
@@ -1908,6 +1916,7 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     with rasterio.open(target, "w", **profile) as dst:
         dst.write(out, 1)
         dst.set_band_description(1, name)
+    progress(1.0, f"Index {name} written")
     ms.setdefault("indices", {})[name] = stamps.inherit_entry(chunk, {"file": str(target.relative_to(chunk.data_dir)),
                                                                         "formula": formula}, ms)  # the reflectance's
     return target
@@ -2029,16 +2038,19 @@ def natural_breaks(values: np.ndarray, classes: int) -> list[float]:
     return [_between(x[i - 1], x[i]) for i in starts]
 
 
-def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_cells: int = 20) -> tuple[np.ndarray, list[float]]:
+def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_cells: int = 20,
+           progress: Progress | None = None) -> tuple[np.ndarray, list[float]]:
     """``values`` cut into ``classes`` (1 = the lowest): by ``quantiles`` (as many cells each),
     ``equal`` intervals, natural breaks (``jenks``: :func:`natural_breaks`, the most homogeneous
     classes) or ``kmeans`` (the same aim by successive approximations from the quantiles);
     patches smaller than ``min_cells`` given to their surroundings. Returns the class raster (0
     where NaN) and the breaks."""
+    progress = as_progress(progress)
     valid = np.isfinite(values)
     v = values[valid]
     if v.size == 0:
         return np.zeros(values.shape, np.int32), []
+    progress(0.0, f"Zones: the breaks of {classes} classes")
     if method == "quantiles":
         breaks = [float(np.quantile(v, k / classes)) for k in range(1, classes)]
     elif method == "equal":
@@ -2061,10 +2073,12 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
         raise ValueError("method: " + ", ".join(ZONING_METHODS))
     cls = np.zeros(values.shape, np.int32)
     cls[valid] = 1 + np.searchsorted(np.asarray(breaks, np.float32), v, side="right")
+    del v
     if min_cells > 1:
         from scipy import ndimage
 
         for k in range(1, classes + 1):
+            progress(0.2 + 0.6 * (k - 1) / classes, f"Zones: patches smaller than {min_cells} cells, class {k}")
             labels, n = ndimage.label(cls == k)
             if n == 0:
                 continue
@@ -2072,10 +2086,12 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
             small = np.isin(labels, np.flatnonzero(sizes < min_cells) + 1)
             if small.any():
                 cls[small] = 0
+        progress(0.8, "Zones: the small patches to their neighbours")
         if (cls == 0).any() and valid.any():  # the small patches and nothing else take the nearest class
             idx = ndimage.distance_transform_edt(cls == 0, return_distances=False, return_indices=True)
             filled = cls[tuple(idx)]
             cls = np.where(valid & (cls == 0), filled, cls)
+    progress(1.0, "Zones: classes made")
     return cls, breaks
 
 
@@ -2156,7 +2172,7 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
         values = src.read(1)
         transform, crs = src.transform, src.crs
     progress(0.05, f"Zoning of {name}: {classes} classes ({method})")
-    cls, breaks = zoning(values, classes, method, min_cells)
+    cls, breaks = zoning(values, classes, method, min_cells, progress=progress.sub(0.05, 0.25))
     polys = zoning_polygons(cls, values, transform, breaks, progress=progress.sub(0.3, 0.6))
     progress(0.9, f"Zoning of {name}: writing {len(polys)} polygons")
     columns = {"classe": "INTEGER", "da": "REAL", "a": "REAL", "media": "REAL", "area_m2": "REAL"}

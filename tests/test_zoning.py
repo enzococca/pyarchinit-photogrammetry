@@ -228,3 +228,13 @@ def test_the_window_offers_natural_breaks(tmp_path, monkeypatch):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_zoning_says_how_far_it_is():
+    """The breaks, the small patches class by class and their neighbours: the progress moves while the classes are
+    made, not only while the polygons are traced."""
+    values, _ = _three_populations(200, 200, seed=2)
+    seen = []
+    ms.zoning(values, classes=3, method="quantiles", min_cells=20, progress=lambda f, m="": seen.append((f, m)))
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions) and fractions[-1] == pytest.approx(1.0) and len(seen) >= 5
