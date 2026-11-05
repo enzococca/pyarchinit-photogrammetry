@@ -2094,13 +2094,15 @@ def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list
     progress = as_progress(progress)
     progress(0.0, "Zones: labelling the patches")
     labels = np.zeros(cls.shape, np.int32)
+    lab = np.zeros(cls.shape, np.int32)  # one buffer for the labels of every class
     count = 0
+    classes = []
     for k in np.unique(cls[cls > 0]):
-        lab, n = ndimage.label(cls == k)  # 4-connected, as the polygons
-        inside = lab > 0
-        labels[inside] = lab[inside] + count
+        n = ndimage.label(cls == k, output=lab)  # 4-connected, as the polygons
+        np.add(labels, np.where(lab > 0, lab + count, 0), out=labels)
+        classes.append((count, n, int(k)))
         count += n
-        del lab, inside
+    del lab
     if count == 0:
         progress(1.0, "Zones: 0 polygons")
         return []
@@ -2109,7 +2111,8 @@ def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list
     sums = np.bincount(flat, weights=np.where(finite, values, 0).ravel().astype(np.float64), minlength=count + 1)
     cells = np.bincount(flat, weights=finite.ravel(), minlength=count + 1)
     class_of = np.zeros(count + 1, np.int32)
-    class_of[flat] = cls.ravel()
+    for start, n, k in classes:
+        class_of[start + 1:start + n + 1] = k
     del flat
     lo_all = float(np.nanmin(values)) if finite.any() else 0.0
     hi_all = float(np.nanmax(values)) if finite.any() else 0.0
