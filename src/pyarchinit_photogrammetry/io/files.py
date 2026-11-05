@@ -121,4 +121,60 @@ def clone(src: str | Path, dst: str | Path) -> None:
         shutil.copy2(src, dst)
 
 
-__all__ = ["replace_file", "clone", "RETRY_DELAYS"]
+_rename_folder = os.replace  # the renames of swap_folder (a test puts a failure in their place)
+
+
+def remove_tree(path: str | Path) -> None:
+    """A folder deleted (the last step of :func:`swap_folder`; a test puts a failure in its place)."""
+    import shutil
+
+    shutil.rmtree(path)
+
+
+def backup_name(place: str | Path) -> Path:
+    """Where :func:`swap_folder` keeps the folder it replaces until the new one is in place."""
+    place = Path(place)
+    return place.with_name(place.name + ".old")
+
+
+def mend_swap(place: str | Path) -> None:
+    """What a swap of ``place`` stopped by a crash left, mended: the old folder moved aside and the new one not in
+    place yet - the old one goes back; both there - the new one is in place, the backup goes."""
+    place, backup = Path(place), backup_name(place)
+    if not backup.exists():
+        return
+    if not place.exists():
+        _rename_folder(backup, place)
+    else:
+        remove_tree(backup)
+
+
+def swap_folder(new: str | Path, place: str | Path) -> None:
+    """The folder ``new`` put in the place of ``place``, crash-safe: the old folder renamed to :func:`backup_name`,
+    the new one renamed into place, the backup deleted. When the second rename fails the old folder goes back (and
+    the error goes on): a failure leaves either folder in place, never neither. A backup that cannot be deleted
+    stays (logged; the next swap deletes it): the swap is made. What a crash left before is mended first
+    (:func:`mend_swap`)."""
+    import logging
+
+    new, place = Path(new), Path(place)
+    backup = backup_name(place)
+    mend_swap(place)
+    moved = False
+    if place.exists():
+        _rename_folder(place, backup)
+        moved = True
+    try:
+        _rename_folder(new, place)
+    except BaseException:
+        if moved:
+            _rename_folder(backup, place)
+        raise
+    if moved:
+        try:
+            remove_tree(backup)
+        except OSError as exc:
+            logging.getLogger("pyarchinit_photogrammetry").warning("Cartella %s non cancellata: %s", backup, exc)
+
+
+__all__ = ["replace_file", "clone", "RETRY_DELAYS", "swap_folder", "mend_swap", "backup_name", "remove_tree"]

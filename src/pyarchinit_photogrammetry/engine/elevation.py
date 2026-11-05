@@ -751,7 +751,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
-                    bounds=None, kind: str = "elevation", scale: str = "cylinder") -> dict:
+                    bounds=None, kind: str = "elevation", scale: str = "cylinder", u_map=None) -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
@@ -762,7 +762,15 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
 
     ``scale`` (a cylinder): ``cylinder`` - ``u`` the arc on the reference cylinder, as the frame says; ``wall`` -
     ``u`` the length along the wall (:func:`wall_map` from a first pass on the relief, kept in the frame's
-    ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall"."""
+    ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall".
+
+    ``u_map`` (``[theta_deg, u]`` pairs, a cylinder): the development on the wall with THIS map instead of one
+    measured again on the relief - the grid in ``u`` of an earlier build kept (the rebuild of a stale elevation,
+    the same grid across campaigns); ``scale`` is then "wall"."""
+    if u_map is not None:
+        if frame.kind != "cylinder":
+            raise ValueError("a u_map is for cylindrical developments")
+        scale = "wall"
     if scale not in ("cylinder", "wall"):
         raise ValueError(f"unknown scale {scale!r}: cylinder or wall")
     if scale == "wall" and frame.kind != "cylinder":
@@ -793,9 +801,12 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
         frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
     if scale == "wall":
-        progress(0.02, "Length of the wall")
-        plain = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
-        umap = wall_map(FrameSurface(chunk, raycaster, plain, resolution, lock, depth, None))
+        if u_map is not None:  # the grid kept
+            umap = np.asarray(u_map, np.float64).reshape(-1, 2)
+        else:
+            progress(0.02, "Length of the wall")
+            plain = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
+            umap = wall_map(FrameSurface(chunk, raycaster, plain, resolution, lock, depth, None))
         frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt,
                          u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
