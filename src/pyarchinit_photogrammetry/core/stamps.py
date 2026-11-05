@@ -36,6 +36,16 @@ TRANSLATION_ATOL, TRANSLATION_RTOL = 5e-7, 1e-12  # metres, and per metre of the
 
 NAMES = {"dem": "DEM", "orthomosaic": "Ortofoto", "dem_precision": "Precisione del DEM", "coverage": "Copertura",
          "tin": "TIN", "slope": "Pendenza", "aspect": "Esposizione"}  # Italian data names, like ``core.versions.PRODUCTS``: the window translates them
+NAMES_EN = {"dem": "DEM", "orthomosaic": "orthomosaic", "dem_precision": "DEM precision", "coverage": "coverage",
+            "tin": "TIN", "slope": "slope", "aspect": "aspect"}  # the same in English: the command line's lines
+
+
+def english_name(item: dict) -> str:
+    """The name of an item of :func:`stale_products` in English text: a product by its English name, the others
+    (an elevation, a version, an index...) by their own."""
+    if item.get("kind") == "product" and item.get("product") in NAMES_EN:
+        return NAMES_EN[item["product"]]
+    return str(item.get("name") or item.get("product"))
 
 
 def _matrix(m) -> np.ndarray:
@@ -189,5 +199,5 @@ def stale_products(chunk) -> list[dict]:
     return out
 
 
-__all__ = ["GRID_PRODUCTS", "STAMP_RTOL", "NAMES", "stamp", "stamp_entry", "same_transform", "is_stale", "entry_stale",
+__all__ = ["GRID_PRODUCTS", "STAMP_RTOL", "NAMES", "NAMES_EN", "english_name", "stamp", "stamp_entry", "same_transform", "is_stale", "entry_stale",
            "stamp_of", "derived_stamp", "inherit", "inherit_entry", "restamp_entries", "stale_products"]

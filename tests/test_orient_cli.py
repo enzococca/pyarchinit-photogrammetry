@@ -152,3 +152,80 @@ def test_context_orient_and_listener(processed, tmp_path):
     context.release()
     context.orient(ch, points=[a, a + [1.0, 0.0, 0.0]])
     assert len(seen) == 1  # released: not told any more
+
+
+def test_open_with_an_unknown_chunk_lists_the_chunks(tmp_path):
+    """``--chunk`` naming no chunk of the project: a usage error with the chunks there are, not a traceback."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    doc.add_chunk("Scavo")
+    doc.add_chunk("Sezione")
+    doc.save(tmp_path / "p.ppg")
+    r = _run(tmp_path / "p.ppg", "--points", "0,0,0;1,0,0;0,1,0", "--chunk", "Nessuno", "--dry-run")
+    assert r.exit_code == 2, r.output
+    assert "Nessuno" in r.output and "Scavo" in r.output and "Sezione" in r.output
+    assert not isinstance(r.exception, StopIteration)
+
+
+def test_orient_lines_name_the_products_in_english():
+    """The lines of ``ppg orient`` are English: the products to build again by their English names."""
+    from pyarchinit_photogrammetry.cli import _orient_lines
+    from pyarchinit_photogrammetry.core import stamps
+
+    result = {"describe": {"tilt_deg": 1.0, "tilt_direction_deg": 2.0, "heading_deg": 3.0, "translation": [0, 0, 0],
+                           "scale": 1.0},
+              "stale": [{"kind": "product", "product": p, "name": stamps.NAMES[p], "id": None}
+                        for p in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect", "tin")]
+              + [{"kind": "elevation", "product": "elevation", "name": "Parete nord", "id": "e1"}]}
+    line = next(x for x in _orient_lines(result, False) if x.startswith("stale"))
+    assert line == ("stale (to build again): DEM, orthomosaic, DEM precision, coverage, slope, aspect, TIN, "
+                    "Parete nord")
+    assert set(stamps.NAMES_EN) == set(stamps.NAMES)
+
+
+def _square(ch, half=0.8):
+    from orient_helpers import centre
+
+    x, y, _z = centre(ch)
+    return (f"POLYGON(({x - half} {y - half}, {x + half} {y - half}, {x + half} {y + half}, {x - half} {y + half}, "
+            f"{x - half} {y - half}))")
+
+
+def test_cli_plane_from_with_x_kept(processed, tmp_path):
+    """``--plane-from`` with A, B and ``--x-kept``: the plane horizontal, A its origin, x the current x projected on
+    the plane (not along A->B as without the option)."""
+    import pyarchinit_photogrammetry as ppg
+    from orient_helpers import centre, local_copy
+
+    for kept in (False, True):
+        doc, ch, _ = local_copy(processed, tmp_path, name=f"locale_{kept}")
+        a = centre(ch)
+        b = a + [0.2, 1.0, 0.0]  # A->B mostly along y
+        args = [doc.path, "--plane-from", _square(ch), "--points", _text([a, b])] + (["--x-kept"] if kept else [])
+        r = _run(*args)
+        assert r.exit_code == 0, r.output
+        m = np.asarray(ppg.Document.open(doc.path).chunk.meta["orientation"]["M"], float)
+        rot = m[:3, :3] / np.linalg.norm(m[:3, 0])
+        n = rot[2]  # the normal of the plane, in the coordinates before
+        want = np.array([1.0, 0.0, 0.0]) if kept else b - a
+        want = want - (want @ n) * n
+        assert np.allclose(rot[0], want / np.linalg.norm(want), atol=1e-9), (kept, rot[0])
+
+
+def test_cli_markers_errors(processed, tmp_path, monkeypatch):
+    """A marker that is not in the chunk is a usage error naming it; any other KeyError of the orientation is not
+    passed off as a wrong marker."""
+    from orient_helpers import local_copy
+
+    doc, ch, _ = local_copy(processed, tmp_path)
+    placed = [m.label for m in ch.markers if m.position is not None][:2]
+    r = _run(doc.path, "--markers", f"{placed[0]},Fantasma", "--dry-run")
+    assert r.exit_code == 2 and "Fantasma" in r.output, r.output
+
+    def broken(*a, **k):
+        raise KeyError("internal")
+
+    monkeypatch.setattr(orient, "orient", broken)
+    r = _run(doc.path, "--markers", ",".join(placed), "--dry-run")
+    assert isinstance(r.exception, KeyError) and r.exit_code == 1, r.output

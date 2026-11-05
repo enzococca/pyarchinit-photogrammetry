@@ -283,6 +283,8 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "estimated": ("Stimata (m)", "Estimated (m)"),
     "control": ("controllo", "control"),
     "check": ("verifica", "check"),
+    "orientation": ("orientamento", "orientation"),
+    "orientation_aside": ("orientamento (non usato)", "orientation (not used)"),
     "product": ("Prodotto", "Product"),
     "size_mb": ("Dimensione (MB)", "Size (MB)"),
     "elements": ("Punti / facce / celle", "Points / faces / cells"),
@@ -499,9 +501,10 @@ def _sensors(chunk, h: Labels) -> Sheet | None:
 def _markers(chunk, h: Labels) -> Sheet | None:
     if not chunk.markers:
         return None
-    from ..markers.gcp import marker_errors
+    from ..markers.gcp import marker_errors, orientation_set_aside
 
     errs = {e["label"]: e for e in marker_errors(chunk)}
+    aside = orientation_set_aside(chunk)
     precision = (chunk.meta.get("precision") or {}).get("markers", {})
     rows = []
     for m in chunk.markers:
@@ -510,7 +513,11 @@ def _markers(chunk, h: Labels) -> Sheet | None:
         est = list(chunk.to_world(m.position)) if m.position is not None else [None] * 3
         acc = float(np.mean(m.reference.accuracy)) if m.reference.location and m.reference.accuracy else None
         prec = list(precision.get(str(m.key)) or [None] * 3)
-        rows.append([m.label, m.code, h("check") if m.checkpoint else h("control"), bool(m.reference.enabled), *ref, acc,
+        if getattr(m, "orientation", False):  # the markers of a hand orientation (engine.orient)
+            kind = h("orientation_aside") if aside else h("orientation")
+        else:
+            kind = h("check") if m.checkpoint else h("control")
+        rows.append([m.label, m.code, kind, bool(m.reference.enabled), *ref, acc,
                      *est, e.get("dx"), e.get("dy"), e.get("dz"), e.get("error"), e.get("projections"),
                      e.get("estimated"), e.get("pixel_error"), *prec])
     headers = [h("label"), h("code"), h("type"), h("used"), h("x_ref"), h("y_ref"), h("z_ref"), h("accuracy"),

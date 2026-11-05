@@ -1036,7 +1036,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     """The local system of ``chunk`` oriented and kept by three orientation markers.
 
     The frame: from the points A, B[, C] (``points`` in chunk coordinates, or ``markers``: labels or keys of placed
-    markers), from a plane fitted to ``plane_xyz`` (A and B, when given, set x), or a motion ``M`` given as it is
+    markers), from a plane fitted to ``plane_xyz`` (A and B, when given, set x; with ``x_along_ab`` False A is the
+    origin and x the current x projected on the plane), or a motion ``M`` given as it is
     (a plugin). ``distance``: the length of A-B in the new system - a control scale bar "Orientamento A-B" on the
     orientation markers -, refused (``"scalebars"``) when control bars already give the scale. Then :func:`apply`
     (refusals as :func:`check`, except the positions of the photos: the markers take their place, listed in
@@ -1076,7 +1077,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
         method = "markers" if markers is not None else ("plane" if plane_xyz is not None else "points")
         if plane_xyz is not None:
             a, b = (pts[0], pts[1]) if pts is not None and len(pts) >= 2 else (None, None)
-            frame = frame_from_plane(plane_xyz, toward, a=a, b=b, flip=flip)
+            # x along A->B, or the current x projected on the plane (A still its origin)
+            frame = frame_from_plane(plane_xyz, toward, a=a, b=b if x_along_ab else None, flip=flip)
         else:
             if pts is None or len(pts) < 2:
                 raise OrientRefused("points", "two or three points are needed")

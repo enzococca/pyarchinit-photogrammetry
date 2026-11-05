@@ -759,6 +759,44 @@ def test_tables_of_the_processed_trench(processed, tmp_path):
     assert {"Progetto", "Camere", "Sensori", "Marker", "Parametri"} <= set(italian)
 
 
+def test_markers_sheet_shows_the_orientation_markers(processed, tmp_path):
+    """The orientation markers of a local system are "orientamento" in the markers sheet (not "controllo"), and
+    "orientamento (non usato)" once other control points place the chunk and set them aside - in both languages."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from orient_helpers import centre, local_copy
+
+    from pyarchinit_photogrammetry.engine import orient
+    from pyarchinit_photogrammetry.markers import gcp
+
+    _doc, ch, _ = local_copy(processed, tmp_path)
+    a = centre(ch)
+    orient.orient(ch, points=[a, a + [1.0, 0.2, 0.1], a + [0.1, 1.0, 0.0]])
+    labels = set(orient.MARKER_LABELS)
+
+    def types(language):
+        sheet = project_tables(ch, language=language)["Marker" if language == "it" else "Markers"]
+        head = sheet.headers
+        return {r[0]: r[head.index("Tipo" if language == "it" else "Type")] for r in sheet.rows}
+
+    for language, word in (("it", "orientamento"), ("en", "orientation")):
+        t = types(language)
+        assert {t[x] for x in labels} == {word}
+        assert {t[m.label] for m in ch.markers if m.label not in labels} <= {
+            "controllo", "verifica"} | {"control", "check"}
+    others = [m for m in ch.markers if not m.orientation and m.position is not None][:3]
+    for m in others:
+        m.reference.location = [float(v) for v in ch.to_world(np.asarray(m.position, float)[None])[0]]
+        m.reference.enabled = True
+        m.checkpoint = False
+    assert gcp.orientation_set_aside(ch)
+    for language, word in (("it", "orientamento (non usato)"), ("en", "orientation (not used)")):
+        t = types(language)
+        assert {t[x] for x in labels} == {word}
+        assert {t[m.label] for m in others} == {"controllo" if language == "it" else "control"}
+
+
 def test_tables_of_multispectral_and_thermal_products(tmp_path):
     doc, cm, ct = small_project(tmp_path)
     book = read_xlsx(export_tables(cm, tmp_path / "campo.xlsx", language="it"))

@@ -55,7 +55,12 @@ def _open(project: Path, chunk: Optional[str] = None):
     doc = Document.open(project)
     if not doc.chunks:
         raise typer.BadParameter("the project has no chunks")
-    ch = doc.chunk if chunk is None else next(c for c in doc.chunks if c.label == chunk or str(c.key) == chunk)
+    if chunk is None:
+        return doc, doc.chunk
+    ch = next((c for c in doc.chunks if c.label == chunk or str(c.key) == chunk), None)
+    if ch is None:
+        names = ", ".join(f"{c.label!r} (key {c.key})" for c in doc.chunks)
+        raise typer.BadParameter(f"no chunk {chunk!r} in the project; its chunks: {names}", param_hint="--chunk")
     return doc, ch
 
 
@@ -684,6 +689,8 @@ def _triples(text: str) -> list[list[float]]:
 
 def _orient_lines(result: dict, dry_run: bool) -> list[str]:
     """What ``ppg orient`` prints of the result of ``engine.orient.orient``."""
+    from .core import stamps
+
     d = result["describe"]
     t = d["translation"]
     lines = [f"tilt {d['tilt_deg']:.1f}° towards {d['tilt_direction_deg']:.1f}°, heading {d['heading_deg']:.1f}°",
@@ -692,8 +699,7 @@ def _orient_lines(result: dict, dry_run: bool) -> list[str]:
     if moved:
         lines.append("moved: " + ", ".join(f"{k} {n}" for k, n in moved.items()))
     if result.get("stale"):
-        lines.append("stale (to build again): " + ", ".join(str(x.get("name") or x.get("product"))
-                                                           for x in result["stale"]))
+        lines.append("stale (to build again): " + ", ".join(stamps.english_name(x) for x in result["stale"]))
     if result.get("aligned"):
         lines.append("aligned chunks moved: " + ", ".join(result["aligned"]))
     if result.get("aligned_left"):
@@ -767,6 +773,14 @@ def orient(project: Path,
     if names is not None and len(names) not in (2, 3):
         raise typer.BadParameter("--markers: two or three markers A,B[,C]")
     doc, ch = _open(project, chunk)
+    if names is not None:  # the markers named: a usage error when one is not in the chunk
+        from .markers import gcp
+
+        try:
+            for name in names:
+                gcp.resolve_marker(ch, name)
+        except KeyError as exc:
+            raise typer.BadParameter(f"--markers: {exc.args[0] if exc.args else exc}") from exc
     kw = dict(x_along_ab=not x_kept, quota=quota, origin_xy=origin_xy, distance=distance, flip=flip,
               move_aligned=aligned, dry_run=dry_run)
     try:
@@ -778,12 +792,7 @@ def orient(project: Path,
             kw.update(plane_xyz=xyz, toward=orient_mod.toward_cameras(ch, xyz), points=pts)
         else:
             kw["points"] = pts
-        try:
-            result = orient_mod.orient(ch, **kw)
-        except KeyError as exc:  # a marker that is not in the chunk
-            if names is None:
-                raise
-            raise typer.BadParameter(f"--markers: {exc.args[0] if exc.args else exc}") from exc
+        result = orient_mod.orient(ch, **kw)
     except orient_mod.OrientRefused as exc:
         typer.echo(f"{exc.reason}: {exc}", err=True)
         if exc.names:
