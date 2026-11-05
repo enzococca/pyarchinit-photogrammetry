@@ -91,21 +91,22 @@ One slim bar above the views. While a step runs, the processing buttons are disa
 | ![](../img/gui/icons/pyarchinit.png){ width=20 } | PyArchInit | orthophoto, DEM and model in the media of PyArchInit |
 | ![](../img/gui/icons/search.png){ width=20 } | Search a command | type a part of the name of any command of the menus and press ++enter++; ++ctrl+k++ (++cmd+k++ on macOS) puts the cursor there |
 
-The **Workflow** menu lists the steps from the photos to the products. A green tick says that the step is
-done in the active chunk, an empty circle that it is still to do; a click runs the step, as the commands of
-the menu *Workflow*:
+The **Workflow** menu lists the steps from the photos to the products, each with the state of the active chunk
+in place of its icon: ![](../img/gui/icons/passo-fatto.png){ width=20 } done,
+![](../img/gui/icons/passo-da-fare.png){ width=20 } still to do. A click runs the step, as the commands of the
+menu *Workflow*:
 
-| | Step | What it does |
-| --- | --- | --- |
-| ![](../img/gui/icons/aggiungi-foto.png){ width=20 } | 1. Add photos | photos into the active chunk |
-| ![](../img/gui/icons/marker.png){ width=20 } | 2. Marker | finds the printed coded targets in the photos |
-| ![](../img/gui/icons/allinea.png){ width=20 } | 3. Align | positions and orientations of the cameras (SfM) |
-| ![](../img/gui/icons/riferimenti.png){ width=20 } | 4. Reference | the coordinates of the markers from a CSV (done when a marker has surveyed coordinates or the chunk is aligned in a coordinate system) |
-| ![](../img/gui/icons/nuvola-densa.png){ width=20 } | 5. Dense cloud | depth maps and dense cloud |
-| ![](../img/gui/icons/modello.png){ width=20 } | 6. Model | the 3D mesh |
-| ![](../img/gui/icons/texture.png){ width=20 } | 7. Texture | the texture of the model |
-| ![](../img/gui/icons/dem.png){ width=20 } | 8. DEM | the digital elevation model |
-| ![](../img/gui/icons/ortofoto.png){ width=20 } | 9. Orthophoto | the orthophoto (true ortho) |
+| Step | What it does |
+| --- | --- |
+| 1. Add photos | photos into the active chunk |
+| 2. Marker | finds the printed coded targets in the photos |
+| 3. Align | positions and orientations of the cameras (SfM) |
+| 4. Reference | the coordinates of the markers from a CSV (done when a marker has surveyed coordinates or the chunk is aligned in a coordinate system) |
+| 5. Dense cloud | depth maps and dense cloud |
+| 6. Model | the 3D mesh |
+| 7. Texture | the texture of the model |
+| 8. DEM | the digital elevation model |
+| 9. Orthophoto | the orthophoto (true ortho) |
 
 *Contour lines*, *Cut / fill volume* and *Plan slice* are in the group *Sections and analyses* of the rail of
 the 2D view and in the menu *Tools*.
@@ -116,7 +117,7 @@ the 2D view and in the menu *Tools*.
 
 On the left of the orthophoto and the DEM a narrow column holds the drawing tools in groups. A click on a
 group opens its panel beside the rail, over the view, with the tools as buttons with icon and name; a small
-arrow beside a button opens its menu. The panel closes when you choose a tool, click the same group again,
+arrow beside a button opens its menu. The panel closes when you choose a tool (an option such as *Snap* leaves it open), click the same group again,
 press ++esc++ or click the view; the pin in its header keeps it open while you work. The group of the tool in
 use is highlighted. A right click on the rail chooses *Icons only* or *Icons and text* (the names of the groups
 under their icons).

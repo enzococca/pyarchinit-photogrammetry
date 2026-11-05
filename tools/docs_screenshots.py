@@ -766,8 +766,8 @@ def _icons(w, bars, folder: Path, lang: str) -> None:
     from pyarchinit_photogrammetry.gui.i18n import tr
 
     keep("top", "search", tr("Cerca un comando... ({0})", "Ctrl+K"), "search", icon("search"))
-    for key, text, _slot, tip in w.WORKFLOW_STEPS:  # the steps with their own icons (the menu shows their state)
-        keep("workflow_menu", key, tr(tip), text, icon(key))
+    for key, it, en in (("step_done", "passo fatto", "step done"), ("step_todo", "passo da fare", "step to do")):
+        keep("workflow_menu", key, it if lang == "it" else en, it, icon(key))  # what the menu shows of a step
     for key, g in w.raster_rail.groups.items():  # the groups of the rail of the 2D view
         keep("rail_2d", key, g.title, "rail-" + key, g.button.icon())
     listed = {g: {n: e for n, e in entries.items() if n in made.get(g, ())} for g, entries in listed.items()

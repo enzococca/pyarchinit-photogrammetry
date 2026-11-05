@@ -131,50 +131,15 @@
   }
  },
  "workflow_menu": {
-  "photos": {
-   "en": "Add photos to the chunk",
-   "it": "Aggiungi foto al chunk",
-   "file": "aggiungi-foto.png"
+  "step_done": {
+   "en": "step done",
+   "it": "passo fatto",
+   "file": "passo-fatto.png"
   },
-  "markers": {
-   "en": "Detect the coded targets",
-   "it": "Rileva i target codificati",
-   "file": "marker.png"
-  },
-  "align": {
-   "en": "Align the photos (SfM)",
-   "it": "Allinea le foto (SfM)",
-   "file": "allinea.png"
-  },
-  "reference": {
-   "en": "Import the coordinates of the markers",
-   "it": "Importa le coordinate dei marker",
-   "file": "riferimenti.png"
-  },
-  "dense": {
-   "en": "Depth maps and dense cloud",
-   "it": "Depth map e nuvola densa",
-   "file": "nuvola-densa.png"
-  },
-  "model": {
-   "en": "Mesh 3D",
-   "it": "Mesh 3D",
-   "file": "modello.png"
-  },
-  "texture": {
-   "en": "Model texture",
-   "it": "Texture del modello",
-   "file": "texture.png"
-  },
-  "dem": {
-   "en": "Digital elevation model",
-   "it": "Modello digitale di elevazione",
-   "file": "dem.png"
-  },
-  "ortho": {
-   "en": "Orthophoto (true ortho)",
-   "it": "Ortofoto (true ortho)",
-   "file": "ortofoto.png"
+  "step_todo": {
+   "en": "step to do",
+   "it": "passo da fare",
+   "file": "passo-da-fare.png"
   }
  },
  "rail_2d": {

@@ -91,21 +91,22 @@ Una sola barra sottile sopra le viste. Mentre un passo lavora, i pulsanti di ela
 | ![](../img/gui/icons/pyarchinit.png){ width=20 } | PyArchInit | ortofoto, DEM e modello nei media di PyArchInit |
 | ![](../img/gui/icons/search.png){ width=20 } | Cerca un comando | scrivi una parte del nome di un comando dei menu e premi ++enter++; ++ctrl+k++ (++cmd+k++ su macOS) porta lì il cursore |
 
-Il menu **Flusso di lavoro** elenca i passi dalle foto ai prodotti. Un segno verde dice che il passo è fatto nel
-chunk attivo, un cerchio vuoto che è ancora da fare; un clic esegue il passo, come i comandi del menu *Flusso di
-lavoro*:
+Il menu **Flusso di lavoro** elenca i passi dalle foto ai prodotti, ciascuno con lo stato del chunk attivo al
+posto dell'icona: ![](../img/gui/icons/passo-fatto.png){ width=20 } fatto,
+![](../img/gui/icons/passo-da-fare.png){ width=20 } ancora da fare. Un clic esegue il passo, come i comandi del
+menu *Flusso di lavoro*:
 
-| | Passo | Cosa fa |
-| --- | --- | --- |
-| ![](../img/gui/icons/aggiungi-foto.png){ width=20 } | 1. Aggiungi foto | le foto nel chunk attivo |
-| ![](../img/gui/icons/marker.png){ width=20 } | 2. Marker | trova i target codificati stampati nelle foto |
-| ![](../img/gui/icons/allinea.png){ width=20 } | 3. Allinea | posizioni e orientamenti delle camere (SfM) |
-| ![](../img/gui/icons/riferimenti.png){ width=20 } | 4. Riferimenti | le coordinate dei marker da un CSV (fatto quando un marker ha coordinate rilevate o il chunk è allineato in un sistema di coordinate) |
-| ![](../img/gui/icons/nuvola-densa.png){ width=20 } | 5. Nuvola densa | depth map e nuvola densa |
-| ![](../img/gui/icons/modello.png){ width=20 } | 6. Modello | la mesh 3D |
-| ![](../img/gui/icons/texture.png){ width=20 } | 7. Texture | la texture del modello |
-| ![](../img/gui/icons/dem.png){ width=20 } | 8. DEM | il modello digitale di elevazione |
-| ![](../img/gui/icons/ortofoto.png){ width=20 } | 9. Ortofoto | l'ortofoto (true ortho) |
+| Passo | Cosa fa |
+| --- | --- |
+| 1. Aggiungi foto | le foto nel chunk attivo |
+| 2. Marker | trova i target codificati stampati nelle foto |
+| 3. Allinea | posizioni e orientamenti delle camere (SfM) |
+| 4. Riferimenti | le coordinate dei marker da un CSV (fatto quando un marker ha coordinate rilevate o il chunk è allineato in un sistema di coordinate) |
+| 5. Nuvola densa | depth map e nuvola densa |
+| 6. Modello | la mesh 3D |
+| 7. Texture | la texture del modello |
+| 8. DEM | il modello digitale di elevazione |
+| 9. Ortofoto | l'ortofoto (true ortho) |
 
 *Curve di livello*, *Volume scavo / riporto* e *Pianta a quota* sono nel gruppo *Sezioni e analisi* della barra
 laterale della vista 2D e nel menu *Strumenti*.
@@ -117,7 +118,7 @@ laterale della vista 2D e nel menu *Strumenti*.
 A sinistra dell'ortofoto e del DEM una colonna stretta tiene gli strumenti di disegno in gruppi. Un clic su un
 gruppo apre il suo pannello accanto alla barra, sopra la vista, con gli strumenti come pulsanti con icona e
 nome; la piccola freccia accanto a un pulsante apre il suo menu. Il pannello si chiude quando scegli uno
-strumento, fai di nuovo clic sul gruppo, premi ++esc++ o fai clic sulla vista; la puntina nella sua intestazione
+strumento (un'opzione come *Snap* lo lascia aperto), fai di nuovo clic sul gruppo, premi ++esc++ o fai clic sulla vista; la puntina nella sua intestazione
 lo tiene aperto mentre lavori. Il gruppo dello strumento in uso è evidenziato. Un clic destro sulla barra
 sceglie *Solo icone* o *Icone e testo* (i nomi dei gruppi sotto le icone).
 
