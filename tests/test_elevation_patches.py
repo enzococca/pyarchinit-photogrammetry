@@ -159,8 +159,10 @@ def test_an_excluded_photo_is_left_out_on_the_wall(wall, plain_photos):
     before = _read(E.elevation_paths(ch, entry)[0])
     u, v = _surface_cell(ch, entry)
     poly = box(u - 0.2, v - 0.12, u + 0.2, v + 0.12)
-    most = max(P.photos_for_area(ch, poly, frame=eid), key=lambda c: c["used"])
     inside, outside = _cells(ch, entry, poly, before.shape[1:])
+    # the photo that paints the most of the area now (the photos' "used" estimate and the cells painted can differ
+    # with the mesh of each platform: 4 % on Linux with Python 3.11 for the photo "used" the most)
+    most = max(P.photos_for_area(ch, poly, frame=eid), key=lambda c: _share(before, inside, plain_colour(ch, c["label"])))
     colour = plain_colour(ch, most["label"])
     assert _share(before, inside, colour) > 0.05
     P.add_patch(ch, poly, [most["label"]], mode="exclude", frame=eid)
