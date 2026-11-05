@@ -25,7 +25,12 @@ from .undo import ScriptChanged, _move, _remove
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
-SKIPPED_KEYS = ("drawings",)  # chunk.meta the rebuild never changes (the window stores its drawings there meanwhile)
+SKIPPED_KEYS = ("drawings",)
+# where the builders write each product, relative to the chunk's folder (whatever file is active now): a file there
+# that is not the active product is written over, so it is copied too
+TARGETS = {"dem": ("dem.tif",), "orthomosaic": ("orthomosaic.tif",), "dem_precision": ("precision/dem_sigma_z.tif",),
+           "coverage": ("fieldcheck/coverage.tif",), "slope": ("terrain/slope.tif",),
+           "aspect": ("terrain/aspect.tif",), "tin": ("tin/tin.npz", "tin/tin.json")}  # chunk.meta the rebuild never changes (the window stores its drawings there meanwhile)
 
 
 class RebuildChanged(ScriptChanged):
@@ -55,10 +60,10 @@ def chunk_files(chunk, items) -> list[str]:
         elif kind == "elevation" and item.get("id"):
             rels.append(str(Path("elevations") / str(item["id"])))
     for name in dict.fromkeys(names):
+        targets = [root / t for t in TARGETS.get(name, (f"terrain/{name}.tif",))]  # a relief: terrain/<method>.tif
         path = chunk.product_path(name)
-        if path is None:
-            continue
-        paths = [Path(path)] + [Path(path).parent / side for side in versions_mod.SIDECARS.get(name, ())]
+        paths = targets if path is None else \
+            [Path(path)] + [Path(path).parent / side for side in versions_mod.SIDECARS.get(name, ())] + targets
         for p in paths:
             try:
                 rels.append(str(p.resolve().relative_to(root.resolve())))
@@ -78,11 +83,15 @@ class RebuildStep:
         self.before_meta = copy.deepcopy(chunk.meta)
         self.before_products = dict(chunk.products)
         self.files: list[str] = []
-        for rel in files:
-            src = self.root / rel
-            if src.exists():
-                clone(src, self.hold / "before" / rel)
-            self.files.append(rel)
+        try:
+            for rel in files:
+                src = self.root / rel
+                if src.exists():
+                    clone(src, self.hold / "before" / rel)
+                self.files.append(rel)
+        except BaseException:  # no room for the copies: none left behind
+            shutil.rmtree(self.hold, ignore_errors=True)
+            raise
         self.existed = {rel: (self.root / rel).exists() for rel in self.files}
         self.after_meta: dict = {}
         self.after_products: dict = {}
@@ -90,6 +99,7 @@ class RebuildStep:
         self.keys: list[str] = []
         self.new: list[str] = []
         self.applied = True
+        self.broken = False  # an undo or a redo failed: the copies stay (drop keeps the hold)
         self.signature: dict = self._signature()  # of the files before: what the task wrote shows in finish
 
     # ------------------------------------------------------------------ after the task
@@ -166,23 +176,57 @@ class RebuildStep:
         self.window._dirty(True)
 
     # ------------------------------------------------------------------ undo / redo
+    def _apply(self, moves) -> None:
+        """``moves(do)`` makes the file operations of an undo or a redo through ``do(kind, a, b)`` (``"move"`` a to
+        b, ``"clone"`` a to b); when one fails those already made are reversed, in the opposite order, before the error
+        goes on: the chunk stays as it was, the step is marked broken and its copies stay in the hold."""
+        journal: list = []
+
+        def do(kind: str, a: Path, b: Path) -> None:
+            if kind == "move":
+                _move(a, b)
+                journal.append(("move", b, a))
+            else:
+                clone(a, b)
+                journal.append(("remove", b, None))
+
+        try:
+            moves(do)
+        except BaseException:
+            self.broken = True
+            for kind, a, b in reversed(journal):
+                try:
+                    if kind == "move":
+                        _move(a, b)
+                    else:
+                        _remove(a)
+                except Exception as exc:  # noqa: BLE001 - the rest is still put back; the hold keeps the copies
+                    log.error("Ricostruzione: %s non rimesso al suo posto (%s); le copie sono in %s", a, exc,
+                              self.hold)
+            raise
+
     def undo(self) -> None:
         self._check(self.after_meta, self.after_products, self.signature)
         self._release()
         after = self.hold / "after"
         shutil.rmtree(after, ignore_errors=True)
-        for rel in self.new:  # what the rebuild added, aside
-            path = self.root / rel
-            if path.exists():
-                _move(path, after / "new" / rel)
-        self.after_existed = {}
-        for rel in self.files:
-            path = self.root / rel
-            self.after_existed[rel] = path.exists()
-            if path.exists():
-                _move(path, after / "files" / rel)
-            if self.existed[rel]:
-                clone(self.hold / "before" / rel, path)
+        existed = {rel: (self.root / rel).exists() for rel in self.files}
+
+        def moves(do) -> None:
+            for rel in self.new:  # what the rebuild added, aside
+                if (self.root / rel).exists():
+                    do("move", self.root / rel, after / "new" / rel)
+            for rel in self.files:
+                if existed[rel]:
+                    do("move", self.root / rel, after / "files" / rel)
+                if self.existed[rel]:
+                    do("clone", self.hold / "before" / rel, self.root / rel)
+
+        try:
+            self._apply(moves)
+        finally:
+            self._reload_if_failed()
+        self.after_existed = existed
         self._set(self.before_meta, self.before_products)
         self.applied = False
         self.signature = self._signature()
@@ -192,22 +236,42 @@ class RebuildStep:
         self._check(self.before_meta, self.before_products, self.signature)
         self._release()
         after = self.hold / "after"
-        for rel in self.files:
-            path = self.root / rel
-            if path.exists() or path.is_symlink():
-                _remove(path)  # the clone of before (its copy stays in the hold)
-            if self.after_existed.get(rel):
-                _move(after / "files" / rel, path)
-        for rel in self.new:
-            src = after / "new" / rel
-            if src.exists():
-                _move(src, self.root / rel)
+        spare = self.hold / "redo"
+        shutil.rmtree(spare, ignore_errors=True)
+
+        def moves(do) -> None:
+            for rel in self.files:
+                path = self.root / rel
+                if path.exists() or path.is_symlink():  # the clone of before (its copy stays in the hold)
+                    do("move", path, spare / rel)
+                if self.after_existed.get(rel):
+                    do("move", after / "files" / rel, path)
+            for rel in self.new:
+                if (after / "new" / rel).exists():
+                    do("move", after / "new" / rel, self.root / rel)
+
+        try:
+            self._apply(moves)
+        finally:
+            self._reload_if_failed()
+        shutil.rmtree(spare, ignore_errors=True)
         self._set(self.after_meta, self.after_products)
         self.applied = True
         self.signature = self._signature()
         self._reload()
 
+    def _reload_if_failed(self) -> None:
+        """After a failed undo or redo (files put back as they were): the views shown again."""
+        if self.broken and self.window.chunk is self.chunk:
+            try:
+                self.window.refresh_all()
+            except Exception as exc:  # noqa: BLE001 - the error of the step is the one said
+                log.warning("Vista non aggiornata: %s", exc)
+
     def drop(self) -> None:
+        if self.broken:  # the copies stay: nothing that was in the project is lost
+            log.warning("Ricostruzione: le copie per Annulla restano in %s", self.hold)
+            return
         shutil.rmtree(self.hold, ignore_errors=True)
 
 

@@ -165,6 +165,10 @@ class UndoHistory:
         if not self.applying:
             self._base = self._snapshot()
 
+    def unchanged(self) -> bool:
+        """Nothing changed since the last entry (or rebase): the project as the history last saw it."""
+        return not self.applying and self._pending is None and self._snapshot() == self._base
+
     def discard_pending(self) -> None:
         """The edit announced by :meth:`backup` did not happen (failed or cancelled)."""
         if self._pending:

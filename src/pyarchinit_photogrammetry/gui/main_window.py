@@ -976,7 +976,9 @@ class MainWindow(QMainWindow):
         self.a_rebuild_keep.setToolTip(tr("Come «Conservala per confrontarla» nei dialoghi di costruzione: il DEM e "
                                           "l'ortofoto rifatti da Ricostruisci i prodotti da rifare lasciano quelli "
                                           "di prima fra le versioni"))
-        self.a_rebuild_keep.setChecked(self.settings.value("rebuild_keep_versions", "true") in ("true", True, 1, "1"))
+        # off by default: kept in the system of before they cannot be compared with the rebuilt ones, and they cost
+        # disk (GBs on a large survey); Modifica > Annulla already takes a rebuild back
+        self.a_rebuild_keep.setChecked(self.settings.value("rebuild_keep_versions", "false") in ("true", True, 1, "1"))
         self.a_rebuild_keep.toggled.connect(
             lambda on: self.settings.setValue("rebuild_keep_versions", "true" if on else "false"))
         m.addAction(self.a_rebuild_keep)
@@ -1693,6 +1695,13 @@ class MainWindow(QMainWindow):
                 if done["restored"] or done["deleted"]:
                     log.info("Elementi rimossi in una sessione interrotta: %d rimessi al loro posto, %d cancellati",
                              done["restored"], done["deleted"])
+            try:  # an elevation whose files were being swapped when the session stopped
+                mended = doc.mend_swaps()
+            except Exception as exc:  # noqa: BLE001 - the project opens anyway
+                log.warning("Cartelle dei prospetti non sistemate: %s", exc)
+            else:
+                if mended:
+                    log.info("Prospetti lasciati a metà da una sessione interrotta: %d sistemati", mended)
         if not doc.chunks:
             doc.add_chunk("Chunk 1")
         self.units = []
@@ -3972,18 +3981,19 @@ class MainWindow(QMainWindow):
 
     def _rebuild_keep(self) -> bool:
         """The DEM and the orthomosaic that the rebuild replaces stay among the versions (the setting of
-        *Ricostruendo, conserva DEM e ortofoto attivi come versioni*, on as the build dialogs' default)."""
+        *Ricostruendo, conserva DEM e ortofoto attivi come versioni*, off by default)."""
         action = getattr(self, "a_rebuild_keep", None)
-        return True if action is None else action.isChecked()
+        return False if action is None else action.isChecked()
 
     def _rebuild_plan(self, ch, items=None) -> tuple[list, list, list]:
         """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
         by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
         each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
         calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
-        kept versions made in another system. The DEM and the orthomosaic replaced are kept as versions first when
-        :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the step
-        fails)."""
+        kept versions made in another system - not those a rebuild kept itself (``"by_rebuild"``: made in the old
+        system on purpose, kept only to look back at). The DEM and the orthomosaic replaced are kept as versions
+        first when :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the
+        step fails)."""
         from ..core import versions
         from .panels import product_name
 
@@ -3998,6 +4008,8 @@ class MainWindow(QMainWindow):
 
             def step(p):
                 kept = versions.keep_active(ch, product, move=True)
+                if kept is not None:
+                    kept["by_rebuild"] = True  # not listed among the versions to make again
                 try:
                     result = fn(p)
                 except BaseException:
@@ -4059,6 +4071,9 @@ class MainWindow(QMainWindow):
                 name = product_name(product)  # the names of the relief menu, not the codes of the methods
                 steps.append((name, on_dem(name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p))))
             elif kind == "version":
+                record = next((e for e in versions.versions(ch, product) if e.get("id") == item.get("id")), None)
+                if record is not None and record.get("by_rebuild"):
+                    continue
                 kept.append(f"{tr(stamps.NAMES.get(product, product))} «{name}»")
             else:
                 by_hand.append(name)
@@ -7816,6 +7831,8 @@ class MainWindow(QMainWindow):
         if not ortho.exists():
             self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry['name']))
             return
+        h = self.history
+        clean = h is not None and h.unchanged()  # every edit so far recorded: showing it adds no entry
         self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
@@ -7842,6 +7859,8 @@ class MainWindow(QMainWindow):
             text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = rilievo verso chi "
                       "guarda", entry['name'])
         self.statusBar().showMessage(text, 15000)
+        if clean:  # what reading and drawing it added (identities, default layers) is no edit
+            h.rebase()
         self._dirty(True)
 
     def _draw_elevation_layers(self, entry: dict) -> None:
@@ -9236,10 +9255,14 @@ class MainWindow(QMainWindow):
         the chunk first. The plan's sets stay loaded whatever is shown."""
         if frame == self.drawings_frame:
             return
+        h = self.history
+        clean = h is not None and h.unchanged()  # every edit so far recorded
         self._sam_cancel()
         self._store_drawings()
         self.drawings_frame = frame
         self._restore_frame()
+        if clean:  # what reading the frame adds (identities, the default layer) is no edit: no entry for it
+            h.rebase()
 
     def _restore_frame(self) -> None:
         """The sets of the elevation shown (:attr:`drawings_frame`) from the chunk; empty on the plan."""

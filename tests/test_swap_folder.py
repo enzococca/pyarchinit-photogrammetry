@@ -106,3 +106,22 @@ def test_a_crash_before_deleting_the_backup_is_mended(tmp_path):
     os.replace(new, place)  # a crash between the second rename and the deletion
     files.mend_swap(place)
     assert _content(place) == "new" and not files.backup_name(place).exists()
+
+
+def test_the_first_error_is_said_when_putting_back_fails_too(tmp_path, monkeypatch, caplog):
+    place, new = _folders(tmp_path)
+    calls = []
+
+    def rename(src, dst):
+        calls.append(1)
+        if len(calls) == 1:
+            return os.replace(src, dst)
+        raise OSError("disco pieno" if len(calls) == 2 else "ancora pieno")
+
+    monkeypatch.setattr(files, "_rename_folder", rename)
+    with pytest.raises(OSError, match="disco pieno"):
+        files.swap_folder(new, place)
+    assert "ancora pieno" in caplog.text  # the failure of the way back logged
+    monkeypatch.undo()
+    files.mend_swap(place)  # the backup becomes the folder again
+    assert _content(place) == "old"

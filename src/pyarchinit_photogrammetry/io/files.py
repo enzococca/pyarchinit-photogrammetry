@@ -168,7 +168,11 @@ def swap_folder(new: str | Path, place: str | Path) -> None:
         _rename_folder(new, place)
     except BaseException:
         if moved:
-            _rename_folder(backup, place)
+            try:
+                _rename_folder(backup, place)
+            except OSError as back:  # the first error is the one said; mend_swap puts the backup back later
+                logging.getLogger("pyarchinit_photogrammetry").error(
+                    "Cartella %s non rimessa al suo posto da %s: %s", place, backup, back)
         raise
     if moved:
         try:
