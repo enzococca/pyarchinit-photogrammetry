@@ -266,3 +266,44 @@ def test_a_failed_chunk_alignment_puts_them_back(tmp_path, monkeypatch):
     assert np.array_equal(ref.transform, np.eye(4)) and not ref.meta.get("levelled")
     assert np.abs(np.array(fd.features(ref)[0]["xyz"]) - np.array(xyz)).max() < 1e-12
     assert np.allclose(ref.meta["drawings"]["free_basis"]["transform"], ref.transform)
+
+
+def test_a_drawing_made_after_a_new_alignment_does_not_move_the_older_ones(tmp_path):
+    """The probe of the 1.7.2 review: draw, re-align, draw another, fit the georeference -> the first drawing stays in
+    the coordinates of the chunk (ruling 7: a new alignment leaves it there), the second follows the fit."""
+    _doc, ch = _georeferenced(tmp_path)
+    first = [[100.0, 201.0, 10.5], [102.0, 203.0, 9.5]]
+    fd.add(ch, "line", first)
+    ch.meta["alignment_id"] = "new"  # a new alignment: another frame, the transform reset, no fit yet
+    ch.transform = geo.identity()
+    second = [[1.0, 2.0, 0.5], [3.0, 2.5, 0.2]]
+    fd.add(ch, "line", second)
+    assert all("basis" not in f for f in fd.features(ch))  # the bases are not part of the drawings given out
+    ch.update_transform()
+    assert not np.allclose(ch.transform, geo.identity())
+    got = {f["name"]: f["xyz"] for f in fd.features(ch)}
+    assert got["Linea 1"] == first
+    assert np.abs(_internal(ch.transform, got["Linea 2"]) - np.array(second)).max() < 1e-9
+    # both in the new alignment now: one basis again, and a later fit moves both
+    assert all("basis" not in f for f in ch.meta["drawings"]["free"])
+    assert ch.meta["drawings"]["free_basis"]["alignment"] == "new"
+    t_old = ch.transform.copy()
+    before = {f["name"]: f["xyz"] for f in fd.features(ch)}
+    _marker(ch, "M3", [3.0, 3.0, 0.3], [103.5, 203.2, 10.4])
+    ch.update_transform()
+    for name, xyz in before.items():
+        now = next(f["xyz"] for f in fd.features(ch) if f["name"] == name)
+        assert np.abs(_internal(ch.transform, now) - _internal(t_old, xyz)).max() < 1e-9
+
+
+def test_a_file_of_1_7_2_without_record_bases_is_read(tmp_path):
+    _doc, ch = _georeferenced(tmp_path)
+    t_old = ch.transform.copy()
+    xyz = [[100.0, 201.0, 10.5], [102.0, 203.0, 9.5]]
+    ch.meta["drawings"] = {"free": [{"id": "a", "layer": fd.DEFAULT_LAYER, "kind": "line", "name": "L", "xyz": xyz,
+                                     "attributes": {}}],
+                           "free_basis": {"alignment": ch.meta.get("alignment_id"), "transform": t_old.tolist()}}
+    _marker(ch, "M3", [3.0, 3.0, 0.3], [103.5, 203.2, 10.4])
+    ch.update_transform()
+    now = fd.features(ch)[0]["xyz"]
+    assert np.abs(_internal(ch.transform, now) - _internal(t_old, xyz)).max() < 1e-9

@@ -5281,7 +5281,7 @@ class MainWindow(QMainWindow):
             drawings["free_basis"] = dict(free["basis"])
         if not drawings:
             ch.meta.pop("drawings", None)
-        free_drawings.follow(ch)
+        free_drawings.follow(ch, adopt=False)  # those of an earlier alignment wait for the fit (keep their basis)
         draw = getattr(self, "_draw_free", None)  # the 3D and 2D views of the free drawings (since 1.7.2)
         if draw is not None:
             draw()

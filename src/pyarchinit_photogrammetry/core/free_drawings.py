@@ -8,7 +8,9 @@ of PyArchInit), kept in ``chunk.meta["drawings"]``.
 * ``"free_basis"``: ``{"alignment", "transform"}``, the alignment and the transform of the chunk the coordinates
   were last written in, so that the drawings follow a change of the transform made inside the program
   (:func:`follow`: the georeference fitted again, chunks aligned, the system of the survey, an orientation) and stay
-  as they are after a new alignment (its markers put the chunk back in the same frame).
+  as they are after a new alignment (its markers put the chunk back in the same frame). A drawing whose basis is
+  another (drawn under an earlier alignment, kept there until a fit takes it: since 1.7.3) has its own ``"basis"``
+  in the record; the records without one (all of them in the files of 1.7.2) are in the set's.
 
 Lengths and areas are computed, not stored. No Qt here. Since 1.7.2."""
 from __future__ import annotations
@@ -119,7 +121,10 @@ def features(chunk, layer: str | None = None) -> list[dict]:
     records = _drawings(chunk).get("free") or []
     valid = [isinstance(rec, dict) and _valid(rec) for rec in records]  # each record checked once
     _say_broken(chunk, records, valid)
-    return [_copied(rec) for rec, ok in zip(records, valid) if ok and (layer is None or rec["layer"] == layer)]
+    out = [_copied(rec) for rec, ok in zip(records, valid) if ok and (layer is None or rec["layer"] == layer)]
+    for rec in out:
+        rec.pop("basis", None)  # where the coordinates were written: kept in the chunk, not part of the drawing
+    return out
 
 
 def layers(chunk) -> list[dict]:
@@ -141,10 +146,58 @@ def layers(chunk) -> list[dict]:
     return out
 
 
-def _basis(chunk, transform=None) -> None:
+def _basis_of(chunk, transform=None) -> dict:
+    """The basis of the drawings written now: the alignment of ``chunk`` and ``transform`` (None: its transform)."""
     t = chunk.transform if transform is None else transform
-    _drawings(chunk, True)["free_basis"] = {"alignment": chunk.meta.get("alignment_id"),
-                                           "transform": np.asarray(t, float).tolist()}
+    return {"alignment": chunk.meta.get("alignment_id"), "transform": np.asarray(t, float).tolist()}
+
+
+def _own(rec: dict, common) -> dict:
+    """The basis of the record ``rec``: its own, else the set's ``common`` (the files of 1.7.2)."""
+    b = rec.get("basis")
+    return b if isinstance(b, dict) else (common if isinstance(common, dict) else {})
+
+
+def _same(a: dict, b: dict) -> bool:
+    return a.get("alignment") == b.get("alignment") and a.get("transform") == b.get("transform")
+
+
+def _keep_bases(drawings: dict, pairs: list, alignment) -> None:
+    """The bases of ``pairs`` (``(record, basis)``) written in ``drawings``: the set's is the one of the records of
+    ``alignment`` (else of the newest), a record keeps its own only when it is another."""
+    if not pairs:
+        return
+    common = next((b for _r, b in reversed(pairs) if b.get("alignment") == alignment), pairs[-1][1])
+    drawings["free_basis"] = {"alignment": common.get("alignment"), "transform": common.get("transform")}
+    for rec, b in pairs:
+        if _same(b, common):
+            rec.pop("basis", None)
+        else:
+            rec["basis"] = {"alignment": b.get("alignment"), "transform": b.get("transform")}
+
+
+def _pairs(drawings: dict) -> list:
+    """``(record, its basis)`` of the valid free drawings of ``drawings``."""
+    common = drawings.get("free_basis")
+    return [(rec, _own(rec, common)) for rec in drawings.get("free") or [] if isinstance(rec, dict) and _valid(rec)]
+
+
+def based(drawings: dict, alignment, transform) -> None:
+    """The free drawings of ``drawings`` (a ``chunk.meta["drawings"]``, or a copy) written now in ``transform`` of
+    ``alignment`` (e.g. all moved by a conversion of the system of the survey): those of that alignment take it as
+    their basis, those drawn under an earlier one keep theirs (a fit of the georeference takes them as they are)."""
+    t = np.asarray(transform, float).tolist()
+    pairs = [(rec, {"alignment": alignment, "transform": t} if b.get("alignment") == alignment or
+              not b.get("transform") else b) for rec, b in _pairs(drawings)]
+    _keep_bases(drawings, pairs, alignment)
+
+
+def _basis(chunk, transform=None) -> None:
+    """Every free drawing of ``chunk`` in one basis: the transform of now (or ``transform``)."""
+    drawings = _drawings(chunk, True)
+    drawings["free_basis"] = _basis_of(chunk, transform)
+    for rec in _stored(chunk):
+        rec.pop("basis", None)
 
 
 def add(chunk, kind: str, xyz, layer: str = DEFAULT_LAYER, name: str = "", attributes: dict | None = None,
@@ -174,10 +227,16 @@ def add(chunk, kind: str, xyz, layer: str = DEFAULT_LAYER, name: str = "", attri
            "attributes": dict(attributes or {}), "created": now, "modified": now}
     if colour:
         rec["colour"] = str(colour)
-    follow(chunk)  # those drawn before a change of the transform no hook saw: where they are on the model
-    _basis(chunk)
-    _drawings(chunk, True).setdefault("free", []).append(rec)
-    return copy.deepcopy(rec)
+    # those drawn before a change of the transform no hook saw: where they are on the model; those of an earlier
+    # alignment keep their basis (the fit that follows the new alignment must not move them)
+    follow(chunk, adopt=False)
+    drawings = _drawings(chunk, True)
+    pairs = _pairs(drawings) + [(rec, _basis_of(chunk))]
+    drawings.setdefault("free", []).append(rec)
+    _keep_bases(drawings, pairs, chunk.meta.get("alignment_id"))
+    out = copy.deepcopy(rec)
+    out.pop("basis", None)
+    return out
 
 
 def _find(chunk, fid: str) -> dict:
@@ -209,7 +268,9 @@ def update(chunk, fid: str, **fields) -> dict:
         rec.pop("colour", None)
     rec.update(new)
     rec["modified"] = _now()
-    return copy.deepcopy(rec)
+    out = copy.deepcopy(rec)
+    out.pop("basis", None)
+    return out
 
 
 def remove(chunk, fids) -> int:
@@ -264,8 +325,8 @@ def colour_of(chunk, rec: dict, layers_: list | None = None) -> str:
 
 def move(chunk, M, transform=None) -> int:
     """Every free drawing of ``chunk`` carried by the motion ``M`` (4 x 4, coordinates of the chunk); the basis
-    takes ``transform`` (the chunk's transform after the motion; None: the one it has now). Returns how many moved;
-    nothing written when there are none."""
+    takes ``transform`` (the chunk's transform after the motion; None: the one it has now) - those drawn under an
+    earlier alignment keep theirs. Returns how many moved; nothing written when there are none."""
     m = np.asarray(M, float).reshape(4, 4)
     moved = 0
     for rec in _stored(chunk):
@@ -275,41 +336,65 @@ def move(chunk, M, transform=None) -> int:
         rec["xyz"] = [[float(v) for v in p] for p in xyz]
         moved += 1
     if _stored(chunk):
-        _basis(chunk, transform)
+        based(_drawings(chunk, True), chunk.meta.get("alignment_id"), chunk.transform if transform is None else transform)
     return moved
 
 
-def follow(chunk) -> np.ndarray | None:
+def follow(chunk, adopt: bool = True) -> np.ndarray | None:
     """The free drawings of ``chunk`` after a change of its transform made inside the program (the georeference
     fitted again, an optimisation, the levelling of a local chunk, chunks aligned): in the alignment of their basis and
     with another transform, carried by ``M = T_now inv(T_basis)`` - they stay where they were on the model -; returns
-    ``M``. In another alignment (a new one: its own frame) they stay in the coordinates of the chunk and the basis
-    takes it (the orientation markers put the chunk back in its frame), said in the log. None when nothing moved. The
-    listeners of :func:`..engine.orient.on_transform_changed` are not told here: they hear of the motions that carry
-    the stores of the chunk (an orientation, its undo)."""
+    ``M`` (of the most drawings, when their bases differ). In another alignment (a new one: its own frame) they stay
+    in the coordinates of the chunk and, with ``adopt``, the basis takes it (the orientation markers put the chunk back
+    in its frame), said in the log; without ``adopt`` (a drawing added, an undo) they keep their basis, so that the
+    fit after the new alignment does not move them. None when nothing moved. The listeners of
+    :func:`..engine.orient.on_transform_changed` are not told here: they hear of the motions that carry the stores of
+    the chunk (an orientation, its undo)."""
     from . import stamps
 
-    if not _stored(chunk):
+    drawings = _drawings(chunk)
+    pairs = _pairs(drawings)
+    if not pairs:
         return None
-    basis = _drawings(chunk).get("free_basis") or {}
     now = np.asarray(chunk.transform, float)
-    if not basis.get("transform"):
-        _basis(chunk)
-        return None
-    if basis.get("alignment") != chunk.meta.get("alignment_id"):
-        _basis(chunk)
+    alignment = chunk.meta.get("alignment_id")
+    current = _basis_of(chunk)
+    groups: list = []  # [basis, [records]]
+    for rec, b in pairs:
+        for g in groups:
+            if _same(g[0], b):
+                g[1].append(rec)
+                break
+        else:
+            groups.append([b, [rec]])
+    out, kept, best, left = [], None, 0, False
+    for b, recs in groups:
+        new = current
+        if not b.get("transform"):
+            pass
+        elif b.get("alignment") != alignment:
+            if adopt:
+                left = True
+            else:
+                new = b
+        else:
+            try:
+                before = np.asarray(b["transform"], float).reshape(4, 4)
+            except (TypeError, ValueError):
+                before = None
+            if before is None or not np.all(np.isfinite(before)) or not np.linalg.cond(before[:3, :3]) < SINGULAR_COND:
+                pass  # no motion from a basis that is not a transform: taken again
+            elif stamps.same_transform(now, before):
+                new = b
+            else:
+                m = now @ np.linalg.inv(before)
+                for rec in recs:
+                    xyz = geometry.apply(m, np.asarray(rec["xyz"], float).reshape(-1, 3))
+                    rec["xyz"] = [[float(v) for v in p] for p in xyz]
+                if len(recs) > best:
+                    kept, best = m, len(recs)
+        out += [(rec, new) for rec in recs]
+    if left:
         log.info("Disegni 3D lasciati nelle coordinate del chunk %s: nuovo allineamento", getattr(chunk, "label", ""))
-        return None
-    try:
-        before = np.asarray(basis["transform"], float).reshape(4, 4)
-    except (TypeError, ValueError):
-        _basis(chunk)
-        return None
-    if not np.all(np.isfinite(before)) or not np.linalg.cond(before[:3, :3]) < SINGULAR_COND:
-        _basis(chunk)  # no motion from a basis that is not a transform: taken again
-        return None
-    if stamps.same_transform(now, before):
-        return None
-    m = now @ np.linalg.inv(before)
-    move(chunk, m)
-    return m
+    _keep_bases(_drawings(chunk, True), out, alignment)
+    return kept
