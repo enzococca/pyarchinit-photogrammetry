@@ -161,7 +161,7 @@ def test_versions_in_the_interface(excavation, tmp_path, monkeypatch):
         (cloud,) = versions.versions(ch, "point_cloud")
         w.show_version("point_cloud", cloud["id"])
         mv = w.model_view
-        assert mv.paths and mv.version_label.isVisibleTo(mv) and not mv.b_lasso.isVisibleTo(mv)
+        assert mv.paths and mv.version_label.isVisibleTo(mv) and mv.b_lasso.isHidden()
         mv.combo.setCurrentIndex(mv.combo.findData("cameras"))
         assert not mv.paths and not mv.version_label.isVisibleTo(mv)
     finally:

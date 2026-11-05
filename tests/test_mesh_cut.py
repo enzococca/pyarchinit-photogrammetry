@@ -259,7 +259,7 @@ def test_the_cut_button_of_the_3d_view(processed, tmp_path, monkeypatch):
     try:
         w._show_model("model")
         app.processEvents()
-        assert w.model_view.b_cut.isVisibleTo(w.model_view)
+        assert not w.model_view.b_cut.isHidden()  # shown in the group Taglia e prospetti of the rail
         w.model_view.cut_requested.emit("horizontal", [picked])
         w.runner.wait()
         app.processEvents()
