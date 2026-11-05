@@ -40,20 +40,6 @@ def _runs(mask, closed: bool = False) -> list:
     return [np.array(r) for r in runs]
 
 
-def _fill_missing(values: list, xy) -> list | None:
-    """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` from
-    their neighbours (the nearest known value beyond the ends); None when no vertex has a value."""
-    known = [i for i, v in enumerate(values) if v is not None]
-    if not known:
-        return None
-    if len(known) == len(values):
-        return [float(v) for v in values]
-    xy = np.asarray(xy, float)
-    t = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy[:, :2], axis=0).T))]) if len(xy) > 1 else np.zeros(1)
-    filled = np.interp(t, t[known], [float(values[i]) for i in known])
-    return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
-
-
 class FreeDrawingActions:
     """The free-drawing methods of the main window (it provides ``chunk``, ``settings``, ``model_view``,
     ``ortho_view``, ``log_pane``, ``_dirty``, ``_warn``, ``_info``, ``_exc``, ``_act`` and the other helpers used)."""
@@ -171,6 +157,8 @@ class FreeDrawingActions:
         ch = self.chunk
         if ch is None:
             return
+        from ..core import free_drawings
+
         xy = np.asarray(coords, float).reshape(-1, 2)
         if self._shown_raster_stale():
             self._warn(tr("Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i "
@@ -178,7 +166,7 @@ class FreeDrawingActions:
             return
         entry = self._frame_entry()
         if entry is None:
-            zs = _fill_missing(self._dem_values(xy), xy)
+            zs = free_drawings.fill_missing(self._dem_values(xy), xy)
             if zs is None:
                 self._warn(tr("Il disegno libero prende le quote dal DEM: serve il DEM sotto almeno un vertice"))
                 return
@@ -186,7 +174,7 @@ class FreeDrawingActions:
         else:
             from ..engine import elevation as E
 
-            ds = _fill_missing(self._relief_values(entry, xy), xy)
+            ds = free_drawings.fill_missing(self._relief_values(entry, xy), xy)
             if ds is None:
                 self._warn(tr("Il disegno libero prende la profondità dal rilievo del prospetto: serve il rilievo "
                               "sotto almeno un vertice"))
@@ -197,17 +185,11 @@ class FreeDrawingActions:
     def _relief_values(self, entry: dict, uv) -> list:
         """The depth of the relief of the elevation ``entry`` at each (u, v), None where it has none (one reading of
         the file for every vertex; :func:`..engine.elevation.relief_at` per point)."""
+        from ..core import free_drawings
         from ..engine import elevation as E
 
         _ortho, relief = E.elevation_paths(self.chunk, entry)
-        if not relief.exists():
-            return [None] * len(uv)
-        import rasterio
-
-        with rasterio.open(relief) as src:
-            vals = [float(v[0]) for v in src.sample([(float(u), float(v)) for u, v in uv])]
-            nodata = src.nodata
-        return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+        return free_drawings.raster_values(relief, uv)
 
     def _free_selected_in_3d(self, fid: str) -> None:
         self._free_selected = fid or ""

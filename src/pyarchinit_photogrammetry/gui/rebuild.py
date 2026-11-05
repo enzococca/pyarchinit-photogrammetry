@@ -25,12 +25,12 @@ from .undo import ScriptChanged, _move, _remove
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
-SKIPPED_KEYS = ("drawings",)
+SKIPPED_KEYS = ("drawings",)  # chunk.meta the rebuild never changes (the window stores its drawings there meanwhile)
 # where the builders write each product, relative to the chunk's folder (whatever file is active now): a file there
 # that is not the active product is written over, so it is copied too
 TARGETS = {"dem": ("dem.tif",), "orthomosaic": ("orthomosaic.tif",), "dem_precision": ("precision/dem_sigma_z.tif",),
            "coverage": ("fieldcheck/coverage.tif",), "slope": ("terrain/slope.tif",),
-           "aspect": ("terrain/aspect.tif",), "tin": ("tin/tin.npz", "tin/tin.json")}  # chunk.meta the rebuild never changes (the window stores its drawings there meanwhile)
+           "aspect": ("terrain/aspect.tif",), "tin": ("tin/tin.npz", "tin/tin.json")}
 
 
 class RebuildChanged(ScriptChanged):

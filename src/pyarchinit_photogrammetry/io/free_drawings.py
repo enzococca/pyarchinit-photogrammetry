@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import free_drawings
+from ..core.free_drawings import fill_missing
 
 log = logging.getLogger(__name__)
 
@@ -442,20 +443,6 @@ def read(path) -> list[dict]:
     raise ValueError(f"free drawings are read from GeoPackage, GeoJSON or DXF, not {ext!r}")
 
 
-def fill_missing(values: list, xy) -> list | None:
-    """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` (by its
-    length in plan; the nearest known value beyond the ends); None when no vertex has a value."""
-    known = [i for i, v in enumerate(values) if v is not None]
-    if not known:
-        return None
-    if len(known) == len(values):
-        return [float(v) for v in values]
-    xy = np.asarray(xy, float)[:, :2]
-    t = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]) if len(xy) > 1 else np.zeros(1)
-    filled = np.interp(t, t[known], [float(values[i]) for i in known])
-    return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
-
-
 class ForeignCrs(ValueError):
     """The drawings of a file cannot be put in the system of the chunk: the file says no system and the chunk is in a
     real one (``reason`` ``"file_unknown"``), or the file is in a real system and the chunk is local
@@ -573,15 +560,7 @@ class StaleDem(ValueError):
 
 
 def _dem_heights(chunk, xy) -> list:
-    path = chunk.dem_path
-    if path is None or not Path(path).exists():
-        return [None] * len(xy)
-    import rasterio
-
-    with rasterio.open(path) as src:
-        vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
-        nodata = src.nodata
-    return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+    return free_drawings.raster_values(chunk.dem_path, xy)
 
 
 def import_features(chunk, path, layer: str | None = None) -> dict:

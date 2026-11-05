@@ -9920,15 +9920,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _dem_values(self, xy) -> list:
         """Heights of the DEM at full resolution at the points ``xy`` ((n, 2) world), None where it has none."""
         ch = self.chunk
-        if ch is None or not ch.dem_path:
+        if ch is None or not ch.dem_path or not Path(ch.dem_path).exists():
             return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
         try:
-            import rasterio
+            from ..core import free_drawings
 
-            with rasterio.open(ch.dem_path) as src:
-                vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
-                nodata = src.nodata
-            return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+            return free_drawings.raster_values(ch.dem_path, xy)
         except Exception:
             return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
 
