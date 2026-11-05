@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QStringListModel, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QCompleter, QLineEdit, QMenu, QSizePolicy
+from PySide6.QtWidgets import QCompleter, QLineEdit, QMenu, QSizePolicy, QWidget
 
 from .i18n import tr
 from .icons import icon
@@ -127,3 +127,30 @@ class CommandSearch(QLineEdit):
 
 
 __all__ = ["CommandSearch", "menu_commands", "clean"]
+
+
+class ShortcutKeeper(QObject):
+    """Ctrl+K kept for the search of the commands: on Linux and Windows a focused line edit or text field takes
+    Ctrl+K (delete to the end of the line) before the window's shortcut sees it. Installed on the application,
+    it leaves the key to the shortcut in ``window`` and in its floating panes; every other key is untouched."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt's name
+        if (ev.type() == QEvent.Type.ShortcutOverride and ev.key() == Qt.Key.Key_K
+                and ev.modifiers() == Qt.KeyboardModifier.ControlModifier and isinstance(obj, QWidget)
+                and self._inside(obj)):
+            ev.ignore()
+            return True  # not accepted: the shortcut of the window runs
+        return False
+
+    def _inside(self, widget) -> bool:
+        top = widget.window()
+        while top is not None:
+            if top is self._window:
+                return True
+            parent = top.parentWidget()
+            top = parent.window() if parent is not None else None
+        return False

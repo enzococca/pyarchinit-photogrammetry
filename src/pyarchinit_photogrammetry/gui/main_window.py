@@ -1552,6 +1552,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         key = QShortcut(QKeySequence("Ctrl+K"), self)  # Cmd+K on macOS
         key.setContext(Qt.ShortcutContext.WindowShortcut)  # this window and its floating panes only
         key.activated.connect(self.command_search.start)
+        from .command_search import ShortcutKeeper
+
+        self._shortcut_keeper = ShortcutKeeper(self)  # a focused text field does not swallow Ctrl+K (Linux)
+        QApplication.instance().installEventFilter(self._shortcut_keeper)
 
     def workflow_states(self) -> dict[str, bool]:
         """Each step of the menu Flusso di lavoro: done (True) or not for the active chunk. References:
@@ -1675,6 +1679,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
+        db.addSeparator()  # the analyses of the DEM and of the model, on the old top bar before 1.7.3
+        for a in (self.a_contours, self.a_volume, self.a_slice):
+            db.addAction(a)
         db.addSeparator()
         db.addAction(self.a_layers_pane)
         with_menu(self.a_layers_pane, self.layer_menu)
@@ -2734,8 +2741,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         chunk = self.chunk
 
         def job(p):
-            p(0.0, tr("Indice {0} dalle bande di riflettanza", name))
-            ms.index_raster(chunk, name, formula)
+            ms.index_raster(chunk, name, formula, progress=p.sub(0.0, 0.15))
             if not v["gpkg"]:
                 return None
             return ms.export_zoning(chunk, name, v["gpkg"], classes=v["classes"], method=v["method"],

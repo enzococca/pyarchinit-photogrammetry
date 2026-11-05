@@ -202,6 +202,7 @@ def test_classic_drawing_bar_comes_back(window, qapp, tmp_path):
     assert w.settings.value("toolbar/classic") == "true"
     bar = w.drawing_toolbar
     assert w.draw_actions["sam"] in bar.actions() and w.a_publish_drawings in bar.actions()
+    assert all(a in bar.actions() for a in (w.a_contours, w.a_volume, w.a_slice))  # as on the old top bar
     from pyarchinit_photogrammetry.gui.main_window import MainWindow
 
     other = MainWindow(w.doc, autoconnect=False)  # the choice is kept
@@ -375,3 +376,26 @@ def test_flyout_scrolls_sideways_when_the_view_is_narrow(window, qapp):
     if fly.width() < fly.wanted_size().width():  # cut by the view: the rest reachable by scrolling
         assert fly.scroll.horizontalScrollBar().maximum() > 0
     rail.close()
+
+
+def test_command_search_shortcut_wins_over_a_text_field(window, qapp):
+    """Ctrl+K in a focused text field (a pane's filter, the console): on Linux a line edit takes it to delete to
+    the end of the line; in the window it opens the search of the commands."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication, QLineEdit
+
+    w = window
+    field = QLineEdit(w.centralWidget())
+    field.show()
+    field.setFocus()
+    _pump(qapp)
+    ev = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier, "k")
+    ev.setAccepted(False)
+    QApplication.sendEvent(field, ev)
+    assert not ev.isAccepted()  # the field does not keep the key: the shortcut of the window runs
+    other = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier, "a")
+    other.setAccepted(False)
+    QApplication.sendEvent(field, other)
+    assert other.isAccepted()  # the other keys of the field are untouched (Ctrl+A selects all)
+    field.deleteLater()
