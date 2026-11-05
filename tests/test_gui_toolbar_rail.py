@@ -202,7 +202,8 @@ def test_classic_drawing_bar_comes_back(window, qapp, tmp_path):
     assert w.settings.value("toolbar/classic") == "true"
     bar = w.drawing_toolbar
     assert w.draw_actions["sam"] in bar.actions() and w.a_publish_drawings in bar.actions()
-    assert all(a in bar.actions() for a in (w.a_contours, w.a_volume, w.a_slice))  # as on the old top bar
+    assert w.a_analysis in bar.actions()  # the analyses of the old top bar, in one button's menu
+    assert w.analysis_menu.actions() == [w.a_contours, w.a_volume, w.a_slice]
     from pyarchinit_photogrammetry.gui.main_window import MainWindow
 
     other = MainWindow(w.doc, autoconnect=False)  # the choice is kept

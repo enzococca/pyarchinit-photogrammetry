@@ -1682,9 +1682,18 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
-        db.addSeparator()  # the analyses of the DEM and of the model, on the old top bar before 1.7.3
+        # the analyses of the DEM and of the model (on the old top bar before 1.7.3): one button with their menu, so
+        # that the bar keeps its texts on a wide screen also with the fonts of Windows
+        self.analysis_menu = QMenu(tr("Analisi"), self)
         for a in (self.a_contours, self.a_volume, self.a_slice):
-            db.addAction(a)
+            self.analysis_menu.addAction(a)
+        self.a_analysis = QAction(icon("contours"), tr("Analisi"), self)
+        self.a_analysis.setToolTip(tr("Curve di livello, volume scavo / riporto, pianta a quota"))
+        self.a_analysis.setMenu(self.analysis_menu)
+        db.addAction(self.a_analysis)
+        b = db.widgetForAction(self.a_analysis)
+        if b is not None:
+            b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         db.addSeparator()
         db.addAction(self.a_layers_pane)
         with_menu(self.a_layers_pane, self.layer_menu)
