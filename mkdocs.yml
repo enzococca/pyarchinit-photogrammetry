@@ -166,6 +166,7 @@ nav:
       - Architectural elements: plugins/architecture.md
       - Masonry: plugins/masonry.md
       - Conservation: plugins/conservation.md
+      - PhotoCAD: plugins/photocad.md
   - Guide:
       - Desktop interface:
           - gui/index.md
