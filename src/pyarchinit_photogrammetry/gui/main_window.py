@@ -636,6 +636,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.free_finished.connect(self._free_from_2d)
         self.ortho_view.feature_double_clicked.connect(self._feature_double_clicked)
         self.ortho_view.raster_loaded.connect(self._draw_free_2d)
+        self.ortho_view.raster_loaded.connect(self._raster_loaded)  # also a raster or a frame shown by a plugin
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -970,6 +971,15 @@ class MainWindow(QMainWindow):
             tip=tr("DEM, ortofoto, prospetti, rilievi e TIN fatti prima dell'ultimo cambio del sistema del chunk, "
                    "rifatti in ordine con i parametri con cui erano stati costruiti"))
         self.a_rebuild_stale.setEnabled(False)
+        self.a_rebuild_keep = QAction(tr("Ricostruendo, conserva DEM e ortofoto attivi come versioni"), self,
+                                      checkable=True)
+        self.a_rebuild_keep.setToolTip(tr("Come «Conservala per confrontarla» nei dialoghi di costruzione: il DEM e "
+                                          "l'ortofoto rifatti da Ricostruisci i prodotti da rifare lasciano quelli "
+                                          "di prima fra le versioni"))
+        self.a_rebuild_keep.setChecked(self.settings.value("rebuild_keep_versions", "true") in ("true", True, 1, "1"))
+        self.a_rebuild_keep.toggled.connect(
+            lambda on: self.settings.setValue("rebuild_keep_versions", "true" if on else "false"))
+        m.addAction(self.a_rebuild_keep)
         self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
         self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
                   tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
@@ -3921,6 +3931,30 @@ class MainWindow(QMainWindow):
             log.warning("Stato del raster mostrato non letto: %s", exc)
         return False
 
+    def _raster_loaded(self) -> None:
+        """The 2D view shows another raster, an empty frame or nothing - by the window or by a plugin
+        (``show_frame``, ``RasterView.load``): the version or the elevation the window said it showed is forgotten
+        when the file shown is not its own, and the notice is judged again."""
+        rv = getattr(self, "_raster_version", None)
+        if isinstance(rv, tuple) and rv and self.chunk is not None:
+            path = self.ortho_view.path
+            own = None
+            try:
+                if rv[0] == "elevation":
+                    from ..engine import elevation as E
+
+                    entry = next((e for e in self.chunk.meta.get("elevations") or [] if e.get("id") == rv[1]), None)
+                    own = E.elevation_paths(self.chunk, entry)[0] if entry is not None else None
+                elif len(rv) == 2:
+                    from ..core import versions
+
+                    own = versions.version_file(self.chunk, rv[0], rv[1])
+            except (KeyError, ValueError, OSError):
+                own = None
+            if own is None or path is None or Path(path).resolve() != Path(own).resolve():
+                self._raster_version = None
+        self._update_stale_banner()
+
     def _update_stale_banner(self) -> None:
         """The notice over the 2D view when the raster shown is to be built again, none otherwise."""
         self.ortho_view.set_banner(tr("Questo raster è stato fatto prima dell'ultimo cambio del sistema del chunk: va "
@@ -3936,13 +3970,43 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - the menu never stops a refresh
             action.setEnabled(False)
 
+    def _rebuild_keep(self) -> bool:
+        """The DEM and the orthomosaic that the rebuild replaces stay among the versions (the setting of
+        *Ricostruendo, conserva DEM e ortofoto attivi come versioni*, on as the build dialogs' default)."""
+        action = getattr(self, "a_rebuild_keep", None)
+        return True if action is None else action.isChecked()
+
     def _rebuild_plan(self, ch, items=None) -> tuple[list, list, list]:
         """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
         by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
         each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
         calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
-        kept versions made in another system."""
+        kept versions made in another system. The DEM and the orthomosaic replaced are kept as versions first when
+        :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the step
+        fails)."""
+        from ..core import versions
+        from .panels import product_name
+
         items = list(stamps.stale_products(ch) if items is None else items)
+        keep = self._rebuild_keep()
+
+        def versioned(product, fn):
+            """``fn`` keeping first the active ``product`` among the versions (when asked): it comes back when
+            ``fn`` fails."""
+            if not keep:
+                return fn
+
+            def step(p):
+                kept = versions.keep_active(ch, product, move=True)
+                try:
+                    result = fn(p)
+                except BaseException:
+                    if kept is not None:
+                        versions.restore(ch, product, kept)
+                    raise
+                versions.set_active_name(ch, product, None)
+                return result
+            return step
 
         def on_dem(name, fn):
             """A step made on the DEM: left by hand when the DEM is still stale at its turn (its rebuild failed or
@@ -3970,7 +4034,7 @@ class MainWindow(QMainWindow):
                         continue
                     steps.append((tr("TIN"), lambda p, ch=ch: self._rebuild_tin(ch, p)))
                     done_tin = True
-                    steps.append((name, lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p)))
+                    steps.append((name, versioned("dem", lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p))))
                 elif product == "tin":
                     if not done_tin:
                         fn = lambda p, ch=ch: self._rebuild_tin(ch, p)  # noqa: E731
@@ -3978,9 +4042,12 @@ class MainWindow(QMainWindow):
                         steps.append((name, on_dem(name, fn) if from_dem else fn))
                 elif product in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect"):
                     fn = lambda p, ch=ch, product=product: self._rebuild_product(ch, product, p)  # noqa: E731
+                    if product in versions.PRODUCTS:
+                        fn = versioned(product, fn)
+                    # the orthomosaic is painted on the DEM on every surface but the model (the DEM, the ground...)
                     from_dem = product in ("dem_precision", "coverage", "slope", "aspect") or (
                         product == "orthomosaic" and ((ch.meta.get("orthomosaic") or {}).get("surface") or "dem")
-                        == "dem")
+                        != "model")
                     steps.append((name, on_dem(name, fn) if from_dem else fn))
                 else:
                     by_hand.append(name)
@@ -3989,6 +4056,7 @@ class MainWindow(QMainWindow):
                 if entry is not None:
                     steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
             elif kind == "relief":
+                name = product_name(product)  # the names of the relief menu, not the codes of the methods
                 steps.append((name, on_dem(name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p))))
             elif kind == "version":
                 kept.append(f"{tr(stamps.NAMES.get(product, product))} «{name}»")
@@ -4043,8 +4111,9 @@ class MainWindow(QMainWindow):
         source = saved.get("source") or "dem"
         if source == "dem" and stamps.is_stale(ch, "dem"):  # its DEM not rebuilt (by hand, or it failed)
             raise _LeftByHand(tr("TIN"))
+        used = saved.get("n_lines", saved.get("n_breaklines"))  # break, soft and boundary lines (n_lines: 1.7.3)
         lines = breaklines.for_tin([dict(r) for r in ch.meta.get("drawings", {}).get("lines") or []]) \
-            if saved.get("n_breaklines") else None
+            if used else None
         max_error = saved.get("max_error") if source == "dem" else None
         classes = saved.get("classes")
         return T.build_tin(ch, source=source, max_error=max_error, breaklines=lines,
@@ -4098,21 +4167,26 @@ class MainWindow(QMainWindow):
         kind = old.get("kind") or "elevation"
         depth = old.get("depth")
         depth = (float(depth[0]), float(depth[1])) if depth else None
-        new = E.build_elevation(ch, E.frame_from_dict(old["frame"]), resolution=old.get("resolution"),
+        from ..io import files
+
+        frame = E.frame_from_dict(old["frame"])
+        scale = old.get("scale") or "cylinder"
+        wall = scale == "wall" and getattr(frame, "u_map", None) is not None
+        new = E.build_elevation(ch, frame, resolution=old.get("resolution"),
                                 name=old.get("name"), depth=depth, bounds=E.bounds_of(ch, old), kind=kind,
-                                scale=old.get("scale") or "cylinder", blending=settings["blending"],
+                                scale=scale, u_map=frame.u_map if wall else None,  # the grid on the wall kept
+                                blending=settings["blending"],
                                 colour_correction=settings["colour_correction"], ghosting=settings["ghosting"],
                                 fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p)
         nid = new["id"]
         root = ch.data_dir / "elevations"
         entries = ch.meta["elevations"]
         entries[:] = [e for e in entries if e is not new]
-        aside = root / f"{eid}.old"
-        shutil.rmtree(aside, ignore_errors=True)
-        if (root / eid).exists():
-            (root / eid).rename(aside)
-        (root / nid).rename(root / eid)
-        shutil.rmtree(aside, ignore_errors=True)
+        try:  # crash-safe: the old folder aside, the new one in place, then the old one deleted
+            files.swap_folder(root / nid, root / eid)
+        except BaseException:
+            shutil.rmtree(root / nid, ignore_errors=True)  # the old elevation stays as it was
+            raise
         for key in ("orthophoto", "relief", "profile"):
             if new.get(key):
                 parts = list(Path(new[key]).parts)
@@ -4133,10 +4207,14 @@ class MainWindow(QMainWindow):
         built again in that order, with the parameters each was built with, in one task. A product that fails is
         logged and the next one goes on. The kept versions and the rasters that need their own inputs (raster
         calculator, multispectral, thermal, satellite) are listed, to be made by hand. Not *Elabora tutto*: that aligns
-        the photos again. False when nothing was started."""
+        the photos again. The whole rebuild is ONE step of *Modifica > Annulla* (:class:`.rebuild.RebuildStep`: the
+        files it writes copied first), also when it is cancelled halfway. False when nothing was started."""
+        from .rebuild import RebuildStep, chunk_files
+
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             return False
+        items = list(stamps.stale_products(ch) if items is None else items)
         steps, by_hand, kept = self._rebuild_plan(ch, items)
         if not steps:
             text = tr("Nessun prodotto da rifare")
@@ -4149,30 +4227,48 @@ class MainWindow(QMainWindow):
         shown = (self.ortho_view.kind, getattr(self, "_raster_version", None)) \
             if self.ortho_view.tr is not None else None
         self._store_drawings()
+        undo = None
+        if self.history is not None and ch is self.chunk:
+            try:
+                undo = RebuildStep(self, ch, chunk_files(ch, items))
+            except OSError as exc:  # no room for the copies: the rebuild goes on, not undoable
+                log.warning("Ricostruzione: copie per Annulla non fatte (%s)", exc)
 
         def job(progress):
             rebuilt, failed = [], []
             n = len(steps)
+            stopped = False
             for i, (name, fn) in enumerate(steps):
-                progress(i / n, tr("Ricostruzione: {0} ({1} di {2})", name, i + 1, n))
                 try:
+                    progress(i / n, tr("Ricostruzione: {0} ({1} di {2})", name, i + 1, n))
                     fn(progress.sub(i / n, 1 / n))
                     rebuilt.append(name)
-                except Cancelled:
-                    raise
+                except Cancelled:  # what was rebuilt stays, and is undone with the rest
+                    stopped = True
+                    break
                 except _LeftByHand as left:  # its input is still in the old system: never built on it
                     by_hand.append(str(left))
                 except Exception as exc:  # noqa: BLE001 - one product failing does not stop the others
                     log.error("Ricostruzione di %s non riuscita: %s\n%s", name, exc, traceback.format_exc())
                     failed.append(f"{name} ({exc})")
-            progress(1.0, tr("Ricostruzione finita"))
-            return rebuilt, failed
+            if not stopped:
+                progress(1.0, tr("Ricostruzione finita"))
+            return rebuilt, failed, stopped
 
         def done(result):
-            rebuilt, failed = result
+            rebuilt, failed, stopped = result
+            if undo is not None and self.history is not None:
+                if undo.finish():
+                    self.history.push(tr("Ricostruisci i prodotti da rifare"), undo, document=False)
+                else:
+                    undo.drop()
             if ch is self.chunk:
                 self._reshow(shown)
             lines = []
+            if stopped:
+                lines.append(tr("Ricostruzione interrotta: quello che è stato rifatto resta (Modifica > Annulla lo "
+                                "riporta indietro)"))
+                self.log_pane.warning(lines[-1])
             if rebuilt:
                 lines.append(tr("Rifatti: {0}", ", ".join(rebuilt)))
                 self.log_pane.info(lines[-1])

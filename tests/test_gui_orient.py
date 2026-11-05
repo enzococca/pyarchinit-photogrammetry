@@ -396,18 +396,17 @@ def _apply_orientation(win, qapp):
 
 
 def test_undo_refused_after_the_stale_products_are_rebuilt(win, qapp):
-    """Orient, rebuild the DEM in the new frame, Annulla: the step is refused with a message and leaves the history;
-    the chunk stays as it is (the rebuilt DEM current in the oriented frame, not made current in the old one)."""
+    """Orient, rebuild the DEM in the new frame outside *Modifica > Annulla* (the DEM step of the window), Annulla:
+    the step is refused with a message and leaves the history; the chunk stays as it is (the rebuilt DEM current in
+    the oriented frame, not made current in the old one)."""
     from pyarchinit_photogrammetry.core import stamps
 
     ch = win.chunk
     _apply_orientation(win, qapp)
     assert stamps.is_stale(ch, "dem")
     oriented = np.array(ch.transform, float)
-    items = [x for x in stamps.stale_products(ch) if x["product"] == "dem"]
-    assert win.rebuild_stale(ch, items)
-    win.runner.wait()
-    qapp.processEvents()
+    win._rebuild_product(ch, "dem", lambda *a, **k: None)
+    win.history.rebase()
     assert not stamps.is_stale(ch, "dem")
     dem = ch.product_path("dem").read_bytes()
     markers = [m.to_dict() for m in ch.markers]
@@ -419,6 +418,30 @@ def test_undo_refused_after_the_stale_products_are_rebuilt(win, qapp):
     assert [m.to_dict() for m in ch.markers] == markers
     assert not win.history.can_undo() or win.history.undo_text() != "Orienta il sistema locale"
     assert "orientamento non si può più annullare" in win.statusBar().currentMessage()
+
+
+def test_rebuild_undone_then_the_orientation(win, qapp):
+    """*Ricostruisci i prodotti da rifare* is a step of its own: Annulla takes the rebuilt DEM back (stale again),
+    then the orientation can be undone too."""
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    before = np.array(ch.transform, float)
+    _apply_orientation(win, qapp)
+    items = [x for x in stamps.stale_products(ch) if x["product"] == "dem"]
+    assert win.rebuild_stale(ch, items)
+    win.runner.wait()
+    qapp.processEvents()
+    assert not stamps.is_stale(ch, "dem")
+    assert win.history.undo_text() == "Ricostruisci i prodotti da rifare"
+    win.undo()
+    qapp.processEvents()
+    assert stamps.is_stale(ch, "dem")
+    assert win.history.undo_text() == "Orienta il sistema locale"
+    win.undo()
+    qapp.processEvents()
+    assert np.allclose(np.asarray(ch.transform, float), before, atol=1e-9)
+    assert not stamps.is_stale(ch, "dem")
 
 
 def test_undo_refused_after_the_georeference_is_fitted_again(win, qapp):

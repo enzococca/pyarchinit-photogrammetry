@@ -2997,7 +2997,10 @@
   "Questo prodotto non si esporta da qui.": "This product is not exported from here.",
   "Esporta le anomalie termiche": "Export the thermal anomalies",
   "GeoTIFF in gradi (32 bit) (*.tif);;CSV (*.csv)": "GeoTIFF in degrees (32 bit) (*.tif);;CSV (*.csv)",
-  "Anomalie termiche esportate": "Thermal anomalies exported"
+  "Anomalie termiche esportate": "Thermal anomalies exported",
+  "Ricostruendo, conserva DEM e ortofoto attivi come versioni": "When rebuilding, keep the active DEM and orthomosaic as versions",
+  "Come «Conservala per confrontarla» nei dialoghi di costruzione: il DEM e l'ortofoto rifatti da Ricostruisci i prodotti da rifare lasciano quelli di prima fra le versioni": "As «Keep it to compare it» in the build dialogs: the DEM and the orthomosaic rebuilt by Rebuild the stale products leave the previous ones among the versions",
+  "Ricostruzione interrotta: quello che è stato rifatto resta (Modifica > Annulla lo riporta indietro)": "Rebuild stopped: what was rebuilt stays (Edit > Undo takes it back)"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
