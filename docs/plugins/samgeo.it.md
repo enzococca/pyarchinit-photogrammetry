@@ -224,8 +224,8 @@ quello che trova.
   modelli guardano, cioè il tassello di 1024 px ridotto a 800 (Grounding DINO) o 1008 (SAM 3). Indica la
   dimensione degli oggetti e la risoluzione la segue: pietre di 15 cm a 0,5 cm/px, non a 1 cm/px. Dopo
   una ricerca il log dice quando le proposte erano piccole o i modelli poco sicuri, e cosa cambiare.
-* **Le pietre una per una** sono compito dello strumento Pietre del programma (*Pietre* nella barra del
-  disegno: SAM su ogni oggetto della vista, senza testo); Samgeo trova le cose per nome.
+* **Le pietre una per una** sono compito dello strumento Pietre del programma (*Pietre* nel menu di SAM
+  della colonna degli strumenti: SAM su ogni oggetto della vista, senza testo); Samgeo trova le cose per nome.
 * **Oggetti, non terreni.** I modelli trovano oggetti - pietre, mattoni, tegole, alberi, persone,
   attrezzi - molto meglio del contrasto tra due terreni: quello sarà compito del plugin geoai, che
   impara dai tuoi disegni.

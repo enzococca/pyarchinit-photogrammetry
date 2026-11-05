@@ -23,7 +23,7 @@ anelli**:
 * **Avvicinare**: la rotella avvicina **verso il cursore** - il punto sotto il mouse si avvicina e resta sotto il
   mouse. **Maiusc + rotella** si muove dritto lungo la linea di vista, senza spostare il centro di rotazione.
 * **Centro di rotazione**: un **doppio clic** sul modello o sulla nuvola mette il pivot sulla superficie in quel
-  punto (come si piazza un marker); la vista non salta. **Centra la vista sul punto** (nella barra) porta poi il
+  punto (come si piazza un marker); la vista non salta. **Centra la vista sul punto** (gruppo *Vista* della colonna) porta poi il
   pivot al centro della vista, alla stessa distanza.
 * *Vista iniziale* mostra di nuovo tutta la scena, *Dall'alto* guarda dritto verso il basso.
 
