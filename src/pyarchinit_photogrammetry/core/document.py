@@ -112,21 +112,26 @@ class Document:
         self.removals = []
 
     def mend_swaps(self) -> int:
-        """The folders of elevations a crash left halfway through their swap (``<id>.old`` beside them, see
+        """The folders of elevations a crash left halfway through their swap (``<id>.old`` or ``<id>.old<n>`` beside them, see
         :func:`..io.files.swap_folder`) mended: the old one back when the new one never came, the backup deleted
         when it did. Returns how many."""
-        from ..io.files import backup_name, mend_swap
+        import re
+
+        from ..io.files import BACKUPS, mend_swap
 
         n = 0
         for c in self.chunks:
             folder = self.files_dir / f"chunk_{c.key}" / "elevations"
             if not folder.is_dir():
                 continue
-            for old in sorted(folder.glob("*.old")):
-                place = old.with_name(old.name[:-len(".old")])
-                if old.is_dir() and backup_name(place) == old:
-                    mend_swap(place)
-                    n += 1
+            places = set()
+            for old in folder.glob("*.old*"):
+                m = re.fullmatch(r"(.+)\.old(\d?)", old.name)
+                if old.is_dir() and m and (not m.group(2) or 0 < int(m.group(2)) < BACKUPS):
+                    places.add(old.with_name(m.group(1)))
+            for place in sorted(places):
+                mend_swap(place)
+                n += 1
         return n
 
     def recover_removed(self) -> dict:

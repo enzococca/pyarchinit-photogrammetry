@@ -125,3 +125,42 @@ def test_the_first_error_is_said_when_putting_back_fails_too(tmp_path, monkeypat
     monkeypatch.undo()
     files.mend_swap(place)  # the backup becomes the folder again
     assert _content(place) == "old"
+
+
+def test_a_backup_that_cannot_be_deleted_does_not_stop_the_next_swap(tmp_path, monkeypatch, caplog):
+    """A file of the old folder held open (Windows): the swap is made, the backup stays; the next swap neither
+    fails on it nor loses it - it takes another name, and a later swap deletes both."""
+    place, new = _folders(tmp_path)
+    real = files.remove_tree
+
+    def held(path, *a, **k):
+        raise OSError("file in uso")
+
+    monkeypatch.setattr(files, "remove_tree", held)
+    files.swap_folder(new, place)
+    other = tmp_path / "ancora"
+    other.mkdir()
+    (other / "elevation.tif").write_text("again")
+    files.swap_folder(other, place)  # the first backup still held: no failure
+    assert _content(place) == "again"
+    assert files.backup_name(place).exists() and files.backup_name(place, 1).exists()
+    assert "file in uso" in caplog.text
+    monkeypatch.setattr(files, "remove_tree", real)
+    third = tmp_path / "terza"
+    third.mkdir()
+    (third / "elevation.tif").write_text("third")
+    files.swap_folder(third, place)
+    assert _content(place) == "third"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["el01"]
+
+
+def test_a_crash_with_a_numbered_backup_is_mended(tmp_path):
+    place, new = _folders(tmp_path)
+    stale = files.backup_name(place)
+    stale.mkdir()
+    (stale / "elevation.tif").write_text("stale")
+    os.utime(stale, (1, 1))  # older than the backup of the crash
+    os.replace(place, files.backup_name(place, 1))  # a crash after moving the old folder aside
+    files.mend_swap(place)
+    assert _content(place) == "old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["el01", "nuovo"]
