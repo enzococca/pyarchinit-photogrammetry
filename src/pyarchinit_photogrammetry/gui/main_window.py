@@ -2594,9 +2594,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         name = v["index"] if not v["formula"].strip() else "Indice"
         formula = v["formula"].strip() or None
 
+        chunk = self.chunk
+
         def job(p):
-            ms.index_raster(self.chunk, name, formula)
-            return ms.export_zoning(self.chunk, name, v["gpkg"], classes=v["classes"], method=v["method"]) if v["gpkg"] else None
+            p(0.0, tr("Indice {0} dalle bande di riflettanza", name))
+            ms.index_raster(chunk, name, formula)
+            if not v["gpkg"]:
+                return None
+            return ms.export_zoning(chunk, name, v["gpkg"], classes=v["classes"], method=v["method"],
+                                    progress=p.sub(0.15, 0.85))
 
         self.run_task("Indice e zonizzazione", job, lambda s: self._info(tr("Indice e zonizzazione"), tr(
             "{0}: {1} poligoni, soglie {2}", name, s["polygons"], ", ".join(str(b) for b in s["breaks"])) if s else name))

@@ -2079,32 +2079,63 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
     return cls, breaks
 
 
-def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list[float]) -> list[tuple]:
+def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list[float],
+                    progress: Progress | None = None) -> list[tuple]:
     """Polygons of the classes (``(shapely geometry, attributes)``): class, its range, the mean
-    and the area of the polygon."""
+    and the area of the polygon.
+
+    Every patch (4-connected cells of one class) is labelled once and the means of all of them are
+    taken together; the polygons are traced on the raster of the labels, so a patch is one polygon
+    with its holes. (A raster per polygon made a large index take hours.)"""
     from rasterio.features import shapes
+    from scipy import ndimage
     from shapely.geometry import shape as to_shape
 
+    progress = as_progress(progress)
+    progress(0.0, "Zones: labelling the patches")
+    labels = np.zeros(cls.shape, np.int32)
+    count = 0
+    for k in np.unique(cls[cls > 0]):
+        lab, n = ndimage.label(cls == k)  # 4-connected, as the polygons
+        inside = lab > 0
+        labels[inside] = lab[inside] + count
+        count += n
+        del lab, inside
+    if count == 0:
+        progress(1.0, "Zones: 0 polygons")
+        return []
+    finite = np.isfinite(values)
+    flat = labels.ravel()
+    sums = np.bincount(flat, weights=np.where(finite, values, 0).ravel().astype(np.float64), minlength=count + 1)
+    cells = np.bincount(flat, weights=finite.ravel(), minlength=count + 1)
+    class_of = np.zeros(count + 1, np.int32)
+    class_of[flat] = cls.ravel()
+    del flat
+    lo_all = float(np.nanmin(values)) if finite.any() else 0.0
+    hi_all = float(np.nanmax(values)) if finite.any() else 0.0
+    del finite
+    progress(0.2, f"Zones: tracing {count} polygons")
     out = []
-    mask = cls > 0
-    for geom, value in shapes(cls.astype(np.int32), mask=mask, transform=transform, connectivity=4):
-        k = int(value)
+    step = max(1, count // 100)
+    for geom, value in shapes(labels, mask=labels > 0, transform=transform, connectivity=4):
+        i = int(value)
+        k = int(class_of[i])
         poly = to_shape(geom)
         if poly.is_empty:
             continue
-        from rasterio.features import rasterize
-
-        inside = rasterize([(geom, 1)], out_shape=cls.shape, transform=transform, fill=0, dtype=np.uint8) == 1
-        vals = values[inside & np.isfinite(values)]
-        low = breaks[k - 2] if k >= 2 else float(np.nanmin(values))
-        high = breaks[k - 1] if k - 1 < len(breaks) else float(np.nanmax(values))
-        out.append((poly, {"classe": k, "da": round(low, 4), "a": round(high, 4),
-                           "media": round(float(vals.mean()), 4) if vals.size else None, "area_m2": round(poly.area, 2)}))
+        low = breaks[k - 2] if k >= 2 else lo_all
+        high = breaks[k - 1] if k - 1 < len(breaks) else hi_all
+        mean = round(float(sums[i] / cells[i]), 4) if cells[i] else None
+        out.append((poly, {"classe": k, "da": round(low, 4), "a": round(high, 4), "media": mean,
+                           "area_m2": round(poly.area, 2)}))
+        if len(out) % step == 0:
+            progress(0.2 + 0.8 * min(len(out) / count, 1.0), f"Zones: {len(out)} of {count} polygons")
+    progress(1.0, f"Zones: {len(out)} polygons")
     return out
 
 
 def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str = "quantiles",
-                  min_cells: int = 20) -> dict:
+                  min_cells: int = 20, progress: Progress | None = None) -> dict:
     """The zoning of the index ``name`` as polygons in a GeoPackage (``path``, layer ``zone``
     with class, range, mean and area) and as a class raster beside the index. Returns a
     summary (breaks, polygons, area per class)."""
@@ -2116,11 +2147,15 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
     info = (ms.get("indices") or {}).get(name)
     if not info:
         raise RuntimeError(f"build the index {name} first")
+    progress = as_progress(progress)
+    progress(0.0, f"Zoning of {name}: reading the index")
     with rasterio.open(chunk.data_dir / info["file"]) as src:
         values = src.read(1)
         transform, crs = src.transform, src.crs
+    progress(0.05, f"Zoning of {name}: {classes} classes ({method})")
     cls, breaks = zoning(values, classes, method, min_cells)
-    polys = zoning_polygons(cls, values, transform, breaks)
+    polys = zoning_polygons(cls, values, transform, breaks, progress=progress.sub(0.3, 0.6))
+    progress(0.9, f"Zoning of {name}: writing {len(polys)} polygons")
     columns = {"classe": "INTEGER", "da": "REAL", "a": "REAL", "media": "REAL", "area_m2": "REAL"}
     gpkg.write_table(path, "zone", "POLYGON", columns, polys, chunk.crs if chunk.crs != "LOCAL" else None, f"zone {name}")
     with rasterio.open(chunk.data_dir / "multispectral" / f"{name}_zone.tif", "w", driver="GTiff", height=cls.shape[0],
