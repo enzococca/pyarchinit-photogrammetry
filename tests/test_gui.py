@@ -196,11 +196,14 @@ def test_window_fits_a_laptop_screen(window, qapp):
         hint = w.minimumSizeHint()
         assert hint.width() <= 900 and hint.height() <= 640, (page, hint)
     styles = {}
+    w.a_classic_bar.setChecked(True)  # the classic drawing bar under the top bar (Vista > Barre)
     for width in (2200, 1280):
         w.resize(width, 720)
         for _ in range(3):
             qapp.processEvents()
         for tb in w.findChildren(QToolBar):
+            if tb.isHidden():
+                continue
             buttons = [b for b in (tb.widgetForAction(a) for a in tb.actions()) if isinstance(b, QToolButton)]
             assert all(b.isVisible() for b in buttons), (width, tb.objectName())  # none behind >>
             assert tb.sizeHint().width() <= width
@@ -212,6 +215,8 @@ def test_window_fits_a_laptop_screen(window, qapp):
         (other + sum(f for f, _ in widths), other, widths)  # texts everywhere on a wide screen
     pan = styles[1280, "drawing_toolbar"][0]
     assert pan != icon_only  # the first drawing tools keep their names
+    assert icon_only not in styles[1280, "workflow_toolbar"]  # the slim top bar keeps its texts on a laptop
+    w.a_classic_bar.setChecked(False)
 
 
 def test_flow_layout_wraps_and_makes_room(qapp):

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
                                QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
                                QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
@@ -415,6 +415,8 @@ class _StatusBar(QStatusBar):
     def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt name
         super().showMessage(translate(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
+SEARCH_WIDTH = (150, 300)  # the search of the commands in the top bar: narrowest and widest, pixels
+
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
              "area": "Area: tutte le unità nel riquadro",
              "stones": "Pietre: ogni pietra nel riquadro (disegno pietra per pietra)"}
@@ -1420,6 +1422,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
+        bars = m.addMenu(icon("panes"), tr("Barre"))
+        self.a_classic_bar = QAction(tr("Barra di disegno classica"), self, checkable=True)
+        self.a_classic_bar.setStatusTip(tr("La barra orizzontale degli strumenti di disegno al posto della barra "
+                                           "laterale della vista 2D"))
+        self.a_classic_bar.setChecked(self.settings.value("toolbar/classic", "false") in ("true", True))
+        bars.addAction(self.a_classic_bar)
         m.addSeparator()
         tmenu = m.addMenu(icon("theme"), tr("Tema"))
         tgroup = QActionGroup(self)
@@ -1460,56 +1468,123 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         m.addAction(self.a_plugins_auto_update)
         m.addSeparator()
         self._act(m, tr("Informazioni"), self.about, icon_name="about")
-        # ------------------------------------------------------------ toolbar
-        tb = QToolBar("Flusso di lavoro")
+        # ------------------------------------------------------------ the bars and the rail of the 2D view
+        self._build_top_bar()
+        self._build_drawing_menus()
+        self._build_drawing_toolbar()
+        self._build_raster_rail()
+        self.set_classic_bar(self.a_classic_bar.isChecked(), save=False)
+        self.a_classic_bar.toggled.connect(self.set_classic_bar)
+        self._refresh_recent()
+        self._apply_draw_options()
+
+    # ---------------------------------------------------------------- top bar, drawing bar, rail of the 2D view
+    #: the steps of the menu Flusso di lavoro of the top bar: key, text, slot name, tooltip
+    WORKFLOW_STEPS = (("photos", "Aggiungi foto", "add_photos", "Aggiungi foto al chunk"),
+                      ("markers", "Marker", "detect_markers", "Rileva i target codificati"),
+                      ("align", "Allinea", "align_photos", "Allinea le foto (SfM)"),
+                      ("reference", "Riferimenti", "import_reference", "Importa le coordinate dei marker"),
+                      ("dense", "Nuvola densa", "build_dense", "Depth map e nuvola densa"),
+                      ("model", "Modello", "build_model", "Mesh 3D"),
+                      ("texture", "Texture", "build_texture", "Texture del modello"),
+                      ("dem", "DEM", "build_dem", "Modello digitale di elevazione"),
+                      ("ortho", "Ortofoto", "build_ortho", "Ortofoto (true ortho)"))
+
+    def _build_top_bar(self) -> None:
+        """One slim bar above the views: Apri, Salva | Flusso di lavoro (a menu of the steps with the
+        state of the active chunk) | Elabora tutto | PyArchInit | the search of the commands."""
+        from .command_search import CommandSearch
+
+        tb = QToolBar(tr("Flusso di lavoro"))
         tb.setObjectName("workflow_toolbar")
         tb.setMovable(False)
-        tb.setIconSize(QSize(26, 26))
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        tb.setIconSize(QSize(20, 20))
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
-        self._toolbar_styles = {tb: Qt.ToolButtonStyle.ToolButtonTextUnderIcon}
+        self.workflow_toolbar = tb
+        self._toolbar_styles = {tb: Qt.ToolButtonStyle.ToolButtonTextBesideIcon}
         self._toolbar_sizes: dict = {}  # toolbar -> (width besides the buttons, [(with text, icon only)])
-        groups = [
-            [("open", "Apri", lambda: self.open_document(), "Apri un progetto", False),
-             ("save", "Salva", self.save_document, "Salva il progetto", False)],
-            [("photos", "Foto", self.add_photos, "Aggiungi foto al chunk", True),
-             ("markers", "Marker", self.detect_markers, "Rileva i target codificati", True),
-             ("align", "Allinea", self.align_photos, "Allinea le foto (SfM)", True),
-             ("reference", "Riferimenti", self.import_reference, "Importa le coordinate dei marker", True)],
-            [("dense", "Nuvola densa", self.build_dense, "Depth map e nuvola densa", True),
-             ("model", "Modello", self.build_model, "Mesh 3D", True),
-             ("texture", "Texture", self.build_texture, "Texture del modello", True),
-             ("dem", "DEM", self.build_dem, "Modello digitale di elevazione", True),
-             ("ortho", "Ortofoto", self.build_ortho, "Ortofoto (true ortho)", True)],
-            [("process_all", "Elabora tutto", self.process_all, "Tutti i passi in sequenza (Ctrl+R)", True)],
-            [("publish", "PyArchInit", self.pyarchinit_publish, "Pubblica in PyArchInit", True)],
-        ]
-        for gi, group in enumerate(groups):
-            if gi:
-                tb.addSeparator()
-            for name, text, slot, tip, processing in group:
-                a = tb.addAction(icon(name), text)
-                a.setStatusTip(tip)
-                a.setToolTip(tip)
-                a.triggered.connect(lambda _=False, s=slot: s())
-                if processing:
-                    self._processing_actions.append(a)
-        tb.addSeparator()  # analyses of the DEM and of the model, next to the products they use
-        for a in (self.a_contours, self.a_volume, self.a_slice):
-            tb.addAction(a)
-        # drawing and layer tools, always visible under the workflow
-        self.addToolBarBreak()
-        db = QToolBar("Disegno e layer")
-        db.setObjectName("drawing_toolbar")
-        db.setMovable(False)
-        db.setIconSize(QSize(20, 20))
-        db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(db)
-        self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        lab = QLabel(tr(" Disegno: "))
-        lab.setObjectName("pageSubtitle")
-        db.addWidget(lab)
-        # short texts in the bar (menus keep the full names, tooltips show them)
+
+        def button(name: str, text: str, slot, tip: str, processing: bool) -> QAction:
+            a = tb.addAction(icon(name), text)
+            a.setStatusTip(tip)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda _=False, s=slot: s())
+            if processing:
+                self._processing_actions.append(a)
+            return a
+
+        button("open", tr("Apri"), lambda: self.open_document(), tr("Apri un progetto"), False)
+        button("save", tr("Salva"), self.save_document, tr("Salva il progetto"), False)
+        tb.addSeparator()
+        self.workflow_menu = QMenu(tr("Flusso di lavoro"), self)
+        self.workflow_actions: dict[str, QAction] = {}
+        for i, (key, text, slot, tip) in enumerate(self.WORKFLOW_STEPS, 1):
+            if key in ("dense", "dem"):  # the reconstruction, the products of the plan
+                self.workflow_menu.addSeparator()
+            a = self.workflow_menu.addAction(icon("step_todo"), f"{i}.  {tr(text)}")
+            a.setToolTip(tr(tip))
+            a.setStatusTip(tr(tip))
+            a.setData(False)
+            a.setObjectName(f"workflow_{key}")
+            a.triggered.connect(lambda _=False, s=slot: getattr(self, s)())
+            self._processing_actions.append(a)
+            self.workflow_actions[key] = a
+        self.workflow_menu.setToolTipsVisible(True)
+        self.workflow_menu.aboutToShow.connect(self._update_workflow_states)
+        self.a_workflow = QAction(icon("workflow"), tr("Flusso di lavoro"), self)
+        self.a_workflow.setToolTip(tr("I passi in ordine, con lo stato del chunk attivo: segno verde = fatto, "
+                                      "cerchio vuoto = da fare"))
+        self.a_workflow.setMenu(self.workflow_menu)
+        tb.addAction(self.a_workflow)
+        wb = tb.widgetForAction(self.a_workflow)
+        if wb is not None:
+            wb.setObjectName("workflowButton")
+            wb.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tb.addSeparator()
+        button("process_all", tr("Elabora tutto"), self.process_all, tr("Tutti i passi in sequenza (Ctrl+R)"), True)
+        button("publish", "PyArchInit", self.pyarchinit_publish, tr("Pubblica in PyArchInit"), True)
+        tb.addSeparator()
+        self.command_search = CommandSearch(self)
+        tb.addWidget(self.command_search)
+        key = QShortcut(QKeySequence("Ctrl+K"), self)  # Cmd+K on macOS
+        key.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        key.activated.connect(self.command_search.start)
+
+    def workflow_states(self) -> dict[str, bool]:
+        """Each step of the menu Flusso di lavoro: done (True) or not for the active chunk. References:
+        a marker with surveyed coordinates, or a chunk aligned in a coordinate system."""
+        from ..core import crs as crs_mod
+
+        ch = self.chunk
+        states = dict.fromkeys(self.workflow_actions, False)
+        if ch is None:
+            return states
+
+        def has(name: str) -> bool:
+            try:
+                p = ch.product_path(name)
+            except RuntimeError:  # a chunk not in a document
+                return False
+            return p is not None and p.exists()
+
+        aligned = bool(ch.aligned_cameras)
+        states.update(photos=bool(ch.cameras), markers=bool(ch.markers), align=aligned,
+                      reference=any(m.reference.location is not None for m in ch.markers)
+                      or (aligned and not crs_mod.is_local(ch.crs)),
+                      dense=has("point_cloud"), model=has("model"), texture=has("model_textured"), dem=has("dem"),
+                      ortho=has("orthomosaic"))
+        return states
+
+    def _update_workflow_states(self) -> None:
+        for key, done in self.workflow_states().items():
+            a = self.workflow_actions[key]
+            if a.data() != done:
+                a.setData(done)
+                a.setIcon(icon("step_done" if done else "step_todo"))
+
+    def _build_drawing_menus(self) -> None:
+        """The actions and the menus the drawing tools share between the rail and the classic bar."""
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "US"),
                          (self.draw_actions["vertices"], "Vertici"), (self.draw_actions["reshape"], "Rimodella"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
@@ -1530,66 +1605,125 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.draw_actions["polygon"].setToolTip(tr("Disegna unità stratigrafica; dal menu: Mano libera"))
         self.draw_actions["vertices"].setToolTip(tr("Modifica i vertici delle unità; dal menu: Rimodella un'unità "
                                                     "con una linea (come in QGIS)"))
+        self.a_layers_pane = QAction(icon("slice"), "Layer", self)
+        self.a_layers_pane.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
+        self.a_layers_pane.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
+        self.a_sections_pane = QAction(icon("line"), tr("Sezioni"), self)
+        self.a_sections_pane.setToolTip(tr("Pannello delle sezioni"))
+        self.a_sections_pane.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
+        self.section_menu.addAction(self.a_sections_pane)  # beside the options of the sections
+        self.a_publish_drawings = QAction(icon("publish"), tr("Pubblica"), self)
+        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
+                                              "quote (pyarchinit_quote)"))
+        self.a_publish_drawings.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
+        self._processing_actions.append(self.a_publish_drawings)
+
+        def menu(*actions) -> QMenu:
+            m = QMenu(self)
+            m.addActions(list(actions))
+            return m
+
+        # in the menus of their buttons: the freehand of Disegna US (as the digitizing techniques of QGIS), Rimodella
+        # next to Vertici, the measuring point next to the spot height (both a click that reads the point), the
+        # Sections pane next to Layer
+        self.select_menu = menu(self.a_select_freehand, self.a_identify_units)
+        self.polygon_menu = menu(self.a_freehand)
+        self.vertices_menu = menu(self.draw_actions["vertices"], self.draw_actions["reshape"])
+        self.quota_menu = menu(self.draw_actions["quota"], self.draw_actions["probe"])
+        self.layer_menu = menu(self.a_layers_pane, self.a_sections_pane)
+
+    def _build_drawing_toolbar(self) -> None:
+        """The classic horizontal drawing bar (Vista > Barre > Barra di disegno classica), hidden by default:
+        the same actions as the rail of the 2D view."""
+        self.addToolBarBreak()
+        db = QToolBar(tr("Disegno e layer"))
+        db.setObjectName("drawing_toolbar")
+        db.setMovable(False)
+        db.setIconSize(QSize(20, 20))
+        db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        db.toggleViewAction().setVisible(False)  # shown by Vista > Barre only, never beside the rail
+        self.addToolBar(db)
+        self.drawing_toolbar = db
+        self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        lab = QLabel(tr(" Disegno: "))
+        lab.setObjectName("pageSubtitle")
+        db.addWidget(lab)
+
+        def with_menu(action: QAction, menu: QMenu | None = None) -> None:
+            b = db.widgetForAction(action)
+            if b is not None:
+                if menu is not None:
+                    b.setMenu(menu)
+                b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
         for mode in ("pan", "select", "polygon", "vertices"):
             db.addAction(self.draw_actions[mode])
-        # in the menus of their buttons, so that the bar keeps its texts on a wide screen: the freehand
-        # of Disegna US (as the digitizing techniques of QGIS), Rimodella next to Vertici, the measuring point
-        # next to the spot height (both a click that reads the point) and, further on, Sezioni next to Layer
-        for mode, actions in (("select", [self.a_select_freehand, self.a_identify_units]),
-                              ("polygon", [self.a_freehand]),
-                              ("vertices", [self.draw_actions["vertices"], self.draw_actions["reshape"]])):
-            button = db.widgetForAction(self.draw_actions[mode])
-            if button is not None:
-                menu = QMenu(self)
-                menu.addActions(actions)
-                button.setMenu(menu)
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.draw_actions["select"], self.select_menu)
+        with_menu(self.draw_actions["polygon"], self.polygon_menu)
+        with_menu(self.draw_actions["vertices"], self.vertices_menu)
         db.addAction(self.a_snap)
-        snap_button = db.widgetForAction(self.a_snap)
-        if snap_button is not None:
-            snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.a_snap)
         for mode in ("line", "measure", "quota", "breakline", "free", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
-        button = db.widgetForAction(self.draw_actions["quota"])
-        if button is not None:  # Punto di misura in the menu of Quota
-            menu = QMenu(self)
-            menu.addActions([self.draw_actions["quota"], self.draw_actions["probe"]])
-            button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        button = db.widgetForAction(self.draw_actions["breakline"])
-        if button is not None:  # the kind of the lines in the menu of the button
-            button.setMenu(self.breakline_menu)
-        button = db.widgetForAction(self.draw_actions["free"])
-        if button is not None:  # line, polygon or point, the layer they go in
-            button.setMenu(self.free_menu)
-        for mode in ("sam", "line", "breakline", "free"):
-            button = db.widgetForAction(self.draw_actions[mode])
-            if button is not None:
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.draw_actions["quota"], self.quota_menu)
+        with_menu(self.draw_actions["breakline"], self.breakline_menu)
+        with_menu(self.draw_actions["free"], self.free_menu)
+        with_menu(self.draw_actions["sam"])
+        with_menu(self.draw_actions["line"])
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
         db.addSeparator()
-        layers = db.addAction(icon("slice"), "Layer")
-        layers.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
-        layers.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
-        a = QAction(icon("line"), tr("Sezioni"), self)
-        a.setToolTip(tr("Pannello delle sezioni"))
-        a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
-        button = db.widgetForAction(layers)
-        if button is not None:  # the Sections pane in the menu of Layer
-            menu = QMenu(self)
-            menu.addActions([layers, a])
-            button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        db.addAction(self.a_layers_pane)
+        with_menu(self.a_layers_pane, self.layer_menu)
         db.addAction(self.a_qgis_open)
-        a = db.addAction(icon("publish"), tr("Pubblica"))
-        a.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le quote "
-                        "(pyarchinit_quote)"))
-        a.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
-        self._processing_actions.append(a)
-        self._refresh_recent()
-        self._apply_draw_options()
+        db.addAction(self.a_publish_drawings)
+        db.setVisible(False)
+
+    def _build_raster_rail(self) -> None:
+        """The rail of the 2D view: the drawing tools in groups, each opening its flyout over the view."""
+        from .tool_rail import ToolRail
+
+        d = self.draw_actions
+        rail = self.raster_rail = ToolRail("2d")
+        rail.add_group("navigate", tr("Naviga"), "rail_navigate",
+                       [(d["pan"], tr("Sposta / interroga")), (d["select"], tr("Seleziona"), self.select_menu)])
+        rail.add_group("draw", tr("Disegno"), "rail_draw",
+                       [(d["polygon"], tr("Disegna US"), self.polygon_menu),
+                        (d["vertices"], tr("Vertici"), self.vertices_menu), (d["reshape"], tr("Rimodella")),
+                        (d["free"], tr("Disegno libero"), self.free_menu),
+                        (d["breakline"], tr("Linee di rottura"), self.breakline_menu), None,
+                        (self.a_snap, "Snap")])
+        rail.add_group("measure", tr("Misure"), "rail_measure",
+                       [(d["measure"], tr("Misura distanza")), (d["area"], tr("Area e superficie 3D")),
+                        (d["quota"], tr("Quota"), self.quota_menu), (d["marker"], "Marker")])
+        rail.add_group("analysis", tr("Sezioni e analisi"), "rail_analysis",
+                       [(d["line"], tr("Sezione")), None, (self.a_contours, tr("Curve di livello")),
+                        (self.a_volume, tr("Volume scavo / riporto")), (self.a_slice, tr("Pianta a quota"))])
+        rail.add_group("auto", tr("Automatico"), "rail_auto",
+                       [(d["sam"], "Segment Anything (SAM)"), (d["patch"], tr("Patch dell'ortofoto"))])
+        rail.add_group("edit", tr("Modifica"), "rail_edit",
+                       [(self.a_sel_delete, tr("Elimina selezionati")), (self.a_sel_merge, tr("Unisci selezionati")),
+                        (self.a_clear_drawings, tr("Cancella disegni"))])
+        rail.add_group("layers", tr("Layer e uscite"), "rail_layers",
+                       [(self.a_layers_pane, "Layer", self.layer_menu), (self.a_qgis_open, "QGIS"),
+                        (self.a_publish_drawings, tr("Pubblica in PyArchInit"))])
+        rail.attach_to_view(self.ortho_view)
+        for a in self.draw_group.actions():  # the group of the tool in use stands out
+            a.toggled.connect(lambda _on: self.raster_rail.mark_active(self.draw_group.checkedAction()))
+        rail.mark_active(self.draw_group.checkedAction())
+
+    def set_classic_bar(self, on: bool, save: bool = True) -> None:
+        """The classic horizontal drawing bar (True) or the rail of the 2D view (False)."""
+        on = bool(on)
+        if self.a_classic_bar.isChecked() != on:
+            self.a_classic_bar.setChecked(on)  # comes back here through toggled
+            return
+        self.drawing_toolbar.setVisible(on)
+        self.raster_rail.set_shown(not on)
+        if save:
+            self.settings.setValue("toolbar/classic", "true" if on else "false")
+        self._fit_toolbars()
 
     def _show_pane(self, tabs, widget: QWidget | None = None) -> None:
         """A pane in front, also when it was closed or floating. ``tabs`` (``self.left_tabs``...) is
@@ -1612,7 +1746,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def restore_layout(self, state) -> bool:
         """The panes as the last session left them (``state`` saved when the window closed)."""
-        return self.panes.restore(state)
+        ok = self.panes.restore(state)
+        self.set_classic_bar(self.a_classic_bar.isChecked(), save=False)  # a state may hold an old drawing bar
+        return ok
 
     def show_view(self, widget: QWidget) -> None:
         self.stack.setCurrentWidget(self.tabs)
@@ -1747,6 +1883,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._update_stack()
         self._capture_states()
         self._update_rebuild_action()
+        self._update_workflow_states()
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
@@ -2993,12 +3130,20 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         long as possible. The tooltips keep the names."""
         icon_only = Qt.ToolButtonStyle.ToolButtonIconOnly
         for tb, style in getattr(self, "_toolbar_styles", {}).items():
+            if tb.isHidden():  # the classic drawing bar while the rail is used
+                continue
             buttons = [b for b in (tb.widgetForAction(a) for a in tb.actions()) if isinstance(b, QToolButton)]
             sizes = self._toolbar_sizes.get(tb)
             if sizes is None or len(sizes[1]) != len(buttons):
                 sizes = self._toolbar_sizes[tb] = self._measure_toolbar(tb, style, buttons)
             other, widths = sizes
             need, avail = other + sum(full for full, _ in widths), self.width() - 16
+            search = getattr(self, "command_search", None)
+            if search is not None and tb is getattr(self, "workflow_toolbar", None):  # measured at its narrowest
+                extra = max(0, min(SEARCH_WIDTH[1] - SEARCH_WIDTH[0], avail - need))
+                if search.width() != SEARCH_WIDTH[0] + extra:
+                    search.setFixedWidth(SEARCH_WIDTH[0] + extra)
+                need += extra
             short = [False] * len(buttons)
             for i in reversed(range(len(buttons))):
                 if need <= avail:
@@ -3013,6 +3158,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     @staticmethod
     def _measure_toolbar(tb: QToolBar, style, buttons: list) -> tuple[int, list]:
+        from .command_search import CommandSearch
+
+        for field in tb.findChildren(CommandSearch):  # measured at its narrowest, widened by _fit_toolbars
+            field.setFixedWidth(SEARCH_WIDTH[0])
         widths = []
         for b in buttons:
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
