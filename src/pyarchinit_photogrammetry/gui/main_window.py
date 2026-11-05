@@ -1548,7 +1548,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.command_search = CommandSearch(self)
         tb.addWidget(self.command_search)
         key = QShortcut(QKeySequence("Ctrl+K"), self)  # Cmd+K on macOS
-        key.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        key.setContext(Qt.ShortcutContext.WindowShortcut)  # this window and its floating panes only
         key.activated.connect(self.command_search.start)
 
     def workflow_states(self) -> dict[str, bool]:

@@ -122,7 +122,7 @@ class RailFlyout(QFrame):
         self.scroll.setWidget(self.pages)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)  # a narrow view: the arrows too
         lay.addWidget(self.scroll, 1)
         self._esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._esc.activated.connect(lambda: rail.close(force=False))
@@ -215,7 +215,9 @@ class ToolRail(QWidget):
         if isinstance(item, QAction) or (isinstance(item, tuple) and isinstance(item[0], QAction)):
             action, text, menu = (item, None, None) if isinstance(item, QAction) else (tuple(item) + (None, None))[:3]
             widget = ActionButton(action, text, menu)
-            widget.clicked.connect(self._used)
+            group_ = action.actionGroup()
+            if not action.isCheckable() or (group_ is not None and group_.isExclusive()):
+                widget.clicked.connect(self._used)  # a tool or a command; an option (Snap) leaves the flyout open
             group.actions.append(action)
             if widget.menu() is not None:
                 widget.menu().triggered.connect(self._used)
@@ -399,9 +401,11 @@ class ToolRail(QWidget):
         self.watch(view)
 
     def watch(self, widget: QWidget) -> None:
-        """A press of the mouse or Esc on ``widget`` closes the flyout (unless pinned); the event goes on."""
-        widget.installEventFilter(self._filter)
-        self._watched.append(widget)
+        """A press of the mouse or Esc on ``widget`` closes the flyout (unless pinned) and goes no further, as
+        with a popup. Called again for a widget, the rail's filter runs before the ones installed since."""
+        widget.installEventFilter(self._filter)  # Qt puts a filter installed again in front
+        if widget not in self._watched:
+            self._watched.append(widget)
 
     @property
     def _filter(self) -> "_RailFilter":
@@ -439,6 +443,7 @@ class _RailFilter(QObject):
     def __init__(self, rail: ToolRail):
         super().__init__(rail)
         self.rail = rail
+        self._swallow = None  # the widget whose press closed the flyout: its release goes with it
 
     def eventFilter(self, obj, ev) -> bool:
         rail = self.rail
@@ -446,7 +451,13 @@ class _RailFilter(QObject):
         if obj is rail._view and t in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
             rail._place()
         elif t == QEvent.Type.MouseButtonPress and obj in rail._watched:
-            rail.close(force=False)
+            if rail.close(force=False):  # as a popup: the press that closes the flyout does nothing else
+                self._swallow = obj
+                return True
+        elif t in (QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick) and obj is self._swallow:
+            if t == QEvent.Type.MouseButtonRelease:
+                self._swallow = None
+            return True
         elif (t == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape and rail.is_open() and not rail.pinned
               and obj in (rail._view, *rail._watched)):
             rail.close(force=False)

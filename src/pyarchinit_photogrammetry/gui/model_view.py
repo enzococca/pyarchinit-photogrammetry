@@ -1566,6 +1566,8 @@ class ModelView(QWidget):
         self._rubber_timer.setSingleShot(True)
         self._rubber_timer.timeout.connect(self._rubber_tick)
         self._draw_target().installEventFilter(self)
+        for widget in (self._draw_target(), self.lasso, self.picker, self.editor):  # the rail's filter first: the
+            self.rail.watch(widget)  # press or the Esc that closes its flyout reach no drawing, pick or lasso
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
 
