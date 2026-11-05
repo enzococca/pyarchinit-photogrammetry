@@ -1555,7 +1555,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         from .command_search import ShortcutKeeper
 
         self._shortcut_keeper = ShortcutKeeper(self)  # a focused text field does not swallow Ctrl+K (Linux)
-        QApplication.instance().installEventFilter(self._shortcut_keeper)
+        QApplication.instance().focusChanged.connect(self._keep_search_shortcut)
+
+    def _keep_search_shortcut(self, old, new) -> None:
+        self._shortcut_keeper.follow(old, new, self)
 
     def workflow_states(self) -> dict[str, bool]:
         """Each step of the menu Flusso di lavoro: done (True) or not for the active chunk. References:

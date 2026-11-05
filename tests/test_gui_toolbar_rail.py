@@ -388,8 +388,10 @@ def test_command_search_shortcut_wins_over_a_text_field(window, qapp):
     w = window
     field = QLineEdit(w.centralWidget())
     field.show()
+    w.activateWindow()
     field.setFocus()
     _pump(qapp)
+    w._keep_search_shortcut(None, field)  # what focusChanged does (offscreen windows may not get the focus)
     ev = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier, "k")
     ev.setAccepted(False)
     QApplication.sendEvent(field, ev)
@@ -398,4 +400,10 @@ def test_command_search_shortcut_wins_over_a_text_field(window, qapp):
     other.setAccepted(False)
     QApplication.sendEvent(field, other)
     assert other.isAccepted()  # the other keys of the field are untouched (Ctrl+A selects all)
+    w._keep_search_shortcut(field, None)  # the cursor leaves: the filter goes with it
+    import gc
+    import weakref
+
+    ref = weakref.ref(w._shortcut_keeper)
+    assert not any(isinstance(r, type(w)) for r in gc.get_referents(ref()))  # no cycle with the window
     field.deleteLater()

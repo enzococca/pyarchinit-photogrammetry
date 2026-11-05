@@ -10,7 +10,7 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QCompleter, QLineEdit, QMenu, QSizePolicy, QWidget
+from PySide6.QtWidgets import QCompleter, QLineEdit, QMenu, QPlainTextEdit, QSizePolicy, QTextEdit
 
 from .i18n import tr
 from .icons import icon
@@ -131,26 +131,25 @@ __all__ = ["CommandSearch", "menu_commands", "clean"]
 
 class ShortcutKeeper(QObject):
     """Ctrl+K kept for the search of the commands: on Linux and Windows a focused line edit or text field takes
-    Ctrl+K (delete to the end of the line) before the window's shortcut sees it. Installed on the application,
-    it leaves the key to the shortcut in ``window`` and in its floating panes; every other key is untouched."""
-
-    def __init__(self, window):
-        super().__init__(window)
-        self._window = window
+    Ctrl+K (delete to the end of the line) before the window's shortcut sees it. Installed only on the text field
+    that has the cursor (see :meth:`follow`), it leaves that key to the window's shortcut; every other key and
+    event is untouched. It holds no reference to the window (a cycle would leave closed windows to the garbage
+    collector, which may run in a worker thread)."""
 
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt's name
         if (ev.type() == QEvent.Type.ShortcutOverride and ev.key() == Qt.Key.Key_K
-                and ev.modifiers() == Qt.KeyboardModifier.ControlModifier and isinstance(obj, QWidget)
-                and self._inside(obj)):
+                and ev.modifiers() == Qt.KeyboardModifier.ControlModifier):
             ev.ignore()
             return True  # not accepted: the shortcut of the window runs
         return False
 
-    def _inside(self, widget) -> bool:
-        top = widget.window()
-        while top is not None:
-            if top is self._window:
-                return True
-            parent = top.parentWidget()
-            top = parent.window() if parent is not None else None
-        return False
+    def follow(self, old, new, window) -> None:
+        """``QApplication.focusChanged``: the filter moved from the text field that lost the cursor to the one of
+        ``window`` that got it."""
+        if isinstance(old, TEXT_FIELDS):
+            old.removeEventFilter(self)
+        if isinstance(new, TEXT_FIELDS) and new.window() is window:
+            new.installEventFilter(self)
+
+
+TEXT_FIELDS = (QLineEdit, QPlainTextEdit, QTextEdit)
