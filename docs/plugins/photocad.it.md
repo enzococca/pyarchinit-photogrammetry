@@ -37,7 +37,7 @@ vede mascherata, come `pcad_live_…abcd`). Senza portachiavi sul computer funzi
 plugin. Restano anche le voci di menu del plugin.
 
 <figure markdown="span">
-  ![Il pannello PhotoCAD con una conversione](../img/plugins/photocad/pane.png)
+  ![Il pannello PhotoCAD con una conversione](../img/plugins/photocad/pane.it.png)
   <figcaption>Il pannello: l'account, i tre pulsanti <em>Vettorializza</em> e le conversioni del chunk. Il pulsante del
   prospetto è spento perché nella vista 2D non è mostrato nessun prospetto.</figcaption>
 </figure>
