@@ -10253,7 +10253,10 @@ class MainWindow(QMainWindow):
                           "lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato"))
             return
         except fio.ForeignCrs as exc:
-            if exc.reason == "chunk_local":
+            if exc.reason == "unreadable":
+                self._warn(tr("Il file nomina un sistema di riferimento che non si riesce a leggere ({0}): nessun "
+                              "disegno importato", str(exc.file_crs)))
+            elif exc.reason == "chunk_local":
                 self._warn(tr("I disegni del file sono in {0} e il chunk è in un sistema locale: nessun disegno "
                               "importato", str(exc.file_crs)))
             else:
@@ -10268,6 +10271,8 @@ class MainWindow(QMainWindow):
             self._draw_free()
         text = tr("{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)",
                   got["added"], Path(path).name, got["dem_z"], got["skipped"])
+        if got.get("rfc7946"):
+            text += tr("; GeoJSON senza sistema letto come WGS 84 (RFC 7946) e convertito in {0}", self.chunk.crs)
         if got.get("holes_dropped"):
             text += tr("; {0} buchi di poligoni lasciati fuori (un disegno libero ha un solo contorno)",
                        got["holes_dropped"])

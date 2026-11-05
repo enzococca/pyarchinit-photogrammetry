@@ -336,7 +336,8 @@ def move(chunk, M, transform=None) -> int:
         rec["xyz"] = [[float(v) for v in p] for p in xyz]
         moved += 1
     if _stored(chunk):
-        based(_drawings(chunk, True), chunk.meta.get("alignment_id"), chunk.transform if transform is None else transform)
+        after = chunk.transform if transform is None else transform
+        based(_drawings(chunk, True), chunk.meta.get("alignment_id"), after)
     return moved
 
 

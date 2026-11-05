@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import sqlite3
 
@@ -15,6 +16,7 @@ from pyarchinit_photogrammetry.core import free_drawings as fd
 from pyarchinit_photogrammetry.io import free_drawings as fio
 
 X0, Y0 = 2480000.0, 4500000.0
+CRS3004 = {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}}
 
 
 def _chunk(tmp_path, crs="EPSG:3004"):
@@ -102,7 +104,7 @@ def test_import_without_z_takes_the_dem(tmp_path):
     dem = dem_mod.write_geotiff(ch.data_dir / "dem.tif", ground, (X0, Y0 + n * res), res, ch.crs,
                                 nodata=dem_mod.NODATA)
     ch._set_product("dem", dem)
-    feats = {"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}}, "features": [
+    feats = {"type": "FeatureCollection", "crs": CRS3004, "features": [
         {"type": "Feature", "properties": {"name": "senza quota", "tipo": "muro"},
          "geometry": {"type": "LineString", "coordinates": [[X0 + 0.55, Y0 + 0.55], [X0 + 1e4, Y0 + 1.0],
                                                             [X0 + 2.05, Y0 + 2.05]]}},
@@ -114,7 +116,7 @@ def test_import_without_z_takes_the_dem(tmp_path):
     path = tmp_path / "scavo_2024.geojson"
     path.write_text(json.dumps(feats), encoding="utf-8")
     got = fio.import_features(ch, path)
-    assert got == {"added": 2, "dem_z": 1, "skipped": 1, "holes_dropped": 0}
+    assert got == {"added": 2, "dem_z": 1, "skipped": 1, "holes_dropped": 0, "rfc7946": False}
     recs = {r["name"]: r for r in fd.features(ch)}
     line = recs["senza quota"]
     assert line["layer"] == "scavo_2024" and line["attributes"] == {"tipo": "muro"}
@@ -153,16 +155,14 @@ def test_import_refused_when_the_heights_would_come_from_a_dem_to_rebuild(tmp_pa
     ch.transform = t @ np.asarray(ch.transform, float)
     assert stamps.is_stale(ch, "dem")
     flat = tmp_path / "piatti.geojson"
-    flat.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}},
-                                "features": [
+    flat.write_text(json.dumps({"type": "FeatureCollection", "crs": CRS3004, "features": [
         {"type": "Feature", "properties": {"name": "senza quota"},
          "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5]}}]}), encoding="utf-8")
     with pytest.raises(fio.StaleDem):
         fio.import_features(ch, flat)
     assert not fd.features(ch)
     with_z = tmp_path / "quote.geojson"
-    with_z.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}},
-                                "features": [
+    with_z.write_text(json.dumps({"type": "FeatureCollection", "crs": CRS3004, "features": [
         {"type": "Feature", "properties": {"name": "con quota"},
          "geometry": {"type": "Point", "coordinates": [X0 + 0.5, Y0 + 0.5, 99.0]}}]}), encoding="utf-8")
     assert fio.import_features(ch, with_z)["added"] == 1
@@ -272,7 +272,7 @@ def test_import_counts_holes_reads_flat_cad_and_keeps_new_ids(tmp_path, caplog):
     ring = [[X0, Y0, 1.0], [X0 + 4, Y0, 1.0], [X0 + 4, Y0 + 4, 1.0], [X0, Y0 + 4, 1.0], [X0, Y0, 1.0]]
     hole = [[X0 + 1, Y0 + 1, 1.0], [X0 + 2, Y0 + 1, 1.0], [X0 + 2, Y0 + 2, 1.0], [X0 + 1, Y0 + 1, 1.0]]
     path = tmp_path / "muro.geojson"
-    path.write_text(json.dumps({"type": "FeatureCollection", "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3004"}}, "features": [
+    path.write_text(json.dumps({"type": "FeatureCollection", "crs": CRS3004, "features": [
         {"type": "Feature", "properties": {"ppg_id": "abc", "name": "con buco"},
          "geometry": {"type": "Polygon", "coordinates": [ring, hole]}}]}), encoding="utf-8")
     got = fio.import_features(ch, path)
@@ -373,3 +373,42 @@ def test_an_unknown_system_against_a_real_one_is_refused(tmp_path):
     out = fio.export(local, tmp_path / "locale.gpkg")
     with pytest.raises(fio.ForeignCrs):
         fio.import_features(ch, out)
+
+
+def test_a_geojson_without_crs_in_lonlat_is_read_as_wgs84(tmp_path, caplog):
+    """RFC 7946 (the GeoJSON of QGIS, geojson.io, web tools): no crs member, longitude and latitude in degrees."""
+    from pyproj import Transformer
+
+    _doc, ch = _chunk(tmp_path, crs="EPSG:32633")
+    coords = [[14.2660, 41.1340, 12.5], [14.2665, 41.1342, 12.75]]
+    path = tmp_path / "qgis_rfc7946.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "name": "linee", "features": [
+        {"type": "Feature", "properties": {"name": "L"}, "geometry": {"type": "LineString", "coordinates": coords}}]}),
+        encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry.io.free_drawings"):
+        got = fio.import_features(ch, path)
+    assert got["added"] == 1 and got["rfc7946"] is True
+    assert any("RFC 7946" in r.getMessage() for r in caplog.records)
+    xs, ys = Transformer.from_crs("EPSG:4326", "EPSG:32633", always_xy=True).transform(
+        [c[0] for c in coords], [c[1] for c in coords])
+    xyz = np.array(fd.features(ch)[0]["xyz"])
+    assert np.abs(xyz[:, :2] - np.column_stack([xs, ys])).max() < 1e-3
+    assert list(xyz[:, 2]) == [12.5, 12.75]
+    # projected numbers without a member (the habit before RFC 7946): refused as before
+    with pytest.raises(fio.ForeignCrs) as e:
+        fio.import_features(ch, _geojson(tmp_path / "proiettato.geojson", [400000.0, 4550000.0, 1.0]))
+    assert e.value.reason == "file_unknown"
+    # a local chunk: as it is
+    (tmp_path / "l").mkdir()
+    _doc2, local = _chunk(tmp_path / "l", crs="LOCAL")
+    got = fio.import_features(local, path)
+    assert got["rfc7946"] is False and fd.features(local)[0]["xyz"] == coords
+
+
+def test_an_unreadable_crs_is_said_as_unreadable(tmp_path):
+    _doc, ch = _chunk(tmp_path, crs="EPSG:3004")
+    path = _geojson(tmp_path / "strano.geojson", [10.0, 40.0, 1.0], "nonsense:crs")
+    with pytest.raises(fio.ForeignCrs) as e:
+        fio.import_features(ch, path)
+    assert e.value.reason == "unreadable" and "nonsense:crs" in str(e.value)
+    assert fd.features(ch) == []

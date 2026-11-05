@@ -659,7 +659,9 @@ def move_stores(chunk, m, sections=None, write: bool = True) -> dict:
     ``chunk.meta`` with no rollback of their own, :func:`apply` puts everything back on a failure. The new values are built aside and written only when all of them are
     built; the files (the elevations' ``frame.json``, ``profile.json``, tags and grids of their rasters, the proxies'
     PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``; ``write`` False
-    (a dry run): no file written, ``chunk.meta`` changed as with them. Returns how many of each store moved."""
+    (a dry run): no file written, ``chunk.meta`` changed as with them (:func:`apply` passes ``write`` only on a dry
+    run: a replacement of this function without it still serves the orientations made). Returns how many of each
+    store moved."""
     import shapely
 
     from ..core import free_drawings
@@ -1047,8 +1049,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
     everything is computed in memory and put back, no file written (the plugins listening are not told):
-    ``describe`` and :func:`apply`'s result without ``state`` and ``markers``. ``notify`` False: the listeners are not told (the caller tells them with
-    :func:`fire` for each chunk of ``state``, with ``M``)."""
+    ``describe`` and :func:`apply`'s result without ``state`` and ``markers``. ``notify`` False: the listeners are
+    not told (the caller tells them with :func:`fire` for each chunk of ``state``, with ``M``)."""
     from ..gnss import heights as hg
     from ..markers import gcp
 

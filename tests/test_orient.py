@@ -652,7 +652,8 @@ NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "
 def _meta_writes(tree) -> set:
     """The keys written in a ``.meta`` of ``tree`` (a module's AST): ``x.meta["k"] = ...`` (spaces inside the
     brackets too), ``x.meta.setdefault("k", ...)``, ``x.meta.update(k=..., **{"k": ...})`` / ``update({"k": ...})``,
-    and the same through a name the function took the meta in (``meta = chunk.meta``, ``meta, v = chunk.meta, {}``)."""
+    and the same through a name the function took the meta in (``meta = chunk.meta``, ``meta, v = chunk.meta, {}``);
+    ``meta.update(values)`` with ``values`` a dict built in the function (its literal keys and ``values["k"] = ...``)."""
     import ast
 
     def is_meta(node) -> bool:
@@ -664,7 +665,7 @@ def _meta_writes(tree) -> set:
     keys = set()
     scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))]
     for scope in [tree, *scopes]:
-        aliases = set()
+        aliases, built = set(), {}
         if scope is not tree:
             for n in ast.walk(scope):
                 if isinstance(n, (ast.Assign, ast.AnnAssign)):
@@ -675,6 +676,15 @@ def _meta_writes(tree) -> set:
                         elif isinstance(t, ast.Tuple) and isinstance(n.value, ast.Tuple):
                             aliases |= {a.id for a, b in zip(t.elts, n.value.elts)
                                         if isinstance(a, ast.Name) and is_meta(b)}
+                            for a, b in zip(t.elts, n.value.elts):
+                                if isinstance(a, ast.Name) and isinstance(b, ast.Dict):
+                                    built.setdefault(a.id, set()).update(text(k) for k in b.keys if k is not None)
+                        if isinstance(t, ast.Name) and isinstance(n.value, ast.Dict):
+                            built.setdefault(t.id, set()).update(text(k) for k in n.value.keys if k is not None)
+            for n in ast.walk(scope):
+                if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name)
+                        and n.value.id in built):
+                    built[n.value.id].add(text(n.slice))
 
         def target(node) -> bool:
             return is_meta(node) or (isinstance(node, ast.Name) and node.id in aliases)
@@ -687,6 +697,9 @@ def _meta_writes(tree) -> set:
                     keys.add(text(n.args[0]))
                 elif n.func.attr == "update":
                     keys |= {k.arg for k in n.keywords if k.arg}
+                    for a in n.args:
+                        if isinstance(a, ast.Name) and a.id in built:
+                            keys |= built[a.id]
                     for d in [a for a in n.args if isinstance(a, ast.Dict)] + [
                             k.value for k in n.keywords if k.arg is None and isinstance(k.value, ast.Dict)]:
                         keys |= {text(k) for k in d.keys if k is not None}
@@ -707,13 +720,16 @@ def f(chunk, cam):
     chunk.meta.update({"dict_key": 3})
     chunk.meta[ "spaced_key" ] = 4
     other["not_meta"] = 5
+    values = {"built_key": 1}
+    values["built_later_key"] = 2
+    meta.update(values)
 
 def g():
     meta = {}
     meta["plain_dict"] = 1
 """
     assert _meta_writes(ast.parse(code)) == {"alias_key", "tuple_alias_key", "keyword_key", "star_key", "dict_key",
-                                             "spaced_key"}
+                                             "spaced_key", "built_key", "built_later_key"}
 
 
 def test_every_chunk_meta_key_of_the_program_is_known():

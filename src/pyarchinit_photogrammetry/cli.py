@@ -861,6 +861,8 @@ def drawings3d(project: Path,
     typer.echo(f"{ch.label}: {got['added']} free drawings imported from {file.name} ({got['dem_z']} with the heights "
                f"of the DEM, {got['skipped']} skipped" + (f", {got['holes_dropped']} holes of polygons left out"
                                                          if got.get("holes_dropped") else "") + ")")
+    if got.get("rfc7946"):
+        typer.echo(f"{file.name}: GeoJSON without a crs member read as WGS 84 (RFC 7946) and converted to {ch.crs}")
 
 
 @app.command("us-proposal")
