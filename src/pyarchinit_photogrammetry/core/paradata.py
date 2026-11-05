@@ -36,9 +36,50 @@ STEPS = {"reconstruction": ("align_cameras", "sfm"), "point_cloud": ("build_poin
          "orthomosaic": ("build_orthomosaic", "orthomosaic")}
 
 
+def _multispectral(product: str) -> tuple[str, str | None] | None:
+    """``(kind, name)`` of a multispectral product named as :func:`engine.multispectral.paradata_product`
+    does (``reflectance``, ``index:<name>``, ``zones:<name>``); ``None`` for the other products."""
+    if product == "reflectance":
+        return "reflectance", None
+    kind, sep, name = product.partition(":")
+    if sep and kind in ("index", "zones") and name:
+        return kind, name
+    return None
+
+
+def _label(product: str) -> str:
+    ms = _multispectral(product)
+    if ms is None:
+        return LABELS.get(product, product)
+    kind, name = ms
+    return {"reflectance": "Reflectance orthomosaic", "index": f"Index {name}",
+            "zones": f"Zones of the index {name}"}[kind]
+
+
+def _multispectral_settings(chunk, product: str) -> tuple[str, dict]:
+    """The step that made a multispectral product and its settings."""
+    kind, name = _multispectral(product)
+    meta = (chunk.meta or {}).get("multispectral") or {}
+    if kind == "reflectance":
+        keep = ("bands", "reflectance_bands", "reference", "panel", "resolution", "balance")
+        settings = {k: meta[k] for k in keep if k in meta}
+        if isinstance(settings.get("balance"), dict):  # the gains photo by photo are not settings
+            settings["balance"] = {k: v for k, v in settings["balance"].items() if not isinstance(v, (dict, list))}
+        return "build_reflectance", settings
+    if kind == "index":
+        return "index_raster", dict((meta.get("indices") or {}).get(name) or {})
+    return "zoning", dict((meta.get("zoning") or {}).get(name) or {})
+
+
 def _sources(chunk, product: str) -> list[str]:
     """What a product is made from (the settings it was built with say which)."""
     meta = chunk.meta or {}
+    ms = _multispectral(product)
+    if ms is not None:
+        kind, name = ms
+        if kind == "reflectance":
+            return ["dem", "photos", "georeference"]
+        return ["reflectance"] if kind == "index" else [f"index:{name}"]
     if product == "reconstruction":
         return ["photos"]
     if product in ("point_cloud", "depth_maps"):
@@ -143,21 +184,33 @@ def provenance(chunk, product: str, path: str | os.PathLike | None = None, opera
         if name in done:
             return nid
         done.add(name)
-        node = {"@id": nid, "@type": "prov:Entity", "prov:label": LABELS.get(name, name)}
+        node = {"@id": nid, "@type": "prov:Entity", "prov:label": _label(name)}
         if name == "photos":
             node.update(_photos(chunk))
         elif name == "georeference":
             node.update(_georeference(chunk))
         else:
-            file = chunk.product_path(name) if name in chunk.products else None
+            ms = _multispectral(name)
+            if ms is not None:
+                from ..engine.multispectral import product_source
+
+                try:
+                    file = product_source(chunk, *ms)
+                except (RuntimeError, ValueError):  # not built (any more)
+                    file = None
+            else:
+                file = chunk.product_path(name) if name in chunk.products else None
             if file is not None and file.exists():
                 node.update({"ppg:file": file.name, "prov:generatedAtTime": _when(file)})
             if name == "reconstruction":
                 tie = chunk.tie_points
                 if tie is not None:
                     node["ppg:tie_points"] = int(len(tie))
-            step, key = STEPS.get(name, (f"build_{name}", name))
-            settings = (chunk.meta or {}).get(key) or ((chunk.meta or {}).get("relief") or {}).get(name)
+            if ms is not None:
+                step, settings = _multispectral_settings(chunk, name)
+            else:
+                step, key = STEPS.get(name, (f"build_{name}", name))
+                settings = (chunk.meta or {}).get(key) or ((chunk.meta or {}).get("relief") or {}).get(name)
             activity = {"@id": nid + "#activity", "@type": "prov:Activity", "prov:label": step,
                         "prov:endedAtTime": node.get("prov:generatedAtTime"), "prov:wasAssociatedWith": agents,
                         "ppg:parameters": _params(settings or {})}

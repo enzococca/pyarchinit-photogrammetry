@@ -1046,6 +1046,178 @@ def test_coloured_index_is_written_by_strips(tmp_path, monkeypatch):
     assert abs(lo - full[0]) < 0.1 and abs(hi - full[1]) < 0.1
 
 
+def test_coloured_strips_follow_the_tiles_of_the_output(tmp_path, monkeypatch):
+    """A tiled coloured export is written by strips a whole number of 256-row tiles high (the last one
+    the rest): a strip never ends inside a row of tiles, which would be compressed twice."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    _doc, ch, _data, _transform = _small_products(tmp_path)
+    h, w = 700, 300
+    z = np.random.default_rng(5).uniform(-0.2, 0.8, (h, w)).astype(np.float32)
+    with rasterio.open(ch.data_dir / "multispectral" / "BIG.tif", "w", driver="GTiff", height=h, width=w, count=1,
+                       dtype="float32", crs="EPSG:3004", transform=from_origin(2480000.0, 4500000.0, 0.05, 0.05),
+                       nodata=float("nan")) as dst:
+        dst.write(z, 1)
+    ch.meta["multispectral"].setdefault("indices", {})["BIG"] = {"file": "multispectral/BIG.tif"}
+    seen = []
+    colours = ms.index_colors
+
+    def counted(values, *a, **k):
+        seen.append(values.shape[0])
+        return colours(values, *a, **k)
+
+    monkeypatch.setattr(ms, "index_colors", counted)
+    monkeypatch.setattr(ms, "COLOUR_BLOCK_CELLS", 300 * 300)  # 300 rows asked: 256 written
+    p = ms.export_product(ch, "index", "BIG", tmp_path / "out" / "big.tif", "colour_tif")
+    assert seen == [256, 256, 188]
+    monkeypatch.setattr(ms, "COLOUR_BLOCK_CELLS", 300 * 600)  # 600 rows asked: 512 written
+    seen.clear()
+    ms.export_product(ch, "index", "BIG", tmp_path / "out" / "big2.tif", "colour_tif")
+    assert seen == [512, 188]
+    with rasterio.open(p) as src:
+        assert src.block_shapes[0] == (256, 256)
+        assert np.array_equal(np.moveaxis(src.read(), 0, -1), colours(z, ms.index_limits(z), "rdylgn"))
+
+
+def test_paradata_of_an_export_names_the_multispectral_product(tmp_path):
+    """The provenance beside an exported reflectance, index or zoning says which product the file is
+    a copy of (the index and the zoning by name) and what that product comes from."""
+    import json
+
+    from pyarchinit_photogrammetry.core.paradata import write_provenance
+
+    _doc, ch, _data, _transform = _small_products(tmp_path)
+    out = tmp_path / "out"
+    expected = {("reflectance", None): ("reflectance", "Reflectance orthomosaic"),
+                ("index", "NDVI"): ("index:NDVI", "Index NDVI"),
+                ("zones", "NDVI"): ("zones:NDVI", "Zones of the index NDVI")}
+    for (kind, name), (key, label) in expected.items():
+        p = ms.export_product(ch, kind, name, out / f"{kind}.{'gpkg' if kind == 'zones' else 'tif'}")
+        assert ms.paradata_product(kind, name) == key
+        graph = json.loads(write_provenance(ch, key, p).read_text())["@graph"]
+        nodes = {n["@id"]: n for n in graph}
+        copy = nodes[f"ppg:file/{p.name}"]
+        top = f"ppg:chunk/{ch.key}/{key}"
+        assert copy["prov:wasDerivedFrom"] == [top] and nodes[top]["prov:label"] == label
+        assert nodes[top]["ppg:file"] == ms.product_source(ch, kind, name).name
+    nodes = {n["@id"]: n for n in json.loads(write_provenance(ch, "zones:NDVI", out / "zones.gpkg").read_text())["@graph"]}
+    base = f"ppg:chunk/{ch.key}/"
+    assert nodes[base + "zones:NDVI"]["prov:wasDerivedFrom"] == [base + "index:NDVI"]
+    assert nodes[base + "index:NDVI"]["prov:wasDerivedFrom"] == [base + "reflectance"]
+    assert base + "multispectral" not in nodes
+
+
+def test_multispectral_export_dialog_suggests_the_suffix_of_the_format(tmp_path, monkeypatch):
+    """The save dialog of a multispectral export opens on the format chosen last time for that product,
+    with the name ending in its suffix; the paradata name the product exported."""
+    pytest.importorskip("PySide6")
+    import json
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    doc, ch, _data, _transform = _small_products(tmp_path)
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    w_.runner.show_dialog = False
+    asked = []
+    answer = {}
+
+    def dialog(_parent, _caption, start, filters, selected="", *a, **k):
+        asked.append((start, selected))
+        return answer["path"], mwmod.tr(answer["filter"])
+
+    monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", dialog)
+    try:
+        png = tmp_path / "out" / "ndvi.png"
+        answer.update(path=str(png), filter="PNG colorato con world file (*.png)")
+        w_.ms_export("index", "NDVI")
+        w_.runner.wait()
+        assert asked[-1][0].endswith("NDVI.tif")  # the first time: the first format
+        prov = json.loads(Path(str(png) + ".prov.jsonld").read_text())["@graph"]
+        assert next(n for n in prov if n["@id"] == f"ppg:file/{png.name}")["prov:wasDerivedFrom"] == [
+            f"ppg:chunk/{ch.key}/index:NDVI"]
+        answer.update(path=str(tmp_path / "out" / "ndvi2.png"))
+        w_.ms_export("index", "NDVI")
+        w_.runner.wait()
+        assert asked[-1][0].endswith("NDVI.png") and asked[-1][1] == mwmod.tr("PNG colorato con world file (*.png)")
+        gp = tmp_path / "out" / "zone_classi.tif"
+        answer.update(path=str(gp), filter="GeoTIFF delle classi (*.tif)")
+        w_.ms_export("zones", "NDVI")
+        w_.runner.wait()
+        assert asked[-1][0].endswith("NDVI_zone.gpkg")
+        w_.ms_export("zones", "NDVI")
+        w_.runner.wait()
+        assert asked[-1][0].endswith("NDVI_zone.tif")
+        prov = json.loads(Path(str(gp) + ".prov.jsonld").read_text())["@graph"]
+        assert next(n for n in prov if n["@id"] == f"ppg:file/{gp.name}")["prov:wasDerivedFrom"] == [
+            f"ppg:chunk/{ch.key}/zones:NDVI"]
+    finally:
+        w_.setWindowModified(False)
+        w_.close()
+
+
+def test_thermal_export_jobs_keep_their_chunk_and_do_not_save(tmp_path, monkeypatch):
+    """The background job of a thermal export (temperatures and anomalies) works on the chunk captured
+    when it was asked for, never on the window's current one, and writing a file does not save the
+    project."""
+    pytest.importorskip("PySide6")
+    import os
+
+    import rasterio
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.engine import thermal as th
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    doc, ch, _data, _transform = _small_products(tmp_path)
+    with rasterio.open(ch.data_dir / "multispectral" / "reflectance.tif") as src:
+        profile = {**src.profile, "count": 1}
+    profile.pop("blockxsize", None)
+    profile.pop("blockysize", None)
+    temps = np.full((60, 80), 21.5, np.float32)
+    for fname, values in (("thermal.tif", temps), ("thermal_anomaly.tif", temps - 21.0)):
+        with rasterio.open(ch.data_dir / "multispectral" / fname, "w", **profile) as dst:
+            dst.write(values, 1)
+    ch.meta["thermal"] = {"file": "multispectral/thermal.tif",
+                          "anomaly": {"file": "multispectral/thermal_anomaly.tif", "radius_m": 2.0}}
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    tasks = []
+    used = []
+    try:
+        monkeypatch.setattr(w_, "run_task", lambda label, fn, on_done=None, refresh=True, save=True, undo=False:
+                            tasks.append((fn, refresh, save)))
+        monkeypatch.setattr(th, "export", lambda chunk, path, fmt=None, **k: used.append(chunk) or Path(path))
+        for anomaly, name in ((True, "anomalie.tif"), (False, "temperatura_C.tif")):
+            dest = tmp_path / "out" / name
+            monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, d=dest, **k: (str(d), ""))
+            w_.ms_thermal_export("tif", anomaly=anomaly)
+        assert len(tasks) == 2 and all(not save and not refresh for _fn, refresh, save in tasks)
+        monkeypatch.setattr(mwmod.MainWindow, "chunk", property(lambda s: pytest.fail("the job read the window's chunk")))
+        for fn, _r, _s in tasks:
+            fn(None)
+        assert used == [ch, ch]
+    finally:
+        monkeypatch.undo()
+        w_.setWindowModified(False)
+        w_.close()
+
+
 def test_multispectral_exports_from_the_window(tmp_path, monkeypatch):
     """*Esporta...* on the multispectral items of the workspace and in the pane's index step writes
     the product in the format of the filter chosen; *File > Esporta > Ortofoto* (and DEM) on a chunk

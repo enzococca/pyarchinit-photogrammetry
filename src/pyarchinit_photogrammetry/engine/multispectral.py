@@ -2161,6 +2161,16 @@ def product_source(chunk: Chunk, kind: str, name: str | None = None) -> Path:
     return chunk.data_dir / rel
 
 
+def paradata_product(kind: str, name: str | None = None) -> str:
+    """The name of a multispectral product in the paradata (:mod:`core.paradata`): ``reflectance``,
+    ``index:<name>`` or ``zones:<name>``."""
+    if kind == "reflectance":
+        return "reflectance"
+    if kind in ("index", "zones") and name:
+        return f"{kind}:{name}"
+    raise ValueError(f"unknown multispectral product {kind!r} {name!r}")
+
+
 def _format_of(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".gpkg":
@@ -2197,6 +2207,9 @@ def _write_colours(src, dst, limits, palette: str) -> None:
     from rasterio.windows import Window
 
     rows = max(1, COLOUR_BLOCK_CELLS // max(src.width, 1))
+    if dst.profile.get("tiled"):  # whole rows of tiles: a tile is never written (and compressed) twice
+        tile = dst.block_shapes[0][0]
+        rows = max(tile, rows // tile * tile)
     for r in range(0, src.height, rows):
         win = Window(0, r, src.width, min(rows, src.height - r))
         z = src.read(1, window=win).astype(np.float32, copy=False)

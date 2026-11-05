@@ -2246,8 +2246,9 @@ class MainWindow(QMainWindow):
             if not path:
                 return
             fmt = "csv" if path.lower().endswith(".csv") or chosen.startswith("CSV") else "tif"
-            self.run_task("Esporta le anomalie termiche", lambda p: th.export(self.chunk, path, fmt, source=source),
-                          lambda out: self._info(tr("Anomalie termiche esportate"), str(out)))
+            ch = self.chunk  # the job never reads the window's chunk: it may change while it runs
+            self.run_task("Esporta le anomalie termiche", lambda p: th.export(ch, path, fmt, source=source),
+                          lambda out: self._info(tr("Anomalie termiche esportate"), str(out)), refresh=False, save=False)
             return
         source = th.thermal_path(self.chunk)
         if source is None:
@@ -2276,8 +2277,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         palette = str(self.settings.value("thermal/palette", "iron") or "iron")
-        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt, palette=palette, single=single),
-                      lambda out: self._info(tr("Temperature esportate"), str(out)))
+        ch = self.chunk
+        self.run_task("Esporta le temperature", lambda p: th.export(ch, path, fmt, palette=palette, single=single),
+                      lambda out: self._info(tr("Temperature esportate"), str(out)), refresh=False, save=False)
 
     def _ms_palette_changed(self, palette: str) -> None:
         """The ramp of the indices: the one shown coloured again where it is, the choice kept."""
@@ -2566,9 +2568,13 @@ class MainWindow(QMainWindow):
             "zones": [("gpkg", "GeoPackage con i poligoni delle zone (*.gpkg)"),
                       ("tif", "GeoTIFF delle classi (*.tif)")]}[kind]
         stem = {"reflectance": "riflettanza", "index": name or "indice", "zones": f"{name}_zone"}[kind]
-        start = str(Path(self._last_dir()) / (stem + (".gpkg" if kind == "zones" else ".tif")))
         texts = [tr(text) for _fmt, text in filters]
-        path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta"), start, ";;".join(texts))
+        formats = [f for f, _t in filters]
+        last = str(self.settings.value(f"ms/export_{kind}", formats[0]) or formats[0])  # the format chosen last time
+        last = last if last in formats else formats[0]
+        start = str(Path(self._last_dir()) / (stem + {"gpkg": ".gpkg", "png": ".png"}.get(last, ".tif")))
+        path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta"), start, ";;".join(texts),
+                                                   texts[formats.index(last)])
         if not path:
             return
         fmt = next((f for (f, _t), text in zip(filters, texts) if text == chosen), None)
@@ -2578,13 +2584,15 @@ class MainWindow(QMainWindow):
         suffix = {"gpkg": ".gpkg", "png": ".png"}.get(fmt, ".tif")
         if Path(path).suffix.lower() != suffix and not (suffix == ".tif" and Path(path).suffix.lower() == ".tiff"):
             path = str(Path(path).with_suffix(suffix))
+        self.settings.setValue(f"ms/export_{kind}", fmt)
         palette = self.ms_pane.palette()
         ch = self.chunk
         operator = str(self.settings.value("pa/disegnatore", "") or "") or None  # read here, not in the worker
+        product = ms_mod.paradata_product(kind, name)
 
         def job(p):
             out = ms_mod.export_product(ch, kind, name, path, fmt, palette=palette)
-            self._write_paradata(ch, "multispectral", out, operator)
+            self._write_paradata(ch, product, out, operator)
             return out
 
         self.run_task("Esportazione", job,
