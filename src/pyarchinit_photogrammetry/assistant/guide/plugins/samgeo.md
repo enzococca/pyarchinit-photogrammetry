@@ -220,7 +220,7 @@ everything found.
   see, which is the tile of 1024 px resized to 800 (Grounding DINO) or 1008 (SAM 3). Give the size of
   the objects and the resolution follows: stones of 15 cm at 0.5 cm/px, not at 1 cm/px. After a run
   the log says when the proposals were small or the models unsure, and what to change.
-* **Stones one by one** are the program's stone tool's job (*Pietre* on the drawing bar: SAM on every
+* **Stones one by one** are the program's stone tool's job (*Pietre* in the menu of SAM in the tool rail: SAM on every
   object of the view, no text); Samgeo finds things by name.
 * **Objects, not soils.** The models find objects - stones, bricks, tiles, trees, people, tools - far
   better than the contrast between two soils: that will be the task of the plugin geoai, which learns

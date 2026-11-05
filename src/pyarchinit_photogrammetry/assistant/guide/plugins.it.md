@@ -184,7 +184,7 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `on_raster_loaded(callback)` | dalla 1.3.2: `callback()` ogni volta che la vista 2D mostra un altro raster, una cornice vuota o niente: lì si ridisegnano i layer e le sovrapposizioni del plugin (si scollega da sola quando il plugin viene tolto) |
 | `on_refresh(callback)` | dalla 1.3.3: `callback()` ogni volta che la finestra mostra di nuovo il progetto (un altro progetto, un altro chunk attivo, un'elaborazione finita, un annulla): lì un pannello del plugin segue il chunk attivo (si scollega da sola quando il plugin viene tolto) |
 | `show_frame(bounds, resolution, text="")` | dalla 1.3.2: una cornice vuota sulla vista 2D (`xmin, ymin, xmax, ymax` nelle coordinate del chunk, metri per pixel) su cui disegnare quando il chunk non ha ortofoto né DEM |
-| `mark_modified()` | dalla 1.3.2: il progetto ha modifiche da salvare (`chunk.meta` o i file del plugin sono cambiati) |
+| `mark_modified()` | dalla 1.3.2: il progetto ha modifiche da salvare (`chunk.meta` o i file del plugin sono cambiati); dalla 1.7.3 *Modifica > Annulla* riporta indietro le chiavi del plugin in `chunk.meta` (vedi sotto) |
 | `call_in_gui(function, *args)` | dalla 1.3.2: `function(*args)` nel thread dell'interfaccia, dalla funzione data a `run` o da un esportatore |
 | `activate_chunk(chunk)` | dalla 1.3.4: `chunk` diventa quello attivo, come quando l'utente lo sceglie nell'area di lavoro (i disegni restano col loro chunk, le viste mostrano il nuovo, le callback di `on_refresh` vengono chiamate); nella riga di comando, il chunk attivo del suo progetto |
 | `show_raster(kind=None, chunk=None, path=None)` | dalla 1.3.4: l'ortofoto (`"ortho"`) o il DEM (`"dem"`) di `chunk` (quello attivo, oppure diventa quello attivo) nella vista 2D con i disegni della finestra, come li mostra la finestra; `None`: l'ortofoto, altrimenti il DEM; `path`: un altro GeoTIFF di quel tipo (una versione conservata, un raster del plugin); `False` se non c'è niente di quel tipo (la vista resta com'era) e nella riga di comando |
@@ -215,6 +215,14 @@ sulla pianta). `engine.elevation.world_of(entry, u, v, None, chunk=chunk)` dà i
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
 nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia quello che `activate`
 ha preso oltre alle sue registrazioni (file aperti, timer).
+
+**Annullare i dati del plugin.** Dalla 1.7.3 le chiavi di `chunk.meta` che non sono del programma fanno parte delle
+istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Un plugin
+che spinge un suo passo (`window.history.push(testo, passo, document=False)`) e poi chiama `mark_modified()` non ha una
+seconda voce per lo stesso cambiamento - ma solo nello stesso giro del ciclo degli eventi: il passo resta "fresco"
+finché non scatta un timer a tempo zero. Un `mark_modified()` chiamato dopo (da una callback successiva, da un timer,
+alla fine di un lavoro in background) registra di nuovo i dati del plugin come una voce a parte, e una sola azione
+diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, nella stessa callback.
 
 ### Compatibilità
 

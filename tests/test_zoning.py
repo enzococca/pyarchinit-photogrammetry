@@ -134,6 +134,37 @@ def test_export_zoning_with_natural_breaks(tmp_path):
     assert ch.meta["multispectral"]["zoning"]["NDVI"]["method"] == "jenks"
 
 
+def test_zoning_polygons_of_many_patches_in_one_pass():
+    """A chequerboard of 4000 patches: one polygon each, with the mean of its own cells and holes kept
+    out of the mean, without a raster per polygon (it took minutes per thousand polygons on a large
+    index); the progress runs from 0 to 1 and says how many polygons were made."""
+    import time
+
+    from rasterio.transform import from_origin
+
+    rng = np.random.default_rng(3)
+    n = 50  # 50 x 80 blocks of 6 x 6 cells
+    cls = np.kron((np.add.outer(np.arange(n), np.arange(80)) % 2) + 1, np.ones((6, 6), np.int32)).astype(np.int32)
+    values = rng.random(cls.shape).astype(np.float32)
+    values[cls.shape[0] // 2, :] = np.nan  # cells without a value inside the patches
+    cls[:6, :6] = 0  # one block without a class
+    transform = from_origin(0, 0, 0.1, 0.1)
+    seen = []
+    t0 = time.perf_counter()
+    polys = ms.zoning_polygons(cls, values, transform, [0.5], progress=lambda f, m="": seen.append((f, m)))
+    elapsed = time.perf_counter() - t0
+    assert len(polys) == n * 80 - 1
+    assert elapsed < 10
+    for poly, attrs in polys[::97]:  # the mean of the cells under the polygon, as before
+        c = poly.representative_point()
+        col, row = int(c.x / 0.1), int(-c.y / 0.1)
+        block = (slice(row // 6 * 6, row // 6 * 6 + 6), slice(col // 6 * 6, col // 6 * 6 + 6))
+        assert attrs["classe"] == int(cls[block][0, 0])
+        assert attrs["media"] == pytest.approx(float(np.nanmean(values[block])), abs=1e-4)
+        assert attrs["area_m2"] == pytest.approx(0.36)
+    assert seen and seen[-1][0] == pytest.approx(1.0) and str(n * 80 - 1) in seen[-1][1]
+
+
 def test_command_line_zoning_with_natural_breaks(tmp_path):
     from typer.testing import CliRunner
 
@@ -197,3 +228,13 @@ def test_the_window_offers_natural_breaks(tmp_path, monkeypatch):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_zoning_says_how_far_it_is():
+    """The breaks, the small patches class by class and their neighbours: the progress moves while the classes are
+    made, not only while the polygons are traced."""
+    values, _ = _three_populations(200, 200, seed=2)
+    seen = []
+    ms.zoning(values, classes=3, method="quantiles", min_cells=20, progress=lambda f, m="": seen.append((f, m)))
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions) and fractions[-1] == pytest.approx(1.0) and len(seen) >= 5

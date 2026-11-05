@@ -1886,7 +1886,7 @@ def index_values(formula: str, bands: dict[str, np.ndarray]) -> np.ndarray:
     return out
 
 
-def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
+def index_raster(chunk: Chunk, name: str, formula: str | None = None, progress: Progress | None = None) -> Path:
     """The index ``name`` (one of :data:`INDICES`, or any ``formula`` over the band names) from
     the reflectance orthomosaic: ``<data>/multispectral/<name>.tif``."""
     import rasterio
@@ -1896,10 +1896,18 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     if not path:
         raise RuntimeError("build the reflectance orthomosaic first")
     formula = formula or INDICES[name][0]
+    progress = as_progress(progress)
+    bands = {}
     with rasterio.open(chunk.data_dir / path) as src:
-        bands = {src.descriptions[i] or f"b{i + 1}": src.read(i + 1) for i in range(src.count)}
+        for i in range(src.count):
+            band = src.descriptions[i] or f"b{i + 1}"
+            progress(0.6 * i / src.count, f"Index {name}: reading the band {band}")
+            bands[band] = src.read(i + 1)
         profile = src.profile.copy()
+    progress(0.6, f"Index {name}: {formula}")
     out = index_values(formula, bands)
+    del bands
+    progress(0.8, f"Index {name}: writing")
     profile.update(count=1, dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     if not profile.get("tiled"):
         profile.pop("blockxsize", None)
@@ -1908,6 +1916,7 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     with rasterio.open(target, "w", **profile) as dst:
         dst.write(out, 1)
         dst.set_band_description(1, name)
+    progress(1.0, f"Index {name} written")
     ms.setdefault("indices", {})[name] = stamps.inherit_entry(chunk, {"file": str(target.relative_to(chunk.data_dir)),
                                                                         "formula": formula}, ms)  # the reflectance's
     return target
@@ -2029,16 +2038,19 @@ def natural_breaks(values: np.ndarray, classes: int) -> list[float]:
     return [_between(x[i - 1], x[i]) for i in starts]
 
 
-def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_cells: int = 20) -> tuple[np.ndarray, list[float]]:
+def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_cells: int = 20,
+           progress: Progress | None = None) -> tuple[np.ndarray, list[float]]:
     """``values`` cut into ``classes`` (1 = the lowest): by ``quantiles`` (as many cells each),
     ``equal`` intervals, natural breaks (``jenks``: :func:`natural_breaks`, the most homogeneous
     classes) or ``kmeans`` (the same aim by successive approximations from the quantiles);
     patches smaller than ``min_cells`` given to their surroundings. Returns the class raster (0
     where NaN) and the breaks."""
+    progress = as_progress(progress)
     valid = np.isfinite(values)
     v = values[valid]
     if v.size == 0:
         return np.zeros(values.shape, np.int32), []
+    progress(0.0, f"Zones: the breaks of {classes} classes")
     if method == "quantiles":
         breaks = [float(np.quantile(v, k / classes)) for k in range(1, classes)]
     elif method == "equal":
@@ -2061,10 +2073,12 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
         raise ValueError("method: " + ", ".join(ZONING_METHODS))
     cls = np.zeros(values.shape, np.int32)
     cls[valid] = 1 + np.searchsorted(np.asarray(breaks, np.float32), v, side="right")
+    del v
     if min_cells > 1:
         from scipy import ndimage
 
         for k in range(1, classes + 1):
+            progress(0.2 + 0.6 * (k - 1) / classes, f"Zones: patches smaller than {min_cells} cells, class {k}")
             labels, n = ndimage.label(cls == k)
             if n == 0:
                 continue
@@ -2072,39 +2086,75 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
             small = np.isin(labels, np.flatnonzero(sizes < min_cells) + 1)
             if small.any():
                 cls[small] = 0
+        progress(0.8, "Zones: the small patches to their neighbours")
         if (cls == 0).any() and valid.any():  # the small patches and nothing else take the nearest class
             idx = ndimage.distance_transform_edt(cls == 0, return_distances=False, return_indices=True)
             filled = cls[tuple(idx)]
             cls = np.where(valid & (cls == 0), filled, cls)
+    progress(1.0, "Zones: classes made")
     return cls, breaks
 
 
-def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list[float]) -> list[tuple]:
+def zoning_polygons(cls: np.ndarray, values: np.ndarray, transform, breaks: list[float],
+                    progress: Progress | None = None) -> list[tuple]:
     """Polygons of the classes (``(shapely geometry, attributes)``): class, its range, the mean
-    and the area of the polygon."""
+    and the area of the polygon.
+
+    Every patch (4-connected cells of one class) is labelled once and the means of all of them are
+    taken together; the polygons are traced on the raster of the labels, so a patch is one polygon
+    with its holes. (A raster per polygon made a large index take hours.)"""
     from rasterio.features import shapes
+    from scipy import ndimage
     from shapely.geometry import shape as to_shape
 
+    progress = as_progress(progress)
+    progress(0.0, "Zones: labelling the patches")
+    labels = np.zeros(cls.shape, np.int32)
+    lab = np.zeros(cls.shape, np.int32)  # one buffer for the labels of every class
+    count = 0
+    classes = []
+    for k in np.unique(cls[cls > 0]):
+        n = ndimage.label(cls == k, output=lab)  # 4-connected, as the polygons
+        np.add(labels, np.where(lab > 0, lab + count, 0), out=labels)
+        classes.append((count, n, int(k)))
+        count += n
+    del lab
+    if count == 0:
+        progress(1.0, "Zones: 0 polygons")
+        return []
+    finite = np.isfinite(values)
+    flat = labels.ravel()
+    sums = np.bincount(flat, weights=np.where(finite, values, 0).ravel().astype(np.float64), minlength=count + 1)
+    cells = np.bincount(flat, weights=finite.ravel(), minlength=count + 1)
+    class_of = np.zeros(count + 1, np.int32)
+    for start, n, k in classes:
+        class_of[start + 1:start + n + 1] = k
+    del flat
+    lo_all = float(np.nanmin(values)) if finite.any() else 0.0
+    hi_all = float(np.nanmax(values)) if finite.any() else 0.0
+    del finite
+    progress(0.2, f"Zones: tracing {count} polygons")
     out = []
-    mask = cls > 0
-    for geom, value in shapes(cls.astype(np.int32), mask=mask, transform=transform, connectivity=4):
-        k = int(value)
+    step = max(1, count // 100)
+    for geom, value in shapes(labels, mask=labels > 0, transform=transform, connectivity=4):
+        i = int(value)
+        k = int(class_of[i])
         poly = to_shape(geom)
         if poly.is_empty:
             continue
-        from rasterio.features import rasterize
-
-        inside = rasterize([(geom, 1)], out_shape=cls.shape, transform=transform, fill=0, dtype=np.uint8) == 1
-        vals = values[inside & np.isfinite(values)]
-        low = breaks[k - 2] if k >= 2 else float(np.nanmin(values))
-        high = breaks[k - 1] if k - 1 < len(breaks) else float(np.nanmax(values))
-        out.append((poly, {"classe": k, "da": round(low, 4), "a": round(high, 4),
-                           "media": round(float(vals.mean()), 4) if vals.size else None, "area_m2": round(poly.area, 2)}))
+        low = breaks[k - 2] if k >= 2 else lo_all
+        high = breaks[k - 1] if k - 1 < len(breaks) else hi_all
+        mean = round(float(sums[i] / cells[i]), 4) if cells[i] else None
+        out.append((poly, {"classe": k, "da": round(low, 4), "a": round(high, 4), "media": mean,
+                           "area_m2": round(poly.area, 2)}))
+        if len(out) % step == 0:
+            progress(0.2 + 0.8 * min(len(out) / count, 1.0), f"Zones: {len(out)} of {count} polygons")
+    progress(1.0, f"Zones: {len(out)} polygons")
     return out
 
 
 def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str = "quantiles",
-                  min_cells: int = 20) -> dict:
+                  min_cells: int = 20, progress: Progress | None = None) -> dict:
     """The zoning of the index ``name`` as polygons in a GeoPackage (``path``, layer ``zone``
     with class, range, mean and area) and as a class raster beside the index. Returns a
     summary (breaks, polygons, area per class)."""
@@ -2116,11 +2166,15 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
     info = (ms.get("indices") or {}).get(name)
     if not info:
         raise RuntimeError(f"build the index {name} first")
+    progress = as_progress(progress)
+    progress(0.0, f"Zoning of {name}: reading the index")
     with rasterio.open(chunk.data_dir / info["file"]) as src:
         values = src.read(1)
         transform, crs = src.transform, src.crs
-    cls, breaks = zoning(values, classes, method, min_cells)
-    polys = zoning_polygons(cls, values, transform, breaks)
+    progress(0.05, f"Zoning of {name}: {classes} classes ({method})")
+    cls, breaks = zoning(values, classes, method, min_cells, progress=progress.sub(0.05, 0.25))
+    polys = zoning_polygons(cls, values, transform, breaks, progress=progress.sub(0.3, 0.6))
+    progress(0.9, f"Zoning of {name}: writing {len(polys)} polygons")
     columns = {"classe": "INTEGER", "da": "REAL", "a": "REAL", "media": "REAL", "area_m2": "REAL"}
     gpkg.write_table(path, "zone", "POLYGON", columns, polys, chunk.crs if chunk.crs != "LOCAL" else None, f"zone {name}")
     with rasterio.open(chunk.data_dir / "multispectral" / f"{name}_zone.tif", "w", driver="GTiff", height=cls.shape[0],
@@ -2161,6 +2215,16 @@ def product_source(chunk: Chunk, kind: str, name: str | None = None) -> Path:
     return chunk.data_dir / rel
 
 
+def paradata_product(kind: str, name: str | None = None) -> str:
+    """The name of a multispectral product in the paradata (:mod:`core.paradata`): ``reflectance``,
+    ``index:<name>`` or ``zones:<name>``."""
+    if kind == "reflectance":
+        return "reflectance"
+    if kind in ("index", "zones") and name:
+        return f"{kind}:{name}"
+    raise ValueError(f"unknown multispectral product {kind!r} {name!r}")
+
+
 def _format_of(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".gpkg":
@@ -2197,6 +2261,9 @@ def _write_colours(src, dst, limits, palette: str) -> None:
     from rasterio.windows import Window
 
     rows = max(1, COLOUR_BLOCK_CELLS // max(src.width, 1))
+    if dst.profile.get("tiled"):  # whole rows of tiles: a tile is never written (and compressed) twice
+        tile = dst.block_shapes[0][0]
+        rows = max(tile, rows // tile * tile)
     for r in range(0, src.height, rows):
         win = Window(0, r, src.width, min(rows, src.height - r))
         z = src.read(1, window=win).astype(np.float32, copy=False)

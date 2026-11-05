@@ -608,6 +608,7 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
     if source not in ("dem", "cloud", "spots"):
         raise ValueError(f"source {source!r}: dem, cloud or spots")
     lines = normalise_lines(breaklines)
+    n_lines = len(lines)  # the lines given (break, soft, boundary): a rebuild passes them again
     if boundary is not None:
         lines.append({"id": "boundary", "kind": "boundary", "coords": _polygon_coords(boundary)})
     dem_path = chunk.product_path("dem")
@@ -682,7 +683,7 @@ def build_tin(chunk, source: str = "dem", max_error: float | None = None, breakl
     tin = Tin(origin, xy, z, tri, con, spot_idx, source, datetime.now().isoformat(timespec="seconds"), {})
     progress(0.93, "Measuring the TIN against the DEM")
     info.update(n_vertices=tin.n_vertices, n_triangles=tin.n_triangles, n_constrained=len(con),
-                n_spots=len(spot_idx), n_breaklines=sum(ln["kind"] == "breakline" for ln in lines),
+                n_spots=len(spot_idx), n_breaklines=sum(ln["kind"] == "breakline" for ln in lines), n_lines=n_lines,
                 native=_native.tin_kernel("tin_triangulate") is not None, warnings=warnings)
     if dem is not None:
         info.update(_dem_error(tin, dem, spot_xyz, lines))

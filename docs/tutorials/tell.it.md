@@ -130,7 +130,7 @@ dei campi intorno; il cursore dà l'altezza sui dintorni in centimetri.
 
 ## 8. Una sezione del tell
 
-Lo strumento *Sezione* della barra di disegno: due clic sul DEM, da ovest a est attraverso la cima
+Lo strumento *Sezione* della barra laterale (gruppo *Sezioni e analisi*): due clic sul DEM, da ovest a est attraverso la cima
 della collina. Il programma taglia il modello lungo la linea e scrive il disegno in scala (SVG), il
 profilo (DXF) e la linea 3D (DXF) nella cartella `sezioni` accanto al progetto; il pannello *Sezioni*
 in basso lo mostra.
@@ -139,7 +139,7 @@ in basso lo mostra.
 
 ## 9. Tagliare il modello
 
-*Taglia* nella barra della vista 3D, *Piano verticale: clic su due punti*: due clic sul modello, a
+*Taglia* nella barra laterale della vista 3D (gruppo *Taglia e prospetti*), *Piano verticale: clic su due punti*: due clic sul modello, a
 ovest e a est della cima. Il dialogo mostra il piano che passa per la loro linea in pianta; *La parte
 sopra il piano* tiene il lato a sinistra della linea dal primo punto al secondo (qui il nord) come
 modello del chunk, e il modello intero resta tra le versioni (tasto destro sul modello nell'area di
@@ -147,8 +147,8 @@ lavoro per riprenderlo).
 
 ![Taglia il modello](../img/tutorial/sultan-cut-dialog.png)
 
-La metà nord vista da sud, con le quote raddoppiate (*Esagerazione verticale* x2 nella barra della
-vista): il bordo del taglio è il profilo della collina attraverso la cima. L'esagerazione cambia solo
+La metà nord vista da sud, con le quote raddoppiate (*Esagerazione verticale* x2 nel gruppo
+*Vista* della barra laterale): il bordo del taglio è il profilo della collina attraverso la cima. L'esagerazione cambia solo
 quello che si vede; clic, sezioni e tagli usano le quote vere. Un taglio può anche tenere una fetta di
 uno spessore dato, oppure salvare le due metà o una serie di fette parallele in file PLY o OBJ.
 

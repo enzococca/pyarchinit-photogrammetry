@@ -121,4 +121,81 @@ def clone(src: str | Path, dst: str | Path) -> None:
         shutil.copy2(src, dst)
 
 
-__all__ = ["replace_file", "clone", "RETRY_DELAYS"]
+_rename_folder = os.replace  # the renames of swap_folder (a test puts a failure in their place)
+
+
+def remove_tree(path: str | Path) -> None:
+    """A folder deleted (the last step of :func:`swap_folder`; a test puts a failure in its place)."""
+    import shutil
+
+    shutil.rmtree(path)
+
+
+BACKUPS = 10  # names a swap may keep the replaced folder under: <name>.old, <name>.old1 ... <name>.old9
+
+
+def backup_name(place: str | Path, n: int = 0) -> Path:
+    """Where :func:`swap_folder` keeps the folder it replaces until the new one is in place: ``<name>.old``, or
+    ``<name>.old<n>`` when an older backup could not be deleted (a file held open on Windows)."""
+    place = Path(place)
+    return place.with_name(place.name + ".old" + (str(n) if n else ""))
+
+
+def backups(place: str | Path) -> list[Path]:
+    """The backups of ``place`` left on disk, the most recent first."""
+    found = [b for b in (backup_name(place, n) for n in range(BACKUPS)) if b.is_dir()]
+    return sorted(found, key=lambda b: b.stat().st_mtime, reverse=True)
+
+
+def mend_swap(place: str | Path) -> None:
+    """What a swap of ``place`` stopped by a crash left, mended: the old folder moved aside and the new one not in
+    place yet - the most recent backup goes back; the new one in place - the backups go. A backup that cannot be
+    deleted stays (logged): it never stops the swap that comes next."""
+    import logging
+
+    place = Path(place)
+    for b in backups(place):
+        if not place.exists():
+            _rename_folder(b, place)
+            continue
+        try:
+            remove_tree(b)
+        except OSError as exc:
+            logging.getLogger("pyarchinit_photogrammetry").warning("Cartella %s non cancellata: %s", b, exc)
+
+
+def swap_folder(new: str | Path, place: str | Path) -> None:
+    """The folder ``new`` put in the place of ``place``, crash-safe: the old folder renamed to a free
+    :func:`backup_name`, the new one renamed into place, the backup deleted. When the second rename fails the old
+    folder goes back (and the error goes on): a failure leaves either folder in place, never neither. A backup that
+    cannot be deleted stays (logged; a later swap deletes it): the swap is made, and the next swap takes another
+    name. What a crash left before is mended first (:func:`mend_swap`)."""
+    import logging
+
+    new, place = Path(new), Path(place)
+    mend_swap(place)
+    backup = next((b for b in (backup_name(place, n) for n in range(BACKUPS)) if not b.exists()), None)
+    if backup is None:
+        raise OSError(f"{place}: {BACKUPS} old copies that cannot be deleted are in the way")
+    moved = False
+    if place.exists():
+        _rename_folder(place, backup)
+        moved = True
+    try:
+        _rename_folder(new, place)
+    except BaseException:
+        if moved:
+            try:
+                _rename_folder(backup, place)
+            except OSError as back:  # the first error is the one said; mend_swap puts the backup back later
+                logging.getLogger("pyarchinit_photogrammetry").error(
+                    "Cartella %s non rimessa al suo posto da %s: %s", place, backup, back)
+        raise
+    if moved:
+        try:
+            remove_tree(backup)
+        except OSError as exc:
+            logging.getLogger("pyarchinit_photogrammetry").warning("Cartella %s non cancellata: %s", backup, exc)
+
+
+__all__ = ["replace_file", "clone", "RETRY_DELAYS", "swap_folder", "mend_swap", "backup_name", "backups", "remove_tree"]

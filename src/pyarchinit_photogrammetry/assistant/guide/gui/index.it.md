@@ -61,8 +61,8 @@ Senza progetto il centro della finestra mostra la pagina iniziale:
 | | Area | Cosa contiene |
 | --- | --- | --- |
 | **1** | Barra dei menu | tutti i comandi: vedi [Menu](menus.md) |
-| **2** | Barra del flusso di lavoro | i passi dalle foto ai prodotti, in ordine: vedi [sotto](#le-barre-degli-strumenti) |
-| **3** | Barra *Disegno* | gli strumenti che disegnano e misurano su ortofoto e DEM: vedi [Disegno e misure](drawing.md) |
+| **2** | Barra in alto | apri, salva, il menu *Flusso di lavoro* dei passi, *Elabora tutto*, PyArchInit e la ricerca dei comandi: vedi [sotto](#le-barre-degli-strumenti) |
+| **3** | Barra laterale | accanto all'ortofoto e al DEM, gli strumenti che disegnano e misurano, in gruppi che aprono un pannello: vedi [sotto](#la-barra-laterale-della-vista-2d) |
 | **4** | Pannelli a sinistra | *Area di lavoro*, *Riferimenti*, *Layer*: il progetto, i suoi marker, ciò che è disegnato ([Pannelli](panes.md)) |
 | **5** | Viste centrali | *Modello* (3D), *Ortofoto / DEM*, *Foto*: vedi [sotto](#le-viste-centrali) |
 | **6** | Pannelli in basso | *Foto* (miniature), *Sezioni*, *Console Python*, *Log* |
@@ -71,46 +71,70 @@ Senza progetto il centro della finestra mostra la pagina iniziale:
 
 Ogni pannello si può spostare, staccare o chiudere, e *Vista > Pannelli* lo riporta: vedi
 [Spostare i pannelli](panes.md#spostare-i-pannelli). La finestra sta sullo schermo di un portatile, fino a
-circa 1000 x 650 pixel: i pulsanti vanno a capo, un pannello troppo basso per il suo contenuto scorre, una barra
-che non ci sta toglie prima i testi (i suggerimenti tengono i nomi).
+circa 1000 x 650 pixel: i pulsanti vanno a capo, un pannello troppo basso per il suo contenuto scorre, la barra in
+alto, se non ci sta, toglie prima i testi (i suggerimenti tengono i nomi).
 
 ## Le barre degli strumenti
 
-### La barra del flusso di lavoro
+### La barra in alto
 
-![La barra del flusso di lavoro](../img/gui/toolbar-workflow.png)
+![La barra in alto](../img/gui/toolbar-workflow.png)
 
-I pulsanti seguono l'ordine del lavoro, da sinistra a destra. Mentre un passo lavora, i pulsanti di
-elaborazione sono disattivati.
+Una sola barra sottile sopra le viste. Mentre un passo lavora, i pulsanti di elaborazione sono disattivati.
 
 | | Pulsante | Cosa fa |
 | --- | --- | --- |
-| ![](../img/gui/icons/apri.png){ width=20 } | Apri un progetto | come *File > Apri...* |
-| ![](../img/gui/icons/salva.png){ width=20 } | Salva il progetto | come *File > Salva* |
-| ![](../img/gui/icons/foto.png){ width=20 } | Aggiungi foto al chunk | le foto nel chunk attivo |
-| ![](../img/gui/icons/marker.png){ width=20 } | Rileva i target codificati | trova i target stampati nelle foto |
-| ![](../img/gui/icons/allinea.png){ width=20 } | Allinea le foto (SfM) | posizioni e orientamenti delle camere |
-| ![](../img/gui/icons/riferimenti.png){ width=20 } | Importa le coordinate dei marker | i punti di controllo da un CSV |
-| ![](../img/gui/icons/nuvola-densa.png){ width=20 } | Depth map e nuvola densa | la nuvola densa |
-| ![](../img/gui/icons/modello.png){ width=20 } | Mesh 3D | il modello |
-| ![](../img/gui/icons/texture.png){ width=20 } | Texture del modello | la texture del modello |
-| ![](../img/gui/icons/dem.png){ width=20 } | Modello digitale di elevazione | il DEM |
-| ![](../img/gui/icons/ortofoto.png){ width=20 } | Ortofoto (true ortho) | l'ortofoto |
-| ![](../img/gui/icons/elabora-tutto.png){ width=20 } | Tutti i passi in sequenza | *Elabora tutto* (++ctrl+r++) |
-| ![](../img/gui/icons/pyarchinit.png){ width=20 } | Pubblica in PyArchInit | ortofoto, DEM e modello nei media di PyArchInit |
-| ![](../img/gui/icons/curve-di-livello.png){ width=20 } | Curve di livello | le curve del DEM |
-| ![](../img/gui/icons/volume-scavo-riporto.png){ width=20 } | Volume scavo / riporto | il volume tolto e aggiunto |
-| ![](../img/gui/icons/pianta-a-quota-slice-orizzontale.png){ width=20 } | Pianta a quota | una pianta del modello a una quota |
+| ![](../img/gui/icons/apri.png){ width=20 } | Apri | come *File > Apri...* |
+| ![](../img/gui/icons/salva.png){ width=20 } | Salva | come *File > Salva* |
+| ![](../img/gui/icons/flusso-di-lavoro.png){ width=20 } | Flusso di lavoro | un menu con i passi in ordine (sotto), ciascuno con lo stato del chunk attivo |
+| ![](../img/gui/icons/elabora-tutto.png){ width=20 } | Elabora tutto | tutti i passi in sequenza (++ctrl+r++) |
+| ![](../img/gui/icons/pyarchinit.png){ width=20 } | PyArchInit | ortofoto, DEM e modello nei media di PyArchInit |
+| ![](../img/gui/icons/search.png){ width=20 } | Cerca un comando | scrivi una parte del nome di un comando dei menu e premi ++enter++; ++ctrl+k++ (++cmd+k++ su macOS) porta lì il cursore |
 
-### La barra Disegno
+Il menu **Flusso di lavoro** elenca i passi dalle foto ai prodotti, ciascuno con lo stato del chunk attivo al
+posto dell'icona: ![](../img/gui/icons/passo-fatto.png){ width=20 } fatto,
+![](../img/gui/icons/passo-da-fare.png){ width=20 } ancora da fare. Un clic esegue il passo, come i comandi del
+menu *Flusso di lavoro*:
 
-![La barra Disegno](../img/gui/toolbar-drawing.png)
+| Passo | Cosa fa |
+| --- | --- |
+| 1. Aggiungi foto | le foto nel chunk attivo |
+| 2. Marker | trova i target codificati stampati nelle foto |
+| 3. Allinea | posizioni e orientamenti delle camere (SfM) |
+| 4. Riferimenti | le coordinate dei marker da un CSV (fatto quando un marker ha coordinate rilevate o il chunk è allineato in un sistema di coordinate) |
+| 5. Nuvola densa | depth map e nuvola densa |
+| 6. Modello | la mesh 3D |
+| 7. Texture | la texture del modello |
+| 8. DEM | il modello digitale di elevazione |
+| 9. Ortofoto | l'ortofoto (true ortho) |
 
-Sempre visibile sotto il flusso di lavoro: le modalità di disegno (*Sposta*, *Seleziona*, *Disegna US* con
-*Mano libera* nel suo menu, *Vertici* con *Rimodella* nel suo menu, *Snap*, *Sezione*, *Misura*, *Quota*
-con *Punto di misura* nel suo menu, *Linee*, *Libero* (*Disegno libero*), *Marker*, *SAM*), *Patch*, *Elimina*, *Unisci*,
-*Cancella disegni*, e le scorciatoie ai pannelli *Layer* (con *Sezioni* nel suo menu), a QGIS e a *Pubblica*. Ogni strumento è descritto in
-[Disegno e misure](drawing.md#la-barra-disegno).
+*Curve di livello*, *Volume scavo / riporto* e *Pianta a quota* sono nel gruppo *Sezioni e analisi* della barra
+laterale della vista 2D e nel menu *Strumenti*.
+
+### La barra laterale della vista 2D
+
+![La barra laterale con il gruppo Disegno aperto](../img/gui/toolbar-drawing.png)
+
+A sinistra dell'ortofoto e del DEM una colonna stretta tiene gli strumenti di disegno in gruppi. Un clic su un
+gruppo apre il suo pannello accanto alla barra, sopra la vista, con gli strumenti come pulsanti con icona e
+nome; la piccola freccia accanto a un pulsante apre il suo menu. Il pannello si chiude quando scegli uno
+strumento (un'opzione come *Snap* lo lascia aperto), fai di nuovo clic sul gruppo, premi ++esc++ o fai clic sulla vista; la puntina nella sua intestazione
+lo tiene aperto mentre lavori. Il gruppo dello strumento in uso è evidenziato. Un clic destro sulla barra
+sceglie *Solo icone* o *Icone e testo* (i nomi dei gruppi sotto le icone).
+
+| | Gruppo | Strumenti |
+| --- | --- | --- |
+| ![](../img/gui/icons/rail-navigate.png){ width=20 } | Naviga | *Sposta / interroga*, *Seleziona* (*Selezione a mano libera* e *Identifica e raggruppa unità* nel suo menu) |
+| ![](../img/gui/icons/rail-draw.png){ width=20 } | Disegno | *Disegna US* (*Mano libera* nel suo menu), *Vertici* (*Rimodella* nel suo menu), *Rimodella*, *Disegno libero*, *Linee di rottura* (il tipo nel suo menu), *Snap* |
+| ![](../img/gui/icons/rail-measure.png){ width=20 } | Misure | *Misura distanza*, *Area e superficie 3D*, *Quota* (*Punto di misura* nel suo menu), *Marker* |
+| ![](../img/gui/icons/rail-analysis.png){ width=20 } | Sezioni e analisi | *Sezione* (le opzioni e il pannello *Sezioni* nel suo menu), *Curve di livello*, *Volume scavo / riporto*, *Pianta a quota* |
+| ![](../img/gui/icons/rail-auto.png){ width=20 } | Automatico | *Segment Anything (SAM)* (i suoi modi e il modello nel suo menu), *Patch dell'ortofoto* |
+| ![](../img/gui/icons/rail-edit.png){ width=20 } | Modifica | *Elimina selezionati*, *Unisci selezionati*, *Cancella disegni* |
+| ![](../img/gui/icons/rail-layers.png){ width=20 } | Layer e uscite | *Layer* (il pannello *Sezioni* nel suo menu), *QGIS*, *Pubblica in PyArchInit* |
+
+Ogni strumento è descritto in [Disegno e misure](drawing.md#gli-strumenti-di-disegno). *Vista > Barre > Barra di
+disegno classica* mostra al posto della barra laterale la vecchia barra orizzontale con gli stessi strumenti,
+sotto la barra in alto.
 
 ## Le viste centrali
 
@@ -132,7 +156,11 @@ all'altra (nell'area di lavoro ++f2++ invece rinomina).
     rotella avvicina verso il cursore, un doppio clic sceglie il centro di rotazione: vedi
     [Vista 3D e trackball](view3d.md).
 
-    La barra sopra la vista ha gli strumenti che lavorano in 3D:
+    Sopra la vista una riga sceglie cosa si vede e come (*Mostra*, i colori, la dimensione dei punti, *Camere*,
+    *Marker*, *Regione*); gli strumenti che lavorano in 3D sono nella barra laterale alla sua sinistra, in quattro
+    gruppi che aprono un pannello come nella vista 2D: *Vista* (*Dall'alto*, *Vista iniziale*, *Centra la vista sul
+    punto*, *Trackball*, *Esagerazione verticale*), *Punti* (*Marker*, *Foto del punto*, *Lazo*), *Taglia e
+    prospetti* (*Sezione*, *Pianta a quota*, *Taglia*, *Prospetto*) e *Disegna*:
 
     * **Marker**: clic su un punto del modello o della nuvola per mettervi un marker;
     * **Foto del punto**: le foto che vedono il punto cliccato;
@@ -185,8 +213,12 @@ l'area di lavoro rimuove. Il menu dice cosa verrà annullato.
   e annullandolo i proxy delle unità seguono i loro poligoni.
 * I passi di elaborazione (allineamento, nuvola densa...) non si annullano: si usano le
   [versioni](processing.md#versioni).
+* Si annullano anche i dati che un plugin tiene nel chunk (quando il plugin dice che il progetto è cambiato), come
+  "Dati dei plugin".
+* *Tutti* / *Nessuno* nel pannello Layer sono un solo passo per tutti i layer che mostrano o nascondono.
 * La cronologia riparte quando si apre un altro progetto; quando un altro chunk diventa attivo tiene solo le
-  rimozioni (le altre modifiche appartengono al loro chunk).
+  rimozioni (le altre modifiche appartengono al loro chunk). Le copie tenute per l'annullamento (nella cartella
+  `undo` di ogni chunk) vengono cancellate quando il programma si chiude.
 
 ## Lingua e tema
 

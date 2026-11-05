@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
                                QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
                                QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
@@ -32,6 +32,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
                       ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
+from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
@@ -62,8 +63,6 @@ PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
-LAYER_PREFIX = "Disegni 3D: "  # the layers of the 2D view that show the free drawings of a user layer (core.free_drawings)
-FREE_KINDS = (("line", "Linea"), ("polygon", "Poligono"), ("point", "Punto"))  # the kinds of Disegno libero
 
 
 class _LeftByHand(Exception):
@@ -325,39 +324,6 @@ class _CallThread:
         return not self._thread.is_alive()
 
 
-def _runs(mask, closed: bool = False) -> list:
-    """The runs of consecutive True of ``mask`` as index arrays; ``closed``: the last and the first are neighbours
-    (a run across the end joined)."""
-    mask = np.asarray(mask, bool)
-    n = len(mask)
-    runs, cur = [], []
-    for i in range(n):
-        if mask[i]:
-            cur.append(i)
-        elif cur:
-            runs.append(cur)
-            cur = []
-    if cur:
-        runs.append(cur)
-    if closed and len(runs) > 1 and runs[0][0] == 0 and runs[-1][-1] == n - 1:
-        runs = [runs[-1] + runs[0]] + runs[1:-1]
-    return [np.array(r) for r in runs]
-
-
-def _fill_missing(values: list, xy) -> list | None:
-    """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` from
-    their neighbours (the nearest known value beyond the ends); None when no vertex has a value."""
-    known = [i for i, v in enumerate(values) if v is not None]
-    if not known:
-        return None
-    if len(known) == len(values):
-        return [float(v) for v in values]
-    xy = np.asarray(xy, float)
-    t = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy[:, :2], axis=0).T))]) if len(xy) > 1 else np.zeros(1)
-    filled = np.interp(t, t[known], [float(values[i]) for i in known])
-    return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
-
-
 class _GuiCalls(QObject):
     """Runs functions in the interface thread: emitted from any thread, received there (queued)."""
 
@@ -449,6 +415,8 @@ class _StatusBar(QStatusBar):
     def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt name
         super().showMessage(translate(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
+SEARCH_WIDTH = (150, 300)  # the search of the commands in the top bar: narrowest and widest, pixels
+
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
              "area": "Area: tutte le unità nel riquadro",
              "stones": "Pietre: ogni pietra nel riquadro (disegno pietra per pietra)"}
@@ -477,7 +445,7 @@ class _Removed:
         self.window._redo_removed(self)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FreeDrawingActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
     UPDATE_WINDOW_POLL_MS = 400  # a window of the update flow held back looks this often for the open one to close
@@ -586,6 +554,7 @@ class MainWindow(QMainWindow):
         self.model_view.free_vertex_moved.connect(self._free_vertex_moved)
         self.model_view.free_delete_requested.connect(self._free_delete_requested)
         self.model_view.free_drape_requested.connect(self._free_draped)
+        self.model_view.busy_message.connect(self._model_busy_message)
         self._free_selected = ""  # the free drawing selected in the 3D view
         # a double click on the drawing selected in 3D: its form, once the mouse events of the view are over
         self.model_view.free_properties_requested.connect(
@@ -636,6 +605,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.free_finished.connect(self._free_from_2d)
         self.ortho_view.feature_double_clicked.connect(self._feature_double_clicked)
         self.ortho_view.raster_loaded.connect(self._draw_free_2d)
+        self.ortho_view.raster_loaded.connect(self._raster_loaded)  # also a raster or a frame shown by a plugin
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -704,6 +674,7 @@ class MainWindow(QMainWindow):
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
+        self.layers_pane.visibility_set.connect(self._layers_visibility_set)
         self.ortho_view.labels_changed.connect(self._labels_changed)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
         self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
@@ -970,6 +941,17 @@ class MainWindow(QMainWindow):
             tip=tr("DEM, ortofoto, prospetti, rilievi e TIN fatti prima dell'ultimo cambio del sistema del chunk, "
                    "rifatti in ordine con i parametri con cui erano stati costruiti"))
         self.a_rebuild_stale.setEnabled(False)
+        self.a_rebuild_keep = QAction(tr("Ricostruendo, conserva DEM e ortofoto attivi come versioni"), self,
+                                      checkable=True)
+        self.a_rebuild_keep.setToolTip(tr("Come «Conservala per confrontarla» nei dialoghi di costruzione: il DEM e "
+                                          "l'ortofoto rifatti da Ricostruisci i prodotti da rifare lasciano quelli "
+                                          "di prima fra le versioni"))
+        # off by default: kept in the system of before they cannot be compared with the rebuilt ones, and they cost
+        # disk (GBs on a large survey); Modifica > Annulla already takes a rebuild back
+        self.a_rebuild_keep.setChecked(self.settings.value("rebuild_keep_versions", "false") in ("true", True, 1, "1"))
+        self.a_rebuild_keep.toggled.connect(
+            lambda on: self.settings.setValue("rebuild_keep_versions", "true" if on else "false"))
+        m.addAction(self.a_rebuild_keep)
         self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
         self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
                   tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
@@ -1440,6 +1422,12 @@ class MainWindow(QMainWindow):
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
+        bars = m.addMenu(icon("panes"), tr("Barre"))
+        self.a_classic_bar = QAction(tr("Barra di disegno classica"), self, checkable=True)
+        self.a_classic_bar.setStatusTip(tr("La barra orizzontale degli strumenti di disegno al posto della barra "
+                                           "laterale della vista 2D"))
+        self.a_classic_bar.setChecked(self.settings.value("toolbar/classic", "false") in ("true", True))
+        bars.addAction(self.a_classic_bar)
         m.addSeparator()
         tmenu = m.addMenu(icon("theme"), tr("Tema"))
         tgroup = QActionGroup(self)
@@ -1480,56 +1468,132 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_plugins_auto_update)
         m.addSeparator()
         self._act(m, tr("Informazioni"), self.about, icon_name="about")
-        # ------------------------------------------------------------ toolbar
-        tb = QToolBar("Flusso di lavoro")
+        # ------------------------------------------------------------ the bars and the rail of the 2D view
+        self._build_top_bar()
+        self._build_drawing_menus()
+        self._build_drawing_toolbar()
+        self._build_raster_rail()
+        self.set_classic_bar(self.a_classic_bar.isChecked(), save=False)
+        self.a_classic_bar.toggled.connect(self.set_classic_bar)
+        # a layout put back (the last session's, Ripristina) holds the drawing bar as it was then: the choice again
+        self.panes.restored.connect(lambda: self.set_classic_bar(self.a_classic_bar.isChecked(), save=False))
+        self._refresh_recent()
+        self._apply_draw_options()
+
+    # ---------------------------------------------------------------- top bar, drawing bar, rail of the 2D view
+    #: the steps of the menu Flusso di lavoro of the top bar: key, text, slot name, tooltip
+    WORKFLOW_STEPS = (("photos", "Aggiungi foto", "add_photos", "Aggiungi foto al chunk"),
+                      ("markers", "Marker", "detect_markers", "Rileva i target codificati"),
+                      ("align", "Allinea", "align_photos", "Allinea le foto (SfM)"),
+                      ("reference", "Riferimenti", "import_reference", "Importa le coordinate dei marker"),
+                      ("dense", "Nuvola densa", "build_dense", "Depth map e nuvola densa"),
+                      ("model", "Modello", "build_model", "Mesh 3D"),
+                      ("texture", "Texture", "build_texture", "Texture del modello"),
+                      ("dem", "DEM", "build_dem", "Modello digitale di elevazione"),
+                      ("ortho", "Ortofoto", "build_ortho", "Ortofoto (true ortho)"))
+
+    def _build_top_bar(self) -> None:
+        """One slim bar above the views: Apri, Salva | Flusso di lavoro (a menu of the steps with the
+        state of the active chunk) | Elabora tutto | PyArchInit | the search of the commands."""
+        from .command_search import CommandSearch
+
+        tb = QToolBar(tr("Flusso di lavoro"))
         tb.setObjectName("workflow_toolbar")
         tb.setMovable(False)
-        tb.setIconSize(QSize(26, 26))
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        tb.setIconSize(QSize(20, 20))
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
-        self._toolbar_styles = {tb: Qt.ToolButtonStyle.ToolButtonTextUnderIcon}
+        self.workflow_toolbar = tb
+        self._toolbar_styles = {tb: Qt.ToolButtonStyle.ToolButtonTextBesideIcon}
         self._toolbar_sizes: dict = {}  # toolbar -> (width besides the buttons, [(with text, icon only)])
-        groups = [
-            [("open", "Apri", lambda: self.open_document(), "Apri un progetto", False),
-             ("save", "Salva", self.save_document, "Salva il progetto", False)],
-            [("photos", "Foto", self.add_photos, "Aggiungi foto al chunk", True),
-             ("markers", "Marker", self.detect_markers, "Rileva i target codificati", True),
-             ("align", "Allinea", self.align_photos, "Allinea le foto (SfM)", True),
-             ("reference", "Riferimenti", self.import_reference, "Importa le coordinate dei marker", True)],
-            [("dense", "Nuvola densa", self.build_dense, "Depth map e nuvola densa", True),
-             ("model", "Modello", self.build_model, "Mesh 3D", True),
-             ("texture", "Texture", self.build_texture, "Texture del modello", True),
-             ("dem", "DEM", self.build_dem, "Modello digitale di elevazione", True),
-             ("ortho", "Ortofoto", self.build_ortho, "Ortofoto (true ortho)", True)],
-            [("process_all", "Elabora tutto", self.process_all, "Tutti i passi in sequenza (Ctrl+R)", True)],
-            [("publish", "PyArchInit", self.pyarchinit_publish, "Pubblica in PyArchInit", True)],
-        ]
-        for gi, group in enumerate(groups):
-            if gi:
-                tb.addSeparator()
-            for name, text, slot, tip, processing in group:
-                a = tb.addAction(icon(name), text)
-                a.setStatusTip(tip)
-                a.setToolTip(tip)
-                a.triggered.connect(lambda _=False, s=slot: s())
-                if processing:
-                    self._processing_actions.append(a)
-        tb.addSeparator()  # analyses of the DEM and of the model, next to the products they use
-        for a in (self.a_contours, self.a_volume, self.a_slice):
-            tb.addAction(a)
-        # drawing and layer tools, always visible under the workflow
-        self.addToolBarBreak()
-        db = QToolBar("Disegno e layer")
-        db.setObjectName("drawing_toolbar")
-        db.setMovable(False)
-        db.setIconSize(QSize(20, 20))
-        db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(db)
-        self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        lab = QLabel(tr(" Disegno: "))
-        lab.setObjectName("pageSubtitle")
-        db.addWidget(lab)
-        # short texts in the bar (menus keep the full names, tooltips show them)
+
+        def button(name: str, text: str, slot, tip: str, processing: bool) -> QAction:
+            a = tb.addAction(icon(name), text)
+            a.setStatusTip(tip)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda _=False, s=slot: s())
+            if processing:
+                self._processing_actions.append(a)
+            return a
+
+        button("open", tr("Apri"), lambda: self.open_document(), tr("Apri un progetto"), False)
+        button("save", tr("Salva"), self.save_document, tr("Salva il progetto"), False)
+        tb.addSeparator()
+        self.workflow_menu = QMenu(tr("Flusso di lavoro"), self)
+        self.workflow_actions: dict[str, QAction] = {}
+        for i, (key, text, slot, tip) in enumerate(self.WORKFLOW_STEPS, 1):
+            if key in ("dense", "dem"):  # the reconstruction, the products of the plan
+                self.workflow_menu.addSeparator()
+            a = self.workflow_menu.addAction(icon("step_todo"), f"{i}.  {tr(text)}")
+            a.setToolTip(tr(tip))
+            a.setStatusTip(tr(tip))
+            a.setData(False)
+            a.setObjectName(f"workflow_{key}")
+            a.triggered.connect(lambda _=False, s=slot: getattr(self, s)())
+            self._processing_actions.append(a)
+            self.workflow_actions[key] = a
+        self.workflow_menu.setToolTipsVisible(True)
+        self.workflow_menu.aboutToShow.connect(self._update_workflow_states)
+        self.a_workflow = QAction(icon("workflow"), tr("Flusso di lavoro"), self)
+        self.a_workflow.setToolTip(tr("I passi in ordine, con lo stato del chunk attivo: segno verde = fatto, "
+                                      "cerchio vuoto = da fare"))
+        self.a_workflow.setMenu(self.workflow_menu)
+        tb.addAction(self.a_workflow)
+        wb = tb.widgetForAction(self.a_workflow)
+        if wb is not None:
+            wb.setObjectName("workflowButton")
+            wb.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tb.addSeparator()
+        button("process_all", tr("Elabora tutto"), self.process_all, tr("Tutti i passi in sequenza (Ctrl+R)"), True)
+        button("publish", "PyArchInit", self.pyarchinit_publish, tr("Pubblica in PyArchInit"), True)
+        tb.addSeparator()
+        self.command_search = CommandSearch(self)
+        tb.addWidget(self.command_search)
+        key = QShortcut(QKeySequence("Ctrl+K"), self)  # Cmd+K on macOS
+        key.setContext(Qt.ShortcutContext.WindowShortcut)  # this window and its floating panes only
+        key.activated.connect(self.command_search.start)
+        from .command_search import ShortcutKeeper
+
+        self._shortcut_keeper = ShortcutKeeper(self)  # a focused text field does not swallow Ctrl+K (Linux)
+        QApplication.instance().focusChanged.connect(self._keep_search_shortcut)
+
+    def _keep_search_shortcut(self, old, new) -> None:
+        self._shortcut_keeper.follow(old, new, self)
+
+    def workflow_states(self) -> dict[str, bool]:
+        """Each step of the menu Flusso di lavoro: done (True) or not for the active chunk. References:
+        a marker with surveyed coordinates, or a chunk aligned in a coordinate system."""
+        from ..core import crs as crs_mod
+
+        ch = self.chunk
+        states = dict.fromkeys(self.workflow_actions, False)
+        if ch is None:
+            return states
+
+        def has(name: str) -> bool:
+            try:
+                p = ch.product_path(name)
+            except RuntimeError:  # a chunk not in a document
+                return False
+            return p is not None and p.exists()
+
+        aligned = bool(ch.aligned_cameras)
+        states.update(photos=bool(ch.cameras), markers=bool(ch.markers), align=aligned,
+                      reference=any(m.reference.location is not None for m in ch.markers)
+                      or (aligned and not crs_mod.is_local(ch.crs)),
+                      dense=has("point_cloud"), model=has("model"), texture=has("model_textured"), dem=has("dem"),
+                      ortho=has("orthomosaic"))
+        return states
+
+    def _update_workflow_states(self) -> None:
+        for key, done in self.workflow_states().items():
+            a = self.workflow_actions[key]
+            if a.data() != done:
+                a.setData(done)
+                a.setIcon(icon("step_done" if done else "step_todo"))
+
+    def _build_drawing_menus(self) -> None:
+        """The actions and the menus the drawing tools share between the rail and the classic bar."""
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "US"),
                          (self.draw_actions["vertices"], "Vertici"), (self.draw_actions["reshape"], "Rimodella"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
@@ -1550,66 +1614,137 @@ class MainWindow(QMainWindow):
         self.draw_actions["polygon"].setToolTip(tr("Disegna unità stratigrafica; dal menu: Mano libera"))
         self.draw_actions["vertices"].setToolTip(tr("Modifica i vertici delle unità; dal menu: Rimodella un'unità "
                                                     "con una linea (come in QGIS)"))
+        self.a_layers_pane = QAction(icon("slice"), "Layer", self)
+        self.a_layers_pane.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
+        self.a_layers_pane.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
+        self.a_sections_pane = QAction(icon("line"), tr("Sezioni"), self)
+        self.a_sections_pane.setToolTip(tr("Pannello delle sezioni"))
+        self.a_sections_pane.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
+        self.section_menu.addAction(self.a_sections_pane)  # beside the options of the sections
+        self.a_publish_drawings = QAction(icon("publish"), tr("Pubblica"), self)
+        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
+                                              "quote (pyarchinit_quote)"))
+        self.a_publish_drawings.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
+        self._processing_actions.append(self.a_publish_drawings)
+
+        def menu(*actions) -> QMenu:
+            m = QMenu(self)
+            m.addActions(list(actions))
+            return m
+
+        # in the menus of their buttons: the freehand of Disegna US (as the digitizing techniques of QGIS), Rimodella
+        # next to Vertici, the measuring point next to the spot height (both a click that reads the point), the
+        # Sections pane next to Layer
+        self.select_menu = menu(self.a_select_freehand, self.a_identify_units)
+        self.polygon_menu = menu(self.a_freehand)
+        self.vertices_menu = menu(self.draw_actions["vertices"], self.draw_actions["reshape"])
+        self.quota_menu = menu(self.draw_actions["quota"], self.draw_actions["probe"])
+        self.layer_menu = menu(self.a_layers_pane, self.a_sections_pane)
+
+    def _build_drawing_toolbar(self) -> None:
+        """The classic horizontal drawing bar (Vista > Barre > Barra di disegno classica), hidden by default:
+        the same actions as the rail of the 2D view."""
+        self.addToolBarBreak()
+        db = QToolBar(tr("Disegno e layer"))
+        db.setObjectName("drawing_toolbar")
+        db.setMovable(False)
+        db.setIconSize(QSize(20, 20))
+        db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        db.toggleViewAction().setVisible(False)  # shown by Vista > Barre only, never beside the rail
+        self.addToolBar(db)
+        self.drawing_toolbar = db
+        self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        lab = QLabel(tr(" Disegno: "))
+        lab.setObjectName("pageSubtitle")
+        db.addWidget(lab)
+
+        def with_menu(action: QAction, menu: QMenu | None = None) -> None:
+            b = db.widgetForAction(action)
+            if b is not None:
+                if menu is not None:
+                    b.setMenu(menu)
+                b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
         for mode in ("pan", "select", "polygon", "vertices"):
             db.addAction(self.draw_actions[mode])
-        # in the menus of their buttons, so that the bar keeps its texts on a wide screen: the freehand
-        # of Disegna US (as the digitizing techniques of QGIS), Rimodella next to Vertici, the measuring point
-        # next to the spot height (both a click that reads the point) and, further on, Sezioni next to Layer
-        for mode, actions in (("select", [self.a_select_freehand, self.a_identify_units]),
-                              ("polygon", [self.a_freehand]),
-                              ("vertices", [self.draw_actions["vertices"], self.draw_actions["reshape"]])):
-            button = db.widgetForAction(self.draw_actions[mode])
-            if button is not None:
-                menu = QMenu(self)
-                menu.addActions(actions)
-                button.setMenu(menu)
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.draw_actions["select"], self.select_menu)
+        with_menu(self.draw_actions["polygon"], self.polygon_menu)
+        with_menu(self.draw_actions["vertices"], self.vertices_menu)
         db.addAction(self.a_snap)
-        snap_button = db.widgetForAction(self.a_snap)
-        if snap_button is not None:
-            snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.a_snap)
         for mode in ("line", "measure", "quota", "breakline", "free", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
-        button = db.widgetForAction(self.draw_actions["quota"])
-        if button is not None:  # Punto di misura in the menu of Quota
-            menu = QMenu(self)
-            menu.addActions([self.draw_actions["quota"], self.draw_actions["probe"]])
-            button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        button = db.widgetForAction(self.draw_actions["breakline"])
-        if button is not None:  # the kind of the lines in the menu of the button
-            button.setMenu(self.breakline_menu)
-        button = db.widgetForAction(self.draw_actions["free"])
-        if button is not None:  # line, polygon or point, the layer they go in
-            button.setMenu(self.free_menu)
-        for mode in ("sam", "line", "breakline", "free"):
-            button = db.widgetForAction(self.draw_actions[mode])
-            if button is not None:
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        with_menu(self.draw_actions["quota"], self.quota_menu)
+        with_menu(self.draw_actions["breakline"], self.breakline_menu)
+        with_menu(self.draw_actions["free"], self.free_menu)
+        with_menu(self.draw_actions["sam"])
+        with_menu(self.draw_actions["line"])
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
+        # the analyses of the DEM and of the model (on the old top bar before 1.7.3): one button with their menu, so
+        # that the bar keeps its texts on a wide screen also with the fonts of Windows
+        self.analysis_menu = QMenu(tr("Analisi"), self)
+        for a in (self.a_contours, self.a_volume, self.a_slice):
+            self.analysis_menu.addAction(a)
+        self.a_analysis = QAction(icon("contours"), tr("Analisi"), self)
+        self.a_analysis.setToolTip(tr("Curve di livello, volume scavo / riporto, pianta a quota"))
+        self.a_analysis.setMenu(self.analysis_menu)
+        db.addAction(self.a_analysis)
+        b = db.widgetForAction(self.a_analysis)
+        if b is not None:
+            b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         db.addSeparator()
-        layers = db.addAction(icon("slice"), "Layer")
-        layers.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
-        layers.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
-        a = QAction(icon("line"), tr("Sezioni"), self)
-        a.setToolTip(tr("Pannello delle sezioni"))
-        a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
-        button = db.widgetForAction(layers)
-        if button is not None:  # the Sections pane in the menu of Layer
-            menu = QMenu(self)
-            menu.addActions([layers, a])
-            button.setMenu(menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        db.addAction(self.a_layers_pane)
+        with_menu(self.a_layers_pane, self.layer_menu)
         db.addAction(self.a_qgis_open)
-        a = db.addAction(icon("publish"), tr("Pubblica"))
-        a.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le quote "
-                        "(pyarchinit_quote)"))
-        a.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
-        self._processing_actions.append(a)
-        self._refresh_recent()
-        self._apply_draw_options()
+        db.addAction(self.a_publish_drawings)
+        db.setVisible(False)
+
+    def _build_raster_rail(self) -> None:
+        """The rail of the 2D view: the drawing tools in groups, each opening its flyout over the view."""
+        from .tool_rail import ToolRail
+
+        d = self.draw_actions
+        rail = self.raster_rail = ToolRail("2d")
+        rail.add_group("navigate", tr("Naviga"), "rail_navigate",
+                       [(d["pan"], tr("Sposta / interroga")), (d["select"], tr("Seleziona"), self.select_menu)])
+        rail.add_group("draw", tr("Disegno"), "rail_draw",
+                       [(d["polygon"], tr("Disegna US"), self.polygon_menu),
+                        (d["vertices"], tr("Vertici"), self.vertices_menu), (d["reshape"], tr("Rimodella")),
+                        (d["free"], tr("Disegno libero"), self.free_menu),
+                        (d["breakline"], tr("Linee di rottura"), self.breakline_menu), None,
+                        (self.a_snap, "Snap")])
+        rail.add_group("measure", tr("Misure"), "rail_measure",
+                       [(d["measure"], tr("Misura distanza")), (d["area"], tr("Area e superficie 3D")),
+                        (d["quota"], tr("Quota"), self.quota_menu), (d["marker"], "Marker")])
+        rail.add_group("analysis", tr("Sezioni e analisi"), "rail_analysis",
+                       [(d["line"], tr("Sezione")), None, (self.a_contours, tr("Curve di livello")),
+                        (self.a_volume, tr("Volume scavo / riporto")), (self.a_slice, tr("Pianta a quota"))])
+        rail.add_group("auto", tr("Automatico"), "rail_auto",
+                       [(d["sam"], "Segment Anything (SAM)"), (d["patch"], tr("Patch dell'ortofoto"))])
+        rail.add_group("edit", tr("Modifica"), "rail_edit",
+                       [(self.a_sel_delete, tr("Elimina selezionati")), (self.a_sel_merge, tr("Unisci selezionati")),
+                        (self.a_clear_drawings, tr("Cancella disegni"))])
+        rail.add_group("layers", tr("Layer e uscite"), "rail_layers",
+                       [(self.a_layers_pane, "Layer", self.layer_menu), (self.a_qgis_open, "QGIS"),
+                        (self.a_publish_drawings, tr("Pubblica in PyArchInit"))])
+        rail.attach_to_view(self.ortho_view)
+        for a in self.draw_group.actions():  # the group of the tool in use stands out
+            a.toggled.connect(lambda _on: self.raster_rail.mark_active(self.draw_group.checkedAction()))
+        rail.mark_active(self.draw_group.checkedAction())
+
+    def set_classic_bar(self, on: bool, save: bool = True) -> None:
+        """The classic horizontal drawing bar (True) or the rail of the 2D view (False)."""
+        on = bool(on)
+        if self.a_classic_bar.isChecked() != on:
+            self.a_classic_bar.setChecked(on)  # comes back here through toggled
+            return
+        self.drawing_toolbar.setVisible(on)
+        self.raster_rail.set_shown(not on)
+        if save:
+            self.settings.setValue("toolbar/classic", "true" if on else "false")
+        self._fit_toolbars()
 
     def _show_pane(self, tabs, widget: QWidget | None = None) -> None:
         """A pane in front, also when it was closed or floating. ``tabs`` (``self.left_tabs``...) is
@@ -1632,7 +1767,7 @@ class MainWindow(QMainWindow):
 
     def restore_layout(self, state) -> bool:
         """The panes as the last session left them (``state`` saved when the window closed)."""
-        return self.panes.restore(state)
+        return self.panes.restore(state)  # then panes.restored: the drawing bar as chosen again
 
     def show_view(self, widget: QWidget) -> None:
         self.stack.setCurrentWidget(self.tabs)
@@ -1683,6 +1818,13 @@ class MainWindow(QMainWindow):
                 if done["restored"] or done["deleted"]:
                     log.info("Elementi rimossi in una sessione interrotta: %d rimessi al loro posto, %d cancellati",
                              done["restored"], done["deleted"])
+            try:  # an elevation whose files were being swapped when the session stopped
+                mended = doc.mend_swaps()
+            except Exception as exc:  # noqa: BLE001 - the project opens anyway
+                log.warning("Cartelle dei prospetti non sistemate: %s", exc)
+            else:
+                if mended:
+                    log.info("Prospetti lasciati a metà da una sessione interrotta: %d sistemati", mended)
         if not doc.chunks:
             doc.add_chunk("Chunk 1")
         self.units = []
@@ -1706,7 +1848,7 @@ class MainWindow(QMainWindow):
         self._capture_states()
         if self.history is None:
             self.history = UndoHistory(self._undo_state, self._undo_apply, lambda: self.chunk,
-                                       on_change=self._undo_actions)
+                                       on_change=self._undo_actions, defer=lambda f: QTimer.singleShot(0, f))
         else:
             self.history.reset()
         if doc.path:
@@ -1760,6 +1902,7 @@ class MainWindow(QMainWindow):
         self._update_stack()
         self._capture_states()
         self._update_rebuild_action()
+        self._update_workflow_states()
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
@@ -1805,7 +1948,9 @@ class MainWindow(QMainWindow):
     def mark_modified(self) -> None:
         """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
         shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
-        take it back."""
+        take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
+        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). A plugin that pushes its own step
+        (``history.push``) before calling this gets no second entry for the same change."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:
@@ -2227,8 +2372,9 @@ class MainWindow(QMainWindow):
             if not path:
                 return
             fmt = "csv" if path.lower().endswith(".csv") or chosen.startswith("CSV") else "tif"
-            self.run_task("Esporta le anomalie termiche", lambda p: th.export(self.chunk, path, fmt, source=source),
-                          lambda out: self._info(tr("Anomalie termiche esportate"), str(out)))
+            ch = self.chunk  # the job never reads the window's chunk: it may change while it runs
+            self.run_task("Esporta le anomalie termiche", lambda p: th.export(ch, path, fmt, source=source),
+                          lambda out: self._info(tr("Anomalie termiche esportate"), str(out)), refresh=False, save=False)
             return
         source = th.thermal_path(self.chunk)
         if source is None:
@@ -2257,8 +2403,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         palette = str(self.settings.value("thermal/palette", "iron") or "iron")
-        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt, palette=palette, single=single),
-                      lambda out: self._info(tr("Temperature esportate"), str(out)))
+        ch = self.chunk
+        self.run_task("Esporta le temperature", lambda p: th.export(ch, path, fmt, palette=palette, single=single),
+                      lambda out: self._info(tr("Temperature esportate"), str(out)), refresh=False, save=False)
 
     def _ms_palette_changed(self, palette: str) -> None:
         """The ramp of the indices: the one shown coloured again where it is, the choice kept."""
@@ -2547,9 +2694,13 @@ class MainWindow(QMainWindow):
             "zones": [("gpkg", "GeoPackage con i poligoni delle zone (*.gpkg)"),
                       ("tif", "GeoTIFF delle classi (*.tif)")]}[kind]
         stem = {"reflectance": "riflettanza", "index": name or "indice", "zones": f"{name}_zone"}[kind]
-        start = str(Path(self._last_dir()) / (stem + (".gpkg" if kind == "zones" else ".tif")))
         texts = [tr(text) for _fmt, text in filters]
-        path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta"), start, ";;".join(texts))
+        formats = [f for f, _t in filters]
+        last = str(self.settings.value(f"ms/export_{kind}", formats[0]) or formats[0])  # the format chosen last time
+        last = last if last in formats else formats[0]
+        start = str(Path(self._last_dir()) / (stem + {"gpkg": ".gpkg", "png": ".png"}.get(last, ".tif")))
+        path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta"), start, ";;".join(texts),
+                                                   texts[formats.index(last)])
         if not path:
             return
         fmt = next((f for (f, _t), text in zip(filters, texts) if text == chosen), None)
@@ -2559,13 +2710,15 @@ class MainWindow(QMainWindow):
         suffix = {"gpkg": ".gpkg", "png": ".png"}.get(fmt, ".tif")
         if Path(path).suffix.lower() != suffix and not (suffix == ".tif" and Path(path).suffix.lower() == ".tiff"):
             path = str(Path(path).with_suffix(suffix))
+        self.settings.setValue(f"ms/export_{kind}", fmt)
         palette = self.ms_pane.palette()
         ch = self.chunk
         operator = str(self.settings.value("pa/disegnatore", "") or "") or None  # read here, not in the worker
+        product = ms_mod.paradata_product(kind, name)
 
         def job(p):
             out = ms_mod.export_product(ch, kind, name, path, fmt, palette=palette)
-            self._write_paradata(ch, "multispectral", out, operator)
+            self._write_paradata(ch, product, out, operator)
             return out
 
         self.run_task("Esportazione", job,
@@ -2597,9 +2750,14 @@ class MainWindow(QMainWindow):
         name = v["index"] if not v["formula"].strip() else "Indice"
         formula = v["formula"].strip() or None
 
+        chunk = self.chunk
+
         def job(p):
-            ms.index_raster(self.chunk, name, formula)
-            return ms.export_zoning(self.chunk, name, v["gpkg"], classes=v["classes"], method=v["method"]) if v["gpkg"] else None
+            ms.index_raster(chunk, name, formula, progress=p.sub(0.0, 0.15))
+            if not v["gpkg"]:
+                return None
+            return ms.export_zoning(chunk, name, v["gpkg"], classes=v["classes"], method=v["method"],
+                                    progress=p.sub(0.15, 0.85))
 
         self.run_task("Indice e zonizzazione", job, lambda s: self._info(tr("Indice e zonizzazione"), tr(
             "{0}: {1} poligoni, soglie {2}", name, s["polygons"], ", ".join(str(b) for b in s["breaks"])) if s else name))
@@ -2996,12 +3154,20 @@ class MainWindow(QMainWindow):
         long as possible. The tooltips keep the names."""
         icon_only = Qt.ToolButtonStyle.ToolButtonIconOnly
         for tb, style in getattr(self, "_toolbar_styles", {}).items():
+            if tb.isHidden():  # the classic drawing bar while the rail is used
+                continue
             buttons = [b for b in (tb.widgetForAction(a) for a in tb.actions()) if isinstance(b, QToolButton)]
             sizes = self._toolbar_sizes.get(tb)
             if sizes is None or len(sizes[1]) != len(buttons):
                 sizes = self._toolbar_sizes[tb] = self._measure_toolbar(tb, style, buttons)
             other, widths = sizes
             need, avail = other + sum(full for full, _ in widths), self.width() - 16
+            search = getattr(self, "command_search", None)
+            if search is not None and tb is getattr(self, "workflow_toolbar", None):  # measured at its narrowest
+                extra = max(0, min(SEARCH_WIDTH[1] - SEARCH_WIDTH[0], avail - need))
+                if search.width() != SEARCH_WIDTH[0] + extra:
+                    search.setFixedWidth(SEARCH_WIDTH[0] + extra)
+                need += extra
             short = [False] * len(buttons)
             for i in reversed(range(len(buttons))):
                 if need <= avail:
@@ -3016,6 +3182,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _measure_toolbar(tb: QToolBar, style, buttons: list) -> tuple[int, list]:
+        from .command_search import CommandSearch
+
+        for field in tb.findChildren(CommandSearch):  # measured at its narrowest, widened by _fit_toolbars
+            field.setFixedWidth(SEARCH_WIDTH[0])
         widths = []
         for b in buttons:
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -3038,6 +3208,8 @@ class MainWindow(QMainWindow):
         self._rustgis_close(withdraw=took and not self.isWindowModified())
         self._say_waiting_steps()
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
+        if self.history is not None:  # nothing can be undone after the session: the copies of its steps go
+            self.history.close(self.doc.chunks)
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
         if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
             self.settings.remove("updates_last_check")
@@ -3921,6 +4093,30 @@ class MainWindow(QMainWindow):
             log.warning("Stato del raster mostrato non letto: %s", exc)
         return False
 
+    def _raster_loaded(self) -> None:
+        """The 2D view shows another raster, an empty frame or nothing - by the window or by a plugin
+        (``show_frame``, ``RasterView.load``): the version or the elevation the window said it showed is forgotten
+        when the file shown is not its own, and the notice is judged again."""
+        rv = getattr(self, "_raster_version", None)
+        if isinstance(rv, tuple) and rv and self.chunk is not None:
+            path = self.ortho_view.path
+            own = None
+            try:
+                if rv[0] == "elevation":
+                    from ..engine import elevation as E
+
+                    entry = next((e for e in self.chunk.meta.get("elevations") or [] if e.get("id") == rv[1]), None)
+                    own = E.elevation_paths(self.chunk, entry)[0] if entry is not None else None
+                elif len(rv) == 2:
+                    from ..core import versions
+
+                    own = versions.version_file(self.chunk, rv[0], rv[1])
+            except (KeyError, ValueError, OSError):
+                own = None
+            if own is None or path is None or Path(path).resolve() != Path(own).resolve():
+                self._raster_version = None
+        self._update_stale_banner()
+
     def _update_stale_banner(self) -> None:
         """The notice over the 2D view when the raster shown is to be built again, none otherwise."""
         self.ortho_view.set_banner(tr("Questo raster è stato fatto prima dell'ultimo cambio del sistema del chunk: va "
@@ -3936,13 +4132,46 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - the menu never stops a refresh
             action.setEnabled(False)
 
+    def _rebuild_keep(self) -> bool:
+        """The DEM and the orthomosaic that the rebuild replaces stay among the versions (the setting of
+        *Ricostruendo, conserva DEM e ortofoto attivi come versioni*, off by default)."""
+        action = getattr(self, "a_rebuild_keep", None)
+        return False if action is None else action.isChecked()
+
     def _rebuild_plan(self, ch, items=None) -> tuple[list, list, list]:
         """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
         by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
         each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
         calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
-        kept versions made in another system."""
+        kept versions made in another system - not those a rebuild kept itself (``"by_rebuild"``: made in the old
+        system on purpose, kept only to look back at). The DEM and the orthomosaic replaced are kept as versions
+        first when :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the
+        step fails)."""
+        from ..core import versions
+        from .panels import product_name
+
         items = list(stamps.stale_products(ch) if items is None else items)
+        keep = self._rebuild_keep()
+
+        def versioned(product, fn):
+            """``fn`` keeping first the active ``product`` among the versions (when asked): it comes back when
+            ``fn`` fails."""
+            if not keep:
+                return fn
+
+            def step(p):
+                kept = versions.keep_active(ch, product, move=True)
+                if kept is not None:
+                    kept["by_rebuild"] = True  # not listed among the versions to make again
+                try:
+                    result = fn(p)
+                except BaseException:
+                    if kept is not None:
+                        versions.restore(ch, product, kept)
+                    raise
+                versions.set_active_name(ch, product, None)
+                return result
+            return step
 
         def on_dem(name, fn):
             """A step made on the DEM: left by hand when the DEM is still stale at its turn (its rebuild failed or
@@ -3970,7 +4199,7 @@ class MainWindow(QMainWindow):
                         continue
                     steps.append((tr("TIN"), lambda p, ch=ch: self._rebuild_tin(ch, p)))
                     done_tin = True
-                    steps.append((name, lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p)))
+                    steps.append((name, versioned("dem", lambda p, ch=ch: self._rebuild_dem_from_tin(ch, p))))
                 elif product == "tin":
                     if not done_tin:
                         fn = lambda p, ch=ch: self._rebuild_tin(ch, p)  # noqa: E731
@@ -3978,9 +4207,12 @@ class MainWindow(QMainWindow):
                         steps.append((name, on_dem(name, fn) if from_dem else fn))
                 elif product in ("dem", "orthomosaic", "dem_precision", "coverage", "slope", "aspect"):
                     fn = lambda p, ch=ch, product=product: self._rebuild_product(ch, product, p)  # noqa: E731
+                    if product in versions.PRODUCTS:
+                        fn = versioned(product, fn)
+                    # the orthomosaic is painted on the DEM on every surface but the model (the DEM, the ground...)
                     from_dem = product in ("dem_precision", "coverage", "slope", "aspect") or (
                         product == "orthomosaic" and ((ch.meta.get("orthomosaic") or {}).get("surface") or "dem")
-                        == "dem")
+                        != "model")
                     steps.append((name, on_dem(name, fn) if from_dem else fn))
                 else:
                     by_hand.append(name)
@@ -3989,8 +4221,12 @@ class MainWindow(QMainWindow):
                 if entry is not None:
                     steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
             elif kind == "relief":
+                name = product_name(product)  # the names of the relief menu, not the codes of the methods
                 steps.append((name, on_dem(name, lambda p, ch=ch, method=product: self._rebuild_relief(ch, method, p))))
             elif kind == "version":
+                record = next((e for e in versions.versions(ch, product) if e.get("id") == item.get("id")), None)
+                if record is not None and record.get("by_rebuild"):
+                    continue
                 kept.append(f"{tr(stamps.NAMES.get(product, product))} «{name}»")
             else:
                 by_hand.append(name)
@@ -4043,8 +4279,9 @@ class MainWindow(QMainWindow):
         source = saved.get("source") or "dem"
         if source == "dem" and stamps.is_stale(ch, "dem"):  # its DEM not rebuilt (by hand, or it failed)
             raise _LeftByHand(tr("TIN"))
+        used = saved.get("n_lines", saved.get("n_breaklines"))  # break, soft and boundary lines (n_lines: 1.7.3)
         lines = breaklines.for_tin([dict(r) for r in ch.meta.get("drawings", {}).get("lines") or []]) \
-            if saved.get("n_breaklines") else None
+            if used else None
         max_error = saved.get("max_error") if source == "dem" else None
         classes = saved.get("classes")
         return T.build_tin(ch, source=source, max_error=max_error, breaklines=lines,
@@ -4098,21 +4335,26 @@ class MainWindow(QMainWindow):
         kind = old.get("kind") or "elevation"
         depth = old.get("depth")
         depth = (float(depth[0]), float(depth[1])) if depth else None
-        new = E.build_elevation(ch, E.frame_from_dict(old["frame"]), resolution=old.get("resolution"),
+        from ..io import files
+
+        frame = E.frame_from_dict(old["frame"])
+        scale = old.get("scale") or "cylinder"
+        wall = scale == "wall" and getattr(frame, "u_map", None) is not None
+        new = E.build_elevation(ch, frame, resolution=old.get("resolution"),
                                 name=old.get("name"), depth=depth, bounds=E.bounds_of(ch, old), kind=kind,
-                                scale=old.get("scale") or "cylinder", blending=settings["blending"],
+                                scale=scale, u_map=frame.u_map if wall else None,  # the grid on the wall kept
+                                blending=settings["blending"],
                                 colour_correction=settings["colour_correction"], ghosting=settings["ghosting"],
                                 fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p)
         nid = new["id"]
         root = ch.data_dir / "elevations"
         entries = ch.meta["elevations"]
         entries[:] = [e for e in entries if e is not new]
-        aside = root / f"{eid}.old"
-        shutil.rmtree(aside, ignore_errors=True)
-        if (root / eid).exists():
-            (root / eid).rename(aside)
-        (root / nid).rename(root / eid)
-        shutil.rmtree(aside, ignore_errors=True)
+        try:  # crash-safe: the old folder aside, the new one in place, then the old one deleted
+            files.swap_folder(root / nid, root / eid)
+        except BaseException:
+            shutil.rmtree(root / nid, ignore_errors=True)  # the old elevation stays as it was
+            raise
         for key in ("orthophoto", "relief", "profile"):
             if new.get(key):
                 parts = list(Path(new[key]).parts)
@@ -4133,10 +4375,14 @@ class MainWindow(QMainWindow):
         built again in that order, with the parameters each was built with, in one task. A product that fails is
         logged and the next one goes on. The kept versions and the rasters that need their own inputs (raster
         calculator, multispectral, thermal, satellite) are listed, to be made by hand. Not *Elabora tutto*: that aligns
-        the photos again. False when nothing was started."""
+        the photos again. The whole rebuild is ONE step of *Modifica > Annulla* (:class:`.rebuild.RebuildStep`: the
+        files it writes copied first), also when it is cancelled halfway. False when nothing was started."""
+        from .rebuild import RebuildStep, chunk_files
+
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             return False
+        items = list(stamps.stale_products(ch) if items is None else items)
         steps, by_hand, kept = self._rebuild_plan(ch, items)
         if not steps:
             text = tr("Nessun prodotto da rifare")
@@ -4149,30 +4395,48 @@ class MainWindow(QMainWindow):
         shown = (self.ortho_view.kind, getattr(self, "_raster_version", None)) \
             if self.ortho_view.tr is not None else None
         self._store_drawings()
+        undo = None
+        if self.history is not None and ch is self.chunk:
+            try:
+                undo = RebuildStep(self, ch, chunk_files(ch, items))
+            except OSError as exc:  # no room for the copies: the rebuild goes on, not undoable
+                log.warning("Ricostruzione: copie per Annulla non fatte (%s)", exc)
 
         def job(progress):
             rebuilt, failed = [], []
             n = len(steps)
+            stopped = False
             for i, (name, fn) in enumerate(steps):
-                progress(i / n, tr("Ricostruzione: {0} ({1} di {2})", name, i + 1, n))
                 try:
+                    progress(i / n, tr("Ricostruzione: {0} ({1} di {2})", name, i + 1, n))
                     fn(progress.sub(i / n, 1 / n))
                     rebuilt.append(name)
-                except Cancelled:
-                    raise
+                except Cancelled:  # what was rebuilt stays, and is undone with the rest
+                    stopped = True
+                    break
                 except _LeftByHand as left:  # its input is still in the old system: never built on it
                     by_hand.append(str(left))
                 except Exception as exc:  # noqa: BLE001 - one product failing does not stop the others
                     log.error("Ricostruzione di %s non riuscita: %s\n%s", name, exc, traceback.format_exc())
                     failed.append(f"{name} ({exc})")
-            progress(1.0, tr("Ricostruzione finita"))
-            return rebuilt, failed
+            if not stopped:
+                progress(1.0, tr("Ricostruzione finita"))
+            return rebuilt, failed, stopped
 
         def done(result):
-            rebuilt, failed = result
+            rebuilt, failed, stopped = result
+            if undo is not None and self.history is not None:
+                if undo.finish():
+                    self.history.push(tr("Ricostruisci i prodotti da rifare"), undo, document=False)
+                else:
+                    undo.drop()
             if ch is self.chunk:
                 self._reshow(shown)
             lines = []
+            if stopped:
+                lines.append(tr("Ricostruzione interrotta: quello che è stato rifatto resta (Modifica > Annulla lo "
+                                "riporta indietro)"))
+                self.log_pane.warning(lines[-1])
             if rebuilt:
                 lines.append(tr("Rifatti: {0}", ", ".join(rebuilt)))
                 self.log_pane.info(lines[-1])
@@ -5084,8 +5348,16 @@ class MainWindow(QMainWindow):
                                         if e.get("id") and e.get("patches")},
                          free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
                                "layers": (ch.meta.get("drawings") or {}).get("free_layers") or [],
-                               "basis": (ch.meta.get("drawings") or {}).get("free_basis")})
+                               "basis": (ch.meta.get("drawings") or {}).get("free_basis")},
+                         plugins=self._plugin_meta(ch))
         return state
+
+    @staticmethod
+    def _plugin_meta(ch) -> dict:
+        """The keys of ``chunk.meta`` that are not the program's: the data of the plugins (part ``plugins``)."""
+        from ..engine.orient import PROGRAM_KEYS
+
+        return {k: v for k, v in ch.meta.items() if k not in PROGRAM_KEYS}
 
     @staticmethod
     def _undo_units(units) -> list:
@@ -5259,11 +5531,27 @@ class MainWindow(QMainWindow):
             self._undo_patches(state)
         if ch is not None and "free" in state:
             self._undo_free(ch, state["free"] or {})
+        if ch is not None and "plugins" in state:
+            self._undo_plugins(ch, state["plugins"] or {})
         if products:
             self.workspace.populate(self.doc)
             if self.model_view.kind:
                 self.model_view.refresh(reset=False)
         self._dirty(True)
+
+    def _undo_plugins(self, ch, data: dict) -> None:
+        """The plugins' keys of ``chunk.meta`` as a snapshot has them (those it has not, gone); the workspace and the
+        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``)."""
+        import copy
+
+        from ..engine.orient import PROGRAM_KEYS
+
+        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data]:
+            del ch.meta[k]
+        for k, v in data.items():
+            ch.meta[k] = copy.deepcopy(v)
+        self.workspace.populate(self.doc)
+        self.refreshed.emit()
 
     def _undo_free(self, ch, free: dict) -> None:
         """The free drawings in 3D, their layers and the basis they were written in (part ``free``) as a snapshot has
@@ -5281,7 +5569,7 @@ class MainWindow(QMainWindow):
             drawings["free_basis"] = dict(free["basis"])
         if not drawings:
             ch.meta.pop("drawings", None)
-        free_drawings.follow(ch)
+        free_drawings.follow(ch, adopt=False)  # those of an earlier alignment wait for the fit (keep their basis)
         draw = getattr(self, "_draw_free", None)  # the 3D and 2D views of the free drawings (since 1.7.2)
         if draw is not None:
             draw()
@@ -7720,6 +8008,8 @@ class MainWindow(QMainWindow):
         if not ortho.exists():
             self._warn(tr("Il prospetto «{0}» non ha più i suoi file.", entry['name']))
             return
+        h = self.history
+        clean = h is not None and h.unchanged()  # every edit so far recorded: showing it adds no entry
         self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
@@ -7746,6 +8036,8 @@ class MainWindow(QMainWindow):
             text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = rilievo verso chi "
                       "guarda", entry['name'])
         self.statusBar().showMessage(text, 15000)
+        if clean:  # what reading and drawing it added (identities, default layers) is no edit
+            h.rebase()
         self._dirty(True)
 
     def _draw_elevation_layers(self, entry: dict) -> None:
@@ -9140,10 +9432,14 @@ class MainWindow(QMainWindow):
         the chunk first. The plan's sets stay loaded whatever is shown."""
         if frame == self.drawings_frame:
             return
+        h = self.history
+        clean = h is not None and h.unchanged()  # every edit so far recorded
         self._sam_cancel()
         self._store_drawings()
         self.drawings_frame = frame
         self._restore_frame()
+        if clean:  # what reading the frame adds (identities, the default layer) is no edit: no entry for it
+            h.rebase()
 
     def _restore_frame(self) -> None:
         """The sets of the elevation shown (:attr:`drawings_frame`) from the chunk; empty on the plan."""
@@ -9826,464 +10122,14 @@ class MainWindow(QMainWindow):
     def _dem_values(self, xy) -> list:
         """Heights of the DEM at full resolution at the points ``xy`` ((n, 2) world), None where it has none."""
         ch = self.chunk
-        if ch is None or not ch.dem_path:
+        if ch is None or not ch.dem_path or not Path(ch.dem_path).exists():
             return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
         try:
-            import rasterio
+            from ..core import free_drawings
 
-            with rasterio.open(ch.dem_path) as src:
-                vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
-                nodata = src.nodata
-            return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+            return free_drawings.raster_values(ch.dem_path, xy)
         except Exception:
             return [self.ortho_view.elevation(float(x), float(y)) for x, y in xy]
-
-    # ---------------------------------------------------------------- free drawings (core.free_drawings, since 1.7.2)
-    def _build_free_menu(self) -> None:
-        """The menu of *Disegno libero*: the kind drawn next, the layer it goes in, a new layer, the form."""
-        from ..core import free_drawings
-
-        self.free_menu = QMenu(tr("Disegno libero"), self)
-        kinds = QActionGroup(self)
-        current = self.settings.value("draw/free_kind", "line")
-        self.free_kind = current if current in ("line", "polygon", "point") else "line"
-        self.free_kind_actions: dict[str, QAction] = {}
-        for key, label in FREE_KINDS:
-            a = self.free_menu.addAction(tr(label))
-            a.setCheckable(True)
-            a.setChecked(key == self.free_kind)
-            a.triggered.connect(lambda _=False, k=key: self.set_free_kind(k))
-            kinds.addAction(a)
-            self.free_kind_actions[key] = a
-        self.free_menu.addSeparator()
-        self.free_layer = str(self.settings.value("draw/free_layer", free_drawings.DEFAULT_LAYER)
-                              or free_drawings.DEFAULT_LAYER)
-        self.free_layer_menu = self.free_menu.addMenu(tr("Layer"))
-        self.free_layer_menu.aboutToShow.connect(self._fill_free_layer_menu)
-        self._act(self.free_menu, tr("Nuovo layer..."), self._new_free_layer)
-        self.free_menu.addSeparator()
-        self.a_free_props = self._act(self.free_menu, tr("Proprietà..."), lambda: self.free_properties())
-        self.a_free_props.setToolTip(tr("Nome, layer, colore, attributi, quote e misure del disegno libero selezionato "
-                                        "(nella vista 2D o nella vista 3D)"))
-
-    def _fill_free_layer_menu(self) -> None:
-        from ..core import free_drawings
-
-        self.free_layer_menu.clear()
-        names = [x["name"] for x in free_drawings.layers(self.chunk)] if self.chunk is not None else []
-        if self.free_layer not in names:
-            names.append(self.free_layer)
-        group = QActionGroup(self.free_layer_menu)
-        for name in names:
-            a = self.free_layer_menu.addAction(name)
-            a.setCheckable(True)
-            a.setChecked(name == self.free_layer)
-            a.setProperty("ppg_no_translate", True)
-            a.triggered.connect(lambda _=False, n=name: self.set_free_layer(n))
-            group.addAction(a)
-
-    def set_free_kind(self, kind: str) -> None:
-        """The kind of the free drawings drawn next in 2D (line, polygon, point); the tool is taken up."""
-        if kind not in ("line", "polygon", "point"):
-            return
-        self.free_kind = kind
-        self.settings.setValue("draw/free_kind", kind)
-        a = self.free_kind_actions.get(kind)
-        if a is not None and not a.isChecked():
-            a.setChecked(True)
-        if self.ortho_view.tr is not None:
-            self.set_draw_mode("free_" + kind)
-
-    def set_free_layer(self, name: str) -> None:
-        """The layer the next free drawings go in (2D and 3D), remembered between sessions."""
-        name = str(name or "").strip()
-        if not name:
-            return
-        self.free_layer = name
-        self.settings.setValue("draw/free_layer", name)
-        self.statusBar().showMessage(tr("I disegni liberi vanno nel layer {0}", name), 10000)
-
-    def _new_free_layer(self) -> None:
-        name, ok = QInputDialog.getText(self, tr("Nuovo layer"), tr("Nome del layer dei disegni liberi:"))
-        if ok and name.strip():
-            if self.chunk is not None:
-                from ..core import free_drawings
-
-                if name.strip() not in {x["name"] for x in free_drawings.layers(self.chunk)}:
-                    free_drawings.set_layer(self.chunk, name.strip())
-                    self._dirty(True)
-            self.set_free_layer(name.strip())
-
-    def _free_record(self, fid: str) -> dict | None:
-        from ..core import free_drawings
-
-        if self.chunk is None or not fid:
-            return None
-        return next((f for f in free_drawings.features(self.chunk) if f["id"] == fid), None)
-
-    def _free_add(self, kind: str, xyz) -> dict | None:
-        """A free drawing of ``kind`` with the vertices ``xyz`` (chunk coordinates) in the current layer, one step of
-        *Modifica > Annulla*, drawn in both views."""
-        from ..core import free_drawings
-
-        ch = self.chunk
-        if ch is None:
-            return None
-        try:
-            rec = free_drawings.add(ch, kind, np.asarray(xyz, float).tolist(), layer=self.free_layer)
-        except ValueError as exc:
-            self.statusBar().showMessage(tr("Disegno non aggiunto: {0}", str(exc)), 15000)
-            return None
-        self._dirty(True)
-        self._draw_free()
-        self.log_pane.info(tr("{0} aggiunto al layer {1}", rec["name"], rec["layer"]))
-        return rec
-
-    def _free_from_3d(self, kind: str, internal) -> None:
-        """A free drawing ended in the 3D view: its vertices (internal) in the chunk's coordinates."""
-        if self.chunk is None:
-            return
-        self._free_add(kind, self.chunk.to_world(np.asarray(internal, float).reshape(-1, 3)))
-
-    def _free_from_2d(self, kind: str, coords) -> None:
-        """A free drawing ended on the 2D view: on the plan each vertex takes the height of the DEM there, on an
-        elevation its (u, v) goes to the chunk's coordinates at the depth of the relief there; a vertex without a value
-        takes the one interpolated along the drawing from its neighbours; none at all: refused."""
-        ch = self.chunk
-        if ch is None:
-            return
-        xy = np.asarray(coords, float).reshape(-1, 2)
-        if self._shown_raster_stale():
-            self._warn(tr("Questo raster va rifatto prima di disegnarci sopra (Flusso di lavoro > Ricostruisci i "
-                          "prodotti da rifare)"))
-            return
-        entry = self._frame_entry()
-        if entry is None:
-            zs = _fill_missing(self._dem_values(xy), xy)
-            if zs is None:
-                self._warn(tr("Il disegno libero prende le quote dal DEM: serve il DEM sotto almeno un vertice"))
-                return
-            xyz = np.column_stack([xy, zs])
-        else:
-            from ..engine import elevation as E
-
-            ds = _fill_missing(self._relief_values(entry, xy), xy)
-            if ds is None:
-                self._warn(tr("Il disegno libero prende la profondità dal rilievo del prospetto: serve il rilievo "
-                              "sotto almeno un vertice"))
-                return
-            xyz = np.array([E.world_of(entry, u, v, d) for (u, v), d in zip(xy, ds)], float)
-        self._free_add(kind, xyz)
-
-    def _relief_values(self, entry: dict, uv) -> list:
-        """The depth of the relief of the elevation ``entry`` at each (u, v), None where it has none (one reading of
-        the file for every vertex; :func:`..engine.elevation.relief_at` per point)."""
-        from ..engine import elevation as E
-
-        _ortho, relief = E.elevation_paths(self.chunk, entry)
-        if not relief.exists():
-            return [None] * len(uv)
-        import rasterio
-
-        with rasterio.open(relief) as src:
-            vals = [float(v[0]) for v in src.sample([(float(u), float(v)) for u, v in uv])]
-            nodata = src.nodata
-        return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
-
-    def _free_selected_in_3d(self, fid: str) -> None:
-        self._free_selected = fid or ""
-
-    def _free_vertex_moved(self, fid: str, index: int, internal) -> None:
-        from ..core import free_drawings
-
-        rec = self._free_record(fid)
-        if rec is None or not 0 <= index < len(rec["xyz"]):
-            return
-        xyz = [list(p) for p in rec["xyz"]]
-        xyz[index] = [float(v) for v in self.chunk.to_world(np.asarray(internal, float).reshape(1, 3))[0]]
-        free_drawings.update(self.chunk, fid, xyz=xyz)
-        self._dirty(True)
-        self._draw_free()
-
-    def _free_delete_requested(self, fid: str, index: int) -> None:
-        """Delete from the 3D view: the drawing (``index`` -1) or one vertex, refused when a polygon would keep fewer
-        than three vertices or a line fewer than two (the drawing is deleted whole instead)."""
-        from ..core import free_drawings
-
-        rec = self._free_record(fid)
-        if rec is None:
-            return
-        if index < 0 or rec["kind"] == "point":
-            free_drawings.remove(self.chunk, fid)
-            self._dirty(True)
-            self._draw_free()
-            self.log_pane.info(tr("{0} eliminato", rec["name"]))
-            return
-        if not 0 <= index < len(rec["xyz"]):
-            return
-        if len(rec["xyz"]) - 1 < free_drawings.MIN_VERTICES[rec["kind"]]:
-            self.statusBar().showMessage(
-                tr("Un poligono ha almeno tre vertici: elimina il disegno intero") if rec["kind"] == "polygon" else
-                tr("Una linea ha almeno due vertici: elimina il disegno intero"), 15000)
-            return
-        xyz = [p for i, p in enumerate(rec["xyz"]) if i != index]
-        free_drawings.update(self.chunk, fid, xyz=xyz)
-        self._dirty(True)
-        self._draw_free()
-
-    def _free_draped(self, fid: str, internal) -> None:
-        from ..core import free_drawings
-
-        if self._free_record(fid) is None:
-            return
-        xyz = self.chunk.to_world(np.asarray(internal, float).reshape(-1, 3))
-        free_drawings.update(self.chunk, fid, xyz=xyz.tolist())
-        self._dirty(True)
-        self._draw_free()
-
-    def _draw_free(self) -> None:
-        """The free drawings of the active chunk shown again in the 3D view and on the 2D view."""
-        from ..core import free_drawings
-
-        ch = self.chunk
-        if ch is None:
-            self._draw_free_3d()
-            self._draw_free_2d()
-            return
-        read = (free_drawings.layers(ch), free_drawings.features(ch))  # read once for both views
-        self._draw_free_3d(read)
-        self._draw_free_2d(read)
-
-    def _draw_free_3d(self, read=None) -> None:
-        """``read``: the layers and the drawings of the active chunk already read (:meth:`_draw_free`)."""
-        from ..core import free_drawings
-
-        ch = self.chunk
-        if ch is None or self.model_view.chunk is not ch:
-            return
-        # once per redraw: reading them per drawing made a redraw quadratic
-        layers, feats = read or (free_drawings.layers(ch), free_drawings.features(ch))
-        hidden = {x["name"] for x in layers if not x.get("visible", True)}
-        shown = [f for f in feats if f["layer"] not in hidden]
-        self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f, layers) for f in shown})
-
-    def _draw_free_2d(self, read=None) -> None:
-        """Per user layer a layer :data:`LAYER_PREFIX` + its name on the 2D view: on the plan the drawings by their x,
-        y; on an elevation the (u, v) of the parts whose depth is within the elevation's depth (+- two cells)."""
-        from ..core import free_drawings
-
-        v, ch = self.ortho_view, self.chunk
-        if not hasattr(self, "free_layer"):  # the window is being built
-            return
-        for name in [n for n in v.layer_order if n.startswith(LAYER_PREFIX)]:
-            v.remove_layer(name)
-        if ch is None or v.tr is None:
-            return
-        entry = self._frame_entry()
-        frame, band = None, None
-        if entry is not None:
-            from ..engine.elevation import frame_from_dict
-
-            frame = frame_from_dict(entry["frame"])
-            lo, hi = entry.get("depth") or (-np.inf, np.inf)
-            margin = 2.0 * float(entry.get("resolution") or 0.0)
-            band = (float(lo) - margin, float(hi) + margin)
-        # the layers and the drawings read once per redraw (``read``: already read by :meth:`_draw_free`)
-        layers, feats = read or (free_drawings.layers(ch), free_drawings.features(ch))
-        by_layer: dict[str, list] = {}
-        for rec in feats:
-            by_layer.setdefault(rec["layer"], []).append(rec)
-        with v.batch():
-            for lay in layers:
-                feats = by_layer.get(lay["name"])
-                if not feats:
-                    continue
-                name = LAYER_PREFIX + lay["name"]
-                for rec in feats:
-                    colour = free_drawings.colour_of(ch, rec, layers)
-                    attrs = {ID_FIELD: rec["id"], "_free": True, "name": rec["name"]}
-                    xyz = np.asarray(rec["xyz"], float)
-                    if frame is None:
-                        self._add_free_part(name, rec["kind"], xyz[:, :2], colour, rec["name"], attrs, closed=True)
-                        continue
-                    uvd = frame.coords(xyz)
-                    inside = (uvd[:, 2] >= band[0]) & (uvd[:, 2] <= band[1])
-                    if inside.all():
-                        self._add_free_part(name, rec["kind"], uvd[:, :2], colour, rec["name"], attrs, closed=True)
-                        continue
-                    if rec["kind"] == "point" or not inside.any():
-                        continue
-                    for run in _runs(inside, closed=rec["kind"] == "polygon"):  # the parts on the face: lines
-                        if len(run) >= 2:
-                            self._add_free_part(name, "line", uvd[run, :2], colour, rec["name"], attrs, closed=False)
-                if name in v.layers and not lay.get("visible", True):
-                    v.set_layer_visible(name, False)
-
-    def _add_free_part(self, layer: str, kind: str, xy, colour: str, label: str, attrs: dict, closed: bool) -> None:
-        v = self.ortho_view
-        if kind == "point":
-            v.add_point(float(xy[0][0]), float(xy[0][1]), colour, label, layer=layer, attrs=dict(attrs))
-        elif kind == "polygon" and closed:
-            v.add_polygon(xy, label, colour, fill_alpha=40, layer=layer, attrs=dict(attrs))
-        else:
-            v.add_line(xy, colour, label, layer=layer, attrs=dict(attrs), width=2.0)
-
-    def _layer_visibility_changed(self, name: str, visible: bool) -> None:
-        """A layer of the free drawings shown or hidden in the Layer pane: kept in the chunk, the 3D view follows."""
-        if not name.startswith(LAYER_PREFIX) or self.chunk is None:
-            return
-        from ..core import free_drawings
-
-        layer = name[len(LAYER_PREFIX):]
-        if next((x for x in free_drawings.layers(self.chunk) if x["name"] == layer), {}).get("visible", True) == visible:
-            return
-        free_drawings.set_layer(self.chunk, layer, visible=visible)
-        self._draw_free_3d()
-        if not getattr(self, "_free_vis_pending", False):  # Tutti / Nessuno: one step of Modifica > Annulla
-            self._free_vis_pending = True
-            QTimer.singleShot(0, self._free_visibility_done)
-
-    def _free_visibility_done(self) -> None:
-        self._free_vis_pending = False
-        self._dirty(True)
-
-    def _feature_double_clicked(self, layer: str, attrs: dict) -> None:
-        if attrs.get("_free") and attrs.get(ID_FIELD):
-            self.free_properties(str(attrs[ID_FIELD]))
-
-    def _selected_free_id(self) -> str:
-        """The free drawing selected: in the 2D view (one), else in the 3D view."""
-        free = [a for _l, _i, a in self.ortho_view.selected_features() if a.get("_free")]
-        if len(free) == 1:
-            return str(free[0].get(ID_FIELD))
-        return self.model_view.selected_free or self._free_selected or ""
-
-    def free_properties(self, fid: str | None = None) -> bool:
-        """The form of the free drawing ``fid`` (default: the one selected in 2D or 3D); its changes written as one
-        step of *Modifica > Annulla*. Whether something changed."""
-        from ..core import free_drawings
-        from . import free_drawing_dialog as fdd
-
-        fid = fid or self._selected_free_id()
-        rec = self._free_record(fid)
-        if rec is None:
-            self.statusBar().showMessage(tr("Seleziona un disegno libero (nella vista 2D o 3D)"), 10000)
-            return False
-        values = fdd.FreeDrawingDialog.ask(self, self.chunk, rec)
-        if not values:
-            return False
-        ch = self.chunk
-        names = {x["name"] for x in free_drawings.layers(ch)}
-        fields = {k: values[k] for k in ("name", "layer", "attributes", "xyz")}
-        if values.get("colour") == "":  # back to the layer's colour
-            fields["colour"] = None
-        elif values.get("colour"):
-            fields["colour"] = values["colour"]
-        try:
-            free_drawings.update(ch, fid, **fields)
-        except ValueError as exc:
-            self._warn(tr("Disegno non modificato: {0}", str(exc)))
-            return False
-        if values["layer"] not in names:  # a new layer, kept with the change (one step)
-            free_drawings.set_layer(ch, values["layer"])
-        self._dirty(True)
-        self._draw_free()
-        return True
-
-    def export_free_drawings(self) -> None:
-        """*File > Esporta > Disegni 3D...*: the free drawings of the active chunk (all, or one layer) into a DXF 3D, a
-        GeoPackage with Z, a GeoJSON or a CSV of the vertices, by the suffix of the file."""
-        if not self._need_chunk():
-            return
-        from ..core import free_drawings
-        from ..io import free_drawings as fio
-
-        if not free_drawings.features(self.chunk):
-            self._warn(tr("Nessun disegno libero: disegnali con Disegno libero (vista 2D) o Disegna (vista 3D)."))
-            return
-        path, _f = QFileDialog.getSaveFileName(
-            self, tr("Esporta i disegni 3D"), str(Path(self._last_dir()) / "disegni_3d.dxf"),
-            "DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson);;CSV (*.csv)")
-        if not path:
-            return
-        if Path(path).suffix.lower() not in fio.SUFFIXES:
-            path += ".dxf"
-        names = [x["name"] for x in free_drawings.layers(self.chunk) if free_drawings.features(self.chunk, x["name"])]
-        everything = tr("Tutti i layer")
-        layer = None
-        if len(names) > 1:
-            chosen, ok = QInputDialog.getItem(self, tr("Esporta i disegni 3D"), tr("Layer:"), [everything, *names], 0,
-                                              False)
-            if not ok:
-                return
-            layer = None if chosen == everything else chosen
-        try:
-            out = fio.export(self.chunk, path, layer=layer)
-        except Exception as exc:
-            self._exc("Esportazione dei disegni 3D non riuscita", exc)
-            return
-        n = len(free_drawings.features(self.chunk, layer))
-        self.log_pane.info(tr("{0} disegni 3D esportati in {1}", n, out))
-        self.statusBar().showMessage(tr("{0} disegni 3D esportati in {1}", n, out), 15000)
-
-    def import_free_drawings(self) -> None:
-        """*File > Importa > Disegni 3D...*: lines, polygons and points of a GeoPackage or a GeoJSON as free drawings of
-        the active chunk (z from the DEM when the file has none), one step of *Modifica > Annulla*."""
-        if not self._need_chunk():
-            return
-        from ..io import free_drawings as fio
-
-        path, _f = QFileDialog.getOpenFileName(self, tr("Importa disegni 3D"), self._last_dir(),
-                                               "GeoPackage, GeoJSON, DXF (*.gpkg *.geojson *.json *.dxf)")
-        if not path:
-            return
-        from ..core import free_drawings
-
-        from_file = tr("Dal file (colonna layer, altrimenti il nome del file)")
-        names = [x["name"] for x in free_drawings.layers(self.chunk)]
-        chosen, ok = QInputDialog.getItem(self, tr("Importa disegni 3D"), tr("Layer:"), [from_file, *names], 0, True)
-        if not ok:
-            return
-        chosen = str(chosen or "").strip()
-        layer = None if not chosen or chosen == from_file else chosen
-        try:
-            got = fio.import_features(self.chunk, path, layer=layer)
-        except fio.StaleDem:
-            self._warn(tr("I disegni del file non hanno quote e il DEM va rifatto prima di prenderle (Flusso di "
-                          "lavoro > Ricostruisci i prodotti da rifare): nessun disegno importato"))
-            return
-        except Exception as exc:
-            self._exc("Importazione dei disegni 3D non riuscita", exc)
-            return
-        if got["added"]:
-            self._dirty(True)
-            self._draw_free()
-        text = tr("{0} disegni 3D importati da {1} ({2} con le quote del DEM, {3} saltati)",
-                  got["added"], Path(path).name, got["dem_z"], got["skipped"])
-        if got.get("holes_dropped"):
-            text += tr("; {0} buchi di poligoni lasciati fuori (un disegno libero ha un solo contorno)",
-                       got["holes_dropped"])
-        self.log_pane.info(text)
-        self.statusBar().showMessage(text, 15000)
-
-    def _free_measures(self, fid: str) -> None:
-        """*Misura area* on a selected free drawing: its measures in 3D (on the model too, for a polygon)."""
-        from . import free_drawing_dialog as fdd
-
-        rec = self._free_record(fid)
-        if rec is None:
-            return
-        model = None
-        if rec["kind"] == "polygon":
-            try:
-                model = fdd.model_in_chunk(self.chunk)
-            except Exception as exc:  # noqa: BLE001 - the drawing's own measures
-                log.warning("Modello non letto per le misure: %s", exc)
-        from ..engine.orient import toward_cameras
-
-        text = fdd.measures_text(rec, model, toward_cameras(self.chunk, np.asarray(rec["xyz"], float)))
-        self.log_pane.info(f"{rec['name']}: {text}")
-        self._info(tr("Misure del disegno libero"), f"{rec['name']}\n{text}")
 
     # ---------------------------------------------------------------- break lines (archaeo.breaklines)
     @property

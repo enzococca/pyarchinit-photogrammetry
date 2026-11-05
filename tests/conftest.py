@@ -199,7 +199,8 @@ def _none_refcount(request):
     """Before Python 3.12 ``None`` is an ordinary object: a C extension that releases a reference
     to it it never took drains its count until the interpreter aborts with ``none_dealloc``
     (the CI did so on 3.11, in whatever test the count ran out). The drop of each test is kept and
-    the tests that drain the most are printed at the end, so the extension can be found."""
+    the tests that drain the most are printed at the end, so the extension can be found; the drop is
+    then given back (the probe still says it, the suite does not die of the sum)."""
     import gc
     import sys
 
@@ -215,6 +216,14 @@ def _none_refcount(request):
         _NONE_DROPS.append((drop, request.node.nodeid))
     if drop > 50:  # said at once, past pytest's capture: the run may abort before its summary
         print(f"[none refcount] -{drop} after {request.node.nodeid}", file=sys.__stderr__, flush=True)
+    if drop > 0:  # given back, so that the drain of one test does not kill a later one: PySide6 6.12 on Linux
+        import ctypes  # and Python 3.11 drops a reference to None per Qt call made from Python (one release of the
+        #               whole suite drains ~400 000; 3.12+, where the app runs, has an immortal None)
+
+        incref = ctypes.pythonapi.Py_IncRef
+        incref.argtypes = [ctypes.py_object]
+        for _ in range(drop):
+            incref(None)
 
 
 _NONE_DROPS: list[tuple[int, str]] = []

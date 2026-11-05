@@ -475,3 +475,99 @@ def test_select_skips_hidden_drawings_and_takes_backspace(view, app):
     view.resize(700, 520)  # a resize: the frozen frame is of the old size, back to the live view
     app.processEvents()
     assert view.stack.currentWidget() is view.canvas
+
+
+def test_a_big_model_s_ray_caster_is_built_in_the_background(view, app, monkeypatch):
+    """A model above ``CASTER_SYNC_FACES``: the ray caster built in a worker thread, the click made meanwhile returns at
+    once, is kept and placed on the model when the caster arrives; a click made before the view moved is not placed
+    (the user is told to click again)."""
+    import threading
+
+    from free3d_helpers import click_vertex, distance_to_model, median_edge, wait_for
+
+    from pyarchinit_photogrammetry.gui import model_view as mvmod
+
+    gate = threading.Event()
+    real = mvmod._caster_parts
+    threads = []
+
+    def slow(path):
+        threads.append(threading.current_thread())
+        gate.wait(20)
+        return real(path)
+
+    monkeypatch.setattr(mvmod, "CASTER_SYNC_FACES", 0)
+    monkeypatch.setattr(mvmod, "_caster_parts", slow)
+    view._draw_mesh = None
+    said = []
+    view.busy_message.connect(said.append)
+    view.start_drawing("point")
+    assert view.caster_preparing and said  # started with the tool, in the status bar
+    target = _targets(view, 1)[0]
+    click_vertex(view, target)  # returns without the caster: kept
+    assert view.drawn == [] and view.caster_preparing
+    gate.set()
+    assert wait_for(lambda: len(view.drawn) == 1)
+    assert threads and threads[0] is not threading.main_thread()
+    assert not view.caster_preparing
+    assert distance_to_model(view.chunk, view.drawn[0][1]).max() < median_edge(view.chunk)
+    assert said[-1] == "Modello pronto per il disegno"
+
+    # the view moved before the caster arrived: the kept click not placed, the user told
+    gate.clear()
+    view.stop_drawing()
+    view._draw_mesh = None
+    view.start_drawing("point")
+    click_vertex(view, target)
+    view.canvas.reset_view()
+    app.processEvents()
+    gate.set()
+    assert wait_for(lambda: not view.caster_preparing)
+    app.processEvents()
+    assert len(view.drawn) == 1
+    assert "clicca di nuovo" in said[-1]
+
+
+def test_a_stale_ray_caster_build_is_let_go(view, app, monkeypatch, tmp_path):
+    """A big model's ray caster built in the background while the model is rewritten (its key changes): the result of
+    the old file is not kept; going back to a key whose build is still running starts no second build."""
+    import os
+    import threading
+
+    from free3d_helpers import wait_for
+
+    from pyarchinit_photogrammetry.gui import model_view as mvmod
+
+    real = mvmod._caster_parts
+    original = view._caster_key
+    old_key, old_path = original()
+    new_path = tmp_path / "model_again.ply"  # the model "written again": another key
+    os.symlink(old_path, new_path)
+    new_key = (str(new_path), 1.0)
+    gates = {str(old_path): threading.Event(), str(new_path): threading.Event()}
+    started = []
+    shown = [old_key]
+
+    def slow(path):
+        started.append(str(path))
+        gates[str(path)].wait(20)
+        return real(path)
+
+    monkeypatch.setattr(mvmod, "CASTER_SYNC_FACES", 0)
+    monkeypatch.setattr(mvmod, "_caster_parts", slow)
+    monkeypatch.setattr(view, "_caster_key", lambda: (shown[0], old_path if shown[0] == old_key else new_path))
+    view._draw_mesh = None
+    assert view._caster() is None and view.caster_preparing  # the build of the first file
+    shown[0] = new_key
+    assert view._caster() is None and view.caster_preparing  # the model rewritten: its own build
+    shown[0] = old_key  # back to the first (another chunk and back): its build still runs, no other
+    assert view._caster() is None
+    assert wait_for(lambda: len(started) == 2) and sorted(started) == sorted(gates)
+    shown[0] = new_key
+    gates[str(old_path)].set()  # the first build ends while the other file is shown: let go
+    assert wait_for(lambda: old_key not in view._caster_running)
+    app.processEvents()
+    assert view._draw_mesh is None
+    gates[str(new_path)].set()
+    assert wait_for(lambda: not view.caster_preparing)
+    assert view._draw_mesh is not None and view._draw_mesh[0] == new_key and len(started) == 2

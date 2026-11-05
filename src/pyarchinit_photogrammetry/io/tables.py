@@ -283,6 +283,8 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "estimated": ("Stimata (m)", "Estimated (m)"),
     "control": ("controllo", "control"),
     "check": ("verifica", "check"),
+    "orientation": ("orientamento", "orientation"),
+    "orientation_aside": ("orientamento (non usato)", "orientation (not used)"),
     "product": ("Prodotto", "Product"),
     "size_mb": ("Dimensione (MB)", "Size (MB)"),
     "elements": ("Punti / facce / celle", "Points / faces / cells"),
@@ -499,9 +501,10 @@ def _sensors(chunk, h: Labels) -> Sheet | None:
 def _markers(chunk, h: Labels) -> Sheet | None:
     if not chunk.markers:
         return None
-    from ..markers.gcp import marker_errors
+    from ..markers.gcp import marker_errors, orientation_set_aside
 
     errs = {e["label"]: e for e in marker_errors(chunk)}
+    aside = orientation_set_aside(chunk)
     precision = (chunk.meta.get("precision") or {}).get("markers", {})
     rows = []
     for m in chunk.markers:
@@ -510,7 +513,11 @@ def _markers(chunk, h: Labels) -> Sheet | None:
         est = list(chunk.to_world(m.position)) if m.position is not None else [None] * 3
         acc = float(np.mean(m.reference.accuracy)) if m.reference.location and m.reference.accuracy else None
         prec = list(precision.get(str(m.key)) or [None] * 3)
-        rows.append([m.label, m.code, h("check") if m.checkpoint else h("control"), bool(m.reference.enabled), *ref, acc,
+        if getattr(m, "orientation", False):  # the markers of a hand orientation (engine.orient)
+            kind = h("orientation_aside") if aside else h("orientation")
+        else:
+            kind = h("check") if m.checkpoint else h("control")
+        rows.append([m.label, m.code, kind, bool(m.reference.enabled), *ref, acc,
                      *est, e.get("dx"), e.get("dy"), e.get("dz"), e.get("error"), e.get("projections"),
                      e.get("estimated"), e.get("pixel_error"), *prec])
     headers = [h("label"), h("code"), h("type"), h("used"), h("x_ref"), h("y_ref"), h("z_ref"), h("accuracy"),
@@ -523,10 +530,18 @@ def _markers(chunk, h: Labels) -> Sheet | None:
 def _scalebars(chunk, h: Labels) -> Sheet | None:
     if not chunk.scalebars:
         return None
-    from ..markers.gcp import scalebar_errors
+    from ..markers.gcp import orientation_set_aside, scalebar_errors
 
-    rows = [[e["label"], e["marker_a"], e["marker_b"], e["distance"], e["accuracy"], h(e["type"]), bool(e["enabled"]),
-             e.get("estimated"), e.get("error")] for e in scalebar_errors(chunk)]
+    own = {m.key for m in chunk.markers if getattr(m, "orientation", False)}  # the bar of a hand orientation
+    aside = orientation_set_aside(chunk)
+
+    def kind(sb, e) -> str:
+        if sb.marker_a in own and sb.marker_b in own:
+            return h("orientation_aside") if aside else h("orientation")
+        return h(e["type"])
+
+    rows = [[e["label"], e["marker_a"], e["marker_b"], e["distance"], e["accuracy"], kind(sb, e), bool(e["enabled"]),
+             e.get("estimated"), e.get("error")] for sb, e in zip(chunk.scalebars, scalebar_errors(chunk))]
     return Sheet([h("bar"), h("marker_a"), h("marker_b"), h("distance"), h("accuracy"), h("type"), h("used"),
                   h("estimated"), h("error_m")], rows, [None, None, None, 4, 4, None, None, 4, 4])
 

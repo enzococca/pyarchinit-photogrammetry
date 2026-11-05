@@ -15,8 +15,10 @@
 :func:`read` reads the GeoPackage (the three tables, or any table of points, lines or polygons, with Z or not), the
 GeoJSON and the DXF written here; :func:`import_features` adds what it reads to a chunk: a feature without Z takes the
 heights of the DEM (missing ones interpolated along the drawing, refused when no vertex is on the DEM), the layer from
-its ``layer`` column, else the name of the file, a new identity when the one it has is already in the chunk. Since
-1.7.2."""
+its ``layer`` column, else the name of the file, a new identity when the one it has is already in the chunk. The
+system of the file (the ``srs`` of a GeoPackage table, the ``crs`` member of a GeoJSON; a DXF has none and is read in
+the chunk's) against the chunk's: reprojected when both are known and differ, refused (:class:`ForeignCrs`) when one is
+unknown and the chunk is not local (since 1.7.3). Since 1.7.2."""
 from __future__ import annotations
 
 import csv
@@ -28,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import free_drawings
+from ..core.free_drawings import fill_missing
 
 log = logging.getLogger(__name__)
 
@@ -273,11 +276,45 @@ def _coords(geom) -> tuple[str, list, bool] | None:
     return kind, [[float(p[0]), float(p[1]), float(p[2]) if has_z and len(p) > 2 else None] for p in pts], has_z
 
 
-def _record(kind, xyz, has_z, props: dict, attributes, holes: int = 0) -> dict:
+def _record(kind, xyz, has_z, props: dict, attributes, holes: int = 0, crs: str | None = None,
+            crs_in_file: bool = False) -> dict:
     return {"id": str(props.get("ppg_id") or props.get("id") or "") or None, "kind": kind,
             "layer": props.get("layer") or None, "name": str(props.get("name") or ""),
             "attributes": attributes, "colour": props.get("colour") or None, "xyz": xyz, "has_z": has_z,
-            "holes": holes}
+            "holes": holes, "crs": crs, "crs_in_file": crs_in_file}
+
+
+def _crs_name(value) -> str | None:
+    """A system as the program names it (``EPSG:3004``, ``OGC:CRS84``, else its WKT) from what a file says; None when
+    it says none or PROJ cannot read it."""
+    if not value:
+        return None
+    try:
+        from pyproj import CRS
+
+        system = CRS.from_user_input(value)
+    except Exception:  # noqa: BLE001 - a system PROJ does not know: unknown
+        return None
+    auth = system.to_authority()
+    return f"{auth[0]}:{auth[1]}" if auth else system.to_wkt()
+
+
+def _gpkg_crs(con, table: str) -> str | None:
+    """The system of the feature table ``table``: None for the undefined ones (``srs_id`` -1 and 0) and those the
+    file does not define."""
+    from . import gpkg
+
+    srs = gpkg.table_srs(con, table)
+    if srs is None or srs <= 0:
+        return None
+    row = con.execute("SELECT organization, organization_coordsys_id, definition FROM gpkg_spatial_ref_sys "
+                      "WHERE srs_id = ?", (srs,)).fetchone()
+    if row is None:
+        return None
+    org, code, definition = row
+    if org and str(org).upper() == "EPSG" and code:
+        return _crs_name(f"EPSG:{int(code)}")
+    return _crs_name(definition if definition and definition != "undefined" else None)
 
 
 def _holes(geom) -> int:
@@ -307,16 +344,18 @@ def _read_gpkg(path: Path) -> list[dict]:
     con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         tables = [r[0] for r in con.execute("SELECT table_name FROM gpkg_geometry_columns ORDER BY table_name")]
+        ours = [t for t, _g in TABLES.values() if t in tables]
+        systems = {t: _gpkg_crs(con, t) for t in ours or tables}
     finally:
         con.close()
-    ours = [t for t, _g in TABLES.values() if t in tables]
     out = []
     for table in ours or tables:
         for geom, values in gpkg.read_table(path, table):
             for part in _parts(geom):
                 got = _coords(part)
                 if got is not None:
-                    out.append(_record(*got, values, _attributes_of(values), _holes(part)))
+                    out.append(_record(*got, values, _attributes_of(values), _holes(part), crs=systems[table],
+                                       crs_in_file=True))
     return out
 
 
@@ -325,6 +364,10 @@ def _read_geojson(path: Path) -> list[dict]:
 
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     feats = data.get("features") if data.get("type") == "FeatureCollection" else [data]
+    member = data.get("crs") if isinstance(data.get("crs"), dict) else {}
+    named = (member.get("properties") or {}).get("name") if member.get("type") == "name" else None
+    crs = _crs_name(named)
+    unreadable = str(named) if named and crs is None else None
     out = []
     for f in feats or []:
         if not isinstance(f, dict) or not f.get("geometry"):
@@ -334,7 +377,15 @@ def _read_geojson(path: Path) -> list[dict]:
         for part in _parts(shapely.geometry.shape(f["geometry"])):
             got = _coords(part)
             if got is not None:
-                out.append(_record(*got, props, dict(attrs), _holes(part)))
+                out.append(_record(*got, props, dict(attrs), _holes(part), crs=crs, crs_in_file=True))
+    # no member (RFC 7946: WGS 84 longitude and latitude, the GeoJSON of QGIS, geojson.io, web tools): said when every
+    # coordinate can be one, so that a file of projected numbers without a member (the habit before RFC 7946) is not
+    # read as degrees
+    lonlat = not data.get("crs") and all(-180.0 <= p[0] <= 180.0 and -90.0 <= p[1] <= 90.0
+                                          for rec in out for p in rec["xyz"])
+    for rec in out:
+        rec["crs_unreadable"] = unreadable
+        rec["lonlat"] = lonlat
     return out
 
 
@@ -377,7 +428,10 @@ def _read_dxf(path: Path) -> list[dict]:
 
 def read(path) -> list[dict]:
     """The drawings of a GeoPackage, a GeoJSON or a DXF: ``[{"id" (None when the file has none), "kind", "layer" (None
-    when the file has none), "name", "attributes", "colour", "xyz" ([[x, y, z or None], ...]), "has_z"}]``."""
+    when the file has none), "name", "attributes", "colour", "xyz" ([[x, y, z or None], ...]), "has_z", "crs" (the
+    system the file says, None when it says none), "crs_in_file" (False for a DXF: the format has no system); a
+    GeoJSON also "crs_unreadable" (the system it names when PROJ cannot read it) and "lonlat" (no ``crs`` member and
+    every coordinate within longitude and latitude: RFC 7946)}]``."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".gpkg":
@@ -389,18 +443,115 @@ def read(path) -> list[dict]:
     raise ValueError(f"free drawings are read from GeoPackage, GeoJSON or DXF, not {ext!r}")
 
 
-def fill_missing(values: list, xy) -> list | None:
-    """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` (by its
-    length in plan; the nearest known value beyond the ends); None when no vertex has a value."""
-    known = [i for i, v in enumerate(values) if v is not None]
-    if not known:
-        return None
-    if len(known) == len(values):
-        return [float(v) for v in values]
-    xy = np.asarray(xy, float)[:, :2]
-    t = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]) if len(xy) > 1 else np.zeros(1)
-    filled = np.interp(t, t[known], [float(values[i]) for i in known])
-    return [float(values[i]) if values[i] is not None else float(filled[i]) for i in range(len(values))]
+class ForeignCrs(ValueError):
+    """The drawings of a file cannot be put in the system of the chunk: the file says no system and the chunk is in a
+    real one (``reason`` ``"file_unknown"``), or the file is in a real system and the chunk is local
+    (``"chunk_local"``), or the file names a system PROJ cannot read (``"unreadable"``). ``file_crs`` and
+    ``chunk_crs``: the two systems (the file's as it names it)."""
+
+    def __init__(self, reason: str, file_crs: str | None, chunk_crs: str | None, message: str):
+        super().__init__(message)
+        self.reason, self.file_crs, self.chunk_crs = reason, file_crs, chunk_crs
+
+
+def _same_system(a: str, b: str) -> bool:
+    from ..core import crs as crs_mod
+
+    ca, cb = crs_mod.epsg_code(a), crs_mod.epsg_code(b)
+    if ca is not None and cb is not None:
+        return ca == cb
+    try:
+        return crs_mod.to_pyproj(crs_mod.horizontal(a)).equals(crs_mod.to_pyproj(crs_mod.horizontal(b)),
+                                                               ignore_axis_order=True)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _systems(chunk, path: Path, records: list) -> bool:
+    """The records of ``path`` checked against the system of ``chunk`` and reprojected in it where they are in
+    another (in place); :class:`ForeignCrs` when one cannot be. A GeoJSON without a ``crs`` member whose coordinates
+    are all longitudes and latitudes is read as WGS 84 (:data:`RFC7946`) in a chunk that is not local. Returns True
+    when that was done."""
+    from ..core import crs as crs_mod
+    from ..gnss import frames
+
+    target = chunk.crs
+    if any(rec.get("crs_unreadable") for rec in records):
+        named = next(rec["crs_unreadable"] for rec in records if rec.get("crs_unreadable"))
+        raise ForeignCrs("unreadable", named, target,
+                         f"{path.name}: the file names a coordinate system PROJ cannot read: {named}")
+    assumed = False
+    if not crs_mod.is_local(target) and records and all(rec.get("crs_in_file") and rec.get("crs") is None
+                                                        and rec.get("lonlat") for rec in records):
+        for rec in records:
+            rec["crs"] = RFC7946
+        assumed = True
+        log.info("%s: GeoJSON senza crs letto come WGS 84 (RFC 7946)", path.name)
+    for rec in records:
+        if not rec.get("crs_in_file"):
+            continue  # a DXF: read in the system of the chunk
+        source = rec.get("crs")
+        if source is None:
+            if not crs_mod.is_local(target):
+                raise ForeignCrs("file_unknown", None, target,
+                                 f"{path.name}: the file says no coordinate system and the chunk is in {target}")
+            continue
+        if crs_mod.is_local(target):
+            raise ForeignCrs("chunk_local", source, target,
+                             f"{path.name}: the drawings are in {source} and the chunk is in a local system")
+    if crs_mod.is_local(target):
+        return assumed
+    plan = crs_mod.horizontal(target)
+    as_they_are: set = set()
+    for rec in records:
+        source = rec.get("crs") if rec.get("crs_in_file") else None
+        if source is None or _same_system(source, target):
+            continue
+        heights = [p[2] is not None for p in rec["xyz"]]
+        pts = np.array([[p[0], p[1], 0.0 if p[2] is None else p[2]] for p in rec["xyz"]], float)
+        legacy = frames.Legacy(DRAWN, chunk)
+        moved = crs_mod.transform_points(pts, source, plan, legacy=legacy)  # the plan; the heights as they are
+        if any(heights):
+            src3, kind = _heights_of(source)
+            if kind is not None and _height_kind(target) is not None:
+                # both systems say what their heights are (above the ellipsoid, above a geoid): converted with them,
+                # through the grid of the geoid where the kinds differ - a GridMissing (the import refused) without it
+                full = crs_mod.transform_points(pts[heights], src3, target, legacy=legacy)
+                moved[heights, 2] = full[:, 2]
+            else:
+                as_they_are.add(source)
+        rec["xyz"] = [[float(q[0]), float(q[1]), None if p[2] is None else float(q[2])]
+                      for p, q in zip(rec["xyz"], moved)]
+    if as_they_are:
+        log.info("%s: quote dei disegni prese così come sono (sistema delle quote non noto: %s, chunk %s)", path.name,
+                 ", ".join(sorted(as_they_are)), target)
+    return assumed
+
+
+WGS84_2D = ("OGC:CRS84", "EPSG:4326")  # longitude and latitude on WGS 84: GeoJSON heights are above its ellipsoid
+
+
+def _height_kind(crs: str) -> str | None:
+    """``"ellipsoidal"`` or ``"orthometric"`` heights of ``crs`` (:func:`..gnss.heights.height_kind`), None when the
+    system has no heights of its own (2D: what its numbers are is not said)."""
+    from ..gnss import heights as hg
+
+    kind = hg.height_kind(crs)
+    return None if kind == hg.NONE else kind
+
+
+def _heights_of(source: str) -> tuple[str, str | None]:
+    """The system the heights of a file in ``source`` are converted from, and their kind: longitude and latitude on WGS
+    84 (RFC 7946, ``EPSG:4326``) have heights above the ellipsoid (``EPSG:4979``); another system its own kind."""
+    from ..gnss import heights as hg
+
+    if source in WGS84_2D:
+        return "EPSG:4979", hg.ELLIPSOIDAL
+    return source, _height_kind(source)
+
+
+RFC7946 = "OGC:CRS84"  # the system of a GeoJSON without a crs member (RFC 7946): WGS 84, longitude first
+DRAWN = "i disegni 3D importati"  # how the warning of a conversion without an epoch names them
 
 
 class StaleDem(ValueError):
@@ -409,15 +560,7 @@ class StaleDem(ValueError):
 
 
 def _dem_heights(chunk, xy) -> list:
-    path = chunk.dem_path
-    if path is None or not Path(path).exists():
-        return [None] * len(xy)
-    import rasterio
-
-    with rasterio.open(path) as src:
-        vals = [float(v[0]) for v in src.sample([(float(x), float(y)) for x, y in xy])]
-        nodata = src.nodata
-    return [None if (nodata is not None and v == nodata) or not np.isfinite(v) else v for v in vals]
+    return free_drawings.raster_values(chunk.dem_path, xy)
 
 
 def import_features(chunk, path, layer: str | None = None) -> dict:
@@ -425,12 +568,17 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
     else the name of the file; a feature without Z gets the heights of the DEM (:func:`fill_missing` along the drawing;
     skipped when no vertex has one); a new identity when the one it has is in the chunk already. Returns
     ``{"added", "dem_z" (of those added, how many took the DEM's heights), "skipped", "holes_dropped" (the holes of
-    polygons left out: a free drawing has one ring)}``. :class:`StaleDem` (nothing added) when heights are wanted
-    from a DEM to rebuild (:mod:`..core.stamps`)."""
+    polygons left out: a free drawing has one ring), "rfc7946" (True: a GeoJSON without a system read as WGS 84 and
+    reprojected)}``. The heights are converted when both systems say what they are (above the ellipsoid - a GeoJSON on
+    WGS 84 -, above a geoid): :class:`..gnss.heights.GridMissing` (nothing added) when the grid of the geoid is missing;
+    else taken as they are, said in the log. :class:`StaleDem` (nothing added) when heights are wanted
+    from a DEM to rebuild (:mod:`..core.stamps`); :class:`ForeignCrs` (nothing added) when the system of the file
+    cannot be put in the chunk's (reprojected when both are known and differ)."""
     from ..core import stamps
 
     path = Path(path)
     records = list(read(path))
+    rfc7946 = _systems(chunk, path, records)
     wanting = any(not rec["has_z"] or any(p[2] is None for p in rec["xyz"]) for rec in records)
     if wanting and chunk.products.get("dem") and stamps.is_stale(chunk, "dem"):
         raise StaleDem(f"{path.name}: drawings without heights and the DEM is to be rebuilt (built in another "
@@ -466,8 +614,9 @@ def import_features(chunk, path, layer: str | None = None) -> dict:
     if holes:
         log.warning("Disegni importati da %s: %d buchi di poligoni lasciati fuori (un disegno libero ha un solo "
                     "contorno)", path.name, holes)
-    return {"added": added, "dem_z": dem_z, "skipped": skipped, "holes_dropped": holes}
+    return {"added": added, "dem_z": dem_z, "skipped": skipped, "holes_dropped": holes, "rfc7946": rfc7946}
 
 
 __all__ = ["TABLES", "TITLES", "FREE_PREFIX", "FORMATS", "write_tables", "write_gpkg", "write_geojson", "write_dxf",
-           "write_csv", "export", "read", "import_features", "fill_missing", "attribute_columns", "StaleDem"]
+           "write_csv", "export", "read", "import_features", "fill_missing", "attribute_columns", "StaleDem",
+           "ForeignCrs"]

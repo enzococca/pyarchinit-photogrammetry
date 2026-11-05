@@ -338,12 +338,22 @@ parte: non entrano in *Aggiorna georeferenziazione*, il pannello *Riferimenti* l
 orientamento a mano viene rifiutato finché i punti di controllo ci sono. Un sistema scelto senza nient'altro che
 collochi il rilievo (A messo su X, Y e quota note) lascia ai marker di orientamento il compito di collocarlo.
 
+**Un blocco di foto con il GPS.** Anche quando le foto hanno posizioni GPS (in un sistema vero, come quelle
+dell'EXIF), dopo un orientamento a mano il prossimo allineamento tiene l'orientamento a mano: sono i marker di
+orientamento a collocare il chunk, che resta LOCALE, e il GPS delle foto non viene usato per collocarlo finché ci sono.
+Il GPS torna a collocare il rilievo quando togli i marker di orientamento (il prossimo allineamento mette il chunk nel
+sistema del GPS), quando scegli per il chunk un sistema vero, o quando misuri tre o più altri punti di controllo.
+
 **Prodotti da rifare.** DEM, ortofoto e i raster fatti da essi (precisione, copertura, rilievi, pendenza,
 esposizione, TIN) sono griglie nella pianta di prima: risultano *da rifare*. La vista raster lo dice in una fascia
 gialla sopra l'immagine, e gli strumenti di disegno rifiutano di disegnarci sopra. *Flusso di lavoro > Ricostruisci
 i prodotti da rifare* (proposto anche dalla finestra del risultato) li rifà in ordine con i parametri che avevano,
 tenendo i disegni; ciò che non può rifare (raster calcolati, multispettrali, termici e satellitari, versioni
 conservate) viene elencato da rifare a mano. I prospetti senza scala restano validi: si spostano con il chunk.
+La ricostruzione è un solo passo di *Modifica > Annulla* (tutti i prodotti tornano insieme come erano). Il DEM e
+l'ortofoto di prima restano fra le versioni solo se nel menu *Flusso di lavoro* è spuntato *Ricostruendo, conserva DEM
+e ortofoto attivi come versioni* (spento per impostazione predefinita: sono nel sistema di prima, non si confrontano pixel per pixel con
+quelli rifatti, e su un rilievo grande occupano GB).
 
 **Rifiuti.** La finestra non si apre, e dice perché, quando l'orientamento lo dà qualcos'altro: un chunk in un
 sistema di coordinate (lo danno i punti di controllo), tre marker di controllo con coordinate (cambia quelle), un
@@ -486,8 +496,9 @@ una modifica sul prospetto in cui è stata fatta.
   le miniature riscritti a ogni salvataggio e le US aggiunte nel frattempo collegate.
 * Il **collegamento dal vivo** con QGIS o RustGIS porta, oltre ai disegni della pianta, quelli di ogni prospetto con
   disegni, in 3D sul rilievo (tabelle `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; in RustGIS
-  nel gruppo "<chunk> - prospetti"), in un solo senso: ciò che si modifica lì in quei layer non torna. Il pacchetto
-  **QField** porta solo la pianta.
+  nel gruppo "<chunk> - prospetti"), in un solo senso: ciò che si modifica lì in quei layer non torna. Un prospetto
+  fatto dopo aver creato il progetto QGIS non c'è finché il progetto non viene creato di nuovo (*QGIS > Apri in
+  QGIS*). Il pacchetto **QField** porta solo la pianta.
 * I disegni della pianta restano caricati qualunque cosa sia mostrata: le funzioni che lavorano sulla pianta
   (proxy, volumi, classi, IFC, proposta di US, PyArchInit, fasi, rapporto) usano sempre i disegni della pianta.
 
@@ -546,7 +557,7 @@ Le [fasi dello scavo](archaeology.md#fasi-dello-scavo) coregistrano così i loro
 L'ortofoto prende ogni cella dalla foto migliore; una patch sceglie la foto a mano in un'area (la chioma di un
 albero sopra un muro, una persona nel saggio, un'ombra).
 
-1. *Patch* nella barra Disegno (o *Strumenti > Patch dell'ortofoto*): trascina un riquadro o fai clic sui vertici
+1. *Patch* nella barra laterale (gruppo *Automatico*) (o *Strumenti > Patch dell'ortofoto*): trascina un riquadro o fai clic sui vertici
    di un poligono e doppio clic; oppure seleziona un poligono (un'unità) e scegli *Assegna immagini a quest'area*
    dal suo menu.
 2. La finestra mostra l'area com'è ora e, per la foto scelta nell'elenco, l'area come verrebbe. L'elenco ha le foto

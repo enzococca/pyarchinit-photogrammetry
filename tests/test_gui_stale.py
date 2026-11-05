@@ -75,10 +75,12 @@ def test_banner_on_a_stale_raster(win, qapp):
 
 def test_banner_survives_a_load_and_follows_the_elevations(win, qapp):
     view = win.ortho_view
+    view.raster_loaded.disconnect(win._raster_loaded)  # the view alone: its notice stays across a load
     view.set_banner("prova")
     win._release_views()  # clear_raster
     assert view.banner_text() == "prova"
-    view.set_banner(None)
+    view.raster_loaded.connect(win._raster_loaded)
+    win._release_views()  # with the window: judged again (nothing shown, nothing stale)
     assert view.banner_text() == ""
     _orient(win, qapp, distance=3.0)  # a scale: the elevations' pixels no longer fit
     entry = win.chunk.meta["elevations"][0]
@@ -363,3 +365,378 @@ def test_products_on_the_dem_left_by_hand_when_its_rebuild_fails(win, qapp, monk
     left = next(line for line in text.splitlines() if line.startswith("Da rifare a mano: "))
     assert "Ortofoto" in left and "Pendenza" in left
     assert stamps.is_stale(ch, "orthomosaic") and stamps.is_stale(ch, "slope")
+
+
+# ---------------------------------------------------------------- 1.7.3
+@pytest.mark.parametrize("surface, waits", [("dem", True), ("ground", True), ("model", False)])
+def test_the_orthomosaic_waits_for_the_dem_on_every_surface_but_the_model(win, qapp, monkeypatch, surface, waits):
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    _orient(win, qapp)
+    ch.meta.setdefault("orthomosaic", {})["surface"] = surface
+    built = []
+
+    def broken(*a, **k):
+        raise RuntimeError("prova")
+
+    monkeypatch.setattr(ch, "build_dem", broken)
+    monkeypatch.setattr(ch, "build_orthomosaic", lambda *a, **k: built.append(k) or stamps.stamp(ch, "orthomosaic"))
+    win.settings.setValue("rebuild_keep_versions", "false")
+    win.rebuild_stale(ch, [s for s in stamps.stale_products(ch) if s["product"] in ("dem", "orthomosaic")])
+    win.runner.wait()
+    qapp.processEvents()
+    assert (built == []) is waits, built
+
+
+def test_tin_rebuilt_with_its_soft_and_boundary_lines(win, qapp, monkeypatch):
+    from orient_helpers import centre
+
+    from pyarchinit_photogrammetry.archaeo import breaklines
+    from pyarchinit_photogrammetry.engine import tin as T
+
+    ch = win.chunk
+    x, y, _z = centre(ch)
+    soft = breaklines.new_record("soft", [(x - 0.5, y - 0.2), (x + 0.5, y + 0.2)])
+    edge = breaklines.new_record("boundary", [(x - 0.8, y - 0.8), (x + 0.8, y - 0.8), (x + 0.8, y + 0.8),
+                                              (x - 0.8, y + 0.8)])
+    ch.meta.setdefault("drawings", {})["lines"] = [soft, edge]
+    win.lines = [dict(soft), dict(edge)]
+    T.build_tin(ch, source="dem", breaklines=breaklines.for_tin([soft, edge]))
+    assert ch.meta["tin"]["n_breaklines"] == 0 and ch.meta["tin"]["n_lines"] == 2
+    seen = []
+    monkeypatch.setattr(T, "build_tin", lambda chunk, **k: seen.append(k))
+    win._rebuild_tin(ch, lambda *a, **k: None)
+    assert [ln["kind"] for ln in seen[0]["breaklines"]] == ["soft", "boundary"]
+
+
+def _fake_dem(ch, calls):
+    import shutil
+
+    from pyarchinit_photogrammetry.core import stamps
+
+    def build(resolution=None, source="point_cloud", interpolate=True, classes=None, progress=None):
+        calls.append("dem")
+        out = ch.data_dir / "dem.tif"
+        kept = [e for e in (ch.meta.get("versions") or {}).get("dem") or []]
+        src = ch.data_dir / kept[-1]["files"]["dem"] if kept and not ch.dem_path else ch.dem_path
+        tmp = ch.data_dir / "dem_nuovo.tif"
+        shutil.copy2(src, tmp)
+        with open(tmp, "ab") as f:  # another file: its bytes differ
+            f.write(b"\0" * 16)
+        tmp.replace(out)
+        ch._set_product("dem", out)
+        stamps.stamp(ch, "dem")
+        return out
+
+    return build
+
+
+def _digest(path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_rebuild_keeps_the_previous_product_and_is_one_undo_step(win, qapp, monkeypatch, keep):
+    from pyarchinit_photogrammetry.core import stamps, versions
+
+    ch = win.chunk
+    _orient(win, qapp)
+    old_path, old_digest = ch.dem_path, _digest(ch.dem_path)
+    old_versions = versions.versions(ch, "dem")
+    calls = []
+    monkeypatch.setattr(ch, "build_dem", _fake_dem(ch, calls))
+    assert not win.a_rebuild_keep.isChecked()  # off by default: kept in the old system they are not comparable
+    win.a_rebuild_keep.setChecked(not keep)
+    win.a_rebuild_keep.setChecked(keep)
+    assert win.settings.value("rebuild_keep_versions") == ("true" if keep else "false")
+    entries = len(win.history.entries)
+    win.rebuild_stale(ch, [s for s in stamps.stale_products(ch) if s["product"] == "dem"])
+    win.runner.wait()
+    qapp.processEvents()
+    assert calls == ["dem"]
+    assert not stamps.is_stale(ch, "dem")
+    new_digest = _digest(ch.dem_path)
+    assert new_digest != old_digest
+    made = versions.versions(ch, "dem")
+    if keep:
+        assert len(made) == len(old_versions) + 1
+        vfile = versions.version_file(ch, "dem", made[-1]["id"])
+        assert _digest(vfile) == old_digest  # the DEM of before, kept as a version (made in the other system)
+        assert stamps.entry_stale(ch, made[-1])
+        assert made[-1].get("by_rebuild") is True  # tagged: not listed as a version to rebuild by hand
+        _steps, _by_hand, kept_lines = win._rebuild_plan(ch)
+        assert not any(made[-1]["name"] in line for line in kept_lines), kept_lines
+    else:
+        assert made == old_versions
+    assert len(win.history.entries) == entries + 1  # ONE step
+    assert win.history.undo_text() == "Ricostruisci i prodotti da rifare"
+    win.undo()
+    qapp.processEvents()
+    assert ch.dem_path == old_path and _digest(ch.dem_path) == old_digest
+    assert stamps.is_stale(ch, "dem")
+    assert versions.versions(ch, "dem") == old_versions
+    if keep:
+        assert not (ch.data_dir / "versions" / "dem" / made[-1]["id"]).exists()
+    win.redo()
+    qapp.processEvents()
+    assert not stamps.is_stale(ch, "dem") and _digest(ch.dem_path) == new_digest
+    assert [e["id"] for e in versions.versions(ch, "dem")] == [e["id"] for e in made]
+    if keep:
+        assert _digest(versions.version_file(ch, "dem", made[-1]["id"])) == old_digest
+
+
+def test_undo_of_a_rebuild_refused_after_another_change(win, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    _orient(win, qapp)
+    monkeypatch.setattr(ch, "build_dem", _fake_dem(ch, []))
+    win.rebuild_stale(ch, [s for s in stamps.stale_products(ch) if s["product"] == "dem"])
+    win.runner.wait()
+    qapp.processEvents()
+    ch.build_dem()  # built again by hand meanwhile (the window's DEM step is not in Modifica > Annulla)
+    digest = _digest(ch.dem_path)
+    win.undo()
+    qapp.processEvents()
+    assert _digest(ch.dem_path) == digest and not stamps.is_stale(ch, "dem")  # nothing put back
+    assert win.history.undo_text() != "Ricostruisci i prodotti da rifare"
+
+
+def test_elevation_kept_when_the_swap_of_its_folder_fails(win, qapp, monkeypatch):
+    from orient_helpers import _write_elevation
+
+    from pyarchinit_photogrammetry.engine import elevation
+    from pyarchinit_photogrammetry.io import files
+
+    ch = win.chunk
+    old = next(e for e in ch.meta["elevations"] if e["id"] == "el000001")
+    before = (ch.data_dir / old["orthophoto"]).read_bytes()
+
+    def fake(chunk, frame, resolution=None, name=None, depth=None, bounds=None, kind="elevation", **kw):
+        entry = _write_elevation(chunk, frame, "nuovo001", kind, bounds, depth, resolution)
+        (chunk.data_dir / entry["orthophoto"]).write_bytes(b"nuovo")
+        return entry
+
+    monkeypatch.setattr(elevation, "build_elevation", fake)
+    real = files._rename_folder
+    calls = []
+
+    def rename(src, dst):
+        calls.append(1)
+        if len(calls) == 2:  # the new folder into place
+            raise OSError("disco pieno")
+        return real(src, dst)
+
+    monkeypatch.setattr(files, "_rename_folder", rename)
+    with pytest.raises(OSError, match="disco pieno"):
+        win._rebuild_elevation(ch, "el000001", lambda *a, **k: None)
+    entries = [e for e in ch.meta["elevations"] if e["id"] in ("el000001", "nuovo001")]
+    assert [e["id"] for e in entries] == ["el000001"] and entries[0] is old
+    assert (ch.data_dir / old["orthophoto"]).read_bytes() == before
+    assert not (ch.data_dir / "elevations" / "nuovo001").exists()
+    assert not files.backup_name(ch.data_dir / "elevations" / "el000001").exists()
+
+
+def test_wall_scale_elevation_rebuilt_on_its_own_u_map(win, monkeypatch):
+    from orient_helpers import centre, cylinder_elevation
+
+    from pyarchinit_photogrammetry.engine import elevation
+
+    ch = win.chunk
+    entry = cylinder_elevation(ch, centre(ch), eid="cy000099")
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def fake(chunk, frame, **kw):
+        seen.append(kw)
+        raise Stop
+
+    monkeypatch.setattr(elevation, "build_elevation", fake)
+    with pytest.raises(Stop):
+        win._rebuild_elevation(ch, "cy000099", lambda *a, **k: None)
+    kw = seen[0]
+    assert np.array_equal(np.asarray(kw["u_map"]), np.asarray(entry["frame"]["u_map"]))
+    assert kw.get("scale", "wall") == "wall" and list(kw["bounds"]) == list(entry["bounds"])
+
+
+def test_relief_steps_named_as_the_relief_menu(win):
+    from pyarchinit_photogrammetry.gui.panels import product_name
+
+    ch = win.chunk
+    ch.meta["relief"] = {"slrm": {"built_in": np.diag([2.0, 2.0, 2.0, 1.0]).tolist()},
+                         "svf": {"built_in": np.diag([2.0, 2.0, 2.0, 1.0]).tolist()}}
+    names = [name for name, _fn in win._rebuild_plan(ch)[0]]
+    assert product_name("slrm") in names and product_name("svf") in names
+    assert "slrm" not in names and "svf" not in names
+
+
+def test_a_raster_shown_by_a_plugin_judges_the_banner_again(win, qapp, tmp_path):
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    view = win.ortho_view
+    ch = win.chunk
+    _orient(win, qapp)
+    win._show_raster("dem")
+    assert view.banner_text().startswith(BANNER)
+    context = Context("prova", tmp_path / "dati", win)
+    context.show_frame((0.0, 0.0, 10.0, 10.0), 0.05)
+    qapp.processEvents()
+    assert view.banner_text() == ""  # an empty frame: nothing stale under it
+    view.load(ch.dem_path, "dem")  # a plugin loading the stale DEM itself
+    assert view.banner_text().startswith(BANNER)
+    entry = next(e for e in ch.meta["elevations"] if e["id"] == "el000001")
+    win.show_elevation(entry)  # rigidly moved: current
+    assert view.banner_text() == ""
+    view.load(ch.dem_path, "dem")  # over the elevation: the DEM is what is judged now
+    assert view.banner_text().startswith(BANNER)
+    assert getattr(win, "_raster_version", None) is None
+
+
+def _fake_ortho(ch, calls):
+    import shutil
+
+    from pyarchinit_photogrammetry.core import stamps
+
+    def build(*a, **k):
+        calls.append("orthomosaic")
+        out = ch.data_dir / "orthomosaic.tif"
+        kept = (ch.meta.get("versions") or {}).get("orthomosaic") or []
+        src = ch.data_dir / kept[-1]["files"]["orthomosaic"] if kept and not ch.orthomosaic_path \
+            else ch.orthomosaic_path
+        tmp = ch.data_dir / "orthomosaic_nuovo.tif"
+        shutil.copy2(src, tmp)
+        with open(tmp, "ab") as f:
+            f.write(b"\0" * 16)
+        tmp.replace(out)
+        ch._set_product("orthomosaic", out)
+        stamps.stamp(ch, "orthomosaic")
+        return out
+
+    return build
+
+
+def _project_state(ch) -> dict:
+    """Every file of the chunk's folder but the copies of Annulla, with the meta and the products."""
+    import json
+
+    files = {}
+    for q in sorted(Path(ch.data_dir).rglob("*")):
+        rel = q.relative_to(ch.data_dir)
+        if q.is_file() and rel.parts[0] != "undo":
+            files[str(rel)] = _digest(q)
+    return {"files": files, "meta": json.dumps(ch.meta, sort_keys=True, default=str),
+            "products": dict(ch.products)}
+
+
+@pytest.mark.parametrize("which", ["undo", "redo"])
+def test_a_failing_undo_or_redo_of_a_rebuild_puts_everything_back(win, qapp, monkeypatch, which):
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.gui import rebuild
+
+    ch = win.chunk
+    _orient(win, qapp)
+    monkeypatch.setattr(ch, "build_dem", _fake_dem(ch, []))
+    monkeypatch.setattr(ch, "build_orthomosaic", _fake_ortho(ch, []))
+    win.a_rebuild_keep.setChecked(True)
+    win.rebuild_stale(ch, [s for s in stamps.stale_products(ch) if s["product"] in ("dem", "orthomosaic")])
+    win.runner.wait()
+    qapp.processEvents()
+    step = win.history.entries[win.history.index - 1].action
+    assert isinstance(step, rebuild.RebuildStep)
+    if which == "redo":
+        win.undo()
+        qapp.processEvents()
+    before = _project_state(ch)
+    stale = [s["product"] for s in stamps.stale_products(ch)]
+    real = rebuild._move
+    calls = []
+
+    def move(src, dst):
+        calls.append((src, dst))
+        if len(calls) == 3:
+            raise OSError("file in uso")
+        return real(src, dst)
+
+    monkeypatch.setattr(rebuild, "_move", move)
+    errors = []
+    monkeypatch.setattr(win, "_exc", lambda *a, **k: errors.append(a))
+    getattr(win, which)()
+    qapp.processEvents()
+    assert len(calls) >= 3
+    assert errors and "file in uso" in str(errors[0][1])  # the error is said
+    assert _project_state(ch) == before  # files, meta (stamps, versions) and products as before the try
+    assert [s["product"] for s in stamps.stale_products(ch)] == stale
+    assert step.hold.exists()  # nothing lost: the copies stay
+    assert step not in [e.action for e in win.history.entries]
+
+
+def test_rebuild_covers_the_files_the_builders_write(win, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.core import stamps
+
+    ch = win.chunk
+    _orient(win, qapp)
+    inactive = ch.data_dir / "dem.tif"  # a DEM file there, not the active one: the builder writes over it
+    inactive.write_bytes(b"un altro DEM")
+    monkeypatch.setattr(ch, "build_dem", _fake_dem(ch, []))
+    win.rebuild_stale(ch, [s for s in stamps.stale_products(ch) if s["product"] == "dem"])
+    win.runner.wait()
+    qapp.processEvents()
+    assert inactive.read_bytes() != b"un altro DEM"
+    win.undo()
+    qapp.processEvents()
+    assert inactive.read_bytes() == b"un altro DEM"
+
+
+def test_a_hold_half_made_is_cleaned_up(win, monkeypatch):
+    from pyarchinit_photogrammetry.gui import rebuild
+
+    ch = win.chunk
+    real = rebuild.clone
+    calls = []
+
+    def clone(src, dst):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("disco pieno")
+        return real(src, dst)
+
+    monkeypatch.setattr(rebuild, "clone", clone)
+    files = rebuild.chunk_files(ch, [{"kind": "product", "product": "dem"},
+                                     {"kind": "product", "product": "orthomosaic"}])
+    assert len(files) >= 2
+    with pytest.raises(OSError, match="disco pieno"):
+        rebuild.RebuildStep(win, ch, files)
+    assert not any((ch.data_dir / "undo").glob("rebuild-*"))
+
+
+def test_showing_an_elevation_is_no_edit(win, qapp):
+    ch = win.chunk
+    win._show_raster("dem")
+    entries = len(win.history.entries)
+    entry = next(e for e in ch.meta["elevations"] if e["id"] == "el000001")
+    win.show_elevation(entry)
+    qapp.processEvents()
+    win._show_raster("dem")
+    qapp.processEvents()
+    win.history.record()
+    assert len(win.history.entries) == entries, [e.text for e in win.history.entries]
+
+
+def test_an_interrupted_swap_of_an_elevation_is_mended_when_the_project_opens(win, qapp):
+    import os
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.io import files
+
+    ch = win.chunk
+    place = ch.data_dir / "elevations" / "el000001"
+    content = (place / "elevation.tif").read_bytes()
+    os.replace(place, files.backup_name(place))  # a crash between the two renames
+    doc = ppg.Document.open(win.doc.path)
+    assert doc.mend_swaps() == 1
+    assert (place / "elevation.tif").read_bytes() == content and not files.backup_name(place).exists()

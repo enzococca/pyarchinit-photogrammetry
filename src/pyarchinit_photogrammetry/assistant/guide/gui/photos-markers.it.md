@@ -473,7 +473,7 @@ foto viene triangolato. Sul saggio sintetico i marker da una foto stanno entro 0
 
 * *Marker* nella vista 3D: la vista si ferma; clic su un punto del modello o della nuvola (il punto mostrato più
   vicino sotto il cursore, affinato lungo la linea di vista sulla nuvola densa completa);
-* *Marker* nella barra Disegno: clic sull'ortofoto o sul DEM (la quota dal DEM a piena risoluzione, altrimenti
+* *Marker* nella barra laterale (gruppo *Misure*): clic sull'ortofoto o sul DEM (la quota dal DEM a piena risoluzione, altrimenti
   dalla nuvola lungo la verticale).
 
 Il nuovo marker (`point 1`, `point 2`...) viene proiettato sulle foto che lo vedono, non nascosto dalla

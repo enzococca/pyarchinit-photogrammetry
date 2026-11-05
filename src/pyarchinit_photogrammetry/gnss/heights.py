@@ -1012,8 +1012,9 @@ def _drawn(chunk, mover, sections: list | None, old_crs: str | None = None,
         _move_lines([r for r in drawings.get("lines") or [] if isinstance(r, dict)], mover)
         if free and any(isinstance(f, dict) for f in drawings.get("free") or []):
             _move_free([f for f in drawings.get("free") or [] if isinstance(f, dict)], mover)
-            drawings["free_basis"] = {"alignment": meta.get("alignment_id"),
-                                      "transform": np.asarray(chunk.transform, float).tolist()}
+            from ..core import free_drawings
+
+            free_drawings.based(drawings, meta.get("alignment_id"), chunk.transform)
         values["drawings"] = drawings
     ortho = _ortho_name(chunk)
     keys = [k for k, rows in (meta.get("stones") or {}).items()

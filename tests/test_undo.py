@@ -61,6 +61,70 @@ def test_history_of_parts_and_files(tmp_path):
     assert not h.record() and not h.can_undo()
 
 
+def test_close_deletes_the_copies_of_the_steps_but_a_broken_hold(tmp_path):
+    """The session ends: the copies of the products, the holds of an orientation and of a rebuild go; the hold a failed
+    undo left on purpose (``broken``) stays; while the session runs nothing of a step that can be undone is touched."""
+    chunk = _Chunk(tmp_path)
+    (tmp_path / "point_cloud.ply").write_text("A")
+    state = {"chunk": 0, "units": []}
+    h = UndoHistory(lambda: dict(state), lambda *a: None, lambda: chunk)
+    h.backup(["point_cloud"])
+    (tmp_path / "point_cloud.ply").write_text("B")
+    assert h.record("Lazo")
+    held = tmp_path / "undo" / "orient-abc"
+    (held / "x.ply").parent.mkdir(parents=True)
+    (held / "x.ply").write_text("p")
+
+    class Step:
+        def __init__(self, hold, broken):
+            self.hold, self.broken, self.dropped = hold, broken, False
+
+        def undo(self):
+            pass
+
+        def redo(self):
+            pass
+
+        def drop(self):
+            self.dropped = True
+
+    broken = Step(tmp_path / "undo" / "rebuild-bad", True)
+    (broken.hold / "before").mkdir(parents=True)
+    h.push("Ricostruisci", broken, document=False)
+    state["units"] = ["u1"]
+    h.record()  # another edit in the session: the copies of the steps that can be undone stay
+    assert len(list((tmp_path / "undo").iterdir())) == 3
+    h.close()
+    assert [p.name for p in (tmp_path / "undo").iterdir()] == ["rebuild-bad"]
+    assert not broken.dropped and not h.can_undo()
+
+
+def test_a_step_pushed_takes_its_plugin_data_with_it():
+    """A plugin's change of its data (part ``plugins``) is an entry of its own, unless the plugin pushed its own step
+    in the same turn: then the step covers it (no second entry)."""
+    state = {"chunk": 0, "plugins": {}}
+    deferred = []
+    h = UndoHistory(lambda: {k: dict(v) if isinstance(v, dict) else v for k, v in state.items()},
+                    lambda parts, names, products: state.update(parts), lambda: None, defer=deferred.append)
+    state["plugins"] = {"mine": 1}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+
+    class Step:
+        def undo(self):
+            pass
+
+        def redo(self):
+            pass
+
+    h.push("Il mio passo", Step(), document=False)
+    state["plugins"] = {"mine": 2}  # changed again in the same turn (a second group of a deletion)
+    assert not h.record() and len(h.entries) == 2
+    for f in deferred:  # the turn ends
+        f()
+    state["plugins"] = {"mine": 3}
+    assert h.record() and len(h.entries) == 3
+
+
 @pytest.fixture
 def window(processed, tmp_path):
     import os
@@ -276,3 +340,42 @@ def geometry_internal(transform, xyz):
     from pyarchinit_photogrammetry.core import geometry as geo
 
     return geo.apply(np.linalg.inv(np.asarray(transform, float)), np.asarray(xyz, float).reshape(-1, 3))
+
+
+def test_the_undo_copies_go_when_the_window_closes(window):
+    """While the window is open the copies of the steps that can be undone stay; closing it deletes them (they used to
+    stay until the next open or switch of chunk)."""
+    w, app = window
+    ch = w.chunk
+    w.history.backup(["point_cloud"])
+    w.history.record("Lazo sulla nuvola")
+    hold = ch.data_dir / "undo" / "orient-test"
+    hold.mkdir(parents=True)
+    (hold / "proxy.ply").write_text("x")
+    w._add_quota({"x": 2480001.0, "y": 4500001.0, "quota_q": 99.5, "us_q": "3"})
+    copies = ch.data_dir / "undo"
+    assert copies.is_dir() and len(list(copies.iterdir())) == 2 and w.a_undo.isEnabled()
+    w.setWindowModified(False)
+    w.close()
+    app.processEvents()
+    assert not copies.exists()
+
+
+def test_a_plugin_change_of_chunk_meta_is_undone(window):
+    """``mark_modified`` after a plugin wrote its key of ``chunk.meta``: *Annulla* takes it back, *Ripeti* again."""
+    w, app = window
+    ch = w.chunk
+    told = []
+    w.refreshed.connect(lambda: told.append(True))
+    ch.meta["fake_plugin"] = {"n": 1, "names": ["a"]}
+    w.mark_modified()
+    assert w.a_undo.text() == "Annulla: Dati dei plugin"
+    ch.meta["fake_plugin"]["n"] = 2
+    w.mark_modified()
+    w.undo()
+    assert ch.meta["fake_plugin"] == {"n": 1, "names": ["a"]} and told
+    w.undo()
+    assert "fake_plugin" not in ch.meta
+    w.redo()
+    w.redo()
+    assert ch.meta["fake_plugin"] == {"n": 2, "names": ["a"]}

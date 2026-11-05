@@ -287,6 +287,33 @@ def test_wall_scale_measures_along_the_wall(oval):
     assert np.ptp(du[np.abs(du) < 1.0]) > 0.03
 
 
+def test_a_given_u_map_keeps_the_wall_grid(oval):
+    """Built again with the ``u_map`` it had (``u_map=``), a development on the wall keeps its grid even when the
+    wall measured again would give another map (a new campaign, a rebuild after the model changed)."""
+    import rasterio
+
+    ch, circle = oval
+    first = E.build_elevation(ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    kept = E.frame_from_dict(first["frame"]).u_map
+    t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+    xy = _ellipse(t) * [1.0, 1.15] + BASE[:2]  # the wall changed: its length along the wall too
+    _write_tower(ch, np.stack([np.column_stack([xy, np.full(len(t), BASE[2] + z)])
+                               for z in np.linspace(0, HEIGHT, 31)]))
+    again = E.build_elevation(ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, bounds=first["bounds"],
+                              u_map=kept)
+    assert again["scale"] == "wall"
+    assert np.array_equal(E.frame_from_dict(again["frame"]).u_map, kept)
+    assert again["bounds"] == first["bounds"] and again["size"] == first["size"]
+    with rasterio.open(ch.data_dir / first["orthophoto"]) as a, rasterio.open(ch.data_dir / again["orthophoto"]) as b:
+        assert a.transform == b.transform and a.shape == b.shape
+    measured = E.build_elevation(ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0,
+                                 bounds=first["bounds"], scale="wall")
+    other = E.frame_from_dict(measured["frame"]).u_map
+    assert other.shape != kept.shape or not np.allclose(other, kept, atol=0.01)  # measured again: another grid
+    with pytest.raises(ValueError, match="cylindrical"):
+        E.build_elevation(ch, E.Plane(BASE, [1, 0, 0], [0, 0, 1]), u_map=kept)
+
+
 def test_u_map_covers_a_full_turn_and_takes_scalars():
     with pytest.raises(ValueError, match="full turn"):
         E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=[[0, 0], [180, 9.0]])

@@ -109,6 +109,15 @@ ICONS = {
     "confidence": ("mdi6.chart-bell-curve-cumulative", "teal"),
     "clean": ("mdi6.broom", "green"), "tie_clean": ("mdi6.filter-variant-remove", "teal"),
     "relink": ("mdi6.link-variant", "blue"),
+    # the top bar and the tool rails of the views
+    "workflow": ("mdi6.sitemap-outline", "teal"), "step_done": ("mdi6.check-circle", "green"),
+    "step_todo": ("mdi6.circle-outline", "grey"), "pin": ("mdi6.pin", "blue"), "pin_off": ("mdi6.pin-outline", "grey"),
+    "rail_navigate": ("mdi6.cursor-default-outline", "blue"), "rail_draw": ("mdi6.draw-pen", "red"),
+    "rail_measure": ("mdi6.ruler-square", "teal"), "rail_analysis": ("mdi6.chart-areaspline", "brown"),
+    "rail_auto": ("mdi6.auto-fix", "violet"), "rail_edit": ("mdi6.vector-square-edit", "red"),
+    "rail_layers": ("mdi6.layers-outline", "olive"), "rail_view": ("mdi6.eye-outline", "orange"),
+    "rail_points": ("mdi6.map-marker-distance", "violet"), "rail_cut": ("mdi6.content-cut", "brown"),
+    "rail_draw3d": ("mdi6.pencil-ruler", "red"),
 }
 
 

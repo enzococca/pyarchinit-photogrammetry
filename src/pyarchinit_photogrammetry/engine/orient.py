@@ -92,7 +92,8 @@ def _frame(origin, x_hint: np.ndarray, normal: np.ndarray, note: str = "") -> Fr
 
 
 def frame_from_points(a, b, c=None, x_along_ab: bool = True, flip: bool = False) -> Frame:
-    """The frame set by points A, B (and C): A origin, x along A->B (or the current +x)."""
+    """The frame set by points A, B (and C): A origin, x along A->B (or the current +x). Without C the plane stays
+    the current horizontal through A; with ``x_along_ab`` False x is then the current x: only the origin moves."""
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and (c is None or np.all(np.isfinite(c)))):
         raise OrientRefused("nan", "a point has no valid coordinates")
@@ -100,10 +101,13 @@ def frame_from_points(a, b, c=None, x_along_ab: bool = True, flip: bool = False)
     if np.linalg.norm(ab) == 0:
         raise OrientRefused("collinear", "A and B coincide")
     if c is None:
+        up = np.array([0.0, 0.0, -1.0 if flip else 1.0])
+        if not x_along_ab:  # the current x on the current horizontal: A-B gives no direction
+            return _frame(a, np.array([1.0, 0.0, 0.0]), up)
         plan = np.array([ab[0], ab[1], 0.0])
         if np.linalg.norm(plan) < COLLINEAR_SIN * np.linalg.norm(ab):
             raise OrientRefused("collinear", "A-B is vertical: it gives no direction in plan")
-        return _frame(a, plan, np.array([0.0, 0.0, -1.0 if flip else 1.0]))
+        return _frame(a, plan, up)
     c = np.asarray(c, dtype=float)
     ac = c - a
     cross = np.cross(ab, ac)
@@ -359,9 +363,10 @@ def _elevation_files(chunk):
         yield e, folder / "frame.json", profile, rasters
 
 
-def capture(chunks, project_sections=None) -> OrientState:
+def capture(chunks, project_sections=None, files: bool = True) -> OrientState:
     """The state of ``chunks`` and of the file of the sections ``project_sections`` (a path, or None) before an
-    orientation."""
+    orientation. ``files`` False: the chunks only (a dry run writes no file: nothing of them to put back, and no clone
+    of the proxies made)."""
     import rasterio
 
     state = OrientState()
@@ -371,6 +376,8 @@ def capture(chunks, project_sections=None) -> OrientState:
             "meta": {k: _copy.deepcopy(ch.meta[k]) for k in MOVED_KEYS if k in ch.meta},
             "markers": [m.to_dict() for m in ch.markers], "scalebars": [s.to_dict() for s in ch.scalebars],
             "cameras": [(cam, _copy.deepcopy(cam.reference.to_dict())) for cam in ch.cameras]})
+        if not files:
+            continue
         for _e, frame_json, profile, rasters in _elevation_files(ch):
             for path in (frame_json, profile):
                 if path is not None and path.exists():
@@ -650,13 +657,15 @@ def _write_rasters(rasters: dict) -> None:
             dst.transform = Affine(*grid)
 
 
-def move_stores(chunk, m, sections=None) -> dict:
+def move_stores(chunk, m, sections=None, write: bool = True) -> dict:
     """Everything kept in the coordinates of ``chunk`` carried by the motion ``m`` (the chunk's transform is not
     changed here: the caller pre-multiplies it). Call it through :func:`apply`: the files are written before
     ``chunk.meta`` with no rollback of their own, :func:`apply` puts everything back on a failure. The new values are built aside and written only when all of them are
     built; the files (the elevations' ``frame.json``, ``profile.json``, tags and grids of their rasters, the proxies'
-    PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``. Returns how many
-    of each store moved."""
+    PLY, the ``sections`` of the project when given - written to their file) before ``chunk.meta``; ``write`` False
+    (a dry run): no file written, ``chunk.meta`` changed as with them (:func:`apply` passes ``write`` only on a dry
+    run: a replacement of this function without it still serves the orientations made). Returns how many of each
+    store moved."""
     import shapely
 
     from ..core import free_drawings
@@ -721,12 +730,13 @@ def move_stores(chunk, m, sections=None) -> dict:
                                           enabled=cam.reference.enabled)))
     counts["camera_references"] = len(photos)
     # written: the files first, then the chunk
-    for path, text in texts.items():
-        path.write_text(text, encoding="utf-8")
-    _write_rasters(rasters)
-    _write_proxies(meshes)
-    if moved_sections is not None:
-        hg._write_sections(hg._sections_file(chunk), moved_sections)
+    if write:
+        for path, text in texts.items():
+            path.write_text(text, encoding="utf-8")
+        _write_rasters(rasters)
+        _write_proxies(meshes)
+        if moved_sections is not None:
+            hg._write_sections(hg._sections_file(chunk), moved_sections)
     for mk, reference in references + photos:
         mk.reference = reference
     meta.update(values)
@@ -788,7 +798,7 @@ def _sections_said(sections: list | None, moved: bool, tilted: bool) -> list[dic
     return out
 
 
-def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
+def apply(chunk, m, move_aligned: bool = True, notify: bool = True, dry_run: bool = False) -> dict:
     """``chunk`` (in a local system) moved by the motion ``m``: its transform pre-multiplied (``m @ T``) and everything
     kept in its coordinates carried along (:func:`move_stores`), with the chunks aligned to it (``move_aligned``);
     the sections of the project moved when no other chunk of the project is in a local system (else kept);
@@ -796,7 +806,8 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
     the rasters on a grid are stale. The window stores its drawings into the chunk first. Refused as :func:`check`
     says. On any error everything is put back and the error raised again. ``notify``: the listeners
     (:func:`on_transform_changed`) told here (False: the caller tells them with :func:`fire`, e.g. the window from its
-    interface thread after a run in the background).
+    interface thread after a run in the background). ``dry_run``: no file written (the chunks changed in memory: the
+    caller puts them back with the state).
 
     Returns ``{"moved": {store: n}, "aligned": [labels moved], "aligned_left": [labels not moved], "stale":
     :func:`..core.stamps.stale_products`, "kept": [{"what", "names"}], "sent_out": [{"what", "names"}],
@@ -826,14 +837,15 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True) -> dict:
     others = [c for c in getattr(doc, "chunks", []) or [] if all(c is not x for x in moving)
               and crs_mod.is_local(c.crs)]
     move_sections = bool(sections) and not others
-    state = capture(moving, path)
+    state = capture(moving, None if dry_run else path, files=not dry_run)
     moved: dict = {}
     try:
         for ch in moving:
             current = [e for e in ch.meta.get("elevations") or [] if isinstance(e, dict)
                        and not stamps.entry_stale(ch, e)]
             _stamp_unstamped(ch)
-            counts = move_stores(ch, m, sections if (ch is chunk and move_sections) else None)
+            counts = move_stores(ch, m, sections if (ch is chunk and move_sections) else None,
+                                 **({"write": False} if dry_run else {}))
             for key, n in counts.items():
                 moved[key] = moved.get(key, 0) + n
             ch.transform = m @ np.asarray(ch.transform, float)
@@ -1028,7 +1040,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     """The local system of ``chunk`` oriented and kept by three orientation markers.
 
     The frame: from the points A, B[, C] (``points`` in chunk coordinates, or ``markers``: labels or keys of placed
-    markers), from a plane fitted to ``plane_xyz`` (A and B, when given, set x), or a motion ``M`` given as it is
+    markers), from a plane fitted to ``plane_xyz`` (A and B, when given, set x; with ``x_along_ab`` False A is the
+    origin and x the current x projected on the plane), or a motion ``M`` given as it is
     (a plugin). ``distance``: the length of A-B in the new system - a control scale bar "Orientamento A-B" on the
     orientation markers -, refused (``"scalebars"``) when control bars already give the scale. Then :func:`apply`
     (refusals as :func:`check`, except the positions of the photos: the markers take their place, listed in
@@ -1040,9 +1053,9 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
     bar when A and B are other points (re-created on the same points, either order, within :data:`SAME_POINT`),
     "state", ...}`` with what :func:`apply` returns; ``state`` puts
     back everything as it was before (:func:`undo`), the earlier orientation markers included. With ``dry_run``
-    everything is done and put back (the plugins listening are not told): ``describe`` and :func:`apply`'s result
-    without ``state`` and ``markers``. ``notify`` False: the listeners are not told (the caller tells them with
-    :func:`fire` for each chunk of ``state``, with ``M``)."""
+    everything is computed in memory and put back, no file written (the plugins listening are not told):
+    ``describe`` and :func:`apply`'s result without ``state`` and ``markers``. ``notify`` False: the listeners are
+    not told (the caller tells them with :func:`fire` for each chunk of ``state``, with ``M``)."""
     from ..gnss import heights as hg
     from ..markers import gcp
 
@@ -1068,7 +1081,8 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
         method = "markers" if markers is not None else ("plane" if plane_xyz is not None else "points")
         if plane_xyz is not None:
             a, b = (pts[0], pts[1]) if pts is not None and len(pts) >= 2 else (None, None)
-            frame = frame_from_plane(plane_xyz, toward, a=a, b=b, flip=flip)
+            # x along A->B, or the current x projected on the plane (A still its origin)
+            frame = frame_from_plane(plane_xyz, toward, a=a, b=b if x_along_ab else None, flip=flip)
         else:
             if pts is None or len(pts) < 2:
                 raise OrientRefused("points", "two or three points are needed")
@@ -1110,12 +1124,12 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
             kept_bar = None
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
-    state = capture(moving, hg._sections_file(chunk))
+    state = capture(moving, None if dry_run else hg._sections_file(chunk), files=not dry_run)
     previous = {k: _copy.deepcopy(chunk.meta[k]) for k in ("orientation", "marker_excluded") if k in chunk.meta}
     try:
         made, weak = write_markers(chunk, [a, b, c], np.eye(4))
         # a dry run tells nobody, but the listeners stay registered: their keys are not said unaware
-        result = apply(chunk, m, move_aligned=move_aligned, notify=notify and not dry_run)
+        result = apply(chunk, m, move_aligned=move_aligned, notify=notify and not dry_run, dry_run=dry_run)
         drop(result.pop("state"))  # ours (taken before the markers) puts back the earlier ones too
         for mk in made:  # apply scaled the accuracy with the references: the markers' own
             mk.reference.accuracy = [MARKER_ACCURACY] * 3

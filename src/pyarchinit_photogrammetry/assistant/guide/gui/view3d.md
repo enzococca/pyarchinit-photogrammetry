@@ -1,7 +1,7 @@
 # 3D view and trackball
 
 The *Model* tab shows the chunk in 3D: tie points, dense cloud, shaded or textured model, the TIN, cameras, markers
-and the reconstruction region (*Show* chooses what). The tools of its bar - marker, photos of the point, section,
+and the reconstruction region (*Show* chooses what). The tools of its rail - marker, photos of the point, section,
 plan slice, cut, elevation, vertical exaggeration - are described in [The central views](index.md#the-central-views);
 this page is about moving around the scene.
 
@@ -22,7 +22,7 @@ As in Metashape, a **sphere with three rings** is drawn around the centre of rot
 * **Zoom**: the wheel zooms **toward the cursor** - the point under the mouse comes closer and stays under it.
   **Shift + wheel** moves straight along the line of sight, without moving the centre of rotation.
 * **Centre of rotation**: a **double click** on the model or the cloud puts the pivot on the surface there (as a
-  marker is placed); the view does not jump. **Centre the view on the point** (in the bar) then brings the pivot to
+  marker is placed); the view does not jump. **Centre the view on the point** (group *Vista* of the rail) then brings the pivot to
   the middle of the view, at the same distance.
 * *Home view* shows the whole scene again, *From above* looks straight down.
 
@@ -47,7 +47,7 @@ as a translucent blue square - and follow every change of the points; they go wh
 
 ## Free drawings
 
-*Draw* in the bar of the view draws lines, polygons and points on the model (*3D line*, *3D polygon*, *3D point*):
+*Draw* in the tool rail of the view draws lines, polygons and points on the model (*3D line*, *3D polygon*, *3D point*):
 the view stays live between the clicks - a click is a vertex, a drag still turns the scene, a double click ends the
 drawing instead of moving the centre of rotation. *Select and edit* chooses a drawing and shows its vertices to drag
 or delete; *Drape on the model* adds vertices on the surface every 20 pixels. The drawings of the visible layers are

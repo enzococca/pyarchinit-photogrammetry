@@ -1,7 +1,7 @@
 # Vista 3D e trackball
 
 La scheda *Modello* mostra il chunk in 3D: punti di legame, nuvola densa, modello ombreggiato o con texture, il TIN,
-camere, marker e regione di ricostruzione (*Mostra* sceglie cosa). Gli strumenti della sua barra - marker, foto del
+camere, marker e regione di ricostruzione (*Mostra* sceglie cosa). Gli strumenti della sua barra laterale - marker, foto del
 punto, sezione, pianta a quota, taglio, prospetto, esagerazione verticale - sono descritti in
 [Le viste centrali](index.md#le-viste-centrali); questa pagina spiega come muoversi nella scena.
 
@@ -23,7 +23,7 @@ anelli**:
 * **Avvicinare**: la rotella avvicina **verso il cursore** - il punto sotto il mouse si avvicina e resta sotto il
   mouse. **Maiusc + rotella** si muove dritto lungo la linea di vista, senza spostare il centro di rotazione.
 * **Centro di rotazione**: un **doppio clic** sul modello o sulla nuvola mette il pivot sulla superficie in quel
-  punto (come si piazza un marker); la vista non salta. **Centra la vista sul punto** (nella barra) porta poi il
+  punto (come si piazza un marker); la vista non salta. **Centra la vista sul punto** (gruppo *Vista* della colonna) porta poi il
   pivot al centro della vista, alla stessa distanza.
 * *Vista iniziale* mostra di nuovo tutta la scena, *Dall'alto* guarda dritto verso il basso.
 
@@ -48,7 +48,7 @@ si chiude ([orientare un sistema locale](processing.md#orientare-un-sistema-loca
 
 ## Disegni liberi
 
-*Disegna* nella barra della vista disegna linee, poligoni e punti sul modello (*Linea 3D*, *Poligono 3D*, *Punto
+*Disegna* nella barra laterale della vista disegna linee, poligoni e punti sul modello (*Linea 3D*, *Poligono 3D*, *Punto
 3D*): la vista resta viva fra un clic e l'altro - un clic è un vertice, trascinare fa ancora ruotare la scena, un
 doppio clic finisce il disegno invece di spostare il centro di rotazione. *Seleziona e modifica* sceglie un disegno e
 mostra i suoi vertici da trascinare o togliere; *Drappeggia sul modello* aggiunge vertici sulla superficie ogni 20

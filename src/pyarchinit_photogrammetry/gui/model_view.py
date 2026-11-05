@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 import numpy as np
-from PySide6.QtCore import QEvent, QLineF, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLineF, QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
                                QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
@@ -165,6 +166,35 @@ SELECT_PX = 6  # a click this close to a line, a polygon's edge or a point of a 
 HANDLE_PX = 8  # a press this close to a vertex of the selected drawing takes that vertex
 DRAPE_PX = 20  # draping: a point picked on the surface every this many screen pixels between two vertices
 DRAWING_COLOUR = "#00e5ff"  # the feature being drawn and its rubber band
+CASTER_SYNC_FACES = 300_000  # a model with up to this many faces: its ray caster built at once; a bigger one in the
+# background (a click meanwhile kept and placed when it is ready)
+MODEL_KINDS = ("model", "model_textured")
+
+
+def _caster_parts(path):
+    """(centre, ray caster, median edge) of the model file ``path``: its vertices minus their centre (internal
+    coordinates); (None, None, 0.0) when it cannot be read. Run in a worker thread for a big model."""
+    try:
+        from ..engine.visibility import Raycaster
+        from ..io.mesh_ply import read_mesh
+
+        mesh = read_mesh(path)
+        xyz = np.asarray(mesh.xyz, np.float64)
+        faces = np.asarray(mesh.faces, np.int64)
+        del mesh
+        centre = xyz.mean(axis=0) if len(xyz) else np.zeros(3)
+        sample = faces[:: max(1, len(faces) // 200_000)]
+        edge = float(np.median(np.linalg.norm(xyz[sample[:, 0]] - xyz[sample[:, 1]], axis=1))) \
+            if len(sample) else 0.0
+        return centre, Raycaster(xyz - centre, faces), edge
+    except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
+        return None, None, 0.0
+
+
+class _CasterRelay(QObject):
+    """Hands the ray caster built in a worker thread to the view (queued to the interface thread)."""
+
+    ready = Signal(object, object)  # the model's key, (centre, ray caster, median edge)
 
 
 def screen_runs(x, y, ok) -> list[list[QPointF]]:
@@ -1306,6 +1336,7 @@ class ModelView(QWidget):
     free_drape_requested = Signal(str, object)  # id, the vertices with the surface points added (internal)
     # select mode: a double click on the selected free drawing (in the live view or on the vertex editor): its form
     free_properties_requested = Signal(str)
+    busy_message = Signal(str)  # a line for the status bar (the model being prepared for drawing); "": done
     CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
     def __init__(self, parent=None):
@@ -1326,9 +1357,9 @@ class ModelView(QWidget):
         self.cb_cams.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
-        b_reset = QPushButton(tr("Vista iniziale"))
+        self.b_reset = b_reset = QPushButton(_icon("home_view"), tr("Vista iniziale"))
         b_reset.setToolTip(tr("La vista iniziale di tutta la scena (tasto Home)"))
-        b_top = QPushButton(tr("Dall'alto"))
+        self.b_top = b_top = QPushButton(_icon("top_view"), tr("Dall'alto"))
         b_top.setToolTip(tr("La vista dall'alto (tasto T); F di fronte (verso +y), L da sinistra (verso +x)"))
         self.b_center = QPushButton(tr("Centra la vista sul punto"))
         self.b_center.setToolTip(tr("Porta al centro della vista il centro di rotazione (doppio clic su un punto "
@@ -1386,26 +1417,26 @@ class ModelView(QWidget):
         self.point_spin.setSuffix(" px")
         self.point_spin.setToolTip(tr("Dimensione dei punti sullo schermo"))
         self.point_label = QLabel(tr("Punti:"))
-        self.b_lasso = QPushButton(tr("Lazo"))
+        self.b_lasso = QPushButton(_icon("select"), tr("Lazo"))
         self.b_lasso.setToolTip(tr("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
                                    "modello (elimina, tieni)"))
         self.b_lasso.clicked.connect(self.start_lasso)
-        self.b_marker = QPushButton("Marker")
+        self.b_marker = QPushButton(_icon("marker"), "Marker")
         self.b_marker.setToolTip(tr("Aggiungi un marker: clic su un punto del modello o della nuvola, come in "
                                     "Metashape. "
                                     "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala"))
         self.b_marker.clicked.connect(lambda: self.start_pick("marker"))
-        self.b_photos = QPushButton(tr("Foto del punto"))
+        self.b_photos = QPushButton(_icon("view_photo"), tr("Foto del punto"))
         self.b_photos.setToolTip(tr("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
                                     "Photos by Point di Metashape"))
         self.b_photos.clicked.connect(lambda: self.start_pick("photos"))
-        self.b_section = QPushButton(tr("Sezione"))
+        self.b_section = QPushButton(_icon("line"), tr("Sezione"))
         self.b_section.setToolTip(tr("Traccia di una sezione: clic su due punti del modello o della nuvola"))
         self.b_section.clicked.connect(lambda: self.start_pick("section"))
-        self.b_slice = QPushButton(tr("Pianta a quota"))
+        self.b_slice = QPushButton(_icon("slice"), tr("Pianta a quota"))
         self.b_slice.setToolTip(tr("Clic su un punto: la pianta del modello tagliato a quella quota"))
         self.b_slice.clicked.connect(lambda: self.start_pick("slice"))
-        self.b_cut = QPushButton(tr("Taglia"))
+        self.b_cut = QPushButton(_icon("rail_cut"), tr("Taglia"))
         self.b_cut.setToolTip(tr("Taglia il modello con un piano: tieni una parte, una fetta, o salva le due parti "
                                  "o una serie di fette"))
         cut_menu = QMenu(self.b_cut)
@@ -1414,14 +1445,14 @@ class ModelView(QWidget):
         cut_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("cut_p"))
         cut_menu.addAction(tr("Con i valori..."), lambda: self.cut_requested.emit("values", []))
         self.b_cut.setMenu(cut_menu)
-        self.b_elevation = QPushButton(tr("Prospetto"))
+        self.b_elevation = QPushButton(_icon("elevation"), tr("Prospetto"))
         self.b_elevation.setToolTip(tr("Ortofoto e rilievo del modello su un piano: quello della vista com'è ora, o "
                                        "quello di tre punti cliccati; un prospetto o una sezione"))
         elev_menu = QMenu(self.b_elevation)
         elev_menu.addAction(tr("Ortofoto da questa vista"), self._elevation_from_view)
         elev_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("elev_p"))
         self.b_elevation.setMenu(elev_menu)
-        self.b_draw3d = QPushButton(tr("Disegna"))
+        self.b_draw3d = QPushButton(_icon("freehand"), tr("Disegna"))
         self.b_draw3d.setToolTip(tr("Linee, poligoni e punti disegnati sul modello o sulla nuvola nei layer dei disegni: "
                                     "clic per i vertici, trascina per ruotare la vista fra un clic e l'altro, "
                                     "Backspace toglie l'ultimo vertice, Invio o doppio clic finisce, Esc annulla"))
@@ -1448,28 +1479,24 @@ class ModelView(QWidget):
         bar.addWidget(self.point_label)
         bar.addWidget(self.point_spin)
         bar.addWidget(self.info_label)
-        bar.addWidget(self.b_lasso)
-        bar.addWidget(self.b_marker)
-        bar.addWidget(self.b_photos)
-        bar.addWidget(self.b_section)
-        bar.addWidget(self.b_slice)
-        bar.addWidget(self.b_cut)
-        bar.addWidget(self.b_elevation)
-        bar.addWidget(self.b_draw3d)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
+        lay.addLayout(bar)  # one row above the canvas: what is shown and how; the tools in the rail beside it
         exag = QWidget()  # the label never on another row than its value
         exag_row = QHBoxLayout(exag)
         exag_row.setContentsMargins(0, 0, 0, 0)
         exag_row.addWidget(QLabel(tr("Esagerazione verticale:")))
         exag_row.addWidget(self.exag_spin)
-        bar.addWidget(exag)
-        bar.addWidget(b_top)
-        bar.addWidget(b_reset)
-        bar.addWidget(self.b_center)
-        bar.addWidget(self.b_trackball)
-        lay.addLayout(bar)
+        from .tool_rail import ToolRail
+
+        self.rail = ToolRail("3d")
+        self.rail.add_group("view", tr("Vista"), "rail_view",
+                            [b_top, b_reset, self.b_center, self.b_trackball, None, exag])
+        self.rail.add_group("points", tr("Punti"), "rail_points", [self.b_marker, self.b_photos, self.b_lasso])
+        self.rail.add_group("cut", tr("Taglia e prospetti"), "rail_cut",
+                            [self.b_section, self.b_slice, self.b_cut, self.b_elevation])
+        self.rail.add_group("draw", tr("Disegna"), "rail_draw3d", [self.b_draw3d])
         self.canvas = None
         if _vtk_usable():
             try:
@@ -1502,9 +1529,11 @@ class ModelView(QWidget):
         self.legend = ClassLegend()
         self.legend.visibility_changed.connect(lambda: self.refresh(reset=False))
         row = QHBoxLayout()
+        row.setSpacing(2)
         row.addWidget(holder, 1)
         row.addWidget(self.legend)
         lay.addLayout(row, 1)
+        self.rail.place_in(row, self.canvas)
         self.chunk = None
         self.kind = None
         self.sd = None  # what is shown (heights exaggerated)
@@ -1517,6 +1546,13 @@ class ModelView(QWidget):
         self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
         self._free_inner: dict = {}  # their internal coordinates by id, converted once
         self._draw_mesh = None  # (key, centre, ray caster, median edge) of the model shown, kept between drawings
+        # the keys of the models whose ray casters are being built in the background: one build per model file, also
+        # across a switch of chunk and back (a big model is not read twice at once); a result no longer of the model
+        # shown (rewritten, another chunk) is let go when it arrives
+        self._caster_running: set = set()
+        self._kept_clicks: list = []  # clicks while it is built: (x, y, line of sight), placed when it is ready
+        self._caster_relay = _CasterRelay(self)
+        self._caster_relay.ready.connect(self._caster_built, Qt.ConnectionType.QueuedConnection)
         self._select_on = False  # Seleziona e modifica: a click selects a free drawing
         self._selected_id: str | None = None
         self._edit_project = None  # the projection of the frozen frame of the editor
@@ -1530,6 +1566,8 @@ class ModelView(QWidget):
         self._rubber_timer.setSingleShot(True)
         self._rubber_timer.timeout.connect(self._rubber_tick)
         self._draw_target().installEventFilter(self)
+        for widget in (self._draw_target(), self.lasso, self.picker, self.editor):  # the rail's filter first: the
+            self.rail.watch(widget)  # press or the Esc that closes its flyout reach no drawing, pick or lasso
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
 
@@ -2173,6 +2211,9 @@ class ModelView(QWidget):
         self._draw_pts, self._rubber, self._press = [], None, None
         self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
         self._put_free()
+        if self.kind in MODEL_KINDS:
+            self._caster()  # a big model: its ray caster started in the background now
+            self._tell_preparing()
         self._draw_target().setFocus()
         QTimer.singleShot(0, lambda: self._draw_kind is not None and self._draw_target().setFocus())  # after the menu
 
@@ -2190,6 +2231,7 @@ class ModelView(QWidget):
             return
         self._draw_kind = None
         self._draw_pts, self._rubber, self._press = [], None, None
+        self._kept_clicks = []
         self._rubber_timer.stop()
         self.canvas.set_hint("")
         self._put_free()
@@ -2344,6 +2386,13 @@ class ModelView(QWidget):
         (the second click of a double click) adds nothing; a polygon's first vertex clicked again ends it."""
         if self.chunk is None or self.sd is None:
             return
+        if self.kind in MODEL_KINDS:
+            self._caster()  # starts the build of a big model's ray caster
+            if self.caster_preparing:  # the click kept: placed when the model is ready
+                o, d, _pixel = self.canvas.view_ray(x, y)
+                self._kept_clicks.append((x, y, np.asarray(o, float), np.asarray(d, float)))
+                self._tell_preparing()
+                return
         project = self.canvas.projector()
         if self._draw_pts:
             last = self.sd.to_display(self.chunk.to_world(np.asarray(self._draw_pts[-1])[None]) - self.sd.offset)
@@ -2368,34 +2417,96 @@ class ModelView(QWidget):
         else:
             self._put_free()
 
-    def _caster(self):
-        """(centre, ray caster, median edge) of the model shown (internal coordinates minus centre), kept for the
-        model file (path and time) until another chunk is shown; None when there is no model to cast rays on."""
+    def _caster_key(self):
+        """(key, path) of the model shown, (None, None) without one."""
         if self.chunk is None:
-            return None
+            return None, None
         path = self.paths.get(self.kind) or self.paths.get("model") or self.chunk.product_path("model")
         if not path or not os.path.exists(path):
-            return None
-        key = (str(path), os.path.getmtime(path))
-        cached = getattr(self, "_draw_mesh", None)
-        if cached is None or cached[0] != key:
-            try:
-                from ..engine.visibility import Raycaster
-                from ..io.mesh_ply import read_mesh
+            return None, None
+        return (str(path), os.path.getmtime(path)), path
 
-                mesh = read_mesh(path)
-                xyz = np.asarray(mesh.xyz, np.float64)
-                faces = np.asarray(mesh.faces, np.int64)
-                centre = xyz.mean(axis=0) if len(xyz) else np.zeros(3)
-                sample = faces[:: max(1, len(faces) // 200_000)]
-                edge = float(np.median(np.linalg.norm(xyz[sample[:, 0]] - xyz[sample[:, 1]], axis=1))) \
-                    if len(sample) else 0.0
-                cached = (key, centre, Raycaster(xyz - centre, faces), edge)
-            except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
-                cached = (key, None, None, 0.0)
+    @property
+    def caster_preparing(self) -> bool:
+        """True while the ray caster of the model shown is being built in the background."""
+        key = self._caster_key()[0]
+        return key is not None and key in self._caster_running
+
+    def _caster(self):
+        """(centre, ray caster, median edge) of the model shown (internal coordinates minus centre), kept for the
+        model file (path and time) until another chunk is shown; None when there is no model to cast rays on or while
+        a big model's (more than ``CASTER_SYNC_FACES`` faces) is built in the background (started here: the interface
+        never waits for it)."""
+        key, path = self._caster_key()
+        if key is None:
+            return None
+        cached = self._draw_mesh
+        if cached is None or cached[0] != key:
+            if key in self._caster_running:
+                return None
+            from ..io.mesh_ply import face_count
+
+            try:
+                faces = face_count(path)
+            except Exception:  # noqa: BLE001 - not a PLY header we read: built at once
+                faces = None
+            if faces is not None and faces > CASTER_SYNC_FACES:
+                self._start_caster(key, path)
+                return None
+            cached = (key, *_caster_parts(path))
             self._draw_mesh = cached
         _key, centre, caster, edge = cached
         return None if caster is None else (centre, caster, edge)
+
+    def _start_caster(self, key, path) -> None:
+        """The ray caster of ``path`` built in a worker thread, handed back through the relay (queued)."""
+        self._caster_running.add(key)
+        relay = self._caster_relay
+
+        def work():
+            parts = _caster_parts(path)
+            try:
+                relay.ready.emit(key, parts)
+            except RuntimeError:  # the view closed meanwhile
+                pass
+
+        threading.Thread(target=work, name="ppg-raycaster", daemon=True).start()
+        self._tell_preparing()
+
+    def _tell_preparing(self) -> None:
+        if self.caster_preparing:
+            text = tr("Preparazione del modello per il disegno...")
+            self.canvas.set_hint(text)
+            self.busy_message.emit(text)
+
+    def _caster_built(self, key, parts) -> None:
+        """The ray caster built in the background (interface thread): kept when it is still the model shown; the
+        clicks kept meanwhile placed when the view has not moved, otherwise the user asked to click again."""
+        self._caster_running.discard(key)
+        if key != self._caster_key()[0]:
+            del parts  # stale: another chunk or the model rewritten meanwhile - not kept
+            return
+        self._draw_mesh = (key, *parts)
+        kept, self._kept_clicks = self._kept_clicks, []
+        if self._draw_kind is None:
+            if self._select_on:
+                self.canvas.set_hint(tr("Clic su un disegno per sceglierlo - Esc esce"))
+            self.busy_message.emit(tr("Modello pronto per il disegno") if self._select_on else "")
+            return
+        self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
+        moved = False
+        for x, y, o, d in kept:
+            o2, d2, _pixel = self.canvas.view_ray(x, y)
+            if not (np.allclose(o, o2) and np.allclose(d, d2)):
+                moved = True
+                break
+            if self._draw_kind is None:
+                break
+            self._click(x, y)
+        if moved:
+            self.busy_message.emit(tr("Modello pronto: la vista è cambiata, clicca di nuovo"))
+        else:
+            self.busy_message.emit(tr("Modello pronto per il disegno"))
 
     def _model_hit(self, x: float, y: float, ray=None):
         """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
@@ -2464,6 +2575,9 @@ class ModelView(QWidget):
         self._select_on = True
         self._press = None
         self.canvas.set_hint(tr("Clic su un disegno per sceglierlo - Esc esce"))
+        if self.kind in MODEL_KINDS:
+            self._caster()  # a big model: its ray caster started in the background now
+            self._tell_preparing()
         self._draw_target().setFocus()
         QTimer.singleShot(0, lambda: self._select_on and self._draw_target().setFocus())  # after the menu
 
@@ -2597,6 +2711,12 @@ class ModelView(QWidget):
         """A vertex let go at (x, y) of the frozen frame: picked again on the surface there (the camera has not
         moved), never left in the air: nothing there puts the handle back."""
         rec = self._selected_record()
+        if rec is not None and self.kind in MODEL_KINDS:
+            self._caster()
+            if self.caster_preparing:  # the model not ready yet: the handle back, never a vertex off the model
+                self.editor.reset_handle(i)
+                self._tell_preparing()
+                return
         point = None if rec is None else self._surface_at(x, y, self._edit_project, refine=True)
         if point is None or not 0 <= i < len(rec[2]):
             self.editor.reset_handle(i)
@@ -2642,6 +2762,11 @@ class ModelView(QWidget):
         rec = self._selected_record()
         if rec is None or rec[1] not in ("line", "polygon") or self.chunk is None:
             return
+        if self.kind in MODEL_KINDS:
+            self._caster()
+            if self.caster_preparing:  # draped when the model is ready (the user asked to do it again)
+                self._tell_preparing()
+                return
         inner = self.chunk.to_internal(rec[2])
         new = self.drape(inner, self.canvas.projector(), self.canvas.view_ray, closed=rec[1] == "polygon")
         self.free_drape_requested.emit(rec[0], new)

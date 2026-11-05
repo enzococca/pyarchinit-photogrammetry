@@ -144,13 +144,17 @@ def _worker(args) -> int:
         if wanted(name):
             save(_menu_picture(w, path, pump, QImage, QPainter, QColor, QPen, QPoint, QRect), name)
 
-    # ---- the bars, and the icons of their buttons (the same in every language)
+    # ---- the top bar, the rail of the 2D view with a flyout open, and the icons of their buttons (the same in
+    # every language)
     bars = {b.objectName(): b for b in w.findChildren(QToolBar)}
-    for name, key in (("toolbar-workflow", "workflow_toolbar"), ("toolbar-drawing", "drawing_toolbar")):
-        if wanted(name):
-            save(bars[key].grab(), name)
+    if wanted("toolbar-workflow"):  # the top bar as far as its search field
+        top = bars["workflow_toolbar"]
+        right = max(x.geometry().right() for x in (top.widgetForAction(a) for a in top.actions()) if x is not None)
+        save(top.grab(QRect(0, 0, min(right + 12, top.width()), top.height())), "toolbar-workflow")
+    if wanted("toolbar-drawing"):
+        save(_rail_picture(w, w.raster_rail, w.ortho_view, "draw", pump, QRect), "toolbar-drawing")
     if wanted("icons"):
-        _icons(bars, out / "icons", lang)
+        _icons(w, bars, out / "icons", lang)
 
     # a modal window opened by Qt itself (a question, a file dialog) is taken and closed
     from PySide6.QtCore import QTimer
@@ -712,31 +716,62 @@ def _pdf_page(path: Path, words: tuple[str, ...], QSize):
     return None
 
 
-def _icons(bars, folder: Path, lang: str) -> None:
-    """The icon of every button of the two bars, 20 px at twice the resolution, named by the Italian
-    text of the button (written once, in the Italian run); ``icons.json`` lists names and texts."""
+def _rail_picture(w, rail, view, group: str, pump, QRect):
+    """The rail of a view with the flyout of ``group`` open, cut from the view."""
+    rail.open(group)
+    pump(300)
+    right = max(rail.geometry().right(), rail.flyout.geometry().right()) + 10
+    bottom = max(rail.groups[k].button.geometry().bottom() for k in rail.groups) + rail.geometry().top()
+    bottom = max(bottom, rail.flyout.geometry().bottom()) + 10
+    picture = view.grab(QRect(0, 0, min(right, view.width()), min(bottom, view.height())))
+    rail.close()
+    pump(100)
+    return picture
+
+
+def _icons(w, bars, folder: Path, lang: str) -> None:
+    """The icon of every button of the top bar, of the steps of its workflow menu, of the drawing tools and
+    of the groups of the rail of the 2D view, 20 px at twice the resolution, named by the Italian text of the button
+    (written once, in the Italian run); ``icons.json`` lists names and texts."""
     import re
     import unicodedata
 
     from PySide6.QtCore import QSize
+
+    from pyarchinit_photogrammetry.gui.icons import icon
 
     folder.mkdir(parents=True, exist_ok=True)
     listed = {}
     index = folder / "icons.json"
     if index.exists():
         listed = json.loads(index.read_text(encoding="utf-8"))
+
+    made: dict[str, set] = {}  # the buttons there are now: entries of buttons no longer there go
+
+    def keep(group: str, n, text: str, name: str, qicon) -> None:
+        made.setdefault(group, set()).add(str(n))
+        entry = listed.setdefault(group, {}).setdefault(str(n), {})
+        entry[lang] = text
+        if lang == "it":
+            slug = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+            slug = re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-") or f"{group}-{n}"
+            entry["file"] = f"{slug}.png"
+            qicon.pixmap(QSize(40, 40)).save(str(folder / f"{slug}.png"), "PNG")
+
     for key in ("workflow_toolbar", "drawing_toolbar"):
         for n, a in enumerate(bars[key].actions()):
             if a.isSeparator() or a.icon().isNull():
                 continue
-            text = (a.toolTip() or a.text()).replace("&", "").split("\n")[0]
-            entry = listed.setdefault(key, {}).setdefault(str(n), {})
-            entry[lang] = text
-            if lang == "it":
-                slug = unicodedata.normalize("NFKD", a.text().replace("&", "")).encode("ascii", "ignore").decode()
-                slug = re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-") or f"{key}-{n}"
-                entry["file"] = f"{slug}.png"
-                a.icon().pixmap(QSize(40, 40)).save(str(folder / f"{slug}.png"), "PNG")
+            keep(key, n, (a.toolTip() or a.text()).replace("&", "").split("\n")[0], a.text().replace("&", ""), a.icon())
+    from pyarchinit_photogrammetry.gui.i18n import tr
+
+    keep("top", "search", tr("Cerca un comando... ({0})", "Ctrl+K"), "search", icon("search"))
+    for key, it, en in (("step_done", "passo fatto", "step done"), ("step_todo", "passo da fare", "step to do")):
+        keep("workflow_menu", key, it if lang == "it" else en, it, icon(key))  # what the menu shows of a step
+    for key, g in w.raster_rail.groups.items():  # the groups of the rail of the 2D view
+        keep("rail_2d", key, g.title, "rail-" + key, g.button.icon())
+    listed = {g: {n: e for n, e in entries.items() if n in made.get(g, ())} for g, entries in listed.items()
+              if g in made}
     index.write_text(json.dumps(listed, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
@@ -869,7 +904,10 @@ def _areas(w, QPainter, QColor, QPen, QFont, QRect, QPoint, QDockWidget, QToolBa
     last = mb.actionGeometry(mb.actions()[-1])
     marks = [QPoint(mb.mapTo(w, QPoint(last.right() + 28, mb.height() // 2)))]
     bars = {b.objectName(): b for b in w.findChildren(QToolBar)}
-    marks += [last_button(bars["workflow_toolbar"]), last_button(bars["drawing_toolbar"])]
+    rail = w.raster_rail  # the rail of the 2D view: the number under its last group
+    last_group = list(rail.groups.values())[-1].button
+    below = last_group.mapTo(w, QPoint(last_group.width() // 2, last_group.height() + 24))
+    marks += [last_button(bars["workflow_toolbar"]), below if rail.isVisible() else None]
     from PySide6.QtWidgets import QTabBar
 
     central = QRect(w.centralWidget().mapTo(w, QPoint(0, 0)), w.centralWidget().size())

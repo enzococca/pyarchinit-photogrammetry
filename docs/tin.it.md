@@ -40,7 +40,7 @@ quelli vincolati più spessi.
 
 ## Linee di rottura
 
-Lo strumento **Linee** della barra di disegno (o *Strumenti > TIN e linee di rottura > Disegna linee di rottura*) le
+Lo strumento **Linee di rottura** della barra laterale della vista 2D (gruppo *Disegno*) (o *Strumenti > TIN e linee di rottura > Disegna linee di rottura*) le
 disegna sull'ortofoto o sul DEM: un clic per vertice, doppio clic o ++enter++ per finire, ++backspace++ toglie l'ultimo
 vertice, ++esc++ annulla. Il menu del pulsante sceglie il tipo delle linee successive:
 

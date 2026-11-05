@@ -131,7 +131,7 @@ edges of the fields around it; the cursor gives the height above the surrounding
 
 ## 8. A section across the tell
 
-The *Section* tool of the drawing bar: two clicks on the DEM, from west to east across the top of
+The *Section* tool of the tool rail (group *Sections and analyses*): two clicks on the DEM, from west to east across the top of
 the mound. The program cuts the model along the line and writes the drawing at scale (SVG), the
 profile (DXF) and the 3D line (DXF) in the folder `sezioni` next to the project; the *Sections* pane
 at the bottom shows it.
@@ -140,7 +140,7 @@ at the bottom shows it.
 
 ## 9. Cutting the model
 
-*Cut* in the bar of the 3D view, *Vertical plane: click two points*: two clicks on the model, west
+*Cut* in the tool rail of the 3D view (group *Cuts and elevations*), *Vertical plane: click two points*: two clicks on the model, west
 and east of the top. The dialog shows the plane through their line in plan; *The part above the
 plane* keeps the side on the left of the line from the first point to the second (north, here) as
 the model of the chunk, and the whole model stays among the versions (right click on the model in
@@ -149,7 +149,7 @@ the workspace brings it back).
 ![Cut the model](../img/tutorial/sultan-cut-dialog.png)
 
 The northern half seen from the south, with the heights doubled (*Vertical exaggeration* x2 in the
-bar of the view): the edge of the cut is the profile of the mound through its top. The exaggeration
+group *View* of the rail): the edge of the cut is the profile of the mound through its top. The exaggeration
 changes only what is shown; clicks, sections and cuts keep the true heights. A cut can also keep a
 slice of a given thickness, or save both halves or a series of parallel slices as PLY or OBJ files.
 

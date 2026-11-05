@@ -1,8 +1,9 @@
 # Menu
 
-Tutti i comandi del programma sono nei menu in alto; le [barre degli strumenti](index.md#le-barre-degli-strumenti)
-e i [pannelli](panes.md) ripetono quelli che si usano più spesso. Questa pagina descrive i menu uno per uno,
-nell'ordine in cui compaiono.
+Tutti i comandi del programma sono nei menu in alto; la [barra in alto](index.md#le-barre-degli-strumenti), le barre
+laterali delle viste e i [pannelli](panes.md) ripetono quelli che si usano più spesso. Il campo di ricerca della barra
+in alto trova un comando qualsiasi dei menu da una parte del suo nome (++ctrl+k++, ++cmd+k++ su macOS). Questa pagina
+descrive i menu uno per uno, nell'ordine in cui compaiono.
 
 | Menu | A cosa serve |
 | --- | --- |
@@ -115,7 +116,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
-| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine |
+| **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
+| **Ricostruendo, conserva DEM e ortofoto attivi come versioni** | un interruttore (spento per impostazione predefinita): la ricostruzione lascia fra le versioni il DEM e l'ortofoto di prima |
 | **Unisci chunk...** | un nuovo chunk con foto, marker, punti, nuvole e modelli di chunk già allineati |
 | **Colori dalle foto (scansioni)...** | colora una scansione laser con le foto allineate di un altro chunk |
 
@@ -196,7 +198,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **Calibra i colori delle foto...** | esposizione di ogni foto e vignettatura degli obiettivi, corrette in ortofoto e texture |
 | **Diagnostica dell'allineamento** | perché un allineamento non va: [vedi sotto](#strumenti-diagnostica-dellallineamento) |
 | **Maschere delle foto** | le parti delle foto da non usare: [vedi sotto](#strumenti-maschere-delle-foto) |
-| **Disegno su ortofoto** | gli strumenti della barra *Disegno*: [vedi sotto](#strumenti-disegno-su-ortofoto) |
+| **Disegno su ortofoto** | gli strumenti della barra laterale della vista 2D: [vedi sotto](#strumenti-disegno-su-ortofoto) |
 | **Patch dell'ortofoto (assegna immagini)** | quale foto usare in un'area dell'ortofoto: [vedi sotto](#strumenti-patch-dellortofoto) |
 | **Curve di livello...** | le curve dal DEM, come layer da interrogare ed esportare |
 | **Volume scavo / riporto...** | il volume tolto e aggiunto rispetto a un piano o a un DEM di prima |
@@ -267,7 +269,7 @@ nell'ortofoto e nella texture.
 
 ![Il sottomenu Disegno su ortofoto](../img/gui/menu-tools-drawing.png)
 
-Sono gli strumenti della barra *Disegno*, descritti con le loro finestre in [Disegno e misure](drawing.md).
+Sono gli strumenti della barra laterale della vista 2D, descritti con le loro finestre in [Disegno e misure](drawing.md).
 
 | Voce | A cosa serve |
 | --- | --- |
@@ -408,6 +410,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | **Assistente** | *Apri l'assistente*; **Azioni**: *Chiedi sempre*, *Subito le rapide* (predefinito), *Esegui tutto (script ed esportazioni chiedono)* - quando partono le azioni dell'assistente ([Azioni](assistant.md#azioni)) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
 | **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
+| **Barre** | *Barra di disegno classica*: la vecchia barra orizzontale degli strumenti di disegno sotto la barra in alto, al posto della [barra laterale](index.md#la-barra-laterale-della-vista-2d) della vista 2D; ricordata |
 | **Tema** | chiaro o scuro, ricordato |
 | **Lingua / Language** | italiano o inglese, al prossimo avvio (*Riavvia ora* riapre subito il progetto) |
 

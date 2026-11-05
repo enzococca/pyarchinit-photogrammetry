@@ -468,7 +468,7 @@ synthetic trench, one-photo markers are within 0.6 mm of the surveyed targets.
 
 * *Marker* in the 3D view: the view freezes; click a point of the model or the cloud (the nearest point shown
   under the cursor, refined along the line of sight on the full dense cloud);
-* *Marker* in the drawing bar: click the orthophoto or the DEM (the height from the DEM at full resolution,
+* *Marker* in the tool rail (group *Measurements*): click the orthophoto or the DEM (the height from the DEM at full resolution,
   else from the cloud along the vertical).
 
 The new marker (`point 1`, `point 2`...) is projected on the photos that see it, not hidden by the surface: blue

@@ -14,7 +14,8 @@ Two kinds of changes are kept:
   the edited ones kept for redo.
 
 The history belongs to the open chunk: it starts again when another project or chunk is opened,
-and its copies (``<chunk data>/undo``) are deleted then. A third kind of entry undoes and redoes
+and its copies (``<chunk data>/undo``) are deleted then, and when the window closes (:meth:`UndoHistory.close`:
+nothing can be undone after the session). A third kind of entry undoes and redoes
 itself (:meth:`UndoHistory.push`): the removals from the workspace (``core.removal``), which act
 on any chunk and stay in the history when another chunk becomes the active one.
 """
@@ -36,7 +37,9 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
               "markers": "Marker", "excluded": "Marker", "scalebars": "Barre di scala",
               "patches": "Patch dell'ortofoto", "frame_patches": "Patch dei prospetti",
-              "region": "Regione di ricostruzione", "lines": "Linee di rottura", "free": "Disegni 3D"}
+              "region": "Regione di ricostruzione", "lines": "Linee di rottura", "free": "Disegni 3D",
+              "plugins": "Dati dei plugin"}
+ABSORBED_PARTS = ("plugins",)  # a change of these made with a step a plugin pushed in the same turn: in that step
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
                  "reconstruction": "Punti di legame", "model_textured": "Texture"}
 
@@ -62,14 +65,18 @@ class Entry:
 class UndoHistory:
     """The entries of a chunk; ``index`` entries are applied (the next undo is ``index - 1``)."""
 
-    def __init__(self, get_state, set_state, get_chunk, limit: int = 50, file_limit: int = 10, on_change=None):
+    def __init__(self, get_state, set_state, get_chunk, limit: int = 50, file_limit: int = 10, on_change=None,
+                 defer=None):
+        """``defer(function)``: ``function`` called soon, after the current turn of the event loop (the window gives
+        a zero-time timer); without it a step pushed stays "fresh" until the next entry, undo or redo."""
         self.get_state, self.set_state, self.get_chunk = get_state, set_state, get_chunk
-        self.limit, self.file_limit, self.on_change = limit, file_limit, on_change
+        self.limit, self.file_limit, self.on_change, self.defer = limit, file_limit, on_change, defer
         self.entries: list[Entry] = []
         self.index = 0
         self.applying = False
         self._base: dict = {}
         self._pending: dict | None = None
+        self.fresh: Entry | None = None  # the step just pushed: its own change of ABSORBED_PARTS is not another entry
         self.reset()
 
     # ------------------------------------------------------------------ state
@@ -89,13 +96,52 @@ class UndoHistory:
                 self._drop_files(e)
         if self._pending:
             shutil.rmtree(self._pending["folder"], ignore_errors=True)
-        self.entries, self.index, self._pending = keep, len(keep), None
+        self.entries, self.index, self._pending, self.fresh = keep, len(keep), None, None
         self._base = self._snapshot()
         ch = self.get_chunk()
         if ch is not None:
             try:
                 shutil.rmtree(ch.data_dir / "undo", ignore_errors=True)
             except Exception:  # pragma: no cover - a chunk without a folder
+                pass
+        self._changed()
+
+    def close(self, chunks=()) -> None:
+        """The session ends (the window closes): nothing can be undone any more, so the copies of the steps backed by
+        files are deleted - the products copied by :meth:`backup`, the holds of an orientation and of a rebuild, in
+        ``<chunk data>/undo`` of the active chunk and of ``chunks`` -, except those a failed undo or redo left on
+        purpose (a step marked ``broken`` keeps its copies: they hold what was in the project). The steps of the whole
+        project (``document``: a script, the removals) are left to the window: their files are settled with the
+        project as saved."""
+        kept = set()
+        for e in self.entries:
+            if e.document:
+                continue
+            if getattr(e.action, "broken", False) and getattr(e.action, "hold", None) is not None:
+                kept.add(Path(e.action.hold).resolve())
+                continue
+            self._drop_files(e)
+        self.discard_pending()
+        self.entries = [e for e in self.entries if e.document]
+        self.index, self.fresh = len(self.entries), None
+        folders = {}
+        for ch in [self.get_chunk(), *chunks]:
+            data = getattr(ch, "data_dir", None)
+            if data is not None:
+                folders[str(Path(data) / "undo")] = Path(data) / "undo"
+        for folder in folders.values():
+            if not folder.is_dir():
+                continue
+            for item in folder.iterdir():
+                if item.resolve() in kept:
+                    continue
+                try:
+                    _remove(item)
+                except OSError as exc:  # noqa: PERF203 - closing never stops here
+                    log.warning("Annulla: copia %s non cancellata (%s)", item, exc)
+            try:
+                folder.rmdir()  # empty: gone; with a kept hold it stays
+            except OSError:
                 pass
         self._changed()
 
@@ -165,6 +211,10 @@ class UndoHistory:
         if not self.applying:
             self._base = self._snapshot()
 
+    def unchanged(self) -> bool:
+        """Nothing changed since the last entry (or rebase): the project as the history last saw it."""
+        return not self.applying and self._pending is None and self._snapshot() == self._base
+
     def discard_pending(self) -> None:
         """The edit announced by :meth:`backup` did not happen (failed or cancelled)."""
         if self._pending:
@@ -182,6 +232,11 @@ class UndoHistory:
             self.reset(keep_document=True)
             return False
         parts = [k for k in new if k != "chunk" and new.get(k) != self._base.get(k)]
+        if self.fresh is not None and self.index == len(self.entries) and self.entries and \
+                self.entries[-1] is self.fresh:
+            for k in [k for k in parts if k in ABSORBED_PARTS]:  # a plugin's own step covers its data
+                self._base[k] = new[k]
+                parts.remove(k)
         files = self._pending
         self._pending = None
         if not parts and not files:
@@ -199,7 +254,7 @@ class UndoHistory:
             self._drop_files(e)
         del self.entries[self.index:]
         self.entries.append(Entry(text, {k: self._base.get(k) for k in parts}, {k: new[k] for k in parts}, files))
-        self._base = new
+        self._base, self.fresh = new, None
         self._trim()
         self._changed()
         return True
@@ -212,10 +267,18 @@ class UndoHistory:
         for e in self.entries[self.index:]:
             self._drop_files(e)
         del self.entries[self.index:]
-        self.entries.append(Entry(text, {}, {}, None, action=action, document=document))
+        entry = Entry(text, {}, {}, None, action=action, document=document)
+        self.entries.append(entry)
         self._base = self._snapshot()
         self._trim()
+        self.fresh = entry
+        if self.defer is not None:
+            self.defer(lambda: self._unfresh(entry))
         self._changed()
+
+    def _unfresh(self, entry: Entry) -> None:
+        if self.fresh is entry:
+            self.fresh = None
 
     def _trim(self) -> None:
         """At most ``limit`` entries, the copies of files of the last ``file_limit`` only."""
@@ -232,6 +295,7 @@ class UndoHistory:
     def undo(self) -> str | None:
         if not self.can_undo():
             return None
+        self.fresh = None
         e = self.entries[self.index - 1]
         if e.action is not None:
             self._run(e, self.index - 1, "undo")
@@ -244,6 +308,7 @@ class UndoHistory:
     def redo(self) -> str | None:
         if not self.can_redo():
             return None
+        self.fresh = None
         e = self.entries[self.index]
         if e.action is not None:
             self._run(e, self.index, "redo")

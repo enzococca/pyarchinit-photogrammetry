@@ -251,7 +251,7 @@ La finestra dice quanto è grande la griglia (*La griglia è in metri locali con
 basso a sinistra (30 x 40 m)*); i campi dei metodi non scelti vengono ignorati.
 
 * **Angoli della griglia = marker.** Mostra l'ortofoto, prendi lo strumento *Marker* della barra
-  *Disegno* e fai clic su ogni picchetto d'angolo: i marker si chiamano *point 1*, *point 2*...
+  laterale (gruppo *Misure*) e fai clic su ogni picchetto d'angolo: i marker si chiamano *point 1*, *point 2*...
   (rinominali nel pannello *Riferimenti* se vuoi). Nella finestra scegli il marker di ogni angolo. Un
   marker con coordinate digitate nel pannello *Riferimenti* dà quelle coordinate, gli altri la posizione
   stimata dal rilievo.
@@ -353,7 +353,7 @@ griglia selezionata:
    Backspace toglie l'ultimo vertice, il tasto destro ricomincia il poligono. Il disegno è quello del
    programma, prestato al plugin.
 3. Doppio clic, oppure Invio, per chiuderlo; Esc annulla, e così la scelta di un altro strumento della
-   barra *Disegno*.
+   barra laterale della vista 2D.
 4. Una finestra chiede un'*Etichetta* (A1, A2... in automatico) e una *Nota*, l'interpretazione (*muro*,
    *fossa*, *fornace?*).
 

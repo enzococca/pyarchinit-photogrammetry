@@ -111,6 +111,29 @@ class Document:
             r.settle()
         self.removals = []
 
+    def mend_swaps(self) -> int:
+        """The folders of elevations a crash left halfway through their swap (``<id>.old`` or ``<id>.old<n>`` beside them, see
+        :func:`..io.files.swap_folder`) mended: the old one back when the new one never came, the backup deleted
+        when it did. Returns how many."""
+        import re
+
+        from ..io.files import BACKUPS, mend_swap
+
+        n = 0
+        for c in self.chunks:
+            folder = self.files_dir / f"chunk_{c.key}" / "elevations"
+            if not folder.is_dir():
+                continue
+            places = set()
+            for old in folder.glob("*.old*"):
+                m = re.fullmatch(r"(.+)\.old(\d?)", old.name)
+                if old.is_dir() and m and (not m.group(2) or 0 < int(m.group(2)) < BACKUPS):
+                    places.add(old.with_name(m.group(1)))
+            for place in sorted(places):
+                mend_swap(place)
+                n += 1
+        return n
+
     def recover_removed(self) -> dict:
         """What a session that crashed left in ``.removed``, settled now (see :func:`removal.recover`)."""
         from .removal import recover

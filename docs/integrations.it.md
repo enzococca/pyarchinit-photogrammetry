@@ -2,7 +2,7 @@
 
 ## QGIS, dal vivo
 
-*QGIS > Apri in QGIS (collegamento dal vivo)* (o il pulsante QGIS nella barra del disegno)
+*QGIS > Apri in QGIS (collegamento dal vivo)* (o *QGIS* nel gruppo *Layer e uscite* della colonna a sinistra della vista 2D)
 scrive un progetto QGIS accanto al `.ppg` (`<nome>_qgis/<nome>_ppg.qgs`) e lo apre:
 
 * raster: l'ortofoto, il DEM (ombreggiatura, all'inizio nascosta) e i valori del DEM;
