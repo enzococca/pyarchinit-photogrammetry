@@ -57,7 +57,8 @@ def _stray(w) -> list:
     for d in docked:
         if d in seen:
             continue
-        together = {d, *[t for t in w.tabifiedDockWidgets(d) if t in docked and w.dockWidgetArea(t) == w.dockWidgetArea(d)]}
+        area = w.dockWidgetArea(d)
+        together = {d, *[t for t in w.tabifiedDockWidgets(d) if t in docked and w.dockWidgetArea(t) == area]}
         seen |= together
         groups += len(together) > 1
     bars = [b for b in w.findChildren(QTabBar) if b.parent() is w and b.metaObject().className() == "QMainWindowTabBar"
