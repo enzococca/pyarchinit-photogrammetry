@@ -8,8 +8,8 @@ elaborazione, le posa sul rilievo con i picchetti della griglia di prospezione, 
 ti fa disegnare le anomalie che vi leggi e le esporta per un GIS. Anomalia e scavo, mappa magnetica e ortofoto finiscono nello stesso posto e
 nello stesso sistema di riferimento.
 
-Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 1.3.3 o
-successiva (1.3.4 o successiva per la sezione della tomografia di resistività nella vista 2D). La
+Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 1.3.4 o
+successiva. La
 versione 0.2.0 aggiunge la [tomografia di resistività elettrica](#ert): le letture di un
 georesistivimetro, invertite con pyGIMLi, diventano una sezione di resistività posata sul rilievo. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geophysics).
@@ -496,8 +496,8 @@ stratigrafiche e i carotaggi del [plugin Geoarcheologia](geoarchaeology.md).
 La scheda *ERT* del pannello *Geofisica* elenca in ordine i passi di un profilo, ognuno con i suoi pulsanti e,
 sotto, il suo stato: *Letture*, *Linea nel rilievo*, *Pseudosezione e filtri*, *Inversione (pyGIMLi)*,
 *Sezione* ed *Esportazioni*. L'elenco in alto sceglie il profilo, quando il chunk ne ha più di uno. Un passo che
-non si può ancora fare - un'inversione prima di posare la linea, una sezione prima dell'inversione - ha i
-pulsanti grigi. Il menu *Plugin > Geofisica* ha le stesse azioni come voci, fra cui *Tomografia elettrica:
+non si può ancora fare - una sezione prima dell'inversione, la linea sulla pianta prima di posarla - ha i
+pulsanti grigi. L'inversione si può fare anche prima di posare la linea: con le quote del file, o piatta. Il menu *Plugin > Geofisica* ha le stesse azioni come voci, fra cui *Tomografia elettrica:
 importa letture...* e *Installa pyGIMLi...*.
 
 <figure markdown="span">
@@ -528,15 +528,19 @@ importa letture...* e *Installa pyGIMLi...*.
 |---|---|---|
 | CSV, TXT (tabella con intestazione) | una lettura per riga: `a, b, m, n` e la resistività apparente `rhoa`, oppure la resistenza `r`, oppure la tensione `u` con la corrente `i`; l'errore `err` se lo strumento lo dà | i nomi delle colonne si riconoscono in molte grafie (`rho`, `appres`, `C1 C2 P1 P2`...); virgola, punto e virgola, tabulazione o spazi fra le colonne, punto o virgola decimale |
 | Esportazione Syscal | le colonne `Spa.1`-`Spa.4`, `Rho`, `Dev` (l'errore in %), `Vp` (mV), `In` (mA) si leggono così come sono | l'esportazione in testo del programma dello strumento |
-| formato unificato di pyGIMLi (`.ohm`, `.dat`, `.shm`) | elettrodi e letture in un solo file, con la topografia degli elettrodi se c'è | il formato che scrive il plugin stesso (*Esporta...*) |
+| formato unificato di pyGIMLi (`.ohm`, `.dat`, `.shm`) | elettrodi e letture in un solo file, con la topografia degli elettrodi se c'è | il formato che scrivono pyGIMLi, BERT e il plugin stesso (*Esporta...*). Un profilo 2D di pyGIMLi (`# x y z` con y la quota e z = 0) dà distanze e quote; le colonne di soli zeri che pyGIMLi scrive per i valori che non ha si ignorano; le unità dopo la barra (`u/mV`, `i/mA`, `err/%`, `rho/Ohmm`) si convertono |
 | RES2DINV, ABEM, altri file degli strumenti | li legge pyGIMLi, nel suo ambiente | serve pyGIMLi installato; il plugin lo propone |
 | tabella degli elettrodi (facoltativa, un secondo file) | `x, z` (distanza lungo la linea e quota), oppure `x, y, z` nelle coordinate del chunk | la linea passa allora per gli elettrodi |
 
 Due cose si decidono all'importazione e la finestra le chiede:
 
 * **Numeri o posizioni.** In `a, b, m, n` un elettrodo può essere il suo numero (1, 2, 3...) o la sua
-  posizione in metri. Il plugin indovina; *Colonne a, b, m, n* te lo lascia dire. Con i numeri,
-  *Distanza fra gli elettrodi numerati* dà i metri fra due elettrodi.
+  posizione in metri. Il plugin indovina: numeri interi da 1, consecutivi, sono numeri; posizioni ogni 2 m
+  (2, 4, 6...) e le colonne `Spa.1`-`Spa.4` di Syscal sono posizioni. *Colonne a, b, m, n* te lo lascia dire.
+  Con i numeri, *Distanza fra gli elettrodi numerati* dà i metri fra due elettrodi (vuoto = 1; si può cambiare
+  anche dopo, quando si posa la linea).
+* **L'elettrodo remoto.** Nei dispositivi polo-dipolo e polo-polo un elettrodo sta "all'infinito": in `b` o `n`
+  una cella vuota, un numero negativo o - con gli elettrodi numerati - lo 0.
 * **Nome.** Il nome del profilo nel progetto; vuoto è il nome del file.
 
 Le letture si tengono come sono: il plugin le legge nel progetto e lavora su quella copia. Il numero di
@@ -557,22 +561,30 @@ lo mette sul terreno, in uno di tre modi.
   più punti per una linea spezzata), doppio clic o Invio per finire, Esc per annullare. La linea va dal
   primo elettrodo verso l'ultimo.
 * **Linea da marker o coordinate...**: *due marker* (il marker del primo elettrodo e quello dell'ultimo),
-  oppure *coordinate digitate*: `X Y` di due punti o più, uno per riga o separati da `;`.
-* **Le coordinate degli elettrodi** nel file importato, se il file le ha: la linea passa per esse e non c'è
-  niente da posare.
+  oppure *coordinate digitate*: `X Y` di due punti o più, uno per riga o separati da `;`. Fra X e Y uno spazio
+  (allora la virgola decimale va bene: `500010,5 4500050,2`) oppure una virgola (allora il punto decimale:
+  `500010.5,4500050.2`); un punto che si può leggere in due modi viene rifiutato.
+* **Le coordinate degli elettrodi** nel file importato, se il file le ha in X, Y: nella stessa finestra,
+  *Linea da* > *coordinate degli elettrodi nel file*. Valgono solo se sono nel sistema del chunk: se cadono
+  lontano dal DEM o dall'ortofoto (un sistema locale dello strumento, per esempio) il plugin lo dice e non posa
+  niente - disegna la linea o usa i marker.
 
 Poi, nella stessa finestra:
 
 * **Primo elettrodo a**: dov'è il primo elettrodo, in metri dal primo punto della linea (0 quando la linea
   parte dal primo elettrodo).
 * **Distanza fra gli elettrodi**: in metri.
+* **Distanza misurata**: *lungo il terreno* (il cavo steso sul pendio: sul campo la spaziatura si misura così;
+  in pianta gli elettrodi risultano più vicini, del 2 % su un pendio del 20 %) o *in pianta*. Il predefinito è
+  *in pianta* per un file con le quote (x e z, come li scrivono pyGIMLi e BERT: x è orizzontale), *lungo il
+  terreno* per gli elettrodi numerati e le posizioni del cavo. Con le quote piatte non cambia nulla.
 * **Quote degli elettrodi**: *dal DEM del chunk* (campionato sotto ogni elettrodo: il predefinito quando il
   chunk ha un DEM), *dal file* (le quote del file degli elettrodi, più la quota sotto) o *piatte* alla quota
   sotto. Le quote sono la topografia che l'inversione segue: su un pendio o un tumulo usa il DEM o il file.
 
 Il pannello dice la lunghezza della linea e l'intervallo delle quote. *Linea sulla pianta* disegna ogni linea
-posata e i suoi elettrodi sull'ortofoto o sul DEM, in un layer, con il suo nome e il numero dell'ultimo
-elettrodo.
+posata e i suoi elettrodi sull'ortofoto o sul DEM, in un layer, con il suo nome e i numeri del primo e
+dell'ultimo elettrodo.
 
 ### La pseudosezione e i filtri { #ert-filter }
 
@@ -619,8 +631,8 @@ minuti. Una finestra segue i passi.
 | Dati robusti | le letture anomale pesano meno |
 | Iterazioni massime | 20 per impostazione predefinita |
 | Errore relativo (%) | l'errore supposto per ogni lettura, 3 % per impostazione predefinita |
-| Errore assoluto della tensione (µV) | un errore che non dipende dalla grandezza del segnale: conta per le letture di piccola tensione, quelle profonde; vuoto = nessuno |
-| Usa gli errori del file | dove il file ha un errore più grande di quello relativo, si usa quello |
+| Errore assoluto della tensione (µV) | un errore che non dipende dalla grandezza del segnale: conta per le letture di piccola tensione, quelle profonde; vuoto = nessuno. Senza la tensione nel file pyGIMLi la ricava dalla resistenza con una corrente di 100 mA |
+| Usa gli errori del file | lettura per lettura: dove il file ha un errore più grande di quello relativo, si usa quello; dove non ne ha, vale quello relativo |
 | Profondità del modello | fin dove arriva la maglia dei parametri; vuoto = automatica dalla lettura più lunga |
 | Nodi fra due elettrodi | la finezza orizzontale della maglia (una frazione della distanza, 0,33 per impostazione predefinita) |
 | Area massima di una cella | l'area massima di un triangolo della maglia, in m²; vuoto = automatica |
@@ -651,28 +663,37 @@ nel parametro *Profondità d'indagine*:
   risolto, a 1) sono oscurate. Richiede tre volte il tempo; è la risposta migliore quando la profondità della
   sezione conta per te.
 
-Il pannello dice quale oscuramento vale e l'area di sezione rimasta (*633 m² di sezione*). Le due soglie si
-possono cambiare dopo l'inversione con la stessa finestra; l'oscuramento non fa parte dei dati e l'inversione
-non si rifà per quello.
+Il pannello dice quale oscuramento vale e l'area di sezione rimasta (*633 m² di sezione*). Le soglie si
+cambiano dopo l'inversione con il pulsante *Oscuramento...* del passo *Sezione*: la sezione si ridisegna dalla
+stessa inversione, che non si rifà (si sceglie anche *nessuno*, tutta la maglia). L'indice DOI c'è solo se
+l'inversione l'ha calcolato.
 
 ### La sezione { #ert-section }
 
-Il passo *Sezione* ha tre pulsanti e una palette.
+Il passo *Sezione* ha quattro pulsanti e una palette.
 
 * **Sezione 2D**: la sezione si apre nella vista 2D in un riferimento proprio: x è la distanza lungo la linea, y
   la quota, quindi la topografia degli elettrodi si vede in cima alla sezione. I colori sono la resistività in
   scala **logaritmica** fra il 2° e il 98° percentile dei valori della sezione, con la legenda in ohm metro, e
-  gli elettrodi come cerchi. Richiede il programma 1.3.4 o successivo.
+  gli elettrodi come cerchi.
 * **Nella vista 3D**: la sezione come immagine verticale appesa sotto la linea, nella vista 3D, nelle
   coordinate del chunk. Il terreno del modello o il DEM è tagliato via da una parte della linea, per vedere la
-  sezione come in una parete di trincea. Se il plugin Geoarcheologia ha nel chunk un modello 3D delle unità,
-  si disegnano anche quelle, e i suoi carotaggi sono disegnati come prismi sottili al loro posto, con il colore
-  delle loro unità. La barra di stato elenca ciò che si vede; scegli un'altra vista nell'elenco *Mostra* della
+  sezione come in una parete di trincea. I proxy delle US del programma (*Proxy US*) si disegnano nei loro
+  colori; se il plugin Geoarcheologia ha nel chunk un modello 3D delle unità, si disegnano anche quelle, e i
+  suoi carotaggi sono disegnati come prismi sottili al loro posto, con il colore dell'intervallo o della sua
+  unità. La scena si prepara in background; l'anteprima del modello del programma non si tocca. La barra di stato elenca ciò che si vede; scegli un'altra vista nell'elenco *Mostra* della
   vista 3D per tornare ai prodotti del chunk. Tutti i profili invertiti del chunk si mostrano insieme.
 * **Linea sulla pianta**: la linea e gli elettrodi sull'ortofoto o sul DEM.
+* **Oscuramento...**: le soglie della parte non risolta, [sopra](#ert-doi), senza rifare l'inversione.
 * **Palette**: *Arcobaleno (classica)* (blu conduttivo, rosso e viola resistivo, la rampa solita delle sezioni di
   resistività), *Viridis*, *Terra* e *Grigi*. La stessa palette va alla vista 2D, alla vista 3D e alla figura
   esportata.
+
+!!! warning "Non disegnare sulla sezione con gli strumenti del programma"
+    La sezione e la pseudosezione stanno nella vista 2D in un riferimento proprio (distanza lungo la linea,
+    quota). Una linea, un poligono o una quota disegnati lì con gli strumenti del programma finiscono fra i
+    disegni della pianta, con quei numeri come coordinate: lontano dal rilievo. Per segnare un'anomalia su una
+    sezione esporta la figura o il GeoTIFF e lavora in un programma di disegno o in QGIS.
 
 <figure markdown="span">
   ![La sezione di resistività nella vista 2D con la sua legenda](../img/plugins/geophysics/ert-section.it.png)
@@ -729,12 +750,12 @@ ppg plugin geophysics ert export scavo.ppg "Linea 1" linea1_pseudo.png --pseudos
 | `import PROGETTO FILE` | `--name`; `--spacing` (metri fra elettrodi numerati, 1); `--electrodes FILE`; `--numbers` o `--positions` per le colonne a, b, m, n (altrimenti indovinate) |
 | `simulate PROGETTO NOME` | `--electrodes` (48), `--spacing` (1), `--scheme` (`dd`, `wa`, `slm`, `pd`), `--model` in JSON (`{"background": 50, "layers": [[3, 200]], "blocks": [[x0, x1, prof0, prof1, rho]]}`), `--slope`, `--noise` (0,02) |
 | `list PROGETTO` | una riga per profilo: elettrodi, letture, valide, dispositivo, posa, adattamento |
-| `place PROGETTO PROFILO` | `--markers INIZIO,FINE`, oppure `--line "X1 Y1; X2 Y2; ..."`; `--first`; `--spacing`; `--heights` `auto`, `dem`, `file`, `flat`; `--z0` |
+| `place PROGETTO PROFILO` | `--markers INIZIO,FINE`, oppure `--line "X1 Y1; X2 Y2; ..."`, oppure niente per le coordinate degli elettrodi nel file; `--first`; `--spacing`; `--along ground|plan` (lungo il terreno o in pianta; predefinito come nella finestra); `--heights` `auto`, `dem`, `file`, `flat`; `--z0` |
 | `filter PROGETTO PROFILO` | `--min`, `--max`, `--max-error`, `--reciprocal`, `--spikes`; `--remove 12,40`, `--restore 12` (letture contate da 1); `--clear` |
-| `invert PROGETTO PROFILO` | `--lam` (20), `--error` % (3), `--abs-u` volt, `--robust`, `--blocky`, `--z-weight` (1), `--max-iter` (20), `--depth`, `--dx` (0,33), `--max-cell`, `--doi coverage|oldenburg`, `--blank coverage|doi|none`, `--drop` (2,5), `--doi-max` (0,4), `--palette` |
+| `invert PROGETTO PROFILO` | `--lam` (20), `--error` % (3), `--abs-u` volt, `--robust`, `--blocky`, `--z-weight` (1), `--max-iter` (20), `--depth`, `--dx` (0,33), `--max-cell`, `--doi coverage|oldenburg`, `--blank coverage|doi|none`, `--drop` (2,5), `--doi-max` (0,4), `--palette`, `--timeout` (minuti prima di fermare un'inversione che non finisce, 240; 0 = nessun limite) |
 | `export PROGETTO PROFILO OUT` | una cartella: tutti i file sopra; un nome di file: uno, dall'estensione (`tif`, `csv`, `xyz`, `png`, `svg`, `pdf`, `gpkg`, `json`, `ohm`); `--pseudosection` per la figura delle letture |
 | `scene PROGETTO` | scrive la PLY della vista 3D (sezioni, terreno tagliato da `--side left|right|all`, `--terrain auto|model|dem|none`) |
-| `remove PROGETTO PROFILO` | toglie il profilo e i suoi file |
+| `remove PROGETTO PROFILO` | toglie il profilo e i suoi file (dalla riga di comando non c'è *Annulla*) |
 
 ### Installare pyGIMLi { #ert-install }
 
@@ -745,8 +766,9 @@ Per questo il programma, che usa altre librerie con i loro runtime, non ne può 
 può usarla anche l'applicazione impacchettata, che non ha pip.
 
 * *Installa pyGIMLi...* (nella scheda ERT, oppure in *Plugin > Geofisica*, oppure `ppg plugin geophysics ert
-  install`): il plugin dice prima che cosa scaricherà - un ambiente di circa **100 MB**, con un Python e
-  pyGIMLi 1.6 da PyPI, fatto con `uv` - e lo installa in `<dati del plugin>/ert-env`. Si fa una volta per
+  install`): il plugin dice prima che cosa scaricherà - un ambiente di circa **80 MB** con pyGIMLi 1.6 da
+  PyPI, fatto con `uv`, più circa 60 MB per il suo Python se `uv` non lo ha già - e lo installa in
+  `<dati del plugin>/ert-env`. Si fa una volta per
   tutti i progetti. Se pyGIMLi è già installato nel Python del programma, si usa quello.
 * `PPG_GEOPHYSICS_ENV` mette l'ambiente in un'altra cartella, per esempio su un disco più grande.
 * *Installa di nuovo pyGIMLi...* lo rifà; è la cosa da provare se l'inversione si lamenta della libreria.
@@ -801,9 +823,13 @@ stanno nel progetto stesso.
 * I GeoTIFF e i GRD esportati con *Esporta...* o `export`, dove scegli.
 * Il GeoPackage di *File > Esporta*, con accanto `<nome>_<griglia>.tif` per ogni griglia
   georeferenziata.
-* Per la tomografia, sempre nella cartella del chunk: `geophysics/ert/<id>/` con le letture e gli elettrodi di
-  ogni profilo (`profile.npz`) e, dopo l'inversione, il risultato di pyGIMLi (la maglia e la resistività delle
-  sue celle), il GeoTIFF della sezione e quello mostrato nella vista 2D, e la PLY della vista 3D
-  (`geophysics/ert/vista_3d.ply`). L'elenco dei profili - nome, dispositivo, linea, filtri, parametri e
-  adattamento - sta nel progetto stesso. L'ambiente di pyGIMLi non è nel progetto: è nella cartella dati del
+* Per la tomografia, sempre nella cartella del chunk: `geophysics/ert/<id>/` con le letture di ogni profilo
+  come lette (`profile.npz`, scritto una volta all'importazione) e, dopo l'inversione, il risultato di pyGIMLi
+  (`inversion-<data>.npz`: la maglia e la resistività delle sue celle), il GeoTIFF della sezione e quello
+  mostrato nella vista 2D (`section-<data>.tif`, `section_view-<data>.tif`, nuovi a ogni disegno), e la PLY
+  della vista 3D (`geophysics/ert/vista_3d.ply`). L'elenco dei profili - nome, dispositivo, linea con gli
+  elettrodi posati, filtri, parametri, adattamento e i nomi dei file in uso - sta nel progetto stesso.
+  *Modifica > Annulla* riporta indietro anche la posa, un'inversione, un oscuramento o un profilo rimosso: i
+  file di prima restano, e quelli di un profilo rimosso aspettano in `geophysics/ert/.removed/`, finché il
+  progetto non si riapre; allora i file che il progetto salvato non usa si cancellano. L'ambiente di pyGIMLi non è nel progetto: è nella cartella dati del
   plugin.
