@@ -107,10 +107,12 @@ class ExternalCalls:
 
 
 class _Lines(io.TextIOBase):
-    """What the script prints: kept whole, and each complete line to the progress."""
+    """What the script prints: kept whole, and each complete line to the progress; ``echo(text)``, when given, gets
+    every piece as it is written (in the script's thread)."""
 
-    def __init__(self, progress: Progress):
+    def __init__(self, progress: Progress, echo=None):
         self.progress = progress
+        self.echo = echo
         self.parts: list[str] = []
         self._line = ""
         self._lock = threading.Lock()
@@ -127,6 +129,11 @@ class _Lines(io.TextIOBase):
                 line, self._line = self._line.split("\n", 1)
                 if line.strip():
                     lines.append(line.rstrip())
+        if self.echo is not None and s:
+            try:
+                self.echo(s)
+            except RuntimeError:  # the receiver is gone (the window closed meanwhile): the text is still kept
+                self.echo = None
         for line in lines:
             self.progress.message(line)
         return len(s)
@@ -218,9 +225,20 @@ def _exit_error(exc: SystemExit) -> str | None:
     return f"exit({code!r})"
 
 
-def run_script(source: str, namespace: dict, progress: Progress, name: str = "script") -> ScriptResult:
+def _script_traceback(exc: BaseException) -> str:
+    """The traceback of the script's error without the frame of :func:`run_script` itself: only the script's lines
+    (and those of what it called)."""
+    tb = exc.__traceback__
+    if tb is not None and tb.tb_frame.f_code is run_script.__code__:
+        tb = tb.tb_next
+    return "".join(traceback.format_exception(type(exc), exc, tb))
+
+
+def run_script(source: str, namespace: dict, progress: Progress, name: str = "script", echo=None) -> ScriptResult:
     """Run ``source`` in ``namespace`` (``progress`` and ``cancel`` added); see the module. Returns what it
-    printed, its error and traceback (None when it ended well) and the external calls it made."""
+    printed, its error and traceback (None when it ended well) and the external calls it made. ``echo(text)``:
+    called with what the script prints as it prints it, in the worker thread (the console queues it to the
+    interface)."""
     namespace.setdefault("__name__", "__main__")
     namespace["progress"] = progress
 
@@ -236,7 +254,7 @@ def run_script(source: str, namespace: dict, progress: Progress, name: str = "sc
 
     namespace.setdefault("exit", stop)
     namespace.setdefault("quit", stop)
-    out = _Lines(progress)
+    out = _Lines(progress, echo)
     error = trace = None
     t0 = time.monotonic()
     external = ExternalCalls()
@@ -253,7 +271,7 @@ def run_script(source: str, namespace: dict, progress: Progress, name: str = "sc
         except BaseException as exc:  # noqa: BLE001 - the script's error is its result
             text = str(exc).strip()
             error = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
-            trace = traceback.format_exc()
+            trace = _script_traceback(exc)
         out.flush_line()
     return ScriptResult(out.text, error, trace, list(external.calls), time.monotonic() - t0)
 

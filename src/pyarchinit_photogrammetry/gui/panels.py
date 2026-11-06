@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QSizePolicy,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QSizePolicy,
                                QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -1345,18 +1345,49 @@ class _Stream(io.TextIOBase):
 
 
 class ConsolePane(QWidget):
-    """Python console bound to the open project: ``doc``, ``chunk``, ``app``, ``ppg``."""
+    """Python console bound to the open project: ``doc``, ``chunk``, ``app``, ``ppg``.
+
+    Over the output a bar runs a ``.py`` file (since 1.7.4): *Esegui file .py...*, *Riesegui* (the last file
+    again), *Recenti* (the last ten, setting ``console/recent``), *Apri nell'editor*, *Pulisci*; a ``.py`` dropped
+    on the console runs too. The pane only asks: ``file_requested(path)`` / ``edit_requested(path)`` go to the
+    window, which runs the file in the worker (``MainWindow.run_python_file``) and writes back through
+    :meth:`begin_file`, :meth:`feed` (from any thread: queued to this one) and :meth:`end_file`."""
 
     executed = Signal()
+    file_requested = Signal(str)
+    edit_requested = Signal(str)
+    _incoming = Signal(str)  # what a file prints in the worker, delivered in the interface thread
     paste_runs_blocks = True
+    RECENT_KEY = "console/recent"
+    DIR_KEY = "console/last_dir"
+    MAX_RECENT = 10
 
     def __init__(self, namespace_factory, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
+        bar = FlowLayout()
+        self.b_run_file = _tool("script", tr("Esegui file .py..."), tr("Scegli un file Python ed eseguilo sul progetto"))
+        self.b_rerun = _tool("refresh", tr("Riesegui"), tr("Esegui di nuovo l'ultimo file"))
+        self.b_recent = _tool("recent", tr("Recenti"), tr("Gli ultimi file eseguiti"))
+        self.recent_menu = QMenu(self.b_recent)
+        self.recent_menu.aboutToShow.connect(self.refresh_recent)
+        self.b_recent.setMenu(self.recent_menu)
+        self.b_recent.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.b_edit = _tool("edit", tr("Apri nell'editor"), tr("Apri l'ultimo file eseguito nell'editor"))
+        self.b_clear = _tool("clear", tr("Pulisci"), tr("Svuota l'output della console"))
+        self.b_run_file.clicked.connect(self.choose_file)
+        self.b_rerun.clicked.connect(self.rerun)
+        self.b_edit.clicked.connect(lambda: self.last_file and self.edit_requested.emit(self.last_file))
+        self.b_clear.clicked.connect(lambda: self.out.clear())
+        for b in (self.b_run_file, self.b_rerun, self.b_recent, self.b_edit, self.b_clear):
+            bar.addWidget(b)
+        lay.addLayout(bar)
         self.out = QPlainTextEdit()
         self.out.setObjectName("consoleOut")
         self.out.setReadOnly(True)
+        self.out.setAcceptDrops(False)  # a file dropped on the output goes to the pane (dropEvent)
+        self.out.viewport().setAcceptDrops(False)
         mono = QFont("Menlo")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.out.setFont(mono)
@@ -1367,11 +1398,139 @@ class ConsolePane(QWidget):
         self.inp.block_pasted.connect(self._run_block)
         lay.addWidget(self.out, 1)
         lay.addWidget(self.inp)
+        self.setAcceptDrops(True)
+        self._incoming.connect(self.write)
+        self.last_file: str | None = None
         self._factory = namespace_factory
         self.console = code.InteractiveConsole(self._factory())
         self.prompt = ">>> "
+        self._set_last(None)
         self.write("pyarchinit-photogrammetry - console Python\n"
                    "Variabili: doc (progetto), chunk (chunk attivo), app (ppg.app), ppg (modulo), np, window\n")
+
+    # ------------------------------------------------------------------ files
+    @staticmethod
+    def _settings():
+        from . import app_settings
+
+        return app_settings()
+
+    def recent_files(self) -> list[str]:
+        """The files run last, the newest first; the ones that are gone are dropped (also from the setting)."""
+        s = self._settings()
+        value = s.value(self.RECENT_KEY, []) or []
+        listed = [value] if isinstance(value, str) else [str(p) for p in value]
+        kept = [p for p in listed if Path(p).is_file()]
+        if kept != listed:
+            s.setValue(self.RECENT_KEY, kept)
+        return kept
+
+    def remember(self, path: str) -> None:
+        """``path`` at the top of *Recenti* (ten at most) and the last file of *Riesegui* / *Apri nell'editor*."""
+        path = str(path)
+        s = self._settings()
+        rec = [p for p in self.recent_files() if p != path]
+        s.setValue(self.RECENT_KEY, [path, *rec][:self.MAX_RECENT])
+        s.setValue(self.DIR_KEY, str(Path(path).parent))
+        self._set_last(path)
+
+    def _set_last(self, path: str | None) -> None:
+        self.last_file = path
+        self.b_rerun.setEnabled(path is not None)
+        self.b_edit.setEnabled(path is not None)
+        name = Path(path).name if path else ""
+        self.b_rerun.setToolTip(tr("Esegui di nuovo {0}", name) if path else tr("Esegui di nuovo l'ultimo file"))
+        self.b_edit.setToolTip(tr("Apri {0} nell'editor", name) if path else
+                               tr("Apri l'ultimo file eseguito nell'editor"))
+
+    def refresh_recent(self) -> None:
+        self.recent_menu.clear()
+        rec = self.recent_files()
+        for p in rec:
+            a = self.recent_menu.addAction(icon("script"), Path(p).name)
+            a.setData(p)
+            a.setToolTip(p)
+            a.triggered.connect(lambda _=False, pp=p: self.file_requested.emit(pp))
+        if not rec:
+            a = self.recent_menu.addAction(tr("Nessun file eseguito"))
+            a.setEnabled(False)
+        self.recent_menu.setToolTipsVisible(True)
+
+    def ask_file(self, parent=None) -> str | None:
+        """A ``.py`` chosen in a file dialog that starts in the folder of the last one; None when cancelled."""
+        start = str(self._settings().value(self.DIR_KEY, "") or "") or str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(parent or self, tr("Script Python"), start, "Python (*.py)")
+        return path or None
+
+    def choose_file(self) -> None:
+        path = self.ask_file()
+        if path:
+            self.file_requested.emit(path)
+
+    def rerun(self) -> None:
+        if self.last_file:
+            self.file_requested.emit(self.last_file)
+
+    def begin_file(self, path: str) -> None:
+        """A file starts: its line in the output, it goes to *Recenti*."""
+        self.remember(path)
+        self.write(f"\n>>> run {path}\n")
+
+    def feed(self, text: str) -> None:
+        """What the running file prints; from any thread (queued to the interface thread)."""
+        self._incoming.emit(text)
+
+    def end_file(self, outcome: str, seconds: float, traceback_text: str | None = None,
+                 names: dict | None = None) -> None:
+        """The file ended: its traceback, ``<<< ok|errore|annullato · seconds``; the ``names`` it defined copied into
+        the console's namespace and listed."""
+        out = self.out.toPlainText()
+        if out and not out.endswith("\n"):
+            self.write("\n")
+        if traceback_text:
+            self.write(traceback_text if traceback_text.endswith("\n") else traceback_text + "\n")
+        if names:
+            self.console.locals.update(names)
+            self.write(tr("Nuovi nomi: {0}", ", ".join(sorted(names))) + "\n")
+        self.write(f"<<< {outcome} · {number(seconds, 2)} s\n")
+
+    @staticmethod
+    def _local_files(mime) -> list[Path]:
+        if mime is None or not mime.hasUrls():
+            return []
+        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+
+    def accepts(self, mime) -> bool:
+        """A drop the console takes: one or more local ``.py`` files."""
+        files = self._local_files(mime)
+        return bool(files) and all(f.suffix.lower() == ".py" for f in files)
+
+    def dragEnterEvent(self, ev) -> None:
+        if self._local_files(ev.mimeData()):
+            ev.acceptProposedAction()  # also other files: the drop says why they do not run
+        else:
+            ev.ignore()
+
+    def dragMoveEvent(self, ev) -> None:
+        if self._local_files(ev.mimeData()):
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def dropEvent(self, ev) -> None:
+        files = self._local_files(ev.mimeData())
+        if not files:
+            ev.ignore()
+            return
+        ev.acceptProposedAction()
+        runs = [f for f in files if f.suffix.lower() == ".py"]
+        for f in files:
+            if f.suffix.lower() != ".py":
+                self.write(tr("{0}: solo i file .py si eseguono nella console", f.name) + "\n")
+        if runs:
+            if len(runs) > 1:
+                self.write(tr("Si esegue un file alla volta: {0}", runs[0].name) + "\n")
+            self.file_requested.emit(str(runs[0]))
 
     def write(self, s: str) -> None:
         self.out.moveCursor(QTextCursor.MoveOperation.End)
@@ -1457,6 +1616,13 @@ class _HistoryLine(QLineEdit):
         if s.strip():
             self.history.append(s)
         self.pos = len(self.history)
+
+    def dragEnterEvent(self, ev) -> None:
+        """Files dropped on the input line go to the console (a ``.py`` runs), not into the line as text."""
+        if ev.mimeData() is not None and ev.mimeData().hasUrls():
+            ev.ignore()
+            return
+        super().dragEnterEvent(ev)
 
     def insertFromMimeData(self, mime) -> None:
         """A paste with a newline is a block: it runs at once (after the text already typed)."""

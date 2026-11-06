@@ -659,6 +659,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.log_pane = LogPane()
         self.console = ConsolePane(self._namespace)
         self.console.executed.connect(self._after_console)
+        self.console.file_requested.connect(self.run_python_file)
+        self.console.edit_requested.connect(self._edit_python_file)
         self.pa_pane = PyArchInitPane()
         self.pa_pane.connect_requested.connect(lambda: self.pyarchinit_connect(ask=True))
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
@@ -15588,22 +15590,98 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.assistant.open_settings()
 
     def run_script(self) -> None:
-        """*Esegui script Python...*: the file chosen run in the worker (:meth:`run_script_source`), its output in
-        the console; Modifica > Annulla takes it back in one step."""
-        path, _ = QFileDialog.getOpenFileName(self, tr("Script Python"), self._last_dir(), "Python (*.py)")
-        if not path:
-            return
-        src = Path(path).read_text(encoding="utf-8")
-        self._show_pane(self.bottom_tabs, self.console)
-        self.console.write(tr("# esecuzione di {0}\n", path))
+        """*Esegui script Python...*: the file chosen run as the console's *Esegui file .py...* runs it
+        (:meth:`run_python_file`)."""
+        path = self.console.ask_file(self)
+        if path:
+            self.run_python_file(path)
+
+    # the names run_script adds to the namespace of a script: not "defined by the file"
+    _SCRIPT_NAMES = frozenset({"progress", "cancel", "exit", "quit", "__builtins__", "__file__", "__name__"})
+
+    def run_python_file(self, path) -> bool:
+        """Run the Python file ``path`` on the project, as the console's *Esegui file .py...* does: in the worker
+        (:meth:`run_script_source`: the progress window, *Annulla* of the progress, ONE entry of Modifica > Annulla
+        named after the file), what it prints in the console as it prints it, framed by ``>>> run <path>`` and a
+        line with the result (ok / errore / annullato) and the seconds; its traceback when it fails. During the run
+        ``sys.argv`` is ``[path]``, ``__file__`` is ``path`` and the file's folder comes first in ``sys.path``. After
+        it, the names it defined at module level (not ``_private``, not modules) are copied into the console, as
+        IPython's ``%run`` does. Returns False when it did not start: another step running (said in the console),
+        a file that cannot be read."""
+        import sys
+        import time as _time
+        import tokenize
+        import types
+
+        from ..assistant.scripts import run_script
+
+        path = str(Path(path).expanduser().absolute())
+        console = self.console
+        self._show_pane(self.bottom_tabs, console)
+        if self.runner.busy:
+            console.write(tr("Un'elaborazione è in corso: il file non parte") + "\n")
+            self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
+            return False
+        try:
+            with tokenize.open(path) as f:  # the encoding of a Python source (a coding line, else UTF-8)
+                source = f.read()
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
+            return False
+        console.begin_file(path)
+        kept: dict = {}
+        echo = console.feed  # thread-safe: a queued signal of the console
+        t0 = _time.monotonic()
+
+        def work(namespace, progress):
+            kept["namespace"] = namespace
+            kept["before"] = set(namespace)
+            folder = str(Path(path).parent)
+            argv = sys.argv
+            sys.argv = [path]
+            sys.path.insert(0, folder)
+            try:
+                return run_script(source, namespace, progress, name=path, echo=echo)
+            finally:
+                sys.argv = argv
+                try:
+                    sys.path.remove(folder)  # the first one: ours
+                except ValueError:  # the file took it away itself
+                    pass
 
         def done(result) -> None:
-            if result.output:
-                self.console.write(result.output if result.output.endswith("\n") else result.output + "\n")
-            if result.error:
-                self.console.write(result.traceback or result.error + "\n")
+            namespace = kept.get("namespace") or {}
+            skip = kept.get("before", set()) | self._SCRIPT_NAMES
+            names = {k: v for k, v in namespace.items()
+                     if k not in skip and not k.startswith("_") and not isinstance(v, types.ModuleType)}
+            if result.error == tr("Script annullato"):
+                outcome = tr("annullato")
+            elif result.error:
+                outcome = tr("errore")
+            else:
+                outcome = "ok"
+            trace = result.traceback or (result.error if result.error and outcome != tr("annullato") else None)
+            console.end_file(outcome, _time.monotonic() - t0, trace, names)
 
-        self.run_script_source(src, Path(path).name, on_done=done, path=path)
+        if not self._script_step(Path(path).name, work, done, path=path):
+            console.write(tr("Un'elaborazione è in corso: il file non parte") + "\n")
+            return False
+        return True
+
+    def _edit_python_file(self, path: str) -> None:
+        """*Apri nell'editor* of the console: the file in the assistant's script editor (shown), else in the
+        system's editor."""
+        pane = getattr(self, "assistant", None)
+        if pane is not None and hasattr(pane, "open_in_editor"):
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self.console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
+                return
+            pane.open_in_editor(text)
+            self._show_pane(self.bottom_tabs, pane)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _build_assistant_actions_menu(self, menu) -> None:
         """*Vista > Assistente > Azioni*: when the assistant's actions run (the setting ``assistant_actions``)."""
