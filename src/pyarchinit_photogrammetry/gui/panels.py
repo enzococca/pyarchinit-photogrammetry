@@ -10,9 +10,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QSizePolicy,
-                               QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QSizePolicy,
+                               QSlider, QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .flow_layout import FlowLayout
@@ -2084,7 +2084,8 @@ LAYER_ICONS = {"polygon": "polygon", "line": "line", "point": "point"}
 
 class LayersPane(QWidget):
     """Layers drawn on the orthomosaic/DEM view: show/hide, zoom, remove, attributes of the
-    clicked feature (editable: double click a value, Enter to confirm)."""
+    clicked feature (editable: double click a value, Enter to confirm). Above them the row *Sfondo*: the raster
+    under the drawings (orthophoto, DEM, relief, elevation, section) shown or hidden, and its opacity."""
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
     us_form_requested = Signal(str, int)  # layer, feature index
@@ -2098,8 +2099,8 @@ class LayersPane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_all = _tool("ok", tr("Tutti"), tr("Mostra tutti i layer"))
-        self.b_none = _tool("eraser", tr("Nessuno"), tr("Nascondi tutti i layer"))
+        self.b_all = _tool("ok", tr("Tutti"), tr("Mostra tutti i layer disegnati (lo sfondo resta com'è)"))
+        self.b_none = _tool("eraser", tr("Nessuno"), tr("Nascondi tutti i layer disegnati (lo sfondo resta com'è)"))
         self.b_zoom = _tool("search", "Zoom", tr("Zoom sul layer o sull'elemento selezionato"))
         self.b_remove = _tool("clear", tr("Rimuovi"), tr("Rimuovi il layer selezionato dalla vista"))
         self.b_us = _tool("us", tr("Scheda unità"), tr("Apri (o crea) la scheda PyArchInit dell'unità selezionata"))
@@ -2114,6 +2115,31 @@ class LayersPane(QWidget):
         for b in (self.b_all, self.b_none, self.b_zoom, self.b_labels, self.b_remove, self.b_us):
             bar.addWidget(b)
         lay.addLayout(bar)
+        # the raster under the drawings: shown or hidden, faded (RasterView.set_raster_visible / _opacity)
+        self.raster_row = QWidget()
+        rrow = QVBoxLayout(self.raster_row)
+        rrow.setContentsMargins(2, 2, 2, 2)
+        rrow.setSpacing(2)
+        self.raster_box = QCheckBox()
+        self.raster_box.setToolTip(tr("Mostra o nasconde il raster sotto i disegni (Vista > Mostra lo sfondo)"))
+        rrow.addWidget(self.raster_box)
+        orow = QHBoxLayout()
+        orow.setContentsMargins(20, 0, 0, 0)
+        title = QLabel(tr("Opacità"))
+        orow.addWidget(title)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setToolTip(tr("Opacità dello sfondo: più bassa, i disegni si leggono meglio"))
+        orow.addWidget(self.opacity_slider, 1)
+        self.opacity_label = QLabel("100 %")
+        self.opacity_label.setMinimumWidth(self.opacity_label.fontMetrics().horizontalAdvance("100 %") + 4)
+        orow.addWidget(self.opacity_label)
+        rrow.addLayout(orow)
+        self.raster_row.hide()
+        lay.addWidget(self.raster_row)
+        self.raster_box.toggled.connect(self._raster_toggled)
+        self.opacity_slider.valueChanged.connect(self._opacity_moved)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIconSize(QSize(16, 16))
@@ -2156,7 +2182,41 @@ class LayersPane(QWidget):
         self.view = view
         view.layers_changed.connect(self.rebuild)
         view.feature_clicked.connect(self.show_attributes)
+        view.raster_loaded.connect(self.sync_raster)
+        view.raster_visibility_changed.connect(self.sync_raster)
         self.rebuild()
+        self.sync_raster()
+
+    def sync_raster(self, *_args) -> None:
+        """The row *Sfondo* as the view is: the name of the raster, shown or hidden, its opacity; no row without a
+        raster (nothing shown, an empty frame)."""
+        view = self.view
+        if view is None or not view.has_raster():
+            self.raster_row.hide()
+            return
+        for w in (self.raster_box, self.opacity_slider):
+            w.blockSignals(True)
+        try:
+            self.raster_box.setText(tr("Sfondo: {0}", view.raster_title))
+            self.raster_box.setChecked(view.raster_visible)
+            percent = int(round(view.raster_opacity * 100))
+            self.opacity_slider.setValue(percent)
+            self.opacity_label.setText(f"{percent} %")
+            self.opacity_slider.setEnabled(view.raster_visible)
+        finally:
+            for w in (self.raster_box, self.opacity_slider):
+                w.blockSignals(False)
+        self.raster_row.show()
+
+    def _raster_toggled(self, shown: bool) -> None:
+        if self.view is not None:
+            self.view.set_raster_visible(shown)
+            self.sync_raster()
+
+    def _opacity_moved(self, value: int) -> None:
+        self.opacity_label.setText(f"{value} %")
+        if self.view is not None:
+            self.view.set_raster_opacity(value / 100.0)
 
     def rebuild(self) -> None:
         if self.view is None:

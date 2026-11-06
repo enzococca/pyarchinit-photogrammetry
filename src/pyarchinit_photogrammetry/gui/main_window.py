@@ -36,7 +36,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
-from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
+from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree, axis_text)
@@ -675,6 +675,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
+        self.ortho_view.raster_loaded.connect(self._sync_background_action)
+        self.ortho_view.raster_visibility_changed.connect(self._sync_background_action)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
         self.layers_pane.visibility_set.connect(self._layers_visibility_set)
@@ -1426,6 +1428,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
         self._act(m, tr("Ortofoto / DEM"), lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
         self._act(m, tr("Foto"), lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        # the raster of the 2D view hidden or shown under the drawings, as the row Sfondo of the Layer pane
+        self.a_show_background = QAction(tr("Mostra lo sfondo (ortofoto, DEM, prospetto)"), self, checkable=True)
+        self.a_show_background.setShortcut(QKeySequence("Ctrl+Shift+B"))
+        self.a_show_background.setStatusTip(tr("Nasconde o mostra il raster della vista 2D sotto i disegni; "
+                                               "l'opacità nel pannello Layer"))
+        self.a_show_background.setEnabled(False)  # no raster yet (the view follows: _sync_background_action)
+        self.a_show_background.toggled.connect(self._background_toggled)
+        m.addAction(self.a_show_background)
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
@@ -1908,10 +1918,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._update_workflow_states()
         self.refreshed.emit()
 
-    def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
+    def _load_raster(self, kind: str | None = None, path=None, bands=None, title: str | None = None) -> None:
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
         that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
-        reflectance orthomosaic) with the drawings on top."""
+        reflectance orthomosaic) with the drawings on top; ``title``: its name in the row *Sfondo* of the Layer pane
+        (by default the kind's, with the name of the file when it is not the chunk's product)."""
         self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
         self._set_drawings_frame(None)  # a raster of the plan: the drawings of the plan
         ch = self.chunk
@@ -1923,7 +1934,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._raster_version = None
             self._update_stale_banner()
             return
-        self.ortho_view.load(path, kind, bands=bands)
+        if title is None and kind in ("ortho", "dem", "index", "calc", "zones"):
+            product = ch.orthomosaic_path if kind == "ortho" else ch.dem_path if kind == "dem" else None
+            if product is None or Path(product) != Path(path):  # a version, a file of a plugin, an index...
+                title = tr("{0} «{1}»", tr(RASTER_TITLES[kind]), Path(path).stem)
+        self.ortho_view.load(path, kind, bands=bands, title=title)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
         self._raster_version = None
@@ -7562,7 +7577,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if path is None or not path.exists():
             self._warn("Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).")
             return
-        self._load_raster("ortho", path)
+        self._load_raster("ortho", path, title=tr("Mappa delle normali"))
         self.show_view(self.ortho_view)
         source = (ch.meta.get("normal_map") or {}).get("source")
         self.statusBar().showMessage(tr("Mappa delle normali dal {0}: rosso est, verde nord, blu alto",
@@ -8179,7 +8194,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         clean = h is not None and h.unchanged()  # every edit so far recorded: showing it adds no entry
         self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
-        self.ortho_view.load(ortho, "ortho")
+        what = tr("Sezione «{0}»", entry["name"]) if entry.get("kind") == "section" else \
+            tr("Prospetto «{0}»", entry["name"])
+        self.ortho_view.load(ortho, "ortho", title=what)
         if relief.exists():
             self.ortho_view.set_dem(relief)
         with self.ortho_view.batch():
@@ -8504,7 +8521,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._warn(tr("Il risultato {0} del calcolatore raster non c'è più.", name))
             return
         self.ortho_view.palette = "viridis"
-        self._load_raster("calc", path)
+        self._load_raster("calc", path, title=tr("{0} «{1}»", tr(RASTER_TITLES["calc"]), name))
         lo, hi = self.ortho_view._dem_range or (0.0, 1.0)
         self.statusBar().showMessage(tr("{0} = {1}: colori da {2} a {3} (Viridis)", name,
                                         ch.meta["calculator"][name].get("formula", ""), decimal_comma(f"{lo:.4g}"),
@@ -9104,8 +9121,22 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except OSError as exc:
             log.error("Riavvio non riuscito: %s", exc)
 
+    def _background_toggled(self, shown: bool) -> None:
+        self.ortho_view.set_raster_visible(shown)
+
+    def _sync_background_action(self, *_args) -> None:
+        """*Vista > Mostra lo sfondo* as the 2D view is: checked when its raster is shown, disabled without one."""
+        a, view = self.a_show_background, self.ortho_view
+        a.blockSignals(True)
+        try:
+            a.setEnabled(view.has_raster())
+            a.setChecked(view.has_raster() and view.raster_visible)
+        finally:
+            a.blockSignals(False)
+
     def set_theme(self, mode: str) -> None:
         theme.apply(QApplication.instance(), mode)
+        self.ortho_view.refresh_background()  # a hidden or faded raster: the neutral background of the new theme
         self.settings.setValue("theme", mode)
         for k, a in self.theme_actions.items():
             a.setChecked(k == mode)
@@ -14848,7 +14879,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         path = versions.version_file(self.chunk, product, vid)
         title = self._version_title(product, vid)
         if product in ("dem", "orthomosaic"):
-            self._load_raster("dem" if product == "dem" else "ortho", path)
+            kind = "dem" if product == "dem" else "ortho"
+            self._load_raster(kind, path, title=tr("{0} «{1}»", tr(RASTER_TITLES[kind]), title))
             self._raster_version = (product, vid)
             self._update_stale_banner()
             self.show_view(self.ortho_view)

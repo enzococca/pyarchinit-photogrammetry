@@ -13,6 +13,7 @@ LIGHT = {
     "selected": "#d6e6ff", "toolbar": "#ffffff", "dock_title": "#e9ecf1", "tab": "#eef0f3",
     "hint_bg": "#fff8e1", "hint_border": "#f6c343", "error_bg": "#fdecea", "warn_bg": "#fff4e5",
     "code_bg": "#f6f8fa", "scroll": "#c5cad2", "progress": "#2f80ed",
+    "canvas_off": "#a3a9b1",  # the 2D view with its raster hidden or faded: drawings in their colours stay readable
 }
 DARK = {
     "window": "#1e2227", "panel": "#262b31", "panel_alt": "#2b3138", "border": "#3a4048", "text": "#e5e7eb",
@@ -20,6 +21,7 @@ DARK = {
     "selected": "#2d4a73", "toolbar": "#262b31", "dock_title": "#2f353c", "tab": "#2b3138",
     "hint_bg": "#3b3520", "hint_border": "#c9a227", "error_bg": "#4a2a2a", "warn_bg": "#4a3a22",
     "code_bg": "#1b1f24", "scroll": "#4a525c", "progress": "#4ea1ff",
+    "canvas_off": "#23272d",
 }
 
 _RESOURCES = Path(__file__).with_name("resources")
