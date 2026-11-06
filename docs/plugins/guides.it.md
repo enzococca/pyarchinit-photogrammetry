@@ -44,7 +44,7 @@ installarli con pip in un ambiente Python, vedi [Plugin](../plugins.md).
 |---|---|---|
 | Geoarcheologia (`geoarchaeology`) | sondaggi, carote e sezioni di scavo sul rilievo: colonne stratigrafiche, superfici di contatto e spessori per kriging, sezioni, un modello 3D delle unità con i volumi | [Geoarcheologia](geoarchaeology.md) |
 | Terreno (`terrain`) | analisi del DEM con WhiteboxTools: corsi d'acqua e bacini, posizione topografica e forme del terreno, curvatura e rugosità, conche e rilievi annidati con i loro volumi, visibilità | [Terreno](terrain.md) |
-| Geofisica (`geophysics`) | griglie di prospezioni magnetometriche, di resistività, GPR ed EM: importazione, georeferenziazione sui picchetti della griglia, filtri, sovrapposizione all'ortofoto e al DEM, esportazioni | [Geofisica](geophysics.md) |
+| Geofisica (`geophysics`) | griglie di prospezioni magnetometriche, di resistività, GPR ed EM: importazione, georeferenziazione sui picchetti della griglia, filtri, sovrapposizione all'ortofoto e al DEM, esportazioni; tomografia di resistività elettrica con pyGIMLi (sezioni in 2D e nella vista 3D) | [Geofisica](geophysics.md) |
 | Archivio GIS (`gis-archive`) | quote, curve di livello, US, sezioni, pietre, marker, DEM e ortofoto di un progetto in un database GeoPackage, PostGIS o SpatiaLite | [Archivio GIS](gis-archive.md) |
 | terrio (`terrio`) | nuvole di punti di qualsiasi formato, anche dal web, nel progetto; classificazione del terreno; raster di riferimento; esportazioni E57, EPT, PMTiles e MBTiles | [terrio](terrio.md) |
 | Spirula (`spirula`) | Gaussian splatting 3D delle foto allineate con Spirula Studio, una mesh dallo splat, l'installazione di Spirula Studio | [Spirula](spirula.md) |
