@@ -254,5 +254,5 @@ progetto aprire alla fine.
 ## Console e script
 
 Tutto ciò che fa l'interfaccia si fa anche nel pannello *Console Python* (`doc`, `chunk`, `app`, `ppg`, `np`,
-`window`) e negli script (`ppg run script.py --project scavo.ppg`, oppure *Strumenti > Esegui script
-Python...*). Vedi l'[API Python](../api.md) e [PyArchInit](../pyarchinit.md).
+`window`) e negli script (`ppg run script.py --project scavo.ppg`, *Strumenti > Esegui script Python...*
+oppure *Esegui file .py...* della console, vedi [Console Python](panes.md#console-python)). Vedi l'[API Python](../api.md) e [PyArchInit](../pyarchinit.md).

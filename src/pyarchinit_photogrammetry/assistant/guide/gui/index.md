@@ -250,5 +250,6 @@ you choose which project to open at the end.
 ## Console and scripts
 
 Everything the interface does is also available in the *Python console* pane (`doc`, `chunk`, `app`, `ppg`,
-`np`, `window`) and in scripts (`ppg run script.py --project scavo.ppg`, or *Tools > Run Python script...*).
+`np`, `window`) and in scripts (`ppg run script.py --project scavo.ppg`, *Tools > Run Python script...*, or the
+console's *Run .py file...*, see [Python console](panes.md#python-console)).
 See the [Python API](../api.md) and [PyArchInit](../pyarchinit.md).
