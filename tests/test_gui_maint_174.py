@@ -122,7 +122,11 @@ def test_a_stray_tab_bar_on_the_window_is_cleaned_when_the_panes_change(window, 
     assert _stray(w) and w.panes.stray_tab_bars()
     w.panes._untidy = (w.panes._layout_key()[0], ())  # as on Linux: these panes were tried before with no bar left
     open_before = sorted(d.objectName() for d in w.panes.docks if not d.isHidden())
-    assert w.panes.tidy() is True
+    # no button held: on the Linux and Windows runners Qt may keep the state of a press synthesized by an earlier test
+    # (the wait while a pane is dragged has its own test)
+    w.panes._buttons_held = lambda: False
+    state = (w.panes.stray_tab_bars(), w.panes._untidy, w.panes._layout_key())
+    assert w.panes.tidy() is True, state
     assert not _stray(w)  # at once, not at the next layout of the window
     w.panes.show(w.console)  # any pane shown (added, closed, moved): the bars are looked at again
     _settle(qapp)

@@ -628,4 +628,8 @@ def test_three_thousand_drawings_redraw_in_under_a_second(win, qapp):
     win._draw_free()
     took = time.perf_counter() - t0
     assert len(win.ortho_view.features(PREFIX + "Pietre 0")) == 600
-    assert took < 1.0, f"{took:.2f} s"
+    import sys
+
+    # 0.2-0.4 s on a laptop; the Windows runners of GitHub were 3-4 times slower in November 2026 (1.35 s)
+    limit = 3.0 if sys.platform == "win32" else 1.0
+    assert took < limit, f"{took:.2f} s"
