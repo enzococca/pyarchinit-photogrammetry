@@ -8,8 +8,8 @@
 
 Writing one: see ``docs/plugins.md``.
 """
-from .api import API_VERSION, Action, Command, Context, Exporter, Plugin
+from .api import API_VERSION, Action, Command, Context, Exporter, Plugin, RailGroup
 from .manager import GROUP, Manager, PluginInfo, plugins_dir
 
 __all__ = ["API_VERSION", "Action", "Command", "Context", "Exporter", "GROUP", "Manager", "Plugin", "PluginInfo",
-           "plugins_dir"]
+           "RailGroup", "plugins_dir"]

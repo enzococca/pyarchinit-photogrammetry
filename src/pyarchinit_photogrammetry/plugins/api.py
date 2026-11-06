@@ -49,6 +49,8 @@ class Action:
     tip: str = ""
     processing: bool = False  # disabled while a step runs, as the processing actions of the window
     plugin: str = ""
+    # the QAction of the window for it (menu Plugin, rails); None in the command line or before the window made it
+    qaction: object = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -73,6 +75,29 @@ class Exporter:
 
 
 @dataclass
+class RailGroup:
+    """Since 1.7.4: a group of a plugin in a tool rail of the window (:meth:`Context.add_rail_group`)."""
+
+    key: str
+    title: str
+    icon: object  # a QIcon or the name of an icon of the program
+    actions: list  # the plugin's Action (from add_action) or QAction objects
+    view: str = "2d"  # "2d": the rail of the 2D view; "3d": that of the 3D view
+    plugin: str = ""
+
+
+def _rail_item(item) -> bool:
+    """An item a rail group takes: an :class:`Action`, a QAction or None (a line)."""
+    if item is None or isinstance(item, Action):
+        return True
+    try:
+        from PySide6.QtGui import QAction
+    except ImportError:  # no Qt: no QAction can exist
+        return False
+    return isinstance(item, QAction)
+
+
+@dataclass
 class Contributions:
     actions: list = field(default_factory=list)
     commands: dict = field(default_factory=dict)
@@ -80,6 +105,7 @@ class Contributions:
     connections: list = field(default_factory=list)  # (signal, slot) disconnected when the plugin goes away
     tree_items: list = field(default_factory=list)  # (plugin, provider) of the workspace, taken out with it
     rasters: list = field(default_factory=list)  # entries of engine.rastercalc.register, taken out with it
+    rail_groups: list = field(default_factory=list)  # RailGroup of the tool rails, taken out with it
 
 
 class Context:
@@ -95,6 +121,7 @@ class Context:
         self.log = logging.getLogger(f"pyarchinit_photogrammetry.plugins.{name}")
         self._panes: list = []  # widgets given to add_pane: out of the window with release()
         self._stops: list = []  # the listeners of the transform (on_transform_changed): stopped with release()
+        self.released = False  # release() called: what it gave the window is gone
 
     @property
     def app(self):
@@ -124,10 +151,42 @@ class Context:
 
     def add_action(self, title: str, callback: Callable[[], object], menu: str = "", tip: str = "",
                    processing: bool = False) -> Action:
-        """A menu action under *Plugin* (in the plugin's submenu, or in ``menu``)."""
+        """A menu action under *Plugin* (in the plugin's submenu, or in ``menu``). Since 1.7.4 also when added
+        after the plugin was activated: the window puts it in the menu then (and the search of the commands
+        finds it) - only in the interface thread (``activate``, an action, ``done``), never from :meth:`run`."""
         action = Action(title, callback, menu, tip, processing, self.name)
         self.contributions.actions.append(action)
+        self._tell_window()
         return action
+
+    def add_rail_group(self, key: str, title: str, icon="plugin", actions=(), view: str = "2d") -> RailGroup:
+        """Since 1.7.4: a group of the plugin in the tool rail of the 2D view (``view`` "2d") or of the 3D view
+        ("3d"), after the program's own groups: its button with ``icon`` (a QIcon or the name of an icon of the
+        program) opens a flyout with ``actions`` - the plugin's :class:`Action` objects returned by
+        :meth:`add_action` (the same as in the menu *Plugin*) or QActions of its own. A plugin with a group of its
+        own is not listed in the program's *Plugin* group of the rail. ``None`` among the actions draws a line
+        between them; anything else raises TypeError at once. Called again with the same ``key`` and ``view`` it
+        replaces the group. Taken away with the plugin (:meth:`release`); kept and shown nowhere in the command
+        line. Only in the interface thread (``activate``, an action, ``done``), as :meth:`add_action`."""
+        if view not in ("2d", "3d"):
+            raise ValueError(f"view: '2d' or '3d', not {view!r}")
+        actions = list(actions)
+        bad = [a for a in actions if not _rail_item(a)]
+        if bad:
+            raise TypeError("add_rail_group: the actions are Action objects (from add_action), QActions or None "
+                            f"(a line between them), not {', '.join(repr(b) for b in bad)}")
+        group = RailGroup(str(key), str(title), icon, actions, view, self.name)
+        groups = self.contributions.rail_groups
+        groups[:] = [g for g in groups if not (g.key == group.key and g.view == view)]
+        groups.append(group)
+        self._tell_window()
+        return group
+
+    def _tell_window(self) -> None:
+        """The window, once it has made the menu of the plugins, shows what was added now (menu, rails, search)."""
+        method = getattr(self.window, "plugin_contributions_changed", None)
+        if method is not None:
+            method(self)
 
     def add_command(self, name: str, function: Callable[..., object], help: str = "") -> Command:
         """A command of ``ppg plugin NAME``; the name must not be taken by another plugin."""
@@ -521,7 +580,9 @@ class Context:
 
     def release(self) -> None:
         """What the plugin connected through the context, disconnected, its items taken out of the workspace
-        and its panes out of the window (the manager calls it after :meth:`Plugin.deactivate`)."""
+        and its panes out of the window (the manager calls it after :meth:`Plugin.deactivate`); since 1.7.4 also its
+        actions out of the menu *Plugin* and its groups out of the tool rails."""
+        self.released = True
         for signal, slot in self.contributions.connections:
             try:
                 signal.disconnect(slot)
@@ -550,6 +611,13 @@ class Context:
             except RuntimeError:  # the window is already gone
                 pass
         self._panes.clear()
+        self.contributions.rail_groups.clear()
+        method = getattr(self.window, "plugin_contributions_changed", None)
+        if method is not None:
+            try:
+                method(self)
+            except RuntimeError:  # the window is already gone
+                pass
 
     def run(self, title: str, function: Callable, done: Callable | None = None) -> object:
         """``function(progress)`` with a progress bar: in the background in the window (``done(result)``

@@ -125,6 +125,192 @@ def test_a_step_pushed_takes_its_plugin_data_with_it():
     assert h.record() and len(h.entries) == 3
 
 
+class _PluginStep:
+    """A step a plugin pushes (its class is not the program's)."""
+
+    def undo(self):
+        pass
+
+    def redo(self):
+        pass
+
+
+def _history(state, applied=None):
+    deferred = []
+
+    def set_state(parts, names, products):
+        if applied is not None:
+            applied.append(parts)
+        state.update(parts)
+
+    h = UndoHistory(lambda: {k: dict(v) if isinstance(v, dict) else v for k, v in state.items()}, set_state,
+                    lambda: None, defer=deferred.append)
+    return h, deferred
+
+
+def _turn_ends(deferred):
+    while deferred:
+        deferred.pop(0)()
+
+
+def test_an_entry_takes_the_plugin_data_changed_in_its_turn():
+    """Units added for a plugin, then its data marked in the same turn: one entry, undone and redone as a whole; a
+    change of the data in a later turn is an entry of its own."""
+    state = {"chunk": 0, "units": [], "plugins": {"samgeo": {"units": 0}}}
+    h, deferred = _history(state)
+    state["units"] = ["u1", "u2"]
+    assert h.record()
+    state["plugins"] = {"samgeo": {"units": 2}}
+    assert not h.record() and len(h.entries) == 1 and h.undo_text() == "Disegni"
+    state["plugins"] = {"samgeo": {"units": 2, "made": [1, 2]}}  # once more in the same turn
+    assert not h.record() and len(h.entries) == 1
+    h.undo()
+    assert state["units"] == [] and state["plugins"] == {"samgeo": {"units": 0}}
+    h.redo()
+    assert state["units"] == ["u1", "u2"] and state["plugins"] == {"samgeo": {"units": 2, "made": [1, 2]}}
+    _turn_ends(deferred)
+    state["plugins"] = {"samgeo": {"units": 3}}
+    assert h.record() and len(h.entries) == 2 and h.undo_text() == "Dati dei plugin"
+
+
+def test_a_key_changed_by_a_plugin_step_is_left_to_its_steps():
+    """A plugin that pushes its own step for its key owns that key: a cache refreshed in it and marked without a step
+    is no entry, and undoing an entry of another plugin's data does not put the key back behind its steps."""
+    state = {"chunk": 0, "plugins": {"other": 1}}
+    applied = []
+    h, deferred = _history(state, applied)
+    state["plugins"] = {"other": 1, "ship": {"items": [1]}}
+    h.push("Relitto: proposte lette", _PluginStep(), document=False)
+    assert h.step_keys == {"ship"} and len(h.entries) == 1
+    _turn_ends(deferred)
+    state["plugins"] = {"other": 1, "ship": {"items": [1], "cache": "plan"}}  # renamed nothing: a cache
+    assert not h.record() and len(h.entries) == 1 and h.unchanged()
+    state["plugins"] = {"other": 2, "ship": {"items": [1], "cache": "plan"}}
+    assert h.record() and len(h.entries) == 2
+    state["plugins"]["ship"]["items"] = [1, 2]  # the plugin's step after the other entry: its own
+    h.push("Relitto: legno", _PluginStep(), document=False)
+    _turn_ends(deferred)
+    h.undo()  # the plugin's step (it undoes itself)
+    h.undo()  # the other plugin's data: "ship" stays as the plugin's steps left it
+    assert applied[-1] == {"plugins": {"other": 1}}  # "ship" not handed back to the window
+
+
+def test_steps_of_the_program_and_of_the_project_claim_no_key():
+    """Only a plugin's own step makes a key its own: the program's steps and the steps of the whole project (a script,
+    a removal) leave the plugins' data in the snapshots."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+    program_step = type("OrientStep", (_PluginStep,), {"__module__": "pyarchinit_photogrammetry.gui.main_window"})
+    state["plugins"] = {"a": 1}
+    h.push("Orienta", program_step(), document=False)
+    state["plugins"] = {"a": 1, "b": 1}
+    h.push("Script", _PluginStep(), document=True)
+    assert not h.step_keys
+    _turn_ends(deferred)
+    state["plugins"] = {"a": 2, "b": 2}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+
+
+def test_a_step_pushed_when_its_task_ends_claims_what_the_task_changed():
+    """A plugin's background task writes its data, the window rebases when it ends (processing, not an edit), then the
+    plugin pushes the step of that change in the same turn: the key is the step's. A rebase of an earlier turn says
+    nothing about a later step."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+    state["plugins"] = {"ship": {"relief": 1}}
+    h.rebase()
+    h.push("Relitto: proposte lette", _PluginStep(), document=False)
+    assert h.step_keys == {"ship"}
+    _turn_ends(deferred)
+    state["plugins"] = {"ship": {"relief": 1}, "mesh": 1}
+    h.rebase()
+    _turn_ends(deferred)
+    h.push("Un altro passo", _PluginStep(), document=False)
+    assert h.step_keys == {"ship"}
+
+
+def test_a_step_never_claims_a_key_created_empty_or_changed_in_an_earlier_turn():
+    """Plugin B's key created by a getter (``setdefault`` of ``{}``) without a mark, and another key B wrote without a
+    mark in an earlier turn: plugin A's next step does not take them, so B's later marked change is one entry."""
+    state = {"chunk": 0, "plugins": {"a": {"n": 0}}}
+    h, deferred = _history(state)
+    state["plugins"]["a"] = {"n": 1}
+    assert h.record()
+    state["plugins"]["b2"] = {"cache": 1}  # B, without a mark, in a turn where something else was recorded
+    _turn_ends(deferred)
+    state["plugins"]["b"] = {}  # a getter of B, when its pane opens
+    state["plugins"]["a"] = {"n": 2}
+    h.push("A: passo", _PluginStep(), document=False)
+    assert h.step_keys == {"a"}
+    _turn_ends(deferred)
+    state["plugins"]["b"] = {"x": 1}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+    _turn_ends(deferred)
+    state["plugins"]["b2"] = {"cache": 2}
+    assert h.record() and len(h.entries) == 4
+
+
+def test_a_step_declares_the_keys_it_covers():
+    """``meta_keys`` of the step, or ``push(..., keys=)``: those keys are the plugin's, nothing else is taken - also
+    when another key differs from the last snapshot."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+
+    class Declared(_PluginStep):
+        meta_keys = ("mine",)
+
+    state["plugins"] = {"mine": 1, "theirs": 1}
+    h.push("Mio", Declared(), document=False)
+    assert h.step_keys == {"mine"}
+    _turn_ends(deferred)
+    state["plugins"] = {"mine": 1, "theirs": 2, "other": 3}
+    h.push("Altro", _PluginStep(), document=False, keys=["other"])
+    assert h.step_keys == {"mine", "other"}
+    _turn_ends(deferred)
+    state["plugins"]["theirs"] = 4
+    assert h.record()
+
+
+def test_ownership_ends_with_the_project():
+    """Another project (``reset()``): no key is a plugin's any more; another chunk of the same project keeps them."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+    state["plugins"] = {"ship": {"items": [1]}}
+    h.push("Relitto", _PluginStep(), document=False)
+    _turn_ends(deferred)
+    h.reset(keep_document=True)
+    assert h.step_keys == {"ship"}
+    h.reset()
+    assert not h.step_keys
+    state["plugins"] = {"ship": {"items": [1], "cache": 1}}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+
+
+def test_two_plugins_in_one_turn():
+    """Plugin A pushes its step, plugin B marks its data in the same turn: B's change goes with the turn's entry (no
+    entry of its own) and B's key is not A's; in a later turn B's change is an entry."""
+    state = {"chunk": 0, "plugins": {"a": 0, "b": 0}}
+    h, deferred = _history(state)
+    state["plugins"]["a"] = 1
+    h.push("A", _PluginStep(), document=False)
+    state["plugins"]["b"] = 1
+    assert not h.record() and len(h.entries) == 1 and h.step_keys == {"a"}
+    _turn_ends(deferred)
+    state["plugins"]["b"] = 2
+    assert h.record() and len(h.entries) == 2
+
+
+def test_close_without_a_chunk_sweeps_the_folder_of_the_last_one(tmp_path):
+    """The document was taken away before closing: the undo folder of the chunk the history last had still goes."""
+    chunk = _Chunk(tmp_path)
+    current = [chunk]
+    h = UndoHistory(lambda: {"chunk": 0}, lambda *a: None, lambda: current[0])
+    (tmp_path / "undo" / "orient-x").mkdir(parents=True)
+    current[0] = None
+    h.close()
+    assert not (tmp_path / "undo").exists()
+
+
 @pytest.fixture
 def window(processed, tmp_path):
     import os
@@ -370,6 +556,7 @@ def test_a_plugin_change_of_chunk_meta_is_undone(window):
     ch.meta["fake_plugin"] = {"n": 1, "names": ["a"]}
     w.mark_modified()
     assert w.a_undo.text() == "Annulla: Dati dei plugin"
+    app.processEvents()  # another action of the user: a turn of the event loop later (in the same turn it would join)
     ch.meta["fake_plugin"]["n"] = 2
     w.mark_modified()
     w.undo()
@@ -379,3 +566,68 @@ def test_a_plugin_change_of_chunk_meta_is_undone(window):
     w.redo()
     w.redo()
     assert ch.meta["fake_plugin"] == {"n": 2, "names": ["a"]}
+
+
+def test_a_window_without_a_document_closes(window):
+    """A script or a plugin's test took the document away (``application.document = None``): the window still closes,
+    the copies of the steps of the history it can reach are let go."""
+    from PySide6.QtGui import QCloseEvent
+
+    from pyarchinit_photogrammetry import app as application
+
+    w, app = window
+    doc = application.document
+    w.history.backup(["point_cloud"])
+    w.history.record("Lazo sulla nuvola")
+    try:
+        application.document = None
+        assert w.chunk is None
+        w.setWindowModified(False)
+        ev = QCloseEvent()
+        w.closeEvent(ev)  # 1.7.3: AttributeError 'NoneType' object has no attribute 'chunks'
+        assert ev.isAccepted() and not w.history.can_undo()
+    finally:
+        application.document = doc
+
+
+def test_a_plugin_action_is_one_undo_entry_or_none(window):
+    """As a plugin uses the window: units added for it and its data marked in the same callback are one entry (undone
+    together); its own step plus ``mark_modified`` is one entry; a key its steps own, refreshed as a cache and marked
+    without a step, is no entry - in a later turn too."""
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.plugins import Context
+
+    w, app = window
+    ch = w.chunk
+    ctx = Context("fake", w.chunk.data_dir / "fake_plugin", window=w)
+    ch.meta["fake_runs"] = {"units": 0}  # a run of the plugin, marked when it was found
+    ctx.mark_modified()
+    app.processEvents()
+    entries = len(w.history.entries)
+    x, y = 2480001.0, 4500001.0
+    before = len(w.units)
+    assert ctx.add_units([box(x + 0.1, y + 0.1, x + 0.3, y + 0.3)]) == 1
+    ch.meta["fake_runs"]["units"] = 1
+    ctx.mark_modified()
+    assert len(w.history.entries) == entries + 1 and len(w.units) == before + 1
+    w.undo()
+    assert len(w.units) == before and ch.meta["fake_runs"] == {"units": 0}
+    w.redo()
+    assert len(w.units) == before + 1 and ch.meta["fake_runs"] == {"units": 1}
+    app.processEvents()
+
+    ch.meta["fake_ship"] = {"items": [1]}
+    w.history.push("Relitto: proposte lette", _PluginStep(), document=False)
+    ctx.mark_modified()
+    assert len(w.history.entries) == entries + 2 and w.a_undo.text() == "Annulla: Relitto: proposte lette"
+    app.processEvents()
+    ch.meta["fake_ship"]["cache"] = "plan"  # renamed nothing: only a cache of the plugin
+    ctx.mark_modified()
+    assert len(w.history.entries) == entries + 2 and w.isWindowModified()
+    app.processEvents()
+    ch.meta["fake_runs"]["units"] = 5  # the other plugin's data: an entry, undone without touching "fake_ship"
+    ctx.mark_modified()
+    assert len(w.history.entries) == entries + 3
+    w.undo()
+    assert ch.meta["fake_runs"] == {"units": 1} and ch.meta["fake_ship"] == {"items": [1], "cache": "plan"}

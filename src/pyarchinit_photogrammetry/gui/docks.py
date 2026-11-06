@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QFram
 
 from .i18n import tr
 
+HELD_RETRY_MS = 200  # Panes.tidy while a mouse button is down: tried again after this
 STATE_VERSION = 2  # of saveState/restoreState; until 1.3.3 (0) the panes were the tabs of two docks
 AREAS = {"left": Qt.DockWidgetArea.LeftDockWidgetArea, "bottom": Qt.DockWidgetArea.BottomDockWidgetArea,
          "right": Qt.DockWidgetArea.RightDockWidgetArea}
@@ -297,6 +298,11 @@ class Panes(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
         self._timer.timeout.connect(self.decorate)
+        self._tidy_timer = QTimer(self)  # the tab bars looked at once the panes moved while the program runs
+        self._tidy_timer.setSingleShot(True)
+        self._tidy_timer.setInterval(0)
+        self._tidy_timer.timeout.connect(self.tidy)
+        self._untidy: tuple | None = None  # the layout a tidy could not clean: not tried again until it changes
         options = QMainWindow.DockOption
         window.setDockOptions(options.AnimatedDocks | options.AllowTabbedDocks | options.AllowNestedDocks
                               | options.GroupedDragging)
@@ -341,13 +347,14 @@ class Panes(QObject):
         index = len(group.docks) if index is None else max(0, min(int(index), len(group.docks)))
         group.docks.insert(index, dock)
         dock.visibilityChanged.connect(lambda visible, d=dock: self._seen(d, visible))
-        dock.dockLocationChanged.connect(lambda _area: self.decorate_later())
-        dock.topLevelChanged.connect(lambda _floating: self.decorate_later())
+        dock.dockLocationChanged.connect(lambda _area: (self.decorate_later(), self.tidy_later()))
+        dock.topLevelChanged.connect(lambda _floating: (self.decorate_later(), self.tidy_later()))
         dock.toggleViewAction().triggered.connect(lambda checked, d=dock: self.show(d) if checked else None)
         if not (self._restored and self.window.restoreDockWidget(dock)):
             self._place(dock)
         self._rebuild_menu()
         self.decorate_later()
+        self.tidy_later()
         return dock
 
     def remove(self, widget) -> QWidget | None:
@@ -364,6 +371,7 @@ class Panes(QObject):
         self._rebuild_menu()
         dock.deleteLater()
         self.decorate_later()
+        self.tidy_later()
         return pane
 
     def show(self, widget) -> PaneDock | None:
@@ -386,6 +394,7 @@ class Panes(QObject):
             holder.raise_()
             holder.activateWindow()
         dock.group.current = dock
+        self.tidy_later()
         return dock
 
     def front(self) -> None:
@@ -419,6 +428,7 @@ class Panes(QObject):
         if visible:
             dock.group.current = dock
         self.decorate_later()
+        self.tidy_later()
 
     def _plugin_name(self, widget: QWidget, title: str) -> str:
         """The object name of a pane added by a plugin with ``left_tabs.addTab``: from the package of
@@ -577,6 +587,83 @@ class Panes(QObject):
                 ic = icons.get(bar.tabData(i))
                 if ic is not None and not ic.isNull() and bar.tabIcon(i).cacheKey() != ic.cacheKey():
                     bar.setTabIcon(i, ic)
+
+    @staticmethod
+    def _buttons_held() -> bool:
+        """A mouse button is down (a pane may be dragged)."""
+        return QApplication.mouseButtons() != Qt.MouseButton.NoButton
+
+    def tidy_later(self) -> None:
+        """:meth:`tidy` once the events of now are handled (only after the window was built: :meth:`keep_default`
+        tidies the layout of the start)."""
+        if self._default is None:
+            return
+        try:
+            self._tidy_timer.start(0)
+        except RuntimeError:  # the window is going away
+            pass
+
+    def stray_tab_bars(self) -> list[QTabBar]:
+        """The tab bars shown on the window beyond one for each group of two or more panes docked together: what Qt
+        (6.12) may leave behind when panes are tabbed in a second area (a second row of *Foto | Sezioni*). Empty when
+        the bars are as many as the groups. A bar Qt no longer uses but keeps "visible" outside the window (it moves
+        it there, as the panes behind a tab, when the panes of an area are closed) is not counted: nothing shows."""
+        window = self.window
+        if not window.isVisible():
+            return []
+        docked = [d for d in self.docks if not d.isHidden() and not d.isFloating()]
+        groups, seen = 0, set()
+        for d in docked:
+            if d in seen:
+                continue
+            area = window.dockWidgetArea(d)
+            together = {d, *[t for t in window.tabifiedDockWidgets(d)
+                             if t in docked and window.dockWidgetArea(t) == area]}
+            seen |= together
+            groups += len(together) > 1
+        inside = window.rect()
+        bars = [b for b in self._window_tab_bars() if b.isVisible() and b.geometry().intersects(inside)]
+        return bars if len(bars) > groups else []
+
+    def tidy(self) -> bool:
+        """The clean-up of the start (:meth:`keep_default`) when a pane was added, shown, closed or moved while the
+        program runs: when the window shows tab bars no group uses, its layout put back as it is now, with the bars
+        made anew. Returns whether it did; a layout it could not clean is not tried again until it changes; while a
+        mouse button is down (a pane being dragged) nothing is done and it is tried again a little later."""
+        if not self.stray_tab_bars():
+            self._untidy = None
+            return False
+        if self._buttons_held():  # a pane being dragged: never its layout put back under the mouse
+            try:
+                self._tidy_timer.start(HELD_RETRY_MS)
+            except RuntimeError:  # the window is going away
+                pass
+            return False
+        key = self._layout_key()
+        if key == self._untidy:
+            return False
+        current = {area: group.current for area, group in self.groups.items()}
+        self._restore_state(self.window.saveState(STATE_VERSION))
+        for area, group in self.groups.items():  # the panes in front stay those in front
+            if current[area] is not None and current[area] in group.docks:
+                group.current = current[area]
+        if self.stray_tab_bars():
+            # a bar with no tab or one tab is never one Qt shows for a group (it shows a bar for two panes or more,
+            # and shows it again itself when it lays one out): left over from an area whose panes all closed
+            for bar in self.stray_tab_bars():
+                if bar.count() < 2:
+                    bar.hide()
+        self._untidy = self._layout_key() if self.stray_tab_bars() else None
+        self.decorate_later()
+        return True
+
+    def _layout_key(self) -> tuple:
+        """The layout :meth:`tidy` could not clean: the panes (shown, floating, area) and the stray bars on the window
+        (which, where): a new stray bar on the same panes is tried again."""
+        panes = tuple((d.objectName(), d.isHidden(), d.isFloating(), int(self.window.dockWidgetArea(d).value))
+                      for d in self.docks)
+        bars = tuple(sorted((id(b), b.geometry().getRect()) for b in self.stray_tab_bars()))
+        return panes, bars
 
     def _window_tab_bars(self) -> list[QTabBar]:
         return [b for b in self.window.children()

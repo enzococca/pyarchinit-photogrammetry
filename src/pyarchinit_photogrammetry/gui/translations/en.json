@@ -1808,7 +1808,7 @@
   "Pubblicazione dei proxy": "Publishing the proxies",
   "Pubblicazione in PyArchInit": "Publishing in PyArchInit",
   "Pubblicazione sezione": "Publishing the section",
-  "Pulisci": "Clean",
+  "Pulisci": "Clear",
   "Pulisci i punti di legame (selezione graduale)...": "Clean the tie points (gradual selection)...",
   "Pulisci il modello": "Clean the model",
   "Pulisci il modello...": "Clean the model...",
@@ -3025,7 +3025,20 @@
   "Icone e testo": "Icons and text",
   "Fissato: resta aperto finché non lo chiudi": "Pinned: stays open until you close it",
   "Fissa il pannello: resta aperto mentre lavori sulla vista": "Pin the panel: it stays open while you work on the view",
-  "Aggiungi foto": "Add photos"
+  "Aggiungi foto": "Add photos",
+  "Esegui file .py...": "Run .py file...",
+  "Scegli un file Python ed eseguilo sul progetto": "Choose a Python file and run it on the project",
+  "Riesegui": "Run again",
+  "Esegui di nuovo l'ultimo file": "Run the last file again",
+  "Recenti": "Recent",
+  "Gli ultimi file eseguiti": "The files run last",
+  "Apri l'ultimo file eseguito nell'editor": "Open the last file run in the editor",
+  "Svuota l'output della console": "Clear the console output",
+  "Nessun file eseguito": "No file run yet",
+  "Un'elaborazione è in corso: il file non parte": "A step is running: the file does not start",
+  "annullato": "cancelled",
+  "I plugin che non hanno un gruppo loro: ognuno con le sue azioni": "The plugins without a group of their own: each with its actions",
+  "Sostituisci": "Replace"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -3989,6 +4002,18 @@
   "; GeoJSON senza sistema letto come WGS 84 (RFC 7946) e convertito in {0}": "; GeoJSON without a system read as WGS 84 (RFC 7946) and converted to {0}",
   "Misure di {0} in calcolo...": "Computing the measures of {0}...",
   "Cerca un comando... ({0})": "Search a command... ({0})",
-  "Scrivi una parte del nome di un comando dei menu e premi Invio ({0})": "Type a part of the name of a menu command and press Enter ({0})"
+  "Scrivi una parte del nome di un comando dei menu e premi Invio ({0})": "Type a part of the name of a menu command and press Enter ({0})",
+  "Esegui di nuovo {0}": "Run {0} again",
+  "Apri {0} nell'editor": "Open {0} in the editor",
+  "Nuovi nomi: {0}": "New names: {0}",
+  "{0}: solo i file .py si eseguono nella console": "{0}: only .py files run in the console",
+  "Si esegue un file alla volta: {0}": "One file runs at a time: {0}",
+  "Il file non si può leggere: {0}": "The file cannot be read: {0}",
+  "Le azioni del plugin {0}": "The actions of the plugin {0}",
+  "L'editor degli script contiene un altro testo. Sostituirlo con {0}? (Ctrl+Z nell'editor lo riporta)": "The script editor holds another text. Replace it with {0}? (Ctrl+Z in the editor brings it back)",
+  "Plugin {0}: l'azione {1} è esclusa: {2}": "Plugin {0}: the action {1} is left out: {2}",
+  "Gruppi dei plugin nella barra degli strumenti non mostrati: {0}": "Plugin groups of the tool rails not shown: {0}",
+  "Plugin {0}: il gruppo {1} della barra degli strumenti è escluso: {2}": "Plugin {0}: the group {1} of the tool rail is left out: {2}",
+  "Plugin {0}: escluso dal gruppo Plugin della barra degli strumenti: {1}": "Plugin {0}: left out of the Plugin group of the tool rail: {1}"
  }
 }

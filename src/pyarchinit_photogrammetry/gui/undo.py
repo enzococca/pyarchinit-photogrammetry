@@ -18,6 +18,19 @@ and its copies (``<chunk data>/undo``) are deleted then, and when the window clo
 nothing can be undone after the session). A third kind of entry undoes and redoes
 itself (:meth:`UndoHistory.push`): the removals from the workspace (``core.removal``), which act
 on any chunk and stay in the history when another chunk becomes the active one.
+
+The data of the plugins (the keys of ``chunk.meta`` that are not the program's, part ``plugins``) are a part of the
+snapshots, with two rules so that an action of a plugin is one entry, or none when it changed nothing of the user's:
+
+* a change of them made in the same turn of the event loop as the last entry joins that entry, whatever made it (a
+  step a plugin pushed covers it; an entry of snapshots - units added for a plugin, the user's edit - takes it as one
+  more part);
+* the keys a plugin's own step covers (:meth:`UndoHistory.push` of a step that is not the program's: its
+  ``meta_keys`` or ``keys=``, or else the keys it changed in its turn, never one just created empty) are the plugin's
+  until another project is opened (:attr:`UndoHistory.step_keys`): its steps undo them, so the snapshots leave them
+  out - a cache the plugin refreshes and marks modified without a step is no entry, and undoing an entry of the other
+  plugins' data never puts them back behind the plugin's steps. What the plugin keeps there and its steps do not undo
+  is not undoable after its first step.
 """
 from __future__ import annotations
 
@@ -39,7 +52,7 @@ PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sect
               "patches": "Patch dell'ortofoto", "frame_patches": "Patch dei prospetti",
               "region": "Regione di ricostruzione", "lines": "Linee di rottura", "free": "Disegni 3D",
               "plugins": "Dati dei plugin"}
-ABSORBED_PARTS = ("plugins",)  # a change of these made with a step a plugin pushed in the same turn: in that step
+ABSORBED_PARTS = ("plugins",)  # a change of these made in the turn of the last entry: a part of that entry
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
                  "reconstruction": "Punti di legame", "model_textured": "Texture"}
 
@@ -76,19 +89,83 @@ class UndoHistory:
         self.applying = False
         self._base: dict = {}
         self._pending: dict | None = None
-        self.fresh: Entry | None = None  # the step just pushed: its own change of ABSORBED_PARTS is not another entry
+        self.fresh: Entry | None = None  # the entry of this turn: a change of ABSORBED_PARTS joins it
+        self.step_keys: set[str] = set()  # keys of ABSORBED_PARTS a plugin's own steps undo: not in the snapshots
+        self._rebased: dict | None = None  # the snapshot before a rebase of this turn (a task's result, then its step)
+        self._settled: dict | None = None  # the plugins' data at the end of the last turn the history saw
+        self._settling = self._closed = False
+        self._data_dir: Path | None = None  # the folder of the chunk the history last had (closing without one)
         self.reset()
 
     # ------------------------------------------------------------------ state
     def _snapshot(self) -> dict:
-        state = self.get_state() or {}
+        state = self._without_step_keys(self.get_state() or {})
         return {k: json.dumps(v, sort_keys=True, default=str) for k, v in state.items()}
+
+    def _without_step_keys(self, state: dict) -> dict:
+        """``state`` without the keys of its ABSORBED_PARTS that the plugins' own steps undo (:attr:`step_keys`)."""
+        if not self.step_keys:
+            return state
+        return {k: ({n: x for n, x in v.items() if n not in self.step_keys}
+                    if k in ABSORBED_PARTS and isinstance(v, dict) else v) for k, v in state.items()}
+
+    @staticmethod
+    def _part(snapshot: dict | None, part: str) -> dict:
+        try:
+            value = json.loads((snapshot or {}).get(part) or "null")
+        except ValueError:  # pragma: no cover - snapshots are JSON
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _claim_step_keys(self, new: dict, declared=None) -> None:
+        """A plugin pushed its own step. ``declared`` (the step's ``meta_keys`` or ``push(keys=)``): those keys are its,
+        nothing else. Otherwise the keys it changed in this turn: those of ABSORBED_PARTS that differ from the last
+        snapshot and from the end of the last turn the history saw (a key changed without a mark in an earlier turn may
+        be another plugin's), or from the snapshot before a rebase of this turn (a plugin's background task changes
+        its data, the window rebases when the task ends, then the plugin pushes the step of that change) - never a key
+        just created empty (a getter's ``setdefault``: often another plugin's, opening its pane)."""
+        if declared is not None:
+            self.step_keys.update([declared] if isinstance(declared, str) else [str(k) for k in declared])
+            return
+        missing = object()
+        for part in ABSORBED_PARTS:
+            now = self._part(new, part)
+            settled = self._settled.get(part) if self._settled is not None else None
+            for base, check in ((self._base, True), (self._rebased, False)):
+                if base is None:
+                    continue
+                old = self._part(base, part)
+                for k in set(old) | set(now):
+                    value = now.get(k, missing)
+                    if old.get(k, missing) == value or (k not in old and value in ({}, [], None, "")):
+                        continue
+                    if check and settled is not None and settled.get(k, missing) == value:
+                        continue  # already so when an earlier turn ended
+                    self.step_keys.add(k)
+
+    def _settle_later(self) -> None:
+        """At the end of this turn, the plugins' data as they are then (:meth:`_claim_step_keys`)."""
+        if self.defer is not None and not self._settling:
+            self._settling = True
+            self.defer(self._settle)
+
+    def _settle(self) -> None:
+        self._settling = False
+        if self._closed:  # the window closed meanwhile: nothing to look at
+            return
+        try:
+            snap = self._snapshot()
+        except RuntimeError:  # pragma: no cover - the window's widgets went first
+            self._settled = None
+            return
+        self._settled = {part: self._part(snap, part) for part in ABSORBED_PARTS}
 
     def reset(self, keep_document: bool = False, keep_entry=None) -> None:
         """Forget everything (another project or chunk is open) and delete the copies;
         ``keep_document``: the entries of the project that can still be undone (removals from the
         workspace) stay, as when another chunk becomes the active one - those ``keep_entry(entry)``
-        says yes to, when it is given."""
+        says yes to, when it is given. Without it (another project) no key of the plugins' data is a plugin's
+        any more (:attr:`step_keys`)."""
         keep = [e for e in self.entries[:self.index] if e.document and (keep_entry is None or keep_entry(e))] \
             if keep_document else []
         for e in self.entries:
@@ -96,9 +173,13 @@ class UndoHistory:
                 self._drop_files(e)
         if self._pending:
             shutil.rmtree(self._pending["folder"], ignore_errors=True)
-        self.entries, self.index, self._pending, self.fresh = keep, len(keep), None, None
+        self.entries, self.index, self._pending, self.fresh, self._rebased = keep, len(keep), None, None, None
+        if not keep_document:
+            self.step_keys = set()
+        self._settled, self._closed = None, False
         self._base = self._snapshot()
         ch = self.get_chunk()
+        self._data_dir = getattr(ch, "data_dir", None) if ch is not None else self._data_dir
         if ch is not None:
             try:
                 shutil.rmtree(ch.data_dir / "undo", ignore_errors=True)
@@ -122,11 +203,15 @@ class UndoHistory:
                 continue
             self._drop_files(e)
         self.discard_pending()
+        self._closed = True
         self.entries = [e for e in self.entries if e.document]
         self.index, self.fresh = len(self.entries), None
         folders = {}
-        for ch in [self.get_chunk(), *chunks]:
-            data = getattr(ch, "data_dir", None)
+        active = self.get_chunk()
+        dirs = [getattr(ch, "data_dir", None) for ch in [active, *chunks]]
+        if active is None:  # the document was taken away: the folder of the chunk the history last had
+            dirs.append(self._data_dir)
+        for data in dirs:
             if data is not None:
                 folders[str(Path(data) / "undo")] = Path(data) / "undo"
         for folder in folders.values():
@@ -209,7 +294,14 @@ class UndoHistory:
         """The project changed by processing, not by an edit (an alignment moves the markers):
         the next entry starts from here."""
         if not self.applying:
+            if self.defer is not None and self._rebased is None:  # a step pushed in this turn may cover the change
+                self._rebased = self._base
+                self.defer(self._unrebase)
             self._base = self._snapshot()
+            self._settle_later()
+
+    def _unrebase(self) -> None:
+        self._rebased = None
 
     def unchanged(self) -> bool:
         """Nothing changed since the last entry (or rebase): the project as the history last saw it."""
@@ -232,14 +324,23 @@ class UndoHistory:
             self.reset(keep_document=True)
             return False
         parts = [k for k in new if k != "chunk" and new.get(k) != self._base.get(k)]
-        if self.fresh is not None and self.index == len(self.entries) and self.entries and \
-                self.entries[-1] is self.fresh:
-            for k in [k for k in parts if k in ABSORBED_PARTS]:  # a plugin's own step covers its data
-                self._base[k] = new[k]
+        fresh = self.fresh if self.fresh is not None and self.index == len(self.entries) and self.entries and \
+            self.entries[-1] is self.fresh else None
+        joined = False
+        if fresh is not None:
+            for k in [k for k in parts if k in ABSORBED_PARTS]:  # made in the turn of the last entry: a part of it
+                if fresh.action is None:  # an entry of snapshots: undone and redone with the rest of it
+                    fresh.before.setdefault(k, self._base.get(k))
+                    fresh.after[k] = new[k]
+                    joined = True
+                self._base[k] = new[k]  # a step pushed by the plugin covers its data
                 parts.remove(k)
         files = self._pending
         self._pending = None
         if not parts and not files:
+            if joined:
+                self._settle_later()
+                self._changed()
             return False
         if not text:
             names = []
@@ -253,28 +354,43 @@ class UndoHistory:
         for e in self.entries[self.index:]:  # a new change: what was undone cannot be redone
             self._drop_files(e)
         del self.entries[self.index:]
-        self.entries.append(Entry(text, {k: self._base.get(k) for k in parts}, {k: new[k] for k in parts}, files))
-        self._base, self.fresh = new, None
+        entry = Entry(text, {k: self._base.get(k) for k in parts}, {k: new[k] for k in parts}, files)
+        self.entries.append(entry)
+        self._base = new
         self._trim()
+        self._freshen(entry)
+        self._settle_later()
         self._changed()
         return True
 
-    def push(self, text: str, action, document: bool = True) -> None:
+    def push(self, text: str, action, document: bool = True, keys=None) -> None:
         """A step already done that undoes and redoes itself: ``action.undo()``, ``action.redo()`` and,
         if it has one, ``action.drop()`` when the history forgets it (a removal from the workspace).
         ``document``: it stays when another chunk becomes the active one. What was undone cannot be
-        redone after it."""
+        redone after it. A step of a plugin (not of the program, not of the whole project) makes keys of the plugins'
+        data its own (:attr:`step_keys`, until another project is opened): ``keys``, or the step's ``meta_keys``, when
+        given (since 1.7.4); otherwise those it changed in this turn (:meth:`_claim_step_keys`)."""
         for e in self.entries[self.index:]:
             self._drop_files(e)
         del self.entries[self.index:]
         entry = Entry(text, {}, {}, None, action=action, document=document)
         self.entries.append(entry)
+        if not document and type(action).__module__.split(".")[0] != __name__.split(".")[0]:
+            self._claim_step_keys(self._snapshot(), keys if keys is not None else getattr(action, "meta_keys", None))
         self._base = self._snapshot()
         self._trim()
         self.fresh = entry
         if self.defer is not None:
             self.defer(lambda: self._unfresh(entry))
+        self._settle_later()
         self._changed()
+
+    def _freshen(self, entry: Entry) -> None:
+        """``entry``, recorded now, takes the changes of ABSORBED_PARTS made in this turn (only with ``defer``: without
+        it nothing would tell when the turn ends)."""
+        self.fresh = entry if self.defer is not None else None
+        if self.defer is not None:
+            self.defer(lambda: self._unfresh(entry))
 
     def _unfresh(self, entry: Entry) -> None:
         if self.fresh is entry:
@@ -342,11 +458,12 @@ class UndoHistory:
         try:
             if files:
                 self._swap_files(files, side)
-            state = {k: (None if v is None else json.loads(v)) for k, v in parts.items()}
+            state = self._without_step_keys({k: (None if v is None else json.loads(v)) for k, v in parts.items()})
             self.set_state(state, set(state), sorted((files or {}).get("before", {})))
         finally:
             self.applying = False
         self._base = self._snapshot()
+        self._settle_later()
 
     def _swap_files(self, files: dict, side: str) -> None:
         ch = self.get_chunk()

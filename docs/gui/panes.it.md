@@ -222,6 +222,27 @@ disegnano è in [Disegno e misure](drawing.md#sezioni).
 Una console Python con il progetto a portata di mano: `doc` (il progetto), `chunk` (il chunk attivo), `app`,
 `ppg` (la libreria), `np` e `window`. Ciò che cambia si vede nella finestra. Un blocco incollato di più righe viene eseguito subito. ++ctrl+shift+p++ la porta davanti.
 
+La barra sopra l'output esegue un intero file Python (dalla 1.7.4):
+
+* **Esegui file .py...** sceglie un file (la finestra si apre nella cartella dell'ultimo) e lo esegue;
+* **Riesegui** esegue di nuovo l'ultimo file (il nome è nel suggerimento);
+* **Recenti** elenca gli ultimi dieci file eseguiti (quelli che non esistono più spariscono dall'elenco);
+* **Apri nell'editor** apre l'ultimo file nell'editor degli script dell'[assistente](assistant.md);
+* **Pulisci** svuota l'output.
+
+Anche un file `.py` trascinato sulla console viene eseguito (gli altri file sono rifiutati con una riga
+nell'output). Il file gira in background come *Strumenti > Esegui script Python...*: la finestra di avanzamento
+può fermarlo, la finestra resta utilizzabile e ciò che cambia nel progetto è **un** solo passo di *Modifica >
+Annulla*, anche se si ferma a metà per un errore; se un'altra elaborazione è in corso non parte (la console lo
+dice). Ciò che stampa compare nella console mentre lo stampa, fra `>>> run <file>` e una riga finale con il
+risultato (ok, errore o annullato) e i secondi impiegati; un errore mostra il suo traceback. Durante
+l'esecuzione `sys.argv` è `[file]`, `__file__` è il file e la sua cartella viene prima in `sys.path`, così può
+importare i moduli che ha accanto. Alla fine i nomi definiti dal file (variabili, funzioni, classi; non quelli
+`_privati` né i moduli importati) vengono copiati nella console, come fa `%run` di IPython, ed elencati in una
+riga (*Nuovi nomi: ...*): si può continuare a usarli al prompt. Dalla console la stessa cosa è
+`window.run_python_file(percorso)` (uno script gira già in background, quindi un file che chiede di eseguire viene
+rifiutato).
+
 ## Assistente
 
 ![Il pannello Assistente](../img/gui/pane-assistant.it.png)

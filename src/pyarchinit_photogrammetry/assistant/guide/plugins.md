@@ -170,7 +170,8 @@ the next start (`ppg plugin` lists its command at once).
 |---|---|
 | `app` | the state shared with scripts: `context.app.document` is the open project, `.chunk` its active chunk ([API](api.md)) |
 | `window` | the main window, or `None` in the command line |
-| `add_action(title, callback, menu="", tip="", processing=False)` | a menu action under *Plugin* (in the plugin's submenu, or in `menu`); `processing=True` disables it while a step runs |
+| `add_action(title, callback, menu="", tip="", processing=False)` | a menu action under *Plugin* (in the plugin's submenu, or in `menu`); `processing=True` disables it while a step runs; since 1.7.4 also when added after `activate` (it goes into the menu then, and the search of the commands finds it); a plugin without a rail group of its own is in the *Plugin* group of the 2D rail with its actions (those with a `menu` in a submenu of that name, as in the menu *Plugin*). Only in the interface thread (`activate`, an action, `done`), never in the function given to `run` |
+| `add_rail_group(key, title, icon="plugin", actions=(), view="2d")` | since 1.7.4: a group of the plugin at the end of the tool rail of the 2D view (`view="2d"`) or of the 3D view (`"3d"`): its button with `icon` (a `QIcon` or the name of an icon of the program) opens a flyout with `actions` - the `Action` objects returned by `add_action` (the same as in the menu *Plugin*) or `QAction`s of the plugin; `None` draws a line between them, anything else raises `TypeError` at once. The same `key` and `view` again replace the group. Only in the interface thread, as `add_action`. A plugin with a group of its own is not listed in the *Plugin* group; the groups go away with the plugin; in the command line they are kept and shown nowhere; returns the `RailGroup` |
 | `add_command(name, function, help="")` | `ppg plugin NAME ARGS...` calls `function(*args)` with the arguments as strings; an int returned is the exit code |
 | `add_exporter(title, suffix, function)` | *File > Esporta > title...*: `function(chunk, path, progress)` writes `path` in the background |
 | `store_drawings()` | writes what the window shows (units and spot heights drawn, stones, sections) into the project before a plugin reads `chunk.meta`; in the interface thread only (an action, `done`), nothing in the command line; the window does it by itself before an exporter runs |
@@ -216,12 +217,24 @@ the function given to `run` (it runs in another thread). `deactivate()` releases
 took beyond its registrations (open files, timers).
 
 **Undo of the plugin's data.** Since 1.7.3 the keys of `chunk.meta` that are not the program's are a part of the
-snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. A plugin that
-pushes its own step (`window.history.push(text, step, document=False)`) and then calls `mark_modified()` gets no
-second entry for the same change - but only within the same turn of the event loop: the step stays "fresh" until a
-zero-time timer fires. A `mark_modified()` called after that (from a later callback, a timer, the end of a background
-task) records the plugin's data again as a separate entry, so one action reads as two steps of *Undo*. Call
-`mark_modified()` right after the push, in the same callback.
+snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. Since 1.7.4:
+
+- **A mark joins the step of its turn.** A change of the plugins' data marked in the same turn of the event loop as
+  the last step joins that step, whatever made it: the step the plugin pushed
+  (`window.history.push(text, step, document=False)`), the units it added with `context.add_units` (undone together
+  with them), the user's edit it reacted to - or another plugin's step pushed in that turn, which then takes the
+  change without undoing it. A modal dialog (`exec`, `ParamDialog.ask`, `message`) between the change and the mark,
+  or between the end of a background task and the push, ends the turn: the mark becomes a step of its own.
+- **A key covered by a plugin's steps is left to them.** A plugin that keeps its undo in its own steps says which keys
+  of `chunk.meta` they cover: a `meta_keys` attribute of the step class (`meta_keys = ("mine",)`; older programs
+  ignore it) or `window.history.push(text, step, document=False, keys=["mine"])` (1.7.4 or later only). From that
+  step on, until another project is opened, those keys leave the snapshots: their steps undo them, a cache refreshed
+  in them and marked without a step is no step (the project is still to be saved), and undoing another plugin's
+  data never puts them back. Without a declaration the program infers the keys from the step: those that changed in
+  the turn of the push (or in the background task that ended in that turn), never a key just created empty.
+- **Consequence:** whatever the plugin keeps under a covered key and its steps do not undo is no longer undoable
+  after its first step - before that step a change of it is a "Plugin data" step, after it none. Keep such data
+  (settings, caches the user may want back) under another key, or cover it with a step.
 
 ### Compatibility
 
@@ -229,7 +242,8 @@ task) records the plugin's data again as a separate entry, so one action reads a
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
-1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2. The plugins written before 1.3.4 put their pane among the tabs of the window with
+1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4 (1.7.3 and older
+ignore an action added later). The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
 `removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -

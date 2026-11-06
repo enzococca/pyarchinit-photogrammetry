@@ -18,12 +18,13 @@ only or icons and text (setting ``rail/text``). Two ways of placing it:
 """
 from __future__ import annotations
 
+import time
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
-                               QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .i18n import tr
 from .icons import icon
@@ -173,14 +174,17 @@ class ToolRail(QWidget):
         self._apply_text()
 
     # ----------------------------------------------------------------- building
-    def add_group(self, key: str, title: str, icon_name: str, items: list, tip: str = "") -> RailGroup:
+    def add_group(self, key: str, title: str, icon_name, items: list, tip: str = "") -> RailGroup:
         """A group: ``items`` are :class:`QAction` (a button with the action's icon text), ``(action,
         text)`` or ``(action, text, menu)`` (the button's own text and a menu beside it), widgets
-        (moved into the flyout as they are) or ``None`` (a separator line)."""
+        (moved into the flyout as they are) or ``None`` (a separator line). ``icon_name``: the name of
+        an icon of the program or a QIcon."""
+        if key in self.groups:
+            self.remove_group(key)
         button = QToolButton()
         button.setObjectName("railGroup")
         button.setProperty("groupKey", key)
-        button.setIcon(icon(icon_name))
+        button.setIcon(icon_name if isinstance(icon_name, QIcon) else icon(icon_name or "plugin"))
         button.setIconSize(QSize(22, 22))
         button.setText(title)
         button.setToolTip(tip or title)
@@ -203,6 +207,23 @@ class ToolRail(QWidget):
         self.groups[key] = group
         self._apply_text()
         return group
+
+    def remove_group(self, key: str) -> None:
+        """Take the group ``key`` away (a plugin's, when it goes): its button and its page with what they hold."""
+        group = self.groups.get(key)
+        if group is None:
+            return
+        if self._current == key:
+            self.close(force=True)
+            self._current = None
+        del self.groups[key]
+        self._lay.removeWidget(group.button)
+        group.button.hide()
+        group.button.deleteLater()
+        self.flyout.pages.removeWidget(group.page)
+        group.page.hide()
+        group.page.deleteLater()
+        self._apply_text()
 
     def _add_item(self, group: RailGroup, lay, item) -> None:
         if item is None:
@@ -440,10 +461,16 @@ class ToolRail(QWidget):
 
 
 class _RailFilter(QObject):
+    """The rail's filter on its view and the widgets it watches: the press that closes the flyout goes no further, as
+    with a popup, and so does the rest of that click - its release, and the double click that may follow it (the
+    second press of a double click then reaches the view as a single click, as Qt does after a popup closed). A new
+    press starts afresh: a release that went to another widget never eats a later one."""
+
     def __init__(self, rail: ToolRail):
         super().__init__(rail)
         self.rail = rail
-        self._swallow = None  # the widget whose press closed the flyout: its release goes with it
+        self._swallow = None  # the widget whose press closed the flyout: its release (and a double click) go with it
+        self._after = None  # (widget, deadline, pressed again): the double click expected until then is swallowed
 
     def eventFilter(self, obj, ev) -> bool:
         rail = self.rail
@@ -451,12 +478,25 @@ class _RailFilter(QObject):
         if obj is rail._view and t in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
             rail._place()
         elif t == QEvent.Type.MouseButtonPress and obj in rail._watched:
+            self._swallow = None  # a new press: whatever the last one left pending is over
             if rail.close(force=False):  # as a popup: the press that closes the flyout does nothing else
                 self._swallow = obj
+                self._after = (obj, time.monotonic() + QApplication.doubleClickInterval() / 1000.0, False)
                 return True
-        elif t in (QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick) and obj is self._swallow:
-            if t == QEvent.Type.MouseButtonRelease:
-                self._swallow = None
+            if self._after is not None and self._after[0] is obj:  # the second press of a double click (Qt 6)
+                self._after = (obj, self._after[1], True)
+        elif t == QEvent.Type.MouseButtonDblClick and obj in rail._watched:
+            after, self._after = self._after, None
+            if obj is self._swallow:  # still within the click that closed the flyout: its release goes too
+                return True
+            if after is not None and after[0] is obj and time.monotonic() <= after[1]:
+                # the second click of a double click whose first press closed the flyout: no double click reaches
+                # the view; when that second click came without a press (Qt 5 style), its release goes with it
+                if not after[2]:
+                    self._swallow = obj
+                return True
+        elif t == QEvent.Type.MouseButtonRelease and obj is self._swallow:
+            self._swallow = None
             return True
         elif (t == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape and rail.is_open() and not rail.pinned
               and obj in (rail._view, *rail._watched)):

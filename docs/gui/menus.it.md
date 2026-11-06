@@ -383,7 +383,7 @@ Il collegamento con il database dello scavo; le schede e le relazioni restano in
 | **Aggiorna struttura del database...** | aggiunge le colonne mancanti di PyArchInit 5, dopo una copia di sicurezza |
 | **Connetti all'avvio al database di PyArchInit** | si collega da solo all'apertura |
 | **Pubblica ortofoto / DEM / modello...** | i prodotti nei media di PyArchInit, legati alle US |
-| **Pubblica unita' e quote disegnate** · **solo le unita'** · **solo le quote** | scrive `pyunitastratigrafiche` e `pyarchinit_quote` |
+| **Pubblica unità e quote disegnate** · **solo le unità** · **solo le quote** | scrive `pyunitastratigrafiche` e `pyarchinit_quote`; la prima è anche *Pubblica in PyArchInit* della barra degli strumenti |
 | **Carica poligoni US sull'ortofoto** | mostra le unità già nel database |
 | **Aggiorna pannello** | rilegge siti, US e documentazione |
 

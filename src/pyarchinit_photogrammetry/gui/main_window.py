@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -659,6 +660,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.log_pane = LogPane()
         self.console = ConsolePane(self._namespace)
         self.console.executed.connect(self._after_console)
+        self.console.file_requested.connect(self.run_python_file)
+        self.console.edit_requested.connect(self._edit_python_file)
         self.pa_pane = PyArchInitPane()
         self.pa_pane.connect_requested.connect(lambda: self.pyarchinit_connect(ask=True))
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
@@ -1365,8 +1368,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         m.addSeparator()
         self._act(m, tr("Pubblica ortofoto / DEM / modello..."), self.pyarchinit_publish, processing=True,
                   icon_name="publish")
-        self._act(m, tr("Pubblica unità e quote disegnate"), self.pyarchinit_publish_drawings, processing=True,
-                  icon_name="publish")
+        # the same action as *Pubblica* of the rail and of the classic drawing bar: the search of the commands finds it
+        self.a_publish_drawings = self._act(m, tr("Pubblica unità e quote disegnate"),
+                                            self.pyarchinit_publish_drawings, processing=True, icon_name="publish")
+        self.a_publish_drawings.setIconText(tr("Pubblica"))  # the short label of the classic drawing bar
+        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
+                                              "quote (pyarchinit_quote)"))
         self._act(m, tr("Pubblica solo le unità (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
                   processing=True, icon_name="publish")
         self._act(m, tr("Pubblica schede UT (ut_table)..."), self.pyarchinit_publish_ut, icon_name="publish")
@@ -1621,11 +1628,6 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.a_sections_pane.setToolTip(tr("Pannello delle sezioni"))
         self.a_sections_pane.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
         self.section_menu.addAction(self.a_sections_pane)  # beside the options of the sections
-        self.a_publish_drawings = QAction(icon("publish"), tr("Pubblica"), self)
-        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
-                                              "quote (pyarchinit_quote)"))
-        self.a_publish_drawings.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
-        self._processing_actions.append(self.a_publish_drawings)
 
         def menu(*actions) -> QMenu:
             m = QMenu(self)
@@ -1787,7 +1789,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     @property
     def chunk(self):
-        return self.doc.chunk
+        doc = self.doc
+        return doc.chunk if doc is not None else None  # a script or a test may take the document away
 
     def _namespace(self) -> dict:
         import pyarchinit_photogrammetry as ppg
@@ -1949,8 +1952,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
         shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
         take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
-        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). A plugin that pushes its own step
-        (``history.push``) before calling this gets no second entry for the same change."""
+        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). Called in the same turn as the last
+        entry - whatever made it: a step the plugin pushed with ``history.push``, units it added, the user's edit,
+        another plugin's step - the change joins that entry. A key of ``chunk.meta`` covered by a step of the plugin
+        (its ``meta_keys``, ``history.push(..., keys=)``, or else the keys the step changed in its turn) is the
+        plugin's from that step until another project is opened: its steps undo it, a change of it without a step (a
+        cache) is no entry - and what the plugin keeps there and its steps do not undo is no longer undoable
+        (``gui.undo``, docs/plugins.md)."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:
@@ -2122,12 +2130,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     # ---------------------------------------------------------------- messages
     # ================================================================ plugins
     def _load_plugins(self) -> None:
-        """The plugins (Strumenti > Plugin): their actions in the menu Plugin, their export formats
-        in File > Esporta. One that fails is written in the log; the window starts anyway."""
+        """The plugins (Strumenti > Plugin): their actions in the menu Plugin and in the tool rails, their export
+        formats in File > Esporta. One that fails is written in the log; the window starts anyway."""
         from ..plugins import Manager
 
         self.plugins = Manager(window=self)
         self.plugin_menu: QMenu | None = None
+        self._plugin_submenus: dict[str, QMenu] = {}
+        self._plugin_rail_ready = False  # the plugins activated: what they add from now on is shown at once
+        self._plugin_extra_contexts = weakref.WeakSet()  # contexts made by hand (not by the manager) that added
+        self._plugin_rail_only = weakref.WeakKeyDictionary()  # context -> QActions of Actions only in its rail groups
         loaded = True
         try:
             self.plugins.load()
@@ -2141,23 +2153,175 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         for info in self.plugins.plugins:
             if info.error:
                 log.warning(tr("Plugin {0} non caricato: {1}", info.name, info.error))
-        actions = self.plugins.actions
-        if actions:
-            menu = self.plugin_menu = QMenu(tr("&Plugin"), self)
-            self.menuBar().insertMenu(self.help_menu.menuAction(), menu)
-            titles = {i.name: i.title for i in self.plugins.plugins}
-            submenus: dict = {}
-            for a in actions:
-                key = a.menu or titles.get(a.plugin, a.plugin)
-                if key not in submenus:
-                    submenus[key] = menu.addMenu(icon("plugin"), key)
-                self._act(submenus[key], a.title, lambda a=a: self._run_plugin_action(a), tip=a.tip,
-                          processing=a.processing)
+        for a in self.plugins.actions:
+            try:
+                self._plugin_qaction(a)
+            except Exception as exc:  # noqa: BLE001 - a plugin never stops the window
+                log.warning(tr("Plugin {0}: l'azione {1} è esclusa: {2}", a.plugin, a.title, exc))
         if self.plugins.exporters:
             self.export_menu.addSeparator()
             for e in self.plugins.exporters:
                 self._act(self.export_menu, e.title + "...", lambda e=e: self._plugin_export(e), processing=True,
                           icon_name="plugin")
+        self._plugin_rail_ready = True
+        try:
+            self.refresh_plugin_rails()
+        except Exception as exc:  # noqa: BLE001 - a plugin never stops the window
+            log.warning(tr("Gruppi dei plugin nella barra degli strumenti non mostrati: {0}", exc))
+
+    def _plugin_titles(self) -> dict[str, str]:
+        return {i.name: i.title or i.name for i in getattr(self.plugins, "plugins", [])}
+
+    def _plugin_qaction(self, action, in_menu: bool = True) -> QAction:
+        """The QAction of a plugin's :class:`~..plugins.api.Action` in the menu Plugin (made, with the menu and the
+        plugin's submenu, the first time; ``in_menu`` False: an Action only in a rail group, a QAction in no menu);
+        a QAction is returned as it is."""
+        if isinstance(action, QAction):
+            return action
+        made = getattr(action, "qaction", None)
+        if isinstance(made, QAction):
+            return made
+        if not in_menu:
+            qa = QAction(action.title, self)
+            qa.triggered.connect(lambda _=False, a=action: self._run_plugin_action(a))
+            if action.tip:
+                qa.setToolTip(action.tip)
+                qa.setStatusTip(action.tip)
+            if action.processing:
+                self._processing_actions.append(qa)
+            action.qaction = qa
+            return qa
+        if self.plugin_menu is None:
+            self.plugin_menu = QMenu(tr("&Plugin"), self)
+            self.menuBar().insertMenu(self.help_menu.menuAction(), self.plugin_menu)
+        self.plugin_menu.menuAction().setVisible(True)
+        key = action.menu or self._plugin_titles().get(action.plugin, action.plugin)
+        sub = self._plugin_submenus.get(key)
+        if sub is None:
+            sub = self._plugin_submenus[key] = self.plugin_menu.addMenu(icon("plugin"), key)
+        qa = self._act(sub, action.title, lambda a=action: self._run_plugin_action(a), tip=action.tip,
+                       processing=action.processing)
+        if action.tip:
+            qa.setToolTip(action.tip)
+        action.qaction = qa
+        return qa
+
+    def _drop_plugin_qaction(self, action) -> None:
+        """The QAction of a plugin's action out of the menu Plugin (the plugin went); an empty submenu with it."""
+        qa = getattr(action, "qaction", None)
+        if not isinstance(qa, QAction):
+            return
+        action.qaction = None
+        if qa in self._processing_actions:
+            self._processing_actions.remove(qa)
+        for key, sub in list(self._plugin_submenus.items()):
+            if qa in sub.actions():
+                sub.removeAction(qa)
+                if not sub.actions() and self.plugin_menu is not None:
+                    self.plugin_menu.removeAction(sub.menuAction())
+                    del self._plugin_submenus[key]
+                    sub.deleteLater()
+        if self.plugin_menu is not None and not self._plugin_submenus:  # no plugin action left: no empty menu
+            self.plugin_menu.menuAction().setVisible(False)
+        qa.deleteLater()
+
+    def plugin_contributions_changed(self, context) -> None:
+        """A plugin added an action or a rail group after it was activated, or went (``context.released``): the
+        menu Plugin, the tool rails and the search of the commands follow. Before the plugins are all activated
+        nothing is done here: :meth:`_load_plugins` shows everything at the end."""
+        if not getattr(self, "_plugin_rail_ready", False):
+            return
+        managed = any(i.context is context for i in getattr(self.plugins, "plugins", []))
+        if context.released:
+            self._plugin_extra_contexts.discard(context)
+            for a in context.contributions.actions + self._plugin_rail_only.pop(context, []):
+                self._drop_plugin_qaction(a)
+        else:
+            if not managed:
+                self._plugin_extra_contexts.add(context)
+            for a in context.contributions.actions:
+                self._plugin_qaction(a)
+        self.refresh_plugin_rails(released=context if context.released else None)
+
+    def _plugin_rail_qaction(self, context, action) -> QAction:
+        """The QAction of an item of a rail group: an Action given to ``add_action`` is the one of the menu Plugin;
+        one only in the group gets a QAction of its own, taken away with the plugin."""
+        if isinstance(action, QAction) or action in context.contributions.actions:
+            return self._plugin_qaction(action)
+        fresh = not isinstance(getattr(action, "qaction", None), QAction)
+        qa = self._plugin_qaction(action, in_menu=False)
+        if fresh:
+            self._plugin_rail_only.setdefault(context, []).append(action)
+        return qa
+
+    def _plugin_rail_entry(self, context, title: str) -> QPushButton:
+        """The button of a plugin in the program's *Plugin* group: its actions in a menu, split by their ``menu=``
+        into submenus as the menu Plugin does (the same QActions)."""
+        button = QPushButton(icon("plugin"), title)
+        button.setObjectName("railItem")
+        button.setToolTip(tr("Le azioni del plugin {0}", title))
+        menu = QMenu(title, button)
+        subs: dict[str, QMenu] = {}
+        for a in context.contributions.actions:
+            if a.menu:
+                if a.menu not in subs:
+                    subs[a.menu] = QMenu(a.menu, menu)
+                subs[a.menu].addAction(self._plugin_qaction(a))
+            else:
+                menu.addAction(self._plugin_qaction(a))
+        for sub in subs.values():
+            sub.menuAction().setIcon(icon("plugin"))
+            menu.addMenu(sub)
+        menu.setToolTipsVisible(True)
+        button.setMenu(menu)
+        return button
+
+    def _plugin_contexts(self, released=None) -> list:
+        """The contexts of the active plugins (those of the manager, then those made by hand), not released."""
+        out = [c for c in self.plugins._active_contexts() if c is not released and not c.released]
+        out += [c for c in list(self._plugin_extra_contexts) if c is not released and not c.released and c not in out]
+        return out
+
+    def refresh_plugin_rails(self, released=None) -> None:
+        """The groups of the plugins in the rails made again: each ``context.add_rail_group`` at the end of its
+        rail (2D or 3D), then the program's **Plugin** group at the end of the 2D rail: every plugin with actions
+        and no group of its own, as a sub-menu of its actions (the same QActions as the menu Plugin). The search of
+        the commands reads the menus again."""
+        if not getattr(self, "_plugin_rail_ready", False):
+            return
+        rails = {"2d": self.raster_rail, "3d": self.model_view.rail}
+        for rail in rails.values():
+            for key in [k for k in rail.groups if k.startswith("plugin:")]:
+                rail.remove_group(key)
+        titles = self._plugin_titles()
+        contexts = self._plugin_contexts(released)
+        grouped = set()
+        for c in contexts:
+            for g in c.contributions.rail_groups:
+                key = f"plugin:{c.name}:{g.key}"
+                try:
+                    items = [None if a is None else self._plugin_rail_qaction(c, a) for a in g.actions]
+                    rails[g.view].add_group(key, g.title, g.icon or "plugin", items)
+                except Exception as exc:  # noqa: BLE001 - one plugin never breaks the others' groups or the window
+                    log.warning(tr("Plugin {0}: il gruppo {1} della barra degli strumenti è escluso: {2}",
+                                   c.name, g.key, exc))
+                    rails.get(g.view, self.raster_rail).remove_group(key)
+                    continue
+                grouped.add(c.name)
+        entries = []
+        for c in contexts:
+            if c.name in grouped or not c.contributions.actions:
+                continue
+            try:
+                entries.append(self._plugin_rail_entry(c, titles.get(c.name, c.name)))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(tr("Plugin {0}: escluso dal gruppo Plugin della barra degli strumenti: {1}", c.name, exc))
+        if entries:
+            self.raster_rail.add_group("plugin:", tr("Plugin"), "plugin", entries,
+                                       tip=tr("I plugin che non hanno un gruppo loro: ognuno con le sue azioni"))
+        search = getattr(self, "command_search", None)
+        if search is not None:
+            search.invalidate()
 
     def _run_plugin_action(self, action) -> None:
         try:
@@ -3209,7 +3373,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._say_waiting_steps()
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
         if self.history is not None:  # nothing can be undone after the session: the copies of its steps go
-            self.history.close(self.doc.chunks)
+            self.history.close(self.doc.chunks if self.doc is not None else ())
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
         if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
             self.settings.remove("updates_last_check")
@@ -5541,12 +5705,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _undo_plugins(self, ch, data: dict) -> None:
         """The plugins' keys of ``chunk.meta`` as a snapshot has them (those it has not, gone); the workspace and the
-        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``)."""
+        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``). The keys a plugin's own
+        steps undo (``history.step_keys``) are left to those steps."""
         import copy
 
         from ..engine.orient import PROGRAM_KEYS
 
-        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data]:
+        own = self.history.step_keys if self.history is not None else set()
+        data = {k: v for k, v in data.items() if k not in own}
+        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data and k not in own]:
             del ch.meta[k]
         for k, v in data.items():
             ch.meta[k] = copy.deepcopy(v)
@@ -15588,22 +15755,106 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.assistant.open_settings()
 
     def run_script(self) -> None:
-        """*Esegui script Python...*: the file chosen run in the worker (:meth:`run_script_source`), its output in
-        the console; Modifica > Annulla takes it back in one step."""
-        path, _ = QFileDialog.getOpenFileName(self, tr("Script Python"), self._last_dir(), "Python (*.py)")
-        if not path:
-            return
-        src = Path(path).read_text(encoding="utf-8")
-        self._show_pane(self.bottom_tabs, self.console)
-        self.console.write(tr("# esecuzione di {0}\n", path))
+        """*Esegui script Python...*: the file chosen run as the console's *Esegui file .py...* runs it
+        (:meth:`run_python_file`)."""
+        path = self.console.ask_file(self)
+        if path:
+            self.run_python_file(path)
+
+    # the names run_script adds to the namespace of a script: not "defined by the file"
+    _SCRIPT_NAMES = frozenset({"progress", "cancel", "exit", "quit", "__builtins__", "__file__", "__name__"})
+
+    def run_python_file(self, path) -> bool:
+        """Run the Python file ``path`` on the project, as the console's *Esegui file .py...* does: in the worker
+        (:meth:`run_script_source`: the progress window, *Annulla* of the progress, ONE entry of Modifica > Annulla
+        named after the file), what it prints in the console as it prints it, framed by ``>>> run <path>`` and a
+        line with the result (ok / errore / annullato) and the seconds; its traceback when it fails. During the run
+        ``sys.argv`` is ``[path]``, ``__file__`` is ``path`` and the file's folder comes first in ``sys.path``. After
+        it, the names it defined at module level (not ``_private``, not modules) are copied into the console, as
+        IPython's ``%run`` does. Returns False when it did not start: another step running (said in the console),
+        a file that cannot be read."""
+        import tokenize
+        import types
+
+        from ..assistant.scripts import run_script
+
+        path = str(Path(path).expanduser().absolute())
+        console = self.console
+        self._show_pane(self.bottom_tabs, console)
+        if self.runner.busy:
+            console.write(tr("Un'elaborazione è in corso: il file non parte") + "\n")
+            self.statusBar().showMessage(tr("Un'elaborazione è in corso: lo script non parte"), 8000)
+            return False
+        try:
+            with tokenize.open(path) as f:  # the encoding of a Python source (a coding line, else UTF-8)
+                source = f.read()
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
+            return False
+        kept: dict = {}
+        echo = console.feed  # thread-safe: a queued signal of the console
+        t0 = time.monotonic()
+
+        def work(namespace, progress):
+            kept["namespace"] = namespace
+            kept["before"] = set(namespace)
+            folder = str(Path(path).parent)
+            argv = sys.argv
+            sys.argv = [path]
+            sys.path.insert(0, folder)
+            try:
+                return run_script(source, namespace, progress, name=path, echo=echo)
+            finally:
+                sys.argv = argv
+                try:
+                    sys.path.remove(folder)  # the first one: ours
+                except ValueError:  # the file took it away itself
+                    pass
 
         def done(result) -> None:
-            if result.output:
-                self.console.write(result.output if result.output.endswith("\n") else result.output + "\n")
-            if result.error:
-                self.console.write(result.traceback or result.error + "\n")
+            namespace = kept.get("namespace") or {}
+            skip = kept.get("before", set()) | self._SCRIPT_NAMES
+            names = {k: v for k, v in namespace.items()
+                     if k not in skip and not k.startswith("_") and not isinstance(v, types.ModuleType)}
+            if result.error == tr("Script annullato"):
+                outcome = tr("annullato")
+            elif result.error:
+                outcome = tr("errore")
+            else:
+                outcome = "ok"
+            trace = result.traceback or (result.error if result.error and outcome != tr("annullato") else None)
+            console.end_file(outcome, time.monotonic() - t0, trace, names)
 
-        self.run_script_source(src, Path(path).name, on_done=done, path=path)
+        if not self._script_step(Path(path).name, work, done, path=path):
+            console.write(tr("Un'elaborazione è in corso: il file non parte") + "\n")
+            return False
+        console.begin_file(path)  # here, in the interface thread: before anything the worker prints (queued)
+        return True
+
+    def _edit_python_file(self, path: str) -> None:
+        """*Apri nell'editor* of the console: the file in the assistant's script editor (shown), else in the
+        system's editor. Another text in the editor (a script not saved) is replaced only when the user says so,
+        and Ctrl+Z there brings it back."""
+        pane = getattr(self, "assistant", None)
+        if pane is not None and hasattr(pane, "open_in_editor"):
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self.console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
+                return
+            editor = getattr(pane, "editor", None)
+            current = editor.toPlainText() if editor is not None else ""
+            if current.strip() and current != text:
+                answer = choice(self, "question", tr("Apri nell'editor"),
+                                tr("L'editor degli script contiene un altro testo. Sostituirlo con {0}? (Ctrl+Z "
+                                   "nell'editor lo riporta)", Path(path).name), [tr("Sostituisci")])
+                if answer != 0:
+                    return
+            if current != text:
+                pane.open_in_editor(text)
+            self._show_pane(self.bottom_tabs, pane)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _build_assistant_actions_menu(self, menu) -> None:
         """*Vista > Assistente > Azioni*: when the assistant's actions run (the setting ``assistant_actions``)."""

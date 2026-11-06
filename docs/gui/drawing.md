@@ -157,6 +157,8 @@ floor and a point](../img/free-3d.png)
 * **Select and edit**: a click chooses a drawing (drawn thicker) and shows its vertices on the frozen view; drag one to
   move it (it is picked again on the surface where you let go, never left in the air), Delete removes the chosen
   vertex or, with none chosen, the drawing (a polygon keeps three vertices, a line two), a double click opens the form.
+  A drawing the model hides is not chosen where the view does not show it (with the graphics card); the simpler
+  renderer without it paints the drawings over the model, so there any drawing seen is chosen.
 
 **On the plan or on an elevation** (*Free drawing* in the tool rail, its menu for *Line*, *Polygon*, *Point*, the
 layer and *New layer...*): click the vertices as with the other tools (snap included; a polygon also freehand);

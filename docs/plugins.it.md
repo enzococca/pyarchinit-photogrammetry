@@ -171,7 +171,8 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 |---|---|
 | `app` | lo stato condiviso con gli script: `context.app.document` è il progetto aperto, `.chunk` il suo chunk attivo ([API](api.md)) |
 | `window` | la finestra principale, o `None` nella riga di comando |
-| `add_action(title, callback, menu="", tip="", processing=False)` | un'azione di menu sotto *Plugin* (nel sottomenu del plugin, o in `menu`); `processing=True` la disattiva mentre gira un passo dell'elaborazione |
+| `add_action(title, callback, menu="", tip="", processing=False)` | un'azione di menu sotto *Plugin* (nel sottomenu del plugin, o in `menu`); `processing=True` la disattiva mentre gira un passo dell'elaborazione; dalla 1.7.4 anche se aggiunta dopo `activate` (entra allora nel menu e la ricerca dei comandi la trova); un plugin senza un gruppo suo nella barra degli strumenti sta nel gruppo *Plugin* della barra della vista 2D con le sue azioni (quelle con un `menu` in un sottomenu con quel nome, come nel menu *Plugin*). Solo nel thread dell'interfaccia (`activate`, un'azione, `done`), mai nella funzione data a `run` |
+| `add_rail_group(key, title, icon="plugin", actions=(), view="2d")` | dalla 1.7.4: un gruppo del plugin in fondo alla barra degli strumenti della vista 2D (`view="2d"`) o della vista 3D (`"3d"`): il suo pulsante con `icon` (una `QIcon` o il nome di un'icona del programma) apre un pannello con `actions`, cioè gli oggetti `Action` restituiti da `add_action` (gli stessi del menu *Plugin*) o `QAction` del plugin; `None` traccia una linea fra le azioni, qualunque altra cosa solleva subito `TypeError`. La stessa `key` con la stessa `view` sostituisce il gruppo. Solo nel thread dell'interfaccia, come `add_action`. Un plugin con un gruppo suo non compare nel gruppo *Plugin*; i gruppi se ne vanno con il plugin; nella riga di comando vengono tenuti e non si vedono da nessuna parte; restituisce il `RailGroup` |
 | `add_command(name, function, help="")` | `ppg plugin NOME ARGOMENTI...` chiama `function(*args)` con gli argomenti come stringhe; un int restituito è il codice d'uscita |
 | `add_exporter(title, suffix, function)` | *File > Esporta > title...*: `function(chunk, path, progress)` scrive `path` in background |
 | `store_drawings()` | scrive nel progetto quello che la finestra mostra (unità e quote disegnate, pietre, sezioni) prima che un plugin legga `chunk.meta`; solo nel thread dell'interfaccia (un'azione, `done`), niente nella riga di comando; la finestra lo fa da sola prima di eseguire un esportatore |
@@ -217,12 +218,25 @@ nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia q
 ha preso oltre alle sue registrazioni (file aperti, timer).
 
 **Annullare i dati del plugin.** Dalla 1.7.3 le chiavi di `chunk.meta` che non sono del programma fanno parte delle
-istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Un plugin
-che spinge un suo passo (`window.history.push(testo, passo, document=False)`) e poi chiama `mark_modified()` non ha una
-seconda voce per lo stesso cambiamento - ma solo nello stesso giro del ciclo degli eventi: il passo resta "fresco"
-finché non scatta un timer a tempo zero. Un `mark_modified()` chiamato dopo (da una callback successiva, da un timer,
-alla fine di un lavoro in background) registra di nuovo i dati del plugin come una voce a parte, e una sola azione
-diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, nella stessa callback.
+istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Dalla 1.7.4:
+
+- **Un segno entra nel passo del suo giro.** Un cambiamento dei dati dei plugin segnato nello stesso giro del ciclo
+  degli eventi dell'ultimo passo entra in quel passo, chiunque l'abbia fatto: il passo spinto dal plugin
+  (`window.history.push(testo, passo, document=False)`), le US aggiunte con `context.add_units` (annullate insieme),
+  la modifica dell'utente a cui il plugin ha reagito - o il passo di un altro plugin spinto in quel giro, che allora
+  prende il cambiamento senza annullarlo. Un dialogo modale (`exec`, `ParamDialog.ask`, `message`) fra il cambiamento
+  e il segno, o fra la fine di un lavoro in background e il push, chiude il giro: il segno diventa un passo a sé.
+- **Una chiave coperta dai passi di un plugin è lasciata a loro.** Un plugin che tiene l'annullamento nei suoi passi
+  dice quali chiavi di `chunk.meta` coprono: un attributo `meta_keys` della classe del passo (`meta_keys = ("mia",)`;
+  i programmi precedenti lo ignorano) o `window.history.push(testo, passo, document=False, keys=["mia"])` (solo dalla
+  1.7.4). Da quel passo, finché non si apre un altro progetto, quelle chiavi escono dalle istantanee: le annullano i
+  suoi passi, una cache aggiornata lì e segnata senza un passo non fa un passo (il progetto resta da salvare), e
+  annullare i dati di un altro plugin non le riporta mai indietro. Senza dichiarazione il programma ricava le chiavi
+  dal passo: quelle cambiate nel giro del push (o nel lavoro in background finito in quel giro), mai una chiave appena
+  creata vuota.
+- **Conseguenza:** quello che il plugin tiene sotto una chiave coperta e che i suoi passi non annullano non si annulla
+  più dopo il suo primo passo - prima di quel passo un cambiamento è un passo "Dati dei plugin", dopo nessuno. Tieni
+  questi dati (impostazioni, cache che l'utente potrebbe voler riavere) sotto un'altra chiave, o coprili con un passo.
 
 ### Compatibilità
 
@@ -230,7 +244,8 @@ diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, ne
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` e `add_action` dopo `activate` 1.7.4 (la 1.7.3 e le
+precedenti ignorano un'azione aggiunta dopo). I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste

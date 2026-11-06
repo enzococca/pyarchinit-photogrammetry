@@ -446,6 +446,8 @@ def test_the_editor_follows_the_selected_drawing(view, app):
 
 
 def test_select_skips_hidden_drawings_and_takes_backspace(view, app):
+    """A drawing behind the model is not taken where the 3D view draws the free drawings with a depth test (VTK: it is
+    not seen there); the software canvas paints them over the model, so there what is seen is taken."""
     from free3d_helpers import click_at, median_edge, screen_of
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -459,9 +461,19 @@ def test_select_skips_hidden_drawings_and_takes_backspace(view, app):
     view.set_free([{"id": "under", "kind": "point", "xyz": world[:1].tolist()},
                    {"id": "seen", "kind": "point", "xyz": world[1:].tolist()}], {})
     got = _record(view)
+    assert view.backend == "software" and not view._free_lines_depth_tested()
     view.start_free_select()
     click_at(view, x + 2, y + 2)
-    assert got["selected"] == [] and view.selected_free is None  # behind the model: not taken
+    assert got["selected"] == ["under"] and view.selected_free == "under"  # painted over the model: seen, taken
+    QTest.keyClick(view.editor, Qt.Key.Key_Escape)
+    click_at(view, 3, 3)  # nothing there: none selected
+    got["selected"].clear()
+    view._free_lines_depth_tested = lambda: True  # as the VTK canvas draws them
+    try:
+        click_at(view, x + 2, y + 2)
+        assert got["selected"] == [] and view.selected_free is None  # behind the model: not seen, not taken
+    finally:
+        del view._free_lines_depth_tested
     x, y = screen_of(view, b)
     click_at(view, x + 2, y + 2)
     assert got["selected"] == ["seen"]

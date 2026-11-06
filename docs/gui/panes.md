@@ -214,6 +214,26 @@ How to draw them is in [Drawing and measures](drawing.md#sections).
 A Python console with the project at hand: `doc` (the project), `chunk` (the active chunk), `app`, `ppg` (the
 library), `np` and `window`. What it changes shows in the window. A pasted block of several lines runs at once. ++ctrl+shift+p++ brings it to the front.
 
+The bar over the output runs a whole Python file (since 1.7.4):
+
+* **Run .py file...** chooses a file (the dialog opens in the folder of the last one) and runs it;
+* **Run again** runs the last file again (its name in the tooltip);
+* **Recent** lists the last ten files run (the ones that no longer exist drop out);
+* **Open in the editor** opens the last file in the script editor of the [assistant](assistant.md);
+* **Clear** empties the output.
+
+A `.py` file dragged onto the console runs too (other files are refused with a line in the output).
+The file runs in the background as *Tools > Run Python script...* does: the progress window can stop it, the
+window stays usable, and whatever it changes in the project is **one** step of *Edit > Undo*, also when it fails
+halfway; while another step is running it does not start (the console says so). What it prints appears in the
+console as it prints it, between `>>> run <file>` and a closing line with the result (ok, error or cancelled)
+and the seconds it took; an error shows its traceback. During the run `sys.argv` is `[file]`, `__file__` is the
+file and its folder comes first in `sys.path`, so it can import the modules beside it. Afterwards the names the
+file defined (variables, functions, classes; not the `_private` ones and not the imported modules) are copied into
+the console, as IPython's `%run` does, and listed in one line (*New names: ...*): you can go on with them at the
+prompt. From the console the same is `window.run_python_file(path)` (a script already runs in the background,
+so a file it asks to run is refused).
+
 ## Assistant
 
 ![The Assistant pane](../img/gui/pane-assistant.png)
