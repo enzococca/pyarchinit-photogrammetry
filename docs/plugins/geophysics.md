@@ -8,7 +8,10 @@ destripe, high-pass...), lays them over the orthophoto or the DEM with the trans
 lets you draw the anomalies you read on them, and exports them for a GIS. Anomaly and excavation,
 magnetic map and orthophoto end up in the same place and the same reference system.
 
-This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later.
+This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later
+(1.3.4 or later for the section of the resistivity tomography in the 2D view). Version 0.2.0 adds
+[electrical resistivity tomography](#ert): the readings of a resistivity meter, inverted with pyGIMLi,
+become a resistivity section placed in the survey.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geophysics).
 
@@ -37,6 +40,9 @@ Its README and source code are in the
 6. *Draw anomaly*: the polygons of what you read on the grid, with a note.
 7. *Export...* as GeoTIFF or Surfer GRD, *File > Export* as GeoPackage, or *Open in QGIS*.
 
+For a profile of a resistivity meter, instead of a grid: the [ERT tab](#ert) - import the readings, place the line,
+filter, invert, look at the section in 2D and in 3D, export.
+
 ## What it does
 
 | Step | What it gives | Useful for |
@@ -47,10 +53,12 @@ Its README and source code are in the
 | Overlay | the grid over the orthophoto or the DEM, with its band, palette and opacity | reading anomalies against walls, trenches, field boundaries and the relief |
 | Anomalies | polygons drawn on the view, each with the grid, the band and a note, kept in the project | the interpretation, next to the survey and the excavation |
 | Exports | GeoTIFF and Surfer GRD of a grid, a GeoPackage with the outlines of the grids and the anomalies, the grids in the QGIS project of the program | the archive, the GIS, the report |
+| Electrical resistivity tomography | the readings of a resistivity meter inverted into a section of resistivity under a line placed on the survey, seen in 2D and in the 3D view with the units and the cores, exported | a line of electrodes across a trench, a mound or a field, read together with the excavation |
 
-It is not a processing program: it does not reduce raw data logged by an instrument, does not join the
+As for the grids, it is not a processing program: it does not reduce raw data logged by an instrument, does not join the
 grids of a survey into a composite and does not interpret: the anomalies are drawn by you. Process the survey in its own software,
-export the grids, then use the plugin to put them on the ground.
+export the grids, then use the plugin to put them on the ground. The tomography is the one exception: it inverts the readings of a
+resistivity meter itself, with [pyGIMLi](https://www.pygimli.org), because a resistivity section does not exist before the inversion.
 
 ## What you need first { #before }
 
@@ -444,6 +452,324 @@ georeferencing says how well the pegs agree among themselves, not whether they a
 * **No interpretation.** The plugin draws the grid where it belongs: the anomalies are read by the
   archaeologist and the geophysicist, and drawn by them with *Draw anomaly* or in QGIS.
 
+## Electrical resistivity tomography (ERT) { #ert }
+
+An ERT profile is a line of electrodes in the ground, 24, 48, 64 or more, a spacing apart, and a
+resistivity meter that injects a current between two of them and reads the voltage between two others,
+hundreds or thousands of times. What it logs is the *apparent* resistivity of each reading: a number
+that mixes the ground between and under the electrodes. The **inversion** finds the distribution of
+resistivity in the ground that explains all the readings; its result is the **resistivity section**, a
+vertical image under the line - conductive ground (clay, wet fill, a ditch) in blue, resistive ground
+(stone, a wall, a void, dry sand) in red and purple.
+
+The plugin takes the readings as the instrument exported them, places the line on the survey, lets you
+look at the data and take out the bad readings, inverts with pyGIMLi, and puts the section where it
+belongs: in a view of its own, with its legend in ohm metres, and in the 3D view under the line, with the
+model, the stratigraphic units and the cores of the [Geoarchaeology plugin](geoarchaeology.md).
+
+<figure markdown="span">
+  ![The section of a synthetic profile with its colour scale](../img/plugins/geophysics/ert-figure.png)
+  <figcaption>The figure exported for a synthetic profile of 61 electrodes 1 m apart over a ground rising 4 %:
+  a conductive surface layer (blue), a resistive layer below it (orange), a buried resistive block in the
+  middle (purple), the electrodes as triangles on the surface, the colours in a logarithmic scale. The parts
+  the readings do not resolve are left white.</figcaption>
+</figure>
+
+!!! note "The examples of this section"
+    The profile is synthetic: pyGIMLi computes the readings of a model (a ground of 40 ohm m over 150 ohm m
+    from 3 m, with a block of 1500 ohm m between 1 and 3 m deep, in the middle of 61 electrodes), adds 2 %
+    of noise, and the plugin inverts them as it would those of an instrument. The block comes back where it
+    is, a little smoothed: that is what an inversion does.
+
+### The ERT tab { #ert-pane }
+
+The *ERT* tab of the *Geophysics* pane lists the steps of a profile in order, each with its buttons and, under
+them, its state: *Readings*, *Line in the survey*, *Pseudosection and filters*, *Inversion (pyGIMLi)*, *Section*
+and *Exports*. The list at the top chooses the profile, when the chunk has more than one. A step that cannot be
+done yet - an inversion before the line is placed, a section before the inversion - has its buttons greyed.
+*Plugins > Geophysics* has the same actions as menu entries, among them *Electrical tomography: import
+readings...* and *Install pyGIMLi...*.
+
+<figure markdown="span">
+  ![The ERT tab of the Geophysics pane](../img/plugins/geophysics/ert-pane.png)
+  <figcaption>The ERT tab after an inversion: every step with its state - 61 electrodes and 1711 readings,
+  a line of 60 m with the heights from the DEM, 1706 valid readings, χ² 0.72 and RMS 2.5 % - and the colours of
+  the section with the blanking in force.</figcaption>
+</figure>
+
+### What you need { #ert-before }
+
+* The plugin, as for the grids, and a project with a chunk. The line is placed on a **projected reference
+  system in metres** (the chunk's); a chunk with a local system works too, with its local coordinates.
+* The **readings** of the resistivity meter as a file (next section) and, if you have them, the
+  coordinates of the electrodes.
+* An **orthophoto or a DEM** of the chunk to draw the line on and to take the heights of the electrodes from
+  (the topography goes into the inversion). Without them the line is typed in or taken from two markers and
+  the ground is flat, or the file gives the heights.
+* **pyGIMLi**, which the plugin installs for you in an environment of its own the first time you invert
+  ([below](#ert-install)). It is not part of the program and is not needed to import, place and filter.
+
+### The readings { #ert-formats }
+
+*Import readings...* takes one file; the format is recognised from its content.
+
+| Format | What it is | Notes |
+|---|---|---|
+| CSV, TXT (a table with a header) | one reading per row: `a, b, m, n` and the apparent resistivity `rhoa`, or the resistance `r`, or the voltage `u` with the current `i`; the error `err` when the instrument gives it | the names of the columns are recognised in many spellings (`rho`, `appres`, `C1 C2 P1 P2`...); a comma, a semicolon, a tab or spaces between the columns, a decimal point or a decimal comma |
+| Syscal export | the columns `Spa.1`-`Spa.4`, `Rho`, `Dev` (the error in %), `Vp` (mV), `In` (mA) are read as they are | the text export of the instrument's software |
+| pyGIMLi's unified format (`.ohm`, `.dat`, `.shm`) | electrodes and readings in one file, with the topography of the electrodes if it has it | the format the plugin itself writes (*Export...*) |
+| RES2DINV, ABEM, other instrument files | read by pyGIMLi, in its environment | needs pyGIMLi installed; the plugin offers it |
+| a table of electrodes (optional, a second file) | `x, z` (distance along the line and height), or `x, y, z` in the coordinates of the chunk | the line then passes through the electrodes |
+
+Two things are decided when you import, and the dialog asks them:
+
+* **Numbers or positions.** In `a, b, m, n` an electrode can be its number (1, 2, 3...) or its position in
+  metres. The plugin guesses; *Columns a, b, m, n* lets you say it. With numbers, *Spacing of the numbered
+  electrodes* gives the metres between two electrodes.
+* **Name.** The name of the profile in the project; empty is the name of the file.
+
+The readings are kept as they are: the plugin reads them into the project and works on that copy. The
+number of electrodes, of readings and the array (dipole-dipole, Wenner, Wenner-Schlumberger, pole-dipole,
+or mixed) are told in the pane, with the notes of the reading: for instance the columns that were guessed
+or the readings with no value.
+
+*Synthetic profile...* makes readings of a ground you describe - two layers and a block, an array, a slope,
+a noise - with pyGIMLi's forward modelling, to try the steps or to see what a line can resolve before the
+field day. It needs pyGIMLi.
+
+### Placing the line in the survey { #ert-place }
+
+The profile lives first in its own frame: x is the distance along the line, y the height. *Line in the
+survey* puts it on the ground, in one of three ways.
+
+* **Draw the line**: with the orthophoto or the DEM in the 2D view, click on the first electrode and on
+  the last (or on more points for a bent line), double click or Enter to end, Esc to cancel. The line runs
+  from the first electrode towards the last.
+* **Line from markers or coordinates...**: *two markers* (the marker of the first electrode and that of the
+  last), or *typed coordinates*: `X Y` of two points or more, one per line or separated by `;`.
+* **The coordinates of the electrodes** in the file you imported, if the file has them: the line passes
+  through them and there is nothing to place.
+
+Then, in the same dialog:
+
+* **First electrode at**: where the first electrode is, in metres from the first point of the line (0 when the
+  line starts on the first electrode).
+* **Spacing of the electrodes**: in metres.
+* **Heights of the electrodes**: *from the DEM of the chunk* (sampled under every electrode: the default
+  when the chunk has a DEM), *from the file* (the heights of the electrodes file, plus the height below) or
+  *flat* at the height below. The heights are the topography the inversion follows: on a slope or a
+  mound, use the DEM or the file.
+
+The pane says the length of the line and the range of the heights. *Line on the plan* draws every placed
+line and its electrodes on the orthophoto or DEM, in a layer, with its name and the number of the last
+electrode.
+
+### The pseudosection and the filters { #ert-filter }
+
+*Show the pseudosection* shows the readings, one point each, in the 2D view: the horizontal position is the
+middle of the readings' four electrodes, the vertical one a conventional **pseudo-depth** (0.17 times the span
+of the electrodes), the colour is the apparent resistivity on a logarithmic scale. It is the data as measured, not the
+ground: but it shows at a glance the bad readings - isolated points of a very different colour - and the
+general layout of the survey.
+
+To take a reading out, select it with the program's *Select* tool and press *Delete*: it turns grey and
+stays out of the inversion. *Filters...* takes out many at once. Every rule is off if left empty.
+
+| Filter | What it removes |
+|---|---|
+| Smallest / largest apparent resistivity | readings below or above the value, in ohm m |
+| Largest error of a reading (%) | readings whose error (the deviation the instrument logs) is above, only if the file has it |
+| Largest reciprocal error (%) | readings that differ from their reciprocal - the same readings with the current and the potential electrodes swapped - by more than the value; only for readings that have one |
+| Spikes: departure from the neighbours | readings far from their neighbours in the pseudosection, in robust deviations of the whole: 8 is a usual start, lower removes more |
+| Give back the readings removed by hand | undoes the deletions made with the *Select* tool |
+
+Zero and negative apparent resistivities are always removed. The pane keeps the count - *1706 valid readings
+of 1711 (spikes 5)* - and every removal is recorded, so nothing is lost: change a rule and the readings come
+back.
+
+<figure markdown="span">
+  ![The pseudosection of the profile in the 2D view](../img/plugins/geophysics/ert-pseudosection.png)
+  <figcaption>The pseudosection of the synthetic profile after the spike filter: five readings that were
+  made wrong on purpose are grey, the others coloured by their apparent resistivity; the electrodes on the
+  top row. The resistive block shows as a vertical band of red under the middle of the line.</figcaption>
+</figure>
+
+### The inversion { #ert-invert }
+
+*Invert...* asks the parameters of pyGIMLi's ERT manager; the defaults suit most profiles, and the
+inversion of a typical profile of 48-64 electrodes takes seconds to a minute or two. A window follows the
+steps.
+
+| Parameter | What it is |
+|---|---|
+| Lambda | the smoothness of the result: higher is smoother and fits the data less; 20 is the default. Lower it for sharp contrasts, raise it for noisy data |
+| Vertical weight | below 1 favours horizontal layers, above 1 vertical structures (1 = equal) |
+| Blocky model | an L1 constraint: sharp boundaries and blocks of uniform resistivity, instead of a smooth change; good for a wall or a ditch in a homogeneous ground |
+| Robust data | outlying readings weigh less |
+| Largest number of iterations | 20 by default |
+| Relative error (%) | the error assumed for every reading, 3 % by default |
+| Absolute voltage error (µV) | an error that does not depend on the size of the signal: matters for the readings with a small voltage, the deep ones; empty = none |
+| Use the errors of the file | where the file has an error larger than the relative one, it is used |
+| Depth of the model | how deep the parameter mesh goes; empty = automatic from the longest reading |
+| Nodes between two electrodes | the horizontal fineness of the mesh (a fraction of the spacing, 0.33 by default) |
+| Largest area of a cell | the largest area of a triangle of the mesh, in m²; empty = automatic |
+
+The mesh is a mesh of triangles that follows the topography of the electrodes, and the geometric factors
+are computed on it. The pane then says the fit: **χ²** (about 1 means the model explains the readings as
+well as the error assumed; far below 1 means the error was overestimated, far above 1 underestimated or
+the model is too smooth), the **RMS** of the misfit in %, the iterations and the cells.
+
+!!! warning "A good fit is not a true section"
+    χ² near 1 says the model explains the data, not that the model is the ground: with a larger lambda, a
+    different mesh or a blocky constraint the section changes and the fit stays good. Compare parameters
+    when you are interpreting a boundary, and keep the deeper and the outer parts, which the readings
+    resolve less, at a distance.
+
+#### The parts the readings do not resolve { #ert-doi }
+
+An inversion fills the whole mesh, including parts the readings know nothing about, at the sides and at the
+bottom. The plugin **blanks** them so that the section does not show ground that was not measured. Two ways,
+chosen in the *Depth of investigation* parameter:
+
+* **Coverage** (the default): the cumulative sensitivity of the readings to each cell. Cells whose coverage is
+  more than *Coverage: blank below* orders of magnitude (2.5 by default) under the best covered ones are blanked.
+* **DOI index of Oldenburg and Li**: two more inversions of the same data, towards a reference model ten times
+  lower and ten times higher; where the three results disagree the ground is not resolved. Cells whose index is
+  above *DOI index: blank above* (0.4 by default; the index goes from 0, resolved, to 1) are blanked. It takes
+  three times as long; it is the better answer when the depth of the section matters to you.
+
+The pane tells which blanking applies and the area of the section left (*633 m² of section*). The two
+thresholds can be changed after the inversion with the same dialog; the blanking is not part of the data and the
+inversion is not repeated for it.
+
+### The section { #ert-section }
+
+The *Section* step has three buttons and a palette.
+
+* **2D section**: the section opens in the 2D view in a frame of its own: x is the distance along the line, y the
+  height, so the topography of the electrodes shows at the top of the section. The colours are the resistivity in
+  a **logarithmic** scale between the 2nd and the 98th percentile of the values of the section, with the legend in ohm metres,
+  and the electrodes as circles. It needs program 1.3.4 or later.
+* **In the 3D view**: the section as a vertical image hanging under the line, in the 3D view, in the coordinates
+  of the chunk. The ground of the model or the DEM is cut away on one side of the line, to see the section as in
+  a trench wall. If the Geoarchaeology plugin has a 3D model of the units in the chunk they are drawn too, and its
+  cores are drawn as thin prisms at their place, with the colour of their units. The status bar lists what is
+  shown; choose another view in the *Show* list of the 3D view to go back to the products of the chunk. All
+  the inverted profiles of the chunk are shown together.
+* **Line on the plan**: the line and the electrodes on the orthophoto or the DEM.
+* **Palette**: *Rainbow (classic)* (blue conductive, red and purple resistive, the usual ramp of the resistivity
+  sections), *Viridis*, *Earth* and *Greys*. The same palette goes to the 2D view, the 3D view and the exported
+  figure.
+
+<figure markdown="span">
+  ![The resistivity section in the 2D view with its legend](../img/plugins/geophysics/ert-section.png)
+  <figcaption>The section in the 2D view, with the ERT tab of the pane on the right: the steps with their state
+  and the fit under *Inversion*. The conductive layer, the resistive layer and the block are where they were put
+  into the model.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![The section in the 3D view with the ground cut away and the cores](../img/plugins/geophysics/ert-3d.png)
+  <figcaption>The same section in the 3D view, hanging under the line with the ground cut away on one side, and
+  three cores drawn as prisms along the line. The ground of this model is the sample DEM of the project.</figcaption>
+</figure>
+
+### Exports { #ert-export }
+
+*Export...* writes the files of the selected profile into a folder, or the one you ask for by its extension. The names of the files carry the name of the profile and an Italian word for what they are (`sezione`, `celle`, `linea`, `letture`, `paradati`, `pseudosezione`), in every language of the program.
+
+| File | What it is |
+|---|---|
+| `<name>_sezione.tif` + `<name>_sezione.frame.json` | the section as a float32 GeoTIFF in ohm m, in the frame of the section (u = distance along the line, v = height; 0.25 m pixels in the example), with no coordinate system and no value (NaN) where blanked; the frame file gives the line, its coordinate system and how u and v go back to the survey |
+| `<name>_celle.csv` | the cells of the mesh: the position in the frame of the section and in the world, the resistivity, its log10, the coverage and whether the cell is blanked |
+| `<name>_sezione.xyz` | the pixels of the section with their world coordinates (x, y, z) and the resistivity |
+| `<name>_sezione.png`, `.svg`, `.pdf` | the figure of the section with its axes and colour bar, as in the figure above |
+| `<name>_pseudosezione.png` | the figure of the pseudosection, with the readings removed marked |
+| `<name>_linea.gpkg` | the line (table `profili_ert`, with the fit) and the electrodes (table `elettrodi_ert`, with their heights) as a GeoPackage, in the system of the chunk |
+| `<name>_paradati.json` | the parameters of the inversion, the fit, the filters, the placement and the versions of pyGIMLi, pgcore and the plugin, so that the section can be reproduced |
+| `<name>_letture.ohm` | the readings kept after the filters, in the unified format |
+
+The GeoPackage is read by QGIS; the XYZ and the CSV by any plotting or contouring program.
+
+### From the command line { #ert-cli }
+
+The same steps with `ppg plugin geophysics ert WHAT PROJECT ...`. Every command works on the active chunk
+(`--chunk LABEL` for another one) and saves the project. A profile is named by its name or by its id.
+
+```bash
+ppg plugin geophysics ert install
+ppg plugin geophysics ert import scavo.ppg linea1.csv --name "Line 1" --spacing 1
+ppg plugin geophysics ert place scavo.ppg "Line 1" --markers E1,E48 --heights dem
+ppg plugin geophysics ert place scavo.ppg "Line 2" --line "500010 4500050; 500070 4500050" --heights dem
+ppg plugin geophysics ert filter scavo.ppg "Line 1" --spikes 8 --max-error 5
+ppg plugin geophysics ert invert scavo.ppg "Line 1" --lam 20 --doi oldenburg
+ppg plugin geophysics ert export scavo.ppg "Line 1" exports/line1
+ppg plugin geophysics ert export scavo.ppg "Line 1" line1_pseudo.png --pseudosection
+```
+
+| Command | Options |
+|---|---|
+| `install` | creates the environment with pyGIMLi (`--force` makes it again); `status` says where pyGIMLi is and whether it works |
+| `import PROJECT FILE` | `--name`; `--spacing` (metres between numbered electrodes, 1); `--electrodes FILE`; `--numbers` or `--positions` for the columns a, b, m, n (else guessed) |
+| `simulate PROJECT NAME` | `--electrodes` (48), `--spacing` (1), `--scheme` (`dd`, `wa`, `slm`, `pd`), `--model` as JSON (`{"background": 50, "layers": [[3, 200]], "blocks": [[x0, x1, depth0, depth1, rho]]}`), `--slope`, `--noise` (0.02) |
+| `list PROJECT` | a line per profile: electrodes, readings, valid, array, placement, fit |
+| `place PROJECT PROFILE` | `--markers START,END`, or `--line "X1 Y1; X2 Y2; ..."`; `--first`; `--spacing`; `--heights` `auto`, `dem`, `file`, `flat`; `--z0` |
+| `filter PROJECT PROFILE` | `--min`, `--max`, `--max-error`, `--reciprocal`, `--spikes`; `--remove 12,40`, `--restore 12` (readings counted from 1); `--clear` |
+| `invert PROJECT PROFILE` | `--lam` (20), `--error` % (3), `--abs-u` volts, `--robust`, `--blocky`, `--z-weight` (1), `--max-iter` (20), `--depth`, `--dx` (0.33), `--max-cell`, `--doi coverage|oldenburg`, `--blank coverage|doi|none`, `--drop` (2.5), `--doi-max` (0.4), `--palette` |
+| `export PROJECT PROFILE OUT` | a folder: all the files above; a file name: one, by its extension (`tif`, `csv`, `xyz`, `png`, `svg`, `pdf`, `gpkg`, `json`, `ohm`); `--pseudosection` for the figure of the readings |
+| `scene PROJECT` | writes the PLY of the 3D view (sections, ground cut away on `--side left|right|all`, `--terrain auto|model|dem|none`) |
+| `remove PROJECT PROFILE` | removes the profile and its files |
+
+### Installing pyGIMLi { #ert-install }
+
+pyGIMLi (Apache-2.0) is a scientific library with a compiled core of its own. It never runs inside the program:
+the plugin keeps it in an environment of its own and runs every reading of an instrument file, every inversion
+and every synthetic profile in a **worker process** there, which sends back the numbers. That is why the program,
+which uses other libraries with their own runtimes, cannot be disturbed by it, and why the packaged application,
+which has no pip, can use it.
+
+* *Install pyGIMLi...* (in the ERT tab, or in *Plugins > Geophysics*, or `ppg plugin geophysics ert install`):
+  the plugin says what it will download first - an environment of about **100 MB**, with a Python and pyGIMLi
+  1.6 from PyPI, made with `uv` - and installs it into `<data of the plugin>/ert-env`. It is made once for all
+  the projects. If pyGIMLi is already installed in the Python of the program, that one is used.
+* `PPG_GEOPHYSICS_ENV` puts the environment in another folder, for instance on a bigger disk.
+* *Install pyGIMLi again...* remakes it; it is the thing to try if the inversion complains about the library.
+* pyGIMLi writes its configuration and cache while it runs: the worker has a home folder of its own
+  (`<data of the plugin>/ert-home`), so nothing goes into yours.
+
+pyGIMLi 1.6 has pre-built packages for:
+
+| System | pyGIMLi |
+|---|---|
+| Windows, 64-bit Intel/AMD | yes |
+| Linux, x86_64 | yes |
+| macOS 26 or later, Apple Silicon and Intel | yes |
+| Windows on ARM, Linux on ARM | **no** |
+
+On a system with no package the *Install pyGIMLi...* button explains it and the tomography is **not
+available**: the rest of the plugin - the grids and the readings, the line, the pseudosection and its filters,
+the exports of what is not inverted - works as before, and an inversion done elsewhere is not lost: the readings
+can be exported as `.ohm` (*Export...*) and inverted in another computer with pyGIMLi, but a section cannot yet
+be imported back.
+
+### What a section tells, and what it does not { #ert-limits }
+
+* **Resolution falls with depth.** The deeper the ground, the fewer readings see it and the more the section is
+  smoothed: a metre-wide wall can be sharp at the surface and a blur at 5 m. The blanked area is the plugin's
+  answer to where the readings stop, but not a measure of how well the part that remains is resolved.
+* **The array decides what is seen.** Dipole-dipole shows vertical structures well and the shallow readings
+  weakly; Wenner shows horizontal layers; Wenner-Schlumberger is in between. Try a synthetic profile with your
+  array and spacing: the spacing is the horizontal limit of the detail.
+* **Resistivity is not a material.** Dry sand, a void and a stone wall are all resistive, a wet clay and a
+  ditch full of water are both conductive: the section says where the resistivity changes, the cores and the
+  excavation say what changes.
+* **Two dimensions.** The ground is assumed not to change at right angles to the line: a feature off the line
+  distorts the section. Three-dimensional inversion (a grid of electrodes), time-lapse (the same line on
+  different days), induced polarisation and joint inversion with GPR or magnetometry are **not** in this
+  version.
+* **The topography is in, the hole is not.** The mesh follows the heights of the electrodes; a trench or a
+  hole between the electrodes is not in the mesh.
+
 ## Files written { #files }
 
 Everything goes into the folder of the chunk, next to the project file:
@@ -456,3 +782,9 @@ project itself.
   the id is made from the date and time of the import (`g20261023163609...`).
 * The GeoTIFF and GRD exported with *Export...* or `export`, where you choose.
 * The GeoPackage of *File > Export*, with `<name>_<grid>.tif` beside it for every georeferenced grid.
+* For the tomography, in the folder of the chunk too: `geophysics/ert/<id>/` with the readings and electrodes of
+  every profile (`profile.npz`) and, after the inversion, the result of pyGIMLi (the mesh and the resistivity of
+  its cells), the GeoTIFF of the section and the one shown in the 2D view, and the PLY of the 3D view
+  (`geophysics/ert/vista_3d.ply`). The list of the profiles - name, array, line, filters, parameters and fit - is
+  kept in the project itself. The environment of pyGIMLi is not in the project: it is in the data folder of the
+  plugin.
