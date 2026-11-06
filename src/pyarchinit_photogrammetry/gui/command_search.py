@@ -2,7 +2,9 @@
 
 Typing shows the commands whose name contains the text, each with the path of its menu
 (``Allinea foto  —  Flusso di lavoro``); Enter or a click runs it. Ctrl+K (Cmd+K on macOS)
-puts the cursor in the field from anywhere in the window.
+puts the cursor in the field from anywhere in the window. The list is read again when the field
+gets the cursor and when the menus change (:meth:`CommandSearch.invalidate`: a plugin that adds
+an action later, a menu added to the menu bar), also while the cursor is in the field.
 """
 from __future__ import annotations
 
@@ -75,16 +77,36 @@ class CommandSearch(QLineEdit):
         comp.activated[str].connect(self.run)
         self.setCompleter(comp)
         self.returnPressed.connect(self._enter)
+        self.textEdited.connect(self._fresh)
         self._last = (None, 0.0)  # the action run last and when: Enter and the popup may both report it
+        self._stale = True
+        window.menuBar().installEventFilter(self)  # a menu added or removed: the list is read again
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt's name
+        if ev.type() in (QEvent.Type.ActionAdded, QEvent.Type.ActionRemoved):
+            self.invalidate()
+        return False
 
     def refresh(self) -> None:
         """The commands as the menus are now (enabled ones only)."""
         self.commands = menu_commands(self._window.menuBar())
         self._model.setStringList(sorted(self.commands, key=str.casefold))
+        self._stale = False
+
+    def invalidate(self) -> None:
+        """The menus changed: the list is read again before the next search (at once when the cursor is in the
+        field, so that what is typed next finds the new commands)."""
+        self._stale = True
+        if self.hasFocus():
+            self.refresh()
+
+    def _fresh(self, _text: str = "") -> None:
+        if self._stale:
+            self.refresh()
 
     def matches(self, text: str) -> list[str]:
         """The commands whose name or menu contains ``text`` (case not counted), names first."""
-        if not self.commands:
+        if not self.commands or self._stale:
             self.refresh()
         t = text.strip().casefold()
         if not t:
@@ -104,6 +126,7 @@ class CommandSearch(QLineEdit):
         super().focusInEvent(ev)
 
     def _enter(self) -> None:
+        self._fresh()
         text = self.text()
         if text in self.commands:
             self.run(text)

@@ -3036,7 +3036,8 @@
   "Svuota l'output della console": "Clear the console output",
   "Nessun file eseguito": "No file run yet",
   "Un'elaborazione è in corso: il file non parte": "A step is running: the file does not start",
-  "annullato": "cancelled"
+  "annullato": "cancelled",
+  "I plugin che non hanno un gruppo loro: ognuno con le sue azioni": "The plugins without a group of their own: each with its actions"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4006,6 +4007,7 @@
   "Nuovi nomi: {0}": "New names: {0}",
   "{0}: solo i file .py si eseguono nella console": "{0}: only .py files run in the console",
   "Si esegue un file alla volta: {0}": "One file runs at a time: {0}",
-  "Il file non si può leggere: {0}": "The file cannot be read: {0}"
+  "Il file non si può leggere: {0}": "The file cannot be read: {0}",
+  "Le azioni del plugin {0}": "The actions of the plugin {0}"
  }
 }

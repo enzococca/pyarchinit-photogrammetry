@@ -21,7 +21,7 @@ from __future__ import annotations
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                                QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -173,14 +173,17 @@ class ToolRail(QWidget):
         self._apply_text()
 
     # ----------------------------------------------------------------- building
-    def add_group(self, key: str, title: str, icon_name: str, items: list, tip: str = "") -> RailGroup:
+    def add_group(self, key: str, title: str, icon_name, items: list, tip: str = "") -> RailGroup:
         """A group: ``items`` are :class:`QAction` (a button with the action's icon text), ``(action,
         text)`` or ``(action, text, menu)`` (the button's own text and a menu beside it), widgets
-        (moved into the flyout as they are) or ``None`` (a separator line)."""
+        (moved into the flyout as they are) or ``None`` (a separator line). ``icon_name``: the name of
+        an icon of the program or a QIcon."""
+        if key in self.groups:
+            self.remove_group(key)
         button = QToolButton()
         button.setObjectName("railGroup")
         button.setProperty("groupKey", key)
-        button.setIcon(icon(icon_name))
+        button.setIcon(icon_name if isinstance(icon_name, QIcon) else icon(icon_name or "plugin"))
         button.setIconSize(QSize(22, 22))
         button.setText(title)
         button.setToolTip(tip or title)
@@ -203,6 +206,23 @@ class ToolRail(QWidget):
         self.groups[key] = group
         self._apply_text()
         return group
+
+    def remove_group(self, key: str) -> None:
+        """Take the group ``key`` away (a plugin's, when it goes): its button and its page with what they hold."""
+        group = self.groups.get(key)
+        if group is None:
+            return
+        if self._current == key:
+            self.close(force=True)
+            self._current = None
+        del self.groups[key]
+        self._lay.removeWidget(group.button)
+        group.button.hide()
+        group.button.deleteLater()
+        self.flyout.pages.removeWidget(group.page)
+        group.page.hide()
+        group.page.deleteLater()
+        self._apply_text()
 
     def _add_item(self, group: RailGroup, lay, item) -> None:
         if item is None:

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -2124,12 +2125,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     # ---------------------------------------------------------------- messages
     # ================================================================ plugins
     def _load_plugins(self) -> None:
-        """The plugins (Strumenti > Plugin): their actions in the menu Plugin, their export formats
-        in File > Esporta. One that fails is written in the log; the window starts anyway."""
+        """The plugins (Strumenti > Plugin): their actions in the menu Plugin and in the tool rails, their export
+        formats in File > Esporta. One that fails is written in the log; the window starts anyway."""
         from ..plugins import Manager
 
         self.plugins = Manager(window=self)
         self.plugin_menu: QMenu | None = None
+        self._plugin_submenus: dict[str, QMenu] = {}
+        self._plugin_rail_ready = False  # the plugins activated: what they add from now on is shown at once
+        self._plugin_extra_contexts = weakref.WeakSet()  # contexts made by hand (not by the manager) that added
         loaded = True
         try:
             self.plugins.load()
@@ -2143,23 +2147,121 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         for info in self.plugins.plugins:
             if info.error:
                 log.warning(tr("Plugin {0} non caricato: {1}", info.name, info.error))
-        actions = self.plugins.actions
-        if actions:
-            menu = self.plugin_menu = QMenu(tr("&Plugin"), self)
-            self.menuBar().insertMenu(self.help_menu.menuAction(), menu)
-            titles = {i.name: i.title for i in self.plugins.plugins}
-            submenus: dict = {}
-            for a in actions:
-                key = a.menu or titles.get(a.plugin, a.plugin)
-                if key not in submenus:
-                    submenus[key] = menu.addMenu(icon("plugin"), key)
-                self._act(submenus[key], a.title, lambda a=a: self._run_plugin_action(a), tip=a.tip,
-                          processing=a.processing)
+        for a in self.plugins.actions:
+            self._plugin_qaction(a)
         if self.plugins.exporters:
             self.export_menu.addSeparator()
             for e in self.plugins.exporters:
                 self._act(self.export_menu, e.title + "...", lambda e=e: self._plugin_export(e), processing=True,
                           icon_name="plugin")
+        self._plugin_rail_ready = True
+        self.refresh_plugin_rails()
+
+    def _plugin_titles(self) -> dict[str, str]:
+        return {i.name: i.title or i.name for i in getattr(self.plugins, "plugins", [])}
+
+    def _plugin_qaction(self, action) -> QAction:
+        """The QAction of a plugin's :class:`~..plugins.api.Action` in the menu Plugin (made, with the menu and the
+        plugin's submenu, the first time); a QAction is returned as it is."""
+        if isinstance(action, QAction):
+            return action
+        made = getattr(action, "qaction", None)
+        if isinstance(made, QAction):
+            return made
+        if self.plugin_menu is None:
+            self.plugin_menu = QMenu(tr("&Plugin"), self)
+            self.menuBar().insertMenu(self.help_menu.menuAction(), self.plugin_menu)
+        key = action.menu or self._plugin_titles().get(action.plugin, action.plugin)
+        sub = self._plugin_submenus.get(key)
+        if sub is None:
+            sub = self._plugin_submenus[key] = self.plugin_menu.addMenu(icon("plugin"), key)
+        qa = self._act(sub, action.title, lambda a=action: self._run_plugin_action(a), tip=action.tip,
+                       processing=action.processing)
+        if action.tip:
+            qa.setToolTip(action.tip)
+        action.qaction = qa
+        return qa
+
+    def _drop_plugin_qaction(self, action) -> None:
+        """The QAction of a plugin's action out of the menu Plugin (the plugin went); an empty submenu with it."""
+        qa = getattr(action, "qaction", None)
+        if not isinstance(qa, QAction):
+            return
+        action.qaction = None
+        if qa in self._processing_actions:
+            self._processing_actions.remove(qa)
+        for key, sub in list(self._plugin_submenus.items()):
+            if qa in sub.actions():
+                sub.removeAction(qa)
+                if not sub.actions() and self.plugin_menu is not None:
+                    self.plugin_menu.removeAction(sub.menuAction())
+                    del self._plugin_submenus[key]
+                    sub.deleteLater()
+        qa.deleteLater()
+
+    def plugin_contributions_changed(self, context) -> None:
+        """A plugin added an action or a rail group after it was activated, or went (``context.released``): the
+        menu Plugin, the tool rails and the search of the commands follow. Before the plugins are all activated
+        nothing is done here: :meth:`_load_plugins` shows everything at the end."""
+        if not getattr(self, "_plugin_rail_ready", False):
+            return
+        managed = any(i.context is context for i in getattr(self.plugins, "plugins", []))
+        if context.released:
+            self._plugin_extra_contexts.discard(context)
+            for a in context.contributions.actions:
+                self._drop_plugin_qaction(a)
+        else:
+            if not managed:
+                self._plugin_extra_contexts.add(context)
+            for a in context.contributions.actions:
+                self._plugin_qaction(a)
+        self.refresh_plugin_rails(released=context if context.released else None)
+
+    def _plugin_contexts(self, released=None) -> list:
+        """The contexts of the active plugins (those of the manager, then those made by hand), not released."""
+        out = [c for c in self.plugins._active_contexts() if c is not released and not c.released]
+        out += [c for c in list(self._plugin_extra_contexts) if c is not released and not c.released and c not in out]
+        return out
+
+    def refresh_plugin_rails(self, released=None) -> None:
+        """The groups of the plugins in the rails made again: each ``context.add_rail_group`` at the end of its
+        rail (2D or 3D), then the program's **Plugin** group at the end of the 2D rail: every plugin with actions
+        and no group of its own, as a sub-menu of its actions (the same QActions as the menu Plugin). The search of
+        the commands reads the menus again."""
+        if not getattr(self, "_plugin_rail_ready", False):
+            return
+        rails = {"2d": self.raster_rail, "3d": self.model_view.rail}
+        for rail in rails.values():
+            for key in [k for k in rail.groups if k.startswith("plugin:")]:
+                rail.remove_group(key)
+        titles = self._plugin_titles()
+        contexts = self._plugin_contexts(released)
+        grouped = set()
+        for c in contexts:
+            for g in c.contributions.rail_groups:
+                items = [self._plugin_qaction(a) for a in g.actions]
+                rails[g.view].add_group(f"plugin:{c.name}:{g.key}", g.title, g.icon or "plugin", items)
+                grouped.add(c.name)
+        entries = []
+        for c in contexts:
+            if c.name in grouped or not c.contributions.actions:
+                continue
+            title = titles.get(c.name, c.name)
+            button = QPushButton(icon("plugin"), title)
+            button.setObjectName("railItem")
+            button.setToolTip(tr("Le azioni del plugin {0}", title))
+            menu = QMenu(title, button)
+            for a in c.contributions.actions:
+                menu.addAction(self._plugin_qaction(a))
+            menu.setToolTipsVisible(True)
+            button.setMenu(menu)
+            entries.append(button)
+        if entries:
+            self.raster_rail.add_group("plugin:", tr("Plugin"), "plugin", entries,
+                                       tip=tr("I plugin che non hanno un gruppo loro: ognuno con le sue azioni"))
+        search = getattr(self, "command_search", None)
+        if search is not None:
+            search.invalidate()
 
     def _run_plugin_action(self, action) -> None:
         try:
@@ -2927,7 +3029,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if fetch:
             dlg.fetch()
         dlg.exec()
-
+        self.refresh_plugin_rails()  # a plugin removed there went from the rails with its release()
     def restart(self) -> None:
         """Close and start again with the same project (after plugins or the language changed)."""
         self._relaunch_on_close = True
