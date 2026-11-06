@@ -383,7 +383,7 @@ The link with the database of the excavation; the forms and the relationships st
 | **Update the database structure...** | adds the missing PyArchInit 5 columns, after a backup copy |
 | **Connect to the PyArchInit database at start-up** | connects by itself when the program opens |
 | **Publish orthophoto / DEM / model...** | the products in the media of PyArchInit, linked to the US |
-| **Publish the drawn units and spot heights** · **only the units** · **only the spot heights** | writes `pyunitastratigrafiche` and `pyarchinit_quote` |
+| **Publish the drawn units and spot heights** · **only the units** · **only the spot heights** | writes `pyunitastratigrafiche` and `pyarchinit_quote`; the first is also *Publish in PyArchInit* of the tool rail |
 | **Load US polygons on the orthophoto** | shows the units already in the database |
 | **Refresh pane** | reads sites, US and documentation again |
 
