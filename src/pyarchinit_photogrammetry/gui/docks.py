@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QDockWidget, QFram
 
 from .i18n import tr
 
+HELD_RETRY_MS = 200  # Panes.tidy while a mouse button is down: tried again after this
 STATE_VERSION = 2  # of saveState/restoreState; until 1.3.3 (0) the panes were the tabs of two docks
 AREAS = {"left": Qt.DockWidgetArea.LeftDockWidgetArea, "bottom": Qt.DockWidgetArea.BottomDockWidgetArea,
          "right": Qt.DockWidgetArea.RightDockWidgetArea}
@@ -587,13 +588,18 @@ class Panes(QObject):
                 if ic is not None and not ic.isNull() and bar.tabIcon(i).cacheKey() != ic.cacheKey():
                     bar.setTabIcon(i, ic)
 
+    @staticmethod
+    def _buttons_held() -> bool:
+        """A mouse button is down (a pane may be dragged)."""
+        return QApplication.mouseButtons() != Qt.MouseButton.NoButton
+
     def tidy_later(self) -> None:
         """:meth:`tidy` once the events of now are handled (only after the window was built: :meth:`keep_default`
         tidies the layout of the start)."""
         if self._default is None:
             return
         try:
-            self._tidy_timer.start()
+            self._tidy_timer.start(0)
         except RuntimeError:  # the window is going away
             pass
 
@@ -622,9 +628,16 @@ class Panes(QObject):
     def tidy(self) -> bool:
         """The clean-up of the start (:meth:`keep_default`) when a pane was added, shown, closed or moved while the
         program runs: when the window shows tab bars no group uses, its layout put back as it is now, with the bars
-        made anew. Returns whether it did; a layout it could not clean is not tried again until it changes."""
+        made anew. Returns whether it did; a layout it could not clean is not tried again until it changes; while a
+        mouse button is down (a pane being dragged) nothing is done and it is tried again a little later."""
         if not self.stray_tab_bars():
             self._untidy = None
+            return False
+        if self._buttons_held():  # a pane being dragged: never its layout put back under the mouse
+            try:
+                self._tidy_timer.start(HELD_RETRY_MS)
+            except RuntimeError:  # the window is going away
+                pass
             return False
         key = tuple((d.objectName(), d.isHidden(), d.isFloating(), int(self.window.dockWidgetArea(d).value))
                     for d in self.docks)

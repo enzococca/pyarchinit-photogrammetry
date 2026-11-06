@@ -193,3 +193,30 @@ def test_the_release_of_a_press_that_closed_the_flyout_is_swallowed_once(window,
     send(P), send(R)  # and the next click passes
     assert seen == [P, R]
     vp.removeEventFilter(recorder)
+
+
+def test_no_tidy_while_a_mouse_button_is_held(window, qapp):
+    """A pane being dragged: the layout is never put back under the mouse; the tab bars are looked at again once
+    the button is let go."""
+    import time
+
+    w = window
+    for d in w.panes.docks:
+        if d.objectName() in RIGHT:
+            d.close()
+    _settle(qapp)
+    left = [b for b in w.panes._window_tab_bars() if b.isVisible() and not b.geometry().intersects(w.rect())]
+    left[0].move(0, 300)  # a stray on the window, as in the test above
+    held = [True]
+    w.panes._buttons_held = lambda: held[0]
+    try:
+        assert w.panes.tidy() is False and _stray(w)  # the button is down: nothing done
+        assert w.panes._tidy_timer.isActive()  # tried again later
+        held[0] = False
+        t0 = time.monotonic()
+        while _stray(w) and time.monotonic() - t0 < 5:
+            qapp.processEvents()
+            time.sleep(0.02)
+        assert not _stray(w)
+    finally:
+        del w.panes._buttons_held
