@@ -217,17 +217,24 @@ the function given to `run` (it runs in another thread). `deactivate()` releases
 took beyond its registrations (open files, timers).
 
 **Undo of the plugin's data.** Since 1.7.3 the keys of `chunk.meta` that are not the program's are a part of the
-snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. Since 1.7.4 an
-action of a plugin is one step, or none when it changed nothing of the user's:
+snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. Since 1.7.4:
 
-- a change of the plugin's data marked in the same turn of the event loop as the last step joins that step - the step
-  the plugin pushed (`window.history.push(text, step, document=False)`), or the step of the units it added with
-  `context.add_units` (undone together with them);
-- a key of `chunk.meta` that a step pushed by the plugin changed is the plugin's own from then on: its steps undo it,
-  so the snapshots leave it out. A plugin that keeps its undo in its own steps can refresh a cache in that key and call
-  `mark_modified()` without a step: the project is to be saved, no step appears. Push the step after changing the key
-  (the step takes the keys that differ from the last snapshot, or, pushed when the plugin's background task ends,
-  the keys the task changed), and keep the data its steps do not undo in another key.
+- **A mark joins the step of its turn.** A change of the plugins' data marked in the same turn of the event loop as
+  the last step joins that step, whatever made it: the step the plugin pushed
+  (`window.history.push(text, step, document=False)`), the units it added with `context.add_units` (undone together
+  with them), the user's edit it reacted to - or another plugin's step pushed in that turn, which then takes the
+  change without undoing it. A modal dialog (`exec`, `ParamDialog.ask`, `message`) between the change and the mark,
+  or between the end of a background task and the push, ends the turn: the mark becomes a step of its own.
+- **A key covered by a plugin's steps is left to them.** A plugin that keeps its undo in its own steps says which keys
+  of `chunk.meta` they cover: a `meta_keys` attribute of the step class (`meta_keys = ("mine",)`; older programs
+  ignore it) or `window.history.push(text, step, document=False, keys=["mine"])` (1.7.4 or later only). From that
+  step on, until another project is opened, those keys leave the snapshots: their steps undo them, a cache refreshed
+  in them and marked without a step is no step (the project is still to be saved), and undoing another plugin's
+  data never puts them back. Without a declaration the program infers the keys from the step: those that changed in
+  the turn of the push (or in the background task that ended in that turn), never a key just created empty.
+- **Consequence:** whatever the plugin keeps under a covered key and its steps do not undo is no longer undoable
+  after its first step - before that step a change of it is a "Plugin data" step, after it none. Keep such data
+  (settings, caches the user may want back) under another key, or cover it with a step.
 
 ### Compatibility
 

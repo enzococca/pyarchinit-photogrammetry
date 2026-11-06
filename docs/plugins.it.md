@@ -218,18 +218,25 @@ nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia q
 ha preso oltre alle sue registrazioni (file aperti, timer).
 
 **Annullare i dati del plugin.** Dalla 1.7.3 le chiavi di `chunk.meta` che non sono del programma fanno parte delle
-istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Dalla 1.7.4
-un'azione di un plugin è un passo solo, o nessuno quando non ha cambiato nulla dell'utente:
+istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Dalla 1.7.4:
 
-- un cambiamento dei dati del plugin segnato nello stesso giro del ciclo degli eventi dell'ultimo passo entra in quel
-  passo - il passo spinto dal plugin (`window.history.push(testo, passo, document=False)`), o il passo delle US che ha
-  aggiunto con `context.add_units` (annullato insieme a loro);
-- una chiave di `chunk.meta` cambiata da un passo spinto dal plugin è del plugin da quel momento: la annullano i suoi
-  passi, quindi le istantanee la lasciano fuori. Un plugin che tiene l'annullamento nei suoi passi può aggiornare una
-  cache in quella chiave e chiamare `mark_modified()` senza un passo: il progetto è da salvare, nessun passo compare.
-  Spingi il passo dopo aver cambiato la chiave (il passo prende le chiavi diverse dall'ultima istantanea o, spinto alla
-  fine di un lavoro in background del plugin, quelle cambiate dal lavoro) e tieni in un'altra chiave i dati che i suoi
-  passi non annullano.
+- **Un segno entra nel passo del suo giro.** Un cambiamento dei dati dei plugin segnato nello stesso giro del ciclo
+  degli eventi dell'ultimo passo entra in quel passo, chiunque l'abbia fatto: il passo spinto dal plugin
+  (`window.history.push(testo, passo, document=False)`), le US aggiunte con `context.add_units` (annullate insieme),
+  la modifica dell'utente a cui il plugin ha reagito - o il passo di un altro plugin spinto in quel giro, che allora
+  prende il cambiamento senza annullarlo. Un dialogo modale (`exec`, `ParamDialog.ask`, `message`) fra il cambiamento
+  e il segno, o fra la fine di un lavoro in background e il push, chiude il giro: il segno diventa un passo a sé.
+- **Una chiave coperta dai passi di un plugin è lasciata a loro.** Un plugin che tiene l'annullamento nei suoi passi
+  dice quali chiavi di `chunk.meta` coprono: un attributo `meta_keys` della classe del passo (`meta_keys = ("mia",)`;
+  i programmi precedenti lo ignorano) o `window.history.push(testo, passo, document=False, keys=["mia"])` (solo dalla
+  1.7.4). Da quel passo, finché non si apre un altro progetto, quelle chiavi escono dalle istantanee: le annullano i
+  suoi passi, una cache aggiornata lì e segnata senza un passo non fa un passo (il progetto resta da salvare), e
+  annullare i dati di un altro plugin non le riporta mai indietro. Senza dichiarazione il programma ricava le chiavi
+  dal passo: quelle cambiate nel giro del push (o nel lavoro in background finito in quel giro), mai una chiave appena
+  creata vuota.
+- **Conseguenza:** quello che il plugin tiene sotto una chiave coperta e che i suoi passi non annullano non si annulla
+  più dopo il suo primo passo - prima di quel passo un cambiamento è un passo "Dati dei plugin", dopo nessuno. Tieni
+  questi dati (impostazioni, cache che l'utente potrebbe voler riavere) sotto un'altra chiave, o coprili con un passo.
 
 ### Compatibilità
 

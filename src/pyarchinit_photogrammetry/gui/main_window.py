@@ -1953,9 +1953,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
         take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
         are a part of its snapshots, "Dati dei plugin" (not the plugin's files). Called in the same turn as the last
-        entry (a step the plugin pushed with ``history.push``, units it added) the change joins that entry; a key of
-        ``chunk.meta`` a step of the plugin changed is the plugin's own from then on (its steps undo it): a change of
-        it without a step (a cache) is no entry (``gui.undo``)."""
+        entry - whatever made it: a step the plugin pushed with ``history.push``, units it added, the user's edit,
+        another plugin's step - the change joins that entry. A key of ``chunk.meta`` covered by a step of the plugin
+        (its ``meta_keys``, ``history.push(..., keys=)``, or else the keys the step changed in its turn) is the
+        plugin's from that step until another project is opened: its steps undo it, a change of it without a step (a
+        cache) is no entry - and what the plugin keeps there and its steps do not undo is no longer undoable
+        (``gui.undo``, docs/plugins.md)."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:

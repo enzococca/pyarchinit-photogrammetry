@@ -229,6 +229,88 @@ def test_a_step_pushed_when_its_task_ends_claims_what_the_task_changed():
     assert h.step_keys == {"ship"}
 
 
+def test_a_step_never_claims_a_key_created_empty_or_changed_in_an_earlier_turn():
+    """Plugin B's key created by a getter (``setdefault`` of ``{}``) without a mark, and another key B wrote without a
+    mark in an earlier turn: plugin A's next step does not take them, so B's later marked change is one entry."""
+    state = {"chunk": 0, "plugins": {"a": {"n": 0}}}
+    h, deferred = _history(state)
+    state["plugins"]["a"] = {"n": 1}
+    assert h.record()
+    state["plugins"]["b2"] = {"cache": 1}  # B, without a mark, in a turn where something else was recorded
+    _turn_ends(deferred)
+    state["plugins"]["b"] = {}  # a getter of B, when its pane opens
+    state["plugins"]["a"] = {"n": 2}
+    h.push("A: passo", _PluginStep(), document=False)
+    assert h.step_keys == {"a"}
+    _turn_ends(deferred)
+    state["plugins"]["b"] = {"x": 1}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+    _turn_ends(deferred)
+    state["plugins"]["b2"] = {"cache": 2}
+    assert h.record() and len(h.entries) == 4
+
+
+def test_a_step_declares_the_keys_it_covers():
+    """``meta_keys`` of the step, or ``push(..., keys=)``: those keys are the plugin's, nothing else is taken - also
+    when another key differs from the last snapshot."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+
+    class Declared(_PluginStep):
+        meta_keys = ("mine",)
+
+    state["plugins"] = {"mine": 1, "theirs": 1}
+    h.push("Mio", Declared(), document=False)
+    assert h.step_keys == {"mine"}
+    _turn_ends(deferred)
+    state["plugins"] = {"mine": 1, "theirs": 2, "other": 3}
+    h.push("Altro", _PluginStep(), document=False, keys=["other"])
+    assert h.step_keys == {"mine", "other"}
+    _turn_ends(deferred)
+    state["plugins"]["theirs"] = 4
+    assert h.record()
+
+
+def test_ownership_ends_with_the_project():
+    """Another project (``reset()``): no key is a plugin's any more; another chunk of the same project keeps them."""
+    state = {"chunk": 0, "plugins": {}}
+    h, deferred = _history(state)
+    state["plugins"] = {"ship": {"items": [1]}}
+    h.push("Relitto", _PluginStep(), document=False)
+    _turn_ends(deferred)
+    h.reset(keep_document=True)
+    assert h.step_keys == {"ship"}
+    h.reset()
+    assert not h.step_keys
+    state["plugins"] = {"ship": {"items": [1], "cache": 1}}
+    assert h.record() and h.undo_text() == "Dati dei plugin"
+
+
+def test_two_plugins_in_one_turn():
+    """Plugin A pushes its step, plugin B marks its data in the same turn: B's change goes with the turn's entry (no
+    entry of its own) and B's key is not A's; in a later turn B's change is an entry."""
+    state = {"chunk": 0, "plugins": {"a": 0, "b": 0}}
+    h, deferred = _history(state)
+    state["plugins"]["a"] = 1
+    h.push("A", _PluginStep(), document=False)
+    state["plugins"]["b"] = 1
+    assert not h.record() and len(h.entries) == 1 and h.step_keys == {"a"}
+    _turn_ends(deferred)
+    state["plugins"]["b"] = 2
+    assert h.record() and len(h.entries) == 2
+
+
+def test_close_without_a_chunk_sweeps_the_folder_of_the_last_one(tmp_path):
+    """The document was taken away before closing: the undo folder of the chunk the history last had still goes."""
+    chunk = _Chunk(tmp_path)
+    current = [chunk]
+    h = UndoHistory(lambda: {"chunk": 0}, lambda *a: None, lambda: current[0])
+    (tmp_path / "undo" / "orient-x").mkdir(parents=True)
+    current[0] = None
+    h.close()
+    assert not (tmp_path / "undo").exists()
+
+
 @pytest.fixture
 def window(processed, tmp_path):
     import os
