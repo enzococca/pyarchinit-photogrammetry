@@ -86,6 +86,17 @@ class RailGroup:
     plugin: str = ""
 
 
+def _rail_item(item) -> bool:
+    """An item a rail group takes: an :class:`Action`, a QAction or None (a line)."""
+    if item is None or isinstance(item, Action):
+        return True
+    try:
+        from PySide6.QtGui import QAction
+    except ImportError:  # no Qt: no QAction can exist
+        return False
+    return isinstance(item, QAction)
+
+
 @dataclass
 class Contributions:
     actions: list = field(default_factory=list)
@@ -142,7 +153,7 @@ class Context:
                    processing: bool = False) -> Action:
         """A menu action under *Plugin* (in the plugin's submenu, or in ``menu``). Since 1.7.4 also when added
         after the plugin was activated: the window puts it in the menu then (and the search of the commands
-        finds it)."""
+        finds it) - only in the interface thread (``activate``, an action, ``done``), never from :meth:`run`."""
         action = Action(title, callback, menu, tip, processing, self.name)
         self.contributions.actions.append(action)
         self._tell_window()
@@ -153,12 +164,18 @@ class Context:
         ("3d"), after the program's own groups: its button with ``icon`` (a QIcon or the name of an icon of the
         program) opens a flyout with ``actions`` - the plugin's :class:`Action` objects returned by
         :meth:`add_action` (the same as in the menu *Plugin*) or QActions of its own. A plugin with a group of its
-        own is not listed in the program's *Plugin* group of the rail. Called again with the same ``key`` and
-        ``view`` it replaces the group. Taken away with the plugin (:meth:`release`); kept and shown nowhere in
-        the command line."""
+        own is not listed in the program's *Plugin* group of the rail. ``None`` among the actions draws a line
+        between them; anything else raises TypeError at once. Called again with the same ``key`` and ``view`` it
+        replaces the group. Taken away with the plugin (:meth:`release`); kept and shown nowhere in the command
+        line. Only in the interface thread (``activate``, an action, ``done``), as :meth:`add_action`."""
         if view not in ("2d", "3d"):
             raise ValueError(f"view: '2d' or '3d', not {view!r}")
-        group = RailGroup(str(key), str(title), icon, list(actions), view, self.name)
+        actions = list(actions)
+        bad = [a for a in actions if not _rail_item(a)]
+        if bad:
+            raise TypeError("add_rail_group: the actions are Action objects (from add_action), QActions or None "
+                            f"(a line between them), not {', '.join(repr(b) for b in bad)}")
+        group = RailGroup(str(key), str(title), icon, actions, view, self.name)
         groups = self.contributions.rail_groups
         groups[:] = [g for g in groups if not (g.key == group.key and g.view == view)]
         groups.append(group)

@@ -195,5 +195,129 @@ def test_add_rail_group_in_the_command_line_and_bad_view(tmp_path):
     assert group.actions == [action] and group.view == "2d"  # kept, nothing to show
     with pytest.raises(ValueError):
         ctx.add_rail_group("h", "Altro", "plugin", [action], view="4d")
+    with pytest.raises(TypeError):
+        ctx.add_rail_group("h", "Altro", "plugin", [action, 3])
+    assert [g.key for g in ctx.contributions.rail_groups] == ["g"]
+    assert ctx.add_rail_group("s", "Con linea", "plugin", [action, None, action]).actions[1] is None
     ctx.release()
     assert not ctx.contributions.rail_groups
+
+
+SEPARATED = '''
+from pyarchinit_photogrammetry.plugins import Plugin
+
+
+class RailPlugin(Plugin):
+    title = "Con separatore"
+
+    def activate(self, context):
+        self.context = context
+        one = context.add_action("Uno", lambda: None)
+        two = context.add_action("Due", lambda: None)
+        context.add_rail_group("tools", "Separati", "plugin", [one, None, two])
+'''
+
+BROKEN = '''
+from pyarchinit_photogrammetry.plugins import Plugin
+
+
+class RailPlugin(Plugin):
+    title = "Gruppo rotto"
+
+    def activate(self, context):
+        self.context, self.refused = context, None
+        one = context.add_action("Uno", lambda: None)
+        try:
+            context.add_rail_group("bad", "Rotto", "plugin", [one, "non un'azione"])
+        except TypeError as exc:
+            self.refused = str(exc)
+'''
+
+MENUS = '''
+from pyarchinit_photogrammetry.plugins import Plugin
+
+
+class RailPlugin(Plugin):
+    title = "Con menu"
+
+    def activate(self, context):
+        self.context = context
+        context.add_action("Libera", lambda: None)
+        context.add_action("Primo", lambda: None, menu="Analisi")
+        context.add_action("Secondo", lambda: None, menu="Analisi")
+        context.add_action("Esporta", lambda: None, menu="Uscite")
+'''
+
+
+def test_a_separator_and_a_bad_item_in_a_rail_group(make_window, qapp, caplog):
+    from pyarchinit_photogrammetry.plugins.api import RailGroup
+
+    w = make_window({"a-sep": SEPARATED, "b-rotto": BROKEN, "c-semplice": PLAIN})
+    group = w.raster_rail.groups["plugin:a-sep:tools"]
+    from PySide6.QtWidgets import QFrame
+
+    assert _texts(group) == ["Uno", "Due"] and group.page.findChildren(QFrame, "railSeparator")  # None: a line
+    broken = w.plugins.get("b-rotto")
+    assert broken.active and broken.plugin.refused and "non un'azione" in broken.plugin.refused  # told at once
+    assert not broken.context.contributions.rail_groups  # nothing kept of the refused group
+    # a group that went wrong all the same (put in by hand, as an older program would have kept it): the others stay
+    forced = RailGroup("forced", "Forzato", "plugin", [object()], "2d", "b-rotto")
+    broken.context.contributions.rail_groups.append(forced)
+    plain = w.plugins.get("c-semplice")
+    with caplog.at_level("WARNING"):
+        plain.context.add_action("Ancora", lambda: None)  # another plugin's call: not broken by the bad group
+    _settle(qapp)
+    assert "plugin:a-sep:tools" in w.raster_rail.groups and "plugin:b-rotto:forced" not in w.raster_rail.groups
+    assert any("b-rotto" in m for m in caplog.messages)
+    entries = {b.text(): [a.text() for a in b.menu().actions()] for b in w.raster_rail.groups[PLUGIN_GROUP].widgets}
+    assert "Ancora" in entries["Semplice"] and "Gruppo rotto" in entries  # its group failed: reachable here
+    w.plugins.unload()  # releasing does not raise either
+    _settle(qapp)
+
+
+def test_a_bad_group_at_start_never_stops_the_window(make_window, qapp, monkeypatch, caplog):
+    """A group that cannot be shown when the window starts: written in the log, the window opens with the others."""
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    real = mw.MainWindow._plugin_qaction
+
+    def flaky(self, action):
+        if getattr(action, "title", "") == "Due":
+            raise RuntimeError("rotto apposta")
+        return real(self, action)
+
+    monkeypatch.setattr(mw.MainWindow, "_plugin_qaction", flaky)
+    with caplog.at_level("WARNING"):
+        w = make_window({"a-sep": SEPARATED, "c-semplice": PLAIN})
+    assert "plugin:a-sep:tools" not in w.raster_rail.groups
+    assert PLUGIN_GROUP in w.raster_rail.groups and any("rotto apposta" in m for m in caplog.messages)
+
+
+def test_the_plugin_group_splits_the_actions_by_their_menu(make_window, qapp):
+    w = make_window({"menu": MENUS})
+    menu = w.raster_rail.groups[PLUGIN_GROUP].widgets[0].menu()
+    flat = [a.text() for a in menu.actions() if a.menu() is None and not a.isSeparator()]
+    subs = {a.text(): [x.text() for x in a.menu().actions()] for a in menu.actions() if a.menu() is not None}
+    assert flat == ["Libera"] and subs == {"Analisi": ["Primo", "Secondo"], "Uscite": ["Esporta"]}
+    top = {a.text(): [x.text() for x in a.menu().actions()] for a in w.plugin_menu.actions() if a.menu()}
+    assert top["Analisi"] == ["Primo", "Secondo"] and top["Uscite"] == ["Esporta"]  # as the menu Plugin does
+
+
+def test_the_empty_plugin_menu_goes_and_rail_only_actions_go_with_the_plugin(make_window, qapp):
+    from PySide6.QtGui import QAction
+
+    from pyarchinit_photogrammetry.plugins.api import Action
+
+    w = make_window({"semplice": PLAIN})
+    plain = w.plugins.get("semplice")
+    only = Action("Solo nella barra", lambda: None, plugin="semplice")  # never given to add_action
+    plain.context.add_rail_group("g", "G", "plugin", [only])
+    _settle(qapp)
+    qa = only.qaction
+    assert isinstance(qa, QAction) and qa not in [x for a in w.plugin_menu.actions() if a.menu()
+                                                  for x in a.menu().actions()]
+    assert w.plugin_menu.menuAction().isVisible()
+    w.plugins.unload()
+    _settle(qapp)
+    assert not w.plugin_menu.menuAction().isVisible()  # no plugin action left: no empty menu Plugin
+    assert only.qaction is None
