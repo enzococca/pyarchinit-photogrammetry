@@ -505,13 +505,21 @@ def test_3d_double_click_opens_the_form_only_on_the_selected_drawing(win, qapp, 
     qapp.processEvents()
     asked = []
     monkeypatch.setattr(fdd.FreeDrawingDialog, "ask", classmethod(lambda cls, w, c, r: asked.append(r["id"])))
-    internal = _model_vertices(ch, 2)
+    a, b = _model_vertices(ch, 2)
+    pa, pb = screen_of(mv, a), screen_of(mv, b)
+    middle = (float(round((pa[0] + pb[0]) / 2)), float(round((pa[1] + pb[1]) / 2)))
+    # the line goes through the very point of the model under the double click: the middle of the straight chord a-b
+    # runs under the synthetic trench by some centimetres there, as does the fixture's drawing f1 (it starts at the
+    # middle of the model, a pixel or two away); both were "visible" only within the depth tolerance of the pick (two
+    # median edges of the mesh), so a finer mesh (Poisson differs from run to run and on Windows) hid the new line and
+    # picked f1. On the surface itself the new line is never hidden there, whatever the mesh.
+    s = mv._model_hit(*middle)
+    assert s is not None
+    internal = np.array([a, s, b])
     before = _ids(ch)
     mv.free_drawn.emit("line", internal)
     fid = _new(ch, before)["id"]
     qapp.processEvents()
-    a, b = (screen_of(mv, p) for p in internal)
-    middle = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
     mv.start_free_select()
     qapp.processEvents()
     _real_double_click(mv, *middle)
