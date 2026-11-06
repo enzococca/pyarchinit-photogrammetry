@@ -1368,8 +1368,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         m.addSeparator()
         self._act(m, tr("Pubblica ortofoto / DEM / modello..."), self.pyarchinit_publish, processing=True,
                   icon_name="publish")
-        self._act(m, tr("Pubblica unità e quote disegnate"), self.pyarchinit_publish_drawings, processing=True,
-                  icon_name="publish")
+        # the same action as *Pubblica* of the rail and of the classic drawing bar: the search of the commands finds it
+        self.a_publish_drawings = self._act(m, tr("Pubblica unità e quote disegnate"),
+                                            self.pyarchinit_publish_drawings, processing=True, icon_name="publish")
+        self.a_publish_drawings.setIconText(tr("Pubblica"))  # the short label of the classic drawing bar
+        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
+                                              "quote (pyarchinit_quote)"))
         self._act(m, tr("Pubblica solo le unità (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
                   processing=True, icon_name="publish")
         self._act(m, tr("Pubblica schede UT (ut_table)..."), self.pyarchinit_publish_ut, icon_name="publish")
@@ -1624,11 +1628,6 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.a_sections_pane.setToolTip(tr("Pannello delle sezioni"))
         self.a_sections_pane.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
         self.section_menu.addAction(self.a_sections_pane)  # beside the options of the sections
-        self.a_publish_drawings = QAction(icon("publish"), tr("Pubblica"), self)
-        self.a_publish_drawings.setToolTip(tr("Scrive in PyArchInit le unità disegnate (pyunitastratigrafiche) e le "
-                                              "quote (pyarchinit_quote)"))
-        self.a_publish_drawings.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
-        self._processing_actions.append(self.a_publish_drawings)
 
         def menu(*actions) -> QMenu:
             m = QMenu(self)
