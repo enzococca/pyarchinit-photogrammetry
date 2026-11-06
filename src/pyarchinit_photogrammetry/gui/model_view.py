@@ -2617,7 +2617,9 @@ class ModelView(QWidget):
 
     def free_at(self, x: float, y: float, project) -> str | None:
         """The free drawing shown within ``SELECT_PX`` of (x, y): the nearest line, polygon edge or point that the
-        model does not hide at that place (on a model view); None when there is none."""
+        model does not hide at that place (on a model view drawn with a depth test, :meth:`_free_lines_depth_tested`;
+        the software canvas paints the drawings over the model, so there the nearest one seen is taken); None when
+        there is none."""
         if self.sd is None or self.chunk is None:
             return None
         here = np.array([x, y], np.float64)
@@ -2645,11 +2647,17 @@ class ModelView(QWidget):
                     at = inner[j] + t[j] * (inner[j + 1] - inner[j])
             if best <= SELECT_PX:
                 found.append((best, fid, at, pix))
-        caster = self._caster() if self.kind in ("model", "model_textured") and found else None
+        hides = self.kind in ("model", "model_textured") and found and self._free_lines_depth_tested()
+        caster = self._caster() if hides else None
         for _d, fid, at, pix in sorted(found, key=lambda f: f[0]):
             if caster is None or not self._hidden_at_own_pixel(at, pix[0], pix[1], caster):
                 return fid
         return None
+
+    def _free_lines_depth_tested(self) -> bool:
+        """True when the canvas draws the free drawings with a depth test (VTK): a drawing the model hides is not seen,
+        so it is not picked there. The software canvas paints them over the image of the model."""
+        return self.backend == "vtk"
 
     def _select(self, fid: str | None) -> None:
         self._selected_id = fid

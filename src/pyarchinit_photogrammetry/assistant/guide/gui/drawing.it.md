@@ -158,6 +158,8 @@ un punto](../img/free-3d.png)
 * **Seleziona e modifica**: un clic sceglie un disegno (più spesso) e mostra i suoi vertici sulla vista ferma; trascina
   un vertice per spostarlo (si riprende sulla superficie dove lo lasci, mai a mezz'aria), Canc toglie il vertice scelto
   o, se nessuno è scelto, il disegno (un poligono tiene tre vertici, una linea due), un doppio clic apre la scheda.
+  Un disegno nascosto dal modello non si sceglie dove la vista non lo mostra (con la scheda grafica); il renderer più
+  semplice, senza scheda grafica, dipinge i disegni sopra il modello, quindi lì si sceglie ogni disegno che si vede.
 
 **Sulla pianta o su un prospetto** (*Disegno libero* nella barra laterale, il suo menu per *Linea*, *Poligono*,
 *Punto*, il layer e *Nuovo layer...*): clic sui vertici come con gli altri strumenti (con lo snap; un poligono anche a
