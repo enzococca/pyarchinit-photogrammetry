@@ -143,8 +143,14 @@ Everything drawn on the orthophoto and the DEM is a layer: stratigraphic units, 
 PyArchInit, section traces, contour lines, plan slices, spot heights, markers, measuring points, measures,
 stones, patches.
 
+* **Background** (application **1.7.5**): the first row, *Background: Orthophoto* (or *DEM*, the relief, *Elevation
+  «name»*, *Section «name»*), is the raster under the drawings. Untick it to hide the raster and see only what is drawn
+  on it, on a plain grey background; *Opacity* (0-100 %) fades it instead. The same as **View > Show the background**
+  (++ctrl+shift+b++). Each raster keeps its choice while the program is open (the orthophoto hidden, the DEM shown, an
+  elevation faded...) and gets it back when it is shown again; the drawing tools, the heights under the cursor and the
+  exports work as usual. Not saved in the project.
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
-  *All* and *None* tick every layer (one step of *Edit > Undo*).
+  *All* and *None* tick every drawn layer (one step of *Edit > Undo*) and leave the background as it is.
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,

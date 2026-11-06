@@ -146,8 +146,15 @@ Tutto ciò che si disegna su ortofoto e DEM è un layer: unità stratigrafiche, 
 PyArchInit, tracce di sezione, curve di livello, piante a quota, quote, marker, punti di misura, misure, pietre,
 patch.
 
+* **Sfondo** (app **1.7.5**): la prima riga, *Sfondo: Ortofoto* (o *DEM*, il rilievo, *Prospetto «nome»*, *Sezione
+  «nome»*), è il raster sotto i disegni. Togli la spunta per nasconderlo e vedere solo ciò che ci è disegnato sopra, su
+  un fondo grigio uniforme; *Opacità* (0-100 %) invece lo sbiadisce. È lo stesso di **Vista > Mostra lo sfondo**
+  (++ctrl+shift+b++). Ogni raster tiene la sua scelta finché il programma è aperto (l'ortofoto nascosta, il DEM visibile,
+  un prospetto sbiadito...) e la ritrova quando lo rivedi; gli strumenti di disegno, le quote sotto il cursore e le
+  esportazioni funzionano come sempre. Non si salva nel progetto.
 * La spunta mostra o nasconde un layer, il doppio clic ingrandisce su di esso (un layer o un singolo
-  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer (un solo passo di *Modifica > Annulla*).
+  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer disegnati (un solo passo di *Modifica >
+  Annulla*) e lasciano lo sfondo com'è.
 * In modalità *Sposta / interroga* un clic su un elemento mostra i suoi attributi (US, area, m2, quota di una
   curva...) qui e nella barra di stato.
 * **Modificare gli attributi**: doppio clic su un valore sotto *Attributi* per cambiarlo (US, area, tipo,
