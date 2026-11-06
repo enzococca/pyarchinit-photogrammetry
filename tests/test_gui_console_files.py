@@ -224,3 +224,42 @@ def test_open_in_the_editor_and_the_menu_entry(window, qapp, tmp_path, monkeypat
     assert w.console.b_edit.isEnabled()
     w.console.b_edit.click()
     assert w.assistant.editor.toPlainText() == source
+
+
+def test_argv_path_and_file_come_back_after_an_error_and_a_cancel(window, qapp, tmp_path):
+    w = window
+    argv, path0 = list(sys.argv), list(sys.path)
+    folder = tmp_path / "rotti"
+    folder.mkdir()
+    bad = folder / "errore.py"
+    bad.write_text("import sys\nseen = (list(sys.argv), sys.path[0], __file__)\nraise RuntimeError('giu')\n",
+                   encoding="utf-8")
+    assert _run(w, qapp, bad)
+    assert w.console.console.locals["seen"] == ([str(bad)], str(folder), str(bad))
+    assert sys.argv == argv and sys.path == path0 and "__file__" not in w.console.console.locals
+    started = threading.Event()
+    sys.modules["_ppg_console_started"] = types.SimpleNamespace(started=started)
+    try:
+        slow = folder / "lungo.py"
+        slow.write_text("import time\nimport _ppg_console_started as s\ns.started.set()\n"
+                        "while True:\n    cancel()\n    time.sleep(0.01)\n", encoding="utf-8")
+        assert w.run_python_file(slow)
+        assert started.wait(20)
+        w.runner.cancel()  # *Annulla* of the progress
+        w.runner.wait()
+        for _ in range(3):
+            qapp.processEvents()
+    finally:
+        sys.modules.pop("_ppg_console_started", None)
+    lines = _text(w).rstrip("\n").splitlines()
+    assert lines[-1].startswith("<<< annullato")
+    assert sys.argv == argv and sys.path == path0
+
+
+def test_the_closing_line_starts_a_line_of_its_own(window, qapp, tmp_path):
+    w = window
+    path = tmp_path / "senza_a_capo.py"
+    path.write_text("print('senza a capo', end='')\n", encoding="utf-8")
+    assert _run(w, qapp, path)
+    lines = _text(w).rstrip("\n").splitlines()
+    assert lines[-2] == "senza a capo" and lines[-1].startswith("<<< ok")

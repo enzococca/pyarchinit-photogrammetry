@@ -1379,7 +1379,7 @@ class ConsolePane(QWidget):
         self.b_run_file.clicked.connect(self.choose_file)
         self.b_rerun.clicked.connect(self.rerun)
         self.b_edit.clicked.connect(lambda: self.last_file and self.edit_requested.emit(self.last_file))
-        self.b_clear.clicked.connect(lambda: self.out.clear())
+        self.b_clear.clicked.connect(self.clear_output)
         for b in (self.b_run_file, self.b_rerun, self.b_recent, self.b_edit, self.b_clear):
             bar.addWidget(b)
         lay.addLayout(bar)
@@ -1400,6 +1400,7 @@ class ConsolePane(QWidget):
         lay.addWidget(self.inp)
         self.setAcceptDrops(True)
         self._incoming.connect(self.write)
+        self._line_open = False  # the output ends without a newline (a print(..., end=""))
         self.last_file: str | None = None
         self._factory = namespace_factory
         self.console = code.InteractiveConsole(self._factory())
@@ -1407,6 +1408,11 @@ class ConsolePane(QWidget):
         self._set_last(None)
         self.write("pyarchinit-photogrammetry - console Python\n"
                    "Variabili: doc (progetto), chunk (chunk attivo), app (ppg.app), ppg (modulo), np, window\n")
+
+    def clear_output(self) -> None:
+        """*Pulisci*: the output emptied."""
+        self.out.clear()
+        self._line_open = False
 
     # ------------------------------------------------------------------ files
     @staticmethod
@@ -1484,8 +1490,7 @@ class ConsolePane(QWidget):
                  names: dict | None = None) -> None:
         """The file ended: its traceback, ``<<< ok|errore|annullato · seconds``; the ``names`` it defined copied into
         the console's namespace and listed."""
-        out = self.out.toPlainText()
-        if out and not out.endswith("\n"):
+        if self._line_open and not self.out.document().isEmpty():  # what the file printed last had no newline
             self.write("\n")
         if traceback_text:
             self.write(traceback_text if traceback_text.endswith("\n") else traceback_text + "\n")
@@ -1533,9 +1538,12 @@ class ConsolePane(QWidget):
             self.file_requested.emit(str(runs[0]))
 
     def write(self, s: str) -> None:
+        if not s:
+            return
         self.out.moveCursor(QTextCursor.MoveOperation.End)
         self.out.insertPlainText(s)
         self.out.moveCursor(QTextCursor.MoveOperation.End)
+        self._line_open = not s.endswith("\n")
 
     @staticmethod
     def _is_block(src: str) -> bool:

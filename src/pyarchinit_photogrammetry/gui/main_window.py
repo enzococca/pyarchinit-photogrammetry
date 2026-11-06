@@ -15763,8 +15763,6 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         it, the names it defined at module level (not ``_private``, not modules) are copied into the console, as
         IPython's ``%run`` does. Returns False when it did not start: another step running (said in the console),
         a file that cannot be read."""
-        import sys
-        import time as _time
         import tokenize
         import types
 
@@ -15783,10 +15781,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
             return False
-        console.begin_file(path)
         kept: dict = {}
         echo = console.feed  # thread-safe: a queued signal of the console
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         def work(namespace, progress):
             kept["namespace"] = namespace
@@ -15816,11 +15813,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             else:
                 outcome = "ok"
             trace = result.traceback or (result.error if result.error and outcome != tr("annullato") else None)
-            console.end_file(outcome, _time.monotonic() - t0, trace, names)
+            console.end_file(outcome, time.monotonic() - t0, trace, names)
 
         if not self._script_step(Path(path).name, work, done, path=path):
             console.write(tr("Un'elaborazione è in corso: il file non parte") + "\n")
             return False
+        console.begin_file(path)  # here, in the interface thread: before anything the worker prints (queued)
         return True
 
     def _edit_python_file(self, path: str) -> None:
