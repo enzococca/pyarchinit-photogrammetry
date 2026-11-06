@@ -218,12 +218,18 @@ nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia q
 ha preso oltre alle sue registrazioni (file aperti, timer).
 
 **Annullare i dati del plugin.** Dalla 1.7.3 le chiavi di `chunk.meta` che non sono del programma fanno parte delle
-istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Un plugin
-che spinge un suo passo (`window.history.push(testo, passo, document=False)`) e poi chiama `mark_modified()` non ha una
-seconda voce per lo stesso cambiamento - ma solo nello stesso giro del ciclo degli eventi: il passo resta "fresco"
-finché non scatta un timer a tempo zero. Un `mark_modified()` chiamato dopo (da una callback successiva, da un timer,
-alla fine di un lavoro in background) registra di nuovo i dati del plugin come una voce a parte, e una sola azione
-diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, nella stessa callback.
+istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Dalla 1.7.4
+un'azione di un plugin è un passo solo, o nessuno quando non ha cambiato nulla dell'utente:
+
+- un cambiamento dei dati del plugin segnato nello stesso giro del ciclo degli eventi dell'ultimo passo entra in quel
+  passo - il passo spinto dal plugin (`window.history.push(testo, passo, document=False)`), o il passo delle US che ha
+  aggiunto con `context.add_units` (annullato insieme a loro);
+- una chiave di `chunk.meta` cambiata da un passo spinto dal plugin è del plugin da quel momento: la annullano i suoi
+  passi, quindi le istantanee la lasciano fuori. Un plugin che tiene l'annullamento nei suoi passi può aggiornare una
+  cache in quella chiave e chiamare `mark_modified()` senza un passo: il progetto è da salvare, nessun passo compare.
+  Spingi il passo dopo aver cambiato la chiave (il passo prende le chiavi diverse dall'ultima istantanea o, spinto alla
+  fine di un lavoro in background del plugin, quelle cambiate dal lavoro) e tieni in un'altra chiave i dati che i suoi
+  passi non annullano.
 
 ### Compatibilità
 

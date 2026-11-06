@@ -1789,7 +1789,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     @property
     def chunk(self):
-        return self.doc.chunk
+        doc = self.doc
+        return doc.chunk if doc is not None else None  # a script or a test may take the document away
 
     def _namespace(self) -> dict:
         import pyarchinit_photogrammetry as ppg
@@ -1951,8 +1952,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
         shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
         take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
-        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). A plugin that pushes its own step
-        (``history.push``) before calling this gets no second entry for the same change."""
+        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). Called in the same turn as the last
+        entry (a step the plugin pushed with ``history.push``, units it added) the change joins that entry; a key of
+        ``chunk.meta`` a step of the plugin changed is the plugin's own from then on (its steps undo it): a change of
+        it without a step (a cache) is no entry (``gui.undo``)."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:
@@ -3367,7 +3370,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._say_waiting_steps()
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
         if self.history is not None:  # nothing can be undone after the session: the copies of its steps go
-            self.history.close(self.doc.chunks)
+            self.history.close(self.doc.chunks if self.doc is not None else ())
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
         if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
             self.settings.remove("updates_last_check")
@@ -5699,12 +5702,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _undo_plugins(self, ch, data: dict) -> None:
         """The plugins' keys of ``chunk.meta`` as a snapshot has them (those it has not, gone); the workspace and the
-        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``)."""
+        plugins told (``refreshed``: their panes and layers follow ``context.on_refresh``). The keys a plugin's own
+        steps undo (``history.step_keys``) are left to those steps."""
         import copy
 
         from ..engine.orient import PROGRAM_KEYS
 
-        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data]:
+        own = self.history.step_keys if self.history is not None else set()
+        data = {k: v for k, v in data.items() if k not in own}
+        for k in [k for k in ch.meta if k not in PROGRAM_KEYS and k not in data and k not in own]:
             del ch.meta[k]
         for k, v in data.items():
             ch.meta[k] = copy.deepcopy(v)
