@@ -503,7 +503,7 @@ importa letture...* e *Installa pyGIMLi...*.
 <figure markdown="span">
   ![La scheda ERT del pannello Geofisica](../img/plugins/geophysics/ert-pane.it.png)
   <figcaption>La scheda ERT dopo un'inversione: ogni passo con il suo stato - 61 elettrodi e 1711 letture,
-  una linea di 60 m con le quote dal DEM, 1706 letture valide, χ² 0,72 e RMS 2,5 % - e i colori della
+  una linea di 60 m con le quote dal DEM, 1706 letture valide, χ² 0,91 e RMS 2,8 % - e i colori della
   sezione con l'oscuramento in vigore.</figcaption>
 </figure>
 
@@ -582,6 +582,12 @@ Poi, nella stessa finestra:
   chunk ha un DEM), *dal file* (le quote del file degli elettrodi, più la quota sotto) o *piatte* alla quota
   sotto. Le quote sono la topografia che l'inversione segue: su un pendio o un tumulo usa il DEM o il file.
 
+<figure markdown="span">
+  ![La finestra della posa dopo aver disegnato la linea](../img/plugins/geophysics/ert-place.it.png)
+  <figcaption>La finestra che si apre quando la linea è disegnata: il primo elettrodo, la spaziatura, come è
+  misurata (qui in pianta, perché le letture sintetiche hanno le quote) e da dove vengono le quote.</figcaption>
+</figure>
+
 Il pannello dice la lunghezza della linea e l'intervallo delle quote. *Linea sulla pianta* disegna ogni linea
 posata e i suoi elettrodi sull'ortofoto o sul DEM, in un layer, con il suo nome e i numeri del primo e
 dell'ultimo elettrodo.
@@ -594,9 +600,11 @@ punto medio dei quattro elettrodi della lettura, quella verticale una **pseudopr
 dati misurati, non il terreno: ma si vedono a colpo d'occhio le letture cattive - punti isolati di un colore
 molto diverso - e l'impostazione generale del rilievo.
 
-Per togliere una lettura selezionala con lo strumento *Seleziona* del programma e premi *Canc*: diventa
-grigia e resta fuori dall'inversione. *Filtri...* ne toglie molte insieme. Ogni regola è spenta se lasciata
-vuota.
+Per togliere delle letture premi *Togli letture...* e disegna un'area intorno a loro sulla pseudosezione, con il
+disegno del programma (trascina un riquadro, oppure clic sui vertici e doppio clic o Invio; Esc annulla): le
+letture dentro diventano grigie e restano fuori dall'inversione. Le letture sono un'unica immagine del plugin,
+non elementi della vista: lo strumento *Seleziona* del programma non le prende. *Filtri...* ne toglie molte
+insieme. Ogni regola è spenta se lasciata vuota.
 
 | Filtro | Che cosa toglie |
 |---|---|
@@ -604,7 +612,7 @@ vuota.
 | Errore massimo della lettura (%) | le letture il cui errore (la deviazione che lo strumento registra) è sopra il valore, solo se il file lo ha |
 | Errore reciproco massimo (%) | le letture che differiscono dalla loro reciproca - la stessa lettura con gli elettrodi di corrente e di potenziale scambiati - di più del valore; solo per le letture che ne hanno una |
 | Picchi: scarto dai vicini | le letture lontane dai vicini nella pseudosezione, in deviazioni robuste dell'insieme: 8 è un inizio usuale, meno ne toglie di più |
-| Rimetti le letture tolte a mano | annulla le cancellazioni fatte con lo strumento *Seleziona* |
+| Rimetti le letture tolte a mano | ridà le letture tolte con *Togli letture...* (anche *Modifica > Annulla* le ridà) |
 
 Le resistività apparenti nulle o negative sono sempre tolte. Il pannello tiene il conto - *1706 letture
 valide su 1711 (picchi 5)* - e ogni rimozione è registrata, quindi niente va perso: cambia una regola e le
@@ -614,7 +622,8 @@ letture tornano.
   ![La pseudosezione del profilo nella vista 2D](../img/plugins/geophysics/ert-pseudosection.it.png)
   <figcaption>La pseudosezione del profilo sintetico dopo il filtro dei picchi: cinque letture rese sbagliate
   apposta sono grigie, le altre colorate secondo la loro resistività apparente; gli elettrodi nella riga in
-  alto. Il blocco resistivo si vede come una banda verticale di rosso sotto il mezzo della linea.</figcaption>
+  alto. Il blocco resistivo si vede come le due bande rosse oblique, a V rovesciata, che partono dal mezzo della
+  linea: il disegno tipico di un corpo resistivo nel dipolo-dipolo.</figcaption>
 </figure>
 
 ### L'inversione { #ert-invert }
@@ -663,7 +672,7 @@ nel parametro *Profondità d'indagine*:
   risolto, a 1) sono oscurate. Richiede tre volte il tempo; è la risposta migliore quando la profondità della
   sezione conta per te.
 
-Il pannello dice quale oscuramento vale e l'area di sezione rimasta (*633 m² di sezione*). Le soglie si
+Il pannello dice quale oscuramento vale e l'area di sezione rimasta (*637 m² di sezione*). Le soglie si
 cambiano dopo l'inversione con il pulsante *Oscuramento...* del passo *Sezione*: la sezione si ridisegna dalla
 stessa inversione, che non si rifà (si sceglie anche *nessuno*, tutta la maglia). L'indice DOI c'è solo se
 l'inversione l'ha calcolato.

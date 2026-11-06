@@ -494,7 +494,7 @@ readings...* and *Install pyGIMLi...*.
 <figure markdown="span">
   ![The ERT tab of the Geophysics pane](../img/plugins/geophysics/ert-pane.png)
   <figcaption>The ERT tab after an inversion: every step with its state - 61 electrodes and 1711 readings,
-  a line of 60 m with the heights from the DEM, 1706 valid readings, χ² 0.72 and RMS 2.5 % - and the colours of
+  a line of 60 m with the heights from the DEM, 1706 valid readings, χ² 0.91 and RMS 2.8 % - and the colours of
   the section with the blanking in force.</figcaption>
 </figure>
 
@@ -573,6 +573,12 @@ Then, in the same dialog:
   *flat* at the height below. The heights are the topography the inversion follows: on a slope or a
   mound, use the DEM or the file.
 
+<figure markdown="span">
+  ![The placement dialog after drawing the line](../img/plugins/geophysics/ert-place.png)
+  <figcaption>The dialog that opens when the line is drawn: the first electrode, the spacing, how it is measured
+  (here in plan, because the synthetic readings have their heights) and where the heights come from.</figcaption>
+</figure>
+
 The pane says the length of the line and the range of the heights. *Line on the plan* draws every placed
 line and its electrodes on the orthophoto or DEM, in a layer, with its name and the numbers of the first and
 the last electrode.
@@ -585,8 +591,11 @@ of the electrodes), the colour is the apparent resistivity on a logarithmic scal
 ground: but it shows at a glance the bad readings - isolated points of a very different colour - and the
 general layout of the survey.
 
-To take a reading out, select it with the program's *Select* tool and press *Delete*: it turns grey and
-stays out of the inversion. *Filters...* takes out many at once. Every rule is off if left empty.
+To take readings out, press *Remove readings...* and draw an area around them on the pseudosection with the
+program's drawing (drag a box, or click the vertices and double click or Enter; Esc cancels): the readings inside
+turn grey and stay out of the inversion. The readings are one picture of the plugin, not features of the view:
+the program's *Select* tool does not pick them. *Filters...* takes out many at once. Every rule is off if left
+empty.
 
 | Filter | What it removes |
 |---|---|
@@ -594,7 +603,7 @@ stays out of the inversion. *Filters...* takes out many at once. Every rule is o
 | Largest error of a reading (%) | readings whose error (the deviation the instrument logs) is above, only if the file has it |
 | Largest reciprocal error (%) | readings that differ from their reciprocal - the same readings with the current and the potential electrodes swapped - by more than the value; only for readings that have one |
 | Spikes: departure from the neighbours | readings far from their neighbours in the pseudosection, in robust deviations of the whole: 8 is a usual start, lower removes more |
-| Give back the readings removed by hand | undoes the deletions made with the *Select* tool |
+| Give back the readings removed by hand | gives back the readings taken out with *Remove readings...* (*Edit > Undo* gives them back too) |
 
 Zero and negative apparent resistivities are always removed. The pane keeps the count - *1706 valid readings
 of 1711 (spikes 5)* - and every removal is recorded, so nothing is lost: change a rule and the readings come
@@ -604,7 +613,8 @@ back.
   ![The pseudosection of the profile in the 2D view](../img/plugins/geophysics/ert-pseudosection.png)
   <figcaption>The pseudosection of the synthetic profile after the spike filter: five readings that were
   made wrong on purpose are grey, the others coloured by their apparent resistivity; the electrodes on the
-  top row. The resistive block shows as a vertical band of red under the middle of the line.</figcaption>
+  top row. The resistive block shows as the two slanting red bands, an upside-down V, starting from the middle of
+  the line: the usual picture of a resistive body in a dipole-dipole array.</figcaption>
 </figure>
 
 ### The inversion { #ert-invert }
@@ -651,7 +661,7 @@ chosen in the *Depth of investigation* parameter:
   above *DOI index: blank above* (0.4 by default; the index goes from 0, resolved, to 1) are blanked. It takes
   three times as long; it is the better answer when the depth of the section matters to you.
 
-The pane tells which blanking applies and the area of the section left (*633 m² of section*). The
+The pane tells which blanking applies and the area of the section left (*637 m² of section*). The
 thresholds are changed after the inversion with the *Blanking...* button of the *Section* step: the section is
 drawn again from the same inversion, which is not repeated (*none*, the whole mesh, can be chosen too). The DOI
 index is there only when the inversion computed it.
