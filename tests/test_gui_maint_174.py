@@ -120,6 +120,7 @@ def test_a_stray_tab_bar_on_the_window_is_cleaned_when_the_panes_change(window, 
     assert left, "Qt keeps the bar of the closed area outside the window"
     left[0].move(0, 300)  # as the second row of Foto | Sezioni of 1.7.3: on the window, used by no group
     assert _stray(w) and w.panes.stray_tab_bars()
+    w.panes._untidy = (w.panes._layout_key()[0], ())  # as on Linux: these panes were tried before with no bar left
     open_before = sorted(d.objectName() for d in w.panes.docks if not d.isHidden())
     assert w.panes.tidy() is True
     assert not _stray(w)  # at once, not at the next layout of the window

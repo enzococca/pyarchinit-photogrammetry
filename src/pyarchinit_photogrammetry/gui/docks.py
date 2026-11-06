@@ -639,8 +639,7 @@ class Panes(QObject):
             except RuntimeError:  # the window is going away
                 pass
             return False
-        key = tuple((d.objectName(), d.isHidden(), d.isFloating(), int(self.window.dockWidgetArea(d).value))
-                    for d in self.docks)
+        key = self._layout_key()
         if key == self._untidy:
             return False
         current = {area: group.current for area, group in self.groups.items()}
@@ -654,9 +653,17 @@ class Panes(QObject):
             for bar in self.stray_tab_bars():
                 if bar.count() < 2:
                     bar.hide()
-        self._untidy = key if self.stray_tab_bars() else None
+        self._untidy = self._layout_key() if self.stray_tab_bars() else None
         self.decorate_later()
         return True
+
+    def _layout_key(self) -> tuple:
+        """The layout :meth:`tidy` could not clean: the panes (shown, floating, area) and the stray bars on the window
+        (which, where): a new stray bar on the same panes is tried again."""
+        panes = tuple((d.objectName(), d.isHidden(), d.isFloating(), int(self.window.dockWidgetArea(d).value))
+                      for d in self.docks)
+        bars = tuple(sorted((id(b), b.geometry().getRect()) for b in self.stray_tab_bars()))
+        return panes, bars
 
     def _window_tab_bars(self) -> list[QTabBar]:
         return [b for b in self.window.children()
