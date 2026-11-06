@@ -15823,7 +15823,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _edit_python_file(self, path: str) -> None:
         """*Apri nell'editor* of the console: the file in the assistant's script editor (shown), else in the
-        system's editor."""
+        system's editor. Another text in the editor (a script not saved) is replaced only when the user says so,
+        and Ctrl+Z there brings it back."""
         pane = getattr(self, "assistant", None)
         if pane is not None and hasattr(pane, "open_in_editor"):
             try:
@@ -15831,7 +15832,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             except (OSError, UnicodeDecodeError) as exc:
                 self.console.write(tr("Il file non si può leggere: {0}", exc) + "\n")
                 return
-            pane.open_in_editor(text)
+            editor = getattr(pane, "editor", None)
+            current = editor.toPlainText() if editor is not None else ""
+            if current.strip() and current != text:
+                answer = choice(self, "question", tr("Apri nell'editor"),
+                                tr("L'editor degli script contiene un altro testo. Sostituirlo con {0}? (Ctrl+Z "
+                                   "nell'editor lo riporta)", Path(path).name), [tr("Sostituisci")])
+                if answer != 0:
+                    return
+            if current != text:
+                pane.open_in_editor(text)
             self._show_pane(self.bottom_tabs, pane)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))

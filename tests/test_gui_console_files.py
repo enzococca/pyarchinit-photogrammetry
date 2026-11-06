@@ -263,3 +263,29 @@ def test_the_closing_line_starts_a_line_of_its_own(window, qapp, tmp_path):
     assert _run(w, qapp, path)
     lines = _text(w).rstrip("\n").splitlines()
     assert lines[-2] == "senza a capo" and lines[-1].startswith("<<< ok")
+
+
+def test_open_in_the_editor_asks_before_replacing_and_keeps_the_undo(window, qapp, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = window
+    path = tmp_path / "nuovo.py"
+    source = "print('dal file')\n"
+    path.write_text(source, encoding="utf-8")
+    assert _run(w, qapp, path)
+    editor = w.assistant.editor
+    editor.setPlainText("")
+    editor.insertPlainText("mio = 'non salvato'\n")  # a script typed in the editor, never saved
+    asked = []
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: asked.append(a[3]) or None)  # Annulla
+    w.console.b_edit.click()
+    assert len(asked) == 1 and "nuovo.py" in asked[0]
+    assert editor.toPlainText() == "mio = 'non salvato'\n"  # cancelled: nothing changed
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: asked.append(a[3]) or 0)  # Sostituisci
+    w.console.b_edit.click()
+    assert len(asked) == 2 and editor.toPlainText() == source
+    editor.undo()  # Ctrl+Z: the old text back
+    assert editor.toPlainText() == "mio = 'non salvato'\n"
+    editor.redo()
+    w.console.b_edit.click()  # the same text as the file: nothing to ask
+    assert len(asked) == 2 and editor.toPlainText() == source

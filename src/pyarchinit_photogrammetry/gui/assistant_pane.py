@@ -817,7 +817,14 @@ class AssistantPane(QWidget):
 
     # ------------------------------------------------------------------ scripts
     def open_in_editor(self, script: str) -> None:
-        self.editor.setPlainText(script)
+        """``script`` in the editor in place of its text, as one edit: Ctrl+Z brings the text before back."""
+        cursor = self.editor.textCursor()
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.insertText(script)
+        cursor.endEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.editor.setTextCursor(cursor)
         self.editor.setFocus()
 
     def run_editor(self) -> None:
