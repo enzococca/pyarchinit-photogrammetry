@@ -1367,7 +1367,8 @@ class ConsolePane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_run_file = _tool("script", tr("Esegui file .py..."), tr("Scegli un file Python ed eseguilo sul progetto"))
+        self.b_run_file = _tool("script", tr("Esegui file .py..."),
+                                tr("Scegli un file Python ed eseguilo sul progetto"))
         self.b_rerun = _tool("refresh", tr("Riesegui"), tr("Esegui di nuovo l'ultimo file"))
         self.b_recent = _tool("recent", tr("Recenti"), tr("Gli ultimi file eseguiti"))
         self.recent_menu = QMenu(self.b_recent)
