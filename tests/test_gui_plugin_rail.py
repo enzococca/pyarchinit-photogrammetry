@@ -1,7 +1,7 @@
 """Plugins in the tool rails (since 1.7.4): ``context.add_rail_group`` puts a group of the plugin's actions at the end
-of the 2D or 3D rail, gone with ``release()``; without it, every plugin with actions is reachable from the **Plugin** group
-at the end of the 2D rail (a sub-menu per plugin, the same actions as the menu Plugin). An action added after the
-window was built goes in the menu Plugin and the search of the commands finds it."""
+of the 2D or 3D rail, gone with ``release()``; without it, every plugin with actions is reachable from the **Plugin**
+group at the end of the 2D rail (a sub-menu per plugin, the same actions as the menu Plugin). An action added after
+the window was built goes in the menu Plugin and the search of the commands finds it."""
 from __future__ import annotations
 
 import os
