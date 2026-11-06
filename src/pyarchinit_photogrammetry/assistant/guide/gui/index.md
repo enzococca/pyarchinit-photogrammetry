@@ -131,9 +131,13 @@ under their icons).
 | ![](../img/gui/icons/rail-auto.png){ width=20 } | Automatic | *Segment Anything (SAM)* (its ways and its model in its menu), *Orthophoto patches* |
 | ![](../img/gui/icons/rail-edit.png){ width=20 } | Edit | *Delete selected*, *Merge selected*, *Clear drawings* |
 | ![](../img/gui/icons/rail-layers.png){ width=20 } | Layers and outputs | *Layer* (the *Sections* pane in its menu), *QGIS*, *Publish in PyArchInit* |
+| ![](../img/gui/icons/rail-plugin.png){ width=20 } | Plugin | since 1.7.4, only with plugins installed: each plugin with its actions in a menu (the same as the menu *Plugin*) |
 
 Each tool is described in [Drawing and measures](drawing.md#the-drawing-tools). *View > Bars > Classic
 drawing bar* shows the old horizontal bar with the same tools under the top bar instead of the rail.
+
+A plugin can add a group of its own at the end of the rail of the 2D or of the 3D view (with its own icon);
+the plugins that do not are in the last group, *Plugin*, so every plugin is reachable from the rail too.
 
 ## The central views
 

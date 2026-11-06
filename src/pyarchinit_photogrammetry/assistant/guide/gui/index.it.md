@@ -131,10 +131,14 @@ sceglie *Solo icone* o *Icone e testo* (i nomi dei gruppi sotto le icone).
 | ![](../img/gui/icons/rail-auto.png){ width=20 } | Automatico | *Segment Anything (SAM)* (i suoi modi e il modello nel suo menu), *Patch dell'ortofoto* |
 | ![](../img/gui/icons/rail-edit.png){ width=20 } | Modifica | *Elimina selezionati*, *Unisci selezionati*, *Cancella disegni* |
 | ![](../img/gui/icons/rail-layers.png){ width=20 } | Layer e uscite | *Layer* (il pannello *Sezioni* nel suo menu), *QGIS*, *Pubblica in PyArchInit* |
+| ![](../img/gui/icons/rail-plugin.png){ width=20 } | Plugin | dalla 1.7.4, solo con dei plugin installati: ogni plugin con le sue azioni in un menu (le stesse del menu *Plugin*) |
 
 Ogni strumento è descritto in [Disegno e misure](drawing.md#gli-strumenti-di-disegno). *Vista > Barre > Barra di
 disegno classica* mostra al posto della barra laterale la vecchia barra orizzontale con gli stessi strumenti,
 sotto la barra in alto.
+
+Un plugin può aggiungere un gruppo suo in fondo alla barra della vista 2D o della vista 3D (con la sua icona);
+i plugin che non lo fanno stanno nell'ultimo gruppo, *Plugin*, così ogni plugin si raggiunge anche dalla barra.
 
 ## Le viste centrali
 

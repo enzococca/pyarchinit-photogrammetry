@@ -171,7 +171,8 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 |---|---|
 | `app` | lo stato condiviso con gli script: `context.app.document` è il progetto aperto, `.chunk` il suo chunk attivo ([API](api.md)) |
 | `window` | la finestra principale, o `None` nella riga di comando |
-| `add_action(title, callback, menu="", tip="", processing=False)` | un'azione di menu sotto *Plugin* (nel sottomenu del plugin, o in `menu`); `processing=True` la disattiva mentre gira un passo dell'elaborazione |
+| `add_action(title, callback, menu="", tip="", processing=False)` | un'azione di menu sotto *Plugin* (nel sottomenu del plugin, o in `menu`); `processing=True` la disattiva mentre gira un passo dell'elaborazione; dalla 1.7.4 anche se aggiunta dopo `activate` (entra allora nel menu e la ricerca dei comandi la trova); un plugin senza un gruppo suo nella barra degli strumenti sta nel gruppo *Plugin* della barra della vista 2D con le sue azioni |
+| `add_rail_group(key, title, icon="plugin", actions=(), view="2d")` | dalla 1.7.4: un gruppo del plugin in fondo alla barra degli strumenti della vista 2D (`view="2d"`) o della vista 3D (`"3d"`): il suo pulsante con `icon` (una `QIcon` o il nome di un'icona del programma) apre un pannello con `actions`, cioè gli oggetti `Action` restituiti da `add_action` (gli stessi del menu *Plugin*) o `QAction` del plugin. La stessa `key` con la stessa `view` sostituisce il gruppo. Un plugin con un gruppo suo non compare nel gruppo *Plugin*; i gruppi se ne vanno con il plugin; nella riga di comando vengono tenuti e non si vedono da nessuna parte; restituisce il `RailGroup` |
 | `add_command(name, function, help="")` | `ppg plugin NOME ARGOMENTI...` chiama `function(*args)` con gli argomenti come stringhe; un int restituito è il codice d'uscita |
 | `add_exporter(title, suffix, function)` | *File > Esporta > title...*: `function(chunk, path, progress)` scrive `path` in background |
 | `store_drawings()` | scrive nel progetto quello che la finestra mostra (unità e quote disegnate, pietre, sezioni) prima che un plugin legga `chunk.meta`; solo nel thread dell'interfaccia (un'azione, `done`), niente nella riga di comando; la finestra lo fa da sola prima di eseguire un esportatore |
@@ -230,7 +231,7 @@ diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, ne
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` 1.7.4. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste
