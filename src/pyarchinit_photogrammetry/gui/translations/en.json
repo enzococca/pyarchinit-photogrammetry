@@ -4010,6 +4010,10 @@
   "Si esegue un file alla volta: {0}": "One file runs at a time: {0}",
   "Il file non si può leggere: {0}": "The file cannot be read: {0}",
   "Le azioni del plugin {0}": "The actions of the plugin {0}",
-  "L'editor degli script contiene un altro testo. Sostituirlo con {0}? (Ctrl+Z nell'editor lo riporta)": "The script editor holds another text. Replace it with {0}? (Ctrl+Z in the editor brings it back)"
+  "L'editor degli script contiene un altro testo. Sostituirlo con {0}? (Ctrl+Z nell'editor lo riporta)": "The script editor holds another text. Replace it with {0}? (Ctrl+Z in the editor brings it back)",
+  "Plugin {0}: l'azione {1} è esclusa: {2}": "Plugin {0}: the action {1} is left out: {2}",
+  "Gruppi dei plugin nella barra degli strumenti non mostrati: {0}": "Plugin groups of the tool rails not shown: {0}",
+  "Plugin {0}: il gruppo {1} della barra degli strumenti è escluso: {2}": "Plugin {0}: the group {1} of the tool rail is left out: {2}",
+  "Plugin {0}: escluso dal gruppo Plugin della barra degli strumenti: {1}": "Plugin {0}: left out of the Plugin group of the tool rail: {1}"
  }
 }

@@ -2151,7 +2151,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             try:
                 self._plugin_qaction(a)
             except Exception as exc:  # noqa: BLE001 - a plugin never stops the window
-                log.warning("plugin %s: the action %s is left out: %s", a.plugin, a.title, exc)
+                log.warning(tr("Plugin {0}: l'azione {1} è esclusa: {2}", a.plugin, a.title, exc))
         if self.plugins.exporters:
             self.export_menu.addSeparator()
             for e in self.plugins.exporters:
@@ -2161,7 +2161,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         try:
             self.refresh_plugin_rails()
         except Exception as exc:  # noqa: BLE001 - a plugin never stops the window
-            log.warning("plugin groups of the tool rails not shown: %s", exc)
+            log.warning(tr("Gruppi dei plugin nella barra degli strumenti non mostrati: {0}", exc))
 
     def _plugin_titles(self) -> dict[str, str]:
         return {i.name: i.title or i.name for i in getattr(self.plugins, "plugins", [])}
@@ -2297,7 +2297,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     items = [None if a is None else self._plugin_rail_qaction(c, a) for a in g.actions]
                     rails[g.view].add_group(key, g.title, g.icon or "plugin", items)
                 except Exception as exc:  # noqa: BLE001 - one plugin never breaks the others' groups or the window
-                    log.warning("plugin %s: the group %s of the tool rail is left out: %s", c.name, g.key, exc)
+                    log.warning(tr("Plugin {0}: il gruppo {1} della barra degli strumenti è escluso: {2}",
+                                   c.name, g.key, exc))
                     rails.get(g.view, self.raster_rail).remove_group(key)
                     continue
                 grouped.add(c.name)
@@ -2308,7 +2309,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             try:
                 entries.append(self._plugin_rail_entry(c, titles.get(c.name, c.name)))
             except Exception as exc:  # noqa: BLE001
-                log.warning("plugin %s: left out of the Plugin group of the tool rail: %s", c.name, exc)
+                log.warning(tr("Plugin {0}: escluso dal gruppo Plugin della barra degli strumenti: {1}", c.name, exc))
         if entries:
             self.raster_rail.add_group("plugin:", tr("Plugin"), "plugin", entries,
                                        tip=tr("I plugin che non hanno un gruppo loro: ognuno con le sue azioni"))
