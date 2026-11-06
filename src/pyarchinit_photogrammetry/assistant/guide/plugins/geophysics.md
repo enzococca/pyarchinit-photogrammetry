@@ -494,7 +494,7 @@ readings...* and *Install pyGIMLi...*.
 <figure markdown="span">
   ![The ERT tab of the Geophysics pane](../img/plugins/geophysics/ert-pane.png)
   <figcaption>The ERT tab after an inversion: every step with its state - 61 electrodes and 1711 readings,
-  a line of 60 m with the heights from the DEM, 1706 valid readings, χ² 0.91 and RMS 2.8 % - and the colours of
+  a line of 60 m with the heights from the DEM, 1706 valid readings, χ² 0.90 and RMS 2.8 % - and the colours of
   the section with the blanking in force.</figcaption>
 </figure>
 
