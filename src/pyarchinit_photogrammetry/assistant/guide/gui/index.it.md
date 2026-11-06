@@ -138,7 +138,9 @@ disegno classica* mostra al posto della barra laterale la vecchia barra orizzont
 sotto la barra in alto.
 
 Un plugin può aggiungere un gruppo suo in fondo alla barra della vista 2D o della vista 3D (con la sua icona);
-i plugin che non lo fanno stanno nell'ultimo gruppo, *Plugin*, così ogni plugin si raggiunge anche dalla barra.
+i plugin che non lo fanno stanno nell'ultimo gruppo, *Plugin*, così ogni plugin si raggiunge anche dalla barra. Con
+la barra di disegno classica la barra laterale della vista 2D è nascosta: i plugin sono allora nel menu *Plugin* (non
+un'azione che un plugin ha dato solo al suo gruppo della barra 2D).
 
 ## Le viste centrali
 

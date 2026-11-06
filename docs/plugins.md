@@ -230,7 +230,8 @@ task) records the plugin's data again as a separate entry, so one action reads a
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
-1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` 1.7.4. The plugins written before 1.3.4 put their pane among the tabs of the window with
+1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4 (1.7.3 and older
+ignore an action added later). The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
 `removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -

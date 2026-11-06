@@ -137,7 +137,9 @@ Each tool is described in [Drawing and measures](drawing.md#the-drawing-tools). 
 drawing bar* shows the old horizontal bar with the same tools under the top bar instead of the rail.
 
 A plugin can add a group of its own at the end of the rail of the 2D or of the 3D view (with its own icon);
-the plugins that do not are in the last group, *Plugin*, so every plugin is reachable from the rail too.
+the plugins that do not are in the last group, *Plugin*, so every plugin is reachable from the rail too. With the
+classic drawing bar the rail of the 2D view is hidden: the plugins are then in the menu *Plugin* (an action a plugin
+gave only to its group of the 2D rail is not there).
 
 ## The central views
 

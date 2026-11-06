@@ -239,8 +239,9 @@ risultato (ok, errore o annullato) e i secondi impiegati; un errore mostra il su
 l'esecuzione `sys.argv` è `[file]`, `__file__` è il file e la sua cartella viene prima in `sys.path`, così può
 importare i moduli che ha accanto. Alla fine i nomi definiti dal file (variabili, funzioni, classi; non quelli
 `_privati` né i moduli importati) vengono copiati nella console, come fa `%run` di IPython, ed elencati in una
-riga (*Nuovi nomi: ...*): si può continuare a usarli al prompt. Da uno script o dalla console la stessa cosa è
-`window.run_python_file(percorso)`.
+riga (*Nuovi nomi: ...*): si può continuare a usarli al prompt. Dalla console la stessa cosa è
+`window.run_python_file(percorso)` (uno script gira già in background, quindi un file che chiede di eseguire viene
+rifiutato).
 
 ## Assistente
 

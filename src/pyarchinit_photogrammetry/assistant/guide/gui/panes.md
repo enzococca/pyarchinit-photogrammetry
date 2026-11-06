@@ -231,7 +231,8 @@ and the seconds it took; an error shows its traceback. During the run `sys.argv`
 file and its folder comes first in `sys.path`, so it can import the modules beside it. Afterwards the names the
 file defined (variables, functions, classes; not the `_private` ones and not the imported modules) are copied into
 the console, as IPython's `%run` does, and listed in one line (*New names: ...*): you can go on with them at the
-prompt. From a script or the console the same is `window.run_python_file(path)`.
+prompt. From the console the same is `window.run_python_file(path)` (a script already runs in the background,
+so a file it asks to run is refused).
 
 ## Assistant
 

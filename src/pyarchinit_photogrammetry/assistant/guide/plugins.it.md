@@ -231,7 +231,8 @@ diventa due passi di *Annulla*. Chiama `mark_modified()` subito dopo il push, ne
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` 1.7.4. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` e `add_action` dopo `activate` 1.7.4 (la 1.7.3 e le
+precedenti ignorano un'azione aggiunta dopo). I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste
