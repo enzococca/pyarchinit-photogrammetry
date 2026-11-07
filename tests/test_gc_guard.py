@@ -154,3 +154,31 @@ def test_the_collector_follows_the_thresholds():
         collector.stop()
         collector.deleteLater()
     assert gc.isenabled()
+
+
+def test_ensure_gives_a_running_collector():
+    """``ensure``: the app's running collector; a stopped one or one without a parent is not reused or doubled."""
+    import gc
+
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry.gui import gc_guard
+
+    app = QApplication.instance() or QApplication([])
+    made = []
+    try:
+        first = gc_guard.ensure(app)
+        made.append(first)
+        assert first.timer.isActive() and gc_guard.ensure(app) is first and not gc.isenabled()
+        first.stop()
+        second = gc_guard.ensure(app)  # the stopped one is not given back
+        made.append(second)
+        assert second is not first and second.timer.isActive()
+        second.stop()
+        loose = gc_guard.install()  # no parent: found all the same
+        made.append(loose)
+        assert gc_guard.ensure(app) is loose
+    finally:
+        for c in made:
+            c.stop()
+        gc.enable()
