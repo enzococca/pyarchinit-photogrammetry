@@ -144,7 +144,7 @@ class Document:
         return recover(self)
 
     def align_chunks(self, reference, chunks=None, method: str = "markers", fix_scale: bool = False,
-                     initial: str = "auto", max_points: int = 200_000, progress=None) -> dict:
+                     initial: str = "auto", max_points: int = 200_000, progress=None, check: bool = False) -> dict:
         """Bring ``chunks`` (Chunk objects, keys or labels; default: the other enabled ones) into the
         world frame of ``reference``: their ``transform`` and CRS change, their products stay.
         ``method``: ``"markers"`` (same labels), ``"points"`` (dense clouds or tie points:
@@ -152,11 +152,12 @@ class Document:
         ``initial`` forces one of ``"markers"``, ``"reference"``, ``"cameras"``, ``"global"``),
         ``"cameras"`` (photos in both chunks). ``fix_scale``: rigid, without scale.
         Returns a report with residuals, correspondences and transforms (see
-        :func:`engine.chunks.align_chunks`)."""
+        :func:`engine.chunks.align_chunks`); ``check``: each chunk measured against the reference once aligned
+        (overlap and distances, :func:`engine.chunks.cloud_distances`)."""
         from ..engine.chunks import align_chunks
 
         return align_chunks(self, reference, chunks, method=method, fix_scale=fix_scale, initial=initial,
-                            max_points=max_points, progress=progress)
+                            max_points=max_points, progress=progress, check=check)
 
     def merge_chunks(self, chunks, label: str | None = None, merge_markers: bool = True,
                      merge_tie_points: bool = True, merge_point_clouds: bool = True, merge_models: bool = False,

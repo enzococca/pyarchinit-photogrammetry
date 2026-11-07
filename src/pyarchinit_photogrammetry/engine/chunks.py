@@ -59,6 +59,7 @@ ALIGNED_POINTS = "the points of a chunk aligned on another"
 ALIGNED_MARKERS = "the markers of a chunk aligned on another"
 MERGED_POINTS = "the points of a chunk merged into another"
 MERGED_MARKERS = "the markers of the merged chunks"
+SHOWN_POINTS = "the points of a chunk shown or compared with another"
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..core.chunk import Chunk
@@ -805,7 +806,7 @@ def _convert_references(chunk: "Chunk", src_crs: str, dst_crs: str) -> None:
 
 
 def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers", fix_scale: bool = False,
-                 initial: str = "auto", max_points: int = 200_000, progress=None) -> dict:
+                 initial: str = "auto", max_points: int = 200_000, progress=None, check: bool = False) -> dict:
     """Bring ``chunks`` (default: every other enabled chunk) into the world frame of ``reference``.
 
     ``method``: ``"markers"``, ``"points"`` or ``"cameras"`` (see the module documentation);
@@ -821,7 +822,9 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
     (markers/cameras), ``residuals`` (per marker or photo, reference world units), ``scale``
     (scale applied), ``transform`` (the new ``chunk.transform``), ``delta`` (old world ->
     reference world) and, for points, ``initial``, ``fitness``, ``overlap``, ``check``
-    (residuals of the common markers, when there are any).
+    (residuals of the common markers, when there are any). ``check``: each chunk is also measured against the
+    reference once aligned (:func:`cloud_distances`): ``distances`` in its entry, with the overlap share and the median
+    distance; ``None`` when it has nothing to measure.
     """
     progress = as_progress(progress)
     if method not in ALIGN_METHODS:
@@ -886,9 +889,145 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
 
     for ch in [ref] + [ch for ch, _T, _info in results]:  # the reference too: levelled above
         free_drawings.follow(ch)
+    if check and results:
+        surface = None
+        for ch, _T, info in results:
+            try:
+                surface = surface or DistanceSurface(ref)
+                info["distances"] = cloud_distances(ref, ch, surface=surface)
+            except ValueError:  # nothing to measure in one of the two
+                info["distances"] = None
     progress(1.0, f"{len(results)} chunks aligned to {ref.label}")
     return {"reference": {"key": ref.key, "label": ref.label}, "method": method, "fix_scale": bool(fix_scale),
             "crs": ref.crs, "levelled_reference": levelled, "chunks": [info for _, _, info in results]}
+
+
+# ------------------------------------------------------------------ distances between chunks
+DISTANCE_POINTS = 200_000  # points of a chunk read to place it or measure it against another (a stride of its file)
+
+
+def preview_points(chunk: "Chunk", max_points: int = DISTANCE_POINTS,
+                   kind: str = "auto") -> tuple[np.ndarray, np.ndarray | None, str]:
+    """At most ``max_points`` points of a chunk, spread evenly through its file (a stride through the memory-mapped
+    binary PLY: a dense cloud of millions of points is not read whole), as internal coordinates ``(N, 3)``, their
+    colours ``(N, 3)`` uint8 (``None`` without colours) and what they are: ``kind`` "point_cloud", "tie_points" or
+    "model" (the vertices of the mesh, or of its preview), or "auto": the dense cloud, else the tie points, else the
+    model. ``ValueError`` when the chunk has none of them."""
+    from ..core.pointcloud import _read_binary_ply_vertices
+
+    order = ("point_cloud", "tie_points", "model") if kind == "auto" else (kind,)
+    for what in order:
+        path = chunk.product_path(what)
+        if path is None or not path.exists():
+            continue
+        arr = _read_binary_ply_vertices(path, mmap=True)
+        if arr is not None and {"x", "y", "z"} <= set(arr.dtype.names or ()):
+            part = arr[::max(1, -(-len(arr) // max(max_points, 1)))]
+            xyz = np.column_stack([part["x"], part["y"], part["z"]]).astype(np.float64)
+            rgb = (np.column_stack([part["red"], part["green"], part["blue"]]).astype(np.uint8)
+                   if {"red", "green", "blue"} <= set(arr.dtype.names) else None)
+        elif what == "model":
+            from ..io.mesh_ply import read_mesh
+
+            m = read_mesh(path)
+            step = max(1, -(-len(m.xyz) // max(max_points, 1)))
+            xyz = np.asarray(m.xyz, np.float64)[::step]
+            rgb = None if m.colors is None else np.asarray(m.colors)[::step, :3].astype(np.uint8)
+        else:
+            pc = PointCloud.load(path)
+            step = max(1, -(-len(pc) // max(max_points, 1)))
+            xyz, rgb = pc.xyz[::step], (None if pc.rgb is None else np.asarray(pc.rgb)[::step])
+        if len(xyz):
+            return xyz, rgb, what
+    raise ValueError(f"{chunk.label}: no dense cloud, tie points or model")
+
+
+def shown_in(chunk: "Chunk", internal: np.ndarray, crs: str | None) -> tuple[np.ndarray, bool]:
+    """Internal points of ``chunk`` in the world coordinates of ``crs`` (the system of the chunk they are shown or
+    compared with): through ``chunk.transform``, then into ``crs`` with PROJ when both are systems of the world and
+    differ. ``(points, placed)``: ``placed`` False when one of the two is a local frame and the other is not - the
+    points stay in their own frame (they cannot be put in the other one)."""
+    world = geometry.apply(chunk.transform, np.asarray(internal, float))
+    if crs is None or chunk.crs == crs or (crs_mod.is_local(chunk.crs) and crs_mod.is_local(crs)):
+        return world, True
+    if crs_mod.is_local(chunk.crs) or crs_mod.is_local(crs):
+        return world, False
+    return crs_mod.transform_points(world, chunk.crs, crs, legacy=Legacy(SHOWN_POINTS, chunk)), True
+
+
+class DistanceSurface:
+    """The surface of a reference chunk to measure other chunks against: at most ``max_points`` points of its dense
+    cloud (else tie points, else the vertices of its model) in its world coordinates, a k-d tree, their normals turned
+    upwards (+z of the world) and their spacing. :meth:`distances` gives signed distances: along the normal of the
+    nearest point where the point lies over or under the surface, else the distance to the nearest point (with the
+    sign of its normal component): a point beyond the edge of the reference is far, never 0."""
+
+    def __init__(self, reference: "Chunk", max_points: int = DISTANCE_POINTS):
+        from scipy.spatial import cKDTree
+
+        internal, _rgb, self.kind = preview_points(reference, max_points)
+        if len(internal) < 10:
+            raise ValueError(f"{reference.label}: too few points to measure against")
+        self.reference = reference
+        self.crs = reference.crs
+        self.xyz = geometry.apply(reference.transform, internal)
+        self.centre = np.round(self.xyz.mean(axis=0), 0)  # local origin: no precision lost in a projected system
+        local = self.xyz - self.centre
+        self.tree = cKDTree(local)
+        normals = estimate_normals(local, self.tree, k=12)
+        normals[normals[:, 2] < 0] *= -1.0
+        self.normals = normals
+        self.spacing = point_spacing(local)
+
+    def distances(self, world: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Signed distances of ``world`` points (in the reference's system) to the surface, and whether each point
+        has the surface over or under it (``covered``: its nearest point within three spacings across)."""
+        p = np.asarray(world, float) - self.centre
+        if not len(p):
+            return np.zeros(0), np.zeros(0, bool)
+        dnn, idx = self.tree.query(p, k=1)
+        dp = np.einsum("ij,ij->i", p - self.tree.data[idx], self.normals[idx])
+        across = np.sqrt(np.maximum(dnn ** 2 - dp ** 2, 0.0))
+        covered = across <= 3.0 * self.spacing
+        d = np.where(covered, dp, np.where(dp >= 0, 1.0, -1.0) * dnn)
+        return d, covered
+
+
+def distance_stats(d: np.ndarray, covered: np.ndarray, threshold: float) -> dict:
+    """Robust statistics of signed distances: on the points with the surface over or under them (``covered``) the
+    median, the NMAD (1.4826 x median absolute deviation) and the 95th percentile of the absolute distance; on all
+    the points the share within ``threshold`` (``overlap``) and the share covered. ``None`` values when no point is
+    covered."""
+    d = np.asarray(d, float)
+    n = len(d)
+    out = {"points": int(n), "threshold": float(threshold), "covered": float(covered.mean()) if n else 0.0,
+           "overlap": float((np.abs(d) <= threshold).mean()) if n else 0.0, "median": None, "nmad": None, "p95": None}
+    c = d[covered]
+    if len(c):
+        med = float(np.median(c))
+        out.update(median=med, nmad=float(1.4826 * np.median(np.abs(c - med))), p95=float(np.percentile(np.abs(c), 95)))
+    return out
+
+
+def cloud_distances(reference, chunk, max_points: int = DISTANCE_POINTS, threshold: float | None = None,
+                    surface: DistanceSurface | None = None, doc: "Document | None" = None) -> dict:
+    """How far the points of ``chunk`` are from the surface of ``reference`` (Chunk objects, or keys or labels with
+    ``doc``): at most ``max_points`` points of each (:func:`preview_points`), ``chunk`` placed in the system of the
+    reference (:func:`shown_in`), signed distances (:class:`DistanceSurface`) and :func:`distance_stats` with
+    ``threshold`` (default: three times the spacing of the reference's points). Returns ``key``, ``label``,
+    ``reference``, ``what`` (the points measured), ``placed`` (False: one of the two is a local frame and the other is
+    not, the numbers compare the two frames as they are) and the statistics, in the units of the reference's world.
+    ``ValueError`` when one of the two has no points."""
+    if doc is not None:
+        reference, chunk = resolve_chunk(doc, reference), resolve_chunk(doc, chunk)
+    surface = surface if surface is not None and surface.reference is reference else DistanceSurface(reference,
+                                                                                                    max_points)
+    internal, _rgb, what = preview_points(chunk, max_points)
+    world, placed = shown_in(chunk, internal, reference.crs)
+    d, covered = surface.distances(world)
+    thr = float(threshold) if threshold is not None else 3.0 * surface.spacing
+    return {"key": chunk.key, "label": chunk.label, "reference": reference.label, "what": what, "placed": placed,
+            **distance_stats(d, covered, thr)}
 
 
 def _level_reference(ref: "Chunk") -> bool:
