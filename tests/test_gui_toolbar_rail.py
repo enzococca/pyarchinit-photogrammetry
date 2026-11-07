@@ -172,13 +172,16 @@ def test_3d_view_one_row_and_the_tools_in_its_rail(window, qapp):
     _pump(qapp)
     rail = mv.rail
     assert list(rail.groups) == ["view", "points", "cut", "draw"]
-    buttons = [mv.b_top, mv.b_reset, mv.b_center, mv.b_trackball, mv.b_marker, mv.b_photos, mv.b_lasso,
+    buttons = [mv.b_top, mv.b_reset, mv.b_center, mv.b_trackball, mv.b_look, mv.b_marker, mv.b_photos, mv.b_lasso,
                mv.b_section, mv.b_slice, mv.b_cut, mv.b_elevation, mv.b_draw3d]
     inside = [b for g in rail.groups.values() for b in g.widgets]
     assert all(b in inside for b in buttons)
     assert mv.exag_spin.window() is window and rail.flyout.isAncestorOf(mv.exag_spin)
-    above = [b for b in mv.findChildren(QPushButton) if not rail.flyout.isAncestorOf(b)]
-    assert not above, [b.text() for b in above]  # only the display choices stay above the canvas
+    # only the display choices stay above the canvas (and the row of the photo looked through, shown only then)
+    assert not mv.look_row.isVisibleTo(mv)
+    above = [b for b in mv.findChildren(QPushButton) if not rail.flyout.isAncestorOf(b)
+             and not mv.look_row.isAncestorOf(b)]
+    assert not above, [b.text() for b in above]
     for b in (mv.combo, mv.cb_cams, mv.cb_marks, mv.cb_region):
         assert not rail.flyout.isAncestorOf(b)
     rows = {b.mapTo(mv, b.rect().topLeft()).y() for b in (mv.combo, mv.cb_cams, mv.cb_marks, mv.cb_region)}

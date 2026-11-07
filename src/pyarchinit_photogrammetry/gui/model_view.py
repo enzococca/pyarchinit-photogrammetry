@@ -8,7 +8,7 @@ import threading
 import time
 
 import numpy as np
-from PySide6.QtCore import QEvent, QLineF, QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLineF, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
                                QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedLayout,
@@ -19,6 +19,7 @@ from ..core.free_drawings import KINDS as FREE_KINDS
 from ..core.free_drawings import MIN_VERTICES as FREE_MIN_VERTICES
 from .flow_layout import FlowLayout
 from .i18n import decimal_comma, thousands_points, tr
+from .look_view import LookThrough
 from .scene import (OrbitCamera, SceneData, available_views, build_scene, exaggerated, sample_mesh_colors, splat,
                     splat_layers)
 from .trackball import MODES as TRACKBALL_MODES
@@ -75,6 +76,8 @@ class _TrackballCanvas:
 
     def _init_trackball(self) -> None:
         self.trackball = Trackball(self)
+        self.look_on = False  # looking through a photo: the camera is the photo's until the view is moved
+        self._fov_before: float | None = None  # the field of view before, given back by Home and T
         self._fade_timer = QTimer(self)
         self._fade_timer.setInterval(50)
         self._fade_timer.timeout.connect(self._fade_tick)
@@ -122,6 +125,29 @@ class _TrackballCanvas:
 
     def _trackball_state(self) -> tuple:
         return round(self.trackball.opacity(), 2), self.trackball.hover
+
+    # ----------------------------------------------------------- looking through a photo
+    def look(self, cam: OrbitCamera) -> None:
+        """The view through a photo: ``cam`` (pose and field of view) taken as it is; moving the view, Home or T
+        leave it (``look_left``)."""
+        if not self.look_on:
+            self._fov_before = float(self.get_cam().fov)
+        self.look_on = True
+        self._put_cam(cam)
+
+    def end_look(self) -> None:
+        """Out of the photo: its image goes; ``look_left`` tells the view."""
+        if not self.look_on:
+            return
+        self.look_on = False
+        self.set_photo(None, None)
+        self.look_left.emit()
+
+    def _fov_back(self) -> float | None:
+        """Out of the photo for Home or T: the field of view of before (None: it was not changed)."""
+        self.end_look()
+        fov, self._fov_before = self._fov_before, None
+        return fov
 
     def view_key(self, key, shift: bool = False) -> bool:
         """A key pressed on the view (``Qt.Key``): True when the view used it."""
@@ -237,9 +263,11 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
     wheel: zoom toward the cursor, Shift+wheel: dolly, double click: centre of rotation)."""
 
     pivot_requested = Signal(float, float)  # a double click: the centre of rotation at this pixel
+    look_left = Signal()  # the view moved away from the photo it looked through
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.photo = None  # the photo looked through: (QImage, (4, 3) corners in the scene, opacity 0-1)
         self.setMinimumSize(200, 150)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -267,6 +295,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         return self.cam
 
     def set_cam(self, cam: OrbitCamera) -> None:
+        self.end_look()  # the view moved: no longer the photo's
         self.cam = cam
         self._dragging = True  # the light preview while it moves, the whole scene a moment after
         self._dirty = True
@@ -275,6 +304,38 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
 
     def redraw(self) -> None:
         self.update()
+
+    def _put_cam(self, cam: OrbitCamera) -> None:
+        self.cam = cam
+        self._dragging = False
+        self._dirty = True
+        self.update()
+
+    def set_photo(self, image: QImage | None, corners, opacity: float | None = None) -> None:
+        """The photo drawn over the scene in the rectangle of its ``corners`` (scene coordinates, seen from the
+        photo's pose); None: no photo."""
+        if image is None or corners is None:
+            self.photo = None
+        else:
+            op = self.photo[2] if opacity is None and self.photo is not None else (0.5 if opacity is None
+                                                                                   else float(opacity))
+            self.photo = (image, np.asarray(corners, np.float64), op)
+        self.update()
+
+    def set_photo_opacity(self, value: float) -> None:
+        if self.photo is not None:
+            self.photo = (self.photo[0], self.photo[1], float(value))
+            self.update()
+
+    def photo_rect(self):
+        """The rectangle (x, y, width, height, widget pixels) of the photo looked through, None: no photo."""
+        if self.photo is None:
+            return None
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        x, y, _z, ok = self.cam.project(self.photo[1], w, h)
+        if not ok.all():
+            return None
+        return float(x.min()), float(y.min()), float(np.ptp(x)), float(np.ptp(y))
 
     # ----------------------------------------------------------- data
     def set_scene(self, sd: SceneData, reset: bool = True) -> None:
@@ -320,12 +381,16 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         self.update()
 
     def reset_view(self) -> None:
+        self._fov_back()  # a new camera: the field of view of every view
         self.cam = OrbitCamera(self.sd.center.astype(float), self.sd.extent * 1.1, up=self.sd.up)
         self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
 
     def top_view(self) -> None:
+        fov = self._fov_back()
+        if fov is not None:
+            self.cam.fov = fov
         self.cam.pitch = 89.5
         self.cam.yaw = -90.0
         self.cam.target = self.sd.center.astype(float)
@@ -361,6 +426,12 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
             self._render(self._dragging)
         p = QPainter(self)
         p.drawImage(0, 0, self._image)
+        rect = self.photo_rect()
+        if rect is not None:  # the photo looked through, under the cameras, markers and drawings
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.setOpacity(self.photo[2])
+            p.drawImage(QRectF(*rect), self.photo[0])
+            p.setOpacity(1.0)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         # few painter calls per frame: lines gathered and drawn with one drawLines (see image_views.polyline_path)
@@ -669,6 +740,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
     a constant size on the screen before every render."""
 
     pivot_requested = Signal(float, float)
+    look_left = Signal()  # the view moved away from the photo it looked through
     TB_ALPHA = {"back": 90, "outline": 150, "cross": 230}  # of 255, as the software canvas draws them
 
     def __init__(self, parent=None):
@@ -692,12 +764,19 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         self._tb_actors = self._make_trackball_actors()
         from vtkmodules.vtkRenderingCore import vtkRenderer
 
-        self._tb_renderer = vtkRenderer()  # a layer above the scene: the rings are never hidden by it
-        self._tb_renderer.SetLayer(1)
+        # the photo looked through: a layer of its own above the scene, with a camera of its own (the photo's)
+        self._photo_renderer = vtkRenderer()
+        self._photo_renderer.SetLayer(1)
+        self._photo_renderer.SetInteractive(False)
+        self._photo_actor = None
+        self._photo_opacity = 0.5
+        self._tb_renderer = vtkRenderer()  # a layer above the scene and the photo: the rings are never hidden
+        self._tb_renderer.SetLayer(2)
         self._tb_renderer.SetInteractive(False)
         self._tb_renderer.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
         rw = self.plotter.ren_win
-        rw.SetNumberOfLayers(max(rw.GetNumberOfLayers(), 2))
+        rw.SetNumberOfLayers(max(rw.GetNumberOfLayers(), 3))
+        rw.AddRenderer(self._photo_renderer)
         rw.AddRenderer(self._tb_renderer)
         for actor, _poly in self._tb_actors.values():
             self._tb_renderer.AddActor(actor)
@@ -733,7 +812,12 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         return cam
 
     def set_cam(self, cam: OrbitCamera) -> None:
+        self.end_look()  # the view moved: no longer the photo's
+        self._put_cam(cam)
+
+    def _put_cam(self, cam: OrbitCamera) -> None:
         c = self.plotter.renderer.GetActiveCamera()
+        c.SetViewAngle(float(cam.fov))
         c.SetPosition(*cam.eye)
         c.SetFocalPoint(*cam.target)
         c.SetViewUp(*(-cam.basis()[1]))
@@ -742,6 +826,63 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
     def redraw(self) -> None:
         self.plotter.render()
+
+    def set_photo(self, image: QImage | None, corners, opacity: float | None = None) -> None:
+        """The photo drawn over the scene on the quad of its ``corners`` (scene coordinates, seen from the photo's
+        pose), in a layer above the scene; None: no photo."""
+        import pyvista as pv
+        from vtkmodules.vtkRenderingCore import vtkCamera
+
+        ren = self._photo_renderer
+        if self._photo_actor is not None:
+            ren.RemoveActor(self._photo_actor)
+            self._photo_actor = None
+        if opacity is not None:
+            self._photo_opacity = float(opacity)
+        if image is not None and corners is not None:
+            img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+            arr = np.frombuffer(img.constBits(), np.uint8, img.sizeInBytes()).reshape(img.height(),
+                                                                                      img.bytesPerLine())
+            arr = arr[:, : img.width() * 4].reshape(img.height(), img.width(), 4)
+            corners = np.asarray(corners, np.float64)
+            quad = pv.PolyData(corners, faces=np.array([4, 0, 1, 2, 3]))
+            quad.active_texture_coordinates = np.array([[0, 1], [1, 1], [1, 0], [0, 0]], np.float32)
+            tex = pv.Texture(np.ascontiguousarray(arr))  # pyvista turns the rows: the first row at t = 1
+            tex.SetInterpolate(True)
+            tex.SetRepeat(False)  # the edges of the photo are not blended with the opposite ones
+            tex.SetEdgeClamp(True)
+            mapper_actor = pv.Actor(mapper=pv.DataSetMapper(quad))
+            mapper_actor.texture = tex
+            prop = mapper_actor.GetProperty()
+            prop.SetLighting(False)
+            prop.SetOpacity(self._photo_opacity)
+            mapper_actor.SetPickable(False)
+            ren.AddActor(mapper_actor)
+            self._photo_actor = mapper_actor
+            main = self.plotter.renderer.GetActiveCamera()
+            own = vtkCamera()  # the photo's camera: clipping around the quad, whatever the scene's range
+            own.DeepCopy(main)
+            eye = np.array(main.GetPosition())
+            depth = float(np.linalg.norm(corners.mean(axis=0) - eye))
+            own.SetClippingRange(depth * 0.25, depth * 4.0)
+            ren.SetActiveCamera(own)
+        self.plotter.render()
+
+    def set_photo_opacity(self, value: float) -> None:
+        self._photo_opacity = float(value)
+        if self._photo_actor is not None:
+            self._photo_actor.GetProperty().SetOpacity(self._photo_opacity)
+            self.plotter.render()
+
+    def photo_rect(self):
+        """The rectangle (x, y, width, height, widget pixels) of the photo looked through, None: no photo."""
+        if self._photo_actor is None:
+            return None
+        pts = np.asarray(self._photo_actor.GetMapper().GetInput().GetPoints().GetData())
+        x, y, _z, ok = self.get_cam().project(pts, *self.view_size())  # in front, whatever the clipping range
+        if not ok.all():
+            return None
+        return float(x.min()), float(y.min()), float(np.ptp(x)), float(np.ptp(y))
 
     def _make_trackball_actors(self) -> dict:
         from vtkmodules.vtkCommonCore import vtkPoints
@@ -977,6 +1118,9 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
     def reset_view(self) -> None:
         pl = self.plotter
+        fov = self._fov_back()
+        if fov is not None:
+            pl.renderer.GetActiveCamera().SetViewAngle(fov)
         c = self.sd.center
         up = self.sd.up
         d = self.sd.extent * 1.1
@@ -988,6 +1132,9 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         pl.render()
 
     def top_view(self) -> None:
+        fov = self._fov_back()
+        if fov is not None:
+            self.plotter.renderer.GetActiveCamera().SetViewAngle(fov)
         c, up = self.sd.center, self.sd.up
         self.plotter.camera_position = [tuple(c + up * self.sd.extent * 1.2), tuple(c), (0, 1, 0)]
         self.plotter.reset_camera()
@@ -1361,9 +1508,10 @@ def _windows_arm64() -> bool:
     return sys.platform == "win32" and platform.machine().upper() == "ARM64"
 
 
-class ModelView(QWidget):
+class ModelView(QWidget, LookThrough):
     """The Model tab: view selector, display toggles and the canvas; point clouds can be
-    coloured by class (with a legend to hide classes) and points selected with a lasso."""
+    coloured by class (with a legend to hide classes) and points selected with a lasso; an aligned photo can be
+    looked through (:class:`.look_view.LookThrough`)."""
 
     view_changed = Signal(str)
     points_selected = Signal(object, object)  # boolean masks over the whole cloud: visible only, all inside
@@ -1391,6 +1539,7 @@ class ModelView(QWidget):
     free_properties_requested = Signal(str)
     busy_message = Signal(str)  # a line for the status bar (the model being prepared for drawing); "": done
     others_changed = Signal()  # the colours or the opacity of the other chunks changed (doc.meta["view"]): to save
+    look_changed = Signal(object)  # the photo looked through (a Camera), None: back to the free view
     OTHER_KINDS = ("cameras", "tie_points", "point_cloud", "model", "model_textured")  # views that show other chunks
     CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX = CLICK_PX, CLICK_MS, RUBBER_MS, SNAP_PX
 
@@ -1576,8 +1725,18 @@ class ModelView(QWidget):
         from .tool_rail import ToolRail
 
         self.rail = ToolRail("3d")
+        self.b_look = QPushButton(_icon("look_through"), tr("Guarda dalla foto"))
+        self.b_look.setToolTip(tr("La vista dal punto di una foto allineata, con la foto sopra il modello (opacità "
+                                  "regolabile), come Look Through di Metashape: Pagina giù/su la foto successiva o "
+                                  "precedente, Esc o muovere la vista esce"))
+        look_menu = QMenu(self.b_look)
+        look_menu.addAction(tr("Foto più adatta alla vista"), self.look_best)
+        look_menu.addAction(tr("Foto successiva (Pagina giù)"), lambda: self.look_step(1))
+        look_menu.addAction(tr("Foto precedente (Pagina su)"), lambda: self.look_step(-1))
+        self.a_look_exit = look_menu.addAction(tr("Esci dalla foto (Esc)"), self.leave_look)
+        self.b_look.setMenu(look_menu)
         self.rail.add_group("view", tr("Vista"), "rail_view",
-                            [b_top, b_reset, self.b_center, self.b_trackball, None, exag])
+                            [b_top, b_reset, self.b_center, self.b_trackball, self.b_look, None, exag])
         self.rail.add_group("points", tr("Punti"), "rail_points", [self.b_marker, self.b_photos, self.b_lasso])
         self.rail.add_group("cut", tr("Taglia e prospetti"), "rail_cut",
                             [self.b_section, self.b_slice, self.b_cut, self.b_elevation])
@@ -1595,6 +1754,8 @@ class ModelView(QWidget):
         b_top.clicked.connect(lambda: self.canvas.top_view())
         self.b_center.clicked.connect(lambda: self.canvas.centre_on_pivot())
         self.canvas.pivot_requested.connect(self._pivot_at)
+        self._init_look()
+        bar.addWidget(self.look_row)
         self.lasso = LassoOverlay(self)
         self.lasso.finished.connect(self._lasso_finished)
         self.picker = PickOverlay(self)
@@ -1782,7 +1943,7 @@ class ModelView(QWidget):
             return
         self._clear_version()
         self.kind = self.combo.currentData()
-        self.refresh(reset=True)
+        self.refresh(reset=self._look is None)  # looking through a photo: the model, the cloud... under the same photo
         self.view_changed.emit(self.kind or "")
 
     COLOR_MODES = {"point_cloud": ("rgb", "class", "elevation", "hag", "confidence"),
@@ -2187,6 +2348,8 @@ class ModelView(QWidget):
             self.exag_spin.blockSignals(False)
         if factor == self.exaggeration and (self.sd is None or self.sd.exaggeration == factor):
             return
+        if factor != 1.0:  # the photo lies on the true heights only
+            self.leave_look()
         self.exaggeration = factor
         if self.base_sd is not None:
             pivot = self.pivot()  # the centre of rotation stays on the same point of the scene
@@ -2419,6 +2582,8 @@ class ModelView(QWidget):
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
+        if getattr(self, "_look", None) is not None:  # the photo fitted to the new size once the layout is done
+            QTimer.singleShot(0, self._look_resized)
         if getattr(self, "editor", None) is not None and self.stack.currentWidget() is self.editor:
             self.stack.setCurrentWidget(self.canvas)  # the frozen frame and its handles are of the old size
 
@@ -2501,6 +2666,9 @@ class ModelView(QWidget):
             self.canvas.update_free()
 
     def eventFilter(self, obj, ev) -> bool:
+        if (getattr(self, "_look", None) is not None and obj is self._draw_target()
+                and ev.type() == QEvent.Type.KeyPress and self._look_key(ev)):
+            return True
         if getattr(self, "_select_on", False) and obj is self._draw_target():
             return self._select_event(ev) or super().eventFilter(obj, ev)
         if getattr(self, "_draw_kind", None) is None or obj is not self._draw_target():

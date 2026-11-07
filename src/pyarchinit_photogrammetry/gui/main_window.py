@@ -568,6 +568,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.model_view = ModelView()
         self.model_view.points_selected.connect(self._points_selected)
         self.model_view.others_changed.connect(lambda: self.setWindowModified(True))  # a view choice: no undo step
+        self.model_view.look_changed.connect(self._looked_through)
         self.model_view.faces_selected.connect(self._faces_selected)
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
         self.model_view.section_requested.connect(self._section_in_3d)
@@ -648,6 +649,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.navigate.connect(self.photo_step)
+        self.photo_view.look_requested.connect(self.look_through_photo)
         self.photo_view.mask_changed.connect(lambda cam: (self._dirty(True), self.statusBar().showMessage(
             tr("Maschera di {0} aggiornata", cam.label), 5000)))
         self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
@@ -5724,6 +5726,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
         if len(cams) == 1 and cams[0].aligned:
+            menu.addAction(icon("look_through"), tr("Guarda dalla foto nella vista 3D"),
+                           lambda: self.look_through_photo(cams[0]))
             menu.addAction(icon("residuals"), tr("Residui dei punti di legame"),
                            lambda: (self.a_residuals.setChecked(True), self.open_photo(cams[0])))
         if cams:
@@ -8913,6 +8917,27 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             + tr("tasto destro per posizionare un marker; Pagina giù/su: foto successiva/precedente"), 20000)
         if self.a_residuals.isChecked():
             self._draw_residuals()
+
+    def look_through_photo(self, camera) -> None:
+        """The 3D view through an aligned photo, with the photo over the model (Metashape's *Look Through*)."""
+        if camera is None or self.chunk is None:
+            return
+        if not camera.aligned:
+            self.statusBar().showMessage(tr("{0} non è allineata: non si può guardare dalla foto", camera.label), 10000)
+            return
+        mv = self.model_view
+        self.show_view(mv)
+        if mv.chunk is not self.chunk:
+            mv.set_chunk(self.chunk)
+        if mv.look_through(camera):
+            self.statusBar().showMessage(
+                tr("{0}: la foto sopra il modello; opacità nella barra della vista, Pagina giù/su foto successiva/"
+                   "precedente, Esc o muovere la vista per uscire", camera.label), 15000)
+
+    def _looked_through(self, camera) -> None:
+        """The photo looked through selected in the Photos pane."""
+        if camera is not None:
+            self.photos.select_camera(camera)
 
     def photo_step(self, step: int) -> None:
         """The next (+1) or previous (-1) photo of the list shown (the filtered one), as Metashape's

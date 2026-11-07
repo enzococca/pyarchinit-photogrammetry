@@ -3080,7 +3080,16 @@
   "Un colore per chunk": "One colour per chunk",
   "Colori veri": "True colours",
   "Distanza dal chunk attivo": "Distance from the active chunk",
-  "sistema locale: sovrapposto al chunk attivo, non collocato": "local frame: superimposed on the active chunk, not placed"
+  "sistema locale: sovrapposto al chunk attivo, non collocato": "local frame: superimposed on the active chunk, not placed",
+  "Guarda dalla foto": "Look through a photo",
+  "La vista dal punto di una foto allineata, con la foto sopra il modello (opacità regolabile), come Look Through di Metashape: Pagina giù/su la foto successiva o precedente, Esc o muovere la vista esce": "The view from where an aligned photo was taken, with the photo over the model (adjustable opacity), as Metashape's Look Through: Page Down/Up the next or previous photo, Esc or moving the view leaves",
+  "Foto più adatta alla vista": "Photo that best matches the view",
+  "Esci dalla foto (Esc)": "Leave the photo (Esc)",
+  "Opacità della foto": "Photo opacity",
+  "0 %: solo il modello, 100 %: solo la foto": "0 %: the model only, 100 %: the photo only",
+  "Esci dalla foto": "Leave the photo",
+  "Torna alla vista libera (Esc); anche ruotare, spostare o avvicinare la vista esce dalla foto": "Back to the free view (Esc); rotating, panning or zooming the view leaves the photo too",
+  "Guarda dalla foto nella vista 3D": "Look through this photo in the 3D view"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4080,6 +4089,11 @@
   "nessuna sovrapposizione con {0}": "no overlap with {0}",
   "{0}: sistema locale, sovrapposto e non collocato: non misurato": "{0}: local frame, superimposed and not placed: not measured",
   "{0} (sistema locale: sovrapposto, non collocato)": "{0} (local frame: superimposed, not placed)",
-  "costruito prima dell'allineamento: spostato con il chunk, inclinato di {0} gradi: la pianta è approssimata, ricostruiscilo": "built before the alignment: moved with the chunk, tilted by {0} degrees: the plan is approximate, build it again"
+  "costruito prima dell'allineamento: spostato con il chunk, inclinato di {0} gradi: la pianta è approssimata, ricostruiscilo": "built before the alignment: moved with the chunk, tilted by {0} degrees: the plan is approximate, build it again",
+  "Foto: {0}": "Photo: {0}",
+  "{0} - Esc: esci, Pagina giù/su: foto successiva/precedente": "{0} - Esc: leave, Page Down/Up: next/previous photo",
+  "Impossibile leggere la foto {0}: {1}": "Cannot read the photo {0}: {1}",
+  "{0} non è allineata: non si può guardare dalla foto": "{0} is not aligned: it cannot be looked through",
+  "{0}: la foto sopra il modello; opacità nella barra della vista, Pagina giù/su foto successiva/precedente, Esc o muovere la vista per uscire": "{0}: the photo over the model; opacity in the bar of the view, Page Down/Up next/previous photo, Esc or moving the view to leave"
  }
 }

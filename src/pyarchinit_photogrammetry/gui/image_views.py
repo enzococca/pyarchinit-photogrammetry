@@ -2162,6 +2162,7 @@ class PhotoView(_ZoomView):
     markers_changed = Signal(object)  # the marker changed (None: not known)
     marker_created = Signal(object)  # a new marker placed on this photo
     navigate = Signal(int)  # -1 previous photo, +1 next
+    look_requested = Signal(object)  # the 3D view through this photo (the camera)
     sam_prompt = Signal(object, float, float, int)  # camera, x, y, label
     mask_changed = Signal(object)  # the camera whose mask was drawn
 
@@ -2512,6 +2513,11 @@ class PhotoView(_ZoomView):
         menu.addSeparator()
         menu.addAction(tr("Foto successiva (Pagina giù)")).triggered.connect(lambda: self.navigate.emit(1))
         menu.addAction(tr("Foto precedente (Pagina su)")).triggered.connect(lambda: self.navigate.emit(-1))
+        if self.camera.aligned:
+            cam = self.camera
+            menu.addSeparator()
+            menu.addAction(tr("Guarda dalla foto nella vista 3D")).triggered.connect(
+                lambda: self.look_requested.emit(cam))
         menu.exec(ev.globalPos())
 
     def _place(self, marker, x, y) -> None:
