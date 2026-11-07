@@ -19,6 +19,8 @@ from .chunk import Chunk
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 FORMAT_VERSION = 1
+_CHUNK_LOCK = threading.Lock()  # a key and a place in the list for one new chunk at a time (module-level: a Document
+#                                stays copyable with copy.deepcopy, which cannot copy a lock)
 
 
 class Document:
@@ -30,7 +32,6 @@ class Document:
         self.script_removals: list | None = None  # while a script runs: its chunk removals, to be undone
         self._path: Path | None = None
         self._tmp: tempfile.TemporaryDirectory | None = None
-        self._chunk_lock = threading.Lock()  # a key and a place in the list for one new chunk at a time
         if path is not None:
             self._path = Path(path).resolve()
             if self._path.exists():
@@ -82,7 +83,7 @@ class Document:
     def add_chunk(self, label: str | None = None) -> Chunk:
         """A new chunk at the end. Its key is never that of a chunk removed in this session (it can
         come back with Modifica > Annulla) nor that of a folder already full in the files folder."""
-        with self._chunk_lock:  # the program and a task in the background (an append) may add one at once
+        with _CHUNK_LOCK:  # the program and a task in the background (an append) may add one at once
             removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
                        for c in r.chunks]
             key = max([c.key for c in self.chunks] + removed, default=-1) + 1

@@ -109,8 +109,18 @@ SECTION_FILES = ("svg", "dxf", "dxf3d")
 KEY_FIELDS = ("reference_key", "reference_chunk")  # a key of another chunk of the project: chunk_alignment, coregistration
 
 
+def _norm(path: str) -> str:
+    """``path`` compared as the system does: one separator, case folded where the file system folds it (Windows)."""
+    return os.path.normcase(os.path.normpath(path)) if path else path
+
+
 def _inside(path: str, folder: str) -> bool:
-    return path == folder or path.startswith(folder + os.sep) or path.startswith(folder + "/")
+    """``path`` is ``folder`` or a path under it, whatever separators either uses (a path stored with ``/`` on
+    Windows, a folder from ``str(Path)`` with ``\\``)."""
+    if not path or not folder:
+        return False
+    p, f = _norm(path), _norm(folder)
+    return p == f or p.startswith(f.rstrip(os.sep) + os.sep)
 
 
 def _moved(value, moves):
@@ -119,7 +129,8 @@ def _moved(value, moves):
     if isinstance(value, str):
         for old, new in moves:
             if _inside(value, old):
-                return new + value[len(old):]
+                rest = os.path.normpath(value)[len(os.path.normpath(old).rstrip(os.sep)):]  # normcase keeps lengths
+                return new + rest.replace(os.sep, "/") if "/" in new and os.sep != "/" else new + rest
         return value
     if isinstance(value, dict):
         return {k: _moved(v, moves) for k, v in value.items()}
