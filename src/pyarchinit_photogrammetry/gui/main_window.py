@@ -671,6 +671,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
         self.workspace.rename_requested.connect(self._workspace_rename)
         self.workspace.shown_in_3d.connect(self._chunk_shown_in_3d)
+        self.workspace.populated.connect(self._chunk_list_seen)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
@@ -710,6 +711,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
         self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
         self._overlay_drawn: dict = {}  # chunk key -> the copy drawn on the view now
+        self._chunk_keys_seen: set = set()  # the chunks the workspace shows (_chunk_list_seen)
         # the rasters of the other chunks, after the window has finished with the raster just shown (a plan or not)
         self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self, self._draw_chunk_overlays))
         self.ortho_view.raster_loaded.connect(self._sync_background_action)
@@ -4508,13 +4510,18 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     and view.kind != "frame")
         except RuntimeError:  # pragma: no cover - the window is closing
             return
+        present = {c.key for c in doc.chunks} if doc is not None else set()
+        for key in [k for k in view.chunk_overlays if k not in present]:  # a chunk no longer in the project
+            view.remove_chunk_overlay(key)
+            self._overlay_drawn.pop(key, None)
+        listed = self._chunk_keys_seen if self._appending else present  # appended chunks: once they are complete
         rows = []
         if plan and len(doc.chunks) > 1:
             base_kind = "dem" if view.kind not in ("ortho", "reflectance", "thermal", "index", "zones", "frame") else \
                 "ortho"
             st = settings(doc)["chunks_2d"]
             for other in doc.chunks:
-                if other is ch:
+                if other is ch or other.key not in listed:
                     continue
                 path, kind = raster_for(other, base_kind)
                 if path is None:
@@ -4554,10 +4561,43 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if store(self.doc, chunks_2d=rows):
             self.setWindowModified(True)
         view = self.ortho_view
-        if shown and key not in view.chunk_overlays or bool(before.get("shown")) != bool(shown):
+        if not shown:  # unticked: away at once, whatever the rows think (a copy kept in the cache comes back quickly)
+            view.remove_chunk_overlay(key)
+            self._overlay_drawn.pop(key, None)
+        if (shown and key not in view.chunk_overlays) or bool(before.get("shown")) != bool(shown):
             self._draw_chunk_overlays()  # the row's note may change too
         else:
             view.set_chunk_overlay_state(key, shown, opacity)
+
+    def _chunk_list_seen(self) -> None:
+        """The workspace was filled again: when the chunks of the project changed (a removal, its undo, an append and
+        its undo, a project opened), the other chunks of the 3D view and of the 2D view follow - a chunk gone is drawn
+        no more - and the choices of the views forget the chunks no longer in the project (a new chunk taking the same
+        key does not come up ticked)."""
+        from .chunk_views import settings, store
+
+        if not hasattr(self, "_overlay_drawn"):  # the window is still being built
+            return
+        doc = self.doc
+        keys = tuple(c.key for c in doc.chunks) if doc is not None else ()
+        seen = (id(doc), keys)
+        if seen == getattr(self, "_chunk_list", None):
+            return
+        self._chunk_list = seen
+        self._chunk_keys_seen = set(keys)
+        if doc is None:
+            return
+        st = settings(doc)
+        kept_3d = [k for k in st["chunks_3d"] if k in self._chunk_keys_seen]
+        kept_2d = {k: v for k, v in st["chunks_2d"].items() if str(k).lstrip("-").isdigit()
+                   and int(k) in self._chunk_keys_seen}
+        if "view" in doc.meta and (kept_3d != st["chunks_3d"] or kept_2d != st["chunks_2d"]):
+            store(doc, chunks_3d=kept_3d, chunks_2d=kept_2d)
+        mv = self.model_view
+        if mv.chunk is not None and mv.chunk.document is doc and (
+                (mv.base_sd is not None and mv.base_sd.others) or mv.other_chunks()):
+            mv.refresh(reset=False)  # (another project: its own views are set right after)
+        self._draw_chunk_overlays()
 
     def _raster_loaded(self) -> None:
         """The 2D view shows another raster, an empty frame or nothing - by the window or by a plugin

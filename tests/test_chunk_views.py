@@ -367,7 +367,7 @@ def test_2d_rows_of_the_other_chunks(win, qapp):
     assert w.doc.meta["view"]["chunks_2d"][str(c.key)]["opacity"] == pytest.approx(0.3)
     _box.setChecked(False)
     qapp.processEvents()
-    assert not view.chunk_overlays[c.key].isVisible()
+    assert c.key not in view.chunk_overlays  # unticked: away at once
     # aligned on the markers: C's transform is A's again, its old DEM drawn where A's is
     _box = pane._chunk_widgets[c.key][0]
     _box.setChecked(True)
@@ -518,3 +518,28 @@ def test_2d_local_chunk_beside_one_in_a_system(win, qapp):
     assert raster.adjusted(-raster.width(), -raster.height(), raster.width(), raster.height()).contains(rect)
     assert QGraphicsView.sceneRect(view).width() <= 3 * raster.width() + 1
     assert "sovrapposto al chunk attivo, non collocato" in pane._chunk_widgets[c.key][3].text()
+
+
+# ---------------------------------------------------------------- final review
+def test_a_removed_chunk_leaves_both_views(win, qapp):
+    from PySide6.QtCore import Qt
+
+    w = win
+    a, b, c = w.doc.chunks
+    _chunk_items(w)["C"].setCheckState(0, Qt.CheckState.Checked)
+    w._show_raster("dem")
+    qapp.processEvents()
+    pane, view = w.layers_pane, w.ortho_view
+    pane._chunk_widgets[c.key][0].setChecked(True)
+    qapp.processEvents()
+    assert [ly.label for ly in w.model_view.base_sd.others] == ["C"] and c.key in view.chunk_overlays
+    assert w.remove_workspace_items([("chunk", c, None)], confirm=False)
+    qapp.processEvents()
+    assert w.model_view.base_sd.others == [] and not view.chunk_overlays and c.key not in pane._chunk_widgets
+    # the choices forget it: a chunk taking its key later does not come up ticked
+    assert c.key not in w.doc.meta["view"]["chunks_3d"] and str(c.key) not in w.doc.meta["view"]["chunks_2d"]
+    # Modifica > Annulla: back in the project and in the Layer pane, not ticked
+    w.history.undo()
+    qapp.processEvents()
+    assert any(ch.key == c.key for ch in w.doc.chunks) and c.key in pane._chunk_widgets
+    assert not pane._chunk_widgets[c.key][0].isChecked() and not view.chunk_overlays
