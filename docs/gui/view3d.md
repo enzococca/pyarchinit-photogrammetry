@@ -105,7 +105,8 @@ view: see the [Layer pane](panes.md#layer).
 Application **1.7.5**. As Metashape's *Look Through*, the 3D view can **take the place of an aligned photo**: the view
 moves to where the photo was taken, looks where the camera looked with its field of view (the calibrated focal length of
 the sensor), and the photo is drawn **over the model**, undistorted with the lens model of the sensor (fisheye lenses
-too) so that it lies on the model, the cloud or the tie points - whatever *Show* chooses. Where the photo and the model
+too) so that it lies on the model, the cloud or the tie points - whatever *Show* chooses. The undistorted photo keeps the
+focal length of the sensor: with a wide fisheye the outer edges of the photo (far from its centre) are cut. Where the photo and the model
 differ, the model is wrong there (or the photo shows something that is no longer there). The photo fills the view in one
 direction and is centred in the other: bands at the sides or above and below when the shapes differ.
 
@@ -118,15 +119,18 @@ Where to start from:
 - the **Look through a photo** button in the *View* group of the rail of the 3D view: *Photo that best matches the
   view* chooses the aligned photo whose direction and position are closest to the view now (the angle between the
   directions, plus 30 degrees for every size of the scene between the positions) and moves the view there; *Next
-  photo* and *Previous photo* go through the photos in the order they were taken (the EXIF time, else the names).
+  photo* and *Previous photo* go through all the aligned photos of the chunk (not only those the *Photos* pane
+  shows) in the order they were taken: by EXIF time, then the photos without a time by name.
 
 While looking through a photo, a row above the view shows its name, **<** and **>** (previous and next photo), the
 **photo opacity** (0 %: the model only, 100 %: the photo only; 50 % the first time, then the last value used) and
-*Leave the photo*. ++page-down++ or ++right++ open the next photo, ++page-up++ or ++left++ the previous one, ++esc++
-leaves. **Any movement of the view leaves the photo** - rotating, panning, zooming, ++home++, ++t++: the photo goes and
+*Leave the photo*; a long name is shortened, whole in its tooltip, and on a narrow view the row goes on more lines.
+++page-down++ or ++right++ open the next photo, ++page-up++ or ++left++ the previous one, ++esc++ leaves (++page-down++,
+++page-up++ and ++esc++ also with the slider or a button of the row in use). **Any movement of the view leaves the photo** - rotating, panning, zooming, ++home++, ++t++: the photo goes and
 the view stays where it was, free to move (++home++ and ++t++ give back the usual field of view). Choosing another view in
 *Show* keeps the photo. The photo is drawn under the cameras, the markers and the free drawings (in the software
-renderer; with VTK it is a layer over the scene and, below 100 %, they show through it). A vertical exaggeration goes back
+renderer; with VTK the photo is a layer over the scene: below 100 % they show through it, at 100 % they are
+hidden). A vertical exaggeration goes back
 to x1 for the photo: the photo lies on the true heights only.
 
 The photo is read and undistorted in the background, at most 1600 pixels on its longer side; the last six are kept, so

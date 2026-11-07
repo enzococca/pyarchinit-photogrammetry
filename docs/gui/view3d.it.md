@@ -106,7 +106,8 @@ vedi il [pannello Layer](panes.md#layer).
 Applicazione **1.7.5**. Come *Look Through* di Metashape, la vista 3D può **mettersi al posto di una foto allineata**: la
 vista va dove è stata scattata la foto, guarda dove guardava la fotocamera con il suo campo visivo (la focale calibrata
 del sensore) e la foto si disegna **sopra il modello**, raddrizzata con il modello dell'obiettivo del sensore (anche i
-fisheye) così che coincida con il modello, la nuvola o i punti di legame - quello che sceglie *Mostra*. Dove foto e
+fisheye) così che coincida con il modello, la nuvola o i punti di legame - quello che sceglie *Mostra*. La foto raddrizzata
+tiene la focale del sensore: con un fisheye molto ampio i bordi esterni della foto (lontani dal centro) restano tagliati. Dove foto e
 modello non coincidono, lì il modello è sbagliato (o la foto mostra qualcosa che non c'è più). La foto riempie la vista
 in una direzione ed è centrata nell'altra: bande ai lati o sopra e sotto quando le forme sono diverse.
 
@@ -119,15 +120,18 @@ Da dove si parte:
 - il pulsante **Guarda dalla foto** nel gruppo *Vista* della colonna di strumenti della vista 3D: *Foto più adatta alla
   vista* sceglie la foto allineata con direzione e posizione più vicine alla vista di adesso (l'angolo fra le
   direzioni, più 30 gradi per ogni dimensione della scena fra le posizioni) e porta lì la vista; *Foto successiva* e
-  *Foto precedente* scorrono le foto nell'ordine in cui sono state scattate (l'ora EXIF, altrimenti i nomi).
+  *Foto precedente* scorrono tutte le foto allineate del chunk (non solo quelle che mostra il pannello *Foto*)
+  nell'ordine in cui sono state scattate: per ora EXIF, poi le foto senza ora per nome.
 
 Mentre si guarda da una foto, una riga sopra la vista ne dà il nome, **<** e **>** (foto precedente e successiva),
 l'**opacità della foto** (0 %: solo il modello, 100 %: solo la foto; 50 % la prima volta, poi l'ultimo valore usato) ed
-*Esci dalla foto*. ++page-down++ o ++right++ aprono la foto successiva, ++page-up++ o ++left++ la precedente, ++esc++
-esce. **Qualsiasi movimento della vista esce dalla foto** - ruotare, spostare, avvicinare, ++home++, ++t++: la foto
+*Esci dalla foto*; un nome lungo si accorcia, intero nel suggerimento, e su una vista stretta la riga va a capo.
+++page-down++ o ++right++ aprono la foto successiva, ++page-up++ o ++left++ la precedente, ++esc++ esce (++page-down++,
+++page-up++ ed ++esc++ anche con il cursore o un pulsante della riga in uso). **Qualsiasi movimento della vista esce dalla foto** - ruotare, spostare, avvicinare, ++home++, ++t++: la foto
 sparisce e la vista resta dov'era, libera di muoversi (++home++ e ++t++ ridanno il campo visivo solito). Scegliere
 un'altra vista in *Mostra* tiene la foto. La foto si disegna sotto camere, marker e disegni liberi (con il motore
-software; con VTK è uno strato sopra la scena e, sotto il 100 %, si vedono attraverso). L'esagerazione verticale torna a
+software; con VTK la foto è uno strato sopra la scena: sotto il 100 % si vedono attraverso, al 100 % restano
+nascosti). L'esagerazione verticale torna a
 x1 per la foto: la foto coincide solo con le quote vere.
 
 La foto si legge e si raddrizza in sottofondo, al massimo 1600 pixel sul lato lungo; le ultime sei restano pronte, così
