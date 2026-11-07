@@ -547,14 +547,19 @@ then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
 
 | Call | Description |
 | --- | --- |
-| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | moves `chunks` (Chunk objects, keys or labels; default: the other enabled chunks) into the world frame and CRS of `reference`; returns a report |
+| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None, check=False)` | moves `chunks` (Chunk objects, keys or labels; default: the other enabled chunks) into the world frame and CRS of `reference`; returns a report; `check=True`: each chunk measured against the reference once aligned (`distances` in its entry) |
+| `engine.chunks.cloud_distances(reference, chunk, max_points=200_000, threshold=None, surface=None, doc=None)` | how far the points of `chunk` are from the surface of `reference` (1.7.5): `median`, `nmad`, `p95` of the signed distance on the points with the reference over or under them, `overlap` (share of all points within `threshold`, default three spacings of the reference's points), `covered`, `points`, `what`, `placed` |
+| `engine.chunks.DistanceSurface(reference, max_points=200_000)` | the surface to measure against, kept for several chunks: `.distances(world_xyz)` -> signed distances (along the normal of the nearest point, turned upwards; the distance to the nearest point beyond the edge) and `covered` |
+| `engine.chunks.preview_points(chunk, max_points=200_000, kind="auto")` | at most `max_points` points of the dense cloud, tie points or model vertices, a stride through the memory-mapped file: internal xyz, colours, what |
+| `engine.chunks.shown_in(chunk, internal_xyz, crs)` | internal points of a chunk in the world of `crs` (PROJ between two systems of the world); `placed` False for a local frame with a system of the world |
 | `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | new chunk (default label `Merged chunk`) in the frame of the first chunk; the inputs are kept |
 | `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | new chunk (default label `<label> (copia)`, then `(copia 2)`... when taken: `engine.chunks.duplicate_label`) with the photos `cameras` of `chunk` (all when None) and their poses and enabled flags, the markers with the projections on those photos, the scale bars, transform, CRS and settings; a COLMAP model written from the poses, so depth maps run without aligning; the masks of the photos kept and the photos living in the chunk folder (reference copies of multispectral and thermal captures) copied, the cameras pointed at the copies; the settings of the captures kept, their products dropped; the tie points copied when every photo is kept (some of the photos need them: ValueError without); products never copied (`keep_products` is reserved); `chunk` is not changed; CLI `ppg duplicate-chunk` |
 | `chunk.set_cameras_enabled(cameras, enabled)` | enables or disables photos (objects of the chunk, keys or labels; KeyError for a name that is not there, ValueError for a Camera of another chunk, e.g. of a duplicate, which shares the keys): a disabled photo keeps its pose, alignment, depth maps, orthomosaic and texture leave it out; returns how many changed; CLI `ppg photos enable\|disable` |
 | `engine.chunks.cameras_in_area(chunk, polygon)` | the photos whose image frames the surface inside `polygon` (chunk coordinates) |
 | `ppg duplicate-chunk project.ppg [--chunk C] [--photos names.txt \| --area WKT] [--label L]` | command line: all the photos, those named in a text file (one a line), or those framing a polygon (WKT, GeoJSON or a GeoJSON file) |
 | `ppg photos enable\|disable project.ppg NAMES... [--chunk C]` | command line: photos by label (or key) |
-| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | command line (default reference: the active chunk) |
+| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--check] [--json]` | command line (default reference: the active chunk); `--check` prints the overlap and the distances of each chunk |
+| `ppg chunk-distances project.ppg [CHUNKS...] -r REF [--max-points N] [--threshold T] [--json]` | command line: the distances of chunks to the surface of a reference, aligned or not (default: the other enabled chunks to the active one) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | command line (default: all enabled chunks) |
 | `core.append.append_projects(doc, sources, chunks=None, webodm=False, progress=None)` | other projects (`.ppg`, `.psx`, WebODM `all.zip` or task folder) as new chunks of `doc`, as *File > Append projects...*: the sources only read, the active chunk unchanged, `doc` not saved; one `Appended` (`path`, `kind`, `chunks`, `error`, `warnings`) per source, a source that fails leaves nothing and the others go on |
 | `ppg append project.ppg SOURCES... [--chunks NAMES] [--webodm]` | command line (`--chunks`: names separated by commas; exit code 1 when a source failed) |
@@ -593,7 +598,8 @@ The report: `{"reference": {"key", "label"}, "method", "fix_scale", "crs", "leve
 `fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` and `check` (residuals of the
 common markers; when the ICP started from them they also anchor it - point-to-point terms
 weighing together as much as the cloud - so a flat or noisy cloud cannot slide away from them,
-`anchored`) for points. `chunk.meta["chunk_alignment"]` keeps a summary.
+`anchored`) for points; with `check=True`, `distances` (`cloud_distances` of the chunk once aligned, `None` when it
+has nothing to measure). `chunk.meta["chunk_alignment"]` keeps a summary.
 
 `merge_chunks` needs chunks in one frame (aligned, or georeferenced in projected CRSs; another
 CRS is converted through a fitted similarity, with a warning above 5 mm). The merged chunk has
@@ -1780,7 +1786,7 @@ assistant ("limited for scripts" under 2).
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
-| `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |

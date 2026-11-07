@@ -55,6 +55,48 @@ mostra i suoi vertici da trascinare o togliere; *Drappeggia sul modello* aggiung
 pixel. I disegni dei layer visibili si vedono nei loro colori, quello scelto più spesso. Vedi
 [disegni liberi](drawing.md#disegni-liberi-2d-e-3d).
 
+## Più chunk insieme
+
+Applicazione **1.7.5**. Con più di un chunk nel progetto, ogni chunk dell'*Area di lavoro* ha una casella: **spuntala per
+mostrare quel chunk nella vista 3D insieme a quello attivo** (il chunk attivo si vede sempre). I chunk sono disegnati
+dove stanno nel mondo - ognuno con la sua trasformazione, convertito nel sistema di coordinate del chunk attivo quando
+entrambi sono sistemi del mondo - così **prima di *Allinea chunk*** vedi dove si trovano e se si sovrappongono, e **dopo**
+se combaciano. Un chunk in un sistema locale accanto a uno in un sistema del mondo non si può mettere nello stesso posto:
+viene disegnato nel suo sistema, e la legenda lo dice.
+
+Ciò che si disegna segue *Mostra*: con la nuvola densa o i punti di legame, una copia diradata dei punti di ogni chunk (mai
+la nuvola intera); con il modello, l'anteprima del suo modello (un chunk che non ce l'ha mostra i suoi punti). *Vista
+iniziale* li inquadra tutti.
+
+![Tre chunk prima dell'allineamento, un colore ciascuno](../img/gui/chunks-3d-before.it.png)
+
+La riga **Altri chunk** sopra la vista (compare appena si spunta un chunk) sceglie i colori e l'opacità degli altri chunk:
+
+| Colori | Cosa mostrano |
+| --- | --- |
+| **Un colore per chunk** | ogni chunk - anche quello attivo - nel suo colore, con il nome nella legenda a destra: dove sono le superfici di due campagne, quale sta sopra |
+| **Colori veri** | i colori delle foto; il chunk attivo tiene i colori scelti per lui (classi, quota...) |
+| **Distanza dal chunk attivo** | il chunk attivo in grigio, gli altri colorati secondo la distanza di ogni punto dalla sua superficie: bianco sopra di essa, rosso più in alto, blu più in basso, saturi oltre la fine della scala (arrotondata a 1, 2 o 5 mm, cm o m dal 95° percentile); grigi i punti che non hanno il chunk attivo né sopra né sotto |
+
+![Dopo *Allinea chunk*: un colore per chunk](../img/gui/chunks-3d-after.it.png)
+
+Con *Distanza dal chunk attivo* la legenda dà, per ogni chunk, la distanza **mediana**, la **NMAD** (la dispersione, come
+una deviazione standard che ignora i valori anomali) e la quota dei suoi punti **entro** tre spaziature dei punti del chunk
+attivo: dopo un buon allineamento la mediana è di pochi millimetri e quasi tutti i punti sono entro. La distanza si misura
+lungo la normale della superficie dove il chunk attivo sta sopra o sotto il punto, altrimenti dal punto più vicino: una
+parte oltre il bordo del chunk attivo non è mai «a 0».
+
+![Le distanze dopo l'allineamento](../img/gui/chunks-3d-distance.it.png)
+
+**Opacità** sbiadisce gli altri chunk (anche con il renderer software): con i colori veri al 50 % due rilievi della stessa
+trincea si leggono uno attraverso l'altro. Le spunte, i colori e l'opacità si salvano nel progetto; sono scelte della
+vista, non passi di *Modifica > Annulla*. Mentre si vede una versione conservata, si disegna solo il chunk attivo.
+
+*Flusso di lavoro > Allinea chunk...* ora finisce con lo stesso controllo: per ogni chunk allineato, la quota dei suoi
+punti entro la soglia e la sua distanza mediana dal riferimento ([riga di comando](../api.md#allineare-e-unire-i-chunk):
+`ppg align-chunks ... --check`, `ppg chunk-distances`). I DEM e le ortofoto dei chunk si confrontano nella vista 2D:
+vedi il [pannello Layer](panes.md#layer).
+
 ## Tasti
 
 Con la vista 3D attiva:

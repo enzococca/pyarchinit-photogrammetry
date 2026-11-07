@@ -115,7 +115,7 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi foto 360°...** | ogni foto sferica diventa le sei facce di un cubo, allineate insieme |
 | **Ricollega foto (altra cartella)...** | ritrova le foto con lo stesso nome in un'altra cartella (spostata, su un altro disco, «solo online» su Dropbox) |
 | **Aggiungi chunk** | un chunk vuoto |
-| **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
+| **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte; il riepilogo dà, per ogni chunk, la quota dei suoi punti sul riferimento e la loro distanza mediana ([più chunk insieme](view3d.md#piu-chunk-insieme)) |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
 | **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
 | **Ricostruendo, conserva DEM e ortofoto attivi come versioni** | un interruttore (spento per impostazione predefinita): la ricostruzione lascia fra le versioni il DEM e l'ortofoto di prima |
