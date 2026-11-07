@@ -178,9 +178,9 @@ def test_3d_view_one_row_and_the_tools_in_its_rail(window, qapp):
     assert all(b in inside for b in buttons)
     assert mv.exag_spin.window() is window and rail.flyout.isAncestorOf(mv.exag_spin)
     # only the display choices stay above the canvas (and the row of the photo looked through, shown only then)
-    assert not mv.look_row.isVisibleTo(mv)
+    assert not mv.look_shown()
     above = [b for b in mv.findChildren(QPushButton) if not rail.flyout.isAncestorOf(b)
-             and not mv.look_row.isAncestorOf(b)]
+             and not any(p.isAncestorOf(b) for p in mv.look_parts)]
     assert not above, [b.text() for b in above]
     for b in (mv.combo, mv.cb_cams, mv.cb_marks, mv.cb_region):
         assert not rail.flyout.isAncestorOf(b)

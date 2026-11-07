@@ -130,7 +130,7 @@ class _TrackballCanvas:
     def look(self, cam: OrbitCamera) -> None:
         """The view through a photo: ``cam`` (pose and field of view) taken as it is; moving the view, Home or T
         leave it (``look_left``)."""
-        if not self.look_on:
+        if self._fov_before is None:  # the free view's, kept through looks and drags until Home or T give it back
             self._fov_before = float(self.get_cam().fov)
         self.look_on = True
         self._put_cam(cam)
@@ -1749,13 +1749,18 @@ class ModelView(QWidget, LookThrough):
                 self.canvas = None
         if self.canvas is None:
             self.canvas = SoftwareCanvas(self)
+        else:  # VTK: the garbage collector in the GUI thread only, also outside gui.main (see gc_guard.ensure)
+            from .gc_guard import ensure
+
+            ensure(QApplication.instance())
         b_reset.clicked.connect(lambda: self.canvas.reset_view())
         self.point_spin.valueChanged.connect(lambda v: self.canvas.set_point_size(v))
         b_top.clicked.connect(lambda: self.canvas.top_view())
         self.b_center.clicked.connect(lambda: self.canvas.centre_on_pivot())
         self.canvas.pivot_requested.connect(self._pivot_at)
         self._init_look()
-        bar.addWidget(self.look_row)
+        for part in self.look_parts:
+            bar.addWidget(part)
         self.lasso = LassoOverlay(self)
         self.lasso.finished.connect(self._lasso_finished)
         self.picker = PickOverlay(self)

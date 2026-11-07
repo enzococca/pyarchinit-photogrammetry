@@ -9,15 +9,16 @@ from collections import OrderedDict
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
 
 from ..engine import look_through as lt
 from .i18n import tr
 from .scene import OrbitCamera
 
-PHOTOS_KEPT = 6  # undistorted photos kept (RGBA at MAX_SIDE: ~4 MB each)
-MAPS_KEPT = 3  # undistortion maps kept (one per sensor and size read)
+PHOTOS_KEPT = 6  # undistorted photos kept (RGBA at MAX_SIDE: 1600 x 1200 x 4 = ~7.7 MB each)
+MAPS_KEPT = 3  # undistortion maps kept, one per sensor and size read (two float32 maps: ~15 MB each)
+LABEL_PX = 170  # the name of the photo elided beyond this (whole in its tooltip)
 SETTING = "view3d/look_opacity"
 
 
@@ -50,12 +51,21 @@ class LookThrough:
         self._look_pending = None  # a photo asked while another one is read
         self._look_relay = _LookRelay(self)
         self._look_relay.ready.connect(self._look_loaded, Qt.ConnectionType.QueuedConnection)
-        self.look_row = QWidget()
-        row = QHBoxLayout(self.look_row)
-        row.setContentsMargins(0, 0, 0, 0)
+        # the row of the photo looked through, in parts the bar of the view wraps (none wider than the display
+        # choices: the 3D view is never widened by it on a narrow screen); shown only while looking
+        def part(*widgets, left: int = 0):
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(left, 0, 0, 0)
+            lay.setSpacing(4)
+            for x in widgets:
+                lay.addWidget(x)
+            w.setVisible(False)
+            return w
+
         self.look_label = QLabel("")
         self.look_label.setStyleSheet("font-weight: bold")
-        row.addWidget(self.look_label)
+        self.look_label.setMaximumWidth(LABEL_PX)
         self.b_look_prev = QPushButton("<")
         self.b_look_prev.setToolTip(tr("Foto precedente (Pagina su)"))
         self.b_look_prev.clicked.connect(lambda: self.look_step(-1))
@@ -64,8 +74,6 @@ class LookThrough:
         self.b_look_next.clicked.connect(lambda: self.look_step(1))
         for b in (self.b_look_prev, self.b_look_next):
             b.setFixedWidth(b.fontMetrics().horizontalAdvance("<") + 24)
-            row.addWidget(b)
-        row.addWidget(QLabel(tr("Opacità della foto")))
         self.look_slider = QSlider(Qt.Orientation.Horizontal)
         self.look_slider.setRange(0, 100)
         try:
@@ -73,20 +81,50 @@ class LookThrough:
         except (TypeError, ValueError):
             value = 50
         self.look_slider.setValue(min(max(value, 0), 100))
-        self.look_slider.setFixedWidth(110)
-        self.look_slider.setToolTip(tr("0 %: solo il modello, 100 %: solo la foto"))
+        self.look_slider.setMinimumWidth(60)
+        self.look_slider.setMaximumWidth(110)
+        self.look_slider.setToolTip(tr("Opacità della foto") + ": " + tr("0 %: solo il modello, 100 %: solo la foto"))
         self.look_slider.valueChanged.connect(self._look_opacity_moved)
-        row.addWidget(self.look_slider)
         self.look_value = QLabel(f"{self.look_slider.value()} %")
         self.look_value.setMinimumWidth(self.look_value.fontMetrics().horizontalAdvance("100 %") + 4)
-        row.addWidget(self.look_value)
         self.b_look_exit = QPushButton(tr("Esci dalla foto"))
         self.b_look_exit.setToolTip(tr("Torna alla vista libera (Esc); anche ruotare, spostare o avvicinare la vista "
                                        "esce dalla foto"))
         self.b_look_exit.clicked.connect(self.leave_look)
-        row.addWidget(self.b_look_exit)
-        self.look_row.setVisible(False)
+        opacity = QLabel(tr("Opacità"))
+        opacity.setToolTip(tr("Opacità della foto"))
+        self.look_parts = [part(self.look_label, left=12), part(self.b_look_prev, self.b_look_next),
+                           part(opacity, self.look_slider, self.look_value), part(self.b_look_exit)]
+        # Esc and Page Down/Up while looking, also with the slider or a button of the row focused (on this view only)
+        self._look_shortcuts = []
+        for key, slot in ((Qt.Key.Key_Escape, self._look_escape), (Qt.Key.Key_PageDown, lambda: self.look_step(1)),
+                          (Qt.Key.Key_PageUp, lambda: self.look_step(-1))):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.setEnabled(False)
+            sc.activated.connect(slot)
+            self._look_shortcuts.append(sc)
         self.canvas.look_left.connect(self._look_left)
+
+    def _show_look_row(self, shown: bool) -> None:
+        for w in self.look_parts:
+            w.setVisible(shown)
+        for sc in self._look_shortcuts:
+            sc.setEnabled(shown)
+
+    def look_shown(self) -> bool:
+        """True when the row of the photo looked through is shown."""
+        return self.look_parts[0].isVisibleTo(self)
+
+    def _look_escape(self) -> None:
+        """Esc while looking: a drawing, a pick or a lasso in progress first, else out of the photo."""
+        if getattr(self, "_draw_kind", None) is not None:
+            self.stop_drawing()
+        elif self.stack.currentWidget() is not self.canvas:
+            self._end_overlays()
+            self.stack.setCurrentWidget(self.canvas)
+        else:
+            self.leave_look()
 
     # ----------------------------------------------------------- state
     @property
@@ -120,8 +158,11 @@ class LookThrough:
         self._look_generation += 1
         self._look = {"camera": camera, "ideal": ideal, "corners": None, "generation": self._look_generation}
         self._look_place()
-        self.look_label.setText(tr("Foto: {0}", camera.label))
-        self.look_row.setVisible(True)
+        text = tr("Foto: {0}", camera.label)
+        fm = self.look_label.fontMetrics()
+        self.look_label.setText(fm.elidedText(text, Qt.TextElideMode.ElideMiddle, LABEL_PX - 4))
+        self.look_label.setToolTip(text)
+        self._show_look_row(True)
         self.canvas.set_hint(tr("{0} - Esc: esci, Pagina giù/su: foto successiva/precedente", camera.label))
         key = self._look_photo_key(camera, sensor, ideal)
         if key in self._look_photos:
@@ -162,7 +203,7 @@ class LookThrough:
             return
         self._look = None
         self._look_pending = None
-        self.look_row.setVisible(False)
+        self._show_look_row(False)
         if getattr(self, "_draw_kind", None) is None:
             self.canvas.set_hint("")
         self.look_changed.emit(None)
@@ -238,7 +279,11 @@ class LookThrough:
         relay = self._look_relay
 
         def work():
-            relay.ready.emit(tag, _load(camera.path, sensor, ideal, maps))
+            result = _load(camera.path, sensor, ideal, maps)
+            try:
+                relay.ready.emit(tag, result)
+            except RuntimeError:  # the view was closed and deleted meanwhile: nobody wants the photo
+                pass
 
         threading.Thread(target=work, name="ppg-look-through", daemon=True).start()
 

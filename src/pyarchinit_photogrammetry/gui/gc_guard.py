@@ -84,4 +84,12 @@ def install(parent=None, interval_ms: int = 500, full_every_s: float = 60.0) -> 
     return GuiThreadCollector(interval_ms, full_every_s, parent)
 
 
-__all__ = ["GuiThreadCollector", "due_generation", "install"]
+def ensure(app) -> GuiThreadCollector:
+    """The collector of ``app`` (the QApplication), installed now when there is none yet: a script run with
+    ``--run``, a plugin or a test that builds a VTK view outside ``gui.main``. VTK frees its objects under a lock of its
+    own: a collection in a thread reading a photo while the GUI thread renders would wait for it forever."""
+    found = app.findChildren(GuiThreadCollector)
+    return found[0] if found else install(app)
+
+
+__all__ = ["GuiThreadCollector", "due_generation", "ensure", "install"]

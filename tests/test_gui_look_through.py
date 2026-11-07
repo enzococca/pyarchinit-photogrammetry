@@ -94,7 +94,7 @@ def test_the_photo_lies_on_the_model(view, app):
     mv = view
     cam, markers = _camera_with_markers(mv.chunk)
     assert mv.look_through(cam)
-    assert mv.look_camera is cam and mv.looks == [cam] and mv.look_row.isVisibleTo(mv)
+    assert mv.look_camera is cam and mv.looks == [cam] and mv.look_shown()
     wait_photo(mv, app)
     # the view is the photo's: centre and direction
     centre, basis = lt.photo_pose(mv.chunk, cam)
@@ -169,7 +169,7 @@ def test_next_previous_best_and_leaving(view, app):
     # Esc leaves: the free view where the photo was
     eye = mv.canvas.get_cam().eye.copy()
     QTest.keyClick(mv.canvas, Qt.Key.Key_Escape)
-    assert mv.look_camera is None and mv.looks[-1] is None and not mv.look_row.isVisibleTo(mv)
+    assert mv.look_camera is None and mv.looks[-1] is None and not mv.look_shown()
     assert mv.canvas.photo is None and np.allclose(mv.canvas.get_cam().eye, eye)
     # the best photo for the view: the view of a photo, moved a little, gives that photo back
     target = order[len(order) // 2]
@@ -214,6 +214,112 @@ def test_the_photo_stays_through_another_kind_and_a_resize(view, app):
     measured = _photo_to_widget(mv, cam, np.array([[m.projections[cam.key].x, m.projections[cam.key].y]
                                                    for m in markers]))
     assert np.abs(projected - measured).max() < 2.0
+
+
+def _drag(canvas, dx=3):
+    tb = canvas.trackball
+    tb.press(300, 260, "rotate")
+    tb.move(300 + dx, 261)
+    tb.release()
+
+
+def test_the_free_view_s_field_of_view_comes_back(view, app):
+    """Look, drag out, look at another photo, then T or Home: the field of view of the free view, not a photo's."""
+    from pyarchinit_photogrammetry.engine import look_through as lt
+
+    mv = view
+    order = lt.ordered_cameras(mv.chunk)
+    free = mv.canvas.get_cam().fov
+    for back in (mv.canvas.top_view, mv.canvas.reset_view):
+        mv.look_through(order[1])
+        assert mv.canvas.get_cam().fov != pytest.approx(free)
+        _drag(mv.canvas)
+        assert mv.look_camera is None
+        mv.look_through(order[2])
+        _drag(mv.canvas, -3)
+        mv.look_through(order[3])
+        back()
+        assert mv.look_camera is None and mv.canvas.get_cam().fov == pytest.approx(free)
+
+
+def test_the_photo_row_never_widens_the_view(view, app):
+    """With a long DJI name the 3D view is not wider while looking than without: the name elided (whole in the
+    tooltip), the row in parts that wrap."""
+    mv = view
+    cam, _markers = _camera_with_markers(mv.chunk)
+    before = mv.minimumSizeHint().width()
+    label, cam.label = cam.label, "DJI_20240512_103012_0423_V.JPG"
+    try:
+        mv.look_through(cam)
+        for _ in range(3):
+            app.processEvents()
+        assert mv.look_shown()
+        assert mv.minimumSizeHint().width() <= before
+        assert mv.look_label.toolTip().endswith(cam.label) and mv.look_label.text() != ""
+        mv.resize(380, 520)  # a narrow dock: the parts go on more lines, nothing is cut
+        for _ in range(3):
+            app.processEvents()
+        assert all(p.geometry().right() <= mv.width() for p in mv.look_parts)
+    finally:
+        cam.label = label
+        mv.leave_look()
+
+
+def test_keys_work_with_the_slider_or_a_button_focused(view, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from pyarchinit_photogrammetry.engine import look_through as lt
+
+    mv = view
+    mv.activateWindow()
+    order = lt.ordered_cameras(mv.chunk)
+    mv.look_through(order[0])
+    mv.look_slider.setFocus()
+    app.processEvents()
+    QTest.keyClick(mv.look_slider, Qt.Key.Key_PageDown)
+    assert mv.look_camera is order[1]
+    mv.b_look_next.setFocus()
+    QTest.keyClick(mv.b_look_next, Qt.Key.Key_PageUp)
+    assert mv.look_camera is order[0]
+    QTest.keyClick(mv.b_look_next, Qt.Key.Key_Escape)
+    assert mv.look_camera is None
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_photo_read_after_the_view_is_gone(processed, app, capfd):
+    """The view closed and deleted while its photo is read: the result is let go, nothing printed."""
+    import gc
+
+    from pyarchinit_photogrammetry.gui.model_view import ModelView
+
+    _doc, chunk, _ = processed
+    mv = ModelView()
+    mv.resize(500, 400)
+    mv.show()
+    mv.set_chunk(chunk, "model")
+    app.processEvents()
+    gate = __import__("threading").Event()
+    from pyarchinit_photogrammetry.gui import look_view
+
+    real = look_view._load
+    look_view._load = lambda *a: (gate.wait(10), real(*a))[1]
+    try:
+        mv.look_through(chunk.aligned_cameras[0])
+        mv.close()
+        import shiboken6
+
+        shiboken6.delete(mv)
+        del mv
+        gc.collect()
+        app.processEvents()
+        gate.set()
+        time.sleep(0.5)
+        app.processEvents()
+    finally:
+        look_view._load = real
+    err = capfd.readouterr().err
+    assert "already deleted" not in err and "Traceback" not in err
 
 
 @pytest.fixture
@@ -324,6 +430,17 @@ def test_vtk_photo_lies_on_the_model(processed, app, monkeypatch):
         assert mv.canvas._photo_actor.GetProperty().GetOpacity() == pytest.approx(1.0)
         mv.leave_look()
         assert mv.canvas._photo_actor is None and mv.look_camera is None
+        # the free view's field of view back after look, drag, look, T
+        from pyarchinit_photogrammetry.engine import look_through as lt
+
+        mv.canvas.reset_view()
+        free = mv.canvas.get_cam().fov
+        order = lt.ordered_cameras(chunk)
+        mv.look_through(order[1])
+        _drag(mv.canvas)
+        mv.look_through(order[2])
+        mv.canvas.top_view()
+        assert mv.canvas.get_cam().fov == pytest.approx(free)
     finally:
         mv.close()
         collector.stop()
