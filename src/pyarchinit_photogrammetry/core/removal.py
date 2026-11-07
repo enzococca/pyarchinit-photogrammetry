@@ -606,20 +606,55 @@ class ChunkRemoval(Removal):
         self.places: dict[int, int] = {}
         self.was_active = None
 
+    adds = False  # the removal of chunks just added (:meth:`added`)
+
     @classmethod
-    def added(cls, document, chunks) -> "ChunkRemoval":
+    def added(cls, document, chunks=()) -> "ChunkRemoval":
         """The removal that undoes an addition of ``chunks`` (*File > Aggiungi progetti*), not applied: the chunks
         stay. The project on disk does not list them until it is saved, so the end of the session deletes their
-        folders unless a save comes first - and, after an undo and a redo, as for any removal."""
-        r = cls(document, chunks)
+        folders unless a save comes first - and, after an undo and a redo, as for any removal. It is a journal too:
+        its list (kind ``"added"`` while the chunks are in place) is written at once and at every :meth:`add`,
+        before their folders are filled, so a session that crashes leaves to :func:`recover` the folders of the
+        chunks the project as saved does not list - those of this list only."""
+        r = cls(document, list(chunks))
+        r.adds = True
         r.state = RESTORED
         r.saved = REMOVED  # what the file on disk says: the chunks are not in it
         root = document.files_dir
         r.files[PRESENT] = [f"chunk_{c.key}" for c in r.chunks if (root / f"chunk_{c.key}").exists()]
+        r._write_manifest()
         return r
 
+    def add(self, chunk) -> None:
+        """One more chunk just added (already in the project, its folder not filled yet), written in the journal."""
+        if not any(chunk is c for c in self.document.chunks):
+            raise ValueError("the chunk is not in the project")
+        if not any(chunk is c for c in self.chunks):
+            self.chunks.append(chunk)
+        rel = f"chunk_{chunk.key}"
+        if rel not in self.files[PRESENT]:
+            self.files[PRESENT].append(rel)
+        self._write_manifest()
+
+    def forget(self, chunks) -> None:
+        """``chunks`` (taken away again: a source that failed) out of the list."""
+        gone = [c for c in self.chunks if any(c is x for x in chunks)]
+        self.chunks = [c for c in self.chunks if not any(c is x for x in gone)]
+        rels = {f"chunk_{c.key}" for c in gone}
+        self.files[PRESENT] = [r for r in self.files[PRESENT] if r not in rels]
+        self._write_manifest()
+
+    def discard(self) -> None:
+        """Nothing added after all: the journal goes (out of the document's removals, its folder deleted)."""
+        self.document.removals[:] = [r for r in self.document.removals if r is not self]
+        _delete(self.folder)
+        trash = self.document.files_dir / TRASH
+        if trash.is_dir() and not any(trash.iterdir()):
+            trash.rmdir()
+
     def _manifest(self) -> dict:
-        return {**super()._manifest(), "chunks": [c.key for c in self.chunks]}
+        kind = "added" if self.adds and self.state == RESTORED else self.kind  # in place: a journal of an addition
+        return {**super()._manifest(), "kind": kind, "chunks": [c.key for c in self.chunks]}
 
     def apply(self) -> None:
         self.redo()
@@ -776,8 +811,17 @@ def recover(document) -> dict:
         except (OSError, ValueError):
             log.warning("%s: no list of what it holds, left as it is", entry)
             continue
-        entries.append((0 if manifest.get("kind") == "chunks" else 1, entry, manifest))
+        entries.append((0 if manifest.get("kind") in ("chunks", "added") else 1, entry, manifest))
     for _order, entry, manifest in sorted(entries, key=lambda t: t[0]):  # the chunks first, then what goes in them
+        if manifest.get("kind") == "added":  # chunks added (Aggiungi progetti), their folders in place: those the
+            for rel in manifest.get("files", {}).get(PRESENT, []):  # project as saved does not list go
+                m = _CHUNK_DIR.match(rel)
+                place = root / rel
+                if m is not None and rel == m.group(0) and int(m.group(1)) not in keys and place.exists():
+                    _delete(place)
+                    out["deleted"] += 1
+            _delete(entry)
+            continue
         for rel in manifest.get("files", {}).get(PRESENT, []):
             src = entry / PRESENT / rel
             if not (src.exists() or src.is_symlink()):
