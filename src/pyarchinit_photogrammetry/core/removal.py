@@ -606,6 +606,18 @@ class ChunkRemoval(Removal):
         self.places: dict[int, int] = {}
         self.was_active = None
 
+    @classmethod
+    def added(cls, document, chunks) -> "ChunkRemoval":
+        """The removal that undoes an addition of ``chunks`` (*File > Aggiungi progetti*), not applied: the chunks
+        stay. The project on disk does not list them until it is saved, so the end of the session deletes their
+        folders unless a save comes first - and, after an undo and a redo, as for any removal."""
+        r = cls(document, chunks)
+        r.state = RESTORED
+        r.saved = REMOVED  # what the file on disk says: the chunks are not in it
+        root = document.files_dir
+        r.files[PRESENT] = [f"chunk_{c.key}" for c in r.chunks if (root / f"chunk_{c.key}").exists()]
+        return r
+
     def _manifest(self) -> dict:
         return {**super()._manifest(), "chunks": [c.key for c in self.chunks]}
 

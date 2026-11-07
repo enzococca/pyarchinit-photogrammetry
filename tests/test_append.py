@@ -247,3 +247,36 @@ def test_cli_append(tmp_path):
     assert "Saggio B" in r.output and "manca.psx" in r.output
     again = ppg.Document.open(tmp_path / "dst" / "mio.ppg")
     assert [c.label for c in again.chunks] == ["X", "Saggio B"]
+
+
+@pytest.mark.parametrize("story", ["not saved", "saved", "saved, undone, saved", "saved, undone", "undone, redone"])
+def test_the_folders_of_chunks_appended_follow_the_project_as_saved(tmp_path, story):
+    """The end of the session (``settle_removals``) keeps the folders of the chunks appended only when the project as
+    last saved lists them."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.append import append_projects
+    from pyarchinit_photogrammetry.core.removal import ChunkRemoval
+
+    src = make_source(tmp_path / "src")
+    doc = ppg.Document()
+    doc.add_chunk("X")
+    doc.save(tmp_path / "dst" / "mio.ppg")
+    (res,) = append_projects(doc, [src])
+    chunks = [c for c in res.chunks if (doc.files_dir / f"chunk_{c.key}").is_dir()]  # Saggio B has no data
+    folders = [doc.files_dir / f"chunk_{c.key}" for c in chunks]
+    assert len(folders) == 1
+    removal = ChunkRemoval.added(doc, res.chunks)
+    for step in story.split(", "):
+        if step.startswith("saved"):
+            doc.save()
+        elif step == "undone":
+            removal.redo()  # Modifica > Annulla of the append
+            assert [c.label for c in doc.chunks] == ["X"] and not any(f.exists() for f in folders)
+        elif step == "redone":
+            removal.undo()
+            assert len(doc.chunks) == 3 and all(f.is_dir() for f in folders)
+    listed = {c["key"] for c in __import__("json").loads(doc.path.read_text())["chunks"]}
+    doc.settle_removals()
+    for c, f in zip(chunks, folders):
+        assert f.is_dir() == (c.key in listed), (story, f)
+    assert not (doc.files_dir / ".removed").exists()
