@@ -296,7 +296,8 @@ class Context:
         """Since 1.3.4: ``chunk`` (of the open project) becomes the active one. In the window as when the
         user picks it in the workspace: the drawings of the chunk left stay with it, those of ``chunk``
         come back, the views show it and the ``on_refresh`` callbacks are called; nothing happens when it
-        is the active one already. In the command line it becomes the active chunk of its project."""
+        is the active one already. In the command line it becomes the active chunk of its project. Since 1.7.5 a
+        RuntimeError while the window appends projects (*File > Aggiungi progetti*: no chunk changes then)."""
         window = self.window
         doc = getattr(window, "doc", None) if window is not None else getattr(chunk, "document", None)
         if doc is None or not any(c is chunk for c in doc.chunks):
@@ -304,8 +305,8 @@ class Context:
         activate = getattr(window, "_activate_chunk", None)
         if activate is None:
             doc.chunk = chunk
-        else:
-            activate(chunk)
+        elif activate(chunk) is False:
+            raise RuntimeError("the window is appending projects: the active chunk cannot change now")
 
     def show_raster(self, kind: str | None = None, chunk=None, path=None) -> bool:
         """Since 1.3.4: the orthophoto (``kind`` "ortho") or the DEM ("dem") of ``chunk`` in the 2D view,

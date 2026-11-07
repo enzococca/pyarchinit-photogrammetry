@@ -168,3 +168,39 @@ def test_no_other_edit_of_the_chunks_while_an_append_runs(window, qapp, tmp_path
         release.set()
     _wait(w, qapp)
     assert w._appending is False and w.a_ws_add_chunk.isEnabled()
+
+
+def test_no_chunk_becomes_active_while_an_append_runs_whatever_asks(window, qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    w, mw = window
+    doc = w.doc
+    first, other = doc.chunks[0], doc.add_chunk("Altro")
+    triggered = []
+
+    class Menu(QMenu):  # the window's menu, whose exec triggers "Rendi attivo" instead of showing itself
+        def exec(self, *_a, **_k):
+            for a in self.actions():
+                if a.text() == mw.tr("Rendi attivo"):
+                    triggered.append(a)
+                    a.trigger()
+                    return a
+            return None
+
+    monkeypatch.setattr(mw, "QMenu", Menu)
+    called = []
+    w._appending = True
+    w._workspace_menu("chunk", other, None, QPoint(0, 0))
+    assert triggered and w.chunk is first  # the right click: refused
+    w._workspace_item("plugin", other, ("prova", {"activate": lambda: called.append(w.chunk)}))
+    assert called == [] and w.chunk is first  # a plugin's tree item: its callback not run on another chunk
+    with pytest.raises(RuntimeError):  # a plugin through its API: told, never left on another chunk
+        Context("prova", tmp_path, window=w).activate_chunk(other)
+    assert w.chunk is first
+    assert w.rebuild_stale() is False
+    w._appending = False
+    w._workspace_menu("chunk", other, None, QPoint(0, 0))
+    assert w.chunk is other

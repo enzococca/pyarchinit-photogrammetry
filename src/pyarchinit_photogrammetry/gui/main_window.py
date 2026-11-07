@@ -4840,7 +4840,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         from .rebuild import RebuildStep, chunk_files
 
         if self._appending_refused():
-            return
+            return False
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             return False
@@ -4988,7 +4988,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """*Duplica chunk...* (menu of a chunk in the Area di lavoro): a new chunk with all the photos of
         ``chunk`` (default the active one), the photos selected in the Photos pane or those framing the
         polygon selected on the orthophoto, with their poses (:meth:`Document.duplicate_chunk`); it becomes
-        the active chunk. Products are not copied: depth maps and the rest are built again on it."""
+        the active chunk. Products are not copied: depth maps and the rest are built again on it. Refused before any
+        question while *Aggiungi progetti* runs."""
+        if self._appending_refused():
+            return
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             self._warn("Nessun chunk attivo.")
@@ -8875,7 +8878,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if callback is None:
             return
         if chunk is not None and chunk is not self.chunk and any(c is chunk for c in self.doc.chunks):
-            self._activate_chunk(chunk)
+            if not self._activate_chunk(chunk):
+                return  # refused (an append runs): never on another chunk
         try:
             callback()
         except Exception as exc:  # a plugin never takes the window down
@@ -9341,8 +9345,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _show_phase(self, key: int) -> None:
         chunk = next((c for c in self.doc.chunks if c.key == key), None)
-        if chunk is not None:
-            self._activate_chunk(chunk)
+        if chunk is not None and self._activate_chunk(chunk):
             self.show_view(self.ortho_view)
 
     def _phase_date_changed(self, key: int, text: str) -> None:
@@ -9982,14 +9985,19 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         pool = {"units": self.frame_units, "quote": self.frame_quote, "points": self.frame_points}[kind]
         return any(item is x for x in pool)
 
-    def _activate_chunk(self, chunk) -> None:
+    def _activate_chunk(self, chunk) -> bool:
         """Another chunk becomes the active one: the drawings of the one left stay with it (the
-        units exposed in that phase of the excavation), those of the new one come back."""
+        units exposed in that phase of the excavation), those of the new one come back. Refused while *Aggiungi
+        progetti* runs (its chunks are half made, and the drawings of a chunk shown then would be written over
+        what the append copies): returns whether ``chunk`` is the active one."""
         if chunk is self.chunk:
-            return
+            return True
+        if self._appending_refused():
+            return False
         self._switch_chunk(chunk)
         if self.history is not None:
             self.history.reset(keep_document=True)  # the history belongs to a chunk; the removals stay
+        return True
 
     def _switch_chunk(self, chunk, store: bool = True) -> None:
         """``chunk`` the active one and the window on it; ``store``: the drawings of the chunk left go
@@ -14752,8 +14760,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         def on(fn):
             """``fn`` with the chunk of the item the active one."""
             def run():
-                if not here and any(chunk is c for c in self.doc.chunks):
-                    self._activate_chunk(chunk)
+                if not here and any(chunk is c for c in self.doc.chunks) and not self._activate_chunk(chunk):
+                    return  # refused (an append runs): never on another chunk
                 fn()
             return run
 
