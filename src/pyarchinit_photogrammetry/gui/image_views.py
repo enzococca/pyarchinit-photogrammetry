@@ -319,6 +319,27 @@ class _DetailRelay(QObject):
     ready = Signal(int, object, object)  # generation, QImage, QRectF in scene coordinates
 
 
+class _ReducedCopy(QGraphicsPixmapItem):
+    """The reduced copy of a raster. Faded (opacity < 1) under the full-resolution detail, it is not painted where the
+    detail is (``hole``, scene rectangle): two translucent layers would compose to more than the opacity chosen."""
+
+    hole: QRectF | None = None
+
+    def paint(self, painter, option, widget=None) -> None:
+        hole = self.hole
+        if hole is None:
+            super().paint(painter, option, widget)
+            return
+        painter.save()
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        path.addRect(self.boundingRect())
+        path.addRect(self.mapRectFromScene(hole))
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        super().paint(painter, option, widget)
+        painter.restore()
+
+
 class _ZoomView(QGraphicsView):
     """Wheel zoom around the cursor, middle/space drag to pan."""
 
@@ -729,7 +750,8 @@ class RasterView(_ZoomView):
                 if n == 3:
                     arr = np.dstack([arr, np.full((h, w), 255, np.uint8)])
                 rgba = arr.astype(np.uint8)
-        self.pixmap_item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(rgba)))
+        self.pixmap_item = _ReducedCopy(QPixmap.fromImage(to_qimage(rgba)))
+        self.scene().addItem(self.pixmap_item)
         self.pixmap_item.setZValue(-2)  # the detail (-1) and the drawings go over it
         self._set_raster_state(*self._raster_choices.get(self.raster_key(), (True, 1.0)))
         self.setSceneRect(QRectF(0, 0, w, h))
@@ -844,6 +866,7 @@ class RasterView(_ZoomView):
                 self._detail_item.setVisible(False)
         elif changed:
             self._view_changed()
+        self._update_hole()
         self.refresh_background()
         if changed and remember:
             self.raster_visibility_changed.emit(visible, opacity)
@@ -902,6 +925,7 @@ class RasterView(_ZoomView):
             if self._detail_item is not None:
                 self._detail_item.setVisible(False)
             self._detail_key = None
+            self._update_hole()
             return
         window, shape, scene = req
         if self._detail_key is not None:
@@ -954,6 +978,21 @@ class RasterView(_ZoomView):
         self._detail_item.setTransform(QTransform.fromScale(scene.width() / max(image.width(), 1),
                                                             scene.height() / max(image.height(), 1)))
         self._detail_item.setVisible(True)
+        self._update_hole()
+
+    def _update_hole(self) -> None:
+        """The reduced copy left out where the detail is drawn while the raster is faded (:class:`_ReducedCopy`)."""
+        base = self.pixmap_item
+        if not isinstance(base, _ReducedCopy):
+            return
+        detail = self._detail_item
+        hole = None
+        if (detail is not None and detail.scene() is self.scene() and detail.isVisible()
+                and self._raster_opacity < 1.0):
+            hole = detail.mapRectToScene(detail.boundingRect())
+        if hole != base.hole:
+            base.hole = hole
+            base.update()
 
     def detail_resolution(self) -> float | None:
         """Ground size of a pixel of the detail shown (world units), None without detail."""

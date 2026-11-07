@@ -350,3 +350,60 @@ def test_drawing_on_a_hidden_raster(win, qapp, monkeypatch):
     assert len(w.units) == n + 1 and w.units[-1].us == "9"
     assert not v.raster_visible  # drawing leaves the background hidden
     assert v.layers["Unita' stratigrafiche"]["visible"]
+
+
+def test_a_faded_raster_composes_once_under_the_detail(view, qapp, tmp_path):
+    """Faded at 50 %, the full-resolution detail and the reduced copy under it would compose to 75 %: the reduced copy
+    is not painted where the detail is, and no seam shows at the edge of the detail."""
+    import rasterio
+    from PySide6.QtCore import QPoint
+
+    path = tmp_path / "bianco.tif"
+    size = 2048
+    with rasterio.open(path, "w", driver="GTiff", height=size, width=size, count=3, dtype="uint8",
+                       transform=from_origin(1000.0, 2000.0, 0.01, 0.01), tiled=True, blockxsize=256,
+                       blockysize=256) as dst:
+        dst.write(np.full((3, size, size), 255, np.uint8))
+        dst.build_overviews([2, 4, 8], Resampling.average)
+    v = view
+    v.load(path, "ortho", max_side=512)
+    v.set_raster_opacity(0.5)
+    p = v.scene_pt(1000.0 + 10.0, 2000.0 - 10.0)
+    v.fitInView(p.x(), p.y(), 20, 15)
+    v.update_detail(wait=True)
+    qapp.processEvents()
+    assert v._detail_item is not None and v._detail_item.isVisible() and v.pixmap_item.hole is not None
+    from pyarchinit_photogrammetry.gui import theme
+
+    bg = QColor_rgb(theme.tokens()["canvas_off"])
+    expected = 0.5 * 255 + 0.5 * bg
+
+    def pixel(img, x, y):
+        c = img.pixelColor(x, y)
+        return np.array([c.red(), c.green(), c.blue()], float)
+
+    img = v.viewport().grab().toImage()
+    centre = pixel(img, img.width() // 2, img.height() // 2)
+    assert np.abs(centre - expected).max() <= 3, (centre, expected)
+    # move the view without reading again: the edge of the detail comes into the view, the same grey on both sides
+    edge = v.mapFromScene(v._detail_item.mapRectToScene(v._detail_item.boundingRect()).topLeft())
+    v.centerOn(v.mapToScene(edge + QPoint(5, 5)))
+    v._detail_timer.stop()
+    qapp.processEvents()
+    v._detail_timer.stop()
+    img = v.viewport().grab().toImage()
+    e = v.mapFromScene(v._detail_item.mapRectToScene(v._detail_item.boundingRect()).topLeft())
+    assert 4 <= e.x() <= img.width() - 5 and 4 <= e.y() <= img.height() - 5
+    for dx, dy in ((-3, 3), (3, 3), (3, -3), (0, 3), (3, 0)):
+        assert np.abs(pixel(img, e.x() + dx + 10, e.y() + dy + 10) - expected).max() <= 3
+    across = [pixel(img, e.x() + k, e.y() + 20) for k in range(-3, 4)]
+    assert max(np.abs(a - expected).max() for a in across) <= 6, across
+    v.set_raster_opacity(1.0)
+    assert v.pixmap_item.hole is None
+
+
+def QColor_rgb(name):
+    from PySide6.QtGui import QColor
+
+    c = QColor(name)
+    return np.array([c.red(), c.green(), c.blue()], float)
