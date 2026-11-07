@@ -11,6 +11,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 from .chunk import Chunk
@@ -29,6 +30,7 @@ class Document:
         self.script_removals: list | None = None  # while a script runs: its chunk removals, to be undone
         self._path: Path | None = None
         self._tmp: tempfile.TemporaryDirectory | None = None
+        self._chunk_lock = threading.Lock()  # a key and a place in the list for one new chunk at a time
         if path is not None:
             self._path = Path(path).resolve()
             if self._path.exists():
@@ -80,14 +82,15 @@ class Document:
     def add_chunk(self, label: str | None = None) -> Chunk:
         """A new chunk at the end. Its key is never that of a chunk removed in this session (it can
         come back with Modifica > Annulla) nor that of a folder already full in the files folder."""
-        removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
-                   for c in r.chunks]
-        key = max([c.key for c in self.chunks] + removed, default=-1) + 1
-        if self._path is not None or self._tmp is not None:  # the files folder exists already
-            while (folder := self.files_dir / f"chunk_{key}").is_dir() and any(folder.iterdir()):
-                key += 1
-        chunk = Chunk(key=key, label=label or f"Chunk {key + 1}", document=self)
-        self.chunks.append(chunk)
+        with self._chunk_lock:  # the program and a task in the background (an append) may add one at once
+            removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
+                       for c in r.chunks]
+            key = max([c.key for c in self.chunks] + removed, default=-1) + 1
+            if self._path is not None or self._tmp is not None:  # the files folder exists already
+                while (folder := self.files_dir / f"chunk_{key}").is_dir() and any(folder.iterdir()):
+                    key += 1
+            chunk = Chunk(key=key, label=label or f"Chunk {key + 1}", document=self)
+            self.chunks.append(chunk)
         return chunk
 
     def remove_chunk(self, chunk: Chunk) -> None:

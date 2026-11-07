@@ -282,10 +282,11 @@ def import_task(source: str | os.PathLike, project: str | os.PathLike, label: st
 
 
 def import_task_into(doc, source: str | os.PathLike, label: str | None = None, extract_to: str | os.PathLike | None = None,
-                     progress=None):
+                     progress=None, on_chunk=None):
     """A WebODM/ODM task (folder or ``all.zip``) as a new chunk of ``doc``, at its end (the active chunk and the rest
     of ``doc`` unchanged, ``doc`` not saved): what :func:`import_task` imports. An ``all.zip`` is extracted in
     ``extract_to``, by default the folder ``webodm`` of the new chunk (it goes with the chunk). The task is only read.
+    ``on_chunk(chunk)``: called as soon as the new chunk is in ``doc``, before anything is written in its folder.
     Returns the new chunk; on an error the chunk is taken out of ``doc`` again and the error goes on."""
     from ..core.progress import as_progress
 
@@ -301,6 +302,8 @@ def import_task_into(doc, source: str | os.PathLike, label: str | None = None, e
         default = source.name
     ch = doc.add_chunk(label or default)
     try:
+        if on_chunk is not None:
+            on_chunk(ch)
         if zipped:
             progress(0.05, "Estrazione dell'archivio WebODM")
             source = _extract(source, Path(extract_to) if extract_to is not None else ch.data_dir / "webodm")
@@ -308,7 +311,8 @@ def import_task_into(doc, source: str | os.PathLike, label: str | None = None, e
     except BaseException:
         import shutil
 
-        doc.chunks.remove(ch)
+        if any(ch is c for c in doc.chunks):
+            doc.chunks.remove(ch)
         shutil.rmtree(doc.files_dir / f"chunk_{ch.key}", ignore_errors=True)
         raise
     return ch

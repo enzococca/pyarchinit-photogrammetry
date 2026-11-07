@@ -886,21 +886,47 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
 
 
 def import_psx_into(doc, psx: str | os.PathLike, chunk_indices=None, dem: str | os.PathLike | None = None,
-                    orthomosaic: str | os.PathLike | None = None, with_model: bool = True, progress=None) -> list:
+                    orthomosaic: str | os.PathLike | None = None, with_model: bool = True, progress=None,
+                    chunk_labels=None, on_chunk=None) -> list:
     """The chunks of a Metashape project as new chunks of ``doc`` (at its end; the active chunk and the rest of
     ``doc`` unchanged, ``doc`` not saved): what :func:`import_psx` imports. ``chunk_indices``: the positions of
-    the chunks to import in :func:`read_psx`'s list (all when None). Returns the new chunks. The Metashape
-    project is only read."""
-    from ..core.camera import Camera, Sensor
+    the chunks to import in :func:`read_psx`'s list, or ``chunk_labels`` their names (all when both are None; a
+    ValueError for a name that is not there). ``on_chunk(chunk)``: called for each new chunk as soon as it is in
+    ``doc``, before anything is written in its folder. Returns the new chunks; on an error the chunks it made are
+    taken out of ``doc`` again, their folders deleted, and the error goes on. The Metashape project is only read."""
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
     psx = Path(psx)
     progress(0.02, "Lettura del progetto Metashape")
     chunks = read_psx(psx)
+    if chunk_labels is not None:
+        labels = [mc.label for mc in chunks]
+        missing = [x for x in chunk_labels if x not in labels]
+        if missing:
+            raise ValueError(f"no chunk {missing[0]!r}: the chunks of the project are "
+                             f"{', '.join(map(repr, labels)) or 'none'}")
+        chunk_indices = [labels.index(x) for x in dict.fromkeys(chunk_labels)]
     if chunk_indices is not None:
         chunks = [chunks[i] for i in chunk_indices]
-    added = []
+    added: list = []
+    try:
+        _import_chunks(doc, psx, chunks, dem, orthomosaic, with_model, progress, added, on_chunk)
+    except BaseException:
+        import shutil
+
+        for ch in added:
+            if any(ch is c for c in doc.chunks):
+                doc.chunks.remove(ch)
+            shutil.rmtree(doc.files_dir / f"chunk_{ch.key}", ignore_errors=True)
+        raise
+    return added
+
+
+def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progress, added: list, on_chunk) -> None:
+    """The body of :func:`import_psx_into`: each new chunk goes into ``added`` (and to ``on_chunk``) at once."""
+    from ..core.camera import Camera, Sensor
+
     empty_exports: list[Path] = []
     exported = _find_exported(psx, empty=empty_exports)
     if dem:
@@ -926,6 +952,8 @@ def import_psx_into(doc, psx: str | os.PathLike, chunk_indices=None, dem: str | 
         sub = progress.sub(0.05 + 0.9 * ci / len(chunks), 0.9 / len(chunks))
         ch = doc.add_chunk(mc.label)
         added.append(ch)
+        if on_chunk is not None:
+            on_chunk(ch)
         sub(0.05, f"{mc.label}: sensori e camere")
         for s in mc.sensors.values():
             model, params, w = sensor_params(s)
@@ -1104,7 +1132,6 @@ def import_psx_into(doc, psx: str | os.PathLike, chunk_indices=None, dem: str | 
                              "frame": "exact" if frame is not None else "similarity"}
         if dem_source:
             ch.meta["import"]["dem"] = dem_source
-    return added
 
 
 __all__ = ["read_psx", "import_psx", "import_psx_into", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
