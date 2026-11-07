@@ -119,3 +119,52 @@ def test_append_keeps_an_active_chunk_with_photos_and_the_folders_go_when_never_
     assert folder.is_dir()
     w._settle_removals(doc)  # the session ends without a save: the project on disk has no such chunk
     assert not folder.exists()
+
+
+def test_sections_of_the_source_come_and_go_with_the_undo(window, qapp, tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from test_append import make_linked_source
+
+    w, mw = window
+    src = make_linked_source(tmp_path / "src")
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, p, t, fields, intro="": {
+        f.name: [0, 1] for f in fields}))
+    w.append_projects(sources=[src])  # two chunks: the checklist
+    _wait(w, qapp)
+    labels = [s["label"] for s in w.sections]
+    assert labels == ["Sezione 1"] and w.sections[0].get("ppg_id")
+    file = Path(w.doc.path).parent / "sezioni" / "sezioni.json"
+    assert [s["label"] for s in json.loads(file.read_text())] == ["Sezione 1"]
+    assert "Tell Sorgente" in w.shown[-1][1]  # the site of the source, said
+    w.undo()
+    _settle(qapp)
+    assert w.sections == [] and json.loads(file.read_text()) == []
+    w.redo()
+    _settle(qapp)
+    assert [s["label"] for s in w.sections] == ["Sezione 1"] and len(json.loads(file.read_text())) == 1
+
+
+def test_no_other_edit_of_the_chunks_while_an_append_runs(window, qapp, tmp_path):
+    import threading
+
+    w, mw = window
+    doc = w.doc
+    other = doc.add_chunk("Altro")
+    release = threading.Event()
+    w._appending = True
+    assert w.run_task("Aggiunta di progetti", lambda p: release.wait(30), refresh=False, save=False)
+    _settle(qapp)
+    try:
+        assert not w.a_ws_add_chunk.isEnabled() and not w.a_ws_append.isEnabled()
+        w.add_chunk()  # refused at once: no question, no chunk
+        w._workspace_item("chunk", other, None)
+        w.rename_chunk(other)
+        w.set_chunks_enabled([other], False)
+        assert [c.label for c in doc.chunks] == ["Chunk 1", "Altro"]
+        assert w.chunk is doc.chunks[0] and other.enabled
+    finally:
+        release.set()
+    _wait(w, qapp)
+    assert w._appending is False and w.a_ws_add_chunk.isEnabled()

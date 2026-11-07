@@ -3063,7 +3063,8 @@
   "Progetti (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;WebODM (*.zip)": "Projects (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;WebODM (*.zip)",
   "Cartella del task WebODM/ODM": "Folder of the WebODM/ODM task",
   "Spunta i chunk da aggiungere: ognuno diventa un chunk nuovo.": "Tick the chunks to append: each becomes a new chunk.",
-  "Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk o Unisci chunk. Modifica > Annulla li toglie tutti.": "Nothing was aligned: to bring them together use Workflow > Align chunks or Merge chunks. Edit > Undo takes them all away."
+  "Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk o Unisci chunk. Modifica > Annulla li toglie tutti.": "Nothing was aligned: to bring them together use Workflow > Align chunks or Merge chunks. Edit > Undo takes them all away.",
+  "Aspetta che finisca l'aggiunta dei progetti": "Wait for the projects being appended"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4050,6 +4051,7 @@
   "«{0}»: {1} foto, prodotti: {2}, CRS {3}": "\"{0}\": {1} photos, products: {2}, CRS {3}",
   "Il chunk attivo è «{0}».": "The active chunk is \"{0}\".",
   "Aggiunti {0} chunk da {1} progetti": "{0} chunks appended from {1} projects",
-  "Aggiungi progetti: {0} non aggiunti": "Append projects: {0} not appended"
+  "Aggiungi progetti: {0} non aggiunti": "Append projects: {0} not appended",
+  "{0} sezioni aggiunte dai progetti": "{0} sections appended from the projects"
  }
 }

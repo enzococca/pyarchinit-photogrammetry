@@ -453,18 +453,24 @@ class _Appended:
     folders unless the project as last saved lists them. ``before``: the active chunk before, active again when
     the undo takes away the active one."""
 
-    def __init__(self, window, removal, before=None):
+    def __init__(self, window, removal, before=None, sections=()):
         self.window = window
         self.inner = _Removed(window, [removal])
         self.inner.after = before
+        self.sections = list(sections)  # the sections of the projects appended, merged into the window's
 
     def undo(self) -> None:
         current = self.window.chunk
         self.inner.active = current if any(current is c for c in self.inner.removals[0].chunks) else None
         self.window._redo_removed(self.inner)
+        if self.sections:
+            self.window._set_sections([s for s in self.window.sections if not any(s is x for x in self.sections)])
 
     def redo(self) -> None:
         self.window._undo_removed(self.inner)
+        if self.sections:
+            self.window._set_sections(self.window.sections + [s for s in self.sections
+                                                              if not any(s is x for x in self.window.sections)])
 
 
 class MainWindow(FreeDrawingActions, QMainWindow):
@@ -500,6 +506,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.pa = None  # PyArchInit bridge
         self.units: list = []  # stratigraphic units drawn on the orthomosaic
         self.sections: list[dict] = []  # sections of the open project (sezioni/sezioni.json)
+        self._appending = False  # File > Aggiungi progetti runs: no other edit of the chunks
         self.line_layers: dict[str, list] = {}  # contour lines, plan slices: redrawn after raster reloads
         self.sam = None
         self.classifier = None  # trained point classifier (ai.learn.ClassifierModel) in use
@@ -961,7 +968,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Ricollega foto (altra cartella)..."), lambda: self.relink_photos(), icon_name="relink",
                   tip=tr("Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
-        self._act(m, tr("Aggiungi chunk"), self.add_chunk, icon_name="chunk_add")
+        self._act(m, tr("Aggiungi chunk"), self.add_chunk, processing=True, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
@@ -2143,6 +2150,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.choose_project_site(tr("Il database contiene {0} siti (scavi).", len(sites)))
 
     def _busy(self, busy: bool) -> None:
+        if not busy:
+            self._appending = False
         if busy:  # the task may write the products the readout under the mouse holds open (see _probe)
             self._probe_reset()
         for a in self._processing_actions:
@@ -4007,6 +4016,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         chunks: dict = {}
         fields = []
         for i, path in enumerate(sources):
+            if self.doc.path is not None and path.resolve() == Path(self.doc.path).resolve():
+                continue  # the open project: refused by the append, said in the summary
             try:
                 if source_kind(path, webodm) == "webodm":
                     continue
@@ -4035,14 +4046,21 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
 
         def done(results):
-            from ..core.removal import ChunkRemoval
+            from ..core.append import merge_sections
 
+            self._appending = False
             if self.doc is not doc:  # pragma: no cover - another project opened meanwhile
                 return
             new = [c for r in results for c in r.chunks]
             active = before
-            if new:
-                step = _Appended(self, ChunkRemoval.added(doc, new), before)
+            if new and results.journal is not None:
+                added = []
+                for prefix, secs in results.sections:
+                    added += merge_sections(self.sections + added, secs, prefix)
+                if added:
+                    self._set_sections(self.sections + added)
+                    self.log_pane.info(tr("{0} sezioni aggiunte dai progetti", len(added)))
+                step = _Appended(self, results.journal, before, added)
                 if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
                     active = new[0]
                     self._activate_chunk(active)
@@ -4054,7 +4072,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self._dirty(True)
             self._append_summary(results, active)
 
-        self.run_task("Aggiunta di progetti", job, done, refresh=False, save=False)
+        self._appending = True  # no other edit of the chunks until it ends (_busy puts it back)
+        if not self.run_task("Aggiunta di progetti", job, done, refresh=False, save=False):
+            self._appending = False
 
     def _append_summary(self, results, active) -> None:
         """What *Aggiungi progetti* did, in the log and in a window: the chunks of each source (photos, products,
@@ -4089,7 +4109,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
         """Aggiungi chunk (the toolbar of the Area di lavoro, Flusso di lavoro): an empty chunk with the
-        name asked, which becomes the active one, as in Metashape."""
+        name asked, which becomes the active one, as in Metashape. Not while a task runs (it may be adding chunks:
+        an append, a merge)."""
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            return
         default = self._new_chunk_name()
         v = ParamDialog.ask(self, "Nuovo chunk", [Field("label", "Nome", default, kind="text")],
                             intro="Il nuovo chunk diventa quello attivo: le foto aggiunte e gli strumenti lavorano "
@@ -4698,6 +4722,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         files it writes copied first), also when it is cancelled halfway. False when nothing was started."""
         from .rebuild import RebuildStep, chunk_files
 
+        if self._appending_refused():
+            return
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             return False
@@ -8674,6 +8700,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if kind == "plugin":  # an item a plugin put in the tree (Context.add_tree_items)
             self._plugin_item_call(chunk, payload[0], payload[1].get("activate"))
             return
+        if chunk is not None and chunk is not self.chunk and self._appending_refused():
+            return
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
             self._activate_chunk(chunk)
             return
@@ -10589,6 +10617,27 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return
         self._sections_dir().mkdir(parents=True, exist_ok=True)
         self._sections_file().write_text(json.dumps(self.sections, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    def _set_sections(self, sections: list[dict]) -> None:
+        """The sections of the project now ``sections`` (an append, its undo): the file, the pane and the layer."""
+        self.sections = list(sections)
+        self._ensure_ppg_ids()
+        if self.sections:
+            self._save_sections()
+        elif self._sections_file().exists():
+            self._sections_file().write_text("[]", encoding="utf-8")
+        self.sections_pane.set_sections(self.sections)
+        if self.ortho_view.tr is not None and self.drawings_frame is None:
+            self.ortho_view.remove_layer("Sezioni")
+        self._draw_sections()
+
+    def _appending_refused(self) -> bool:
+        """While *Aggiungi progetti* runs, no other edit of the chunks (activate, rename, enable, duplicate): its
+        chunks are half made."""
+        if getattr(self, "_appending", False):
+            self.statusBar().showMessage(tr("Aspetta che finisca l'aggiunta dei progetti"), 6000)
+            return True
+        return False
 
     def _load_sections(self) -> None:
         """Sections of the open project (``sezioni/sezioni.json``) into the pane and the layer."""
@@ -14475,15 +14524,20 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         chunks = [c for k, c, _p in items if k == "chunk"]
         cams = [p for k, _c, p in items if k == "camera"]
         target = self._selected_chunk(items)
+        appending = getattr(self, "_appending", False)  # its chunks are half made: nothing else on the chunks
+        self.a_ws_add_chunk.setEnabled(not busy)
+        self.a_ws_append.setEnabled(not busy)
         self.a_ws_add_photos.setEnabled(not busy)
         self.a_ws_add_folder.setEnabled(not busy)
-        self.a_ws_activate.setEnabled(target is not None and target is not self.chunk)
-        self.a_ws_enable.setEnabled(any(not c.enabled for c in chunks + cams))
-        self.a_ws_disable.setEnabled(any(c.enabled for c in chunks + cams))
-        self.a_ws_rename.setEnabled(len(items) == 1 and self.workspace._renameable(items[0]))
+        self.a_ws_activate.setEnabled(not appending and target is not None and target is not self.chunk)
+        self.a_ws_enable.setEnabled(not appending and any(not c.enabled for c in chunks + cams))
+        self.a_ws_disable.setEnabled(not appending and any(c.enabled for c in chunks + cams))
+        self.a_ws_rename.setEnabled(not appending and len(items) == 1 and self.workspace._renameable(items[0]))
         self.a_ws_remove.setEnabled(not busy and any(k in REMOVABLE for k, _c, _p in items))
 
     def _workspace_activate(self) -> None:
+        if self._appending_refused():
+            return
         chunk = self._selected_chunk()
         if chunk is not None:
             self._activate_chunk(chunk)
@@ -14502,6 +14556,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def set_chunks_enabled(self, chunks, enabled: bool) -> None:
         """Chunks enabled or disabled, as in Metashape: a disabled chunk stays in the project, out of the batch
         steps on the enabled chunks and of the chunks proposed by Allinea chunk and Unisci chunk."""
+        if self._appending_refused():
+            return
         for c in chunks:
             c.enabled = bool(enabled)
         self._dirty(True)
@@ -14514,6 +14570,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def rename_chunk(self, chunk=None) -> None:
         """Rinomina... (F2): the name of a chunk."""
+        if self._appending_refused():
+            return
         chunk = chunk or self.chunk
         if chunk is None:
             return
