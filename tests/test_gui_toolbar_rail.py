@@ -294,6 +294,36 @@ def test_3d_flyout_closes_first_on_press_and_esc(window, qapp):
     assert not rail.is_open() and mv._draw_kind == "line"
     QTest.keyClick(target, Qt.Key.Key_Escape)  # second Esc: the drawing
     assert mv._draw_kind is None
+    # looking through a photo: the same order, then the photo
+    cam = window.chunk.aligned_cameras[3]
+    assert mv.look_through(cam)
+    rail.open("view")
+    _pump(qapp)
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # the flyout first, the photo stays
+    assert not rail.is_open() and mv.look_camera is cam
+    mv.start_drawing("line")
+    rail.open("view")
+    _pump(qapp)
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # the flyout
+    assert not rail.is_open() and mv._draw_kind == "line" and mv.look_camera is cam
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # the drawing
+    assert mv._draw_kind is None and mv.look_camera is cam
+    mv.start_free_select()
+    QTest.keyClick(target, Qt.Key.Key_Escape)  # the free selection tool
+    assert not mv.free_select_on and mv.look_camera is cam
+    rail.open("view")
+    _pump(qapp)
+    mv.exag_spin.setFocus()  # the focus inside the flyout: its Esc closes it
+    _pump(qapp)
+    QTest.keyClick(mv.exag_spin, Qt.Key.Key_Escape)
+    assert not rail.is_open() and mv.look_camera is cam
+    mv.b_look_next.setFocus()  # a button of the photo row: the flyout first, then the photo
+    rail.open("view")
+    _pump(qapp)
+    QTest.keyClick(mv.b_look_next, Qt.Key.Key_Escape)
+    assert not rail.is_open() and mv.look_camera is cam
+    QTest.keyClick(mv.b_look_next, Qt.Key.Key_Escape)
+    assert mv.look_camera is None
 
 
 def test_a_toggle_keeps_the_flyout_open(window, qapp):

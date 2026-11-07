@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
 
 from ..engine import look_through as lt
@@ -95,31 +95,27 @@ class LookThrough:
         opacity.setToolTip(tr("Opacità della foto"))
         self.look_parts = [part(self.look_label, left=12), part(self.b_look_prev, self.b_look_next),
                            part(opacity, self.look_slider, self.look_value), part(self.b_look_exit)]
-        # Esc and Page Down/Up while looking, also with the slider or a button of the row focused (on this view only)
-        self._look_shortcuts = []
-        for key, slot in ((Qt.Key.Key_Escape, self._look_escape), (Qt.Key.Key_PageDown, lambda: self.look_step(1)),
-                          (Qt.Key.Key_PageUp, lambda: self.look_step(-1))):
-            sc = QShortcut(QKeySequence(key), self)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.setEnabled(False)
-            sc.activated.connect(slot)
-            self._look_shortcuts.append(sc)
+        # Esc and Page Down/Up while looking also with the slider or a button of the row focused: an event filter on
+        # those widgets only (no shortcut: an Esc shortcut beside the flyout's would make both ambiguous); the rail
+        # watches them after, so an open flyout takes Esc first (see ModelView.eventFilter)
+        self._look_keyed = (self.b_look_prev, self.b_look_next, self.look_slider, self.b_look_exit)
         self.canvas.look_left.connect(self._look_left)
 
     def _show_look_row(self, shown: bool) -> None:
         for w in self.look_parts:
             w.setVisible(shown)
-        for sc in self._look_shortcuts:
-            sc.setEnabled(shown)
 
     def look_shown(self) -> bool:
         """True when the row of the photo looked through is shown."""
         return self.look_parts[0].isVisibleTo(self)
 
     def _look_escape(self) -> None:
-        """Esc while looking: a drawing, a pick or a lasso in progress first, else out of the photo."""
+        """Esc while looking (an open flyout of the rail has taken it before): a drawing, the free selection, a pick
+        or a lasso in progress first, else out of the photo."""
         if getattr(self, "_draw_kind", None) is not None:
             self.stop_drawing()
+        elif getattr(self, "_select_on", False):
+            self.stop_free_select()
         elif self.stack.currentWidget() is not self.canvas:
             self._end_overlays()
             self.stack.setCurrentWidget(self.canvas)
@@ -242,7 +238,7 @@ class LookThrough:
         """A key on the view while looking through a photo: True when it was used."""
         key = ev.key()
         if key == Qt.Key.Key_Escape:
-            self.leave_look()
+            self._look_escape()
         elif key in (Qt.Key.Key_PageDown, Qt.Key.Key_Right):
             self.look_step(1)
         elif key in (Qt.Key.Key_PageUp, Qt.Key.Key_Left):

@@ -284,6 +284,13 @@ def test_keys_work_with_the_slider_or_a_button_focused(view, app):
     assert mv.look_camera is order[0]
     QTest.keyClick(mv.b_look_next, Qt.Key.Key_Escape)
     assert mv.look_camera is None
+    # other children of the view keep Page Up/Down: the size of the points steps, the photo stays
+    mv.look_through(order[0])
+    mv.point_spin.setValue(2)
+    mv.point_spin.setFocus()
+    QTest.keyClick(mv.point_spin, Qt.Key.Key_PageUp)
+    assert mv.look_camera is order[0] and mv.point_spin.value() > 2
+    mv.leave_look()
 
 
 @pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")

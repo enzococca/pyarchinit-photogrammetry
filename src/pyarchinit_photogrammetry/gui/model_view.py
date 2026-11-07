@@ -1828,8 +1828,11 @@ class ModelView(QWidget, LookThrough):
         self._rubber_timer.setSingleShot(True)
         self._rubber_timer.timeout.connect(self._rubber_tick)
         self._draw_target().installEventFilter(self)
-        for widget in (self._draw_target(), self.lasso, self.picker, self.editor):  # the rail's filter first: the
-            self.rail.watch(widget)  # press or the Esc that closes its flyout reach no drawing, pick or lasso
+        for widget in self._look_keyed:  # the keys of the photo row while looking through a photo
+            widget.installEventFilter(self)
+        for widget in (self._draw_target(), self.lasso, self.picker, self.editor) + self._look_keyed:  # the rail's
+            self.rail.watch(widget)  # filter first: the press or the Esc that closes its flyout reach no drawing,
+            # pick, lasso or photo
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
 
@@ -2671,9 +2674,12 @@ class ModelView(QWidget, LookThrough):
             self.canvas.update_free()
 
     def eventFilter(self, obj, ev) -> bool:
-        if (getattr(self, "_look", None) is not None and obj is self._draw_target()
-                and ev.type() == QEvent.Type.KeyPress and self._look_key(ev)):
-            return True
+        if getattr(self, "_look", None) is not None and ev.type() == QEvent.Type.KeyPress:
+            if obj is self._draw_target() and self._look_key(ev):  # the canvas: Esc, Page Down/Up, the arrows
+                return True
+            if (obj in self._look_keyed and ev.key() in (Qt.Key.Key_Escape, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)
+                    and self._look_key(ev)):  # the photo row: Esc and Page Down/Up (its slider keeps its arrows)
+                return True
         if getattr(self, "_select_on", False) and obj is self._draw_target():
             return self._select_event(ev) or super().eventFilter(obj, ev)
         if getattr(self, "_draw_kind", None) is None or obj is not self._draw_target():
