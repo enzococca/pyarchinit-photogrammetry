@@ -3064,7 +3064,23 @@
   "Cartella del task WebODM/ODM": "Folder of the WebODM/ODM task",
   "Spunta i chunk da aggiungere: ognuno diventa un chunk nuovo.": "Tick the chunks to append: each becomes a new chunk.",
   "Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk o Unisci chunk. Modifica > Annulla li toglie tutti.": "Nothing was aligned: to bring them together use Workflow > Align chunks or Merge chunks. Edit > Undo takes them all away.",
-  "Aspetta che finisca l'aggiunta dei progetti": "Wait for the projects being appended"
+  "Aspetta che finisca l'aggiunta dei progetti": "Wait for the projects being appended",
+  "Fuori dal chunk attivo": "Outside the active chunk",
+  "costruito prima dell'allineamento: spostato con il chunk": "built before the alignment: moved with the chunk",
+  "nel proprio sistema locale": "in its own local frame",
+  "Per vederli insieme: spunta i chunk nell'Area di lavoro (Mostra nella vista 3D), colori «Distanza dal chunk attivo»; nel pannello Layer i loro DEM e ortofoto.": "To see them together: tick the chunks in the Workspace (Show in the 3D view), colours “Distance from the active chunk”; their DEMs and orthophotos in the Layers pane.",
+  "Colori dei chunk mostrati insieme: uno per chunk, i loro colori, o la distanza dalla superficie del chunk attivo (blu sotto, rosso sopra)": "Colours of the chunks shown together: one per chunk, their own colours, or the distance from the surface of the active chunk (blue below, red above)",
+  "Opacità degli altri chunk": "Opacity of the other chunks",
+  "Altri chunk:": "Other chunks:",
+  "ALTRI CHUNK": "OTHER CHUNKS",
+  "Il DEM o l'ortofoto degli altri chunk sopra il raster mostrato, sotto i disegni: per confrontare due campagne o vedere come si sovrappongono prima e dopo Allinea chunk": "The DEM or orthophoto of the other chunks over the raster shown, under the drawings: to compare two campaigns or see how they overlap before and after Align chunks",
+  "Opacità del raster di questo chunk": "Opacity of this chunk's raster",
+  "Mostra o nasconde il raster di questo chunk": "Shows or hides this chunk's raster",
+  "Il chunk attivo è sempre nella vista 3D": "The active chunk is always in the 3D view",
+  "Spunta: mostra nella vista 3D insieme al chunk attivo (prima e dopo Allinea chunk)": "Tick: show in the 3D view together with the active chunk (before and after Align chunks)",
+  "Un colore per chunk": "One colour per chunk",
+  "Colori veri": "True colours",
+  "Distanza dal chunk attivo": "Distance from the active chunk"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4052,6 +4068,18 @@
   "Il chunk attivo è «{0}».": "The active chunk is \"{0}\".",
   "Aggiunti {0} chunk da {1} progetti": "{0} chunks appended from {1} projects",
   "Aggiungi progetti: {0} non aggiunti": "Append projects: {0} not appended",
-  "{0} sezioni aggiunte dai progetti": "{0} sections appended from the projects"
+  "{0} sezioni aggiunte dai progetti": "{0} sections appended from the projects",
+  "{0} (attivo)": "{0} (active)",
+  "{0} (nel proprio sistema locale)": "{0} (in its own local frame)",
+  "{0} o più (sopra)": "{0} or more (above)",
+  "{0} o meno (sotto)": "{0} or less (below)",
+  "costruito prima dell'allineamento: spostato in pianta, il chunk è inclinato di {0} gradi": "built before the alignment: moved in plan, the chunk is tilted by {0} degrees",
+  "{0}: nel proprio sistema locale, non misurato": "{0}: in its own local frame, not measured",
+  "{0}: nessuna sovrapposizione": "{0}: no overlap",
+  "{0}: mediana {1}, NMAD {2}, entro {3}: {4} %": "{0}: median {1}, NMAD {2}, within {3}: {4} %",
+  "{0} nella vista 3D con {1}: Vista iniziale (Home) per inquadrarli tutti": "{0} in the 3D view with {1}: Home view (Home key) to frame them all",
+  "Non mostrato: {0}": "Not shown: {0}",
+  "sovrapposizione {0} % (entro {1}), distanza mediana {2}, NMAD {3}": "overlap {0} % (within {1}), median distance {2}, NMAD {3}",
+  "nessuna sovrapposizione con {0}": "no overlap with {0}"
  }
 }

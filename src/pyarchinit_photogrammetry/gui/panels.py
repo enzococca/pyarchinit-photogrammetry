@@ -154,6 +154,7 @@ class WorkspaceTree(QTreeWidget):
     remove_requested = Signal(object)  # [(kind, chunk, payload)] of the items selected
     rename_requested = Signal(str, object, object)  # kind, chunk, payload of the current item
     populated = Signal()  # filled again (the selection is gone)
+    shown_in_3d = Signal(object, bool)  # a chunk ticked or unticked: shown in the 3D view with the active one
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -169,6 +170,8 @@ class WorkspaceTree(QTreeWidget):
         self.providers: list[tuple[str, object]] = []  # (plugin, provider(chunk) -> items) of the plugins
         self._plugin_items: list[tuple[str, dict]] = []  # (plugin, item) shown (their index is in the data)
         self._plugin_nodes: list[tuple[QTreeWidgetItem, tuple]] = []  # their nodes, by plugin, chunk and labels
+        self._filling = False
+        self.itemChanged.connect(self._item_changed)
 
     @staticmethod
     def _place(item) -> tuple | None:
@@ -196,6 +199,30 @@ class WorkspaceTree(QTreeWidget):
             states, opened, scroll = {}, {}, 0
         self._plugin_items, self._plugin_nodes = [], []
         self.document = document
+        self._filling = True
+        try:
+            self._fill(document, states, opened, scroll)
+        finally:
+            self._filling = False
+
+    def _item_changed(self, item, _column) -> None:
+        """The box of a chunk (*Mostra nella vista 3D*): told to the window; the active chunk is always shown, its box
+        stays ticked."""
+        if self._filling:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] != "chunk" or data[1] is None:
+            return
+        shown = item.checkState(0) == Qt.CheckState.Checked
+        if self.document is not None and data[1] is self.document.chunk:
+            if not shown:
+                self._filling = True
+                item.setCheckState(0, Qt.CheckState.Checked)
+                self._filling = False
+            return
+        self.shown_in_3d.emit(data[1], shown)
+
+    def _fill(self, document, states, opened, scroll) -> None:
         self.clear()
         name = document.path.name if document.path else tr("Progetto senza nome")
         root = QTreeWidgetItem([tr("{0}  ({1} chunk)", name, len(document.chunks))])
@@ -218,6 +245,15 @@ class WorkspaceTree(QTreeWidget):
             ci.setToolTip(0, tr("Chunk attivo: gli strumenti lavorano su di lui. Tasto destro: rinomina, attiva o "
                                 "disattiva, rimuovi") if ch is document.chunk else
                           tr("Doppio clic per renderlo attivo; tasto destro: rinomina, attiva o disattiva, rimuovi"))
+            if len(document.chunks) > 1:  # several chunks: each can be shown in the 3D view with the active one
+                from .chunk_views import settings
+
+                shown = ch is document.chunk or ch.key in settings(document)["chunks_3d"]
+                ci.setFlags(ci.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                ci.setCheckState(0, Qt.CheckState.Checked if shown else Qt.CheckState.Unchecked)
+                ci.setToolTip(0, ci.toolTip(0) + "\n" + (
+                    tr("Il chunk attivo è sempre nella vista 3D") if ch is document.chunk else
+                    tr("Spunta: mostra nella vista 3D insieme al chunk attivo (prima e dopo Allinea chunk)")))
             f = ci.font(0)
             f.setBold(ch is document.chunk)
             ci.setFont(0, f)
@@ -2091,6 +2127,7 @@ class LayersPane(QWidget):
     us_form_requested = Signal(str, int)  # layer, feature index
     visibility_changed = Signal(str, bool)  # layer, shown: by its box (the window may keep it)
     visibility_set = Signal(dict)  # by Tutti / Nessuno: {layer: (shown before, shown now)} of the layers it changed
+    chunk_overlay_changed = Signal(int, bool, float)  # another chunk's raster: key, shown, opacity (0-1)
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
 
@@ -2138,6 +2175,14 @@ class LayersPane(QWidget):
         rrow.addLayout(orow)
         self.raster_row.hide()
         lay.addWidget(self.raster_row)
+        # the DEM or orthophoto of the other chunks over the raster shown (set_chunk_rows): one row each, with opacity
+        self.chunks_box = QWidget()
+        self.chunks_rows = QVBoxLayout(self.chunks_box)
+        self.chunks_rows.setContentsMargins(2, 2, 2, 2)
+        self.chunks_rows.setSpacing(2)
+        self.chunks_box.hide()
+        lay.addWidget(self.chunks_box)
+        self._chunk_widgets: dict = {}  # key -> (box, slider, percent label)
         self.raster_box.toggled.connect(self._raster_toggled)
         self.opacity_slider.valueChanged.connect(self._opacity_moved)
         self.tree = QTreeWidget()
@@ -2207,6 +2252,78 @@ class LayersPane(QWidget):
             for w in (self.raster_box, self.opacity_slider):
                 w.blockSignals(False)
         self.raster_row.show()
+
+    def set_chunk_rows(self, rows) -> None:
+        """The rows of the other chunks: ``[(key, text, shown, opacity, note)]``; none: the part is hidden. The same
+        chunks again: their rows updated in place (a row being used keeps its focus)."""
+        if [r[:2] for r in rows] == [(k, w[0].text()) for k, w in self._chunk_widgets.items()]:
+            for key, _text, shown, opacity, note in rows:
+                box, slider, label, hint = self._chunk_widgets[key]
+                for widget in (box, slider):
+                    widget.blockSignals(True)
+                box.setChecked(bool(shown))
+                slider.setValue(int(round(opacity * 100)))
+                slider.setEnabled(bool(shown))
+                label.setText(f"{slider.value()} %")
+                box.setToolTip(note or tr("Mostra o nasconde il raster di questo chunk"))
+                hint.setText(note)
+                hint.setVisible(bool(note))
+                for widget in (box, slider):
+                    widget.blockSignals(False)
+            self.chunks_box.setVisible(bool(rows))
+            return
+        while self.chunks_rows.count():
+            item = self.chunks_rows.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+        self._chunk_widgets = {}
+        if not rows:
+            self.chunks_box.hide()
+            return
+        title = QLabel(tr("ALTRI CHUNK"))
+        title.setObjectName("sectionTitle")
+        title.setToolTip(tr("Il DEM o l'ortofoto degli altri chunk sopra il raster mostrato, sotto i disegni: per "
+                            "confrontare due campagne o vedere come si sovrappongono prima e dopo Allinea chunk"))
+        self.chunks_rows.addWidget(title)
+        for key, text, shown, opacity, note in rows:
+            row = QWidget()
+            col = QVBoxLayout(row)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(0)
+            box = QCheckBox(text)
+            box.setChecked(bool(shown))
+            box.setToolTip(note or tr("Mostra o nasconde il raster di questo chunk"))
+            col.addWidget(box)
+            orow = QHBoxLayout()
+            orow.setContentsMargins(20, 0, 0, 0)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(int(round(opacity * 100)))
+            slider.setEnabled(bool(shown))
+            slider.setToolTip(tr("Opacità del raster di questo chunk"))
+            orow.addWidget(slider, 1)
+            label = QLabel(f"{slider.value()} %")
+            label.setMinimumWidth(label.fontMetrics().horizontalAdvance("100 %") + 4)
+            orow.addWidget(label)
+            col.addLayout(orow)
+            hint = QLabel(note)
+            hint.setObjectName("pageSubtitle")
+            hint.setWordWrap(True)
+            hint.setContentsMargins(20, 0, 0, 0)
+            hint.setVisible(bool(note))
+            col.addWidget(hint)
+            self.chunks_rows.addWidget(row)
+            self._chunk_widgets[key] = (box, slider, label, hint)
+            box.toggled.connect(lambda on, k=key: self._chunk_row_changed(k))
+            slider.valueChanged.connect(lambda _v, k=key: self._chunk_row_changed(k))
+        self.chunks_box.show()
+
+    def _chunk_row_changed(self, key) -> None:
+        box, slider, label, _hint = self._chunk_widgets[key]
+        label.setText(f"{slider.value()} %")
+        slider.setEnabled(box.isChecked())
+        self.chunk_overlay_changed.emit(int(key), box.isChecked(), slider.value() / 100.0)
 
     def _raster_toggled(self, shown: bool) -> None:
         if self.view is not None:

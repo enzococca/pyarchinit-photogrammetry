@@ -567,6 +567,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.tabs.setIconSize(QSize(18, 18))
         self.model_view = ModelView()
         self.model_view.points_selected.connect(self._points_selected)
+        self.model_view.others_changed.connect(lambda: self.setWindowModified(True))  # a view choice: no undo step
         self.model_view.faces_selected.connect(self._faces_selected)
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
         self.model_view.section_requested.connect(self._section_in_3d)
@@ -667,6 +668,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.workspace.context_requested.connect(self._workspace_menu)
         self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
         self.workspace.rename_requested.connect(self._workspace_rename)
+        self.workspace.shown_in_3d.connect(self._chunk_shown_in_3d)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
@@ -703,6 +705,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
+        self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
+        self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
+        # the rasters of the other chunks, after the window has finished with the raster just shown (a plan or not)
+        self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self._draw_chunk_overlays))
         self.ortho_view.raster_loaded.connect(self._sync_background_action)
         self.ortho_view.raster_visibility_changed.connect(self._sync_background_action)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
@@ -4170,6 +4176,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         metric = _is_scaled(ref)
 
         def done(report):
+            from .chunk_views import length_text
+
             lines = []
             for e in report["chunks"]:
                 rmse = e.get("rmse")
@@ -4179,16 +4187,40 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                 e['label'], e.get('correspondences', 0), err, e['scale'])
                              + (tr("; da ricostruire: {0}",
                                    ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
+                d = e.get("distances")
+                if d is not None and d.get("median") is not None:  # how well it sits on the reference now
+                    lines.append("    " + tr("sovrapposizione {0} % (entro {1}), distanza mediana {2}, NMAD {3}",
+                                               f"{d['overlap'] * 100:.0f}", length_text(d["threshold"], metric),
+                                               length_text(d["median"], metric, signed=True),
+                                               length_text(d["nmad"], metric)))
+                elif d is not None:
+                    lines.append("    " + tr("nessuna sovrapposizione con {0}", ref.label))
             if report.get("levelled_reference"):
                 lines.append(tr("Il chunk {0} è stato prima messo in bolla (come per il DEM).", ref.label))
             text = tr("Allineati a {0} ({1}):\n",
                       ref.label, tr(dict(markers='marker', cameras='foto', points='punti')[v['method']])) \
-                + "\n".join(lines)
+                + "\n".join(lines) + "\n\n" + tr("Per vederli insieme: spunta i chunk nell'Area di lavoro (Mostra nella "
+                                                  "vista 3D), colori «Distanza dal chunk attivo»; nel pannello Layer i "
+                                                  "loro DEM e ortofoto.")
             self._info("Allinea chunk", text)
 
         self.run_task("Allineamento dei chunk",
-                      lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p),
+                      lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p,
+                                                 check=True),
                       done)
+
+    def _chunk_shown_in_3d(self, chunk, shown: bool) -> None:
+        """A chunk ticked or unticked in the workspace: drawn or no longer drawn in the 3D view with the active one
+        (kept with the project, ``doc.meta["view"]``; a choice of the view: no step of Modifica > Annulla)."""
+        from .chunk_views import set_shown_3d
+
+        if set_shown_3d(self.doc, chunk, shown):
+            self.setWindowModified(True)
+        self.model_view.refresh(reset=False)
+        if shown:
+            self.show_view(self.model_view)
+            self.statusBar().showMessage(tr("{0} nella vista 3D con {1}: Vista iniziale (Home) per inquadrarli tutti",
+                                            chunk.label, self.chunk.label if self.chunk else ""), 6000)
 
     # ---------------------------------------------------------------- Orienta il sistema locale
     def orient_local(self) -> None:
@@ -4435,6 +4467,90 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except Exception as exc:  # noqa: BLE001 - a notice: never in the way of showing the raster
             log.warning("Stato del raster mostrato non letto: %s", exc)
         return False
+
+    # ---------------------------------------------------------------- rasters of the other chunks in the 2D view
+    def _overlay_of(self, ch, base_kind: str):
+        """The reduced copy of the raster of ``ch`` for the plan of the active chunk, kept while nothing it depends on
+        changes (its file, both transforms and systems, the colours of the DEM shown); ``None`` without one."""
+        from .chunk_views import overlay_image, raster_for
+
+        path, kind = raster_for(ch, base_kind)
+        if path is None:
+            return None
+        view = self.ortho_view
+        dem_range = view._dem_range if view.kind == "dem" and kind == "dem" else None
+        key = (ch.key, str(path), path.stat().st_mtime_ns, np.asarray(ch.transform, float).tobytes(), ch.crs,
+               self.chunk.crs, json.dumps((ch.meta.get("built_in") or {}).get("dem" if kind == "dem" else "orthomosaic")),
+               base_kind, None if dem_range is None else tuple(float(v) for v in dem_range))
+        if key not in self._overlay_cache:
+            if len(self._overlay_cache) >= 6:  # a few kept: memory bounded
+                self._overlay_cache.pop(next(iter(self._overlay_cache)))
+            try:
+                self._overlay_cache[key] = overlay_image(ch, self.chunk, base_kind, dem_range)
+            except Exception as exc:  # a raster that cannot be read or placed: the row says so, nothing drawn
+                log.warning("Raster del chunk %s non mostrato: %s", ch.label, exc)
+                self._overlay_cache[key] = ("error", str(exc))
+        return self._overlay_cache[key]
+
+    def _draw_chunk_overlays(self) -> None:
+        """The rows of the other chunks in the Layer pane and, for those ticked, their DEM or orthophoto over the raster
+        of the plan (``doc.meta["view"]["chunks_2d"]``); none on an elevation or a section."""
+        from .chunk_views import raster_for, settings
+
+        view, doc, ch = self.ortho_view, self.doc, self.chunk
+        try:
+            plan = ch is not None and doc is not None and view.tr is not None and self.drawings_frame is None
+        except RuntimeError:  # pragma: no cover - the window is closing
+            return
+        rows = []
+        if plan and len(doc.chunks) > 1:
+            base_kind = "dem" if view.kind not in ("ortho", "reflectance", "thermal", "index", "zones", "frame") else \
+                "ortho"
+            st = settings(doc)["chunks_2d"]
+            for other in doc.chunks:
+                if other is ch:
+                    continue
+                path, kind = raster_for(other, base_kind)
+                if path is None:
+                    continue
+                cfg = st.get(str(other.key)) or {}
+                shown, opacity = bool(cfg.get("shown", False)), float(cfg.get("opacity", 0.6))
+                note = ""
+                if shown:
+                    got = self._overlay_of(other, base_kind)
+                    if got is None or isinstance(got[0], str):
+                        note = tr("Non mostrato: {0}", got[1] if got else "")
+                        view.remove_chunk_overlay(other.key)
+                    else:
+                        rgba, affine, kind, note = got
+                        if other.key not in view.chunk_overlays:
+                            view.set_chunk_overlay(other.key, rgba, affine, opacity, True)
+                        else:
+                            view.set_chunk_overlay_state(other.key, True, opacity)
+                else:
+                    view.set_chunk_overlay_state(other.key, False)
+                what = tr("DEM") if kind == "dem" else tr("Ortofoto")
+                rows.append((other.key, f"{other.label}: {what}", shown, opacity, note))
+        else:
+            for key in list(view.chunk_overlays):
+                view.remove_chunk_overlay(key)
+        self.layers_pane.set_chunk_rows(rows)
+
+    def _chunk_overlay_changed(self, key: int, shown: bool, opacity: float) -> None:
+        """A row of the other chunks in the Layer pane: its raster shown, hidden or faded (kept with the project, a choice
+        of the view: no step of Modifica > Annulla)."""
+        from .chunk_views import settings, store
+
+        rows = settings(self.doc)["chunks_2d"]
+        before = rows.get(str(key)) or {}
+        rows[str(key)] = {"shown": bool(shown), "opacity": round(float(opacity), 3)}
+        if store(self.doc, chunks_2d=rows):
+            self.setWindowModified(True)
+        view = self.ortho_view
+        if shown and key not in view.chunk_overlays or bool(before.get("shown")) != bool(shown):
+            self._draw_chunk_overlays()  # the row's note may change too
+        else:
+            view.set_chunk_overlay_state(key, shown, opacity)
 
     def _raster_loaded(self) -> None:
         """The 2D view shows another raster, an empty frame or nothing - by the window or by a plugin
