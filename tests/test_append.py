@@ -261,11 +261,13 @@ def test_the_folders_of_chunks_appended_follow_the_project_as_saved(tmp_path, st
     doc = ppg.Document()
     doc.add_chunk("X")
     doc.save(tmp_path / "dst" / "mio.ppg")
-    (res,) = append_projects(doc, [src])
+    results = append_projects(doc, [src])
+    (res,) = results
     chunks = [c for c in res.chunks if (doc.files_dir / f"chunk_{c.key}").is_dir()]  # Saggio B has no data
     folders = [doc.files_dir / f"chunk_{c.key}" for c in chunks]
     assert len(folders) == 1
-    removal = ChunkRemoval.added(doc, res.chunks)
+    removal = results.journal
+    assert isinstance(removal, ChunkRemoval) and removal.chunks == res.chunks
     for step in story.split(", "):
         if step.startswith("saved"):
             doc.save()
@@ -280,3 +282,181 @@ def test_the_folders_of_chunks_appended_follow_the_project_as_saved(tmp_path, st
     for c, f in zip(chunks, folders):
         assert f.is_dir() == (c.key in listed), (story, f)
     assert not (doc.files_dir / ".removed").exists()
+
+
+# ------------------------------------------------------------------ fix round 1 (review of T2)
+def make_linked_source(root: Path) -> Path:
+    """A project whose chunks point at one another: B aligned to A (*Allinea chunk*) and its DEM coregistered on A's
+    (by key and by the file of a kept version of A), a proxy of B on A's DEM, a zoning GeoPackage of A beside the
+    project, sections beside it, a site."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    a = doc.add_chunk("A")
+    b = doc.add_chunk("B")
+    doc.meta["sito"] = "Tell Sorgente"
+    doc.save(root / "sorgente.ppg")
+    dem_a = _raster(a.data_dir / "versions" / "dem" / "v1" / "dem.tif")
+    _raster(a.data_dir / "dem.tif")
+    a._set_product("dem", a.data_dir / "dem.tif")
+    gpkg = root / "zone_ndvi.gpkg"
+    gpkg.write_bytes(b"gpkg of the source")
+    a.meta["multispectral"] = {"zoning": {"NDVI": {"file": str(gpkg), "raster": "multispectral/NDVI_zone.tif"}}}
+    b.meta["chunk_alignment"] = {"reference": "A", "reference_key": a.key, "method": "markers"}
+    b.meta["dem"] = {"coregistration": {"reference_chunk": a.key, "reference_version": "v1",
+                                        "reference_file": str(dem_a)}}
+    b.meta["proxies"] = [{"id": "p1", "base_dem": str(a.data_dir / "dem.tif")}]
+    (root / "sezioni").mkdir()
+    (root / "sezioni" / "sezione_1.svg").write_text("<svg/>")
+    (root / "sezioni" / "sezioni.json").write_text(json.dumps([
+        {"label": "Sezione 1", "p1": [0, 0], "p2": [1, 1], "length": 1.41, "svg": str(root / "sezioni" / "sezione_1.svg"),
+         "kind": "vertical", "ppg_id": "abc"}]))
+    doc.save()
+    return root / "sorgente.ppg"
+
+
+def _target(tmp_path, *labels):
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    for label in labels or ("X",):
+        doc.add_chunk(label)
+    doc.meta["sito"] = "Tell Mio"
+    doc.save(tmp_path / "dst" / "mio.ppg")
+    return doc
+
+
+def test_keys_of_chunks_appended_together_follow_and_the_others_are_dropped(tmp_path):
+    from pyarchinit_photogrammetry.core.append import append_projects
+    from pyarchinit_photogrammetry.engine import orient
+
+    src = make_linked_source(tmp_path / "src")
+    doc = _target(tmp_path, "X", "Y")  # keys 0 and 1: the keys of A and B in the source
+    (res,) = append_projects(doc, [src])
+    a, b = res.chunks
+    assert (a.key, b.key) == (2, 3)
+    assert b.meta["chunk_alignment"]["reference_key"] == a.key
+    assert b.meta["dem"]["coregistration"]["reference_chunk"] == a.key
+    assert [c.label for c in orient.aligned_to(a)] == ["B"] and orient.aligned_to(doc.chunks[0]) == []
+    # the files of A that B uses: the copies
+    assert b.meta["dem"]["coregistration"]["reference_file"] == str(a.data_dir / "versions" / "dem" / "v1" / "dem.tif")
+    assert b.meta["proxies"][0]["base_dem"] == str(a.data_dir / "dem.tif")
+    # B alone: no key that names X or Y, the link dropped and said
+    doc2 = _target(tmp_path / "two", "X", "Y")
+    (res2,) = append_projects(doc2, [src], chunks=["B"])
+    (b2,) = res2.chunks
+    assert "chunk_alignment" not in b2.meta
+    assert b2.meta["dem"]["coregistration"]["reference_chunk"] is None
+    assert orient.aligned_to(doc2.chunks[0]) == [] and orient.aligned_to(doc2.chunks[1]) == []
+    text = " ".join(res2.warnings)
+    assert "allineato a «A»" in text and "coregistrazione" in text
+    assert "file di chunk del progetto di origine" in text  # A's DEM: left in the source, said
+
+
+def test_zoning_sections_and_site_of_the_source(tmp_path):
+    from pyarchinit_photogrammetry.core.append import append_projects, write_sections
+
+    src = make_linked_source(tmp_path / "src")
+    gpkg = tmp_path / "src" / "zone_ndvi.gpkg"
+    doc = _target(tmp_path)
+    results = append_projects(doc, [src])
+    a = results[0].chunks[0]
+    copy_ = Path(a.meta["multispectral"]["zoning"]["NDVI"]["file"])
+    assert copy_ != gpkg and copy_.read_bytes() == gpkg.read_bytes() and str(copy_).startswith(str(a.data_dir))
+    assert any("Tell Sorgente" in w and "Tell Mio" in w for w in results[0].warnings)
+    assert doc.meta["sito"] == "Tell Mio"
+    ((prefix, sections),) = results.sections
+    assert prefix == "sorgente" and Path(sections[0]["svg"]).parent == tmp_path / "dst" / "sezioni"
+    assert Path(sections[0]["svg"]).read_text() == "<svg/>"
+    added = write_sections(doc, sections, prefix)
+    assert [s["label"] for s in added] == ["Sezione 1"]
+    again = write_sections(doc, sections, prefix)  # the same once more: a name and an identity of their own
+    assert [s["label"] for s in again] == ["sorgente - Sezione 1"] and "ppg_id" not in again[0]
+    on_disk = json.loads((tmp_path / "dst" / "sezioni" / "sezioni.json").read_text())
+    assert len(on_disk) == 2
+    assert json.loads((tmp_path / "src" / "sezioni" / "sezioni.json").read_text())[0]["label"] == "Sezione 1"
+
+
+def test_a_failing_source_takes_away_only_its_own_chunks(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.core.append import append_projects
+    from pyarchinit_photogrammetry.core.progress import Progress
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from test_integrations import make_psx
+
+    src = make_source(tmp_path / "src")
+    psx, _o, _a = make_psx(tmp_path / "ms")
+    doc = _target(tmp_path)
+    mine = []
+
+    def user_adds(fraction, message):  # the user adds a chunk while the append runs
+        if not mine and fraction > 0.1:
+            mine.append(doc.add_chunk("Mio"))
+            (mine[0].data_dir / "dati.txt").write_text("miei")
+
+    def broken(*a, **k):
+        raise RuntimeError("modello rotto")
+
+    monkeypatch.setattr(ms, "_import_model", broken)  # the psx fails after making its chunk
+    res_ppg, res_psx = append_projects(doc, [src, psx], progress=Progress(user_adds))
+    assert res_psx.error == "modello rotto" and not res_psx.chunks
+    assert [c.label for c in doc.chunks] == ["X", "Chunk 1", "Saggio B", "Mio"]
+    assert (mine[0].data_dir / "dati.txt").read_text() == "miei"
+    # the importer alone cleans its own chunk too
+    doc2 = _target(tmp_path / "two")
+    with pytest.raises(RuntimeError):
+        ms.import_psx_into(doc2, psx)
+    assert [c.label for c in doc2.chunks] == ["X"]
+    assert not [d for d in doc2.files_dir.iterdir() if d.name.startswith("chunk_") and d.name != "chunk_0"]
+
+
+def test_keys_are_given_one_at_a_time(tmp_path):
+    import threading
+
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    doc.save(tmp_path / "p.ppg")
+    start = threading.Barrier(8)
+
+    def add():
+        start.wait()
+        for _ in range(25):
+            doc.add_chunk()
+
+    threads = [threading.Thread(target=add) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    keys = [c.key for c in doc.chunks]
+    assert len(keys) == 200 and len(set(keys)) == 200
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_a_crash_after_an_append_is_settled_at_the_next_opening(tmp_path, saved):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.append import append_projects
+
+    src = make_source(tmp_path / "src")
+    doc = _target(tmp_path)
+    journal_seen = []
+
+    def watch(fraction, message):  # the journal lists a chunk before its folder is filled
+        trash = doc.files_dir / ".removed"
+        if trash.is_dir() and not journal_seen:
+            manifests = [json.loads(m.read_text()) for m in trash.glob("*/removed.json")]
+            journal_seen.extend(m["files"]["present"] for m in manifests if m["kind"] == "added")
+
+    from pyarchinit_photogrammetry.core.progress import Progress
+
+    results = append_projects(doc, [src], progress=Progress(watch))
+    assert journal_seen and journal_seen[0]
+    folder = doc.files_dir / f"chunk_{results[0].chunks[0].key}"
+    assert folder.is_dir() and results.journal is not None
+    if saved:
+        doc.save()
+    # the program dies here: nothing settled; the next opening reads the project as saved
+    again = ppg.Document.open(doc.path)
+    again.recover_removed()
+    assert folder.is_dir() == saved
+    assert not (again.files_dir / ".removed").exists()

@@ -1537,13 +1537,18 @@ def append(project: Path,
 
     The sources are only read; the chunks keep their frame and CRS: align or merge them next (align-chunks,
     merge-chunks). A source that fails does not stop the others (exit code 1 at the end)."""
-    from .core.append import append_projects
+    from .core.append import append_projects, write_sections
 
     doc = Document.open(project)
     wanted = [c.strip() for c in chunks.split(",") if c.strip()] if chunks else None
     results = append_projects(doc, sources, chunks=wanted, webodm=webodm, progress=print_progress)
     if any(r.chunks for r in results):
         doc.save()
+        for prefix, sections in results.sections:
+            added = write_sections(doc, sections, prefix)
+            if added:
+                typer.echo(f"{prefix}: {len(added)} sections added")
+    doc.settle_removals()  # the journal of the append: the project as saved lists the chunks
     for r in results:
         if r.error:
             typer.echo(f"{r.path}: not appended: {r.error}", err=True)
