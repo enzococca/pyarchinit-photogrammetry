@@ -4524,7 +4524,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 if other is ch or other.key not in listed:
                     continue
                 path, kind = raster_for(other, base_kind)
-                if path is None:
+                if path is None:  # none (any more): no row, nothing drawn
+                    view.remove_chunk_overlay(other.key)
+                    self._overlay_drawn.pop(other.key, None)
                     continue
                 cfg = st.get(str(other.key)) or {}
                 shown, opacity = bool(cfg.get("shown", False)), float(cfg.get("opacity", 0.6))
@@ -4576,8 +4578,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         key does not come up ticked)."""
         from .chunk_views import settings, store
 
-        if not hasattr(self, "_overlay_drawn"):  # the window is still being built
-            return
+        if not hasattr(self, "_overlay_drawn") or self._appending:  # still being built; or an append runs (a plugin's
+            return  # refresh_tree): its chunks are half made, the populate at its end comes here
         doc = self.doc
         keys = tuple(c.key for c in doc.chunks) if doc is not None else ()
         seen = (id(doc), keys)
@@ -15194,6 +15196,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         else:
             self.workspace.populate(self.doc)
             self._update_title()
+            self._other_chunks_changed()  # a product of another chunk gone or back: the views that show it follow
+
+    def _other_chunks_changed(self) -> None:
+        """The data of other chunks changed (a product removed or put back): the 3D view drawn again when it shows
+        other chunks, the rasters of the other chunks and their Layer rows again."""
+        mv = self.model_view
+        if mv.chunk is not None and mv.chunk.document is self.doc and (
+                (mv.base_sd is not None and mv.base_sd.others) or mv.other_chunks()):
+            mv.refresh(reset=False)
+        self._draw_chunk_overlays()
 
     def _undo_removed(self, step) -> None:
         """Modifica > Annulla of a removal: everything back in its place; the chunk that was active, active

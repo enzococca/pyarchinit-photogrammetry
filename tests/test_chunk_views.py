@@ -543,3 +543,38 @@ def test_a_removed_chunk_leaves_both_views(win, qapp):
     qapp.processEvents()
     assert any(ch.key == c.key for ch in w.doc.chunks) and c.key in pane._chunk_widgets
     assert not pane._chunk_widgets[c.key][0].isChecked() and not view.chunk_overlays
+
+
+def test_a_removed_product_of_another_chunk_leaves_the_views(win, qapp):
+    from PySide6.QtCore import Qt
+
+    w = win
+    a, b, c = w.doc.chunks
+    _chunk_items(w)["C"].setCheckState(0, Qt.CheckState.Checked)
+    w._show_raster("dem")
+    qapp.processEvents()
+    pane, view = w.layers_pane, w.ortho_view
+    pane._chunk_widgets[c.key][0].setChecked(True)
+    qapp.processEvents()
+    assert c.key in view.chunk_overlays
+    # its DEM removed: no raster, no row; undo puts both back (still ticked); redo takes them away again
+    assert w.remove_workspace_items([("product", c, "dem")], confirm=False)
+    qapp.processEvents()
+    assert c.key not in view.chunk_overlays and c.key not in pane._chunk_widgets
+    w.history.undo()
+    qapp.processEvents()
+    assert c.key in pane._chunk_widgets and pane._chunk_widgets[c.key][0].isChecked() and c.key in view.chunk_overlays
+    w.history.redo()
+    qapp.processEvents()
+    assert c.key not in view.chunk_overlays and c.key not in pane._chunk_widgets
+    # its dense cloud removed: nothing of it left to draw in 3D; back with the undo
+    assert [ly.label for ly in w.model_view.base_sd.others] == ["C"]
+    assert w.remove_workspace_items([("product", c, "point_cloud")], confirm=False)
+    qapp.processEvents()
+    assert w.model_view.base_sd.others == []
+    w.history.undo()
+    qapp.processEvents()
+    assert [ly.label for ly in w.model_view.base_sd.others] == ["C"]
+    w.history.redo()
+    qapp.processEvents()
+    assert w.model_view.base_sd.others == []
