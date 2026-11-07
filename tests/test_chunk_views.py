@@ -357,7 +357,9 @@ def test_2d_rows_of_the_other_chunks(win, qapp):
     base = view.pixmap_item.mapRectToScene(view.pixmap_item.boundingRect())
     assert view.world(rect.topLeft())[0] - view.world(base.topLeft())[0] == pytest.approx(0.5, abs=0.03)
     # the view can be moved over the part beyond the raster; the raster itself is what it was
-    assert view.sceneRect().contains(rect) and view.raster_rect() == base
+    from PySide6.QtWidgets import QGraphicsView
+
+    assert QGraphicsView.sceneRect(view).contains(rect) and view.raster_rect() == base == view.sceneRect()
     _box, _slider, _label, _hint = pane._chunk_widgets[c.key]  # updated in place (the note)
     assert "spostato con il chunk" in _box.toolTip()
     _slider.setValue(30)
@@ -393,3 +395,126 @@ def test_scene_of_a_chunk_without_cameras_has_its_own_origin(tmp_path):
     assert np.allclose(sd.offset, (2480002.0, 4500002.0, 100.0), atol=1.0)
     back = sd.points.astype(float) + sd.offset
     assert np.abs(back - ch.to_world(ch.point_cloud.xyz)).max() < 1e-4
+
+
+# ---------------------------------------------------------------- fix round 1
+def _utm(ch):
+    """The chunk in a projected system, its frame 2 480 000 / 4 500 000 m away from its internal one."""
+    T = np.asarray(ch.transform, float).copy()
+    T[:3, 3] += (2480000.0, 4500000.0, 100.0)
+    ch.transform, ch.crs = T, "EPSG:3004"
+
+
+def test_a_local_chunk_beside_one_in_a_system_is_superimposed_in_3d(three, model_view, qapp):
+    from pyarchinit_photogrammetry.gui import chunk_views
+
+    a, b, c = three.chunks
+    _utm(a)  # A in Monte Mario, B and C local frames
+    chunk_views.set_shown_3d(three, b, True)
+    v = model_view
+    v.set_chunk(a, "point_cloud")
+    lb = _layer(v, "B")
+    assert not lb.placed
+    sd = v.base_sd
+    # around the middle of A, not millions of metres away: Home frames the trench
+    assert np.linalg.norm(np.median(lb.points, axis=0) - sd.center) < 1.0
+    assert sd.extent < 20.0
+    rows = [v.chunks_legend.item(i).text() for i in range(v.chunks_legend.count())]
+    assert "B (sistema locale: sovrapposto, non collocato)" in rows
+    v.others_combo.setCurrentIndex(v.others_combo.findData("distance"))
+    rows = [v.chunks_legend.item(i).text() for i in range(v.chunks_legend.count())]
+    assert any("sovrapposto e non collocato: non misurato" in r for r in rows)
+
+
+def test_opacity_redraws_without_building_the_scene(three, model_view, qapp):
+    from pyarchinit_photogrammetry.gui import chunk_views
+
+    a, b, _c = three.chunks
+    chunk_views.set_shown_3d(three, b, True)
+    v = model_view
+    v.set_chunk(a, "point_cloud")
+    calls = []
+    v.canvas.set_scene = lambda *args, **kw: calls.append(1)
+    v.others_slider.setValue(30)
+    v._others_opacity_apply()
+    assert not calls and v.canvas.sd.others_opacity == pytest.approx(0.3)
+
+
+def test_view_choices_are_not_undone(three):
+    from pyarchinit_photogrammetry.gui import chunk_views
+    from pyarchinit_photogrammetry.gui.undo import snapshot_document
+
+    chunk_views.set_shown_3d(three, three.chunks[1], True)
+    assert "view" not in snapshot_document(three)["meta"]
+
+
+def test_a_dem_built_before_the_alignment_moves_in_height_too(tmp_path):
+    from pyarchinit_photogrammetry.gui.chunk_views import overlay_image
+    from pyarchinit_photogrammetry.gui.image_views import dem_colors
+
+    doc = make_project(tmp_path / "quota.ppg", shift=(0.5, 0.0, 0.2), n=2000)
+    a, _b, c = doc.chunks
+    _dem(a)
+    _dem(c)  # built with the identity, the chunk moved 0.5 m east and 0.2 m up since
+    rgba, affine, kind, note = overlay_image(c, a, "dem", dem_range=(-1.0, 1.0))
+    import rasterio
+
+    with rasterio.open(a.dem_path) as src:
+        z = src.read(1).astype(float)
+    expected = dem_colors(z + 0.2, 0.02, (-1.0, 1.0))
+    assert kind == "dem" and affine.c == pytest.approx(0.5) and "spostato con il chunk" in note
+    assert np.abs(rgba.astype(int) - expected.astype(int)).max() <= 1
+
+
+def test_2d_scene_rect_stays_the_raster(win, qapp):
+    """The plugins size their overlays from view.sceneRect(): it stays the raster with other chunks drawn; the view
+    scrolls over them within a bounded area, back to the raster when they are hidden."""
+    from PySide6.QtWidgets import QGraphicsView
+
+    w = win
+    a, _b, c = w.doc.chunks
+    w._show_raster("dem")
+    qapp.processEvents()
+    view, pane = w.ortho_view, w.layers_pane
+    pane._chunk_widgets[c.key][0].setChecked(True)
+    qapp.processEvents()
+    item = view.chunk_overlays[c.key]
+    raster = view.raster_rect()
+    assert view.sceneRect() == raster and (raster.width(), raster.height()) == view._base_size
+    scroll = QGraphicsView.sceneRect(view)
+    assert scroll.contains(item.mapRectToScene(item.boundingRect())) and scroll != raster
+    plugin_array = np.zeros((int(view.sceneRect().height()), int(view.sceneRect().width())))  # as an overlay of a plugin
+    assert plugin_array.shape == (view._base_size[1], view._base_size[0])
+    pane._chunk_widgets[c.key][0].setChecked(False)
+    qapp.processEvents()
+    assert QGraphicsView.sceneRect(view) == raster
+    # a plugin's frame: no rows, no rasters of other chunks
+    view.show_frame((0.0, 0.0, 4.0, 3.0), 0.02)
+    qapp.processEvents()
+    assert not view.chunk_overlays and not pane.chunks_box.isVisibleTo(pane)
+
+
+def test_2d_local_chunk_beside_one_in_a_system(win, qapp):
+    from PySide6.QtWidgets import QGraphicsView
+
+    w = win
+    a, _b, c = w.doc.chunks
+    _utm(a)
+    import rasterio
+    from rasterio.transform import from_origin
+
+    with rasterio.open(a.dem_path, "r+") as dst:  # the DEM of A in its system
+        dst.transform = from_origin(2480000.0, 4500003.0, 0.02, 0.02)
+        dst.crs = "EPSG:3004"
+    a.meta["built_in"]["dem"] = np.asarray(a.transform).tolist()
+    w._show_raster("dem")
+    qapp.processEvents()
+    view, pane = w.ortho_view, w.layers_pane
+    pane._chunk_widgets[c.key][0].setChecked(True)
+    qapp.processEvents()
+    item = view.chunk_overlays[c.key]
+    rect = item.mapRectToScene(item.boundingRect())
+    raster = view.raster_rect()
+    assert raster.adjusted(-raster.width(), -raster.height(), raster.width(), raster.height()).contains(rect)
+    assert QGraphicsView.sceneRect(view).width() <= 3 * raster.width() + 1
+    assert "sovrapposto al chunk attivo, non collocato" in pane._chunk_widgets[c.key][3].text()

@@ -627,6 +627,7 @@ class RasterView(_ZoomView):
         empties it, ``text`` in its place."""
         self._empty_scene()
         self.tr = None
+        self._src_size = self._base_size = (0, 0)
         self.raster_title = ""
         self._set_raster_state(True, 1.0)
         if text:
@@ -737,10 +738,26 @@ class RasterView(_ZoomView):
         self.raster_loaded.emit()
 
     def raster_rect(self) -> QRectF:
-        """The raster (or the empty frame) shown, in scene pixels: the scene can be larger (the rasters of other
-        chunks beyond it, :meth:`set_chunk_overlay`)."""
+        """The raster (or the empty frame) shown, in scene pixels."""
         w, h = self._base_size
-        return QRectF(0, 0, w, h) if w and h else self.sceneRect()
+        return QRectF(0, 0, w, h) if w and h else QGraphicsView.sceneRect(self)
+
+    def sceneRect(self) -> QRectF:  # noqa: N802 - Qt's name
+        """The raster shown, in its pixels (:meth:`raster_rect`): what the window and the plugins size their arrays and
+        overlays from. The area Qt lets the view scroll over can be larger - the rasters of other chunks beyond it
+        (:meth:`set_chunk_overlay`), at most one raster size on each side - and is not this."""
+        return self.raster_rect() if self._base_size[0] and self._base_size[1] else QGraphicsView.sceneRect(self)
+
+    def _update_scroll_rect(self) -> None:
+        """The area the view scrolls over: the raster and the visible rasters of other chunks, bounded to the raster
+        grown by its own size on each side; back to the raster when they are hidden or removed."""
+        base = self.raster_rect()
+        rect = QRectF(base)
+        for item in self.chunk_overlays.values():
+            if item.isVisible():
+                rect = rect.united(item.mapRectToScene(item.boundingRect()))
+        rect = rect.intersected(base.adjusted(-base.width(), -base.height(), base.width(), base.height()))
+        QGraphicsView.setSceneRect(self, rect)
 
     # ----------------------------------------------------------- rasters of other chunks
     def set_chunk_overlay(self, key, rgba: np.ndarray, affine, opacity: float = 0.6, shown: bool = True) -> None:
@@ -760,15 +777,15 @@ class RasterView(_ZoomView):
         item.setVisible(bool(shown))
         self.scene().addItem(item)
         self.chunk_overlays[key] = item
-        # the view can be moved over it, also where it is beyond the raster shown (a chunk not aligned yet)
-        self.setSceneRect(self.sceneRect().united(item.mapRectToScene(item.boundingRect())))
+        self._update_scroll_rect()  # the view can be moved over it, also beyond the raster (a chunk not aligned yet)
 
     def set_chunk_overlay_state(self, key, shown: bool | None = None, opacity: float | None = None) -> None:
         item = self.chunk_overlays.get(key)
         if item is None:
             return
-        if shown is not None:
+        if shown is not None and bool(shown) != item.isVisible():
             item.setVisible(bool(shown))
+            self._update_scroll_rect()
         if opacity is not None:
             item.setOpacity(min(max(float(opacity), 0.0), 1.0))
 
@@ -776,6 +793,7 @@ class RasterView(_ZoomView):
         item = self.chunk_overlays.pop(key, None)
         if item is not None and item.scene() is self.scene():
             self.scene().removeItem(item)
+            self._update_scroll_rect()
 
     # ----------------------------------------------------------- the raster shown or hidden
     def has_raster(self) -> bool:

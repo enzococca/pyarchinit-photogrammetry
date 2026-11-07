@@ -707,6 +707,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
         self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
+        self._overlay_drawn: dict = {}  # chunk key -> the copy drawn on the view now
         # the rasters of the other chunks, after the window has finished with the raster just shown (a plan or not)
         self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self, self._draw_chunk_overlays))
         self.ortho_view.raster_loaded.connect(self._sync_background_action)
@@ -4500,7 +4501,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         view, doc, ch = self.ortho_view, self.doc, self.chunk
         try:
-            plan = ch is not None and doc is not None and view.tr is not None and self.drawings_frame is None
+            # the plan only: not an elevation, nor a frame of a plugin (its coordinates may be no place of the world)
+            plan = (ch is not None and doc is not None and view.tr is not None and self.drawings_frame is None
+                    and view.kind != "frame")
         except RuntimeError:  # pragma: no cover - the window is closing
             return
         rows = []
@@ -4524,8 +4527,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                         view.remove_chunk_overlay(other.key)
                     else:
                         rgba, affine, kind, note = got
-                        if other.key not in view.chunk_overlays:
-                            view.set_chunk_overlay(other.key, rgba, affine, opacity, True)
+                        if other.key not in view.chunk_overlays or self._overlay_drawn.get(other.key) is not got:
+                            view.set_chunk_overlay(other.key, rgba, affine, opacity, True)  # new, or made again
+                            self._overlay_drawn[other.key] = got
                         else:
                             view.set_chunk_overlay_state(other.key, True, opacity)
                 else:

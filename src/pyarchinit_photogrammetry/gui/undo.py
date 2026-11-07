@@ -516,7 +516,8 @@ def snapshot_document(doc) -> dict:
     import copy
 
     out: dict = {c.key: copy.deepcopy(c.to_dict()) for c in doc.chunks}
-    out["meta"] = copy.deepcopy(doc.meta)
+    # the choices of the views (doc.meta["view"]: the other chunks shown, their colours) are no edit: not in the snapshots
+    out["meta"] = copy.deepcopy({k: v for k, v in doc.meta.items() if k != "view"})
     out["order"] = [c.key for c in doc.chunks]
     return out
 
@@ -678,8 +679,11 @@ class ScriptAction:
                 self._set_chunk(ch, snap[key])
             chunks.append(ch)
         doc.chunks[:] = chunks
+        view = doc.meta.get("view")  # the choices of the views stay as they are now
         doc.meta.clear()
-        doc.meta.update(copy.deepcopy(snap["meta"]))
+        doc.meta.update(copy.deepcopy({k: v for k, v in snap["meta"].items() if k != "view"}))
+        if view is not None:
+            doc.meta["view"] = view
 
     def _version_entry(self, key, product: str, vid: str) -> dict:
         from ..core import versions as v

@@ -309,6 +309,11 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         self._dirty = True
         self.update()
 
+    def set_others_opacity(self, value: float) -> None:
+        """The opacity of the other chunks: drawn again from the samples kept, nothing sampled anew."""
+        self._dirty = True
+        self.update()
+
     def set_point_size(self, px: float) -> None:
         self.point_size = max(1, int(round(px)))
         self._dirty = True
@@ -800,6 +805,12 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             lines.SetCells(len(cells) // 3, numpy_to_vtkIdTypeArray(cells.astype(np.int64), deep=True))
             poly.Modified()
             actor.GetProperty().SetLineWidth(2.6 if name.split("_")[0] == self.trackball.hover else 1.5)
+
+    def set_others_opacity(self, value: float) -> None:
+        """The opacity of the other chunks: their actors' property, the scene is not built again."""
+        for actor in getattr(self, "_other_actors", []):
+            actor.GetProperty().SetOpacity(float(value))
+        self.plotter.render()
 
     def set_point_size(self, px: float) -> None:
         self.point_size = float(px)
@@ -1792,7 +1803,7 @@ class ModelView(QWidget):
         if modes != self._color_modes:
             self.color_combo.clear()
             for key in modes:
-                self.color_combo.addItem(self.COLOR_LABELS[key], key)
+                self.color_combo.addItem(tr(self.COLOR_LABELS[key]), key)
             self._color_modes = modes
         i = self.color_combo.findData(self._wanted_mode)  # e.g. classes asked while the model was shown
         if i >= 0:
@@ -2259,12 +2270,13 @@ class ModelView(QWidget):
     def _other_layer(self, ch, sd, max_points: int, cache: dict):
         from .chunk_views import build_layer
 
+        anchor = np.asarray(sd.center, float) + np.asarray(sd.offset, float)  # the middle of the active chunk alone
         key = (ch.key, self.kind, max_points, np.asarray(ch.transform, float).tobytes(), ch.crs, self.chunk.crs,
-               tuple(np.asarray(sd.offset, float)), self._files(ch))
+               tuple(np.asarray(sd.offset, float)), tuple(np.round(anchor, 2)), self._files(ch))
         if key in self._others_cache:
             layer = self._others_cache[key]
         else:
-            layer = build_layer(ch, self.chunk, sd.offset, self.kind, max_points)
+            layer = build_layer(ch, self.chunk, sd.offset, self.kind, max_points, anchor=anchor)
         cache[key] = layer
         return layer
 
@@ -2353,7 +2365,7 @@ class ModelView(QWidget):
             if sd is not None:
                 sd.others_opacity = value
         if self.sd is not None and self.sd.others:
-            self.canvas.set_scene(self.sd, reset=False)
+            self.canvas.set_others_opacity(value)
 
     # ----------------------------------------------------------- free drawings
     def set_free(self, features_world, colours=None, selected=None) -> None:

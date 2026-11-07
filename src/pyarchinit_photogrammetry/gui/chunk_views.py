@@ -119,22 +119,39 @@ class OtherLayer:
         return self.mesh_vertices if self.mesh_vertices is not None else self.points
 
 
+def _placed(chunk, internal, active, anchor):
+    """World points of ``chunk`` in the system of ``active`` and whether they are placed there. A chunk that cannot be
+    placed (a local frame next to a system of the world, a conversion that fails) is superimposed: its own middle put
+    on ``anchor`` (the middle of the active chunk's scene), never left millions of metres away."""
+    from ..engine.chunks import shown_in
+
+    try:
+        world, placed = shown_in(chunk, internal, active.crs)
+    except (ValueError, RuntimeError):
+        world, placed = chunk.to_world(np.asarray(internal, float)), False
+    if not placed and anchor is not None and len(world):
+        world = world - np.median(world, axis=0) + np.asarray(anchor, float)
+    return world, placed
+
+
 def build_layer(chunk, active, offset, kind: str, max_points: int = 400_000,
-                max_faces: int = 600_000) -> OtherLayer | None:
+                max_faces: int = 600_000, anchor=None) -> OtherLayer | None:
     """``chunk`` as a layer of the 3D view of ``active`` (scene offset ``offset``): the preview of its model when the
     active chunk shows a model and this one has it, else a stride of its dense cloud, tie points or model vertices.
-    ``None`` when it has nothing to show."""
-    from ..engine.chunks import preview_points, shown_in
+    A chunk that cannot be placed in the active one's system is superimposed around ``anchor`` (world coordinates of
+    the middle of the active scene; default the offset), ``placed`` False. ``None`` when it has nothing to show."""
+    from ..engine.chunks import preview_points
     from .scene import display_model
 
     doc = chunk.document
     layer = OtherLayer(chunk.key, chunk.label, chunk_colour(doc, chunk))
     off = np.asarray(offset, float)
+    anchor = off if anchor is None else np.asarray(anchor, float)
     path = chunk.product_path("model")
     if kind in ("model", "model_textured") and path is not None and path.exists():
         mesh = display_model(chunk, max_faces)
         if mesh is not None and len(mesh.faces):
-            world, layer.placed = shown_in(chunk, np.asarray(mesh.vertices, float), active.crs)
+            world, layer.placed = _placed(chunk, np.asarray(mesh.vertices, float), active, anchor)
             faces = np.asarray(mesh.faces)
             if len(faces) > max_faces:
                 faces = faces[np.random.default_rng(0).choice(len(faces), max_faces, replace=False)]
@@ -153,7 +170,7 @@ def build_layer(chunk, active, offset, kind: str, max_points: int = 400_000,
             internal, rgb, layer.what = preview_points(chunk, max_points, "auto")
         except ValueError:
             return None
-    world, layer.placed = shown_in(chunk, internal, active.crs)
+    world, layer.placed = _placed(chunk, internal, active, anchor)
     layer.points = (world - off).astype(np.float32)
     layer.rgb = rgb
     return layer
@@ -269,7 +286,7 @@ def legend_rows(active, layers, mode: str, metric: bool = True) -> list[tuple[st
         for ly in layers:
             s = ly.stats
             if not ly.placed:
-                rows.append(("", tr("{0}: nel proprio sistema locale, non misurato", ly.label)))
+                rows.append(("", tr("{0}: sistema locale, sovrapposto e non collocato: non misurato", ly.label)))
             elif s is None or s["median"] is None:
                 rows.append(("", tr("{0}: nessuna sovrapposizione", ly.label)))
             else:
@@ -279,7 +296,7 @@ def legend_rows(active, layers, mode: str, metric: bool = True) -> list[tuple[st
         return rows
     rows.append((chunk_colour(doc, active) if mode == "chunk" else "", tr("{0} (attivo)", active.label)))
     for ly in layers:
-        text = ly.label if ly.placed else tr("{0} (nel proprio sistema locale)", ly.label)
+        text = ly.label if ly.placed else tr("{0} (sistema locale: sovrapposto, non collocato)", ly.label)
         rows.append((ly.colour if mode == "chunk" else "", text))
     return rows
 
@@ -329,17 +346,20 @@ def overlay_image(chunk, active, kind: str, dem_range=None, max_side: int = OVER
         f = max(1.0, max(src.width, src.height) / max_side)
         h, w = max(1, int(round(src.height / f))), max(1, int(round(src.width / f)))
         tr_ = src.transform @ Affine.scale(src.width / w, src.height / h)
+        z = None
         if k == "dem":
             z = src.read(1, out_shape=(h, w), resampling=Resampling.average, masked=True)
             z = z.astype(np.float64).filled(np.nan)
-            rgba = dem_colors(z, abs(tr_.a), dem_range or dem_limits(z))
+            rgba = None
         else:
             n = min(src.count, 4)
             arr = np.moveaxis(src.read(list(range(1, n + 1)), out_shape=(n, h, w), resampling=Resampling.average),
                               0, -1)
             if n == 3:
                 arr = np.dstack([arr, np.full((h, w), 255, np.uint8)])
-            elif n < 3:
+            elif n == 2:  # grey and alpha
+                arr = np.dstack([arr[..., 0]] * 3 + [arr[..., 1]])
+            elif n == 1:
                 arr = np.dstack([arr[..., 0]] * 3 + [np.full((h, w), 255, np.uint8)])
             rgba = np.ascontiguousarray(arr.astype(np.uint8))
     built = (chunk.meta.get("built_in") or {}).get("dem" if k == "dem" else "orthomosaic")
@@ -347,18 +367,46 @@ def overlay_image(chunk, active, kind: str, dem_range=None, max_side: int = OVER
         move = np.asarray(chunk.transform, float) @ np.linalg.inv(np.asarray(built, float))
         s, R, _t = geometry.decompose_similarity(move)
         tilt = float(np.degrees(np.arccos(np.clip(R[2, 2], -1.0, 1.0))))
+        if z is not None:  # the heights move with the chunk too: z' = m20 x + m21 y + m22 z + m23 at every cell
+            cols, rows = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
+            x = tr_.a * cols + tr_.b * rows + tr_.c
+            y = tr_.d * cols + tr_.e * rows + tr_.f
+            z = move[2, 0] * x + move[2, 1] * y + move[2, 2] * z + move[2, 3]
         plan = Affine(move[0, 0], move[0, 1], move[0, 3], move[1, 0], move[1, 1], move[1, 3])
         tr_ = plan @ tr_
         notes.append(tr("costruito prima dell'allineamento: spostato con il chunk") if tilt < 0.5 else
-                     tr("costruito prima dell'allineamento: spostato in pianta, il chunk è inclinato di {0} gradi",
-                        decimal_comma(f"{tilt:.1f}")))
+                     tr("costruito prima dell'allineamento: spostato con il chunk, inclinato di {0} gradi: la pianta è "
+                        "approssimata, ricostruiscilo", decimal_comma(f"{tilt:.1f}")))
+    if z is not None:
+        rgba = dem_colors(z, abs(tr_.a), dem_range or dem_limits(z))
     src_crs, dst_crs = chunk.crs, active.crs
     if src_crs != dst_crs and not (crs_mod.is_local(src_crs) and crs_mod.is_local(dst_crs)):
         if crs_mod.is_local(src_crs) or crs_mod.is_local(dst_crs):
-            notes.append(tr("nel proprio sistema locale"))
+            tr_ = _superimposed(tr_, rgba.shape, active)
+            notes.append(tr("sistema locale: sovrapposto al chunk attivo, non collocato"))
         else:
             rgba, tr_ = _warp(rgba, tr_, src_crs, dst_crs)
     return rgba, tr_, k, "; ".join(notes)
+
+
+def _superimposed(transform, shape, active):
+    """The affine of a raster that cannot be placed in the active chunk's system, moved so that its middle is on the
+    middle of the active chunk's own raster (DEM or orthophoto): seen beside it, never millions of metres away."""
+    import rasterio
+    from affine import Affine
+
+    h, w = shape[:2]
+    cx, cy = transform @ (w / 2.0, h / 2.0)
+    target = None
+    for path in (active.dem_path, active.orthomosaic_path):
+        if path is not None and path.exists():
+            with rasterio.open(path) as src:
+                b = src.bounds
+                target = ((b.left + b.right) / 2.0, (b.bottom + b.top) / 2.0)
+            break
+    if target is None:
+        return transform
+    return Affine.translation(target[0] - cx, target[1] - cy) @ transform
 
 
 def _warp(rgba: np.ndarray, transform, src_crs: str, dst_crs: str):
@@ -370,7 +418,7 @@ def _warp(rgba: np.ndarray, transform, src_crs: str, dst_crs: str):
 
     h, w = rgba.shape[:2]
     src_h, dst_h = crs_mod.horizontal(src_crs), crs_mod.horizontal(dst_crs)
-    xs, ys = zip(*(transform * (c, r) for c, r in ((0, 0), (w, 0), (0, h), (w, h))))  # rotated after an alignment
+    xs, ys = zip(*(transform @ (c, r) for c, r in ((0, 0), (w, 0), (0, h), (w, h))))  # rotated after an alignment
     dst_t, dw, dh = calculate_default_transform(src_h, dst_h, w, h, left=min(xs), bottom=min(ys), right=max(xs),
                                                 top=max(ys))
     out = np.zeros((4, dh, dw), np.uint8)
