@@ -446,6 +446,27 @@ class _Removed:
         self.window._redo_removed(self)
 
 
+class _Appended:
+    """An entry of Modifica > Annulla for *File > Aggiungi progetti*: undo takes the chunks appended away as a removal
+    from the workspace does (``core.removal``: their folders set aside), redo brings them back. ``removal`` is a
+    :meth:`core.removal.ChunkRemoval.added`, made when they were appended: the end of the session deletes their
+    folders unless the project as last saved lists them. ``before``: the active chunk before, active again when
+    the undo takes away the active one."""
+
+    def __init__(self, window, removal, before=None):
+        self.window = window
+        self.inner = _Removed(window, [removal])
+        self.inner.after = before
+
+    def undo(self) -> None:
+        current = self.window.chunk
+        self.inner.active = current if any(current is c for c in self.inner.removals[0].chunks) else None
+        self.window._redo_removed(self.inner)
+
+    def redo(self) -> None:
+        self.window._undo_removed(self.inner)
+
+
 class MainWindow(FreeDrawingActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
@@ -885,6 +906,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         exp.addSeparator()
         self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
+        self.a_append = self._act(
+            m, tr("Aggiungi progetti..."), self.append_projects, processing=True, icon_name="append",
+            tip=tr("Altri progetti (.ppg, Metashape .psx, WebODM) nel progetto aperto: ogni loro chunk diventa un "
+                   "chunk nuovo, come File > Append di Metashape"))
         imp = m.addMenu(icon("open"), tr("Importa"))
         self._act(imp, tr("Scansioni laser (E57, PTX)..."), self.import_scans, processing=True, icon_name="scan",
                   tip=tr("Una o più scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
@@ -3945,6 +3970,121 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._info("Importazione completata", text + ("\n\n" + "\n".join(warn[:6]) if warn else ""))
 
         self.run_task("Importazione", job, done, refresh=False, save=False)
+
+    def append_projects(self, sources=None, webodm: bool = False) -> None:
+        """*File > Aggiungi progetti...* (also the bar and the menu of the Area di lavoro), as Metashape's *File >
+        Append*: other projects - ``.ppg``, Metashape ``.psx``, a WebODM ``all.zip`` or task folder - in the open
+        one, each chunk of them a new chunk (:func:`core.append.append_projects`); asked when ``sources`` is None
+        (files, or a WebODM task folder: ``webodm``). Of a source with several chunks the user ticks those to take.
+        The sources are only read; the project is marked modified, not saved; nothing is aligned. The active chunk
+        stays, unless it is empty: then the first chunk appended takes its place. One step of Modifica > Annulla
+        takes them all away. A summary says what came, from where, and what failed."""
+        from ..core.append import append_projects, source_chunks, source_kind
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            return
+        if sources is None:
+            how = choice(self, "question", tr("Aggiungi progetti"),
+                         tr("Ogni chunk dei progetti scelti diventa un chunk nuovo di questo progetto; i progetti "
+                            "scelti non vengono modificati.\n\nScegli i file (.ppg, Metashape .psx, all.zip di "
+                            "WebODM) o la cartella di un task WebODM/ODM."),
+                         [tr("File..."), tr("Cartella di un task WebODM...")])
+            if how is None:
+                return
+            if how == 0:
+                files, _ = QFileDialog.getOpenFileNames(
+                    self, tr("Progetti da aggiungere"), self._last_dir(),
+                    tr("Progetti (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;"
+                       "WebODM (*.zip)"))
+                sources = list(files)
+            else:
+                folder = QFileDialog.getExistingDirectory(self, tr("Cartella del task WebODM/ODM"), self._last_dir())
+                sources, webodm = ([folder] if folder else []), True
+        sources = [Path(s) for s in sources if s]
+        if not sources:
+            return
+        chunks: dict = {}
+        fields = []
+        for i, path in enumerate(sources):
+            try:
+                if source_kind(path, webodm) == "webodm":
+                    continue
+                labels = source_chunks(path)
+            except Exception:  # noqa: BLE001 - the error is told with the others, at the end
+                continue
+            if len(labels) > 1:
+                fields.append(Field(f"s{i}", tr("Chunk di {0}", path.name), list(range(len(labels))),
+                                    choices=list(enumerate(labels)), kind="checklist"))
+        if fields:
+            v = ParamDialog.ask(self, tr("Aggiungi progetti"), fields,
+                                intro=tr("Spunta i chunk da aggiungere: ognuno diventa un chunk nuovo."))
+            if not v:
+                return
+            for f in fields:
+                path = sources[int(f.name[1:])]
+                chunks[str(path)] = [int(k) for k in v[f.name]]
+            sources = [p for p in sources if chunks.get(str(p), [0]) != []]  # nothing ticked: left out
+            if not sources:
+                return
+        doc = self.doc
+        before = self.chunk
+        self._store_drawings()
+
+        def job(p):
+            return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
+
+        def done(results):
+            from ..core.removal import ChunkRemoval
+
+            if self.doc is not doc:  # pragma: no cover - another project opened meanwhile
+                return
+            new = [c for r in results for c in r.chunks]
+            active = before
+            if new:
+                step = _Appended(self, ChunkRemoval.added(doc, new), before)
+                if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
+                    active = new[0]
+                    self._activate_chunk(active)
+                else:
+                    self.workspace.populate(doc)
+                    self._update_title()
+                if self.history is not None:
+                    self.history.push(tr("Aggiungi progetti"), step)
+                self._dirty(True)
+            self._append_summary(results, active)
+
+        self.run_task("Aggiunta di progetti", job, done, refresh=False, save=False)
+
+    def _append_summary(self, results, active) -> None:
+        """What *Aggiungi progetti* did, in the log and in a window: the chunks of each source (photos, products,
+        CRS), the warnings, the sources that failed and why; nothing aligned."""
+        lines, failed, warnings = [], 0, []
+        for r in results:
+            if r.error:
+                failed += 1
+                lines.append(tr("{0}: non aggiunto ({1})", r.path.name, r.error))
+                self.log_pane.warning(tr("{0}: non aggiunto ({1})", r.path, r.error))
+                continue
+            lines.append(tr("{0}: {1} chunk", r.path.name, len(r.chunks)))
+            for ch in r.chunks:
+                products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or tr("nessuno")
+                lines.append("  " + tr("«{0}»: {1} foto, prodotti: {2}, CRS {3}", ch.label, len(ch.cameras),
+                                       products, ch.crs))
+            warnings += [f"{r.path.name}: {w}" for w in r.warnings]
+        added = sum(len(r.chunks) for r in results)
+        text = "\n".join(lines)
+        if added:
+            text += "\n\n" + (tr("Il chunk attivo è «{0}».", active.label) if active is not None else "")
+            text += "\n" + tr("Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk "
+                               "o Unisci chunk. Modifica > Annulla li toglie tutti.")
+        for w in warnings:
+            self.log_pane.warning(w)
+        if warnings:
+            text += "\n\n" + "\n".join(warnings[:6]) + ("\n..." if len(warnings) > 6 else "")
+        self.log_pane.info(tr("Aggiunti {0} chunk da {1} progetti", added, len(results) - failed))
+        title = tr("Aggiungi progetti") if not failed else tr("Aggiungi progetti: {0} non aggiunti", failed)
+        self._info(title, text)
 
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
@@ -14284,6 +14424,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         self.a_ws_add_chunk = add("add_chunk", tr("Aggiungi chunk"),
                                   tr("Aggiungi chunk: un chunk vuoto, che diventa quello attivo"), self.add_chunk)
+        self.a_ws_append = add("append", tr("Aggiungi progetti..."),
+                               tr("Aggiungi progetti: i chunk di altri progetti (.ppg, .psx, WebODM) come chunk nuovi"),
+                               self.append_projects)
         self.a_ws_add_photos = add("add_photos", tr("Aggiungi foto..."), tr("Aggiungi foto al chunk attivo"),
                                    self.add_photos)
         self.a_ws_add_folder = add("add_folder", tr("Aggiungi cartella..."),
@@ -14446,6 +14589,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         menu = QMenu(self)
         if kind == "document":
             menu.addAction(icon("add_chunk"), tr("Aggiungi chunk"), self.add_chunk)
+            menu.addAction(icon("append"), tr("Aggiungi progetti..."), self.append_projects)
         elif kind == "chunk":
             a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
             a.setEnabled(chunk is not self.chunk)

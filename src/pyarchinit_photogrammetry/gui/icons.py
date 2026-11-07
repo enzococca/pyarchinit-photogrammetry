@@ -101,6 +101,7 @@ ICONS = {
     # and on the dark theme and tell an enabled button from a disabled (grey) one
     "add_chunk": ("mdi6.package-variant-plus", "teal"), "add_photos": ("mdi6.image-plus-outline", "blue"),
     "add_folder": ("mdi6.folder-plus-outline", "blue"), "activate": ("mdi6.radiobox-marked", "blue"),
+    "append": ("mdi6.file-import-outline", "teal"),
     "enable": ("mdi6.check-circle-outline", "green"), "disable": ("mdi6.cancel", "orange"),
     "rename": ("mdi6.rename-outline", "cyan"), "remove": ("mdi6.delete-outline", "red"),
     # cleaning and cropping

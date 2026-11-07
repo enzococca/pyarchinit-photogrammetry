@@ -3050,7 +3050,20 @@
   "Differenza fra DEM": "Difference of DEMs",
   "Rilievo: sky-view factor": "Relief: sky-view factor",
   "Rilievo: openness positiva": "Relief: positive openness",
-  "Rilievo: openness negativa": "Relief: negative openness"
+  "Rilievo: openness negativa": "Relief: negative openness",
+  "Aggiungi progetti...": "Append projects...",
+  "Aggiungi progetti": "Append projects",
+  "Aggiunta di progetti": "Appending projects",
+  "Aggiungi progetti: i chunk di altri progetti (.ppg, .psx, WebODM) come chunk nuovi": "Append projects: the chunks of other projects (.ppg, .psx, WebODM) as new chunks",
+  "Altri progetti (.ppg, Metashape .psx, WebODM) nel progetto aperto: ogni loro chunk diventa un chunk nuovo, come File > Append di Metashape": "Other projects (.ppg, Metashape .psx, WebODM) into the open one: each of their chunks becomes a new chunk, as Metashape's File > Append",
+  "Ogni chunk dei progetti scelti diventa un chunk nuovo di questo progetto; i progetti scelti non vengono modificati.\n\nScegli i file (.ppg, Metashape .psx, all.zip di WebODM) o la cartella di un task WebODM/ODM.": "Each chunk of the projects chosen becomes a new chunk of this project; the projects chosen are not changed.\n\nChoose the files (.ppg, Metashape .psx, WebODM all.zip) or the folder of a WebODM/ODM task.",
+  "File...": "Files...",
+  "Cartella di un task WebODM...": "Folder of a WebODM task...",
+  "Progetti da aggiungere": "Projects to append",
+  "Progetti (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;WebODM (*.zip)": "Projects (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;WebODM (*.zip)",
+  "Cartella del task WebODM/ODM": "Folder of the WebODM/ODM task",
+  "Spunta i chunk da aggiungere: ognuno diventa un chunk nuovo.": "Tick the chunks to append: each becomes a new chunk.",
+  "Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk o Unisci chunk. Modifica > Annulla li toglie tutti.": "Nothing was aligned: to bring them together use Workflow > Align chunks or Merge chunks. Edit > Undo takes them all away."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4030,6 +4043,13 @@
   "Sfondo: {0}": "Background: {0}",
   "{0} «{1}»": "{0} «{1}»",
   "Sezione «{0}»": "Section «{0}»",
-  "Prospetto «{0}»": "Elevation «{0}»"
+  "Prospetto «{0}»": "Elevation «{0}»",
+  "Chunk di {0}": "Chunks of {0}",
+  "{0}: non aggiunto ({1})": "{0}: not appended ({1})",
+  "{0}: {1} chunk": "{0}: {1} chunks",
+  "«{0}»: {1} foto, prodotti: {2}, CRS {3}": "\"{0}\": {1} photos, products: {2}, CRS {3}",
+  "Il chunk attivo è «{0}».": "The active chunk is \"{0}\".",
+  "Aggiunti {0} chunk da {1} progetti": "{0} chunks appended from {1} projects",
+  "Aggiungi progetti: {0} non aggiunti": "Append projects: {0} not appended"
  }
 }
