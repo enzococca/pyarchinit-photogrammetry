@@ -60,6 +60,7 @@ tiene i pulsanti che non ci stanno):
 | Pulsante | Cosa fa |
 | --- | --- |
 | *Aggiungi chunk* | un chunk vuoto con il nome che gli dai, che diventa quello attivo |
+| *Aggiungi progetti...* | i chunk di altri progetti (`.ppg`, `.psx`, WebODM) come chunk nuovi, come *File > Aggiungi progetti...* |
 | *Aggiungi foto...*, *Aggiungi cartella...* | foto, o una cartella di foto, nel chunk attivo |
 | *Rendi attivo* | il chunk selezionato diventa quello attivo (lo stesso fa un doppio clic) |
 | *Attiva*, *Disattiva* | un chunk disattivato resta nel progetto, fuori dai passi batch e dai chunk che propongono *Allinea chunk* e *Unisci chunk*; una foto disattivata resta fuori dal prossimo allineamento e dalle prossime costruzioni |
@@ -77,7 +78,7 @@ tiene i pulsanti che non ci stanno):
 | un marker | *Filtra le foto di ...*, *Rimuovi il marker* |
 | *Camere*, *Marker*, *Barre di scala* | la rimozione di tutto ciò che contengono |
 | più elementi | *Attiva*, *Disattiva*, *Rimuovi N elementi* |
-| il progetto | *Aggiungi chunk* |
+| il progetto | *Aggiungi chunk*, *Aggiungi progetti...* |
 
 I comandi lavorano anche sui chunk che non sono quello attivo: rimuovere, rinominare, attivare e disattivare
 agiscono sul chunk dell'elemento e lasciano com'è il chunk attivo, mentre mostrare un elemento e i comandi

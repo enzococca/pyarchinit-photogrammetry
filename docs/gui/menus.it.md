@@ -33,6 +33,7 @@ descrive i menu uno per uno, nell'ordine in cui compaiono.
 | **Salva** ++ctrl+s++ · **Salva con nome...** ++ctrl+shift+s++ | salva il progetto; dopo ogni passo di elaborazione il programma lo salva da solo, una volta che ha un file |
 | **Esporta** | i prodotti in altri formati: [vedi sotto](#file-esporta) |
 | **Importa** | progetti e dati di altri programmi: [vedi sotto](#file-importa) |
+| **Aggiungi progetti...** | altri progetti - `.ppg`, Metashape `.psx`, `all.zip` o cartella di un task WebODM - in quello aperto, ogni loro chunk un chunk nuovo, come *File > Append* di Metashape ([Aggiungere progetti](../integrations.md#aggiungere-progetti)) |
 | **Genera report HTML...** | il rapporto di elaborazione come pagina web (lo stesso contenuto del [rapporto PDF](exports.md#rapporto-pdf)) |
 | **Crea e apri progetto demo...** | uno scavo sintetico con foto, target e un database PyArchInit, per provare il programma ([Demo](index.md#il-progetto-demo)) |
 | **Pagina iniziale** | torna alla [pagina iniziale](index.md#la-pagina-iniziale) |

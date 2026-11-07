@@ -154,9 +154,37 @@ How it behaves:
 QGIS and RustGIS can be linked at the same time: both read and write the same GeoPackage, and the edits of either
 come in through it.
 
+## Appending projects
+
+*File > Append projects...* (also in the bar and the right click of the Workspace) works as Metashape's *File >
+Append*: other projects go into the open one, each of their chunks a **new chunk**. One window takes several files
+at once - projects of this program (`.ppg`), Metashape projects (`.psx`), WebODM archives (`all.zip`) - and a second
+choice the folder of a WebODM/ODM task. Of a `.ppg` or `.psx` with more than one chunk you tick the chunks to take.
+From the command line: `ppg append progetto.ppg altro.ppg scavo.psx all.zip [--chunks "Chunk 1,Saggio B"]
+[--webodm]` (the project is saved at the end; the exit code is 1 when a source failed).
+
+* **`.ppg`**: every chunk comes with a copy of its data folder (depth maps, clouds, model and texture, DEM,
+  orthophoto, versions, elevations; one file at a time, a copy-on-write clone on APFS: instant and taking no space),
+  and with its photos, sensors, cameras, markers, scale bars, references, coordinate system, transform, drawings and
+  settings. The photos stay where they are: they are stored relative to this project when they are inside its folder,
+  absolute otherwise. A DEM or an orthophoto of another program the chunk points to stays where it is too.
+* **`.psx`** and **WebODM**: what [the Metashape import](#metashape-psx) and [the WebODM import](#webodm-odm) bring,
+  in new chunks of the open project. An `all.zip` is extracted inside the folder of its new chunk.
+
+The projects chosen are only read, never written. A chunk keeps its name; when the project already has one with that
+name, the name of the file goes before it (`scavo - Chunk 1`). The active chunk stays the same (when it is empty, the
+first chunk appended takes its place). A summary says what came from each source - chunks, photos, products,
+coordinate system, warnings - and which sources could not be appended and why: one failing does not stop the others.
+
+**Nothing is aligned**: each chunk keeps its own frame and coordinate system. To bring them together use *Flusso di
+lavoro > Allinea chunk* (markers, photos in common or points) or *Unisci chunk*.
+
+The project is marked modified, not saved. *Edit > Undo* takes all the chunks appended away in one step (and *Redo*
+brings them back); their folders follow the project as last saved: closing without saving deletes them.
+
 ## Metashape (`.psx`)
 
-*File > Importa > Progetto Metashape* or `ppg import-metashape progetto.psx nuovo.ppg`.
+*File > Importa > Progetto Metashape* or `ppg import-metashape progetto.psx nuovo.ppg` (a new project; to add its chunks to the open one, [*File > Append projects...*](#appending-projects)).
 The project is read directly (no Metashape needed): sensors with their calibration
 (converted to COLMAP `FULL_OPENCV`: `f`, `cx/cy` from the centre, `b1`, `k1..k3`, `p1/p2`
 swapped to OpenCV order), aligned cameras, markers with references, accuracies and
@@ -211,7 +239,7 @@ GeoTIFF), dense clouds in Metashape's octree format, masks, skew `b2`, `k4`.
 ## WebODM / ODM
 
 *File > Importa > Progetto WebODM* or `ppg import-webodm all.zip nuovo.ppg` (or the task
-folder). Orthophoto, DSM (or DTM), georeferenced point cloud (`.laz`/`.las`/`.ply`) and the
+folder; to add it as a chunk of the open project, [*File > Append projects...*](#appending-projects)). Orthophoto, DSM (or DTM), georeferenced point cloud (`.laz`/`.las`/`.ply`) and the
 textured mesh (`odm_textured_model_geo.obj`, relative to the offset in `coords.txt`) become
 the products of a chunk in the CRS of the rasters.
 

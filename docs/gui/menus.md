@@ -33,6 +33,7 @@ order they appear.
 | **Save** ++ctrl+s++ · **Save as...** ++ctrl+shift+s++ | saves the project; after every processing step the program saves it by itself, once it has a file |
 | **Export** | the products in other formats: [see below](#file-export) |
 | **Import** | projects and data of other programs: [see below](#file-import) |
+| **Append projects...** | other projects - `.ppg`, Metashape `.psx`, WebODM `all.zip` or task folder - into the open one, each of their chunks a new chunk, as Metashape's *File > Append* ([Appending projects](../integrations.md#appending-projects)) |
 | **Generate HTML report...** | the processing report as a web page (the same content as the [PDF report](exports.md#pdf-report)) |
 | **Create and open demo project...** | a synthetic trench with photos, targets and a PyArchInit database, to try the program ([Demo](index.md#the-demo-project)) |
 | **Start page** | back to the [start page](index.md#the-start-page) |
