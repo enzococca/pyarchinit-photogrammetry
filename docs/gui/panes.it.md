@@ -52,6 +52,12 @@ disattivato e una foto disattivata sono grigi.
 Un clic seleziona (++ctrl++ + clic e ++shift++ + clic per più elementi); un doppio clic o ++enter++ rende attivo
 un chunk, e apre una foto, un prodotto o una versione dopo aver reso attivo il suo chunk.
 
+Con più di un chunk, ogni chunk ha una **casella** (applicazione **1.7.5**): spuntata, il chunk si disegna nella vista 3D
+insieme a quello attivo, prima e dopo *Allinea chunk* ([più chunk insieme](view3d.md#piu-chunk-insieme)); la casella del
+chunk attivo resta spuntata.
+
+![Le caselle dei chunk](../img/gui/chunks-workspace.it.png){ width=300 }
+
 <div style="clear: both"></div>
 
 **La barra sopra l'albero** ha solo icone (i suggerimenti dicono il nome; in un pannello stretto il » alla fine
@@ -153,6 +159,19 @@ patch.
   (++ctrl+shift+b++). Ogni raster tiene la sua scelta finché il programma è aperto (l'ortofoto nascosta, il DEM visibile,
   un prospetto sbiadito...) e la ritrova quando lo rivedi; gli strumenti di disegno, le quote sotto il cursore e le
   esportazioni funzionano come sempre. Non si salva nel progetto.
+* **Altri chunk** (app **1.7.5**): con più di un chunk, sotto lo sfondo una riga per ogni altro chunk che ha un DEM o
+  un'ortofoto - il suo DEM sotto un DEM, la sua ortofoto sotto un'ortofoto, altrimenti quello che ha. Spuntala per
+  disegnare quel raster sopra lo sfondo del chunk attivo, sotto i disegni; il suo cursore ne regola l'opacità (60 % per
+  cominciare), così si confrontano due campagne sulla stessa trincea. Un raster costruito prima di *Allinea chunk* viene
+  spostato con il suo chunk (la riga lo dice; un chunk anche inclinato viene spostato solo in pianta, le quote restano:
+  ricostruiscilo); un chunk in un altro sistema di coordinate viene riproiettato in quello del chunk attivo, uno in un
+  sistema locale accanto a un sistema del mondo resta nel suo. Si disegna solo una copia ridotta (al massimo 2000 pixel),
+  niente viene letto a piena risoluzione. Le spunte e le opacità si salvano nel progetto; su un prospetto o una sezione
+  le righe non ci sono.
+
+  ![Le righe degli altri chunk](../img/gui/chunks-layers-rows.it.png){ width=260 }
+  ![L'ortofoto di un altro chunk, non ancora allineato, sopra quella attiva al 55 %](../img/gui/chunks-2d-before.it.png){ width=420 }
+
 * La spunta mostra o nasconde un layer, il doppio clic ingrandisce su di esso (un layer o un singolo
   elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer disegnati (un solo passo di *Modifica >
   Annulla*) e lasciano lo sfondo com'è.

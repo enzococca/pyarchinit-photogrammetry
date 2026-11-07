@@ -51,6 +51,12 @@ photo are grey.
 A click selects (++ctrl++ + click and ++shift++ + click select several items); a double click or ++enter++
 makes a chunk the active one, and opens a photo, a product or a version after making its chunk the active one.
 
+With more than one chunk, each chunk has a **box** (application **1.7.5**): ticked, the chunk is drawn in the 3D view
+together with the active one, before and after *Align chunks* ([several chunks together](view3d.md#several-chunks-together));
+the box of the active chunk stays ticked.
+
+![The boxes of the chunks](../img/gui/chunks-workspace.png){ width=300 }
+
 <div style="clear: both"></div>
 
 **The bar above the tree** has icons only (their tooltips name them; on a narrow pane the » at its end holds the
@@ -150,6 +156,18 @@ stones, patches.
   (++ctrl+shift+b++). Each raster keeps its choice while the program is open (the orthophoto hidden, the DEM shown, an
   elevation faded...) and gets it back when it is shown again; the drawing tools, the heights under the cursor and the
   exports work as usual. Not saved in the project.
+* **Other chunks** (application **1.7.5**): with more than one chunk, under the background a row for each other chunk
+  that has a DEM or an orthophoto - its DEM under a DEM, its orthophoto under an orthophoto, else the one it has. Tick it
+  to draw that raster over the background of the active chunk, under the drawings; its slider sets its opacity (60 % to
+  begin with), so that two campaigns on the same trench can be compared. A raster built before *Align chunks* is moved
+  with its chunk (the row says so; a chunk also tilted is moved in plan only, its heights stay: build it again); a chunk
+  in another coordinate system is warped into the active one's, one in a local frame next to a system of the world stays
+  in its own. Only a reduced copy is drawn (2000 pixels at most), nothing is read at full resolution. The ticks and the
+  opacities are saved in the project; on an elevation or a section there are no rows.
+
+  ![The rows of the other chunks](../img/gui/chunks-layers-rows.png){ width=260 }
+  ![The orthophoto of another chunk, not aligned yet, over the active one at 55 %](../img/gui/chunks-2d-before.png){ width=420 }
+
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
   *All* and *None* tick every drawn layer (one step of *Edit > Undo*) and leave the background as it is.
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)

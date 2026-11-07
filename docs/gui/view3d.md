@@ -53,6 +53,49 @@ drawing instead of moving the centre of rotation. *Select and edit* chooses a dr
 or delete; *Drape on the model* adds vertices on the surface every 20 pixels. The drawings of the visible layers are
 drawn in their colours, the selected one thicker. See [free drawings](drawing.md#free-drawings-2d-and-3d).
 
+## Several chunks together
+
+Application **1.7.5**. With more than one chunk in the project, every chunk of the *Workspace* has a box:
+**tick it to show that chunk in the 3D view together with the active one** (the active chunk is always shown). The
+chunks are drawn where they are in the world - each through its own transform, converted into the coordinate system of
+the active chunk when both are systems of the world - so you can see **before *Align chunks*** where they lie and
+whether they overlap, and **after it** whether they match. A chunk in a local frame next to a chunk in a system of the
+world cannot be put in the same place: it is drawn in its own frame, and the legend says so.
+
+What is drawn follows *Show*: with the dense cloud or the tie points, a thinned copy of the points of each chunk (never
+the whole cloud); with the model, the preview of its model (a chunk without one shows its points). *Home view* frames
+all of them.
+
+![Three chunks before the alignment, one colour each](../img/gui/chunks-3d-before.png)
+
+The row **Other chunks** above the view (it appears as soon as a chunk is ticked) chooses the colours and the opacity of
+the other chunks:
+
+| Colours | What they show |
+| --- | --- |
+| **One colour per chunk** | each chunk - the active one too - in its own colour, named in the legend on the right: where the surfaces of two campaigns are, which one lies above |
+| **True colours** | the colours of the photos; the active chunk keeps the colours chosen for it (classes, height...) |
+| **Distance from the active chunk** | the active chunk grey, the others coloured by the distance of each point from its surface: white on it, red above, blue below, saturated beyond the end of the scale (rounded to 1, 2 or 5 mm, cm or m from the 95th percentile); grey the points with nothing of the active chunk over or under them |
+
+![After *Align chunks*: one colour per chunk](../img/gui/chunks-3d-after.png)
+
+With *Distance from the active chunk* the legend gives, for each chunk, the **median** distance, the **NMAD** (the
+spread, as a standard deviation that ignores the outliers) and the share of its points **within** three spacings of the
+points of the active chunk: after a good alignment the median is a few millimetres and most points are within. The
+distance is measured along the normal of the surface where the active chunk is over or under the point, else to the
+nearest point: a part beyond the edge of the active chunk is never "at 0".
+
+![The distances after the alignment](../img/gui/chunks-3d-distance.png)
+
+**Opacity** fades the other chunks (also in the software renderer): with true colours at 50 % two surveys of the same
+trench read one through the other. The ticks, the colours and the opacity are saved in the project; they are choices of
+the view, not steps of *Edit > Undo*. While a kept version is shown, only the active chunk is drawn.
+
+*Workflow > Align chunks...* now ends with the same check: for each chunk aligned, the share of its points within the
+threshold and its median distance from the reference ([command line](../api.md#align-and-merge-chunks):
+`ppg align-chunks ... --check`, `ppg chunk-distances`). The DEMs and orthophotos of the chunks can be compared in the 2D
+view: see the [Layer pane](panes.md#layer).
+
 ## Keys
 
 With the 3D view focused:
