@@ -143,3 +143,13 @@ def test_order_and_best_photo():
     assert lt.best_photo(chunk, [5, 0, 0.2], [0, 0, 1.0], 10.0).label == "C"
     # turned the other way: none
     assert lt.best_photo(chunk, [0, 0, 0], [0, 0, -1.0], 10.0) is None
+
+
+def test_photos_without_a_time_come_after_the_dated_ones():
+    def cam(label, when=None):
+        return types.SimpleNamespace(label=label, aligned=True, enabled=True, transform=np.eye(4),
+                                     meta={"datetime": when} if when else {})
+
+    chunk = _chunk(np.eye(4))
+    chunk.cameras = [cam("A"), cam("Z", "2024:01:01 10:00:02"), cam("B"), cam("Y", "2024:01:01 10:00:01")]
+    assert [c.label for c in lt.ordered_cameras(chunk)] == ["Y", "Z", "A", "B"]

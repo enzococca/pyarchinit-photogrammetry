@@ -138,10 +138,11 @@ def fit_in_view(ideal: Ideal, view_width: float, view_height: float) -> tuple[fl
 
 
 def ordered_cameras(chunk) -> list:
-    """The aligned, enabled photos in the order they were taken (the EXIF time; the names where there is none):
-    the order of *Pagina giù/su* while looking through them."""
+    """The aligned, enabled photos in the order they were taken (the EXIF time), then the photos without a time by
+    name: the order of *Pagina giù/su* while looking through them."""
     cams = [c for c in chunk.cameras if c.aligned and c.enabled]
-    return sorted(cams, key=lambda c: (str(c.meta.get("datetime") or ""), c.label))
+    return sorted(cams, key=lambda c: (0, str(c.meta["datetime"]), c.label) if c.meta.get("datetime")
+                  else (1, "", c.label))
 
 
 def best_photo(chunk, eye, forward, size: float, cameras=None):
