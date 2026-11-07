@@ -61,8 +61,9 @@ Applicazione **1.7.5**. Con più di un chunk nel progetto, ogni chunk dell'*Area
 mostrare quel chunk nella vista 3D insieme a quello attivo** (il chunk attivo si vede sempre). I chunk sono disegnati
 dove stanno nel mondo - ognuno con la sua trasformazione, convertito nel sistema di coordinate del chunk attivo quando
 entrambi sono sistemi del mondo - così **prima di *Allinea chunk*** vedi dove si trovano e se si sovrappongono, e **dopo**
-se combaciano. Un chunk in un sistema locale accanto a uno in un sistema del mondo non si può mettere nello stesso posto:
-viene disegnato nel suo sistema, e la legenda lo dice.
+se combaciano. Un chunk in un sistema locale accanto a uno in un sistema del mondo non si può collocare: viene
+**sovrapposto** - il suo centro sul centro del chunk attivo, per vederli all'incirca uno accanto all'altro - e la legenda
+dice «sistema locale: sovrapposto, non collocato»; non viene misurato.
 
 Ciò che si disegna segue *Mostra*: con la nuvola densa o i punti di legame, una copia diradata dei punti di ogni chunk (mai
 la nuvola intera); con il modello, l'anteprima del suo modello (un chunk che non ce l'ha mostra i suoi punti). *Vista
@@ -84,7 +85,10 @@ Con *Distanza dal chunk attivo* la legenda dà, per ogni chunk, la distanza **me
 una deviazione standard che ignora i valori anomali) e la quota dei suoi punti **entro** tre spaziature dei punti del chunk
 attivo: dopo un buon allineamento la mediana è di pochi millimetri e quasi tutti i punti sono entro. La distanza si misura
 lungo la normale della superficie dove il chunk attivo sta sopra o sotto il punto, altrimenti dal punto più vicino: una
-parte oltre il bordo del chunk attivo non è mai «a 0».
+parte oltre il bordo del chunk attivo non è mai «a 0». «Sopra» e «sotto» seguono la verticale del mondo: si leggono su
+piani di calpestio e superfici poco inclinate, non sulle pareti. I punti di ogni chunk sono una copia diradata (al massimo
+200 000 per il riferimento), quindi la soglia - tre spaziature di quella copia - è più larga della spaziatura di una
+nuvola molto densa: `ppg chunk-distances --threshold` la imposta.
 
 ![Le distanze dopo l'allineamento](../img/gui/chunks-3d-distance.it.png)
 

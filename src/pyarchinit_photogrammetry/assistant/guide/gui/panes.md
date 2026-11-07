@@ -160,9 +160,9 @@ stones, patches.
   that has a DEM or an orthophoto - its DEM under a DEM, its orthophoto under an orthophoto, else the one it has. Tick it
   to draw that raster over the background of the active chunk, under the drawings; its slider sets its opacity (60 % to
   begin with), so that two campaigns on the same trench can be compared. A raster built before *Align chunks* is moved
-  with its chunk (the row says so; a chunk also tilted is moved in plan only, its heights stay: build it again); a chunk
-  in another coordinate system is warped into the active one's, one in a local frame next to a system of the world stays
-  in its own. Only a reduced copy is drawn (2000 pixels at most), nothing is read at full resolution. The ticks and the
+  with its chunk - in plan and, for a DEM, in height (the row says so; for a chunk also tilted the plan is approximate:
+  build it again); a chunk in another coordinate system is warped into the active one's; one in a local frame next to a
+  system of the world is superimposed, its middle on the middle of the active raster ("not placed"). Only a reduced copy is drawn (2000 pixels at most), nothing is read at full resolution. The ticks and the
   opacities are saved in the project; on an elevation or a section there are no rows.
 
   ![The rows of the other chunks](../img/gui/chunks-layers-rows.png){ width=260 }

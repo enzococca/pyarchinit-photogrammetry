@@ -60,7 +60,8 @@ Application **1.7.5**. With more than one chunk in the project, every chunk of t
 chunks are drawn where they are in the world - each through its own transform, converted into the coordinate system of
 the active chunk when both are systems of the world - so you can see **before *Align chunks*** where they lie and
 whether they overlap, and **after it** whether they match. A chunk in a local frame next to a chunk in a system of the
-world cannot be put in the same place: it is drawn in its own frame, and the legend says so.
+world cannot be placed: it is **superimposed** - its middle on the middle of the active chunk, to see the two roughly
+side by side - and the legend says "local frame: superimposed, not placed"; it is not measured.
 
 What is drawn follows *Show*: with the dense cloud or the tie points, a thinned copy of the points of each chunk (never
 the whole cloud); with the model, the preview of its model (a chunk without one shows its points). *Home view* frames
@@ -83,7 +84,10 @@ With *Distance from the active chunk* the legend gives, for each chunk, the **me
 spread, as a standard deviation that ignores the outliers) and the share of its points **within** three spacings of the
 points of the active chunk: after a good alignment the median is a few millimetres and most points are within. The
 distance is measured along the normal of the surface where the active chunk is over or under the point, else to the
-nearest point: a part beyond the edge of the active chunk is never "at 0".
+nearest point: a part beyond the edge of the active chunk is never "at 0". "Above" and "below" follow the vertical of
+the world: they read on floors and gently sloping surfaces, not on walls. The points of each chunk are a thinned copy
+(at most 200 000 for the reference), so the threshold - three spacings of that copy - is wider than the spacing of a
+very dense cloud: `ppg chunk-distances --threshold` sets it.
 
 ![The distances after the alignment](../img/gui/chunks-3d-distance.png)
 

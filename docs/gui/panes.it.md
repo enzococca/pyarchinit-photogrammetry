@@ -163,9 +163,10 @@ patch.
   un'ortofoto - il suo DEM sotto un DEM, la sua ortofoto sotto un'ortofoto, altrimenti quello che ha. Spuntala per
   disegnare quel raster sopra lo sfondo del chunk attivo, sotto i disegni; il suo cursore ne regola l'opacità (60 % per
   cominciare), così si confrontano due campagne sulla stessa trincea. Un raster costruito prima di *Allinea chunk* viene
-  spostato con il suo chunk (la riga lo dice; un chunk anche inclinato viene spostato solo in pianta, le quote restano:
-  ricostruiscilo); un chunk in un altro sistema di coordinate viene riproiettato in quello del chunk attivo, uno in un
-  sistema locale accanto a un sistema del mondo resta nel suo. Si disegna solo una copia ridotta (al massimo 2000 pixel),
+  spostato con il suo chunk - in pianta e, per un DEM, in quota (la riga lo dice; per un chunk anche inclinato la pianta è
+  approssimata: ricostruiscilo); un chunk in un altro sistema di coordinate viene riproiettato in quello del chunk
+  attivo; uno in un sistema locale accanto a un sistema del mondo viene sovrapposto, il suo centro sul centro del raster
+  attivo («non collocato»). Si disegna solo una copia ridotta (al massimo 2000 pixel),
   niente viene letto a piena risoluzione. Le spunte e le opacità si salvano nel progetto; su un prospetto o una sezione
   le righe non ci sono.
 
