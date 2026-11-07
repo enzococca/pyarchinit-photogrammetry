@@ -1527,6 +1527,39 @@ def merge_chunks(project: Path,
 
 
 @app.command()
+def append(project: Path,
+           sources: list[Path] = typer.Argument(..., help="projects to append: .ppg, Metashape .psx, WebODM all.zip "
+                                                          "or task folder"),
+           chunks: Optional[str] = typer.Option(None, help="only the chunks with these names (comma separated) of the "
+                                                           ".ppg and .psx sources"),
+           webodm: bool = typer.Option(False, help="every source is a WebODM/ODM task (all.zip or task folder)")):
+    """Append other projects, each chunk of them as a new chunk of PROJECT (as Metashape's File > Append).
+
+    The sources are only read; the chunks keep their frame and CRS: align or merge them next (align-chunks,
+    merge-chunks). A source that fails does not stop the others (exit code 1 at the end)."""
+    from .core.append import append_projects
+
+    doc = Document.open(project)
+    wanted = [c.strip() for c in chunks.split(",") if c.strip()] if chunks else None
+    results = append_projects(doc, sources, chunks=wanted, webodm=webodm, progress=print_progress)
+    if any(r.chunks for r in results):
+        doc.save()
+    for r in results:
+        if r.error:
+            typer.echo(f"{r.path}: not appended: {r.error}", err=True)
+            continue
+        for ch in r.chunks:
+            products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or "-"
+            typer.echo(f"{r.path.name}: [{ch.key}] {ch.label}: {len(ch.cameras)} photos, CRS {ch.crs}, "
+                       f"products: {products}")
+        for w in r.warnings:
+            typer.echo(f"  warning: {w}")
+    typer.echo("Nothing was aligned: use align-chunks or merge-chunks to bring the chunks together.")
+    if any(r.error for r in results):
+        raise typer.Exit(1)
+
+
+@app.command()
 def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = None, model: Optional[Path] = None,
            cloud: Optional[Path] = None, cameras: Optional[Path] = None, markers: Optional[Path] = None,
            report: Optional[Path] = None,
