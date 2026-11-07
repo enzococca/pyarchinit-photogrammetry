@@ -460,3 +460,15 @@ def test_a_crash_after_an_append_is_settled_at_the_next_opening(tmp_path, saved)
     again.recover_removed()
     assert folder.is_dir() == saved
     assert not (again.files_dir / ".removed").exists()
+
+
+def test_link_targets_of_windows_are_read_as_plain_paths():
+    """os.readlink on Windows gives absolute targets as extended paths: the prefix goes, so the target is seen under
+    the folder of the source project and moved to the copy."""
+    from pyarchinit_photogrammetry.core.append import _plain_link
+
+    assert _plain_link("\\\\?\\C:\\a\\b.tif") == "C:\\a\\b.tif"
+    assert _plain_link("\\??\\C:\\a\\b.tif") == "C:\\a\\b.tif"
+    assert _plain_link("\\\\?\\UNC\\server\\share\\b.tif") == "\\\\server\\share\\b.tif"
+    assert _plain_link("/Users/a/b.tif") == "/Users/a/b.tif"
+    assert _plain_link("../dem.tif") == "../dem.tif"

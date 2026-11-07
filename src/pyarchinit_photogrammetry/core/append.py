@@ -109,6 +109,18 @@ SECTION_FILES = ("svg", "dxf", "dxf3d")
 KEY_FIELDS = ("reference_key", "reference_chunk")  # a key of another chunk of the project: chunk_alignment, coregistration
 
 
+def _plain_link(link: str) -> str:
+    """A link target as an ordinary path: Windows gives absolute targets with the prefix of extended paths
+    (``\\\\?\\C:\\...`` or ``\\??\\C:\\...``), which no folder of the project starts with."""
+    for prefix in ("\\\\?\\UNC\\", "\\??\\UNC\\"):
+        if link.startswith(prefix):
+            return "\\\\" + link[len(prefix):]
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if link.startswith(prefix):
+            return link[len(prefix):]
+    return link
+
+
 def _norm(path: str) -> str:
     """``path`` compared as the system does: one separator, case folded where the file system folds it (Windows)."""
     return os.path.normcase(os.path.normpath(path)) if path else path
@@ -202,7 +214,7 @@ def _copy_folder(src: Path, dst: Path, progress, label: str, moves) -> None:
         target = dst / path.relative_to(src)
         target.parent.mkdir(parents=True, exist_ok=True)
         if path.is_symlink():
-            link = os.readlink(path)
+            link = _plain_link(os.readlink(path))
             if os.path.isabs(link):
                 link = _moved(link, moves)
             os.symlink(link, target)
