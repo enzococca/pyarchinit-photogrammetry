@@ -575,6 +575,8 @@ sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci 
 | `ppg duplicate-chunk project.ppg [--chunk C] [--photos nomi.txt \| --area WKT] [--label L]` | riga di comando: tutte le foto, quelle elencate in un file di testo (una per riga) o quelle che inquadrano un poligono (WKT, GeoJSON o un file GeoJSON) |
 | `ppg photos enable\|disable project.ppg NOMI... [--chunk C]` | riga di comando: foto per etichetta (o chiave) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | riga di comando (predefinito: tutti i chunk abilitati) |
+| `core.append.append_projects(doc, sources, chunks=None, webodm=False, progress=None)` | altri progetti (`.ppg`, `.psx`, `all.zip` o cartella di un task WebODM) come chunk nuovi di `doc`, come *File > Aggiungi progetti...*: le sorgenti solo lette, il chunk attivo invariato, `doc` non salvato; un `Appended` (`path`, `kind`, `chunks`, `error`, `warnings`) per sorgente, una che non riesce non lascia nulla e le altre proseguono |
+| `ppg append project.ppg SORGENTI... [--chunks NOMI] [--webodm]` | riga di comando (`--chunks`: nomi separati da virgole; codice d'uscita 1 se una sorgente non è entrata) |
 
 Metodi di `align_chunks`:
 

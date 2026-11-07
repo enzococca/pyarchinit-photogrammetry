@@ -556,6 +556,8 @@ then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
 | `ppg photos enable\|disable project.ppg NAMES... [--chunk C]` | command line: photos by label (or key) |
 | `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | command line (default reference: the active chunk) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | command line (default: all enabled chunks) |
+| `core.append.append_projects(doc, sources, chunks=None, webodm=False, progress=None)` | other projects (`.ppg`, `.psx`, WebODM `all.zip` or task folder) as new chunks of `doc`, as *File > Append projects...*: the sources only read, the active chunk unchanged, `doc` not saved; one `Appended` (`path`, `kind`, `chunks`, `error`, `warnings`) per source, a source that fails leaves nothing and the others go on |
+| `ppg append project.ppg SOURCES... [--chunks NAMES] [--webodm]` | command line (`--chunks`: names separated by commas; exit code 1 when a source failed) |
 
 Methods of `align_chunks`:
 

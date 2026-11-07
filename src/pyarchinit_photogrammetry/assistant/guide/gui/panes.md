@@ -59,6 +59,7 @@ buttons that do not fit):
 | Button | What it does |
 | --- | --- |
 | *Add chunk* | an empty chunk with the name you give it, which becomes the active one |
+| *Append projects...* | the chunks of other projects (`.ppg`, `.psx`, WebODM) as new chunks, as *File > Append projects...* |
 | *Add photos...*, *Add folder...* | photos, or a folder of photos, into the active chunk |
 | *Make active* | the chunk selected becomes the active one (a double click does the same) |
 | *Enable*, *Disable* | a disabled chunk stays in the project, out of the batch steps and of the chunks *Align chunks* and *Merge chunks* propose; a disabled photo stays out of the next alignment and builds |
@@ -76,7 +77,7 @@ buttons that do not fit):
 | a marker | *Filter the photos of ...*, *Remove the marker* |
 | *Cameras*, *Markers*, *Scale bars* | the removal of all they hold |
 | several items | *Enable*, *Disable*, *Remove N items* |
-| the project | *Add chunk* |
+| the project | *Add chunk*, *Append projects...* |
 
 The commands work on chunks that are not the active one too: removing, renaming, enabling and disabling act
 on the chunk of the item and leave the active chunk as it is, while showing an item and the commands of its
