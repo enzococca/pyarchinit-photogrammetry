@@ -85,6 +85,7 @@ class LookThrough:
         self.look_slider.setMaximumWidth(110)
         self.look_slider.setToolTip(tr("Opacità della foto") + ": " + tr("0 %: solo il modello, 100 %: solo la foto"))
         self.look_slider.valueChanged.connect(self._look_opacity_moved)
+        self.look_slider.sliderReleased.connect(lambda: self._look_opacity_moved(self.look_slider.value()))
         self.look_value = QLabel(f"{self.look_slider.value()} %")
         self.look_value.setMinimumWidth(self.look_value.fontMetrics().horizontalAdvance("100 %") + 4)
         self.b_look_exit = QPushButton(tr("Esci dalla foto"))
@@ -328,4 +329,5 @@ class LookThrough:
 
         self.look_value.setText(f"{value} %")
         self.canvas.set_photo_opacity(value / 100.0)
-        app_settings().setValue(SETTING, int(value))
+        if not self.look_slider.isSliderDown():  # dragged: the setting written once, when it is let go
+            app_settings().setValue(SETTING, int(value))
