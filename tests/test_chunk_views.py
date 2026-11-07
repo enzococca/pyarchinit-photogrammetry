@@ -189,6 +189,9 @@ def test_3d_view_shows_the_ticked_chunks_where_they_are(three, model_view, qapp)
     assert (v.base_sd.colors == chunk_views.rgb_of(chunk_views.chunk_colour(three, a))).all()
     rows = [v.chunks_legend.item(i).text() for i in range(v.chunks_legend.count())]
     assert rows == ["A (attivo)", "B", "C"]
+    v.set_color_mode("class")  # the active chunk in its chunk colour: no legend of classes beside it
+    assert not v.legend.isVisibleTo(v) and v.chunks_legend.isVisibleTo(v)
+    v.set_color_mode("rgb")
     # the image: the three colours are on the screen
     img = v.canvas.grab_array()
     for ch in (a, b, c):

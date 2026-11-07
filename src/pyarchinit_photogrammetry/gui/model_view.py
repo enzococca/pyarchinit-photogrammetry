@@ -2218,6 +2218,8 @@ class ModelView(QWidget):
         self.info_label.setText(tr("Senza punti del suolo (classe 2): classifica prima la nuvola") if sd.hag_missing
                                 else tr("Senza confidenza: Flusso di lavoro > Calcola la confidenza"))
         self.info_label.setVisible(bool(sd.confidence_missing or sd.hag_missing))
+        if sd.others and self.others_combo.currentData() != "rgb":  # the active chunk drawn in one colour: its
+            self.legend.setVisible(False)  # classes or confidence ranges are not what is shown
         self.canvas.set_scene(sd, reset=reset)
 
     # ----------------------------------------------------------- other chunks

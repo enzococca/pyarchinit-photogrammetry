@@ -708,7 +708,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
         self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
         # the rasters of the other chunks, after the window has finished with the raster just shown (a plan or not)
-        self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self._draw_chunk_overlays))
+        self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self, self._draw_chunk_overlays))
         self.ortho_view.raster_loaded.connect(self._sync_background_action)
         self.ortho_view.raster_visibility_changed.connect(self._sync_background_action)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
@@ -4214,8 +4214,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         (kept with the project, ``doc.meta["view"]``; a choice of the view: no step of Modifica > Annulla)."""
         from .chunk_views import set_shown_3d
 
-        if set_shown_3d(self.doc, chunk, shown):
-            self.setWindowModified(True)
+        if not set_shown_3d(self.doc, chunk, shown):
+            return  # the item changed for another reason (its text, its icon): nothing to do
+        self.setWindowModified(True)
         self.model_view.refresh(reset=False)
         if shown:
             self.show_view(self.model_view)
