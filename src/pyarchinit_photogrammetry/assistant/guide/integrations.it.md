@@ -183,9 +183,26 @@ di coordinate, avvisi - e quali sorgenti non sono entrate e perché: una che non
 **Niente viene allineato**: ogni chunk tiene il suo sistema. Per metterli insieme si usa *Flusso di lavoro > Allinea
 chunk* (marker, foto in comune o punti) o *Unisci chunk*.
 
-Il progetto risulta modificato, non salvato. *Modifica > Annulla* toglie in un passo tutti i chunk aggiunti (e
-*Ripeti* li rimette); le loro cartelle seguono il progetto come è stato salvato l'ultima volta: chiudendo senza salvare
-vengono cancellate.
+Che cos'altro arriva con i chunk di un `.ppg`:
+
+* i collegamenti fra chunk aggiunti insieme li seguono: un chunk allineato a un altro (*Flusso di lavoro > Allinea
+  chunk*) resta allineato alla sua copia, un DEM coregistrato su un altro chunk nomina la copia, e i file di un chunk
+  fratello (il DEM usato da una coregistrazione o da un proxy US) puntano alle copie. Un collegamento a un chunk *non*
+  aggiunto viene tolto e detto nel riepilogo (mai un collegamento a un altro chunk di questo progetto); un file di un
+  chunk non aggiunto resta dov'è, letto e mai modificato, e il riepilogo lo nomina;
+* i GeoPackage delle zonizzazioni multispettrali, scritti accanto al progetto di origine, vengono copiati nella
+  cartella del chunk (QGIS modifica la copia);
+* le sezioni del progetto di origine (`sezioni/sezioni.json` accanto a lui) si uniscono a quelle di questo progetto,
+  con i loro SVG e DXF copiati nella sua cartella `sezioni` (un nome già usato prende davanti quello della sorgente);
+  non quando i due progetti stanno nella stessa cartella (condividono già le sezioni);
+* il sito di questo progetto (*PyArchInit*) non cambia: il riepilogo dice quando la sorgente è di un altro sito;
+* i disegni già pubblicati in PyArchInit tengono il collegamento alle schede che hanno scritto.
+
+Mentre l'aggiunta lavora, i chunk del progetto non si possono aggiungere, rendere attivi, rinominare, attivare o disattivare.
+Il progetto risulta modificato, non salvato. *Modifica > Annulla* toglie in un passo tutti i chunk aggiunti (con le
+sezioni che hanno portato) e *Ripeti* li rimette; le loro cartelle seguono il progetto come è stato salvato l'ultima
+volta: chiudendo senza salvare vengono cancellate, e dopo un arresto improvviso l'apertura successiva cancella le copie
+che il progetto salvato non elenca (l'aggiunta scrive l'elenco dei chunk che crea prima di copiarne le cartelle).
 
 ## Metashape (`.psx`)
 

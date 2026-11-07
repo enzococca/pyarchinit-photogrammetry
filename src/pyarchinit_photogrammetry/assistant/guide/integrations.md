@@ -176,11 +176,29 @@ name, the name of the file goes before it (`scavo - Chunk 1`). The active chunk 
 first chunk appended takes its place). A summary says what came from each source - chunks, photos, products,
 coordinate system, warnings - and which sources could not be appended and why: one failing does not stop the others.
 
-**Nothing is aligned**: each chunk keeps its own frame and coordinate system. To bring them together use *Flusso di
-lavoro > Allinea chunk* (markers, photos in common or points) or *Unisci chunk*.
+What else comes with the chunks of a `.ppg`:
 
-The project is marked modified, not saved. *Edit > Undo* takes all the chunks appended away in one step (and *Redo*
-brings them back); their folders follow the project as last saved: closing without saving deletes them.
+* links between chunks appended together follow them: a chunk aligned to another (*Workflow > Align chunks*) stays
+  aligned to its copy, a DEM coregistered on another chunk names the copy, and files of a sibling chunk (the DEM a
+  coregistration or a US proxy used) point at the copies. A link to a chunk *not* appended is dropped and said in the
+  summary (never a link to a different chunk of this project); a file of a chunk not appended is left where it is,
+  read and never changed, and the summary names it;
+* the GeoPackages of the multispectral zonings, written beside the source project, are copied into the folder of the
+  chunk (QGIS edits the copy);
+* the sections of the source project (`sezioni/sezioni.json` beside it) join this project's sections, their SVG and
+  DXF copied into its `sezioni` folder (a name already used gets the source's name before it); not when the two
+  projects are in the same folder (they share the sections already);
+* the site of this project (*PyArchInit*) does not change: the summary says when the source belongs to another site;
+* drawings already published to PyArchInit keep their link to the records they wrote.
+
+**Nothing is aligned**: each chunk keeps its own frame and coordinate system. To bring them together use *Workflow >
+Align chunks* (markers, photos in common or points) or *Merge chunks*.
+
+While the append runs, the chunks of the project cannot be added, activated, renamed, enabled or disabled. The project
+is marked modified, not saved. *Edit > Undo* takes all the chunks appended away in one step (with the sections they
+brought) and *Redo* brings them back; their folders follow the project as last saved: closing without saving deletes
+them, and after a crash the next opening deletes the copies the saved project does not list (the append writes the
+list of the chunks it makes before copying their folders).
 
 ## Metashape (`.psx`)
 
