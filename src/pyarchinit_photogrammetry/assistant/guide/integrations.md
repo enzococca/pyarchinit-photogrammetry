@@ -187,7 +187,9 @@ What else comes with the chunks of a `.ppg`:
   chunk (QGIS edits the copy);
 * the sections of the source project (`sezioni/sezioni.json` beside it) join this project's sections, their SVG and
   DXF copied into its `sezioni` folder (a name already used gets the source's name before it); not when the two
-  projects are in the same folder (they share the sections already);
+  projects are in the same folder (they share the sections already). As every section of the program, they are
+  written at once, not with the project; after an undo or a cancellation the list of sections goes back as it
+  was, while the copied SVG and DXF files stay in `sezioni/`;
 * the site of this project (*PyArchInit*) does not change: the summary says when the source belongs to another site;
 * drawings already published to PyArchInit keep their link to the records they wrote.
 

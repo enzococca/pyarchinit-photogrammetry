@@ -194,7 +194,9 @@ Che cos'altro arriva con i chunk di un `.ppg`:
   cartella del chunk (QGIS modifica la copia);
 * le sezioni del progetto di origine (`sezioni/sezioni.json` accanto a lui) si uniscono a quelle di questo progetto,
   con i loro SVG e DXF copiati nella sua cartella `sezioni` (un nome già usato prende davanti quello della sorgente);
-  non quando i due progetti stanno nella stessa cartella (condividono già le sezioni);
+  non quando i due progetti stanno nella stessa cartella (condividono già le sezioni). Come ogni sezione del
+  programma, sono scritte subito, non con il progetto; dopo un annullamento o un'interruzione l'elenco delle sezioni
+  torna com'era, mentre i file SVG e DXF copiati restano in `sezioni/`;
 * il sito di questo progetto (*PyArchInit*) non cambia: il riepilogo dice quando la sorgente è di un altro sito;
 * i disegni già pubblicati in PyArchInit tengono il collegamento alle schede che hanno scritto.
 
