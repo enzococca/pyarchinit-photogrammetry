@@ -126,7 +126,8 @@ While looking through a photo, a row above the view shows its name, **<** and **
 **photo opacity** (0 %: the model only, 100 %: the photo only; 50 % the first time, then the last value used) and
 *Leave the photo*; a long name is shortened, whole in its tooltip, and on a narrow view the row goes on more lines.
 ++page-down++ or ++right++ open the next photo, ++page-up++ or ++left++ the previous one, ++esc++ leaves (++page-down++,
-++page-up++ and ++esc++ also with the slider or a button of the row in use). **Any movement of the view leaves the photo** - rotating, panning, zooming, ++home++, ++t++: the photo goes and
+++page-up++ and ++esc++ also with the slider or a button of the row in use; ++esc++ first closes an open
+panel of the rail, then ends a drawing or the free selection, then leaves the photo). **Any movement of the view leaves the photo** - rotating, panning, zooming, ++home++, ++t++: the photo goes and
 the view stays where it was, free to move (++home++ and ++t++ give back the usual field of view). Choosing another view in
 *Show* keeps the photo. The photo is drawn under the cameras, the markers and the free drawings (in the software
 renderer; with VTK the photo is a layer over the scene: below 100 % they show through it, at 100 % they are

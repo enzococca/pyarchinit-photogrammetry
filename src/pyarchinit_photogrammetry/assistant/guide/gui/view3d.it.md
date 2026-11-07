@@ -127,7 +127,8 @@ Mentre si guarda da una foto, una riga sopra la vista ne dà il nome, **<** e **
 l'**opacità della foto** (0 %: solo il modello, 100 %: solo la foto; 50 % la prima volta, poi l'ultimo valore usato) ed
 *Esci dalla foto*; un nome lungo si accorcia, intero nel suggerimento, e su una vista stretta la riga va a capo.
 ++page-down++ o ++right++ aprono la foto successiva, ++page-up++ o ++left++ la precedente, ++esc++ esce (++page-down++,
-++page-up++ ed ++esc++ anche con il cursore o un pulsante della riga in uso). **Qualsiasi movimento della vista esce dalla foto** - ruotare, spostare, avvicinare, ++home++, ++t++: la foto
+++page-up++ ed ++esc++ anche con il cursore o un pulsante della riga in uso; ++esc++ prima chiude un pannello
+aperto della colonna di strumenti, poi termina un disegno o la selezione libera, poi esce dalla foto). **Qualsiasi movimento della vista esce dalla foto** - ruotare, spostare, avvicinare, ++home++, ++t++: la foto
 sparisce e la vista resta dov'era, libera di muoversi (++home++ e ++t++ ridanno il campo visivo solito). Scegliere
 un'altra vista in *Mostra* tiene la foto. La foto si disegna sotto camere, marker e disegni liberi (con il motore
 software; con VTK la foto è uno strato sopra la scena: sotto il 100 % si vedono attraverso, al 100 % restano
