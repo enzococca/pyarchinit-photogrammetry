@@ -868,19 +868,39 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                with_model: bool = True, progress=None):
     """Build a ``.ppg`` project from a Metashape project: photos, calibrated sensors, aligned
     cameras, markers with references and projections, tie points, the model, and exported
-    DEM/orthomosaic. Returns the Document."""
-    from ..core.camera import Camera, Sensor
+    DEM/orthomosaic. Returns the Document, saved, its active chunk the one with the most aligned photos."""
     from ..core.document import Document
+    from ..core.progress import as_progress
+
+    progress = as_progress(progress)
+    doc = Document()
+    doc.save(project)
+    chunks = import_psx_into(doc, psx, None if chunk_index is None else [chunk_index], dem=dem,
+                             orthomosaic=orthomosaic, with_model=with_model, progress=progress)
+    best = max(chunks, key=lambda c: len(c.aligned_cameras), default=None)  # the first of the best
+    if best is not None:
+        doc.chunk = best
+    doc.save()
+    progress(1.0, f"Importati {len(chunks)} chunk da Metashape")
+    return doc
+
+
+def import_psx_into(doc, psx: str | os.PathLike, chunk_indices=None, dem: str | os.PathLike | None = None,
+                    orthomosaic: str | os.PathLike | None = None, with_model: bool = True, progress=None) -> list:
+    """The chunks of a Metashape project as new chunks of ``doc`` (at its end; the active chunk and the rest of
+    ``doc`` unchanged, ``doc`` not saved): what :func:`import_psx` imports. ``chunk_indices``: the positions of
+    the chunks to import in :func:`read_psx`'s list (all when None). Returns the new chunks. The Metashape
+    project is only read."""
+    from ..core.camera import Camera, Sensor
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
     psx = Path(psx)
     progress(0.02, "Lettura del progetto Metashape")
     chunks = read_psx(psx)
-    if chunk_index is not None:
-        chunks = [chunks[chunk_index]]
-    doc = Document()
-    doc.save(project)
+    if chunk_indices is not None:
+        chunks = [chunks[i] for i in chunk_indices]
+    added = []
     empty_exports: list[Path] = []
     exported = _find_exported(psx, empty=empty_exports)
     if dem:
@@ -902,10 +922,10 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
     for mc in empty:
         warnings.append(f"{mc.label}: chunk vuoto, non importato")
     chunks = [mc for mc in chunks if mc not in empty] or chunks[:1]
-    best, best_n = None, -1
     for ci, mc in enumerate(chunks):
         sub = progress.sub(0.05 + 0.9 * ci / len(chunks), 0.9 / len(chunks))
         ch = doc.add_chunk(mc.label)
+        added.append(ch)
         sub(0.05, f"{mc.label}: sensori e camere")
         for s in mc.sensors.values():
             model, params, w = sensor_params(s)
@@ -1084,14 +1104,8 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                              "frame": "exact" if frame is not None else "similarity"}
         if dem_source:
             ch.meta["import"]["dem"] = dem_source
-        if len(aligned) > best_n:
-            best, best_n = ch, len(aligned)
-    if best is not None:
-        doc.chunk = best
-    doc.save()
-    progress(1.0, f"Importati {len(chunks)} chunk da Metashape")
-    return doc
+    return added
 
 
-__all__ = ["read_psx", "import_psx", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
+__all__ = ["read_psx", "import_psx", "import_psx_into", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
            "MsChunk", "MsScaleBar"]
