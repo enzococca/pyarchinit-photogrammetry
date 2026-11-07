@@ -566,15 +566,22 @@ sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci 
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | porta `chunks` (oggetti Chunk, chiavi o etichette; predefinito: gli altri chunk abilitati) nel sistema mondo e nel CRS di `reference`; restituisce un rapporto |
+| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None, check=False)` | porta `chunks` (oggetti Chunk, chiavi o etichette; predefinito: gli altri chunk abilitati) nel sistema mondo e nel CRS di `reference`; restituisce un rapporto; `check=True`: ogni chunk misurato sul riferimento una volta allineato (`distances` nella sua voce) |
+| `engine.chunks.cloud_distances(reference, chunk, max_points=200_000, threshold=None, surface=None, doc=None)` | quanto distano i punti di `chunk` dalla superficie di `reference` (1.7.5): `median`, `nmad`, `p95` della distanza con segno sui punti che hanno il riferimento sopra o sotto, `overlap` (quota di tutti i punti entro `threshold`, predefinita tre spaziature dei punti del riferimento), `covered`, `points`, `what`, `placed` |
+| `engine.chunks.DistanceSurface(reference, max_points=200_000)` | la superficie su cui misurare, tenuta per più chunk: `.distances(world_xyz)` -> distanze con segno (lungo la normale del punto più vicino, rivolta in alto; oltre il bordo la distanza dal punto più vicino) e `covered` |
+| `engine.chunks.preview_points(chunk, max_points=200_000, kind="auto")` | al massimo `max_points` punti della nuvola densa, dei punti di legame o dei vertici del modello, a passo nel file mappato in memoria: xyz interni, colori, cosa sono |
+| `engine.chunks.shown_in(chunk, internal_xyz, crs)` | punti interni di un chunk nel mondo di `crs` (PROJ fra due sistemi del mondo); `placed` False per un sistema locale con un sistema del mondo |
 | `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | nuovo chunk (etichetta predefinita `Merged chunk`) nel sistema del primo chunk; quelli di partenza restano |
-| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | riga di comando (riferimento predefinito: il chunk attivo) |
+| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--check] [--json]` | riga di comando (riferimento predefinito: il chunk attivo); `--check` stampa la sovrapposizione e le distanze di ogni chunk |
+| `ppg chunk-distances project.ppg [CHUNKS...] -r REF [--max-points N] [--threshold T] [--json]` | riga di comando: le distanze dei chunk dalla superficie di un riferimento, allineati o no (predefinito: gli altri chunk abilitati da quello attivo) |
 | `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | nuovo chunk (etichetta predefinita `<etichetta> (copia)`, poi `(copia 2)`... se già usata: `engine.chunks.duplicate_label`) con le foto `cameras` di `chunk` (tutte con None) e le loro pose e il loro stato attivo, i marker con le proiezioni su quelle foto, le barre di scala, trasformazione, CRS e impostazioni; un modello COLMAP scritto dalle pose, così le mappe di profondità girano senza allineare; le maschere delle foto tenute e le foto che stanno nella cartella del chunk (copie di riferimento delle riprese multispettrali e termiche) copiate, le camere puntate sulle copie; le impostazioni delle riprese restano, i loro prodotti no; i punti di legame copiati quando si tengono tutte le foto (una parte delle foto ne ha bisogno: ValueError senza); i prodotti mai copiati (`keep_products` è riservato); `chunk` non cambia; CLI `ppg duplicate-chunk` |
 | `chunk.set_cameras_enabled(cameras, enabled)` | attiva o disattiva foto (oggetti del chunk, chiavi o etichette; KeyError per un nome che non c'è, ValueError per una Camera di un altro chunk, per esempio di un duplicato, che ne condivide le chiavi): una foto disattivata tiene la sua posa, allineamento, mappe di profondità, ortofoto e texture la lasciano fuori; restituisce quante sono cambiate; CLI `ppg photos enable\|disable` |
 | `engine.chunks.cameras_in_area(chunk, polygon)` | le foto la cui immagine inquadra la superficie dentro `polygon` (coordinate del chunk) |
 | `ppg duplicate-chunk project.ppg [--chunk C] [--photos nomi.txt \| --area WKT] [--label L]` | riga di comando: tutte le foto, quelle elencate in un file di testo (una per riga) o quelle che inquadrano un poligono (WKT, GeoJSON o un file GeoJSON) |
 | `ppg photos enable\|disable project.ppg NOMI... [--chunk C]` | riga di comando: foto per etichetta (o chiave) |
 | `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | riga di comando (predefinito: tutti i chunk abilitati) |
+| `core.append.append_projects(doc, sources, chunks=None, webodm=False, progress=None)` | altri progetti (`.ppg`, `.psx`, `all.zip` o cartella di un task WebODM) come chunk nuovi di `doc`, come *File > Aggiungi progetti...*: le sorgenti solo lette, il chunk attivo invariato, `doc` non salvato; un `Appended` (`path`, `kind`, `chunks`, `error`, `warnings`) per sorgente, una che non riesce non lascia nulla e le altre proseguono |
+| `ppg append project.ppg SORGENTI... [--chunks NOMI] [--webodm]` | riga di comando (`--chunks`: nomi separati da virgole; codice d'uscita 1 se una sorgente non è entrata) |
 
 Metodi di `align_chunks`:
 
@@ -611,7 +618,8 @@ foto) e `max_error` per marker/camere; `initial`, `source`/`target` (`point_clou
 `fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` e `check` (residui dei marker in
 comune; quando l'ICP è partito da loro ne sono anche le ancore - termini punto-punto che insieme
 pesano quanto la nuvola - così una nuvola piatta o rumorosa non può scivolare via da loro,
-`anchored`) per i punti. `chunk.meta["chunk_alignment"]` ne conserva un riassunto.
+`anchored`) per i punti; con `check=True`, `distances` (`cloud_distances` del chunk una volta allineato, `None` quando
+non ha nulla da misurare). `chunk.meta["chunk_alignment"]` ne conserva un riassunto.
 
 `merge_chunks` vuole chunk in un unico sistema (allineati, o georeferenziati in CRS proiettati; un
 altro CRS viene convertito con una similarità stimata, con un avviso sopra i 5 mm). Il chunk unito
@@ -1829,7 +1837,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
-| `engine.chunks` | `align_chunks`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |

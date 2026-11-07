@@ -11,6 +11,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 from .chunk import Chunk
@@ -18,6 +19,8 @@ from .chunk import Chunk
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 FORMAT_VERSION = 1
+_CHUNK_LOCK = threading.Lock()  # a key and a place in the list for one new chunk at a time (module-level: a Document
+#                                stays copyable with copy.deepcopy, which cannot copy a lock)
 
 
 class Document:
@@ -80,14 +83,15 @@ class Document:
     def add_chunk(self, label: str | None = None) -> Chunk:
         """A new chunk at the end. Its key is never that of a chunk removed in this session (it can
         come back with Modifica > Annulla) nor that of a folder already full in the files folder."""
-        removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
-                   for c in r.chunks]
-        key = max([c.key for c in self.chunks] + removed, default=-1) + 1
-        if self._path is not None or self._tmp is not None:  # the files folder exists already
-            while (folder := self.files_dir / f"chunk_{key}").is_dir() and any(folder.iterdir()):
-                key += 1
-        chunk = Chunk(key=key, label=label or f"Chunk {key + 1}", document=self)
-        self.chunks.append(chunk)
+        with _CHUNK_LOCK:  # the program and a task in the background (an append) may add one at once
+            removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
+                       for c in r.chunks]
+            key = max([c.key for c in self.chunks] + removed, default=-1) + 1
+            if self._path is not None or self._tmp is not None:  # the files folder exists already
+                while (folder := self.files_dir / f"chunk_{key}").is_dir() and any(folder.iterdir()):
+                    key += 1
+            chunk = Chunk(key=key, label=label or f"Chunk {key + 1}", document=self)
+            self.chunks.append(chunk)
         return chunk
 
     def remove_chunk(self, chunk: Chunk) -> None:
@@ -141,7 +145,7 @@ class Document:
         return recover(self)
 
     def align_chunks(self, reference, chunks=None, method: str = "markers", fix_scale: bool = False,
-                     initial: str = "auto", max_points: int = 200_000, progress=None) -> dict:
+                     initial: str = "auto", max_points: int = 200_000, progress=None, check: bool = False) -> dict:
         """Bring ``chunks`` (Chunk objects, keys or labels; default: the other enabled ones) into the
         world frame of ``reference``: their ``transform`` and CRS change, their products stay.
         ``method``: ``"markers"`` (same labels), ``"points"`` (dense clouds or tie points:
@@ -149,11 +153,12 @@ class Document:
         ``initial`` forces one of ``"markers"``, ``"reference"``, ``"cameras"``, ``"global"``),
         ``"cameras"`` (photos in both chunks). ``fix_scale``: rigid, without scale.
         Returns a report with residuals, correspondences and transforms (see
-        :func:`engine.chunks.align_chunks`)."""
+        :func:`engine.chunks.align_chunks`); ``check``: each chunk measured against the reference once aligned
+        (overlap and distances, :func:`engine.chunks.cloud_distances`)."""
         from ..engine.chunks import align_chunks
 
         return align_chunks(self, reference, chunks, method=method, fix_scale=fix_scale, initial=initial,
-                            max_points=max_points, progress=progress)
+                            max_points=max_points, progress=progress, check=check)
 
     def merge_chunks(self, chunks, label: str | None = None, merge_markers: bool = True,
                      merge_tie_points: bool = True, merge_point_clouds: bool = True, merge_models: bool = False,

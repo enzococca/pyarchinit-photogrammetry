@@ -43,6 +43,10 @@ class SceneData:
     # colour "#rrggbb", selected); and the feature being drawn with the end of its rubber band ((N, 3) or None)
     free: list = field(default_factory=list)
     drawing: np.ndarray | None = None
+    # other chunks shown with this one (gui.chunk_views.OtherLayer: points or a mesh in scene coordinates, colours) and
+    # their opacity (0-1)
+    others: list = field(default_factory=list)
+    others_opacity: float = 1.0
 
     def to_display(self, pts) -> np.ndarray:
         """Scene coordinates -> the coordinates shown (heights exaggerated)."""
@@ -60,9 +64,12 @@ class SceneData:
         up = self.up / np.linalg.norm(self.up)
         return pts + np.multiply.outer(((pts - self.pivot) @ up) * (1.0 / self.exaggeration - 1.0), up)
 
+    def _other_coords(self) -> list:
+        return [c for c in (ly.coords() for ly in self.others) if c is not None and len(c)]
+
     @property
     def extent(self) -> float:
-        arrs = [a for a in (self.points, self.mesh_vertices) if a is not None and len(a)]
+        arrs = [a for a in (self.points, self.mesh_vertices) if a is not None and len(a)] + self._other_coords()
         if not arrs and self.cameras:
             arrs.append(np.vstack(self.cameras))
         if not arrs:
@@ -72,6 +79,12 @@ class SceneData:
 
     @property
     def center(self) -> np.ndarray:
+        others = self._other_coords()
+        if others:  # the middle of everything shown: before an alignment the chunks may be far apart
+            arrs = [a for a in (self.points, self.mesh_vertices) if a is not None and len(a)] + others
+            lo = np.min([a.min(axis=0) for a in arrs], axis=0)
+            hi = np.max([a.max(axis=0) for a in arrs], axis=0)
+            return (lo + hi) / 2.0
         for a in (self.mesh_vertices, self.points):
             if a is not None and len(a):
                 return np.median(a, axis=0)
@@ -100,6 +113,10 @@ def exaggerated(sd: SceneData, factor: float) -> SceneData:
     if sd.axes is not None:  # the origin where it is shown; the directions as they are
         out.axes = (out.to_display(np.asarray(sd.axes[0], np.float64)[None])[0], sd.axes[1], sd.axes[2])
     out.free = [(fid, kind, out.to_display(xyz), colour, sel) for fid, kind, xyz, colour, sel in sd.free]
+    if sd.others:
+        from .chunk_views import shown_layer
+
+        out.others = [shown_layer(ly, out.to_display) for ly in sd.others]
     if sd.drawing is not None:
         out.drawing = out.to_display(sd.drawing)
     return out
@@ -245,11 +262,20 @@ def best_view(chunk) -> str:
 
 
 def _offset(chunk) -> np.ndarray:
+    """The local origin of the scene: the middle of the aligned cameras, rounded to the metre; without cameras (a laser
+    scan, a model or a cloud of another program) the middle of a few points of the chunk - world coordinates of a
+    projected system in float32 would be rounded to decimetres."""
     cams = chunk.aligned_cameras
     if cams:
         c = chunk.to_world(np.array([cam.center for cam in cams]))
         return np.round(np.median(c, axis=0), 0)
-    return np.zeros(3)
+    from ..engine.chunks import preview_points
+
+    try:
+        internal, _rgb, _what = preview_points(chunk, 2000)
+    except (ValueError, OSError):
+        return np.zeros(3)
+    return np.round(np.median(chunk.to_world(internal), axis=0), 0)
 
 
 def _textured_model(chunk, max_faces: int) -> bool:
@@ -637,6 +663,31 @@ class OrbitCamera:
         return x, y, z, ok
 
 
+def _nearest(pts: np.ndarray, cam: OrbitCamera, width: int, height: int, size: int):
+    """The nearest point of ``pts`` on each pixel it covers (a square of ``size`` pixels per point): flat pixel
+    indices, the index of the point and its depth."""
+    x, y, z, ok = cam.project(pts, width, height)
+    idx = np.nonzero(ok)[0]
+    xi, yi = np.floor(x[ok]).astype(np.int64), np.floor(y[ok]).astype(np.int64)
+    zz = z[ok]
+    offs = [(0, 0)] if size <= 1 else [(dx, dy) for dx in range(size) for dy in range(size)]
+    X = np.concatenate([xi + dx for dx, _ in offs])
+    Y = np.concatenate([yi + dy for _, dy in offs])
+    Z = np.tile(zz, len(offs))
+    C = np.tile(idx, len(offs))
+    inside = (X >= 0) & (X < width) & (Y >= 0) & (Y < height)
+    X, Y, Z, C = X[inside], Y[inside], Z[inside], C[inside]
+    if len(X) == 0:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0)
+    pix = Y * width + X
+    order = np.lexsort((Z, pix))  # by pixel, nearest first
+    pix_s = pix[order]
+    first = np.ones(len(pix_s), bool)
+    first[1:] = pix_s[1:] != pix_s[:-1]
+    sel = order[first]
+    return pix[sel], C[sel], Z[sel]
+
+
 def splat(pts: np.ndarray, colors: np.ndarray, cam: OrbitCamera, width: int, height: int, size: int = 2,
           background=(52, 56, 64)) -> np.ndarray:
     """Z-buffered point splatting into an RGB image (nearest point wins per pixel)."""
@@ -644,23 +695,26 @@ def splat(pts: np.ndarray, colors: np.ndarray, cam: OrbitCamera, width: int, hei
     img[:] = background
     if pts is None or len(pts) == 0:
         return img
-    x, y, z, ok = cam.project(pts, width, height)
-    xi, yi = np.floor(x[ok]).astype(np.int64), np.floor(y[ok]).astype(np.int64)
-    zz, col = z[ok], colors[ok]
-    offs = [(0, 0)] if size <= 1 else [(dx, dy) for dx in range(size) for dy in range(size)]
-    X = np.concatenate([xi + dx for dx, _ in offs])
-    Y = np.concatenate([yi + dy for _, dy in offs])
-    Z = np.tile(zz, len(offs))
-    C = np.tile(np.arange(len(zz)), len(offs))
-    inside = (X >= 0) & (X < width) & (Y >= 0) & (Y < height)
-    X, Y, Z, C = X[inside], Y[inside], Z[inside], C[inside]
-    if len(X) == 0:
-        return img
-    pix = Y * width + X
-    order = np.lexsort((Z, pix))  # by pixel, nearest first
-    pix_s = pix[order]
-    first = np.ones(len(pix_s), bool)
-    first[1:] = pix_s[1:] != pix_s[:-1]
-    sel = order[first]
-    img.reshape(-1, 3)[pix[sel]] = col[C[sel]]
+    pix, which, _z = _nearest(pts, cam, width, height, size)
+    img.reshape(-1, 3)[pix] = colors[which]
     return img
+
+
+def splat_layers(layers, cam: OrbitCamera, width: int, height: int, size: int = 2,
+                 background=(52, 56, 64)) -> np.ndarray:
+    """Several point sets ``[(pts, colours, opacity)]`` z-buffered together: each drawn where it is nearer than what
+    is already there, blended with it by its opacity (the first set, the active chunk, is opaque)."""
+    img = np.empty((height, width, 3), np.float32)
+    img[:] = background
+    flat = img.reshape(-1, 3)
+    depth = np.full(width * height, np.inf)
+    for pts, colours, alpha in layers:
+        if pts is None or not len(pts):
+            continue
+        pix, which, z = _nearest(pts, cam, width, height, size)
+        front = z < depth[pix]
+        pix, which, z = pix[front], which[front], z[front]
+        a = float(min(max(alpha, 0.0), 1.0))
+        flat[pix] = a * colours[which].astype(np.float32) + (1.0 - a) * flat[pix]
+        depth[pix] = z
+    return np.clip(img, 0, 255).astype(np.uint8)

@@ -263,21 +263,66 @@ def _extract(zip_path: Path, dest: Path) -> Path:
 
 
 def import_task(source: str | os.PathLike, project: str | os.PathLike, label: str | None = None, progress=None):
-    """A ``.ppg`` project with the products of a WebODM/ODM task (folder or ``all.zip``)."""
+    """A ``.ppg`` project with the products of a WebODM/ODM task (folder or ``all.zip``, extracted beside the
+    project in ``<project name>_odm``)."""
     from ..core.document import Document
-    from ..core.pointcloud import PointCloud
+    from ..core.progress import as_progress
+
+    progress = as_progress(progress)
+    project = Path(project)
+    doc = Document()
+    doc.save(project)
+    extract_to = project.parent / f"{project.stem}_odm" if Path(source).suffix.lower() == ".zip" else None
+    if extract_to is not None and label is None:
+        label = extract_to.name  # the name of the folder extracted, as before
+    import_task_into(doc, source, label=label, extract_to=extract_to, progress=progress)
+    doc.save()
+    progress(1.0, "Progetto WebODM importato")
+    return doc
+
+
+def import_task_into(doc, source: str | os.PathLike, label: str | None = None, extract_to: str | os.PathLike | None = None,
+                     progress=None, on_chunk=None):
+    """A WebODM/ODM task (folder or ``all.zip``) as a new chunk of ``doc``, at its end (the active chunk and the rest
+    of ``doc`` unchanged, ``doc`` not saved): what :func:`import_task` imports. An ``all.zip`` is extracted in
+    ``extract_to``, by default the folder ``webodm`` of the new chunk (it goes with the chunk). The task is only read.
+    ``on_chunk(chunk)``: called as soon as the new chunk is in ``doc``, before anything is written in its folder.
+    Returns the new chunk; on an error the chunk is taken out of ``doc`` again and the error goes on."""
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
     source = Path(source)
-    project = Path(project)
-    doc = Document()
-    doc.save(project)
-    if source.suffix.lower() == ".zip":
-        progress(0.05, "Estrazione dell'archivio WebODM")
-        source = _extract(source, project.parent / f"{project.stem}_odm")
+    zipped = source.suffix.lower() == ".zip"
+    if zipped:
+        if not zipfile.is_zipfile(source):
+            raise ValueError(f"{source} is not a zip archive")
+        default = source.stem if source.stem.lower() != "all" else (source.parent.name or source.stem)
+    else:
+        read_task(source)  # not a task: the error before any chunk
+        default = source.name
+    ch = doc.add_chunk(label or default)
+    try:
+        if on_chunk is not None:
+            on_chunk(ch)
+        if zipped:
+            progress(0.05, "Estrazione dell'archivio WebODM")
+            source = _extract(source, Path(extract_to) if extract_to is not None else ch.data_dir / "webodm")
+        _fill_chunk(ch, source, progress)
+    except BaseException:
+        import shutil
+
+        if any(ch is c for c in doc.chunks):
+            doc.chunks.remove(ch)
+        shutil.rmtree(doc.files_dir / f"chunk_{ch.key}", ignore_errors=True)
+        raise
+    return ch
+
+
+def _fill_chunk(ch, source: Path, progress) -> None:
+    """The products, cameras and GCPs of the task folder ``source`` in the new chunk ``ch``."""
+    from ..core.pointcloud import PointCloud
+
     info = read_task(source)
-    ch = doc.add_chunk(label or source.name)
     ch.crs = info["crs"] or "LOCAL"
     off = info["offset"]
     m = np.eye(4)
@@ -333,9 +378,6 @@ def import_task(source: str | os.PathLike, project: str | os.PathLike, label: st
             warnings.append(f"modello COLMAP non scritto ({exc})")
     ch.meta["import"] = {"source": "webodm", "folder": str(source), "offset": off.tolist(), **report,
                          "warnings": warnings}
-    doc.save()
-    progress(1.0, "Progetto WebODM importato")
-    return doc
 
 
-__all__ = ["read_task", "import_task", "read_cameras", "read_gcps", "sensor_from_opensfm"]
+__all__ = ["read_task", "import_task", "import_task_into", "read_cameras", "read_gcps", "sensor_from_opensfm"]

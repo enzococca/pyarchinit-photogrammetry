@@ -65,6 +65,7 @@ ICONS = {
     "view3d": ("mdi6.rotate-3d", "orange"), "view_ortho": ("mdi6.map", "amber"),
     "trackball": ("mdi6.rotate-orbit", "orange"), "pivot": ("mdi6.image-filter-center-focus-weak", "orange"),
     "view_photo": ("mdi6.image-outline", "blue"), "console": ("mdi6.console", "slate"),
+    "look_through": ("mdi6.camera-iris", "blue"),
     "assistant": ("mdi6.robot-outline", "teal"),
     "log": ("mdi6.text-box-outline", "grey"), "theme": ("mdi6.theme-light-dark", "grey"),
     "language": ("mdi6.translate", "grey"),
@@ -101,6 +102,7 @@ ICONS = {
     # and on the dark theme and tell an enabled button from a disabled (grey) one
     "add_chunk": ("mdi6.package-variant-plus", "teal"), "add_photos": ("mdi6.image-plus-outline", "blue"),
     "add_folder": ("mdi6.folder-plus-outline", "blue"), "activate": ("mdi6.radiobox-marked", "blue"),
+    "append": ("mdi6.file-import-outline", "teal"),
     "enable": ("mdi6.check-circle-outline", "green"), "disable": ("mdi6.cancel", "orange"),
     "rename": ("mdi6.rename-outline", "cyan"), "remove": ("mdi6.delete-outline", "red"),
     # cleaning and cropping

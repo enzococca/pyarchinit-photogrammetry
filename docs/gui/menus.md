@@ -33,6 +33,7 @@ order they appear.
 | **Save** ++ctrl+s++ · **Save as...** ++ctrl+shift+s++ | saves the project; after every processing step the program saves it by itself, once it has a file |
 | **Export** | the products in other formats: [see below](#file-export) |
 | **Import** | projects and data of other programs: [see below](#file-import) |
+| **Append projects...** | other projects - `.ppg`, Metashape `.psx`, WebODM `all.zip` or task folder - into the open one, each of their chunks a new chunk, as Metashape's *File > Append* ([Appending projects](../integrations.md#appending-projects)) |
 | **Generate HTML report...** | the processing report as a web page (the same content as the [PDF report](exports.md#pdf-report)) |
 | **Create and open demo project...** | a synthetic trench with photos, targets and a PyArchInit database, to try the program ([Demo](index.md#the-demo-project)) |
 | **Start page** | back to the [start page](index.md#the-start-page) |
@@ -114,7 +115,7 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Add 360° photos...** | every spherical photo becomes the six faces of a cube, aligned together |
 | **Relink photos (another folder)...** | finds the photos with the same names in another folder (moved, on another disk, "online only" on Dropbox) |
 | **Add chunk** | an empty chunk |
-| **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds |
+| **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds; the summary gives, for each chunk, the share of its points on the reference and their median distance ([several chunks together](view3d.md#several-chunks-together)) |
 | **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
 | **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order; one step of *Edit > Undo* |
 | **When rebuilding, keep the active DEM and orthomosaic as versions** | a toggle (off by default): the rebuild leaves the DEM and orthophoto of before among the versions |
@@ -409,6 +410,7 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | **Workspace** ... **Log** | brings a pane to the front (the console also with ++ctrl+shift+p++) |
 | **Assistant** | *Open the assistant*; **Actions**: *Always ask*, *Quick ones at once* (default), *Run everything (scripts and exports ask)* - when the assistant's actions run ([Actions](assistant.md#actions)) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
+| **Show the background (orthophoto, DEM, elevation)** ++ctrl+shift+b++ | hides or shows the raster of the 2D view under the drawings, as the row *Background* of the [Layer pane](panes.md#layer), where its opacity is (1.7.5) |
 | **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
 | **Bars** | *Classic drawing bar*: the old horizontal bar of the drawing tools under the top bar, instead of the [tool rail](index.md#the-tool-rail-of-the-2d-view) of the 2D view; remembered |
 | **Theme** | light or dark, remembered |

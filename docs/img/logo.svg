@@ -1,33 +1,27 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>PPG — PyArchInit Photogrammetry</title>
+  <desc>The PPG monogram framed by viewfinder corners, with a lens-shaped G.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2c5d8f"/>
-      <stop offset="1" stop-color="#153552"/>
+    <linearGradient id="tile" x1="24" y1="18" x2="223" y2="242" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#253E51"/>
+      <stop offset="1" stop-color="#101E2D"/>
     </linearGradient>
-    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#4f8fcf"/>
-      <stop offset="1" stop-color="#2c5d8f"/>
+    <linearGradient id="lens" x1="162" y1="93" x2="220" y2="166" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#83F0E7"/>
+      <stop offset="1" stop-color="#52ACEF"/>
     </linearGradient>
   </defs>
-  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
-  <!-- stratigraphy: three layers of a trench section -->
-  <path d="M28 150 Q90 132 128 150 T228 150 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#c98a4b"/>
-  <path d="M28 176 Q90 162 128 178 T228 176 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#a66a35"/>
-  <path d="M28 204 Q90 192 128 206 T228 204 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#7d4c27"/>
-  <!-- wall stub -->
-  <rect x="150" y="118" width="48" height="36" rx="4" fill="#e8dcc8"/>
-  <path d="M150 130 h48 M150 142 h48 M166 118 v12 M182 130 v12 M166 142 v12" stroke="#b9a98f" stroke-width="3" fill="none"/>
-  <!-- camera -->
-  <rect x="50" y="52" width="104" height="72" rx="14" fill="#ffffff"/>
-  <rect x="76" y="40" width="40" height="18" rx="6" fill="#ffffff"/>
-  <circle cx="102" cy="88" r="26" fill="#1d3f61"/>
-  <circle cx="102" cy="88" r="16" fill="#4f8fcf"/>
-  <circle cx="96" cy="82" r="5" fill="#ffffff" opacity="0.9"/>
-  <circle cx="138" cy="66" r="5" fill="#f39c12"/>
-  <!-- ground control target -->
-  <g transform="translate(206 74)">
-    <circle r="18" fill="#ffffff"/>
-    <path d="M-18 0 A18 18 0 0 1 0 -18 L0 0 Z M18 0 A18 18 0 0 1 0 18 L0 0 Z" fill="#e74c3c"/>
-  </g>
+  <rect x="10" y="10" width="236" height="236" rx="55" fill="url(#tile)"/>
+  <path d="M34 82V68Q34 60 42 60H57M222 174V188Q222 196 214 196H199"
+        fill="none" stroke="#81A6BA" stroke-width="6" stroke-linecap="round"/>
+  <path d="M34 166V90H59C77 90 88 101 88 117C88 133 77 144 59 144H49V166Z
+           M49 105V129H59C68 129 73 125 73 117C73 109 68 105 59 105Z
+           M96 166V90H121C139 90 150 101 150 117C150 133 139 144 121 144H111V166Z
+           M111 105V129H121C130 129 135 125 135 117C135 109 130 105 121 105Z"
+        fill="#F5E9D3" fill-rule="evenodd"/>
+  <path d="M219 102C213 94 204 90 193 90C172 90 156 106 156 128
+           C156 150 172 166 193 166C204 166 214 162 222 154V123H191V137H207V147
+           C203 150 198 151 193 151C180 151 171 142 171 128
+           C171 114 180 105 193 105C200 105 205 108 209 112Z"
+        fill="url(#lens)"/>
 </svg>

@@ -1474,6 +1474,8 @@ def align_chunks(project: Path,
                  fix_scale: bool = typer.Option(False, help="rigid: keep the scale of each chunk (chunks already scaled)"),
                  initial: str = typer.Option("auto", help="points: initial position (auto, markers, reference, "
                                                           "cameras, global)"),
+                 check: bool = typer.Option(False, "--check", help="measure each chunk against the reference once "
+                                            "aligned: overlap and distances of its points"),
                  as_json: bool = typer.Option(False, "--json", help="print the whole report as JSON")):
     """Align chunks to the frame and CRS of a reference chunk (markers, points or cameras)."""
     doc = Document.open(project)
@@ -1481,7 +1483,7 @@ def align_chunks(project: Path,
         raise typer.BadParameter("the project has no chunks")
     try:
         report = doc.align_chunks(reference if reference is not None else doc.chunk, chunks or None, method=method,
-                                  fix_scale=fix_scale, initial=initial, progress=print_progress)
+                                  fix_scale=fix_scale, initial=initial, progress=print_progress, check=check)
     except (ValueError, KeyError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
@@ -1490,12 +1492,61 @@ def align_chunks(project: Path,
         typer.echo(json.dumps(report, indent=1))
         return
     for c in report["chunks"]:
+        if check:
+            typer.echo(_distance_line(c.get("distances"), c["label"], report["reference"]["label"]))
         rmse = "-" if c.get("rmse") is None else f"{c['rmse']:.4g}"
         extra = f", initial position {c['initial']}" if c.get("initial") else ""
         typer.echo(f"{c['label']} -> {report['reference']['label']}: {c['method']}, {c['correspondences']} "
                    f"correspondences, RMSE {rmse}, scale {c['scale']:.6g}{extra}")
         if c.get("stale_products"):
             typer.echo(f"  build again: {', '.join(c['stale_products'])}")
+
+
+def _distance_line(d: dict | None, label: str, reference: str) -> str:
+    """One line of the distances of a chunk to a reference (:func:`engine.chunks.cloud_distances`)."""
+    if d is None:
+        return f"{label} -> {reference}: nothing to measure (no dense cloud, tie points or model)"
+    where = "" if d["placed"] else " (local frame and system of the world: compared as they are)"
+    if d["median"] is None:
+        return (f"{label} -> {reference}: no overlap ({d['points']} points, none over or under the reference)"
+                + where)
+    return (f"{label} -> {reference}: overlap {d['overlap'] * 100:.1f} % within {d['threshold']:.4g}, median distance "
+            f"{d['median']:+.4g}, NMAD {d['nmad']:.4g}, p95 {d['p95']:.4g} ({d['points']} points, "
+            f"{d['covered'] * 100:.0f} % over the reference)" + where)
+
+
+@app.command("chunk-distances")
+def chunk_distances(project: Path,
+                    chunks: Optional[list[str]] = typer.Argument(None, help="chunks to measure (labels or keys); "
+                                                                            "default: the other enabled chunks"),
+                    reference: Optional[str] = typer.Option(None, "--reference", "-r",
+                                                            help="reference chunk (label or key); default: the active "
+                                                                 "one"),
+                    max_points: int = typer.Option(200_000, help="points read from each chunk"),
+                    threshold: Optional[float] = typer.Option(None, help="overlap: points within this distance "
+                                                                         "(default: 3 spacings of the reference)"),
+                    as_json: bool = typer.Option(False, "--json", help="print the results as JSON")):
+    """How far the points of chunks are from the surface of a reference chunk: median, NMAD, 95th percentile of the
+    distance and the share of points within the threshold (the overlap), in the units of the reference's system."""
+    from .engine.chunks import DistanceSurface, cloud_distances, resolve_chunk
+
+    doc = Document.open(project)
+    if doc.chunk is None:
+        raise typer.BadParameter("the project has no chunks")
+    try:
+        ref = resolve_chunk(doc, reference if reference is not None else doc.chunk)
+        todo = [resolve_chunk(doc, c) for c in chunks] if chunks else [c for c in doc.chunks
+                                                                       if c is not ref and c.enabled]
+        surface = DistanceSurface(ref, max_points)
+        out = [cloud_distances(ref, ch, max_points, threshold, surface=surface) for ch in todo if ch is not ref]
+    except (ValueError, KeyError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    if as_json:
+        typer.echo(json.dumps(out, indent=1))
+        return
+    for d in out:
+        typer.echo(_distance_line(d, d["label"], d["reference"]))
 
 
 @app.command("merge-chunks")
@@ -1524,6 +1575,44 @@ def merge_chunks(project: Path,
                f"CRS {merged.crs}, products: {', '.join(sorted(merged.products)) or '-'}")
     for w in merged.meta["merge"]["warnings"]:
         typer.echo(f"  warning: {w}")
+
+
+@app.command()
+def append(project: Path,
+           sources: list[Path] = typer.Argument(..., help="projects to append: .ppg, Metashape .psx, WebODM all.zip "
+                                                          "or task folder"),
+           chunks: Optional[str] = typer.Option(None, help="only the chunks with these names (comma separated) of the "
+                                                           ".ppg and .psx sources"),
+           webodm: bool = typer.Option(False, help="every source is a WebODM/ODM task (all.zip or task folder)")):
+    """Append other projects, each chunk of them as a new chunk of PROJECT (as Metashape's File > Append).
+
+    The sources are only read; the chunks keep their frame and CRS: align or merge them next (align-chunks,
+    merge-chunks). A source that fails does not stop the others (exit code 1 at the end)."""
+    from .core.append import append_projects, write_sections
+
+    doc = Document.open(project)
+    wanted = [c.strip() for c in chunks.split(",") if c.strip()] if chunks else None
+    results = append_projects(doc, sources, chunks=wanted, webodm=webodm, progress=print_progress)
+    if any(r.chunks for r in results):
+        doc.save()
+        for prefix, sections in results.sections:
+            added = write_sections(doc, sections, prefix)
+            if added:
+                typer.echo(f"{prefix}: {len(added)} sections added")
+    doc.settle_removals()  # the journal of the append: the project as saved lists the chunks
+    for r in results:
+        if r.error:
+            typer.echo(f"{r.path}: not appended: {r.error}", err=True)
+            continue
+        for ch in r.chunks:
+            products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or "-"
+            typer.echo(f"{r.path.name}: [{ch.key}] {ch.label}: {len(ch.cameras)} photos, CRS {ch.crs}, "
+                       f"products: {products}")
+        for w in r.warnings:
+            typer.echo(f"  warning: {w}")
+    typer.echo("Nothing was aligned: use align-chunks or merge-chunks to bring the chunks together.")
+    if any(r.error for r in results):
+        raise typer.Exit(1)
 
 
 @app.command()

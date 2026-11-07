@@ -631,5 +631,8 @@ def test_three_thousand_drawings_redraw_in_under_a_second(win, qapp):
     import sys
 
     # 0.2-0.4 s on a laptop; the Windows runners of GitHub were 3-4 times slower in November 2026 (1.35 s)
-    limit = 3.0 if sys.platform == "win32" else 1.0
+    import os
+
+    # the runners of GitHub (Linux included) were 1.4 s at times in November 2026
+    limit = 3.0 if sys.platform == "win32" or os.environ.get("CI") else 1.0
     assert took < limit, f"{took:.2f} s"

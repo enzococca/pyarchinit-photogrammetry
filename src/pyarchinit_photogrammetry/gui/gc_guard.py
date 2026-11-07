@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import gc
 import time
+import weakref
 
 from PySide6.QtCore import QObject, QTimer
 
@@ -41,6 +42,9 @@ def due_generation(counts, threshold, full_allowed: bool = True) -> int | None:
     return 2
 
 
+_COLLECTORS: "weakref.WeakSet" = weakref.WeakSet()  # every collector made, to find a running one (ensure)
+
+
 class GuiThreadCollector(QObject):
     """Python's automatic collection, run by a timer of the GUI thread: every ``interval_ms``
     the generation that is due (:func:`due_generation`) is collected here. A full collection (the
@@ -57,6 +61,7 @@ class GuiThreadCollector(QObject):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.collect)
         self.timer.start(int(interval_ms))
+        _COLLECTORS.add(self)
 
     def collect(self) -> int:
         """Collect the generation that is due, if any; the number of unreachable objects found."""
@@ -84,4 +89,19 @@ def install(parent=None, interval_ms: int = 500, full_every_s: float = 60.0) -> 
     return GuiThreadCollector(interval_ms, full_every_s, parent)
 
 
-__all__ = ["GuiThreadCollector", "due_generation", "install"]
+def ensure(app) -> GuiThreadCollector:
+    """A running collector (``app``'s or one installed without a parent), installed now with ``app`` as its parent
+    when there is none: a script run with ``--run``, a plugin or a test that builds a VTK view outside ``gui.main``.
+    VTK frees its objects under a lock of its own: a collection in a thread reading a photo while the GUI thread
+    renders would wait for it forever. A stopped collector does not count. Outside ``gui.main`` the automatic
+    collection stays off for the rest of the process: cycles are collected while Qt processes events."""
+    for collector in list(_COLLECTORS):
+        try:
+            if collector.timer.isActive():
+                return collector
+        except RuntimeError:  # its C++ object is gone (the parent was deleted)
+            continue
+    return install(app)
+
+
+__all__ = ["GuiThreadCollector", "due_generation", "ensure", "install"]

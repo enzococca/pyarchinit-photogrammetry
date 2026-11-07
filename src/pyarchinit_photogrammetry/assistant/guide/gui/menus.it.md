@@ -33,6 +33,7 @@ descrive i menu uno per uno, nell'ordine in cui compaiono.
 | **Salva** ++ctrl+s++ · **Salva con nome...** ++ctrl+shift+s++ | salva il progetto; dopo ogni passo di elaborazione il programma lo salva da solo, una volta che ha un file |
 | **Esporta** | i prodotti in altri formati: [vedi sotto](#file-esporta) |
 | **Importa** | progetti e dati di altri programmi: [vedi sotto](#file-importa) |
+| **Aggiungi progetti...** | altri progetti - `.ppg`, Metashape `.psx`, `all.zip` o cartella di un task WebODM - in quello aperto, ogni loro chunk un chunk nuovo, come *File > Append* di Metashape ([Aggiungere progetti](../integrations.md#aggiungere-progetti)) |
 | **Genera report HTML...** | il rapporto di elaborazione come pagina web (lo stesso contenuto del [rapporto PDF](exports.md#rapporto-pdf)) |
 | **Crea e apri progetto demo...** | uno scavo sintetico con foto, target e un database PyArchInit, per provare il programma ([Demo](index.md#il-progetto-demo)) |
 | **Pagina iniziale** | torna alla [pagina iniziale](index.md#la-pagina-iniziale) |
@@ -114,7 +115,7 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi foto 360°...** | ogni foto sferica diventa le sei facce di un cubo, allineate insieme |
 | **Ricollega foto (altra cartella)...** | ritrova le foto con lo stesso nome in un'altra cartella (spostata, su un altro disco, «solo online» su Dropbox) |
 | **Aggiungi chunk** | un chunk vuoto |
-| **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte |
+| **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte; il riepilogo dà, per ogni chunk, la quota dei suoi punti sul riferimento e la loro distanza mediana ([più chunk insieme](view3d.md#piu-chunk-insieme)) |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
 | **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
 | **Ricostruendo, conserva DEM e ortofoto attivi come versioni** | un interruttore (spento per impostazione predefinita): la ricostruzione lascia fra le versioni il DEM e l'ortofoto di prima |
@@ -409,6 +410,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | **Area di lavoro** ... **Log** | porta davanti un pannello (la console anche con ++ctrl+shift+p++) |
 | **Assistente** | *Apri l'assistente*; **Azioni**: *Chiedi sempre*, *Subito le rapide* (predefinito), *Esegui tutto (script ed esportazioni chiedono)* - quando partono le azioni dell'assistente ([Azioni](assistant.md#azioni)) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
+| **Mostra lo sfondo (ortofoto, DEM, prospetto)** ++ctrl+shift+b++ | nasconde o mostra il raster della vista 2D sotto i disegni, come la riga *Sfondo* del [pannello Layer](panes.md#layer), dove c'è anche l'opacità (1.7.5) |
 | **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
 | **Barre** | *Barra di disegno classica*: la vecchia barra orizzontale degli strumenti di disegno sotto la barra in alto, al posto della [barra laterale](index.md#la-barra-laterale-della-vista-2d) della vista 2D; ricordata |
 | **Tema** | chiaro o scuro, ricordato |

@@ -52,6 +52,12 @@ disattivato e una foto disattivata sono grigi.
 Un clic seleziona (++ctrl++ + clic e ++shift++ + clic per più elementi); un doppio clic o ++enter++ rende attivo
 un chunk, e apre una foto, un prodotto o una versione dopo aver reso attivo il suo chunk.
 
+Con più di un chunk, ogni chunk ha una **casella** (applicazione **1.7.5**): spuntata, il chunk si disegna nella vista 3D
+insieme a quello attivo, prima e dopo *Allinea chunk* ([più chunk insieme](view3d.md#piu-chunk-insieme)); la casella del
+chunk attivo resta spuntata.
+
+![Le caselle dei chunk](../img/gui/chunks-workspace.it.png){ width=300 }
+
 <div style="clear: both"></div>
 
 **La barra sopra l'albero** ha solo icone (i suggerimenti dicono il nome; in un pannello stretto il » alla fine
@@ -60,6 +66,7 @@ tiene i pulsanti che non ci stanno):
 | Pulsante | Cosa fa |
 | --- | --- |
 | *Aggiungi chunk* | un chunk vuoto con il nome che gli dai, che diventa quello attivo |
+| *Aggiungi progetti...* | i chunk di altri progetti (`.ppg`, `.psx`, WebODM) come chunk nuovi, come *File > Aggiungi progetti...* |
 | *Aggiungi foto...*, *Aggiungi cartella...* | foto, o una cartella di foto, nel chunk attivo |
 | *Rendi attivo* | il chunk selezionato diventa quello attivo (lo stesso fa un doppio clic) |
 | *Attiva*, *Disattiva* | un chunk disattivato resta nel progetto, fuori dai passi batch e dai chunk che propongono *Allinea chunk* e *Unisci chunk*; una foto disattivata resta fuori dal prossimo allineamento e dalle prossime costruzioni |
@@ -77,7 +84,7 @@ tiene i pulsanti che non ci stanno):
 | un marker | *Filtra le foto di ...*, *Rimuovi il marker* |
 | *Camere*, *Marker*, *Barre di scala* | la rimozione di tutto ciò che contengono |
 | più elementi | *Attiva*, *Disattiva*, *Rimuovi N elementi* |
-| il progetto | *Aggiungi chunk* |
+| il progetto | *Aggiungi chunk*, *Aggiungi progetti...* |
 
 I comandi lavorano anche sui chunk che non sono quello attivo: rimuovere, rinominare, attivare e disattivare
 agiscono sul chunk dell'elemento e lasciano com'è il chunk attivo, mentre mostrare un elemento e i comandi
@@ -146,8 +153,29 @@ Tutto ciò che si disegna su ortofoto e DEM è un layer: unità stratigrafiche, 
 PyArchInit, tracce di sezione, curve di livello, piante a quota, quote, marker, punti di misura, misure, pietre,
 patch.
 
+* **Sfondo** (app **1.7.5**): la prima riga, *Sfondo: Ortofoto* (o *DEM*, il rilievo, *Prospetto «nome»*, *Sezione
+  «nome»*), è il raster sotto i disegni. Togli la spunta per nasconderlo e vedere solo ciò che ci è disegnato sopra, su
+  un fondo grigio uniforme; *Opacità* (0-100 %) invece lo sbiadisce. È lo stesso di **Vista > Mostra lo sfondo**
+  (++ctrl+shift+b++). Ogni raster tiene la sua scelta finché il programma è aperto (l'ortofoto nascosta, il DEM visibile,
+  un prospetto sbiadito...) e la ritrova quando lo rivedi; gli strumenti di disegno, le quote sotto il cursore e le
+  esportazioni funzionano come sempre. Non si salva nel progetto.
+* **Altri chunk** (app **1.7.5**): con più di un chunk, sotto lo sfondo una riga per ogni altro chunk che ha un DEM o
+  un'ortofoto - il suo DEM sotto un DEM, la sua ortofoto sotto un'ortofoto, altrimenti quello che ha. Spuntala per
+  disegnare quel raster sopra lo sfondo del chunk attivo, sotto i disegni; il suo cursore ne regola l'opacità (60 % per
+  cominciare), così si confrontano due campagne sulla stessa trincea. Un raster costruito prima di *Allinea chunk* viene
+  spostato con il suo chunk - in pianta e, per un DEM, in quota (la riga lo dice; per un chunk anche inclinato la pianta è
+  approssimata: ricostruiscilo); un chunk in un altro sistema di coordinate viene riproiettato in quello del chunk
+  attivo; uno in un sistema locale accanto a un sistema del mondo viene sovrapposto, il suo centro sul centro del raster
+  attivo («non collocato»). Si disegna solo una copia ridotta (al massimo 2000 pixel),
+  niente viene letto a piena risoluzione. Le spunte e le opacità si salvano nel progetto; su un prospetto o una sezione
+  le righe non ci sono.
+
+  ![Le righe degli altri chunk](../img/gui/chunks-layers-rows.it.png){ width=260 }
+  ![L'ortofoto di un altro chunk, non ancora allineato, sopra quella attiva al 55 %](../img/gui/chunks-2d-before.it.png){ width=420 }
+
 * La spunta mostra o nasconde un layer, il doppio clic ingrandisce su di esso (un layer o un singolo
-  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer (un solo passo di *Modifica > Annulla*).
+  elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer disegnati (un solo passo di *Modifica >
+  Annulla*) e lasciano lo sfondo com'è.
 * In modalità *Sposta / interroga* un clic su un elemento mostra i suoi attributi (US, area, m2, quota di una
   curva...) qui e nella barra di stato.
 * **Modificare gli attributi**: doppio clic su un valore sotto *Attributi* per cambiarlo (US, area, tipo,

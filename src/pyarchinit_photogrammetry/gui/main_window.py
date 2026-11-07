@@ -36,7 +36,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
-from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
+from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree, axis_text)
@@ -446,6 +446,33 @@ class _Removed:
         self.window._redo_removed(self)
 
 
+class _Appended:
+    """An entry of Modifica > Annulla for *File > Aggiungi progetti*: undo takes the chunks appended away as a removal
+    from the workspace does (``core.removal``: their folders set aside), redo brings them back. ``removal`` is a
+    :meth:`core.removal.ChunkRemoval.added`, made when they were appended: the end of the session deletes their
+    folders unless the project as last saved lists them. ``before``: the active chunk before, active again when
+    the undo takes away the active one."""
+
+    def __init__(self, window, removal, before=None, sections=()):
+        self.window = window
+        self.inner = _Removed(window, [removal])
+        self.inner.after = before
+        self.sections = list(sections)  # the sections of the projects appended, merged into the window's
+
+    def undo(self) -> None:
+        current = self.window.chunk
+        self.inner.active = current if any(current is c for c in self.inner.removals[0].chunks) else None
+        self.window._redo_removed(self.inner)
+        if self.sections:
+            self.window._set_sections([s for s in self.window.sections if not any(s is x for x in self.sections)])
+
+    def redo(self) -> None:
+        self.window._undo_removed(self.inner)
+        if self.sections:
+            self.window._set_sections(self.window.sections + [s for s in self.sections
+                                                              if not any(s is x for x in self.window.sections)])
+
+
 class MainWindow(FreeDrawingActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
@@ -479,6 +506,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.pa = None  # PyArchInit bridge
         self.units: list = []  # stratigraphic units drawn on the orthomosaic
         self.sections: list[dict] = []  # sections of the open project (sezioni/sezioni.json)
+        self._appending = False  # File > Aggiungi progetti runs: no other edit of the chunks
         self.line_layers: dict[str, list] = {}  # contour lines, plan slices: redrawn after raster reloads
         self.sam = None
         self.classifier = None  # trained point classifier (ai.learn.ClassifierModel) in use
@@ -539,6 +567,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.tabs.setIconSize(QSize(18, 18))
         self.model_view = ModelView()
         self.model_view.points_selected.connect(self._points_selected)
+        self.model_view.others_changed.connect(lambda: self.setWindowModified(True))  # a view choice: no undo step
+        self.model_view.look_changed.connect(self._looked_through)
         self.model_view.faces_selected.connect(self._faces_selected)
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
         self.model_view.section_requested.connect(self._section_in_3d)
@@ -619,6 +649,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.navigate.connect(self.photo_step)
+        self.photo_view.look_requested.connect(self.look_through_photo)
         self.photo_view.mask_changed.connect(lambda cam: (self._dirty(True), self.statusBar().showMessage(
             tr("Maschera di {0} aggiornata", cam.label), 5000)))
         self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
@@ -639,6 +670,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.workspace.context_requested.connect(self._workspace_menu)
         self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
         self.workspace.rename_requested.connect(self._workspace_rename)
+        self.workspace.shown_in_3d.connect(self._chunk_shown_in_3d)
+        self.workspace.populated.connect(self._chunk_list_seen)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
@@ -675,6 +708,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
+        self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
+        self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
+        self._overlay_drawn: dict = {}  # chunk key -> the copy drawn on the view now
+        self._chunk_keys_seen: set = set()  # the chunks the workspace shows (_chunk_list_seen)
+        # the rasters of the other chunks, after the window has finished with the raster just shown (a plan or not)
+        self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self, self._draw_chunk_overlays))
+        self.ortho_view.raster_loaded.connect(self._sync_background_action)
+        self.ortho_view.raster_visibility_changed.connect(self._sync_background_action)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
         self.layers_pane.visibility_set.connect(self._layers_visibility_set)
@@ -883,6 +924,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         exp.addSeparator()
         self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
+        self.a_append = self._act(
+            m, tr("Aggiungi progetti..."), self.append_projects, processing=True, icon_name="append",
+            tip=tr("Altri progetti (.ppg, Metashape .psx, WebODM) nel progetto aperto: ogni loro chunk diventa un "
+                   "chunk nuovo, come File > Append di Metashape"))
         imp = m.addMenu(icon("open"), tr("Importa"))
         self._act(imp, tr("Scansioni laser (E57, PTX)..."), self.import_scans, processing=True, icon_name="scan",
                   tip=tr("Una o più scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
@@ -934,7 +979,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Ricollega foto (altra cartella)..."), lambda: self.relink_photos(), icon_name="relink",
                   tip=tr("Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
-        self._act(m, tr("Aggiungi chunk"), self.add_chunk, icon_name="chunk_add")
+        self._act(m, tr("Aggiungi chunk"), self.add_chunk, processing=True, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
@@ -1426,6 +1471,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
         self._act(m, tr("Ortofoto / DEM"), lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
         self._act(m, tr("Foto"), lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        # the raster of the 2D view hidden or shown under the drawings, as the row Sfondo of the Layer pane
+        self.a_show_background = QAction(tr("Mostra lo sfondo (ortofoto, DEM, prospetto)"), self, checkable=True)
+        self.a_show_background.setShortcut(QKeySequence("Ctrl+Shift+B"))
+        self.a_show_background.setStatusTip(tr("Nasconde o mostra il raster della vista 2D sotto i disegni; "
+                                               "l'opacità nel pannello Layer"))
+        self.a_show_background.setEnabled(False)  # no raster yet (the view follows: _sync_background_action)
+        self.a_show_background.toggled.connect(self._background_toggled)
+        m.addAction(self.a_show_background)
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
@@ -1908,10 +1961,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._update_workflow_states()
         self.refreshed.emit()
 
-    def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
+    def _load_raster(self, kind: str | None = None, path=None, bands=None, title: str | None = None) -> None:
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
         that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
-        reflectance orthomosaic) with the drawings on top."""
+        reflectance orthomosaic) with the drawings on top; ``title``: its name in the row *Sfondo* of the Layer pane
+        (by default the kind's, with the name of the file when it is not the chunk's product)."""
         self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
         self._set_drawings_frame(None)  # a raster of the plan: the drawings of the plan
         ch = self.chunk
@@ -1923,7 +1977,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._raster_version = None
             self._update_stale_banner()
             return
-        self.ortho_view.load(path, kind, bands=bands)
+        if title is None and kind in ("ortho", "dem", "index", "calc", "zones"):
+            product = ch.orthomosaic_path if kind == "ortho" else ch.dem_path if kind == "dem" else None
+            if product is None or Path(product) != Path(path):  # a version, a file of a plugin, an index...
+                title = tr("{0} «{1}»", tr(RASTER_TITLES[kind]), Path(path).stem)
+        self.ortho_view.load(path, kind, bands=bands, title=title)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
         self._raster_version = None
@@ -2103,6 +2161,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.choose_project_site(tr("Il database contiene {0} siti (scavi).", len(sites)))
 
     def _busy(self, busy: bool) -> None:
+        if not busy:
+            self._appending = False
         if busy:  # the task may write the products the readout under the mouse holds open (see _probe)
             self._probe_reset()
         for a in self._processing_actions:
@@ -3931,10 +3991,140 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         self.run_task("Importazione", job, done, refresh=False, save=False)
 
+    def append_projects(self, sources=None, webodm: bool = False) -> None:
+        """*File > Aggiungi progetti...* (also the bar and the menu of the Area di lavoro), as Metashape's *File >
+        Append*: other projects - ``.ppg``, Metashape ``.psx``, a WebODM ``all.zip`` or task folder - in the open
+        one, each chunk of them a new chunk (:func:`core.append.append_projects`); asked when ``sources`` is None
+        (files, or a WebODM task folder: ``webodm``). Of a source with several chunks the user ticks those to take.
+        The sources are only read; the project is marked modified, not saved; nothing is aligned. The active chunk
+        stays, unless it is empty: then the first chunk appended takes its place. One step of Modifica > Annulla
+        takes them all away. A summary says what came, from where, and what failed."""
+        from ..core.append import append_projects, source_chunks, source_kind
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            return
+        if sources is None:
+            how = choice(self, "question", tr("Aggiungi progetti"),
+                         tr("Ogni chunk dei progetti scelti diventa un chunk nuovo di questo progetto; i progetti "
+                            "scelti non vengono modificati.\n\nScegli i file (.ppg, Metashape .psx, all.zip di "
+                            "WebODM) o la cartella di un task WebODM/ODM."),
+                         [tr("File..."), tr("Cartella di un task WebODM...")])
+            if how is None:
+                return
+            if how == 0:
+                files, _ = QFileDialog.getOpenFileNames(
+                    self, tr("Progetti da aggiungere"), self._last_dir(),
+                    tr("Progetti (*.ppg *.psx *.zip);;PyArchInit Photogrammetry (*.ppg);;Metashape (*.psx);;"
+                       "WebODM (*.zip)"))
+                sources = list(files)
+            else:
+                folder = QFileDialog.getExistingDirectory(self, tr("Cartella del task WebODM/ODM"), self._last_dir())
+                sources, webodm = ([folder] if folder else []), True
+        sources = [Path(s) for s in sources if s]
+        if not sources:
+            return
+        chunks: dict = {}
+        fields = []
+        for i, path in enumerate(sources):
+            if self.doc.path is not None and path.resolve() == Path(self.doc.path).resolve():
+                continue  # the open project: refused by the append, said in the summary
+            try:
+                if source_kind(path, webodm) == "webodm":
+                    continue
+                labels = source_chunks(path)
+            except Exception:  # noqa: BLE001 - the error is told with the others, at the end
+                continue
+            if len(labels) > 1:
+                fields.append(Field(f"s{i}", tr("Chunk di {0}", path.name), list(range(len(labels))),
+                                    choices=list(enumerate(labels)), kind="checklist"))
+        if fields:
+            v = ParamDialog.ask(self, tr("Aggiungi progetti"), fields,
+                                intro=tr("Spunta i chunk da aggiungere: ognuno diventa un chunk nuovo."))
+            if not v:
+                return
+            for f in fields:
+                path = sources[int(f.name[1:])]
+                chunks[str(path)] = [int(k) for k in v[f.name]]
+            sources = [p for p in sources if chunks.get(str(p), [0]) != []]  # nothing ticked: left out
+            if not sources:
+                return
+        doc = self.doc
+        before = self.chunk
+        self._store_drawings()
+
+        def job(p):
+            return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
+
+        def done(results):
+            from ..core.append import merge_sections
+
+            self._appending = False
+            if self.doc is not doc:  # pragma: no cover - another project opened meanwhile
+                return
+            new = [c for r in results for c in r.chunks]
+            active = before
+            if new and results.journal is not None:
+                added = []
+                for prefix, secs in results.sections:
+                    added += merge_sections(self.sections + added, secs, prefix)
+                if added:
+                    self._set_sections(self.sections + added)
+                    self.log_pane.info(tr("{0} sezioni aggiunte dai progetti", len(added)))
+                step = _Appended(self, results.journal, before, added)
+                if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
+                    active = new[0]
+                    self._activate_chunk(active)
+                else:
+                    self.workspace.populate(doc)
+                    self._update_title()
+                if self.history is not None:
+                    self.history.push(tr("Aggiungi progetti"), step)
+                self._dirty(True)
+            self._append_summary(results, active)
+
+        self._appending = True  # no other edit of the chunks until it ends (_busy puts it back)
+        if not self.run_task("Aggiunta di progetti", job, done, refresh=False, save=False):
+            self._appending = False
+
+    def _append_summary(self, results, active) -> None:
+        """What *Aggiungi progetti* did, in the log and in a window: the chunks of each source (photos, products,
+        CRS), the warnings, the sources that failed and why; nothing aligned."""
+        lines, failed, warnings = [], 0, []
+        for r in results:
+            if r.error:
+                failed += 1
+                lines.append(tr("{0}: non aggiunto ({1})", r.path.name, r.error))
+                self.log_pane.warning(tr("{0}: non aggiunto ({1})", r.path, r.error))
+                continue
+            lines.append(tr("{0}: {1} chunk", r.path.name, len(r.chunks)))
+            for ch in r.chunks:
+                products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or tr("nessuno")
+                lines.append("  " + tr("«{0}»: {1} foto, prodotti: {2}, CRS {3}", ch.label, len(ch.cameras),
+                                       products, ch.crs))
+            warnings += [f"{r.path.name}: {w}" for w in r.warnings]
+        added = sum(len(r.chunks) for r in results)
+        text = "\n".join(lines)
+        if added:
+            text += "\n\n" + (tr("Il chunk attivo è «{0}».", active.label) if active is not None else "")
+            text += "\n" + tr("Niente è stato allineato: per metterli insieme usa Flusso di lavoro > Allinea chunk "
+                               "o Unisci chunk. Modifica > Annulla li toglie tutti.")
+        for w in warnings:
+            self.log_pane.warning(w)
+        if warnings:
+            text += "\n\n" + "\n".join(warnings[:6]) + ("\n..." if len(warnings) > 6 else "")
+        self.log_pane.info(tr("Aggiunti {0} chunk da {1} progetti", added, len(results) - failed))
+        title = tr("Aggiungi progetti") if not failed else tr("Aggiungi progetti: {0} non aggiunti", failed)
+        self._info(title, text)
+
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
         """Aggiungi chunk (the toolbar of the Area di lavoro, Flusso di lavoro): an empty chunk with the
-        name asked, which becomes the active one, as in Metashape."""
+        name asked, which becomes the active one, as in Metashape. Not while a task runs (it may be adding chunks:
+        an append, a merge)."""
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            return
         default = self._new_chunk_name()
         v = ParamDialog.ask(self, "Nuovo chunk", [Field("label", "Nome", default, kind="text")],
                             intro="Il nuovo chunk diventa quello attivo: le foto aggiunte e gli strumenti lavorano "
@@ -3991,6 +4181,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         metric = _is_scaled(ref)
 
         def done(report):
+            from .chunk_views import length_text
+
             lines = []
             for e in report["chunks"]:
                 rmse = e.get("rmse")
@@ -4000,16 +4192,41 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                 e['label'], e.get('correspondences', 0), err, e['scale'])
                              + (tr("; da ricostruire: {0}",
                                    ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
+                d = e.get("distances")
+                if d is not None and d.get("median") is not None:  # how well it sits on the reference now
+                    lines.append("    " + tr("sovrapposizione {0} % (entro {1}), distanza mediana {2}, NMAD {3}",
+                                               f"{d['overlap'] * 100:.0f}", length_text(d["threshold"], metric),
+                                               length_text(d["median"], metric, signed=True),
+                                               length_text(d["nmad"], metric)))
+                elif d is not None:
+                    lines.append("    " + tr("nessuna sovrapposizione con {0}", ref.label))
             if report.get("levelled_reference"):
                 lines.append(tr("Il chunk {0} è stato prima messo in bolla (come per il DEM).", ref.label))
             text = tr("Allineati a {0} ({1}):\n",
                       ref.label, tr(dict(markers='marker', cameras='foto', points='punti')[v['method']])) \
-                + "\n".join(lines)
+                + "\n".join(lines) + "\n\n" + tr("Per vederli insieme: spunta i chunk nell'Area di lavoro (Mostra nella "
+                                                  "vista 3D), colori «Distanza dal chunk attivo»; nel pannello Layer i "
+                                                  "loro DEM e ortofoto.")
             self._info("Allinea chunk", text)
 
         self.run_task("Allineamento dei chunk",
-                      lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p),
+                      lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p,
+                                                 check=True),
                       done)
+
+    def _chunk_shown_in_3d(self, chunk, shown: bool) -> None:
+        """A chunk ticked or unticked in the workspace: drawn or no longer drawn in the 3D view with the active one
+        (kept with the project, ``doc.meta["view"]``; a choice of the view: no step of Modifica > Annulla)."""
+        from .chunk_views import set_shown_3d
+
+        if not set_shown_3d(self.doc, chunk, shown):
+            return  # the item changed for another reason (its text, its icon): nothing to do
+        self.setWindowModified(True)
+        self.model_view.refresh(reset=False)
+        if shown:
+            self.show_view(self.model_view)
+            self.statusBar().showMessage(tr("{0} nella vista 3D con {1}: Vista iniziale (Home) per inquadrarli tutti",
+                                            chunk.label, self.chunk.label if self.chunk else ""), 6000)
 
     # ---------------------------------------------------------------- Orienta il sistema locale
     def orient_local(self) -> None:
@@ -4256,6 +4473,133 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except Exception as exc:  # noqa: BLE001 - a notice: never in the way of showing the raster
             log.warning("Stato del raster mostrato non letto: %s", exc)
         return False
+
+    # ---------------------------------------------------------------- rasters of the other chunks in the 2D view
+    def _overlay_of(self, ch, base_kind: str):
+        """The reduced copy of the raster of ``ch`` for the plan of the active chunk, kept while nothing it depends on
+        changes (its file, both transforms and systems, the colours of the DEM shown); ``None`` without one."""
+        from .chunk_views import overlay_image, raster_for
+
+        path, kind = raster_for(ch, base_kind)
+        if path is None:
+            return None
+        view = self.ortho_view
+        dem_range = view._dem_range if view.kind == "dem" and kind == "dem" else None
+        key = (ch.key, str(path), path.stat().st_mtime_ns, np.asarray(ch.transform, float).tobytes(), ch.crs,
+               self.chunk.crs, json.dumps((ch.meta.get("built_in") or {}).get("dem" if kind == "dem" else "orthomosaic")),
+               base_kind, None if dem_range is None else tuple(float(v) for v in dem_range))
+        if key not in self._overlay_cache:
+            if len(self._overlay_cache) >= 6:  # a few kept: memory bounded
+                self._overlay_cache.pop(next(iter(self._overlay_cache)))
+            try:
+                self._overlay_cache[key] = overlay_image(ch, self.chunk, base_kind, dem_range)
+            except Exception as exc:  # a raster that cannot be read or placed: the row says so, nothing drawn
+                log.warning("Raster del chunk %s non mostrato: %s", ch.label, exc)
+                self._overlay_cache[key] = ("error", str(exc))
+        return self._overlay_cache[key]
+
+    def _draw_chunk_overlays(self) -> None:
+        """The rows of the other chunks in the Layer pane and, for those ticked, their DEM or orthophoto over the raster
+        of the plan (``doc.meta["view"]["chunks_2d"]``); none on an elevation or a section."""
+        from .chunk_views import raster_for, settings
+
+        view, doc, ch = self.ortho_view, self.doc, self.chunk
+        try:
+            # the plan only: not an elevation, nor a frame of a plugin (its coordinates may be no place of the world)
+            plan = (ch is not None and doc is not None and view.tr is not None and self.drawings_frame is None
+                    and view.kind != "frame")
+        except RuntimeError:  # pragma: no cover - the window is closing
+            return
+        present = {c.key for c in doc.chunks} if doc is not None else set()
+        for key in [k for k in view.chunk_overlays if k not in present]:  # a chunk no longer in the project
+            view.remove_chunk_overlay(key)
+            self._overlay_drawn.pop(key, None)
+        listed = self._chunk_keys_seen if self._appending else present  # appended chunks: once they are complete
+        rows = []
+        if plan and len(doc.chunks) > 1:
+            base_kind = "dem" if view.kind not in ("ortho", "reflectance", "thermal", "index", "zones", "frame") else \
+                "ortho"
+            st = settings(doc)["chunks_2d"]
+            for other in doc.chunks:
+                if other is ch or other.key not in listed:
+                    continue
+                path, kind = raster_for(other, base_kind)
+                if path is None:  # none (any more): no row, nothing drawn
+                    view.remove_chunk_overlay(other.key)
+                    self._overlay_drawn.pop(other.key, None)
+                    continue
+                cfg = st.get(str(other.key)) or {}
+                shown, opacity = bool(cfg.get("shown", False)), float(cfg.get("opacity", 0.6))
+                note = ""
+                if shown:
+                    got = self._overlay_of(other, base_kind)
+                    if got is None or isinstance(got[0], str):
+                        note = tr("Non mostrato: {0}", got[1] if got else "")
+                        view.remove_chunk_overlay(other.key)
+                    else:
+                        rgba, affine, kind, note = got
+                        if other.key not in view.chunk_overlays or self._overlay_drawn.get(other.key) is not got:
+                            view.set_chunk_overlay(other.key, rgba, affine, opacity, True)  # new, or made again
+                            self._overlay_drawn[other.key] = got
+                        else:
+                            view.set_chunk_overlay_state(other.key, True, opacity)
+                else:
+                    view.set_chunk_overlay_state(other.key, False)
+                what = tr("DEM") if kind == "dem" else tr("Ortofoto")
+                rows.append((other.key, f"{other.label}: {what}", shown, opacity, note))
+        else:
+            for key in list(view.chunk_overlays):
+                view.remove_chunk_overlay(key)
+        self.layers_pane.set_chunk_rows(rows)
+
+    def _chunk_overlay_changed(self, key: int, shown: bool, opacity: float) -> None:
+        """A row of the other chunks in the Layer pane: its raster shown, hidden or faded (kept with the project, a choice
+        of the view: no step of Modifica > Annulla)."""
+        from .chunk_views import settings, store
+
+        rows = settings(self.doc)["chunks_2d"]
+        before = rows.get(str(key)) or {}
+        rows[str(key)] = {"shown": bool(shown), "opacity": round(float(opacity), 3)}
+        if store(self.doc, chunks_2d=rows):
+            self.setWindowModified(True)
+        view = self.ortho_view
+        if not shown:  # unticked: away at once, whatever the rows think (a copy kept in the cache comes back quickly)
+            view.remove_chunk_overlay(key)
+            self._overlay_drawn.pop(key, None)
+        if (shown and key not in view.chunk_overlays) or bool(before.get("shown")) != bool(shown):
+            self._draw_chunk_overlays()  # the row's note may change too
+        else:
+            view.set_chunk_overlay_state(key, shown, opacity)
+
+    def _chunk_list_seen(self) -> None:
+        """The workspace was filled again: when the chunks of the project changed (a removal, its undo, an append and
+        its undo, a project opened), the other chunks of the 3D view and of the 2D view follow - a chunk gone is drawn
+        no more - and the choices of the views forget the chunks no longer in the project (a new chunk taking the same
+        key does not come up ticked)."""
+        from .chunk_views import settings, store
+
+        if not hasattr(self, "_overlay_drawn") or self._appending:  # still being built; or an append runs (a plugin's
+            return  # refresh_tree): its chunks are half made, the populate at its end comes here
+        doc = self.doc
+        keys = tuple(c.key for c in doc.chunks) if doc is not None else ()
+        seen = (id(doc), keys)
+        if seen == getattr(self, "_chunk_list", None):
+            return
+        self._chunk_list = seen
+        self._chunk_keys_seen = set(keys)
+        if doc is None:
+            return
+        st = settings(doc)
+        kept_3d = [k for k in st["chunks_3d"] if k in self._chunk_keys_seen]
+        kept_2d = {k: v for k, v in st["chunks_2d"].items() if str(k).lstrip("-").isdigit()
+                   and int(k) in self._chunk_keys_seen}
+        if "view" in doc.meta and (kept_3d != st["chunks_3d"] or kept_2d != st["chunks_2d"]):
+            store(doc, chunks_3d=kept_3d, chunks_2d=kept_2d)
+        mv = self.model_view
+        if mv.chunk is not None and mv.chunk.document is doc and (
+                (mv.base_sd is not None and mv.base_sd.others) or mv.other_chunks()):
+            mv.refresh(reset=False)  # (another project: its own views are set right after)
+        self._draw_chunk_overlays()
 
     def _raster_loaded(self) -> None:
         """The 2D view shows another raster, an empty frame or nothing - by the window or by a plugin
@@ -4543,6 +4887,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         files it writes copied first), also when it is cancelled halfway. False when nothing was started."""
         from .rebuild import RebuildStep, chunk_files
 
+        if self._appending_refused():
+            return False
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             return False
@@ -4690,7 +5036,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """*Duplica chunk...* (menu of a chunk in the Area di lavoro): a new chunk with all the photos of
         ``chunk`` (default the active one), the photos selected in the Photos pane or those framing the
         polygon selected on the orthophoto, with their poses (:meth:`Document.duplicate_chunk`); it becomes
-        the active chunk. Products are not copied: depth maps and the rest are built again on it."""
+        the active chunk. Products are not copied: depth maps and the rest are built again on it. Refused before any
+        question while *Aggiungi progetti* runs."""
+        if self._appending_refused():
+            return
         ch = chunk if chunk is not None else self.chunk
         if ch is None:
             self._warn("Nessun chunk attivo.")
@@ -5419,6 +5768,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
         if len(cams) == 1 and cams[0].aligned:
+            menu.addAction(icon("look_through"), tr("Guarda dalla foto nella vista 3D"),
+                           lambda: self.look_through_photo(cams[0]))
             menu.addAction(icon("residuals"), tr("Residui dei punti di legame"),
                            lambda: (self.a_residuals.setChecked(True), self.open_photo(cams[0])))
         if cams:
@@ -7562,7 +7913,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if path is None or not path.exists():
             self._warn("Costruisci prima la mappa delle normali (Strumenti > Mappa delle normali).")
             return
-        self._load_raster("ortho", path)
+        self._load_raster("ortho", path, title=tr("Mappa delle normali"))
         self.show_view(self.ortho_view)
         source = (ch.meta.get("normal_map") or {}).get("source")
         self.statusBar().showMessage(tr("Mappa delle normali dal {0}: rosso est, verde nord, blu alto",
@@ -8179,7 +8530,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         clean = h is not None and h.unchanged()  # every edit so far recorded: showing it adds no entry
         self._set_drawings_frame(entry["id"])  # the drawings of the plan (or of another elevation) stored first
         self._raster_version = ("elevation", entry["id"])
-        self.ortho_view.load(ortho, "ortho")
+        what = tr("Sezione «{0}»", entry["name"]) if entry.get("kind") == "section" else \
+            tr("Prospetto «{0}»", entry["name"])
+        self.ortho_view.load(ortho, "ortho", title=what)
         if relief.exists():
             self.ortho_view.set_dem(relief)
         with self.ortho_view.batch():
@@ -8504,7 +8857,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._warn(tr("Il risultato {0} del calcolatore raster non c'è più.", name))
             return
         self.ortho_view.palette = "viridis"
-        self._load_raster("calc", path)
+        self._load_raster("calc", path, title=tr("{0} «{1}»", tr(RASTER_TITLES["calc"]), name))
         lo, hi = self.ortho_view._dem_range or (0.0, 1.0)
         self.statusBar().showMessage(tr("{0} = {1}: colori da {2} a {3} (Viridis)", name,
                                         ch.meta["calculator"][name].get("formula", ""), decimal_comma(f"{lo:.4g}"),
@@ -8516,6 +8869,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         product, a version... opens, its chunk made the active one first."""
         if kind == "plugin":  # an item a plugin put in the tree (Context.add_tree_items)
             self._plugin_item_call(chunk, payload[0], payload[1].get("activate"))
+            return
+        if chunk is not None and chunk is not self.chunk and self._appending_refused():
             return
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
             self._activate_chunk(chunk)
@@ -8573,7 +8928,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if callback is None:
             return
         if chunk is not None and chunk is not self.chunk and any(c is chunk for c in self.doc.chunks):
-            self._activate_chunk(chunk)
+            if not self._activate_chunk(chunk):
+                return  # refused (an append runs): never on another chunk
         try:
             callback()
         except Exception as exc:  # a plugin never takes the window down
@@ -8603,6 +8959,27 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             + tr("tasto destro per posizionare un marker; Pagina giù/su: foto successiva/precedente"), 20000)
         if self.a_residuals.isChecked():
             self._draw_residuals()
+
+    def look_through_photo(self, camera) -> None:
+        """The 3D view through an aligned photo, with the photo over the model (Metashape's *Look Through*)."""
+        if camera is None or self.chunk is None:
+            return
+        if not camera.aligned:
+            self.statusBar().showMessage(tr("{0} non è allineata: non si può guardare dalla foto", camera.label), 10000)
+            return
+        mv = self.model_view
+        self.show_view(mv)
+        if mv.chunk is not self.chunk:
+            mv.set_chunk(self.chunk)
+        if mv.look_through(camera):
+            self.statusBar().showMessage(
+                tr("{0}: la foto sopra il modello; opacità nella barra della vista, Pagina giù/su foto successiva/"
+                   "precedente, Esc o muovere la vista per uscire", camera.label), 15000)
+
+    def _looked_through(self, camera) -> None:
+        """The photo looked through selected in the Photos pane."""
+        if camera is not None:
+            self.photos.select_camera(camera)
 
     def photo_step(self, step: int) -> None:
         """The next (+1) or previous (-1) photo of the list shown (the filtered one), as Metashape's
@@ -9039,8 +9416,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _show_phase(self, key: int) -> None:
         chunk = next((c for c in self.doc.chunks if c.key == key), None)
-        if chunk is not None:
-            self._activate_chunk(chunk)
+        if chunk is not None and self._activate_chunk(chunk):
             self.show_view(self.ortho_view)
 
     def _phase_date_changed(self, key: int, text: str) -> None:
@@ -9104,8 +9480,22 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except OSError as exc:
             log.error("Riavvio non riuscito: %s", exc)
 
+    def _background_toggled(self, shown: bool) -> None:
+        self.ortho_view.set_raster_visible(shown)
+
+    def _sync_background_action(self, *_args) -> None:
+        """*Vista > Mostra lo sfondo* as the 2D view is: checked when its raster is shown, disabled without one."""
+        a, view = self.a_show_background, self.ortho_view
+        a.blockSignals(True)
+        try:
+            a.setEnabled(view.has_raster())
+            a.setChecked(view.has_raster() and view.raster_visible)
+        finally:
+            a.blockSignals(False)
+
     def set_theme(self, mode: str) -> None:
         theme.apply(QApplication.instance(), mode)
+        self.ortho_view.refresh_background()  # a hidden or faded raster: the neutral background of the new theme
         self.settings.setValue("theme", mode)
         for k, a in self.theme_actions.items():
             a.setChecked(k == mode)
@@ -9666,14 +10056,19 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         pool = {"units": self.frame_units, "quote": self.frame_quote, "points": self.frame_points}[kind]
         return any(item is x for x in pool)
 
-    def _activate_chunk(self, chunk) -> None:
+    def _activate_chunk(self, chunk) -> bool:
         """Another chunk becomes the active one: the drawings of the one left stay with it (the
-        units exposed in that phase of the excavation), those of the new one come back."""
+        units exposed in that phase of the excavation), those of the new one come back. Refused while *Aggiungi
+        progetti* runs (its chunks are half made, and the drawings of a chunk shown then would be written over
+        what the append copies): returns whether ``chunk`` is the active one."""
         if chunk is self.chunk:
-            return
+            return True
+        if self._appending_refused():
+            return False
         self._switch_chunk(chunk)
         if self.history is not None:
             self.history.reset(keep_document=True)  # the history belongs to a chunk; the removals stay
+        return True
 
     def _switch_chunk(self, chunk, store: bool = True) -> None:
         """``chunk`` the active one and the window on it; ``store``: the drawings of the chunk left go
@@ -10418,6 +10813,27 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return
         self._sections_dir().mkdir(parents=True, exist_ok=True)
         self._sections_file().write_text(json.dumps(self.sections, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    def _set_sections(self, sections: list[dict]) -> None:
+        """The sections of the project now ``sections`` (an append, its undo): the file, the pane and the layer."""
+        self.sections = list(sections)
+        self._ensure_ppg_ids()
+        if self.sections:
+            self._save_sections()
+        elif self._sections_file().exists():
+            self._sections_file().write_text("[]", encoding="utf-8")
+        self.sections_pane.set_sections(self.sections)
+        if self.ortho_view.tr is not None and self.drawings_frame is None:
+            self.ortho_view.remove_layer("Sezioni")
+        self._draw_sections()
+
+    def _appending_refused(self) -> bool:
+        """While *Aggiungi progetti* runs, no other edit of the chunks (activate, rename, enable, duplicate): its
+        chunks are half made."""
+        if getattr(self, "_appending", False):
+            self.statusBar().showMessage(tr("Aspetta che finisca l'aggiunta dei progetti"), 6000)
+            return True
+        return False
 
     def _load_sections(self) -> None:
         """Sections of the open project (``sezioni/sezioni.json``) into the pane and the layer."""
@@ -14253,6 +14669,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         self.a_ws_add_chunk = add("add_chunk", tr("Aggiungi chunk"),
                                   tr("Aggiungi chunk: un chunk vuoto, che diventa quello attivo"), self.add_chunk)
+        self.a_ws_append = add("append", tr("Aggiungi progetti..."),
+                               tr("Aggiungi progetti: i chunk di altri progetti (.ppg, .psx, WebODM) come chunk nuovi"),
+                               self.append_projects)
         self.a_ws_add_photos = add("add_photos", tr("Aggiungi foto..."), tr("Aggiungi foto al chunk attivo"),
                                    self.add_photos)
         self.a_ws_add_folder = add("add_folder", tr("Aggiungi cartella..."),
@@ -14301,15 +14720,20 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         chunks = [c for k, c, _p in items if k == "chunk"]
         cams = [p for k, _c, p in items if k == "camera"]
         target = self._selected_chunk(items)
+        appending = getattr(self, "_appending", False)  # its chunks are half made: nothing else on the chunks
+        self.a_ws_add_chunk.setEnabled(not busy)
+        self.a_ws_append.setEnabled(not busy)
         self.a_ws_add_photos.setEnabled(not busy)
         self.a_ws_add_folder.setEnabled(not busy)
-        self.a_ws_activate.setEnabled(target is not None and target is not self.chunk)
-        self.a_ws_enable.setEnabled(any(not c.enabled for c in chunks + cams))
-        self.a_ws_disable.setEnabled(any(c.enabled for c in chunks + cams))
-        self.a_ws_rename.setEnabled(len(items) == 1 and self.workspace._renameable(items[0]))
+        self.a_ws_activate.setEnabled(not appending and target is not None and target is not self.chunk)
+        self.a_ws_enable.setEnabled(not appending and any(not c.enabled for c in chunks + cams))
+        self.a_ws_disable.setEnabled(not appending and any(c.enabled for c in chunks + cams))
+        self.a_ws_rename.setEnabled(not appending and len(items) == 1 and self.workspace._renameable(items[0]))
         self.a_ws_remove.setEnabled(not busy and any(k in REMOVABLE for k, _c, _p in items))
 
     def _workspace_activate(self) -> None:
+        if self._appending_refused():
+            return
         chunk = self._selected_chunk()
         if chunk is not None:
             self._activate_chunk(chunk)
@@ -14328,6 +14752,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def set_chunks_enabled(self, chunks, enabled: bool) -> None:
         """Chunks enabled or disabled, as in Metashape: a disabled chunk stays in the project, out of the batch
         steps on the enabled chunks and of the chunks proposed by Allinea chunk and Unisci chunk."""
+        if self._appending_refused():
+            return
         for c in chunks:
             c.enabled = bool(enabled)
         self._dirty(True)
@@ -14340,6 +14766,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def rename_chunk(self, chunk=None) -> None:
         """Rinomina... (F2): the name of a chunk."""
+        if self._appending_refused():
+            return
         chunk = chunk or self.chunk
         if chunk is None:
             return
@@ -14403,8 +14831,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         def on(fn):
             """``fn`` with the chunk of the item the active one."""
             def run():
-                if not here and any(chunk is c for c in self.doc.chunks):
-                    self._activate_chunk(chunk)
+                if not here and any(chunk is c for c in self.doc.chunks) and not self._activate_chunk(chunk):
+                    return  # refused (an append runs): never on another chunk
                 fn()
             return run
 
@@ -14415,6 +14843,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         menu = QMenu(self)
         if kind == "document":
             menu.addAction(icon("add_chunk"), tr("Aggiungi chunk"), self.add_chunk)
+            menu.addAction(icon("append"), tr("Aggiungi progetti..."), self.append_projects)
         elif kind == "chunk":
             a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
             a.setEnabled(chunk is not self.chunk)
@@ -14767,6 +15196,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         else:
             self.workspace.populate(self.doc)
             self._update_title()
+            self._other_chunks_changed()  # a product of another chunk gone or back: the views that show it follow
+
+    def _other_chunks_changed(self) -> None:
+        """The data of other chunks changed (a product removed or put back): the 3D view drawn again when it shows
+        other chunks, the rasters of the other chunks and their Layer rows again."""
+        mv = self.model_view
+        if mv.chunk is not None and mv.chunk.document is self.doc and (
+                (mv.base_sd is not None and mv.base_sd.others) or mv.other_chunks()):
+            mv.refresh(reset=False)
+        self._draw_chunk_overlays()
 
     def _undo_removed(self, step) -> None:
         """Modifica > Annulla of a removal: everything back in its place; the chunk that was active, active
@@ -14848,7 +15287,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         path = versions.version_file(self.chunk, product, vid)
         title = self._version_title(product, vid)
         if product in ("dem", "orthomosaic"):
-            self._load_raster("dem" if product == "dem" else "ortho", path)
+            kind = "dem" if product == "dem" else "ortho"
+            self._load_raster(kind, path, title=tr("{0} «{1}»", tr(RASTER_TITLES[kind]), title))
             self._raster_version = (product, vid)
             self._update_stale_banner()
             self.show_view(self.ortho_view)

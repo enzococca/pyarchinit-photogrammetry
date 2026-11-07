@@ -156,9 +156,59 @@ Come si comporta:
 QGIS e RustGIS possono essere collegati insieme: entrambi leggono e scrivono lo stesso GeoPackage, e le modifiche
 dell'uno e dell'altro arrivano da lì.
 
+## Aggiungere progetti
+
+*File > Aggiungi progetti...* (anche nella barra e nel tasto destro dell'Area di lavoro) funziona come *File > Append*
+di Metashape: altri progetti entrano in quello aperto, ogni loro chunk un **chunk nuovo**. Una sola finestra prende
+più file insieme - progetti di questo programma (`.ppg`), progetti Metashape (`.psx`), archivi WebODM (`all.zip`) - e
+una seconda scelta la cartella di un task WebODM/ODM. Di un `.ppg` o di un `.psx` con più di un chunk si spuntano i
+chunk da prendere. Dalla riga di comando: `ppg append progetto.ppg altro.ppg scavo.psx all.zip [--chunks "Chunk
+1,Saggio B"] [--webodm]` (il progetto viene salvato alla fine; il codice d'uscita è 1 se una sorgente non è entrata).
+
+* **`.ppg`**: ogni chunk arriva con una copia della sua cartella dei dati (mappe di profondità, nuvole, modello e
+  texture, DEM, ortofoto, versioni, prospetti; un file alla volta, su APFS un clone copy-on-write: istantaneo e senza
+  occupare spazio), con le foto, i sensori, le camere, i marker, le barre di scala, i riferimenti, il sistema di
+  coordinate, la trasformazione, i disegni e le impostazioni. Le foto restano dove sono: vengono salvate relative a
+  questo progetto quando stanno nella sua cartella, assolute altrimenti. Anche un DEM o un'ortofoto di un altro
+  programma a cui il chunk rimanda resta dov'è.
+* **`.psx`** e **WebODM**: quello che portano [l'importazione da Metashape](#metashape-psx) e [quella da
+  WebODM](#webodm-odm), in chunk nuovi del progetto aperto. Un `all.zip` viene estratto nella cartella del suo chunk
+  nuovo.
+
+I progetti scelti vengono solo letti, mai scritti. Un chunk tiene il suo nome; se il progetto ne ha già uno con quel
+nome, davanti va il nome del file (`scavo - Chunk 1`). Il chunk attivo resta lo stesso (se è vuoto, il primo chunk
+aggiunto prende il suo posto). Un riepilogo dice che cosa è arrivato da ogni sorgente - chunk, foto, prodotti, sistema
+di coordinate, avvisi - e quali sorgenti non sono entrate e perché: una che non riesce non ferma le altre.
+
+**Niente viene allineato**: ogni chunk tiene il suo sistema. Per metterli insieme si usa *Flusso di lavoro > Allinea
+chunk* (marker, foto in comune o punti) o *Unisci chunk*.
+
+Che cos'altro arriva con i chunk di un `.ppg`:
+
+* i collegamenti fra chunk aggiunti insieme li seguono: un chunk allineato a un altro (*Flusso di lavoro > Allinea
+  chunk*) resta allineato alla sua copia, un DEM coregistrato su un altro chunk nomina la copia, e i file di un chunk
+  fratello (il DEM usato da una coregistrazione o da un proxy US) puntano alle copie. Un collegamento a un chunk *non*
+  aggiunto viene tolto e detto nel riepilogo (mai un collegamento a un altro chunk di questo progetto); un file di un
+  chunk non aggiunto resta dov'è, letto e mai modificato, e il riepilogo lo nomina;
+* i GeoPackage delle zonizzazioni multispettrali, scritti accanto al progetto di origine, vengono copiati nella
+  cartella del chunk (QGIS modifica la copia);
+* le sezioni del progetto di origine (`sezioni/sezioni.json` accanto a lui) si uniscono a quelle di questo progetto,
+  con i loro SVG e DXF copiati nella sua cartella `sezioni` (un nome già usato prende davanti quello della sorgente);
+  non quando i due progetti stanno nella stessa cartella (condividono già le sezioni). Come ogni sezione del
+  programma, sono scritte subito, non con il progetto; dopo un annullamento o un'interruzione l'elenco delle sezioni
+  torna com'era, mentre i file SVG e DXF copiati restano in `sezioni/`;
+* il sito di questo progetto (*PyArchInit*) non cambia: il riepilogo dice quando la sorgente è di un altro sito;
+* i disegni già pubblicati in PyArchInit tengono il collegamento alle schede che hanno scritto.
+
+Mentre l'aggiunta lavora, i chunk del progetto non si possono aggiungere, rendere attivi, rinominare, attivare o disattivare.
+Il progetto risulta modificato, non salvato. *Modifica > Annulla* toglie in un passo tutti i chunk aggiunti (con le
+sezioni che hanno portato) e *Ripeti* li rimette; le loro cartelle seguono il progetto come è stato salvato l'ultima
+volta: chiudendo senza salvare vengono cancellate, e dopo un arresto improvviso l'apertura successiva cancella le copie
+che il progetto salvato non elenca (l'aggiunta scrive l'elenco dei chunk che crea prima di copiarne le cartelle).
+
 ## Metashape (`.psx`)
 
-*File > Importa > Progetto Metashape* o `ppg import-metashape progetto.psx nuovo.ppg`.
+*File > Importa > Progetto Metashape* o `ppg import-metashape progetto.psx nuovo.ppg` (un progetto nuovo; per aggiungere i suoi chunk a quello aperto, [*File > Aggiungi progetti...*](#aggiungere-progetti)).
 Il progetto viene letto direttamente (Metashape non serve): i sensori con la loro calibrazione
 (convertita nel modello COLMAP `FULL_OPENCV`: `f`, `cx/cy` dal centro, `b1`, `k1..k3`, `p1/p2`
 scambiati nell'ordine di OpenCV), le camere allineate, i marker con riferimenti, accuratezze e
@@ -218,7 +268,7 @@ maschere, lo skew `b2`, `k4`.
 ## WebODM / ODM
 
 *File > Importa > Progetto WebODM* o `ppg import-webodm all.zip nuovo.ppg` (o la cartella del
-task). Ortofoto, DSM (o DTM), nuvola di punti georeferenziata (`.laz`/`.las`/`.ply`) e la mesh con
+task; per aggiungerlo come chunk del progetto aperto, [*File > Aggiungi progetti...*](#aggiungere-progetti)). Ortofoto, DSM (o DTM), nuvola di punti georeferenziata (`.laz`/`.las`/`.ply`) e la mesh con
 texture (`odm_textured_model_geo.obj`, relativa all'offset in `coords.txt`) diventano i prodotti di
 un chunk nel CRS dei raster.
 

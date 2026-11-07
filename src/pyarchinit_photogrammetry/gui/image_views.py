@@ -299,10 +299,45 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
     return arr.astype(np.uint8)
 
 
+VIEW_BACKGROUND = "#343840"  # behind a raster shown at full opacity (and around it)
+
+# The name of a raster in the row *Sfondo* of the Layer pane, by the kind it is shown as (translated when shown); the
+# window gives its own for an elevation, a section, a version, a result of the calculator, a file of a plugin.
+RASTER_TITLES = {"ortho": "Ortofoto", "dem": "DEM", "reflectance": "Ortofoto di riflettanza",
+                 "thermal": "Ortofoto termica", "thermal_anomaly": "Anomalie termiche", "index": "Indice",
+                 "zones": "Zone", "diff": "Differenza fra DEM", "sigma": "Precisione del DEM (sigma Z)",
+                 "coverage": "Copertura delle foto", "slope": "Pendenza", "aspect": "Esposizione",
+                 "calc": "Calcolatore raster", "svf": "Rilievo: sky-view factor",
+                 "openness_pos": "Rilievo: openness positiva", "openness_neg": "Rilievo: openness negativa",
+                 "slrm": "Rilievo locale (SLRM)", "msrm": "Rilievo multiscala (MSRM)",
+                 "multi_hillshade": "Ombreggiatura da 16 direzioni"}
+
+
 class _DetailRelay(QObject):
     """Hands a detail image from the reading thread to the view (queued to the GUI thread)."""
 
     ready = Signal(int, object, object)  # generation, QImage, QRectF in scene coordinates
+
+
+class _ReducedCopy(QGraphicsPixmapItem):
+    """The reduced copy of a raster. Faded (opacity < 1) under the full-resolution detail, it is not painted where the
+    detail is (``hole``, scene rectangle): two translucent layers would compose to more than the opacity chosen."""
+
+    hole: QRectF | None = None
+
+    def paint(self, painter, option, widget=None) -> None:
+        hole = self.hole
+        if hole is None:
+            super().paint(painter, option, widget)
+            return
+        painter.save()
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        path.addRect(self.boundingRect())
+        path.addRect(self.mapRectFromScene(hole))
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        super().paint(painter, option, widget)
+        painter.restore()
 
 
 class _ZoomView(QGraphicsView):
@@ -314,7 +349,7 @@ class _ZoomView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setBackgroundBrush(QColor(52, 56, 64))
+        self.setBackgroundBrush(QColor(VIEW_BACKGROUND))
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.pixmap_item: QGraphicsPixmapItem | None = None
 
@@ -455,6 +490,7 @@ class RasterView(_ZoomView):
     free_finished = Signal(str, object)
     feature_double_clicked = Signal(str, dict)  # layer, attributes: a double click on a feature (pan or select)
     raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
+    raster_visibility_changed = Signal(bool, float)  # the raster shown or hidden, its opacity (0-1)
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
     sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
@@ -525,6 +561,14 @@ class RasterView(_ZoomView):
         self._detail_timer.setSingleShot(True)
         self._detail_timer.setInterval(120)
         self._detail_timer.timeout.connect(self.update_detail)
+        # the raster shown (reduced copy and detail) can be hidden or faded so that the drawings on top can be seen;
+        # the choice is kept per raster (kind, file) for the session and comes back when that raster is shown again
+        self.raster_title = ""  # its name in the Layer pane ("Ortofoto", "Prospetto «Parete sud»"...)
+        self._raster_visible = True
+        self._raster_opacity = 1.0
+        self._raster_choices: dict[tuple[str, str], tuple[bool, float]] = {}
+        # the rasters of other chunks over the one shown (MainWindow, gui.chunk_views.overlay_image): key -> pixmap item
+        self.chunk_overlays: dict = {}
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             bar.valueChanged.connect(self._view_changed)
             bar.rangeChanged.connect(self._view_changed)
@@ -590,6 +634,8 @@ class RasterView(_ZoomView):
         self._sam_items = []
         self._detail_item, self._detail_key = None, None
         self._detail_gen += 1  # a detail still being read belongs to the previous raster
+        self.pixmap_item = None  # deleted by clear()
+        self.chunk_overlays = {}  # deleted by clear()
         self.scene().clear()
         self.overlays, self._clicks, self._click_xy, self._rubber = [], [], [], None
         self.layers, self.layer_order = {}, []
@@ -602,6 +648,9 @@ class RasterView(_ZoomView):
         empties it, ``text`` in its place."""
         self._empty_scene()
         self.tr = None
+        self._src_size = self._base_size = (0, 0)
+        self.raster_title = ""
+        self._set_raster_state(True, 1.0)
         if text:
             self.scene().addText(text)
         self.raster_loaded.emit()
@@ -619,6 +668,8 @@ class RasterView(_ZoomView):
         w = max(1, int(np.ceil((x1 - x0) / resolution)))
         h = max(1, int(np.ceil((y1 - y0) / resolution)))
         self.path, self.kind, self.z = None, "frame", None
+        self.raster_title = ""  # an empty frame: no background to hide
+        self._set_raster_state(True, 1.0)
         self.tr = from_origin(x0, y1, resolution, resolution)
         self._src_size = self._base_size = (w, h)
         self._dem_lookup = None
@@ -632,12 +683,16 @@ class RasterView(_ZoomView):
         self.fit()
         self.raster_loaded.emit()
 
-    def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None) -> None:
+    def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None, title: str | None = None) -> None:
+        """``path`` shown as ``kind`` ("ortho", "dem", a relief...); ``title``: its name in the Layer pane (by
+        default the kind's, :data:`RASTER_TITLES`). Shown or hidden, and faded, as the last time it was shown in
+        this session."""
         import rasterio
         from rasterio.enums import Resampling
 
         self._empty_scene()
         self.path, self.kind = Path(path), kind
+        self.raster_title = title or tr(RASTER_TITLES.get(kind, "Raster"))
         with rasterio.open(path) as src:
             f = max(1.0, max(src.width, src.height) / max_side)
             levels = src.overviews(1) if f > 1 else []
@@ -695,16 +750,139 @@ class RasterView(_ZoomView):
                 if n == 3:
                     arr = np.dstack([arr, np.full((h, w), 255, np.uint8)])
                 rgba = arr.astype(np.uint8)
-        self.pixmap_item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(rgba)))
+        self.pixmap_item = _ReducedCopy(QPixmap.fromImage(to_qimage(rgba)))
+        self.scene().addItem(self.pixmap_item)
         self.pixmap_item.setZValue(-2)  # the detail (-1) and the drawings go over it
+        self._set_raster_state(*self._raster_choices.get(self.raster_key(), (True, 1.0)))
         self.setSceneRect(QRectF(0, 0, w, h))
         self.fit()
         self._view_changed()
         self.raster_loaded.emit()
 
+    def raster_rect(self) -> QRectF:
+        """The raster (or the empty frame) shown, in scene pixels."""
+        w, h = self._base_size
+        return QRectF(0, 0, w, h) if w and h else QGraphicsView.sceneRect(self)
+
+    def sceneRect(self) -> QRectF:  # noqa: N802 - Qt's name
+        """The raster shown, in its pixels (:meth:`raster_rect`): what the window and the plugins size their arrays and
+        overlays from. The area Qt lets the view scroll over can be larger - the rasters of other chunks beyond it
+        (:meth:`set_chunk_overlay`), at most one raster size on each side - and is not this."""
+        return self.raster_rect() if self._base_size[0] and self._base_size[1] else QGraphicsView.sceneRect(self)
+
+    def _update_scroll_rect(self) -> None:
+        """The area the view scrolls over: the raster and the visible rasters of other chunks, bounded to the raster
+        grown by its own size on each side; back to the raster when they are hidden or removed."""
+        base = self.raster_rect()
+        rect = QRectF(base)
+        for item in self.chunk_overlays.values():
+            if item.isVisible():
+                rect = rect.united(item.mapRectToScene(item.boundingRect()))
+        rect = rect.intersected(base.adjusted(-base.width(), -base.height(), base.width(), base.height()))
+        QGraphicsView.setSceneRect(self, rect)
+
+    # ----------------------------------------------------------- rasters of other chunks
+    def set_chunk_overlay(self, key, rgba: np.ndarray, affine, opacity: float = 0.6, shown: bool = True) -> None:
+        """The raster of another chunk over the one shown, under the drawings: ``rgba`` ``(H, W, 4)`` uint8 and
+        ``affine`` (a rasterio Affine) from its pixels to the world of the view; replaces the one of ``key``."""
+        from PySide6.QtGui import QTransform
+
+        self.remove_chunk_overlay(key)
+        if self.tr is None:
+            return
+        a = (~self.tr) @ affine  # its pixels -> pixels of the view
+        item = QGraphicsPixmapItem(QPixmap.fromImage(to_qimage(rgba)))
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        item.setTransform(QTransform(a.a, a.d, a.b, a.e, a.c, a.f))
+        item.setZValue(-0.6)  # over the raster and its detail, under the overlays of the plugins and the drawings
+        item.setOpacity(min(max(float(opacity), 0.0), 1.0))
+        item.setVisible(bool(shown))
+        self.scene().addItem(item)
+        self.chunk_overlays[key] = item
+        self._update_scroll_rect()  # the view can be moved over it, also beyond the raster (a chunk not aligned yet)
+
+    def set_chunk_overlay_state(self, key, shown: bool | None = None, opacity: float | None = None) -> None:
+        item = self.chunk_overlays.get(key)
+        if item is None:
+            return
+        if shown is not None and bool(shown) != item.isVisible():
+            item.setVisible(bool(shown))
+            self._update_scroll_rect()
+        if opacity is not None:
+            item.setOpacity(min(max(float(opacity), 0.0), 1.0))
+
+    def remove_chunk_overlay(self, key) -> None:
+        item = self.chunk_overlays.pop(key, None)
+        if item is not None and item.scene() is self.scene():
+            self.scene().removeItem(item)
+            self._update_scroll_rect()
+
+    # ----------------------------------------------------------- the raster shown or hidden
+    def has_raster(self) -> bool:
+        """A raster is shown (not an empty frame, not nothing): it can be hidden and faded."""
+        return self.pixmap_item is not None
+
+    def raster_key(self) -> tuple[str, str] | None:
+        """The raster shown for the choices kept in the session: its kind and its file (an elevation is its own
+        file); None for an empty frame or nothing."""
+        if not self.has_raster() or self.path is None:
+            return None
+        return str(self.kind), str(self.path)
+
+    @property
+    def raster_visible(self) -> bool:
+        return self._raster_visible
+
+    @property
+    def raster_opacity(self) -> float:
+        return self._raster_opacity
+
+    def set_raster_visible(self, visible: bool) -> None:
+        """The raster shown (``True``) or hidden: the drawings stay, on the neutral background of the theme. Nothing
+        happens without a raster (an empty frame has nothing to hide)."""
+        if self.has_raster():
+            self._set_raster_state(bool(visible), self._raster_opacity, remember=True)
+
+    def set_raster_opacity(self, opacity: float) -> None:
+        """The opacity of the raster, 0 (transparent) to 1."""
+        if self.has_raster():
+            self._set_raster_state(self._raster_visible, min(max(float(opacity), 0.0), 1.0), remember=True)
+
+    def _set_raster_state(self, visible: bool, opacity: float, remember: bool = False) -> None:
+        changed = (visible, opacity) != (self._raster_visible, self._raster_opacity)
+        self._raster_visible, self._raster_opacity = visible, opacity
+        if remember and self.raster_key() is not None:
+            self._raster_choices[self.raster_key()] = (visible, opacity)
+        for item in (self.pixmap_item, self._detail_item):
+            if item is not None:
+                item.setOpacity(opacity)
+        if self.pixmap_item is not None:
+            self.pixmap_item.setVisible(visible)
+        if not visible:  # nothing read for a raster nobody sees; a detail being read is dropped
+            self._detail_timer.stop()
+            self._detail_gen += 1
+            self._detail_key = None
+            if self._detail_item is not None:
+                self._detail_item.setVisible(False)
+        elif changed:
+            self._view_changed()
+        self._update_hole()
+        self.refresh_background()
+        if changed and remember:
+            self.raster_visibility_changed.emit(visible, opacity)
+
+    def refresh_background(self) -> None:
+        """The background of the view: dark grey behind a raster shown at full opacity; the neutral background of the
+        theme (:data:`.theme.LIGHT` / ``DARK`` ``canvas_off``) behind a hidden or faded raster, so that the drawings
+        read on it. Called again when the theme changes."""
+        from . import theme
+
+        off = self.has_raster() and (not self._raster_visible or self._raster_opacity < 1.0)
+        self.setBackgroundBrush(QColor(theme.tokens()["canvas_off"] if off else VIEW_BACKGROUND))
+
     # ----------------------------------------------------------- full-resolution detail
     def _view_changed(self, *_args) -> None:
-        if self.detail and self.tr is not None and self.path is not None:
+        if self.detail and self.tr is not None and self.path is not None and self._raster_visible:
             self._detail_timer.start()  # once the zoom or the panning pauses
 
     def resizeEvent(self, ev) -> None:
@@ -726,7 +904,7 @@ class RasterView(_ZoomView):
             return None  # the reduced copy already has a pixel per screen pixel
         vis = self.mapToScene(self.viewport().rect()).boundingRect()
         m = 0.25 * max(vis.width(), vis.height())  # a margin: short pans need no new reading
-        rect = vis.adjusted(-m, -m, m, m).intersected(self.sceneRect())
+        rect = vis.adjusted(-m, -m, m, m).intersected(self.raster_rect())
         if rect.isEmpty():
             return None
         c0, r0 = max(int(np.floor(rect.left() * fx)), 0), max(int(np.floor(rect.top() * fy)), 0)
@@ -741,12 +919,13 @@ class RasterView(_ZoomView):
 
     def update_detail(self, wait: bool = False) -> None:
         """Read the visible part of the raster again at the resolution of the screen (in a
-        thread; ``wait`` reads it here, for tests and snapshots)."""
-        req = self._detail_request()
+        thread; ``wait`` reads it here, for tests and snapshots). Nothing is read while the raster is hidden."""
+        req = self._detail_request() if self._raster_visible else None
         if req is None:
             if self._detail_item is not None:
                 self._detail_item.setVisible(False)
             self._detail_key = None
+            self._update_hole()
             return
         window, shape, scene = req
         if self._detail_key is not None:
@@ -785,19 +964,35 @@ class RasterView(_ZoomView):
             pass
 
     def _show_detail(self, gen: int, image, scene: QRectF) -> None:
-        if gen != self._detail_gen or self.tr is None:
-            return  # an older request, or another raster
+        if gen != self._detail_gen or self.tr is None or not self._raster_visible:
+            return  # an older request, another raster, or a raster hidden meanwhile
         pix = QPixmap.fromImage(image)
         if self._detail_item is None or self._detail_item.scene() is not self.scene():
             self._detail_item = self.scene().addPixmap(pix)
             self._detail_item.setZValue(-1)
             self._detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            self._detail_item.setOpacity(self._raster_opacity)
         else:
             self._detail_item.setPixmap(pix)
         self._detail_item.setPos(scene.topLeft())
         self._detail_item.setTransform(QTransform.fromScale(scene.width() / max(image.width(), 1),
                                                             scene.height() / max(image.height(), 1)))
         self._detail_item.setVisible(True)
+        self._update_hole()
+
+    def _update_hole(self) -> None:
+        """The reduced copy left out where the detail is drawn while the raster is faded (:class:`_ReducedCopy`)."""
+        base = self.pixmap_item
+        if not isinstance(base, _ReducedCopy):
+            return
+        detail = self._detail_item
+        hole = None
+        if (detail is not None and detail.scene() is self.scene() and detail.isVisible()
+                and self._raster_opacity < 1.0):
+            hole = detail.mapRectToScene(detail.boundingRect())
+        if hole != base.hole:
+            base.hole = hole
+            base.update()
 
     def detail_resolution(self) -> float | None:
         """Ground size of a pixel of the detail shown (world units), None without detail."""
@@ -814,8 +1009,8 @@ class RasterView(_ZoomView):
         if self.tr is None:
             return
         with rasterio.open(path) as src:
-            w = int(self.sceneRect().width())
-            h = int(self.sceneRect().height())
+            w = int(self.raster_rect().width())
+            h = int(self.raster_rect().height())
             z = src.read(1, out_shape=(max(1, h // 4), max(1, w // 4)), resampling=Resampling.average, masked=True)
             self._dem_lookup = (z.filled(np.nan).astype(float), src.transform @ src.transform.scale(
                 src.width / max(1, w // 4), src.height / max(1, h // 4)))
@@ -1225,9 +1420,9 @@ class RasterView(_ZoomView):
         """World extent of what the view shows, within the raster."""
         if self.tr is None:
             return None
-        rect = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
+        rect = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.raster_rect())
         if rect.isEmpty():
-            rect = self.sceneRect()
+            rect = self.raster_rect()
         x0, y0 = self.world(rect.bottomLeft())
         x1, y1 = self.world(rect.topRight())
         return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
@@ -2006,6 +2201,7 @@ class PhotoView(_ZoomView):
     markers_changed = Signal(object)  # the marker changed (None: not known)
     marker_created = Signal(object)  # a new marker placed on this photo
     navigate = Signal(int)  # -1 previous photo, +1 next
+    look_requested = Signal(object)  # the 3D view through this photo (the camera)
     sam_prompt = Signal(object, float, float, int)  # camera, x, y, label
     mask_changed = Signal(object)  # the camera whose mask was drawn
 
@@ -2356,6 +2552,11 @@ class PhotoView(_ZoomView):
         menu.addSeparator()
         menu.addAction(tr("Foto successiva (Pagina giù)")).triggered.connect(lambda: self.navigate.emit(1))
         menu.addAction(tr("Foto precedente (Pagina su)")).triggered.connect(lambda: self.navigate.emit(-1))
+        if self.camera.aligned:
+            cam = self.camera
+            menu.addSeparator()
+            menu.addAction(tr("Guarda dalla foto nella vista 3D")).triggered.connect(
+                lambda: self.look_requested.emit(cam))
         menu.exec(ev.globalPos())
 
     def _place(self, marker, x, y) -> None:

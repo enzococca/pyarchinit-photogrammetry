@@ -51,6 +51,12 @@ photo are grey.
 A click selects (++ctrl++ + click and ++shift++ + click select several items); a double click or ++enter++
 makes a chunk the active one, and opens a photo, a product or a version after making its chunk the active one.
 
+With more than one chunk, each chunk has a **box** (application **1.7.5**): ticked, the chunk is drawn in the 3D view
+together with the active one, before and after *Align chunks* ([several chunks together](view3d.md#several-chunks-together));
+the box of the active chunk stays ticked.
+
+![The boxes of the chunks](../img/gui/chunks-workspace.png){ width=300 }
+
 <div style="clear: both"></div>
 
 **The bar above the tree** has icons only (their tooltips name them; on a narrow pane the » at its end holds the
@@ -59,6 +65,7 @@ buttons that do not fit):
 | Button | What it does |
 | --- | --- |
 | *Add chunk* | an empty chunk with the name you give it, which becomes the active one |
+| *Append projects...* | the chunks of other projects (`.ppg`, `.psx`, WebODM) as new chunks, as *File > Append projects...* |
 | *Add photos...*, *Add folder...* | photos, or a folder of photos, into the active chunk |
 | *Make active* | the chunk selected becomes the active one (a double click does the same) |
 | *Enable*, *Disable* | a disabled chunk stays in the project, out of the batch steps and of the chunks *Align chunks* and *Merge chunks* propose; a disabled photo stays out of the next alignment and builds |
@@ -76,7 +83,7 @@ buttons that do not fit):
 | a marker | *Filter the photos of ...*, *Remove the marker* |
 | *Cameras*, *Markers*, *Scale bars* | the removal of all they hold |
 | several items | *Enable*, *Disable*, *Remove N items* |
-| the project | *Add chunk* |
+| the project | *Add chunk*, *Append projects...* |
 
 The commands work on chunks that are not the active one too: removing, renaming, enabling and disabling act
 on the chunk of the item and leave the active chunk as it is, while showing an item and the commands of its
@@ -143,8 +150,26 @@ Everything drawn on the orthophoto and the DEM is a layer: stratigraphic units, 
 PyArchInit, section traces, contour lines, plan slices, spot heights, markers, measuring points, measures,
 stones, patches.
 
+* **Background** (application **1.7.5**): the first row, *Background: Orthophoto* (or *DEM*, the relief, *Elevation
+  «name»*, *Section «name»*), is the raster under the drawings. Untick it to hide the raster and see only what is drawn
+  on it, on a plain grey background; *Opacity* (0-100 %) fades it instead. The same as **View > Show the background**
+  (++ctrl+shift+b++). Each raster keeps its choice while the program is open (the orthophoto hidden, the DEM shown, an
+  elevation faded...) and gets it back when it is shown again; the drawing tools, the heights under the cursor and the
+  exports work as usual. Not saved in the project.
+* **Other chunks** (application **1.7.5**): with more than one chunk, under the background a row for each other chunk
+  that has a DEM or an orthophoto - its DEM under a DEM, its orthophoto under an orthophoto, else the one it has. Tick it
+  to draw that raster over the background of the active chunk, under the drawings; its slider sets its opacity (60 % to
+  begin with), so that two campaigns on the same trench can be compared. A raster built before *Align chunks* is moved
+  with its chunk - in plan and, for a DEM, in height (the row says so; for a chunk also tilted the plan is approximate:
+  build it again); a chunk in another coordinate system is warped into the active one's; one in a local frame next to a
+  system of the world is superimposed, its middle on the middle of the active raster ("not placed"). Only a reduced copy is drawn (2000 pixels at most), nothing is read at full resolution. The ticks and the
+  opacities are saved in the project; on an elevation or a section there are no rows.
+
+  ![The rows of the other chunks](../img/gui/chunks-layers-rows.png){ width=260 }
+  ![The orthophoto of another chunk, not aligned yet, over the active one at 55 %](../img/gui/chunks-2d-before.png){ width=420 }
+
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
-  *All* and *None* tick every layer (one step of *Edit > Undo*).
+  *All* and *None* tick every drawn layer (one step of *Edit > Undo*) and leave the background as it is.
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,

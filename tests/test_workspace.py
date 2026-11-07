@@ -497,8 +497,8 @@ def test_the_bar_of_the_workspace_adds_activates_renames_and_disables(window, mo
     assert bar is w.workspace_toolbar and dock.widget().widget() is w.workspace  # the pane is still the tree
     assert bar.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
     assert [a.text() for a in bar.actions() if a.text()] == [
-        "Aggiungi chunk", "Aggiungi foto...", "Aggiungi cartella...", "Rendi attivo", "Attiva", "Disattiva",
-        "Rinomina...", "Rimuovi"]
+        "Aggiungi chunk", "Aggiungi progetti...", "Aggiungi foto...", "Aggiungi cartella...", "Rendi attivo", "Attiva",
+        "Disattiva", "Rinomina...", "Rimuovi"]
     assert all(a.toolTip() for a in bar.actions() if a.text())
     assert bar.geometry().bottom() < dock.widget().viewport().geometry().top() + 1  # above the tree, not over it
     doc = w.doc
