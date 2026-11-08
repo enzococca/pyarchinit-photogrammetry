@@ -132,12 +132,14 @@ ppg plugin photocad list scavo.ppg                  # also the elevations: eleva
 ppg plugin photocad convert scavo.ppg --source ortho --out pianta.dxf
 ppg plugin photocad convert scavo.ppg --source elevation:<id> --3d --out prospetto.gpkg
 ppg plugin photocad convert scavo.ppg --source dem --bbox xmin,ymin,xmax,ymax --simplified --yes
-ppg plugin photocad fetch scavo.ppg --id <id> [--out disegno.dxf] [--search-px N] [--yes]
+ppg plugin photocad fetch scavo.ppg --id <id> [--out disegno.dxf] [--search-px N] [--accept] [--yes]
 ppg plugin photocad polygonize scavo.ppg <id> [--snap-px 2] [--min-area-px 50]
 ppg plugin photocad units scavo.ppg <id> --tipo USM --start 101 [--from lines|polygons]
 ppg plugin photocad export scavo.ppg <id> disegno.svg
 ppg plugin photocad remove scavo.ppg <id>
 ```
+
+A drawing refused only because its lines lie more than 2 px from the image's edges (a soft image: under water, mist), while the search found a clear match, leaves `overlay.jpg` in its tile folder: look at it, and if the red lines sit on the outlines place it with `fetch --accept` (in the window: *Accetta dopo il controllo*), at no charge (plugin 0.1.2).
 
 `convert` asks for confirmation at the prompt unless you pass `--yes`. Other options: `--chunk NAME`,
 `--remove-background`, `--pdf`, `--name`, `--max-tiles N`, `--out FILE` (`.dxf`, `.gpkg`, `.svg` or `.pdf`).

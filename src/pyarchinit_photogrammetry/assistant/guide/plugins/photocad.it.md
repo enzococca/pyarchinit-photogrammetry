@@ -132,12 +132,14 @@ ppg plugin photocad list scavo.ppg                  # anche i prospetti: elevati
 ppg plugin photocad convert scavo.ppg --source ortho --out pianta.dxf
 ppg plugin photocad convert scavo.ppg --source elevation:<id> --3d --out prospetto.gpkg
 ppg plugin photocad convert scavo.ppg --source dem --bbox xmin,ymin,xmax,ymax --simplified --yes
-ppg plugin photocad fetch scavo.ppg --id <id> [--out disegno.dxf] [--search-px N] [--yes]
+ppg plugin photocad fetch scavo.ppg --id <id> [--out disegno.dxf] [--search-px N] [--accept] [--yes]
 ppg plugin photocad polygonize scavo.ppg <id> [--snap-px 2] [--min-area-px 50]
 ppg plugin photocad units scavo.ppg <id> --tipo USM --start 101 [--from lines|polygons]
 ppg plugin photocad export scavo.ppg <id> disegno.svg
 ppg plugin photocad remove scavo.ppg <id>
 ```
+
+Un disegno rifiutato solo perché i tratti stanno a più di 2 px dai bordi dell'immagine (un'immagine morbida: sott'acqua, foschia), mentre la ricerca ha trovato un accordo netto, lascia `overlay.jpg` nella cartella della tessera: guardala e, se i tratti rossi stanno sui contorni, collocalo con `fetch --accept` (nella finestra: *Accetta dopo il controllo*), senza addebito (plugin 0.1.2).
 
 `convert` chiede conferma al prompt se non passi `--yes`. Altre opzioni: `--chunk NOME`, `--remove-background`, `--pdf`,
 `--name`, `--max-tiles N`, `--out FILE` (`.dxf`, `.gpkg`, `.svg` o `.pdf`).
