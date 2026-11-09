@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..core import geometry
 from ..core.marker import Marker
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -581,6 +582,573 @@ def import_ties(doc: "Document", path) -> list[Tie]:
     return made
 
 
+# --------------------------------------------------------------------------- the joint solve
+KINDS = {"similarity": 7, "rigid": 6, "plan": 4, "shift": 3, "height": 1, "fixed": 0}
+HUBER = 2.0  # robust solve: an observation whose residual is above HUBER x its precision weighs HUBER / that ratio
+RANK_RATIO = 1e-6  # an unknown the ties do not determine: a singular value of the Jacobian below this x the largest
+TIED_POINTS = "the points of a chunk tied to another"
+TIED_MARKERS = "the known points of tied chunks"
+
+
+class TieError(ValueError):
+    """A solve that cannot be made: ``str()`` is the English message, ``italian`` the Italian one (the window shows
+    the Italian one, the command line the English one)."""
+
+    def __init__(self, english: str, italian: str):
+        super().__init__(english)
+        self.english = english
+        self.italian = italian
+
+
+def _not_same_frame(a_label, a_crs, b_label, b_crs) -> TieError:
+    """The words of :func:`..engine.chunks._frame_to` (merging chunks in a local frame and in a projected system)."""
+    return TieError(f"chunk {a_label} ({a_crs or 'LOCAL'}) and {b_label} ({b_crs or 'LOCAL'}) are not in the same frame: "
+                    "a local frame and a projected system cannot be mixed in one solve (fix the chunk in the other "
+                    "system, or leave its known points out)",
+                    f"il chunk {a_label} ({a_crs or 'LOCAL'}) e {b_label} ({b_crs or 'LOCAL'}) non sono nello stesso "
+                    "sistema: un sistema locale e uno proiettato non si mescolano in una stima (fissa il chunk "
+                    "nell'altro sistema, o lascia fuori i suoi punti noti)")
+
+
+@dataclass
+class _Obs:
+    """One observation of the solve: the end ``(chunk key, internal xyz)`` against the other end or against known
+    world coordinates (``target``, in the system of the solve), with a precision per axis."""
+
+    kind: str  # "tie" | "known" | "reference"
+    name: str
+    tie_id: str | None
+    a: tuple[int, np.ndarray]
+    b: tuple[int, np.ndarray] | None
+    target: np.ndarray | None
+    sigma: np.ndarray
+    check: bool = False  # a check point: reported, never fitted
+
+
+@dataclass
+class Solution:
+    """What :func:`solve` found; nothing applied (:func:`apply`).
+
+    ``transforms``: the new ``chunk.transform`` of every chunk of the solve (the fixed ones as they are);
+    ``residuals``: one entry per observation - ``id`` (tie id, None for a reference), ``name``, ``kind`` ("tie",
+    "known", "reference"), ``chunks``, ``dx``/``dy``/``dz``/``d`` (world units of the solve; tie = end A - end B, known
+    point = computed - known), ``precision``, ``normalised`` (the residual over its precision), ``weight`` (< 1 when
+    the robust solve weighs it down), ``fitted`` (False: reported only - observations between fixed chunks, check
+    points); ``redundancy``: equations - unknowns of the fitted observations (0: no check at all); ``rms`` of the fitted
+    residuals; ``per_chunk``: ``kind``, ``label``, ``rotation_deg``, ``shift`` (how far its centre moves), ``scale``,
+    ``crs_before``, ``observations``; ``crs``: the system of the solve (the fixed chunks', else the known points');
+    ``left_out``: ``[{"id", "name", "reason"}]`` the ties not used; ``warnings``; ``previous``: the transform and CRS of
+    each chunk when it was solved (:func:`apply` refuses when they changed)."""
+
+    transforms: dict[int, np.ndarray]
+    residuals: list[dict]
+    redundancy: int
+    rms: float
+    per_chunk: dict[int, dict]
+    crs: str | None
+    unknowns: dict[int, str]
+    left_out: list[dict]
+    warnings: list[str]
+    previous: dict[int, dict]
+    robust: bool = False
+    sigma0: float | None = None
+
+    def to_dict(self) -> dict:
+        return {"transforms": {str(k): np.asarray(v, float).tolist() for k, v in self.transforms.items()},
+                "residuals": self.residuals, "redundancy": int(self.redundancy), "rms": float(self.rms),
+                "sigma0": None if self.sigma0 is None else float(self.sigma0),
+                "per_chunk": {str(k): v for k, v in self.per_chunk.items()}, "crs": self.crs,
+                "unknowns": {str(k): v for k, v in self.unknowns.items()}, "left_out": self.left_out,
+                "warnings": list(self.warnings), "robust": bool(self.robust)}
+
+
+def _translate(t) -> np.ndarray:
+    m = np.eye(4)
+    m[:3, 3] = t
+    return m
+
+
+def _rot_z(theta: float) -> np.ndarray:
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _correction(kind: str, x: np.ndarray, g: np.ndarray) -> np.ndarray:
+    """The 4x4 change of a chunk in the local frame of the solve: ``x' = s R (x - g) + g + t`` (``g`` its centre)."""
+    from .chunks import _rodrigues
+
+    R, s, t = np.eye(3), 1.0, np.zeros(3)
+    if kind in ("similarity", "rigid"):
+        R, t = _rodrigues(x[:3]), x[3:6]
+        if kind == "similarity":
+            s = float(np.exp(x[6]))
+    elif kind == "plan":
+        R, t = _rot_z(x[0]), x[1:4]
+    elif kind == "shift":
+        t = x[:3]
+    elif kind == "height":
+        t = np.array([0.0, 0.0, x[0]])
+    m = np.eye(4)
+    m[:3, :3] = s * R
+    m[:3, 3] = g + t - s * R @ g
+    return m
+
+
+def _initial(kind: str, src: np.ndarray, dst: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """A closed-form first position of a chunk for its kind of unknowns (src -> dst, local frame of the solve), so
+    that the least squares start close even for a chunk in a local frame put into a projected system."""
+    from .chunks import _spread
+
+    w = w / w.sum()
+    if kind in ("similarity", "rigid") and len(src) >= 3 and _spread(src):
+        return geometry.umeyama(src, dst, with_scale=kind == "similarity", weights=w)
+    if kind in ("similarity", "rigid", "plan"):
+        cs, cd = w @ src, w @ dst
+        a, b = src[:, :2] - cs[:2], dst[:, :2] - cd[:2]
+        theta = float(np.arctan2(np.sum(w * (a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0])),
+                                 np.sum(w * (a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1])))) if len(src) > 1 else 0.0
+        m = np.eye(4)
+        m[:3, :3] = _rot_z(theta)
+        m[:3, 3] = cd - m[:3, :3] @ cs
+        return m
+    d = w @ (dst - src)
+    if kind == "height":
+        d = np.array([0.0, 0.0, d[2]])
+    return _translate(d) if kind == "shift" or kind == "height" else np.eye(4)
+
+
+def _rotation_deg(m: np.ndarray) -> float:
+    a = np.asarray(m, float)[:3, :3]
+    s = float(np.cbrt(np.linalg.det(a)))
+    c = (np.trace(a / s) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def _sample_points(chunk: "Chunk") -> np.ndarray:
+    """Internal points spread over a chunk (its cameras, markers, tie points and a box around them) to carry it from
+    one projected system to another as a similarity (as merging chunks does)."""
+    pts = [c.center for c in chunk.aligned_cameras] + [m.position for m in chunk.markers if m.position is not None]
+    tp = chunk.tie_points
+    if tp is not None and len(tp):
+        pts += list(tp.xyz[np.random.default_rng(0).choice(len(tp), min(len(tp), 2000), replace=False)])
+    pts = np.array(pts, float).reshape(-1, 3)
+    centre = pts.mean(0) if len(pts) else np.zeros(3)
+    size = max(float(np.ptp(pts, axis=0).max()) if len(pts) else 0.0, 10.0 / max(float(chunk.scale), 1e-12))
+    box = centre + size / 2 * np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+    return np.vstack([pts, box])
+
+
+def _compatible(a: str | None, b: str | None) -> bool:
+    from ..core import crs as crs_mod
+
+    return a == b or (crs_mod.is_local(a) and crs_mod.is_local(b)) or not (crs_mod.is_local(a) or crs_mod.is_local(b))
+
+
+def _to_system(points: np.ndarray, src: str | None, dst: str | None, chunk, what: str) -> np.ndarray:
+    from ..core import crs as crs_mod
+    from ..gnss.frames import Legacy
+
+    if src == dst or (crs_mod.is_local(src) and crs_mod.is_local(dst)):
+        return np.asarray(points, float)
+    return crs_mod.transform_points(np.asarray(points, float), src, dst, legacy=Legacy(what, chunk))
+
+
+def _sigma3(values, fallback: float) -> np.ndarray:
+    v = np.asarray(values if values else [fallback], float).reshape(-1)
+    v = np.resize(v, 3) if len(v) != 3 else v
+    v = np.where(np.isfinite(v) & (v > 0), v, fallback)
+    return v
+
+
+def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, robust: bool = False) -> Solution:
+    """Several chunks placed together from their ties, one least squares; nothing is changed (:func:`apply`).
+
+    ``unknowns``: chunk (object, key or label) -> ``"similarity"`` (rotation, shift, scale: 7), ``"rigid"`` (6),
+    ``"plan"`` (rotation about the vertical of the world system, shift in x, y, z: 4; tilt and scale stay),
+    ``"shift"`` (3), ``"height"`` (1) or ``"fixed"`` (0); only these chunks take part. ``ties``: Tie objects or ids
+    (default every tie of the document); inactive or broken ties, ties with an end that has no position and ties to a
+    chunk outside the solve are left out and listed in ``Solution.left_out``.
+
+    Known points: a tie towards known coordinates always counts (its marker's reference, per axis); with
+    ``references`` the control markers of the chunks (as for the georeference) count too, as ground control points,
+    except the markers of known ties (counted once, through the tie). A tie between two markers that both have a
+    reference counts as the tie, and each reference once. Check points are reported, never fitted; observations that
+    move nothing (between fixed chunks) are reported only.
+
+    The system of the solve is the fixed chunks' (the first fixed chunk in the document), else the known points'.
+    As *Allinea chunk* does, a moving chunk in another system goes into that one (its CRS becomes it on apply); between
+    two projected systems points and known coordinates are converted; a local frame and a projected system are never
+    mixed where both must hold - two fixed chunks, or a known point and the system of the solve - (:class:`TieError`).
+    Weights ``1 / precision**2``; ``robust``: Huber weights (:data:`HUBER`) found again until they settle.
+
+    :class:`TieError`: an unknown kind; nothing fixes the system (no fixed chunk, no known point); a chunk with fewer
+    equations than unknowns ("similarity" with 2 ties); unknowns the ties do not determine (points on a line, chunks
+    tied only among themselves); chunks in systems that cannot be mixed; a geographic system."""
+    from scipy.optimize import least_squares
+
+    from ..core import crs as crs_mod
+
+    chunks: dict[int, "Chunk"] = {}
+    kinds: dict[int, str] = {}
+    for item, kind in unknowns.items():
+        try:
+            ch = _chunk(doc, item)
+        except (KeyError, ValueError) as exc:
+            raise TieError(f"unknown chunk: {exc}", f"chunk sconosciuto: {exc}") from None
+        if kind not in KINDS:
+            raise TieError(f"chunk {ch.label}: unknowns {kind!r}: use one of {', '.join(KINDS)}",
+                           f"chunk {ch.label}: incognite {kind!r}: usa una di {', '.join(KINDS)}")
+        chunks[ch.key], kinds[ch.key] = ch, kind
+    order = [c.key for c in doc.chunks if c.key in chunks]
+    if not order:
+        raise TieError("no chunk in the solve", "nessun chunk nella stima")
+
+    # the ties and the observations they give (internal points of their ends)
+    wanted = None if ties is None else {t if isinstance(t, str) else t.id for t in ties}
+    every_tie = ties_of(doc)
+    # the reference of a known tie's marker counts through the tie only: never also as a reference, even when the
+    # tie is off, broken or not among ``ties``
+    known_ends = {t.a for t in every_tie if t.b is None}
+    left_out, observations = [], []
+    for t in every_tie:
+        if wanted is not None and t.id not in wanted:
+            continue
+        if t.broken:
+            left_out.append({"id": t.id, "name": t.name, "reason": t.broken})
+            continue
+        if not t.active:
+            left_out.append({"id": t.id, "name": t.name, "reason": "inactive"})
+            continue
+        outside = [doc_chunk.label for k, _ in t.ends() if k not in chunks
+                   for doc_chunk in doc.chunks if doc_chunk.key == k]
+        if outside:
+            left_out.append({"id": t.id, "name": t.name,
+                             "reason": f"chunk {', '.join(outside)} not in the solve"})
+            continue
+        points, missing = [], []
+        for end, uid in t.end_uids():
+            chunk, marker = resolve_end(doc, end, uid)
+            p = end_internal(chunk, marker)
+            if p is None:
+                missing.append(f"marker {marker.label!r} of chunk {chunk.label!r}")
+            points.append((chunk.key, p))
+        if missing:
+            left_out.append({"id": t.id, "name": t.name, "reason": f"no position for {', '.join(missing)}"})
+            continue
+        if t.b is None:
+            chunk, marker = resolve_end(doc, t.a, t.a_uid)
+            sigma = _sigma3(marker.reference.accuracy, t.precision)
+            observations.append(("known", t, points[0], None, np.asarray(t.known, float), t.crs, sigma, False,
+                                 chunk))
+        else:
+            observations.append(("tie", t, points[0], points[1], None, None, np.full(3, float(t.precision)), False,
+                                 None))
+    if references:
+        for key in order:
+            ch = chunks[key]
+            for m in ch.markers:
+                if (key, m.key) in known_ends or not (m.reference.enabled and m.reference.location):
+                    continue
+                p = end_internal(ch, m)
+                if p is None:
+                    left_out.append({"id": None, "name": m.label,
+                                     "reason": f"reference of chunk {ch.label!r} without a position"})
+                    continue
+                observations.append(("reference", m, (key, p), None, np.asarray(m.reference.location, float), ch.crs,
+                                     _sigma3(m.reference.accuracy, TABLE_PRECISION), bool(m.checkpoint), ch))
+
+    # the system of the solve
+    fixed = [k for k in order if kinds[k] == "fixed"]
+    known_obs = [o for o in observations if o[0] != "tie" and not o[7]]
+    if not fixed and not any(kinds[o[2][0]] != "fixed" for o in known_obs):
+        raise TieError("nothing fixes the system of the solve: mark a chunk as fixed, or give known points "
+                       "(GNSS points, benchmarks, references)",
+                       "niente fissa il sistema della stima: segna un chunk come fisso, o dai dei punti noti "
+                       "(punti GNSS, capisaldi, riferimenti)")
+    if fixed:
+        system_chunk = chunks[fixed[0]]
+        system = system_chunk.crs
+        for k in fixed[1:]:
+            if not _compatible(chunks[k].crs, system):
+                raise _not_same_frame(chunks[k].label, chunks[k].crs, system_chunk.label, system)
+    else:
+        first = next(o for o in known_obs if kinds[o[2][0]] != "fixed")
+        system_chunk, system = first[8], first[5]
+    if crs_mod.is_geographic(system):
+        raise TieError(f"the system {system} is geographic; use a projected system (e.g. the UTM zone)",
+                       f"il sistema {system} è geografico; usa un sistema proiettato (es. il fuso UTM)")
+    for o in list(observations):
+        if o[0] != "tie" and not _compatible(o[5], system):
+            if not o[7]:
+                raise _not_same_frame(o[8].label, o[5], system_chunk.label, system)
+            observations.remove(o)  # a check point that cannot be measured in this system
+            left_out.append({"id": None, "name": o[1].label,
+                             "reason": f"check point of chunk {o[8].label!r} in {o[5] or 'LOCAL'}, not in {system}"})
+
+    warnings: list[str] = []
+    # each chunk: internal -> world of the solve, as it is now (a chunk in another projected system carried as a
+    # similarity fitted through the projection; one in a local frame placed by the first position below)
+    world_of: dict[int, np.ndarray] = {}
+    for key in order:
+        ch = chunks[key]
+        T = np.asarray(ch.transform, float)
+        if ch.crs == system or crs_mod.is_local(ch.crs) and crs_mod.is_local(system) or not _compatible(ch.crs, system):
+            world_of[key] = T
+            continue
+        pts = _sample_points(ch)
+        dst = _to_system(geometry.apply(T, pts), ch.crs, system, ch, TIED_POINTS)
+        off = np.round(dst.mean(0))
+        W = geometry.umeyama(pts, dst - off, with_scale=True)
+        err = float(np.sqrt(np.mean(np.sum((geometry.apply(W, pts) - (dst - off)) ** 2, axis=1))))
+        if err > 0.005:
+            warnings.append(f"{ch.label}: {ch.crs} -> {system} approximated within {err:.3f} m")
+        world_of[key] = _translate(off) @ W
+    for key in order:
+        ch = chunks[key]
+        if kinds[key] == "fixed":
+            if (crs_mod.is_local(ch.crs) and ch.aligned_cameras and not ch.meta.get("levelled")
+                    and np.allclose(geometry.decompose_similarity(ch.transform)[1], np.eye(3))):
+                warnings.append(f"{ch.label}: a local frame not levelled yet - building its DEM will turn it (and not "
+                                "the chunks tied to it): level it first (build its DEM), then solve")
+            continue
+        if not _compatible(ch.crs, system):
+            if any(m.reference.location for m in ch.markers):
+                warnings.append(f"{ch.label}: its marker references are in {ch.crs or 'LOCAL'}; they stay as they are "
+                                f"and no longer match once it is in {system or 'LOCAL'}")
+            if kinds[key] in ("plan", "shift", "height"):
+                warnings.append(f"{ch.label}: from {ch.crs or 'LOCAL'} to {system or 'LOCAL'} with '{kinds[key]}' "
+                                "unknowns: its tilt and scale stay those of its own frame")
+
+    # the observations in the local frame of the solve (world minus a rounded offset)
+    obs: list[_Obs] = []
+    for kind, item, a, b, target, crs, sigma, check, ch in observations:
+        if target is not None:
+            target = _to_system(target[None], crs, system, ch, TIED_MARKERS)[0]
+        name = item.name if kind != "reference" else item.label
+        obs.append(_Obs(kind, name, item.id if kind != "reference" else None, a, b, target, sigma, check))
+    anchor = [o.target for o in obs if o.target is not None and not o.check]
+    for o in obs:
+        for end in (o.a, o.b):
+            if end is not None and kinds[end[0]] == "fixed":
+                anchor.append(geometry.apply(world_of[end[0]], end[1]))
+    offset = np.round(np.median(np.array(anchor), axis=0)) if anchor else np.zeros(3)
+    base = {k: _translate(-offset) @ world_of[k] for k in order}  # internal -> local frame of the solve
+
+    def moving(o: _Obs) -> bool:
+        return any(e is not None and kinds[e[0]] != "fixed" for e in (o.a, o.b))
+
+    fitted = [o for o in obs if not o.check and moving(o)]
+    # enough equations for every chunk
+    for key in order:
+        need = KINDS[kinds[key]]
+        if not need:
+            continue
+        n = 3 * sum(1 for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key)
+        if n < need:
+            raise TieError(f"chunk {chunks[key].label}: {n} equations for {need} unknowns ({kinds[key]}): not enough "
+                           "ties - add ties or known points, or choose fewer unknowns (plan, shift, height)",
+                           f"chunk {chunks[key].label}: {n} equazioni per {need} incognite ({kinds[key]}): legami "
+                           "insufficienti - aggiungi legami o punti noti, o scegli meno incognite (in pianta, solo "
+                           "spostamento, solo quota)")
+
+    # first positions: chunk by chunk from what is placed already (fixed chunks, known points)
+    placed = {k for k in order if kinds[k] == "fixed"}
+    while True:
+        progress = False
+        for key in order:
+            if key in placed:
+                continue
+            src, dst, w = [], [], []
+            for o in fitted:
+                ends = [e for e in (o.a, o.b) if e is not None]
+                mine = [e for e in ends if e[0] == key]
+                if not mine:
+                    continue
+                if o.target is not None:
+                    there = o.target - offset
+                else:
+                    other = next((e for e in ends if e[0] != key), None)
+                    if other is None or other[0] not in placed:
+                        continue
+                    there = geometry.apply(base[other[0]], other[1])
+                src.append(geometry.apply(base[key], mine[0][1]))
+                dst.append(there)
+                w.append(1.0 / float(np.mean(o.sigma ** 2)))
+            if src:
+                base[key] = _initial(kinds[key], np.array(src), np.array(dst), np.array(w)) @ base[key]
+                placed.add(key)
+                progress = True
+        if not progress:
+            break
+
+    # the unknowns
+    slices, centre, start = {}, {}, 0
+    for key in order:
+        n = KINDS[kinds[key]]
+        slices[key] = slice(start, start + n)
+        start += n
+        pts = [geometry.apply(base[key], e[1]) for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key]
+        centre[key] = np.mean(pts, axis=0) if pts else np.zeros(3)
+    n_par = start
+    qa = np.array([geometry.apply(base[o.a[0]], o.a[1]) for o in fitted]).reshape(-1, 3)
+    qb = np.array([geometry.apply(base[o.b[0]], o.b[1]) if o.b is not None else o.target - offset for o in fitted]).reshape(-1, 3)
+    ka = [o.a[0] for o in fitted]
+    kb = [o.b[0] if o.b is not None else None for o in fitted]
+    sig = np.array([o.sigma for o in fitted]).reshape(-1, 3)
+
+    def moved(x):
+        return {k: _correction(kinds[k], x[slices[k]], centre[k]) for k in order}
+
+    def positions(x):
+        C = moved(x)
+        pa = np.array([geometry.apply(C[k], q) for k, q in zip(ka, qa)]).reshape(-1, 3)
+        pb = np.array([q if k is None else geometry.apply(C[k], q) for k, q in zip(kb, qb)]).reshape(-1, 3)
+        return pa - pb
+
+    weights = np.ones(len(fitted))
+
+    def residuals(x):
+        return ((positions(x) / sig) * np.sqrt(weights)[:, None]).ravel()
+
+    x = np.zeros(n_par)
+    result = None
+    if n_par:
+        for _round in range(30 if robust else 1):
+            result = least_squares(residuals, x, method="trf", x_scale="jac", xtol=1e-15, ftol=1e-15, gtol=1e-15,
+                                   max_nfev=200 * (n_par + 1))
+            x = result.x
+            if not robust:
+                break
+            norm = np.linalg.norm(positions(x) / sig, axis=1)
+            new = np.where(norm > HUBER, HUBER / np.maximum(norm, 1e-300), 1.0)
+            if np.allclose(new, weights, atol=1e-6):
+                break
+            weights = new
+        # unknowns the ties do not determine
+        J = result.jac
+        sv, vt = np.linalg.svd(J, full_matrices=False)[1:]
+        top = sv[0] if len(sv) else 0.0
+        null = vt[sv <= RANK_RATIO * top] if top > 0 else vt
+        if len(sv) < n_par:  # fewer equations than unknowns in all
+            null = np.vstack([null, np.linalg.svd(J)[2][len(sv):]])
+        if len(null):
+            loose = [chunks[k].label for k in order if KINDS[kinds[k]] and
+                     np.abs(null[:, slices[k]]).max() > 1e-6]
+            raise TieError(f"the ties do not determine chunk {', '.join(loose)}: points on a line, or chunks tied only "
+                           "among themselves and not to a fixed chunk or known points",
+                           f"i legami non determinano il chunk {', '.join(loose)}: punti su una linea, o chunk legati "
+                           "solo fra loro e non a un chunk fisso o a punti noti")
+
+    C = moved(x)
+    final = {k: _translate(offset) @ C[k] @ base[k] for k in order}
+    transforms = {k: (np.asarray(chunks[k].transform, float).copy() if kinds[k] == "fixed" else final[k])
+                  for k in order}
+
+    # residuals of every observation
+    weight_of = {id(o): float(w) for o, w in zip(fitted, weights)}
+    entries = []
+    for o in obs:
+        pa = geometry.apply(final[o.a[0]], o.a[1])
+        pb = (geometry.apply(final[o.b[0]], o.b[1]) if o.b is not None else o.target)
+        r = pa - pb
+        entries.append({"id": o.tie_id, "name": o.name, "kind": o.kind,
+                        "chunks": [o.a[0]] + ([o.b[0]] if o.b is not None else []),
+                        "dx": float(r[0]), "dy": float(r[1]), "dz": float(r[2]), "d": float(np.linalg.norm(r)),
+                        "precision": float(np.max(o.sigma)), "normalised": float(np.linalg.norm(r / o.sigma)),
+                        "weight": weight_of.get(id(o), 1.0), "fitted": id(o) in weight_of,
+                        "check": bool(o.check)})
+    used = [e for e in entries if e["fitted"]]
+    redundancy = 3 * len(used) - n_par
+    rms = float(np.sqrt(np.mean([e["d"] ** 2 for e in used]))) if used else 0.0
+    sigma0 = (float(np.sqrt(sum(e["weight"] * e["normalised"] ** 2 for e in used) / redundancy))
+              if redundancy > 0 else None)
+
+    per_chunk, previous = {}, {}
+    for key in order:
+        ch = chunks[key]
+        previous[key] = {"transform": np.asarray(ch.transform, float).copy(), "crs": ch.crs}
+        D = final[key] @ np.linalg.inv(world_of[key]) if kinds[key] != "fixed" else np.eye(4)
+        g = geometry.apply(world_of[key], _sample_points(ch).mean(0)) if kinds[key] != "fixed" else np.zeros(3)
+        n = sum(1 for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key)
+        per_chunk[key] = {"label": ch.label, "kind": kinds[key], "rotation_deg": _rotation_deg(D) if n else 0.0,
+                          "shift": float(np.linalg.norm(geometry.apply(D, g) - g)),
+                          "scale": float(np.cbrt(np.linalg.det(D[:3, :3]))), "crs_before": ch.crs,
+                          "crs": ch.crs if kinds[key] == "fixed" else system, "observations": n}
+        if kinds[key] == "fixed":
+            per_chunk[key]["rotation_deg"] = 0.0
+    return Solution(transforms=transforms, residuals=entries, redundancy=int(redundancy), rms=rms,
+                    per_chunk=per_chunk, crs=system, unknowns=dict(kinds), left_out=left_out, warnings=warnings,
+                    previous=previous, robust=bool(robust), sigma0=sigma0)
+
+
+def apply(doc: "Document", solution: Solution) -> dict:
+    """The transforms of ``solution`` given to its chunks (and their CRS: the system of the solve, the marker
+    references converted between two projected systems, as *Allinea chunk* does); the report kept in
+    ``doc.meta["ties_report"]``. :class:`TieError` when a chunk changed since the solve (solve again). Returns what it
+    changed, for :func:`restore` (one Annulla step)."""
+    import copy
+
+    from ..core import crs as crs_mod
+    from ..core import free_drawings
+    from .chunks import _convert_references
+
+    chunks = {c.key: c for c in doc.chunks}
+    for key, before in solution.previous.items():
+        ch = chunks.get(key)
+        if ch is None or ch.crs != before["crs"] or not np.array_equal(np.asarray(ch.transform, float),
+                                                                       before["transform"]):
+            label = ch.label if ch is not None else key
+            raise TieError(f"chunk {label} changed since the solve: solve again",
+                           f"il chunk {label} è cambiato dopo la stima: rifai la stima")
+    changed = {"chunks": {}, "ties_report": copy.deepcopy(doc.meta.get("ties_report"))}
+    for key, kind in solution.unknowns.items():
+        if kind == "fixed":
+            continue
+        ch = chunks[key]
+        changed["chunks"][key] = {"transform": np.asarray(ch.transform, float).tolist(), "crs": ch.crs,
+                                  "references": {m.key: copy.deepcopy(m.reference.location) for m in ch.markers},
+                                  "chunk_alignment": copy.deepcopy(ch.meta.get("chunk_alignment")),
+                                  "levelled": ch.meta.get("levelled")}
+        if (ch.crs != solution.crs and not crs_mod.is_local(ch.crs) and not crs_mod.is_local(solution.crs)):
+            _convert_references(ch, ch.crs, solution.crs)
+        ch.transform = np.asarray(solution.transforms[key], float).copy()
+        ch.crs = solution.crs
+        ch.meta["chunk_alignment"] = {"method": "ties", "kind": kind, "rmse": solution.rms,
+                                      "redundancy": solution.redundancy}
+        if crs_mod.is_local(solution.crs):
+            ch.meta["levelled"] = True  # its frame is now the solve's: building its DEM must not turn it again
+        free_drawings.follow(ch)
+    doc.meta["ties_report"] = solution.to_dict()
+    return changed
+
+
+def restore(doc: "Document", changed: dict) -> None:
+    """What :func:`apply` changed, put back."""
+    from ..core import free_drawings
+
+    chunks = {c.key: c for c in doc.chunks}
+    for key, before in changed["chunks"].items():
+        ch = chunks.get(int(key))
+        if ch is None:
+            continue
+        ch.transform = np.asarray(before["transform"], float)
+        ch.crs = before["crs"]
+        for m in ch.markers:
+            if m.key in before["references"]:
+                m.reference.location = before["references"][m.key]
+        for meta_key in ("chunk_alignment", "levelled"):
+            if before.get(meta_key) is None:
+                ch.meta.pop(meta_key, None)
+            else:
+                ch.meta[meta_key] = before[meta_key]
+        free_drawings.follow(ch, adopt=False)
+    if changed.get("ties_report") is None:
+        doc.meta.pop("ties_report", None)
+    else:
+        doc.meta["ties_report"] = changed["ties_report"]
+
+
 __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "add_known", "link_markers",
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
-           "remove_tie", "resolve_end", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION"]
+           "remove_tie", "resolve_end", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION",
+           "KINDS", "TieError", "Solution", "solve", "apply", "restore"]
