@@ -352,7 +352,7 @@ proposes again what was accepted or rejected. The limits, plainly:
 ### A drawing classified by orientation
 
 From version 0.5.0, with pyarchinit-photogrammetry 1.7.7 or later (the button is hidden with an older program), a tracing
-of your own can fill the catalogue: *Classified drawing...* in step 8 reads a layer of free drawings of the chunk, or a
+of your own can fill the catalogue: *Import a classified drawing...* in step 8 reads a layer of free drawings of the chunk, or a
 GeoPackage, GeoJSON or DXF file (put in the chunk's system as the import of free drawings does), turns it into the ship
 plan and has the program classify it along the keel line ([A drawing classified by orientation](../gui/drawing.md#a-drawing-classified-by-orientation)). The plugin gives the groups their meaning:
 
@@ -367,14 +367,16 @@ numbers). The side comes from the mean y, as for a timber traced by hand; the na
 bow (both sides of one frame share N), `comento B1`, `B2`, ... and `fascia T1`, ... numbered from the keel on each side.
 
 Nothing enters the catalogue before the **check plate**: it shows every element coloured by group with the plugin's names,
-and a box per kind with its count. *Into the catalogue* adds the kinds ticked as measured timbers (source `orient:<id>`),
-one step of *Edit > Undo*; *Cancel* leaves the catalogue as it was. The plate is kept in `shipwreck/classified/plate.png`.
+and a box per kind with its count. *Into the catalogue* adds the kinds ticked as measured timbers (source `orient:<drawing>:<id>`),
+one step of *Edit > Undo*; *Cancel* leaves the catalogue as it was. Importing the same drawing again, or a drawing
+that grew, adds only what is new: a timber already in the catalogue from a classified drawing (same kind, same vertices) is
+skipped, and the window and the command line say how many. The plate is kept in `shipwreck/classified/plate.png`.
 
 !!! tip "Frames drawn as loose lines"
     A traced polygon is always one element: draw frames and strakes as polygons when you can. Frames drawn as **two loose
     lines each, close together** (for instance 12 cm sided with 13 cm between them) look like evenly spaced lines and come out
     as single lines across, not frames: set **Pair isolation** to 1 (`--pair-isolation 1`), or draw them as polygons. Lower
-    it only for such drawings and check the plate: with 1 a loose seam may pair with the end of a frame polygon nearby.
+    it only for such drawings and check the plate: with 1 two loose seams close together may also be read as a strake.
 
 The form also takes the pairs' distance (from 2 cm to 50 cm by default) and the shortest piece read (5 cm). From the
 command line:
@@ -386,7 +388,8 @@ ppg plugin shipwreck classified PROJECT.ppg --file drawing.dxf --pair-isolation 
 ppg plugin shipwreck classified PROJECT.ppg --layer "Rilievo" --param pair_max=0.4 --accept 7 8 9
 ```
 
-Without `--accept` nothing is written; `--accept` with ids takes those elements, with none all of them (of `--kinds`).
+Without `--accept` nothing is written; `--accept` with ids takes those elements, with none all of them (of `--kinds`). The ids are
+those listed by a run without `--accept` with the same drawing and the same parameters: change either and they change.
 
 ### The 3D timbers
 

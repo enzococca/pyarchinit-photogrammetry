@@ -355,7 +355,7 @@ ripropone ciò che è stato accettato o scartato. I limiti, detti chiaramente:
 ### Un disegno classificato per orientamento
 
 Dalla versione 0.5.0, con pyarchinit-photogrammetry 1.7.7 o successivo (con un programma più vecchio il pulsante è nascosto),
-un tuo ricalco può riempire il catalogo: *Disegno classificato...* al passo 8 legge un layer di disegni liberi del chunk, oppure
+un tuo ricalco può riempire il catalogo: *Importa un disegno classificato...* al passo 8 legge un layer di disegni liberi del chunk, oppure
 un file GeoPackage, GeoJSON o DXF (portato nel sistema del chunk come fa l'importazione dei disegni liberi), lo porta nella
 pianta della nave e lo fa classificare dal programma lungo la chiglia ([Un disegno classificato per orientamento](../gui/drawing.md#un-disegno-classificato-per-orientamento)). Il significato dei gruppi lo dà il plugin:
 
@@ -371,15 +371,17 @@ numero). Il lato viene dalla y media, come per un legno ricalcato a mano; i nomi
 ogni lato.
 
 Niente entra nel catalogo prima della **tavola di controllo**: mostra ogni elemento colorato per gruppo con i nomi del plugin,
-e una casella per tipo con il suo numero. *Nel catalogo* aggiunge i tipi spuntati come legni misurati (sorgente `orient:<id>`),
-un passo di *Modifica > Annulla*; *Annulla* lascia il catalogo com'era. La tavola resta in `shipwreck/classified/plate.png`.
+e una casella per tipo con il suo numero. *Nel catalogo* aggiunge i tipi spuntati come legni misurati (sorgente `orient:<disegno>:<id>`),
+un passo di *Modifica > Annulla*; *Annulla* lascia il catalogo com'era. Importando di nuovo lo stesso disegno, o un disegno
+cresciuto, entra solo il nuovo: un legno già nel catalogo da un disegno classificato (stesso tipo, stessi vertici) viene
+saltato, e la finestra e la riga di comando dicono quanti. La tavola resta in `shipwreck/classified/plate.png`.
 
 !!! tip "Ordinate disegnate come linee sciolte"
     Un poligono ricalcato è sempre un elemento solo: quando puoi, disegna ordinate e fasce come poligoni. Ordinate disegnate
     con **due linee sciolte ciascuna, vicine fra loro** (per esempio larghe 12 cm con 13 cm fra l'una e l'altra) sembrano linee
     a passo regolare ed escono come linee di traverso singole, non come ordinate: porta **Isolamento delle coppie** a 1
-    (`--pair-isolation 1`), oppure disegnale come poligoni. Abbassalo solo per disegni così e guarda la tavola: con 1 un
-    comento sciolto può far coppia con l'estremità di un'ordinata disegnata come poligono lì vicino.
+    (`--pair-isolation 1`), oppure disegnale come poligoni. Abbassalo solo per disegni così e guarda la tavola: con 1 anche
+    due comenti sciolti vicini fra loro possono essere letti come una fascia.
 
 La finestra chiede anche la distanza delle coppie (da 2 a 50 cm di partenza) e il tratto più corto letto (5 cm). Dalla riga di
 comando:
@@ -391,7 +393,9 @@ ppg plugin shipwreck classified PROGETTO.ppg --file disegno.dxf --pair-isolation
 ppg plugin shipwreck classified PROGETTO.ppg --layer "Rilievo" --param pair_max=0.4 --accept 7 8 9
 ```
 
-Senza `--accept` non si scrive niente; `--accept` con degli id prende quegli elementi, senza tutti (dei tipi di `--kinds`).
+Senza `--accept` non si scrive niente; `--accept` con degli id prende quegli elementi, senza tutti (dei tipi di `--kinds`). Gli
+id sono quelli elencati da un'esecuzione senza `--accept` con lo stesso disegno e gli stessi parametri: se cambia l'uno o
+l'altro cambiano.
 
 ### I legni 3D
 
