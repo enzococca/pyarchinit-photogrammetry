@@ -276,10 +276,32 @@ def test_known_coordinates_follow_the_marker_reference():
     m.reference.accuracy = [0.03, 0.03, 0.03]
     got = ties.ties_of(doc)[0]
     assert got.known == [11.0, 20.0, 1.0] and got.precision == pytest.approx(0.03)
-    got.precision = 0.04
-    got.known = [12.0, 20.0, 1.0]
-    ties.save_ties(doc, [got])  # edited in the Legami pane
+    ties.update_known(doc, tie.id, known=[12.0, 20.0, 1.0], precision=0.04)  # edited in the Legami pane
     assert m.reference.location == [12.0, 20.0, 1.0] and m.reference.accuracy == [0.04] * 3
+    assert ties.ties_of(doc)[0].known == [12.0, 20.0, 1.0]
+
+
+def test_tie_operations_never_rewrite_the_reference_of_a_known_point():
+    doc, a, b = _two_chunks()
+    tie = ties.add_known(doc, b, [0, 0, 0], [10.0, 20.0, 1.0], "GNSS 1", 0.02)
+    m = b.marker_by_key(tie.a[1])
+    m.reference.accuracy = [0.02, 0.02, 0.05]  # per axis, set by the user
+    ties.add_tie(doc, a, [1, 1, 1], b, [2, 2, 2])  # an unrelated tie reads and saves all of them
+    ties.save_ties(doc, ties.ties_of(doc))
+    assert m.reference.accuracy == [0.02, 0.02, 0.05] and m.reference.location == [10.0, 20.0, 1.0]
+
+
+def test_a_cleared_reference_leaves_no_known_point():
+    doc, a, b = _two_chunks()
+    tie = ties.add_known(doc, b, [0, 0, 0], [10.0, 20.0, 1.0], "GNSS 1", 0.02)
+    m = b.marker_by_key(tie.a[1])
+    m.reference.location = None  # cleared in the Riferimenti pane
+    ties.add_tie(doc, a, [1, 1, 1], b, [2, 2, 2])
+    assert m.reference.location is None  # never restored
+    got = next(t for t in ties.ties_of(doc) if t.id == tie.id)
+    assert not got.active and "reference" in got.broken
+    assert [r["id"] for r in ties.check_ends(doc)] == [tie.id]
+    assert m.reference.location is None
 
 
 def test_a_given_name_never_duplicates_a_marker_label():

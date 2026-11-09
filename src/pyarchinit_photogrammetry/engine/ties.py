@@ -110,15 +110,9 @@ def ties_of(doc: "Document") -> list[Tie]:
 
 
 def save_ties(doc: "Document", ties: list[Tie]) -> None:
-    """The ties written in ``doc.meta["ties"]`` (plain JSON); no key when there are none. The known coordinates and
-    the precision of a known tie are written to its marker's reference too (one value in both panes)."""
-    for t in ties:
-        if t.b is None and t.known is not None:
-            found = resolve_end(doc, t.a, t.a_uid)
-            if found is not None:
-                marker = found[1]
-                marker.reference.location = [float(v) for v in t.known]
-                marker.reference.accuracy = [float(t.precision)] * 3
+    """The ties written in ``doc.meta["ties"]`` (plain JSON); no key when there are none. Markers are never touched:
+    the reference of a known point belongs to its marker (the user's, in the Riferimenti pane); it is changed only by
+    :func:`add_known` and :func:`update_known`."""
     if ties:
         doc.meta[META_KEY] = [t.to_dict() for t in ties]
     else:
@@ -159,17 +153,45 @@ def _settle(doc: "Document", tie: Tie) -> None:
         chunk, marker = found
         if marker.key != end[1]:
             setattr(tie, which, (chunk.key, marker.key))
-        if which == "a" and tie.b is None and marker.reference.location:
+        if which == "a" and tie.b is None:
+            if not marker.reference.location:  # cleared by the user: no known point any more (never put back)
+                reasons.append(f"a: marker {marker.label!r} of chunk {chunk.label!r} has no reference any more")
+                continue
             tie.known = [float(v) for v in marker.reference.location]
-            tie.precision = float(max(marker.reference.accuracy or [tie.precision]))
+            tie.precision = float(max(marker.reference.accuracy or [tie.precision]))  # read only: per axis it stays
             tie.crs = chunk.crs
     if reasons:
         tie.broken = "; ".join(reasons)
         tie.active = False
 
 
+def update_known(doc: "Document", tie_id: str, known=None, precision: float | None = None) -> Tie:
+    """An explicit edit of a known tie (the Legami pane): its coordinates and/or precision written to its marker's
+    reference (the accuracy becomes ``precision`` on every axis), the only place they are kept."""
+    ties = ties_of(doc)
+    tie = next((t for t in ties if t.id == tie_id), None)
+    if tie is None:
+        raise KeyError(f"no tie {tie_id!r} in the document")
+    if tie.b is not None:
+        raise ValueError("only a tie towards known coordinates has them")
+    found = resolve_end(doc, tie.a, tie.a_uid)
+    if found is None:
+        raise ValueError(f"the tie {tie.name!r} has lost its marker")
+    marker = found[1]
+    if known is not None:
+        marker.reference.location = [float(v) for v in _point(known)]
+        marker.reference.enabled = True
+    if precision is not None:
+        marker.reference.accuracy = [_check_precision(precision)] * 3
+    for t in ties:
+        _settle(doc, t)
+    save_ties(doc, ties)
+    return next(t for t in ties if t.id == tie_id)
+
+
 def check_ends(doc: "Document") -> list[dict]:
-    """The ties with an end gone (chunk removed, marker removed or replaced by another under its key): made inactive
+    """The ties with an end gone (chunk removed, marker removed or replaced by another under its key, reference of a
+    known point cleared): made inactive
     and stored so; returns ``[{"id", "name", "end", "reason"}]`` for the report. Ends whose marker moved to another
     key are stored with the new key."""
     ties = ties_of(doc)
@@ -561,4 +583,4 @@ def import_ties(doc: "Document", path) -> list[Tie]:
 
 __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "add_known", "link_markers",
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
-           "remove_tie", "resolve_end", "check_ends", "TABLE_PRECISION", "MIN_PHOTO_PRECISION"]
+           "remove_tie", "resolve_end", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION"]

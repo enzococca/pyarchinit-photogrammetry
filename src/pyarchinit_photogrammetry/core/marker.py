@@ -46,7 +46,7 @@ class Marker:
     reference: Reference = field(default_factory=Reference)
     checkpoint: bool = False  # used only to assess accuracy, not for georeferencing
     orientation: bool = False  # one of the three markers that keep the orientation of a local system
-    uid: str | None = None  # an identity that never comes back for another point (a tie names its ends by it)
+    uid: str | None = None  # unique within its chunk (copies keep it; a tie looks it up in its own chunk)
 
     def to_dict(self) -> dict:
         d = {
