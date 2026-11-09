@@ -173,34 +173,38 @@ def edge_points(polygons, cell: float, step: int = LAND_STEP) -> np.ndarray:
 def _heights_at(path, pts: np.ndarray) -> np.ndarray:
     """The DEM ``path`` at ``pts``, interpolated between the centres of the four cells around each point (bilinear: the
     cell holding a point alone is off by up to half a cell times the slope, and on one side of it when the points fall
-    on the cell edges). NaN where a cell around has no value and outside the grid (a DEM written without nodata would
-    give 0 there)."""
+    on the cell edges). In the outer half of the border cells the height is the border cell's (the position clipped
+    to the centres of the grid before the cells are chosen). NaN where a cell around has no value and outside the grid
+    (a DEM written without nodata would give 0 there). One window of the file is read, the one around all the points
+    (a long outline is not one reading per point)."""
     import rasterio
-
-    from ..core.free_drawings import raster_values
+    from rasterio.windows import Window
 
     z = np.full(len(pts), np.nan)
     if not len(pts):
         return z
     with rasterio.open(path) as src:
-        b, tr, shape = src.bounds, src.transform, (src.height, src.width)
-    inside = (pts[:, 0] >= b.left) & (pts[:, 0] <= b.right) & (pts[:, 1] >= b.bottom) & (pts[:, 1] <= b.top)
-    if not inside.any():
-        return z
-    a, bb, c, d, e, f = tr.a, tr.b, tr.c, tr.d, tr.e, tr.f
-    det = a * e - bb * d
-    dx, dy = pts[inside, 0] - c, pts[inside, 1] - f
-    cols, rows = (e * dx - bb * dy) / det, (a * dy - d * dx) / det
-    fc, fr = cols - 0.5, rows - 0.5  # in cell centres
-    c0, r0 = np.floor(fc).astype(int), np.floor(fr).astype(int)
-    tc, tr_ = fc - c0, fr - r0  # weights
-    c0, r0 = np.clip(c0, 0, shape[1] - 1), np.clip(r0, 0, shape[0] - 1)
-    c1, r1 = np.clip(c0 + 1, 0, shape[1] - 1), np.clip(r0 + 1, 0, shape[0] - 1)
-    corners = []
-    for rr, cc in ((r0, c0), (r0, c1), (r1, c0), (r1, c1)):
-        xy = np.column_stack([c + a * (cc + 0.5) + bb * (rr + 0.5), f + d * (cc + 0.5) + e * (rr + 0.5)])
-        corners.append(np.array([np.nan if v is None else v for v in raster_values(path, xy)], float))
-    z00, z01, z10, z11 = corners
+        b, tr, (height, width) = src.bounds, src.transform, (src.height, src.width)
+        inside = (pts[:, 0] >= b.left) & (pts[:, 0] <= b.right) & (pts[:, 1] >= b.bottom) & (pts[:, 1] <= b.top)
+        if not inside.any():
+            return z
+        a, bb, c, d, e, f = tr.a, tr.b, tr.c, tr.d, tr.e, tr.f
+        det = a * e - bb * d
+        dx, dy = pts[inside, 0] - c, pts[inside, 1] - f
+        cols, rows = (e * dx - bb * dy) / det, (a * dy - d * dx) / det
+        fc = np.clip(cols - 0.5, 0.0, width - 1.0)  # in cell centres, clipped to the grid before the cells are chosen
+        fr = np.clip(rows - 0.5, 0.0, height - 1.0)
+        c0 = np.clip(np.floor(fc).astype(int), 0, max(width - 2, 0))
+        r0 = np.clip(np.floor(fr).astype(int), 0, max(height - 2, 0))
+        c1, r1 = np.minimum(c0 + 1, width - 1), np.minimum(r0 + 1, height - 1)
+        tc, tr_ = fc - c0, fr - r0  # weights (0 or 1 at the border)
+        col0, row0 = int(c0.min()), int(r0.min())
+        win = Window(col0, row0, int(c1.max()) - col0 + 1, int(r1.max()) - row0 + 1)
+        band = src.read(1, window=win, masked=True)
+    grid = np.ma.filled(band.astype(np.float64), np.nan)
+    grid[~np.isfinite(grid)] = np.nan
+    r0, r1, c0, c1 = r0 - row0, r1 - row0, c0 - col0, c1 - col0
+    z00, z01, z10, z11 = grid[r0, c0], grid[r0, c1], grid[r1, c0], grid[r1, c1]
     z[inside] = (z00 * (1 - tc) + z01 * tc) * (1 - tr_) + (z10 * (1 - tc) + z11 * tc) * tr_
     return z
 
@@ -228,7 +232,8 @@ def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> 
     edge, nrm = edge_samples(polys, cell, LAND_STEP)
     near = edge + LAND_STEP * cell * nrm
     far = edge + 2 * LAND_STEP * cell * nrm
-    z2, z4 = _heights_at(path, near), _heights_at(path, far)
+    both_z = _heights_at(path, np.concatenate([near, far]))  # one reading of the DEM for the two
+    z2, z4 = both_z[:len(near)], both_z[len(near):]
     if len(far):
         wet = shapely.contains_xy(shapely.union_all(polys), far[:, 0], far[:, 1])
         z4[wet] = np.nan  # the far reading in the water: not the bank

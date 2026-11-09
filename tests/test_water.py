@@ -265,3 +265,45 @@ def test_a_failed_dem_undoes_the_whole_correction(tmp_path, monkeypatch):
     assert versions.versions(a, "point_cloud") == [] and versions.versions(a, "dem") == []
     assert a.dem_path.read_bytes() == dem_before
     assert not (a.meta.get("dense") or {}).get("refraction") and "correction" not in a.meta["water"]
+
+
+def _plane_dem(path, cell=0.1, n=8):
+    """A DEM rising 1 m per column to the east and 10 m per row to the south (z = column + 10 row at the centres) in
+    a small grid at the origin."""
+    rr, cc = np.mgrid[0:n, 0:n].astype(np.float32)
+    return write_geotiff(path, cc + 10.0 * rr, (X0, Y0), cell, CRS, nodata=NODATA)
+
+
+def test_heights_in_the_outer_half_cell_of_the_border(tmp_path):
+    """A point in the outer half of the first column (left edge) or the first row (top edge) takes the border cell's
+    height, not a mix pulled toward the second cell."""
+    path = _plane_dem(tmp_path / "dem.tif")
+    pts = np.array([[X0 + 0.02, Y0 - 0.45],   # left edge, outer half of column 0
+                    [X0 + 0.25, Y0 - 0.02],   # top edge, outer half of row 0: between columns 2 and 3 (z 2.0)
+                    [X0 + 0.79, Y0 - 0.45],   # right edge, outer half of the last column
+                    [X0 + 0.10, Y0 - 0.45]])  # inside: between the centres of columns 0 and 1
+    z = water._heights_at(path, pts)
+    assert z.tolist() == pytest.approx([40.0, 2.0, 47.0, 40.5])
+    assert np.isnan(water._heights_at(path, np.array([[X0 - 0.01, Y0 - 0.4]])))[0]  # outside the grid
+
+def test_heights_read_in_one_window(tmp_path, monkeypatch):
+    """A long outline is read with one window of the DEM, not one reading per point and corner."""
+    import rasterio
+
+    path = _plane_dem(tmp_path / "dem.tif", n=64)
+    reads = []
+    real = rasterio.io.DatasetReader.read
+
+    def counting(self, *args, **kwargs):
+        reads.append(kwargs.get("window"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(rasterio.io.DatasetReader, "read", counting)
+    monkeypatch.setattr(rasterio.io.DatasetReader, "sample", lambda *a, **k: pytest.fail("no sampling per point"))
+    rng = np.random.default_rng(1)
+    pts = np.column_stack([X0 + 0.5 + rng.random(5000) * 5.0, Y0 - 0.5 - rng.random(5000) * 5.0])
+    z = water._heights_at(path, pts)
+    assert len(reads) == 1 and reads[0] is not None
+    assert reads[0].width < 64 and reads[0].height < 64  # the window around the points, not the whole DEM
+    expect = np.clip((pts[:, 0] - X0) / 0.1 - 0.5, 0, 63) + 10.0 * np.clip((Y0 - pts[:, 1]) / 0.1 - 0.5, 0, 63)
+    assert z == pytest.approx(expect, abs=1e-5)
