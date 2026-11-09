@@ -355,6 +355,43 @@ def test_another_chunk_builds_on_the_same_wall_grid(oval, tower_base, tmp_path):
         E.build_like(second_ch, {**first, "crs": "EPSG:32633" if str(second_ch.crs) != "EPSG:32633" else "EPSG:4326"})
 
 
+def test_build_like_across_local_chunks_needs_the_same_frame_said(oval, tower_base, tmp_path, caplog):
+    """Two local chunks (no reference system) have worlds of their own: an elevation of one, rebuilt in the other, would
+    be empty or misplaced in silence. It is refused unless ``same_frame=True`` says the two are in the same frame; a
+    CRS written differently but meaning the same system passes; the colour correction is copied; without a name the
+    new one gets a name of its own; a stale source is said."""
+    from pyarchinit_photogrammetry.core import stamps
+
+    first_ch, circle = oval
+    first = E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    second_ch, _xy = _oval_chunk(tower_base, tmp_path / "locale")
+    first_ch.crs = second_ch.crs = "LOCAL"
+    entry = {**first, "crs": "LOCAL"}
+    with pytest.raises(ValueError, match="same_frame"):
+        E.build_like(second_ch, entry, source=first_ch)
+    with pytest.raises(ValueError, match="same_frame"):
+        E.build_like(second_ch, entry)                       # not an elevation of this chunk: another chunk's
+    again = E.build_like(second_ch, entry, source=first_ch, same_frame=True)
+    assert again["size"] == first["size"]
+    assert again["colour_correction"] == first["colour_correction"]
+    # the same chunk: no flag needed; the default name differs from the source's
+    second_ch.meta.setdefault("elevations", []).append(dict(again, id="sorgente", name="Torre"))
+    twin = E.build_like(second_ch, dict(again, id="sorgente", name="Torre"))
+    assert twin["name"] != "Torre" and twin["name"].startswith("Torre")
+    other = E.build_like(second_ch, dict(again, id="sorgente", name="Torre"))
+    assert other["name"] not in ("Torre", twin["name"])
+    # EPSG written two ways: the same system
+    assert E.same_crs("EPSG:32633", "epsg:32633") and not E.same_crs("EPSG:32633", "EPSG:32634")
+    assert not E.same_crs("LOCAL", "EPSG:32633")
+    # a stale source (built in a transform of another scale): said in the entry and the log
+    stale = dict(first, crs="LOCAL")
+    stale["built_in"] = (np.diag([2.0, 2.0, 2.0, 1.0]) @ np.asarray(first_ch.transform, float).reshape(4, 4)).tolist()
+    assert stamps.entry_stale(first_ch, stale, scale_only=True)
+    made = E.build_like(second_ch, stale, source=first_ch, same_frame=True)
+    assert made["grid_of_stale"] is True and "stale" in caplog.text.lower()
+    assert "grid_of_stale" not in again
+
+
 def test_u_map_covers_a_full_turn_and_takes_scalars():
     with pytest.raises(ValueError, match="full turn"):
         E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=[[0, 0], [180, 9.0]])
@@ -418,6 +455,15 @@ def test_cli_cylinder_axis_and_scale(tower):
     assert r.exit_code != 0 and "--like" in r.output
     r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], "--like-chunk", "nessuno"])
     assert r.exit_code != 0 and "--like-chunk" in r.output
+    for extra in (["--axis", "crest"], ["--scale", "wall"], ["--front", "1"], ["--outside"]):
+        r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], *extra])
+        assert r.exit_code != 0 and extra[0] in r.output, extra
+    # no --name: a name of its own, so --like by name stays unambiguous
+    for _ in range(2):
+        r = runner.invoke(app, ["elevation", str(path), "--like", "Seconda campagna"])
+        assert r.exit_code == 0, r.output
+    names = [e["name"] for e in ppg.Document.open(path).chunk.meta["elevations"]]
+    assert names.count("Seconda campagna") == 1 and "Seconda campagna (2)" in names and "Seconda campagna (3)" in names
 
 
 # ---------------------------------------------------------------- the axis through the tower's own centre

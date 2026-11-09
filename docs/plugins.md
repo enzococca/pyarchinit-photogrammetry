@@ -227,8 +227,8 @@ snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of 
   or between the end of a background task and the push, ends the turn: the mark becomes a step of its own.
 - **A mark while processing ends is no step.** Marked while a processing step of the program ends (its save and
   refresh: a plugin refreshing its data on `context.on_refresh`, say) or while a script of the console runs, the
-  change is a part of the processing - the history starts again from it, it cannot be undone - or of the script's
-  step.
+  change is a part of the processing - a processing step without undo (`run_task` without `undo`): the history
+  starts again from it, it cannot be undone - or of the script's step.
 - **A key covered by a plugin's steps is left to them.** A plugin that keeps its undo in its own steps says which keys
   of `chunk.meta` they cover: a `meta_keys` attribute of the step class (`meta_keys = ("mine",)`; older programs
   ignore it) or `window.history.push(text, step, document=False, keys=["mine"])` (1.7.4 or later only). From that

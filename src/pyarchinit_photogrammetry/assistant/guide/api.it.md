@@ -1538,7 +1538,8 @@ una sezione lasciata davanti al muro - viene attraversato).
 | `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | il cilindro per un cerchio adattato a punti in pianta; il suo asse da `cylinder_axis`, tenuto in `Cylinder.tilt` |
 | `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | l'asse di un cilindro e `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
 | `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder", u_map=None)` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
-| `build_like(chunk, entry, name=None, progress=None, workers=None)` | un prospetto di `chunk` sul sistema e sulla griglia di `entry` (di questo chunk o di un altro nello stesso sistema di riferimento): gli stessi pixel, per confrontare le campagne |
+| `build_like(chunk, entry, name=None, progress=None, workers=None, source=None, same_frame=False)` | un prospetto di `chunk` sul sistema e sulla griglia di `entry` (di questo chunk o di `source`, nello stesso sistema di riferimento): gli stessi pixel, per confrontare le campagne |
+| `same_crs(a, b)` | due sistemi di riferimento di chunk confrontati per significato, non per testo |
 | `wall_map(surface)`, `wall_length(entry)` | la `u_map` che fa di u la lunghezza lungo il muro; la lunghezza del muro tutto intorno |
 | `cut_profile(chunk, frame, bounds=None, simplify=0)` | la linea dove un piano taglia il modello, polilinee di `(u, v)` |
 | `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | il profilo di una sezione; come DXF nelle coordinate del prospetto (layer PROFILO, MARKER) |
@@ -1580,10 +1581,17 @@ senza `tilt` e `u_map` sono verticali e sul cilindro, come prima della 1.7.1.
 costruisce, quindi un'altra campagna sullo stesso muro avrebbe un'altra griglia. Per tenerla:
 `build_elevation(..., u_map=mappa)` (lo sviluppo su quella mappa, `scale` allora "wall"), `scale="keep"` (il sistema
 così com'è: un sistema letto con `frame_from_dict(entry["frame"])` tiene la sua mappa, un cilindro senza resta sul
-cilindro), o `build_like(chunk, entry)` - il sistema con la sua mappa, la risoluzione, `bounds`, la fascia di
-profondità, il tipo e le impostazioni del mosaico di `entry`, così le due ortofoto e i due rilievi stanno sugli
-stessi pixel. I chunk devono essere nello stesso sistema di riferimento (altrimenti ValueError); la voce nuova dice
-`grid_of` (l'id di `entry`). Riga di comando: `ppg elevation --like ID [--like-chunk CHUNK]`.
+cilindro), o `build_like(chunk, entry, source=None)` - il sistema con la sua mappa, la risoluzione, `bounds`, la fascia di
+profondità, il tipo, la fusione, la correzione del colore (attiva o no, rimisurata sulle foto di questo chunk), il
+filtro delle immagini fantasma, il riempimento dei buchi e l'angolo massimo di `entry`, così le due ortofoto e i due
+rilievi stanno sugli stessi pixel. Non si copiano le patch e i disegni del prospetto di partenza. I chunk devono essere
+nello stesso sistema di riferimento, confrontato per significato (`same_crs`; altrimenti ValueError). Due chunk LOCAL
+hanno mondi propri: un prospetto di un altro chunk con un sistema locale si rifiuta, a meno che `same_frame=True`
+dica che i due stanno nello stesso sistema (allineati, uniti, orientati sugli stessi marker) - altrimenti la griglia
+potrebbe venire vuota o fuori posto senza dirlo. Senza `name` il nuovo prende il nome di partenza reso distinto
+("Torre (2)"). La voce nuova dice `grid_of` (l'id di `entry`) e `grid_of_stale` quando quello di partenza è stato
+costruito in una trasformazione di un'altra scala (detto anche nel log). Riga di comando: `ppg elevation --like ID
+[--like-chunk CHUNK] [--same-frame]`.
 
 ### Disegni sui prospetti e sulle sezioni
 
