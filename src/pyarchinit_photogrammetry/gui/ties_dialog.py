@@ -127,7 +127,7 @@ def check(doc, unknowns: dict, robust: bool, references: bool, axes: dict, progr
     elif axes:
         axis_error = ties_mod.TieError("a straight axis needs its direction in two chunks at least",
                                        "un asse dritto richiede la sua direzione in almeno due chunk")
-    step(1.0, tr("Rapporto"))
+    step(1.0, tr("Rapporto", context="report"))
     return {"solution": solution, "checks": checks, "loo": loo, "warnings": warnings, "axis": axis,
             "axis_error": axis_error, "report": ties_mod.report(solution, checks, loo, warnings, axis)}
 
@@ -404,7 +404,7 @@ class TiesDialog(QDialog):
         bottom = QWidget()
         bl = QVBoxLayout(bottom)
         bl.setContentsMargins(0, 0, 0, 0)
-        bl.addWidget(QLabel("<b>" + html.escape(tr("Rapporto")) + "</b>"))
+        bl.addWidget(QLabel("<b>" + html.escape(tr("Rapporto", context="report")) + "</b>"))
         self.report = QTextBrowser()
         self.report.setPlaceholderText(tr("Premi Controlla: la stima e i controlli, niente viene applicato"))
         bl.addWidget(self.report, 1)
