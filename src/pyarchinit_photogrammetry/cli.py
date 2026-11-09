@@ -4636,6 +4636,122 @@ def mask_colour(project: Path,
                + (f", {result.holes} hole(s) left out" if result.holes else ""))
 
 
+water_app = typer.Typer(help="The water level of a chunk and the refraction correction of its dense cloud")
+app.add_typer(water_app, name="water")
+
+
+def _water_n(n: Optional[float], sea: bool, fresh: bool, default: Optional[float]) -> Optional[float]:
+    from .engine import water
+
+    if (n is not None) + bool(sea) + bool(fresh) > 1:
+        raise typer.BadParameter("give one of --n, --sea, --fresh")
+    if sea:
+        return water.N_SEA
+    if fresh:
+        return water.N_FRESH
+    return default if n is None else n
+
+
+def _water_line(lv: dict) -> str:
+    spread = lv.get("spread")
+    return (f"water level {lv['level']:.3f} m ({lv.get('source')}), n {lv['n']:.2f}"
+            + (f", spread (NMAD) {spread:.3f} m" if spread is not None else ""))
+
+
+@water_app.command("level")
+def water_level(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                set_z: Optional[float] = typer.Option(None, "--set", help="the level by hand: a world height (m)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the water as the polygons of a layer of "
+                                                    "free drawings (a colour mask, for instance)"),
+                hue: Optional[str] = typer.Option(None, "--hue", help="the water as a colour range of the "
+                                                  "orthophoto: hue low,high in degrees 0-360"),
+                sat: Optional[str] = typer.Option(None, "--sat", help="saturation low,high in % (default 0,100)"),
+                val: Optional[str] = typer.Option(None, "--val", help="value low,high in % (default 0,100)"),
+                sample: Optional[str] = typer.Option(None, "--sample", help="X,Y: the water is the colour of the "
+                                                     "orthophoto there"),
+                n: Optional[float] = typer.Option(None, "--n", help="refractive index of the water (1.0-2.0)"),
+                sea: bool = typer.Option(False, "--sea", help="sea water: n 1.34 (the default)"),
+                fresh: bool = typer.Option(False, "--fresh", help="fresh water: n 1.33")):
+    """The level of the water of a chunk, by hand (--set) or from the edge of the water (--layer, --hue/--sat/--val,
+    --sample): the DEM read two cells on the land side of the outline, the median the level. Stored in the project."""
+    from .engine import colour_mask, water
+
+    ways = sum(v is not None for v in (set_z, layer, hue or sat or val or None, sample))
+    if ways != 1:
+        raise typer.BadParameter("give one of --set Z, --layer NAME, --hue/--sat/--val, --sample X,Y")
+    if (sat or val) and hue is None:
+        raise typer.BadParameter("--sat/--val need --hue")
+    idx = _water_n(n, sea, fresh, water.N_SEA)
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if set_z is not None:
+            rec = water.set_level(ch, set_z, source="hand", n=idx)
+        else:
+            if layer is not None:
+                what = layer
+            elif sample is not None:
+                x, y, _z = _coordinates(sample, "--sample")
+                what = colour_mask.sample(ch, x, y)
+                typer.echo(f"sampled: {what.text()}")
+            else:
+                what = colour_mask.HsvRange(_range_of(hue, "--hue", 360), _range_of(sat, "--sat", 100) or (0.0, 100.0),
+                                            _range_of(val, "--val", 100) or (0.0, 100.0))
+            info = water.level_from_edge(ch, what, progress=print_progress)
+            rec = water.set_level(ch, info.pop("level"), source="edge", n=idx, **info)
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(_water_line(rec))
+    if rec.get("edge_cells"):
+        typer.echo(f"edge: {rec['edge_cells']} DEM cells on the land side, 10-90 % {rec['p10']:.3f} - "
+                   f"{rec['p90']:.3f} m")
+
+
+@water_app.command("correct")
+def water_correct(project: Path,
+                  chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                  n: Optional[float] = typer.Option(None, "--n", help="refractive index (default: the one stored "
+                                                    "with the level)"),
+                  dem: bool = typer.Option(False, "--dem", help="build the DEM again from the corrected cloud (a new "
+                                           "version of the DEM)")):
+    """The dense cloud corrected for the refraction under the water level (z' = L - n (L - z) below it): a new
+    version of the dense cloud, the one before kept among the versions."""
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        r = water.correct_cloud(ch, n=n, rebuild_dem=dem, progress=print_progress)
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"{r['below']} of {r['points']} points below the level {r['level']:.3f} m corrected with n "
+               f"{r['n']:.2f}; the cloud before kept as version {r['version']}")
+    typer.echo(f"note: {water.NOTE_EN} ({water.NOTE})")
+    if r.get("dem"):
+        typer.echo(f"DEM built again from the corrected cloud; the DEM before kept as version {r['dem_version']}")
+
+
+@water_app.command("show")
+def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (label or key)")):
+    """The water level of a chunk in its current system, and the correction of its cloud if any."""
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    lv = water.level_of(ch)
+    if lv is None:
+        typer.echo(f"{ch.label}: no water level")
+        return
+    typer.echo(f"{ch.label}: {_water_line(lv)}")
+    corr = (ch.meta.get("dense") or {}).get("refraction")
+    if corr:
+        typer.echo(f"active dense cloud corrected for the refraction (n {corr['n']:.2f}, level {corr['level']:.3f} m, "
+                   f"{corr['below']} points below); note: {water.NOTE_EN}")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 

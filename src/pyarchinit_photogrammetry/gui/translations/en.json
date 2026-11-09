@@ -3292,7 +3292,12 @@
   "Ritaglia con i poligoni di questo layer...": "Crop with the polygons of this layer...",
   "Lettura dell'ortofoto...": "Reading the orthophoto...",
   "Maschera dei colori...": "Mask of the colours...",
-  "Poligoni della maschera...": "Polygons of the mask..."
+  "Poligoni della maschera...": "Polygons of the mask...",
+  "Riva dell'acqua...": "Edge of the water...",
+  "Lettura del DEM lungo la riva...": "Reading the DEM along the edge...",
+  "Correzione della rifrazione...": "Refraction correction...",
+  "Scrittura della nuvola corretta...": "Writing the corrected cloud...",
+  "DEM dalla nuvola corretta...": "DEM from the corrected cloud..."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4396,6 +4401,8 @@
   "Anteprima: {0}": "Preview: {0}",
   "Il layer {0} non ha poligoni da usare per il ritaglio.": "The layer {0} has no polygons to crop with.",
   "Anteprima ridotta (celle di {0} m): {1} regioni, {2} m2, {3} % dell'ortofoto. Il layer si calcola su celle più fini: macchie e aree minime possono cambiare.": "Reduced preview (cells of {0} m): {1} regions, {2} m2, {3} % of the orthophoto. The layer is computed on finer cells: specks and smallest areas may change.",
-  "Maschera dal colore: il chunk attivo è cambiato durante il calcolo. Rendi attivo {0} e crea di nuovo il layer.": "Mask from colour: the active chunk changed during the computation. Make {0} active and create the layer again."
+  "Maschera dal colore: il chunk attivo è cambiato durante il calcolo. Rendi attivo {0} e crea di nuovo il layer.": "Mask from colour: the active chunk changed during the computation. Make {0} active and create the layer again.",
+  "Nuvola corretta per la rifrazione (n {0})": "Cloud corrected for the refraction (n {0})",
+  "DEM dalla nuvola corretta (n {0})": "DEM from the corrected cloud (n {0})"
  }
 }
