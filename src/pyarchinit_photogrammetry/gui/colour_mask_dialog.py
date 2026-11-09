@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QLabel, QLineEdit, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from ..engine import colour_mask
+from . import i18n
 from .i18n import tr
 from .ties_dialog import undo_shortcuts
 
@@ -27,6 +28,13 @@ PREVIEW_SIDE = 1000  # pixels a side of the copy of the orthophoto the preview i
 PREVIEW_LAYER = "Anteprima della maschera"  # the layer of the 2D view that shows the preview
 PREVIEW_MAX = 300  # polygons of the preview drawn, at most (the largest)
 PREVIEW_COLOUR = "#00a5e0"
+
+
+def error_text(exc: Exception) -> str:
+    """An error of the mask in the language of the interface: a :class:`..engine.colour_mask.MaskError` has both."""
+    if isinstance(exc, colour_mask.MaskError):
+        return exc.italian if i18n.current() == "it" else exc.english
+    return i18n.translate(str(exc))
 
 
 class RangeRow(QWidget):
@@ -186,13 +194,8 @@ class ColourMaskDialog(QDialog):
         return colour_mask.HsvRange(self.r_hue.values(), self.r_sat.values(), self.r_val.values())
 
     def set_range(self, rng: colour_mask.HsvRange) -> None:
-        self._timer.blockSignals(True)
-        try:
-            for row, (lo, hi) in ((self.r_hue, rng.hue), (self.r_sat, rng.sat), (self.r_val, rng.val)):
-                row.set_values(lo, hi)
-        finally:
-            self._timer.blockSignals(False)
-        self._changed()
+        for row, (lo, hi) in ((self.r_hue, rng.hue), (self.r_sat, rng.sat), (self.r_val, rng.val)):
+            row.set_values(lo, hi)  # each move starts the timer of the preview again
 
     def options(self) -> dict:
         return {"opening": self.s_opening.value(), "fill_holes": self.c_holes.isChecked(),
@@ -215,12 +218,13 @@ class ColourMaskDialog(QDialog):
             self.preview = colour_mask.mask(self.chunk, rng, image=self.image, **self.options())
         except ValueError as exc:
             self.preview = None
-            self.l_preview.setText(tr("Anteprima: {0}", str(exc)))
+            self.l_preview.setText(tr("Anteprima: {0}", error_text(exc)))
             self._clear_preview()
             self._update_buttons()
             return None
         r = self.preview
-        self.l_preview.setText(tr("Anteprima (celle di {0} m): {1} regioni, {2} m2, {3} % dell'ortofoto",
+        self.l_preview.setText(tr("Anteprima ridotta (celle di {0} m): {1} regioni, {2} m2, {3} % dell'ortofoto. "
+                                  "Il layer si calcola su celle più fini: macchie e aree minime possono cambiare.",
                                   f"{r.cell:.3f}", len(r.polygons), f"{r.area:.2f}", f"{100 * r.share:.1f}"))
         self._draw_preview(r)
         self._update_buttons()
@@ -267,7 +271,7 @@ class ColourMaskDialog(QDialog):
         try:
             rng = colour_mask.sample(self.chunk, x, y, radius=self.s_radius.value())
         except ValueError as exc:
-            self.window._warn(tr("Maschera dal colore: {0}", str(exc)))
+            self.window._warn(tr("Maschera dal colore: {0}", error_text(exc)))
             return
         self.set_range(rng)
         self.update_preview()
@@ -281,7 +285,7 @@ class ColourMaskDialog(QDialog):
         try:
             rng = self.range()
         except ValueError as exc:
-            self.window._warn(tr("Maschera dal colore: {0}", str(exc)))
+            self.window._warn(tr("Maschera dal colore: {0}", error_text(exc)))
             return False
         layer = self.e_layer.text().strip() or colour_mask.next_layer_name(self.chunk)
         chunk, opts = self.chunk, self.options()
@@ -314,13 +318,17 @@ class ColourMaskDialog(QDialog):
         if self._gone():
             return
         if isinstance(result, dict):
-            self.window._warn(tr("Maschera dal colore: {0}", str(result["error"])))
+            self.window._warn(tr("Maschera dal colore: {0}", error_text(result["error"])))
             return
         w = self.window
+        if w.chunk is not self.chunk:  # another chunk active: the step of Annulla would be lost with its history
+            w._warn(tr("Maschera dal colore: il chunk attivo è cambiato durante il calcolo. Rendi attivo {0} e crea "
+                       "di nuovo il layer.", self.chunk.label))
+            return
         try:
             ids = colour_mask.to_layer(self.chunk, result, layer=layer)
         except ValueError as exc:
-            w._warn(tr("Maschera dal colore: {0}", str(exc)))
+            w._warn(tr("Maschera dal colore: {0}", error_text(exc)))
             return
         w.setWindowModified(True)
         if w.history is not None and not w.history.applying:

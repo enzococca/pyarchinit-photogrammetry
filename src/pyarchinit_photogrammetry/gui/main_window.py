@@ -4365,15 +4365,21 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _layer_actions(self, name: str) -> list:
         """The commands of the context menu of the layer ``name`` of the Layer pane that are the window's: a layer of
-        free drawings with polygons cuts the products (*Ritaglia con questa maschera*)."""
+        free drawings with polygons cuts the products (*Ritaglia con questa maschera* for a colour mask, *Ritaglia con i
+        poligoni di questo layer* for the others)."""
         from ..core import free_drawings
 
         if not name.startswith(LAYER_PREFIX) or self.chunk is None:
             return []
         layer = name[len(LAYER_PREFIX):]
-        if not any(f["kind"] == "polygon" for f in free_drawings.features(self.chunk, layer)):
+        polys = [f for f in free_drawings.features(self.chunk, layer) if f["kind"] == "polygon"]
+        if not polys:
             return []
-        return [(tr("Ritaglia con questa maschera..."), "crop", lambda: self.crop_with_layer(layer))]
+        from ..engine.colour_mask import SOURCE_KEY, SOURCE_VALUE
+
+        mask = all((f.get("attributes") or {}).get(SOURCE_KEY) == SOURCE_VALUE for f in polys)
+        text = tr("Ritaglia con questa maschera...") if mask else tr("Ritaglia con i poligoni di questo layer...")
+        return [(text, "crop", lambda: self.crop_with_layer(layer))]
 
     def _live_ties_dialog(self):
         """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""

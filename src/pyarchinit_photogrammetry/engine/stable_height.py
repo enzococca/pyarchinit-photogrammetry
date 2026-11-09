@@ -29,14 +29,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..archaeo import coreg
 from ..core import crs as crs_mod
-from ..core import stamps
+from ..core import free_drawings, stamps
 from ..core.progress import Progress, as_progress
 from . import ties
 
@@ -253,20 +252,6 @@ def _area_spec(area) -> dict | None:
     return {"layer": str(area)}
 
 
-def _polygons_of_layer(chunk: "Chunk", layer: str) -> list:
-    """The polygons of the free-drawing layer ``layer`` of ``chunk`` in its current world (the drawings carried by a
-    change of the transform no hook saw yet, on a copy: nothing written)."""
-    import copy
-
-    from ..core import free_drawings
-
-    view = SimpleNamespace(meta={"drawings": copy.deepcopy(chunk.meta.get("drawings") or {}),
-                                 "alignment_id": chunk.meta.get("alignment_id")},
-                           transform=chunk.transform, label=chunk.label)
-    free_drawings.follow(view, adopt=False)
-    return [np.asarray(f["xyz"], float) for f in free_drawings.features(view, layer) if f["kind"] == "polygon"]
-
-
 def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | None, what: str):
     """The shapely geometry (in ``system``) of an area ``spec``; None for None. A file that says no system (a DXF, a
     GeoJSON without one) is taken in the system of the chunks; one in a local frame with projected chunks, or the
@@ -279,7 +264,7 @@ def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | No
     rings: list[np.ndarray] = []
     if "layer" in spec:
         for chunk in chunks:  # the layer of A, else of B
-            found = _polygons_of_layer(chunk, spec["layer"])
+            found = free_drawings.polygons_in_world(chunk, spec["layer"])
             if found:
                 if not ties._compatible(chunk.crs, system):
                     raise ties._not_same_frame(chunk.label, chunk.crs, chunks[0].label, system)

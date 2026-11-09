@@ -139,3 +139,37 @@ def test_no_orthophoto_said(qapp, tmp_path, monkeypatch):
         assert any("ortofoto" in t for _k, t in w.said)
     finally:
         _close(w)
+
+
+def test_layer_menu_words_and_a_chunk_changed_during_the_run(qapp, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.engine import colour_mask
+    from pyarchinit_photogrammetry.gui import i18n
+    from pyarchinit_photogrammetry.gui.colour_mask_dialog import error_text
+    from pyarchinit_photogrammetry.gui.free_drawing_actions import LAYER_PREFIX
+
+    doc, a = project(tmp_path)
+    free_drawings.add(a, "polygon", [[WATER[0], WATER[1], 50], [WATER[2], WATER[1], 50], [WATER[2], WATER[3], 50]],
+                      layer="A mano")
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        texts = [x.text() for x in w.layers_pane.layer_menu(LAYER_PREFIX + "A mano").actions()]
+        assert "Ritaglia con i poligoni di questo layer..." in texts
+        assert not any(t.startswith("Ritaglia con questa maschera") for t in texts)
+        dlg = w.open_colour_mask()
+        result = colour_mask.mask(a, colour_mask.HsvRange((170.0, 210.0), (40.0, 100.0), (30.0, 100.0)))
+        b = doc.add_chunk("B")
+        w._activate_chunk(b)
+        qapp.processEvents()
+        assert w.chunk is b
+        dlg._made(result, "Maschera colore 1")
+        assert free_drawings.features(a, "Maschera colore 1") == []
+        assert any("chunk attivo è cambiato" in t for _k, t in w.said)
+        err = colour_mask.MaskError("the mask is empty", "la maschera è vuota")
+        assert error_text(err) == "la maschera è vuota"
+        i18n.set_current("en")
+        try:
+            assert error_text(err) == "the mask is empty"
+        finally:
+            i18n.set_current("it")
+    finally:
+        _close(w)

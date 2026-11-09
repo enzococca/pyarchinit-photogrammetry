@@ -217,3 +217,87 @@ def test_cli_mask_colour(tmp_path):
     assert both.exit_code != 0  # a range or a sample, not both
     none = CliRunner().invoke(app, ["mask", "colour", p, "A"])
     assert none.exit_code != 0
+
+
+def test_a_hue_from_360_is_from_0(tmp_path):
+    _doc, a = project(tmp_path)
+    opts = dict(keep="all", opening=0.0, fill_holes=False, min_area=0.0)
+    from_360 = colour_mask.mask(a, HsvRange((360.0, 15.0), (50.0, 100.0), (30.0, 100.0)), **opts)
+    from_0 = colour_mask.mask(a, HsvRange((0.0, 15.0), (50.0, 100.0), (30.0, 100.0)), **opts)
+    assert from_360.cells == from_0.cells  # not every hue
+    assert colour_mask._circular_median(np.array([359.99, 0.01])) % 360.0 < 0.1
+
+
+def test_mask_side_bounds_share_and_16_bits(tmp_path, monkeypatch):
+    import rasterio
+
+    _doc, a = project(tmp_path)
+    monkeypatch.setattr(colour_mask, "MASK_SIDE", 100)  # the cap read at the call
+    small = colour_mask.mask(a, WATER_RANGE)
+    assert small.cell == pytest.approx(W / 100)
+    monkeypatch.undo()
+    whole = colour_mask.mask(a, WATER_RANGE)
+    part = colour_mask.mask(a, WATER_RANGE, bounds=(WATER[0] - 0.2, WATER[1] - 0.2, WATER[2] + 0.2, WATER[3] + 0.2))
+    assert np.allclose(part.polygons[0].bounds, whole.polygons[0].bounds, atol=RES)
+    assert part.share > 2 * whole.share  # of the area read
+    with pytest.raises(colour_mask.MaskError, match="outside") as err:
+        colour_mask.mask(a, WATER_RANGE, bounds=(X0 - 10, Y1 - 10, X0 - 9, Y1 - 9))
+    assert "fuori" in err.value.italian
+    grown = colour_mask.mask(a, WATER_RANGE, margin=5.0)
+    assert grown.share <= 1.0 and grown.share == pytest.approx(whole.share)  # the cells, before the margin
+    # a 16 bit orthophoto: the same rectangle
+    path = a.orthomosaic_path
+    with rasterio.open(path) as src:
+        data, profile = src.read(), src.profile
+    profile.update(dtype="uint16")
+    p16 = path.with_name("ortho16.tif")
+    with rasterio.open(p16, "w", **profile) as dst:
+        dst.colorinterp = [rasterio.enums.ColorInterp.red, rasterio.enums.ColorInterp.green,
+                           rasterio.enums.ColorInterp.blue, rasterio.enums.ColorInterp.alpha]
+        dst.write(data.astype(np.uint16) * 257)
+    a._set_product("orthomosaic", p16)
+    r16 = colour_mask.mask(a, WATER_RANGE)
+    assert np.allclose(r16.polygons[0].bounds, whole.polygons[0].bounds, atol=RES)
+
+
+def test_stale_orthophoto_and_dem_refused(tmp_path):
+    _doc, a = project(tmp_path)
+    r = colour_mask.mask(a, WATER_RANGE)
+    built = np.asarray(a.transform, float).copy()
+    built[:3, 3] += (0.5, 0.0, 0.0)  # built in another place of the chunk
+    a.meta.setdefault("built_in", {})["dem"] = built.tolist()
+    with pytest.raises(colour_mask.MaskError, match="DEM") as err:
+        colour_mask.to_layer(a, r)
+    assert "rifallo" in err.value.italian and free_drawings.features(a) == []
+    a.meta["built_in"]["orthomosaic"] = built.tolist()
+    with pytest.raises(colour_mask.MaskError, match="orthophoto"):
+        colour_mask.mask(a, WATER_RANGE)
+
+
+def test_crop_with_the_union_of_a_layer(tmp_path):
+    import rasterio
+
+    from pyarchinit_photogrammetry.engine import crop
+
+    _doc, a = project(tmp_path)
+    reds = colour_mask.mask(a, HsvRange((345.0, 15.0), (50.0, 100.0), (30.0, 100.0)))
+    water = colour_mask.mask(a, WATER_RANGE)
+    colour_mask.to_layer(a, water, layer="Due")
+    colour_mask.to_layer(a, reds, layer="Due", replace=False)
+    u = colour_mask.union(a, "Due")
+    assert u.geom_type == "MultiPolygon" and u.area == pytest.approx(water.area + reds.area, rel=1e-6)
+    out = crop.crop_raster(a.orthomosaic_path, tmp_path / "ritaglio.tif", u)
+    with rasterio.open(out) as src:
+        alpha = src.read(4)
+        tr = src.transform
+    rows, cols = np.nonzero(alpha)
+    xs, ys = tr.c + (cols + 0.5) * tr.a, tr.f + (rows + 0.5) * tr.e
+    from shapely.geometry import Point
+
+    sample = np.random.default_rng(0).choice(len(xs), 200, replace=False)
+    assert all(u.buffer(RES).contains(Point(xs[i], ys[i])) for i in sample)  # nothing outside the two polygons
+    gap = _px((WATER[2] + RED[0]) / 2, (WATER[1] + WATER[3]) / 2)  # between them: transparent
+    c, r = (int((X0 + gap[0] * RES - tr.c) / tr.a), int((Y1 - gap[1] * RES - tr.f) / tr.e))
+    assert alpha[r, c] == 0
+    with pytest.raises(colour_mask.MaskError):
+        colour_mask.union(a, "nessuno")
