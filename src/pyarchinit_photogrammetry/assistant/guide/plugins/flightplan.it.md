@@ -132,6 +132,11 @@ del progetto, mai sulle tegole se non le scegli. Se il suolo sotto un decollo no
 rimisurare (niente rete per le tegole, il decollo fuori dal DEM, il DEM che non c'è più) l'esportazione **si rifiuta**
 e dice perché: un file non porta mai quote, o discese dei punti speciali, contate dal decollo di prima.
 
+Ogni punto di un blocco che segue il terreno ha bisogno del suo suolo. Un punto di cui il suolo non si legge (fuori dal
+DEM del progetto con le tegole non scelte, o con le tegole che non rispondono) **non si indovina mai**: *Segui il
+terreno* si ferma e l'esportazione si rifiuta, dicendo quanti punti di quale blocco e come uscirne - estendere il DEM
+perché copra il volo, o scegliere le tegole pubbliche.
+
 Gli avvisi di *Progetta* (GSD, sovrapposizione, distanza dal suolo) leggono il suolo dal DEM del progetto; chiedono le
 tegole pubbliche solo quando le quote del piano vengono da lì.
 

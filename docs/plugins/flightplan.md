@@ -131,6 +131,11 @@ DEM only, never on the tiles unless you choose them. If the ground under a takeo
 for the tiles, the takeoff off the DEM, the DEM gone) the export is **refused** and says why: a file never carries
 heights, or descents of the special points, counted from the old takeoff.
 
+Every point of a block that follows the terrain needs its ground. A point whose ground cannot be read (outside the
+project DEM with the tiles not chosen, or the tiles not answering) is **never guessed**: *Follow the terrain* stops and
+the export is refused, saying how many points of which block, and the way out - extend the DEM to cover the flight, or
+choose the public tiles.
+
 The warnings of *Design* (GSD, overlap, distance from the ground) read the ground from the project DEM; they ask the
 public tiles only when the plan's heights come from them.
 
