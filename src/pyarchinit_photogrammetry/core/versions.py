@@ -283,8 +283,11 @@ def _activate_files(chunk, product: str, entry: dict, copy: bool = False) -> Non
             chunk._set_product("model_textured", dst / Path(entry["files"]["model_textured"]).name)
         elif role == "texture":
             chunk._set_product("model_textured", dst)
-    if entry.get("params"):
-        chunk.meta[PARAMS[product]] = dict(entry["params"])
+    if "params" in entry:  # the parameters of the version made active, also none (kept before it had any)
+        if entry["params"]:
+            chunk.meta[PARAMS[product]] = dict(entry["params"])
+        else:
+            chunk.meta.pop(PARAMS[product], None)
     chunk.meta.setdefault("active_versions", {})[product] = {"name": entry["name"], "created": entry["created"]}
     if entry.get("built_in") is not None:  # its stamp is the active product's now; none: built before 1.7.2
         chunk.meta.setdefault("built_in", {})[product] = [list(row) for row in entry["built_in"]]

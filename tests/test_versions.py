@@ -167,3 +167,17 @@ def test_versions_in_the_interface(excavation, tmp_path, monkeypatch):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_activating_a_version_kept_without_parameters_clears_them(excavation):
+    ch = excavation
+    assert "dense" not in ch.meta  # the cloud was written with no parameters
+    kept = versions.keep_active(ch, "point_cloud", move=False)
+    assert kept["params"] == {}
+    ch.meta["dense"] = {"quality": "high"}  # a cloud built afterwards, with its parameters
+    versions.set_active_name(ch, "point_cloud", "Nuvola nuova")
+    newer = versions.activate(ch, "point_cloud", kept["id"])
+    assert "dense" not in ch.meta  # the parameters of the newer cloud do not stay on the older one
+    assert newer["params"] == {"quality": "high"}
+    versions.activate(ch, "point_cloud", newer["id"])
+    assert ch.meta["dense"] == {"quality": "high"}
