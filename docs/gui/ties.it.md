@@ -309,7 +309,9 @@ marker vengono triangolati: gli altri marker del chunk restano dove sono. Tutta 
 controllare e applicare come tutti gli altri.
 
 Una proposta appartiene all'allineamento in cui è stata trovata: dopo un nuovo allineamento delle foto del chunk,
-accettarla viene rifiutato - cerca di nuovo.
+accettarla viene rifiutato - cerca di nuovo. La finestra lo dice sotto la tabella, e anche quando il chunk è stato
+spostato da una stima dopo la ricerca (accettare resta giusto, ma coordinate, spostamenti e righe rosse sono di prima)
+o rimosso.
 
 ## Riga di comando
 

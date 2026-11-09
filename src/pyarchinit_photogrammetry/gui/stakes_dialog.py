@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import html
+import threading
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget,
@@ -27,6 +28,7 @@ from .ties_dialog import edit_state, error_text, record_edit, undo_shortcuts
 
 RED = "#c0392b"
 GREY = "#7f8c8d"
+ORANGE = "#b9770e"
 PREVIEW_SIZE = 256  # pixels of each half of the picture of a proposal
 
 FLAG_TEXTS = {  # the flags of a proposal (engine.stakes) as the window says them
@@ -49,6 +51,12 @@ def _chunks_with_ortho(doc) -> list:
 
 def _referenced(ch) -> bool:
     return any(m.reference.location is not None and m.reference.enabled for m in ch.markers)
+
+
+class _PreviewRelay(QObject):
+    """Brings the picture of a proposal, made in a thread of its own, to the window (a queued signal)."""
+
+    done = Signal(object, object)  # key, RGB array or the exception
 
 
 def to_pixmap(rgb: np.ndarray) -> QPixmap:
@@ -83,13 +91,17 @@ class StakesDialog(QDialog):
         self.result: dict | None = None  # stakes.check of the proposals shown
         self.searching = False
         self._previews: dict = {}
+        self._preview_wanted = None  # the key of the picture the window waits for (made in a thread)
+        self._preview_relay = _PreviewRelay(self)
+        self._preview_relay.done.connect(self._preview_made)
+        self.placed: dict | None = None  # the chunk of the proposals at search time: transform, alignment
 
         lay = QVBoxLayout(self)
         intro = QLabel(tr("Picchetti e capisaldi cercati vicino a punti di coordinate note: teste scure e rotonde "
                           "sull'ortofoto, confermate dalle foto. Sono solo proposte: diventano legami a coordinate "
-                          "note solo quando le accetti. Rileva prima i target codificati (Flusso di lavoro > Rileva marker codificati): "
-                          "su un'ortofoto a bassa risoluzione le celle di un target non rilevato possono sembrare "
-                          "teste."))
+                          "note solo quando le accetti. Rileva prima i target codificati (Flusso di lavoro > Rileva "
+                          "marker codificati...): su un'ortofoto a bassa risoluzione le celle di un target non "
+                          "rilevato possono sembrare teste."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
 
@@ -150,6 +162,7 @@ class StakesDialog(QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         ll.addWidget(self.table, 1)
         self.summary = QLabel("")
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setWordWrap(True)
         ll.addWidget(self.summary)
         split.addWidget(left)
@@ -198,6 +211,7 @@ class StakesDialog(QDialog):
         self.b_close.clicked.connect(self.close)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.finished.connect(self._forget)
+        window.refreshed.connect(self.follow)  # chunks removed, moved or aligned again while the window is open
         undo_shortcuts(self, window)
         self._fill_chunks()
         self._update_buttons()
@@ -337,6 +351,9 @@ class StakesDialog(QDialog):
             return
         self.proposals = list(result)
         self.chunk_key = key
+        ch = self.chunk()
+        self.placed = None if ch is None else {"transform": np.asarray(ch.transform, float).copy(),
+                                               "alignment": ties_mod._alignment(ch)}
         self._previews.clear()
         self._refill()
         found = sum(p.best is not None for p in self.proposals)
@@ -345,6 +362,42 @@ class StakesDialog(QDialog):
 
     def chunk(self):
         return next((c for c in self.doc.chunks if c.key == self.chunk_key), None)
+
+    def stale(self) -> str | None:
+        """Why the proposals shown no longer match their chunk (removed, moved by a solve, aligned again), or None.
+        Accepting stays right after a move (the ends are kept in the internal frame) and is refused after a new
+        alignment or a removal; the coordinates, displacements and red rows of the table are those of the search."""
+        if self.chunk_key is None or not self.proposals:
+            return None
+        ch = self.chunk()
+        if ch is None:
+            return tr("il chunk delle proposte non c'è più: cerca di nuovo")
+        if self.placed is None:
+            return None
+        if self.placed["alignment"] != ties_mod._alignment(ch):
+            return tr("il chunk è stato allineato di nuovo dopo la ricerca: cerca di nuovo")
+        if not np.allclose(np.asarray(ch.transform, float), self.placed["transform"], rtol=0, atol=1e-9):
+            return tr("il chunk è stato spostato dopo la ricerca: coordinate, spostamenti e righe rosse sono di "
+                      "prima - cerca di nuovo")
+        return None
+
+    def follow(self) -> None:
+        """The main window refreshed: the chunks of the combo read again (one removed, renamed, a new orthophoto) and
+        the note of proposals that no longer match their chunk."""
+        try:
+            self.isVisible()
+        except RuntimeError:
+            return
+        if self.doc is not self.window.doc:
+            return
+        seen = [(c.key, c.label) for c in _chunks_with_ortho(self.doc)]
+        if seen != [(self.c_chunk.itemData(i), self.c_chunk.itemText(i)) for i in range(self.c_chunk.count())]:
+            key = self.c_chunk.currentData()
+            self._fill_chunks()
+            i = self.c_chunk.findData(key)
+            if i >= 0:
+                self.c_chunk.setCurrentIndex(i)
+        self._refill()
 
     # ------------------------------------------------------------------ table
     def _warning(self, p: stakes.Proposal, suspects: set, outliers: set) -> str:
@@ -397,7 +450,12 @@ class StakesDialog(QDialog):
             text = ""
         if suspects or outliers:
             text += " " + tr("In rosso: da controllare prima di accettarli.")
-        self.summary.setText(text.strip())
+        why = self.stale()
+        if why:
+            text = f'<span style="color:{ORANGE}">{html.escape(why)}</span><br>' + html.escape(text.strip())
+        else:
+            text = html.escape(text.strip())
+        self.summary.setText(text)
         self._update_buttons()
         self._selection_changed()
 
@@ -445,16 +503,50 @@ class StakesDialog(QDialog):
             self.preview_text.setText("")
             return
         key = (p.point.name, id(p.best))
+        self._preview_wanted = key
         pix = self._previews.get(key)
-        if pix is None:
-            try:
-                pix = to_pixmap(stakes.preview(ch, p, size=PREVIEW_SIZE))
-            except (OSError, ValueError) as exc:
-                self.preview.setPixmap(QPixmap())
-                self.preview.setText(error_text(exc))
-                return
-            self._previews[key] = pix
-        self.preview.setPixmap(pix)
+        if pix is None:  # read in a thread: a slow photo (a network or "online only" folder) never stops the window
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText(tr("Lettura dell'ortofoto e della foto..."))
+            relay = self._preview_relay
+
+            def make():
+                try:
+                    out = stakes.preview(ch, p, size=PREVIEW_SIZE)
+                except Exception as exc:  # noqa: BLE001 - said in the window
+                    out = exc
+                with contextlib.suppress(RuntimeError):  # the window closed meanwhile
+                    relay.done.emit(key, out)
+
+            threading.Thread(target=make, name="ppg-stake-preview", daemon=True).start()
+        else:
+            self.preview.setPixmap(pix)
+        self._preview_caption(p)
+
+    def _preview_made(self, key, out) -> None:
+        if isinstance(out, np.ndarray):
+            self._previews[key] = to_pixmap(out)
+        if key != self._preview_wanted:
+            return
+        self._preview_wanted = None
+        if isinstance(out, np.ndarray):
+            self.preview.setPixmap(self._previews[key])
+        else:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText(error_text(out))
+
+    def wait_preview(self, timeout_s: float = 30.0) -> None:
+        """Wait (processing events) for the picture asked: for scripts and tests."""
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        t0 = time.monotonic()
+        while self._preview_wanted is not None and time.monotonic() - t0 < timeout_s:
+            QApplication.processEvents()
+            time.sleep(0.01)
+
+    def _preview_caption(self, p) -> None:
         if p.best is None:
             self.preview_text.setText(tr("Croce rossa sul punto noto: nessuna testa trovata."))
         else:
@@ -506,14 +598,21 @@ class StakesDialog(QDialog):
         return self._accept(names)
 
     def _accept(self, names: list[str]) -> list:
+        if not names:
+            return []
         ch = self.chunk()
-        if not names or ch is None:
+        if ch is None:
+            self.window._warn(tr("Cerca picchetti: {0}", tr("il chunk delle proposte non c'è più: cerca di nuovo")))
             return []
         chosen = [p for p in self.proposals if p.point.name in names]
         before = edit_state(self.doc)
         try:
             made = stakes.accept(self.doc, ch, chosen)
         except (ValueError, KeyError, ties_mod.TieError) as exc:
+            # a failure half way leaves what was made before it: one step of Annulla all the same (none if nothing)
+            if record_edit(self.window, tr("Accetta i picchetti"), before):
+                with contextlib.suppress(AttributeError, RuntimeError):
+                    self.window._ties_made()
             self.window._warn(tr("Cerca picchetti: {0}", error_text(exc)))
             return []
         record_edit(self.window, tr("Accetta i picchetti"), before)
@@ -532,6 +631,8 @@ class StakesDialog(QDialog):
         if getattr(self, "_forgotten", False):
             return
         self._forgotten = True
+        with contextlib.suppress(RuntimeError, TypeError):
+            self.window.refreshed.disconnect(self.follow)
         if getattr(self.window, "_stakes_dialog", None) is self:
             self.window._stakes_dialog = None
 

@@ -406,8 +406,13 @@ class TiesDialog(QDialog):
             row.addWidget(b)
         row.addStretch(1)
         tl.addLayout(row)
+        split.addWidget(top)
 
-        tl.addWidget(QLabel("<b>" + html.escape(tr("Quote stabili")) + "</b>"))
+        # the stable heights and the unknowns in panes of their own: the splitter lets the user give the room
+        mid = QWidget()
+        ml = QVBoxLayout(mid)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(QLabel("<b>" + html.escape(tr("Quote stabili")) + "</b>"))
         self.heights = QTableWidget(0, len(self.HCOLS))
         self.heights.setHorizontalHeaderLabels([tr("Nome"), tr("Chunk"), tr("Rispetto a"), tr("dz (m)"),
                                                 tr("NMAD (m)"), tr("Celle"), tr("Piano"), tr("Attivo"),
@@ -417,8 +422,7 @@ class TiesDialog(QDialog):
         self.heights.verticalHeader().setVisible(False)
         self.heights.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.heights.horizontalHeader().setStretchLastSection(True)
-        self.heights.setMaximumHeight(120)  # a few rows: the ties above keep the room
-        tl.addWidget(self.heights)
+        ml.addWidget(self.heights, 1)
         hrow = QHBoxLayout()
         self.b_measure_height = QPushButton(tr("Misura quota stabile..."))
         self.b_measure_height.setToolTip(tr("La quota di un chunk rispetto a un altro sul terreno che non è cambiato "
@@ -431,9 +435,13 @@ class TiesDialog(QDialog):
         for b in (self.b_measure_height, self.b_remeasure_height, self.b_remove_height):
             hrow.addWidget(b)
         hrow.addStretch(1)
-        tl.addLayout(hrow)
+        ml.addLayout(hrow)
+        split.addWidget(mid)
 
-        tl.addWidget(QLabel("<b>" + html.escape(tr("Incognite per chunk")) + "</b>"))
+        low = QWidget()
+        ll = QVBoxLayout(low)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(QLabel("<b>" + html.escape(tr("Incognite per chunk")) + "</b>"))
         self.chunks = QTableWidget(0, 4)
         self.chunks.setHorizontalHeaderLabels([tr("Chunk"), tr("Incognite"), tr("Asse: da marker"),
                                                tr("Asse: a marker")])
@@ -441,8 +449,7 @@ class TiesDialog(QDialog):
         self.chunks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.chunks.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.chunks.horizontalHeader().setStretchLastSection(True)
-        self.chunks.setMaximumHeight(160)  # the ties above keep the room; more chunks scroll
-        tl.addWidget(self.chunks)
+        ll.addWidget(self.chunks, 1)
         opts = QHBoxLayout()
         self.c_robust = QCheckBox(tr("Robusto"))
         self.c_robust.setToolTip(tr("Pesi di Huber: un legame sbagliato pesa meno (la stima si ripete finché i pesi "
@@ -453,8 +460,8 @@ class TiesDialog(QDialog):
         opts.addWidget(self.c_robust)
         opts.addWidget(self.c_references)
         opts.addStretch(1)
-        tl.addLayout(opts)
-        split.addWidget(top)
+        ll.addLayout(opts)
+        split.addWidget(low)
 
         bottom = QWidget()
         bl = QVBoxLayout(bottom)
@@ -464,6 +471,10 @@ class TiesDialog(QDialog):
         self.report.setPlaceholderText(tr("Premi Controlla: la stima e i controlli, niente viene applicato"))
         bl.addWidget(self.report, 1)
         split.addWidget(bottom)
+        split.setChildrenCollapsible(False)
+        for i, stretch in enumerate((3, 1, 1, 2)):  # the ties first, the report next
+            split.setStretchFactor(i, stretch)
+        split.setSizes([260, 130, 130, 220])
 
         buttons = QHBoxLayout()
         self.b_check = QPushButton(tr("Controlla"))

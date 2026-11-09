@@ -747,6 +747,7 @@ def _stakes_shots(w, demo: Path, pump, save) -> None:
         dlg.e_file.setText("~/ppg_demo/punti_noti.csv")
         confirmed = [p.point.name for p in dlg.proposals if p.best is not None and not p.best.ortho_only]
         dlg.select(confirmed[:1] or [dlg.proposals[0].point.name])
+        dlg.wait_preview()
         pump(600)
         save(dlg.grab(), "stakes-dialog")
         w._close_stakes_dialog()

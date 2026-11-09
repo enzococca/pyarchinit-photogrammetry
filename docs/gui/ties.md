@@ -298,7 +298,9 @@ alone are triangulated: the other markers of the chunk stay where they are. The 
 any other.
 
 A proposal belongs to the alignment it was found in: after a new alignment of the photos of the chunk, accepting it
-is refused - search again.
+is refused - search again. The window says so under the table, and also when the chunk was moved by a solve after
+the search (accepting is still right then, but the coordinates, displacements and red rows are those of before) or
+removed.
 
 ## Command line
 

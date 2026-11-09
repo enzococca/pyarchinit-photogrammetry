@@ -158,6 +158,7 @@ def test_the_preview_shows_the_selected_proposal(qapp, tmp_path, monkeypatch, sc
         dlg = _searched(w, qapp, tmp_path, truth)
         assert dlg.preview_pixmap() is None  # nothing selected yet
         dlg.select([dlg.proposals[1].point.name])
+        dlg.wait_preview()  # read in a thread of its own
         pix = dlg.preview_pixmap()
         assert pix is not None and not pix.isNull()
         assert (pix.width(), pix.height()) == (2 * PREVIEW_SIZE, PREVIEW_SIZE)
@@ -170,6 +171,94 @@ def test_the_preview_shows_the_selected_proposal(qapp, tmp_path, monkeypatch, sc
         if p.others:
             assert dlg.other_candidate()
             assert dlg.proposals[1].best is p.others[0]
+            dlg.wait_preview()
             assert dlg.preview_pixmap() is not None
+    finally:
+        _close(w)
+
+
+def _confirmed(p):
+    """A proposal as if the photos had confirmed it (no photo measurement kept: the window's choice is tested)."""
+    p.best.ortho_only, p.best.agreeing, p.best.photos = False, 4, []
+    p.flags = [f for f in p.flags if f != "ortho_only"]
+
+
+def test_accept_the_agreeing_ones_leaves_out_the_red_and_the_orthophoto_only(qapp, tmp_path, monkeypatch, scene):
+    sc, truth = scene
+    doc, _ch = project(tmp_path, sc)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _searched(w, qapp, tmp_path, truth)
+        names = [p.point.name for p in dlg.proposals]
+        for p in dlg.proposals[:3]:
+            _confirmed(p)
+        dlg._refill()
+        dlg.result["suspects"] = [names[0]]  # a red row: never accepted with the agreeing ones
+        steps = len(w.history.entries)
+        made = dlg.accept_agreeing()
+        assert sorted(t.name for t in made) == sorted(names[1:3])
+        assert sorted(t.name for t in ties.ties_of(doc)) == sorted(names[1:3])
+        assert len(w.history.entries) == steps + 1
+        assert [p.point.name for p in dlg.proposals] == [names[0], *names[3:]]
+    finally:
+        _close(w)
+
+
+def test_accept_refused_after_a_new_alignment_or_when_the_chunk_is_gone(qapp, tmp_path, monkeypatch, scene):
+    sc, truth = scene
+    doc, ch = project(tmp_path, sc)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _searched(w, qapp, tmp_path, truth)
+        steps, markers = len(w.history.entries), len(ch.markers)
+        first = dlg.proposals[0].point.name
+        dlg.proposals[0].alignment = "un altro allineamento"
+        dlg.select([first])
+        assert dlg.accept_selected() == []
+        assert w.said[-1][0] == "warn" and ties.ties_of(doc) == []
+        assert len(w.history.entries) == steps and len(ch.markers) == markers
+        # the chunk moved by a solve after the search: the window says the table is of before
+        t = np.asarray(ch.transform, float).copy()
+        t[0, 3] += 0.5
+        ch.transform = t
+        w.refresh_all()
+        qapp.processEvents()
+        assert "spostato dopo la ricerca" in dlg.summary.text()
+        # the chunk removed: said, nothing added
+        dlg.chunk_key = 10_000
+        dlg.select([dlg.proposals[1].point.name])
+        assert dlg.accept_selected() == []
+        assert w.said[-1][0] == "warn" and "non c'è più" in w.said[-1][1]
+        assert ties.ties_of(doc) == [] and len(w.history.entries) == steps
+    finally:
+        _close(w)
+
+
+def test_a_failure_half_way_is_still_one_step(qapp, tmp_path, monkeypatch, scene):
+    from pyarchinit_photogrammetry.engine import stakes
+
+    sc, truth = scene
+    doc, _ch = project(tmp_path, sc)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _searched(w, qapp, tmp_path, truth)
+        real = ties.add_known
+        calls = []
+
+        def add_known(*a, **k):  # the second proposal fails after the first one is made
+            calls.append(1)
+            if len(calls) == 2:
+                raise ValueError("precisione non valida")
+            return real(*a, **k)
+
+        monkeypatch.setattr(stakes.ties, "add_known", add_known)
+        dlg.select([p.point.name for p in dlg.proposals[:2]])
+        steps = len(w.history.entries)
+        assert dlg.accept_selected() == []
+        assert w.said[-1][0] == "warn"
+        assert len(ties.ties_of(doc)) == 1 and len(w.history.entries) == steps + 1  # what was made, undoable
+        w.undo()
+        qapp.processEvents()
+        assert ties.ties_of(doc) == []
     finally:
         _close(w)

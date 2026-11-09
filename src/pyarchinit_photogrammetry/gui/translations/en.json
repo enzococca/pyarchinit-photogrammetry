@@ -3254,12 +3254,16 @@
   "Croce rossa sul punto noto: nessuna testa trovata.": "Red cross on the known point: no head found.",
   "Nessuna proposta confermata dalle foto e senza avvisi.": "No proposal confirmed by the photos and without warnings.",
   "Accetta i picchetti": "Accept the stakes",
-  "Picchetti e capisaldi cercati vicino a punti di coordinate note: teste scure e rotonde sull'ortofoto, confermate dalle foto. Sono solo proposte: diventano legami a coordinate note solo quando le accetti. Rileva prima i target codificati (Flusso di lavoro > Rileva marker codificati): su un'ortofoto a bassa risoluzione le celle di un target non rilevato possono sembrare teste.": "Stakes and benchmarks looked for near points of known coordinates: dark round heads on the orthophoto, confirmed by the photos. They are only proposals: they become known ties only when you accept them. Detect the coded targets first (Workflow > Detect coded markers): on a coarse orthophoto the cells of an undetected target can look like heads.",
   "nessuna testa trovata": "no head found",
   "nessuna quota per il punto (niente z e niente DEM lì)": "no height for the point (no z and no DEM there)",
   "fuori dall'ortofoto": "outside the orthophoto",
   "nessuna foto allineata": "no aligned photos",
-  "foto illeggibili": "unreadable photos"
+  "foto illeggibili": "unreadable photos",
+  "Picchetti e capisaldi cercati vicino a punti di coordinate note: teste scure e rotonde sull'ortofoto, confermate dalle foto. Sono solo proposte: diventano legami a coordinate note solo quando le accetti. Rileva prima i target codificati (Flusso di lavoro > Rileva marker codificati...): su un'ortofoto a bassa risoluzione le celle di un target non rilevato possono sembrare teste.": "Stakes and benchmarks looked for near points of known coordinates: dark round heads on the orthophoto, confirmed by the photos. They are only proposals: they become known ties only when you accept them. Detect the coded targets first (Workflow > Detect coded markers...): on a coarse orthophoto the cells of an undetected target can look like heads.",
+  "Lettura dell'ortofoto e della foto...": "Reading the orthophoto and the photo...",
+  "il chunk delle proposte non c'è più: cerca di nuovo": "the chunk of the proposals is no longer there: search again",
+  "il chunk è stato allineato di nuovo dopo la ricerca: cerca di nuovo": "the chunk was aligned again after the search: search again",
+  "il chunk è stato spostato dopo la ricerca: coordinate, spostamenti e righe rosse sono di prima - cerca di nuovo": "the chunk was moved after the search: coordinates, displacements and red rows are those of before - search again"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
