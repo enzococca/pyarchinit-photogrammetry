@@ -231,7 +231,7 @@ def test_report_structured_and_in_two_languages(scene):
     json.dumps(rep)
     assert rep["suspects"] == [made[3].id]
     codes = [m["code"] for m in rep["messages"]]
-    assert "distance_suspect" in codes and "loo_large" in codes
+    assert "distance_suspect" in codes and "loo_large_solved" in codes
     # the chunk's precision is poor because the ties disagree (sigma0), not because of their spread: it says so
     assert sol.per_chunk[b.chunk.key]["precision_cause"] == "residuals" and "precision_residuals" in codes
     assert "precision_spread" not in codes
@@ -349,3 +349,33 @@ def test_leave_one_out_takes_the_solution_already_made(scene, monkeypatch):
     monkeypatch.setattr(ties, "solve", lambda *a, **k: calls.append(k.get("check_ties")) or real(*a, **k))
     loo = ties.leave_one_out(doc, unknowns, solution=sol)
     assert len(loo) == 5 and all(c for c in calls) and len(calls) == 5
+
+
+def test_leave_one_out_tolerance_has_the_precision_of_the_solve_without_the_tie(scene):
+    """Four ties close together and a right one far away: without it the others place B loosely at its point, and
+    its ends come out ~0.1 m apart - more than 3 x its own precision, within the precision of that solve. It is not
+    called wrong; a wrong tie still is."""
+    doc, a, b, _c = _three(scene)
+    noise = [(0.008, -0.006, 0.004), (-0.007, 0.009, -0.005), (0.006, 0.007, 0.008), (-0.009, -0.005, -0.006)]
+    for xy, n in zip([(0.6, 0.6), (0.9, 0.6), (0.9, 0.9), (0.6, 0.9)], noise):
+        w = _world(scene, xy)[0]
+        ties.add_tie(doc, a.chunk, a.internal(w)[0], b.chunk, b.internal(w + np.array(n))[0], precision=0.01)
+    w = _world(scene, (3.6, 2.6))[0]
+    far = ties.add_tie(doc, a.chunk, a.internal(w)[0], b.chunk, b.internal(w)[0], precision=0.01)
+    unknowns = {a.chunk.key: "fixed", b.chunk.key: "rigid"}
+    sol = ties.solve(doc, unknowns)
+    loo = ties.leave_one_out(doc, unknowns, solution=sol)
+    assert loo[far.id] > 3 * 0.01 and loo.precision[far.id] > 3 * 0.01  # its own precision alone would name it
+    rep = ties.report(sol, [], loo, [])
+    assert not [m for m in rep["messages"] if m["code"].startswith("loo_large")]
+    row = next(r for r in rep["ties"] if r["id"] == far.id)
+    assert row["loo_precision"] == pytest.approx(loo.precision[far.id])
+    json.dumps(rep)
+    # a wrong tie is named with both precisions
+    doc, a, b, _c, made = _five_with_a_wrong_one(scene)
+    unknowns = {a.chunk.key: "fixed", b.chunk.key: "similarity"}
+    sol = ties.solve(doc, unknowns)
+    loo = ties.leave_one_out(doc, unknowns, solution=sol)
+    msgs = [m for m in ties.report(sol, [], loo, [])["messages"] if m["code"].startswith("loo_large")]
+    assert [m["args"][0] for m in msgs] == [made[3].name]
+    assert msgs[0]["code"] == "loo_large_solved" and "of the solve without it" in ties.render(msgs[0])

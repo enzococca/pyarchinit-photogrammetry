@@ -114,7 +114,8 @@ The report gives:
       times its combined precision does not agree; the tie found in most of the pairs that do not agree is named as
       **probably wrong**;
     * **leave one out**: each tie is taken away in turn and the others place its ends; when they end up far apart
-      (more than 3 times its precision), the tie is named;
+      (more than 3 times its precision combined with how precisely the others alone place them - a chunk held by a
+      few ties close together is placed loosely far from them), the tie is named;
     * **large residuals**: a tie with a residual over 3 times its precision;
     * **implausible movements**: a chunk georeferenced by GPS or GNSS turned by more than 5 degrees, or scaled
       outside 0.98-1.02. A chunk in a local frame has no limit;

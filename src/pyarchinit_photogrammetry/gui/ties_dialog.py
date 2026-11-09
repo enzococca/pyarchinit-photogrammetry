@@ -35,7 +35,7 @@ RED = "#c0392b"
 ORANGE = "#b9770e"
 GREY = "#7f8c8d"
 # messages of the report that point at a wrong tie or a wrong result (red); the precision warnings are advice
-ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "residual_large", "implausible_rotation",
+ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "loo_large_solved", "residual_large", "implausible_rotation",
           "implausible_scale", "axis_bent", "distance_scale", "distance_scale_known"}
 ADVICE = {"precision_spread", "precision_residuals", "precision_inherited", "not_levelled", "tilt_scale_kept",
           "local_references", "approximated", "robust_unsettled"}

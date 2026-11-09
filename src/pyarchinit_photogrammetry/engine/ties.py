@@ -819,6 +819,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "loo_large": ("Legame «{0}» tolto: gli altri mettono i suoi estremi a {1:.3f} m l'uno dall'altro (precisione "
                   "{2:.3f} m)",
                   "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m)"),
+    "loo_large_solved": ("Legame «{0}» tolto: gli altri mettono i suoi estremi a {1:.3f} m l'uno dall'altro "
+                         "(precisione {2:.3f} m, della stima senza di lui {3:.3f} m)",
+                         "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m, of the "
+                         "solve without it {3:.3f} m)"),
     "axis_bent": ("Asse dritto: {0} e {1} formano un angolo di {2:.1f}° (in pianta {3:.1f}°, in quota {4:.1f}°)",
                   "Straight axis: {0} and {1} meet at {2:.1f}° (in plan {3:.1f}°, in height {4:.1f}°)"),
     "out_no_such_tie": ("Escluso «{0}»: nessun legame con questo identificativo", "Left out «{0}»: no such tie"),
@@ -1476,6 +1480,29 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
 
     # residuals of every observation
     weight_of = {id(o): float(w) for o, w in zip(fitted, weights)}
+
+    def predicted(o) -> float | None:
+        """How precisely the unknowns put the ends of a check observation together: the largest standard deviation
+        of its separation from the covariance of the unknowns (one finite difference per unknown)."""
+        keys = [o.a[0]] + ([o.b[0]] if o.b is not None else [])
+        if not n_par or any(k not in slices for k in keys):
+            return None
+        a = geometry.apply(base[o.a[0]], o.a[1])
+        b = geometry.apply(base[o.b[0]], o.b[1]) if o.b is not None else None
+
+        def sep(xx):
+            C = moved(xx)
+            return geometry.apply(C[o.a[0]], a) - (geometry.apply(C[o.b[0]], b) if b is not None else 0.0)
+
+        here = sep(x)
+        G = np.zeros((3, n_par))
+        for j in [j for k in dict.fromkeys(keys) for j in range(slices[k].start, slices[k].stop)]:
+            step = x.copy()
+            step[j] += 1e-7
+            G[:, j] = (sep(step) - here) / 1e-7
+        cov = G @ covariance @ G.T
+        return float(np.sqrt(max(0.0, float(np.linalg.eigvalsh((cov + cov.T) / 2).max()))))
+
     entries = []
     for o in obs:
         pa = geometry.apply(final[o.a[0]], o.a[1])
@@ -1486,7 +1513,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                         "dx": float(r[0]), "dy": float(r[1]), "dz": float(r[2]), "d": float(np.linalg.norm(r)),
                         "precision": float(np.max(o.sigma)), "normalised": float(np.linalg.norm(r / o.sigma)),
                         "weight": weight_of.get(id(o), 1.0), "fitted": id(o) in weight_of,
-                        "check": bool(o.check)})
+                        "check": bool(o.check), "predicted": predicted(o) if o.check else None})
     used = [e for e in entries if e["fitted"]]
     redundancy = 3 * len(used) - n_par
     rms = float(np.sqrt(np.mean([e["d"] ** 2 for e in used]))) if used else 0.0
@@ -1784,8 +1811,18 @@ def suspects(checks: list[dict]) -> list[str]:
     return [tid for tid, _f, _n in bad]
 
 
+class LeaveOneOut(dict):
+    """tie id -> how far apart the others put its ends (:func:`leave_one_out`); ``precision``: tie id -> how
+    precisely the solve without it puts them (the largest standard deviation of the separation, from the covariance
+    of its unknowns)."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.precision: dict[str, float] = {}
+
+
 def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool = True,
-                  robust: bool = False, solution: Solution | None = None) -> dict[str, float]:
+                  robust: bool = False, solution: Solution | None = None) -> LeaveOneOut:
     """For each tie of the solve (two-chunk ties and known points), the solve made again without it: how far apart
     the others put its ends (for a known point: from its coordinates). A wrong tie is far from where the others put
     it. Only ties after whose removal some redundancy is left (>= 1); the others are not in the result. Nothing is
@@ -1793,12 +1830,14 @@ def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool =
     :class:`TieError` when the solve with every tie cannot be made.
 
     One solve per tie (each up to 30 robust rounds with ``robust``): the window runs it in its worker. The value is
-    a distance, without the propagated precision of the reduced solve (:func:`report` compares it with 3 x the
-    tie's precision and names only the ties near the worst: fix the worst one, solve again)."""
+    a distance; ``LeaveOneOut.precision`` has how precisely the reduced solve puts the ends together (a chunk held by
+    few ties is placed loosely without one of them): :func:`report` compares the distance with 3 x the two precisions
+    combined (``hypot``), so a right tie is not named under weak geometry, and names only the ties near the worst
+    (a wrong tie drags the others: fix the worst one, solve again)."""
     full = solution if solution is not None else solve(doc, unknowns, ties=ties, references=references,
                                                        robust=robust)
     ids = [r["id"] for r in full.residuals if r["id"] is not None and r["fitted"]]
-    out: dict[str, float] = {}
+    out = LeaveOneOut()
     if full.redundancy < 4:  # a tie takes 3 equations away: nothing would be left to check it
         return out
     for tid in ids:
@@ -1811,6 +1850,8 @@ def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool =
         entry = next((r for r in sol.residuals if r["id"] == tid), None)
         if entry is not None:
             out[tid] = float(entry["d"])
+            if entry.get("predicted") is not None:
+                out.precision[tid] = float(entry["predicted"])
     return out
 
 
@@ -1921,6 +1962,7 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
 
     suspect = suspects(checks)
     counts = _distance_counts(checks)
+    loo_precision = dict(getattr(loo, "precision", None) or {})
     labels = {k: v["label"] for k, v in solution.per_chunk.items()}
     rows = []
     for r in solution.residuals:
@@ -1930,7 +1972,8 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
         rows.append({"id": r["id"], "name": r["name"], "kind": r["kind"], "chunks": r["chunks"], "d": r["d"],
                      "plan": float(np.hypot(r["dx"], r["dy"])), "dz": r["dz"], "precision": r["precision"],
                      "normalised": r["normalised"], "fitted": r["fitted"], "check": r["check"],
-                     "loo": loo.get(r["id"]), "distance_pairs": n, "distance_failed": f,
+                     "loo": loo.get(r["id"]), "loo_precision": loo_precision.get(r["id"]),
+                     "distance_pairs": n, "distance_failed": f,
                      "suspect": r["id"] in suspect})
     names = {r["id"]: r["name"] for r in rows}
     for ch in checks:
@@ -1968,9 +2011,12 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
     precision = {r["id"]: r["precision"] for r in rows}
     worst = max(loo.values()) if loo else 0.0
     for tid, value in sorted(loo.items(), key=lambda kv: -kv[1]):
-        # a wrong tie drags the others too: only those near the worst one are named
-        if value > CHECK_FACTOR * precision.get(tid, 0.0) and value >= 0.5 * worst:
-            msgs.append(message("loo_large", names.get(tid, tid), value, precision.get(tid, 0.0)))
+        # the tolerance: the tie's precision and how precisely the solve without it puts its ends together; a wrong
+        # tie drags the others too: only those near the worst one are named
+        own, solved = precision.get(tid, 0.0), loo_precision.get(tid, 0.0)
+        if value > CHECK_FACTOR * float(np.hypot(own, solved)) and value >= 0.5 * worst:
+            msgs.append(message("loo_large_solved", names.get(tid, tid), value, own, solved) if solved > own / 10
+                        else message("loo_large", names.get(tid, tid), value, own))
     large = sorted((r for r in rows if r["fitted"] and r["normalised"] > CHECK_FACTOR), key=lambda r: -r["normalised"])
     for r in large:  # as above: those near the worst one
         if r["normalised"] >= 0.5 * large[0]["normalised"]:
@@ -2040,4 +2086,4 @@ __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
            "remove_tie", "resolve_end", "dem_height", "world_to_internal", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION",
            "KINDS", "TieError", "Solution", "solve", "Comma", "held_by_references", "apply", "restore", "MESSAGES", "message", "render",
-           "distance_checks", "suspects", "leave_one_out", "plausibility", "axis_check", "report", "report_text"]
+           "distance_checks", "suspects", "LeaveOneOut", "leave_one_out", "plausibility", "axis_check", "report", "report_text"]

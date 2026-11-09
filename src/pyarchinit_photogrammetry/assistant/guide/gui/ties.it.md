@@ -119,7 +119,9 @@ Il rapporto dà:
       combinata non torna; il legame presente in più coppie che non tornano è indicato come **probabilmente
       sbagliato**;
     * **togli un legame per volta**: ogni legame viene tolto a turno e gli altri ne collocano gli estremi; quando
-      finiscono lontani (più di 3 volte la sua precisione), il legame è indicato;
+      finiscono lontani (più di 3 volte la sua precisione combinata con la precisione con cui li collocano gli altri
+      da soli - un chunk tenuto da pochi legami vicini fra loro è collocato male lontano da loro), il legame è
+      indicato;
     * **residui grandi**: un legame con un residuo oltre 3 volte la sua precisione;
     * **movimenti non plausibili**: un chunk georeferenziato da GPS o GNSS ruotato di più di 5 gradi, o scalato fuori
       da 0,98-1,02. Un chunk in un sistema locale non ha limiti;
