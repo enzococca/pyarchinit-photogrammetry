@@ -694,13 +694,9 @@ class CommonPointsWindow(QDialog):
     def _triangulate_end(chunk, marker) -> None:
         """``marker`` triangulated from its photos (two or more), else placed on the surface (the rules of
         :func:`..markers.gcp.triangulate_markers`); the other markers of the chunk stay where they are."""
-        import copy
+        from ..markers import gcp
 
-        kept = {id(m): copy.deepcopy(m.position) for m in chunk.markers if m is not marker}
-        chunk.triangulate_markers()
-        for m in chunk.markers:
-            if id(m) in kept:
-                m.position = kept[id(m)]
+        gcp.triangulate_markers(chunk, only=[marker])
 
     def _ends_now(self, tie) -> list:
         """The internal places of a tie's ends now (None for an end without one)."""

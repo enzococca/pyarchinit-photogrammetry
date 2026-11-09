@@ -227,6 +227,79 @@ def test_accept_makes_known_ties_and_nothing_before(tmp_path, scene):
         stakes.accept(doc, ch, props, names=["S1"])
 
 
+def test_accept_leaves_the_other_markers_where_they_are(tmp_path, scene):
+    """Accepting a stake triangulates its own marker only: a marker whose position was adjusted with the block (it
+    differs from what its photos give), a marker measured on one photo, a ground control point and the end of an
+    existing tie keep their positions."""
+    sc, truth, _ = scene
+    doc, ch = with_photos(tmp_path, sc, truth)
+    cams = sorted(ch.aligned_cameras, key=lambda c: c.label)
+    p = ch.to_internal(np.array([truth["S5"]]))[0] + np.array([0.15, -0.1, 0.0])
+
+    def seen(cam):
+        px, _d = cam.project(ch.sensor(cam), p[None])
+        return float(px[0, 0]), float(px[0, 1])
+
+    adjusted = ch.add_marker("adjusted", p + np.array([0.004, -0.003, 0.006]))
+    for cam in cams[:3]:
+        ch.add_marker_projection(adjusted, cam, *seen(cam), pinned=True)
+    one = ch.add_marker("one photo", p + np.array([0.0, 0.0, 0.2]))
+    ch.add_marker_projection(one, cams[0], *seen(cams[0]), pinned=True)
+    gcp_marker = ch.add_marker("GCP", p + np.array([0.05, 0.05, 0.0]), reference=truth["S1"])
+    for cam in cams[3:]:
+        ch.add_marker_projection(gcp_marker, cam, *seen(cam), pinned=False)
+    other = ties.add_known(doc, ch, p + np.array([-0.1, 0.0, 0.0]), truth["S3"], name="esistente")
+    end = next(m for m in ch.markers if m.key == other.a[1])
+    ch.add_marker_projection(end, cams[1], *seen(cams[1]), pinned=True)
+    before = {m.label: m.position.copy() for m in ch.markers}
+    props = stakes.find(doc, ch, [points_from(truth)[4]], radius=0.5)
+    stakes.accept(doc, ch, props)
+    for m in ch.markers:
+        if m.label in before:
+            assert np.array_equal(m.position, before[m.label]), m.label
+
+
+def test_a_coded_target_is_not_a_head(tmp_path):
+    """The black cells of a coded target are dark and square: never proposed, also when the known point is the
+    target itself; a head next to it is found."""
+    sc = synthetic.make_scene(size=(4.0, 3.0), texel=0.004, crs=CRS)
+    tx, ty, _ = sc.targets[7]
+    truth = synthetic.add_stakes(sc, [(tx - sc.origin[0], ty - sc.origin[1] + 0.35)])
+    doc, ch = project(tmp_path, sc)
+    for code, (x, y, z) in sc.targets.items():
+        p, = stakes.find(doc, ch, [stakes.KnownPoint(f"T{code}", np.array([x, y, z]), CRS, 0.02)], radius=0.15)
+        assert p.best is None, (code, p.best)
+    p, = stakes.find(doc, ch, [stakes.KnownPoint("T7", np.array(sc.targets[7]), CRS, 0.02)], radius=0.6)
+    assert p.best is not None and np.linalg.norm(p.best.xy_world - np.asarray(truth["S1"])[:2]) < 0.02
+    assert all(np.hypot(*(c.xy_world - np.asarray(sc.targets[7])[:2])) > 0.1 for c in [p.best, *p.others])
+    # a target detected in the chunk: its footprint is left out by itself too
+    m = ch.add_marker("target 7", ch.to_internal(np.array([sc.targets[7]]))[0])
+    m.code = 7
+    centred = stakes.find(doc, ch, [stakes.KnownPoint("T7", np.array(sc.targets[7]), CRS, 0.02)], radius=0.6,
+                          head=(0.01, 0.12))[0]  # smaller heads let single cells through the size test
+    assert all(np.hypot(*(c.xy_world - np.asarray(sc.targets[7])[:2])) > 0.1
+               for c in ([centred.best] if centred.best else []) + centred.others)
+
+
+def test_check_compares_distances_in_the_chunks_system(tmp_path, scene):
+    """Known points given in another projected system (Monte Mario zone 1 for a chunk in zone 2: a scale factor far
+    from 1 there): both distances of a pair are measured in the chunk's system."""
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    names = list(truth)
+    other = crs_mod.transform_points(np.array([truth[n] for n in names]), CRS, "EPSG:3003")
+    pts = [stakes.KnownPoint(n, other[i], "EPSG:3003", 0.02) for i, n in enumerate(names)]
+    props = stakes.find(doc, ch, pts, radius=0.3)
+    assert all(p.best is not None for p in props)
+    assert all(np.allclose(p.known, truth[p.point.name], atol=1e-3) for p in props)
+    result = stakes.check(props)
+    assert all(abs(c["difference"]) < 0.005 for c in result["pairs"]), [c["difference"] for c in result["pairs"]]
+    back = stakes.Proposal.from_dict(json.loads(json.dumps(props[0].to_dict())))
+    assert np.allclose(back.known, props[0].known)
+
+
 def test_known_points_from_csv_chunk_and_ties(tmp_path, scene):
     sc, truth, _ = scene
     doc, ch = project(tmp_path, sc)

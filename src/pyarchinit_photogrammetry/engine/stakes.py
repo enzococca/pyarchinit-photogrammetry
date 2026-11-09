@@ -45,6 +45,10 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..core.document import Document
 
 MIN_CIRCULARITY = 0.6  # 4 pi A / P^2 of a head: a disc is 1, a square 0.79, a stick far less
+MAX_FILL = 0.9  # the area of a head over that of its smallest enclosing rectangle: a disc 0.79, a square (a black
+#                 cell of a coded target) 1
+MIN_SOLIDITY = 0.8  # the dark cells over the area within the outline: a head is solid, a target's frame is not
+TARGET_CLEARANCE = 0.10  # metres: no candidate this close to a coded target detected in the chunk (its cells)
 BACKGROUND_HEADS = 5  # the median background is taken over this many (largest) head diameters
 PHOTO_WINDOW_HEADS = 4  # the window searched in a photo around the projection of a candidate: heads across
 MAX_PHOTOS = 12  # at most this many photos looked at per candidate
@@ -115,8 +119,9 @@ class Candidate:
 class Proposal:
     """What :func:`find` proposes for a known point in chunk ``chunk`` (its key): ``best`` (None: no head found),
     ``others``, ``displacement`` (best - known, world metres; z NaN without a known z), ``flags`` (``no_candidate``,
-    ``ortho_only``, ``no_aligned_photos``, ``photos_unreadable``, ``outside_orthophoto``, ``no_height``) and the
-    alignment of the chunk when found (an accepted proposal must be in the same internal frame)."""
+    ``ortho_only``, ``no_aligned_photos``, ``photos_unreadable``, ``outside_orthophoto``, ``no_height``), the
+    alignment of the chunk when found (an accepted proposal must be in the same internal frame) and ``known``, the
+    known point in the chunk's system (what :func:`check` compares: one system for both distances)."""
 
     point: KnownPoint
     chunk: int
@@ -125,9 +130,12 @@ class Proposal:
     displacement: np.ndarray | None = None
     flags: list[str] = field(default_factory=list)
     alignment: str | None = None
+    known: np.ndarray | None = None  # the known point in the chunk's system (z NaN when not known)
 
     def to_dict(self) -> dict:
         return {"point": self.point.to_dict(), "chunk": int(self.chunk),
+                "known": None if self.known is None else [None if not np.isfinite(v) else float(v)
+                                                          for v in self.known],
                 "best": None if self.best is None else self.best.to_dict(),
                 "others": [c.to_dict() for c in self.others],
                 "displacement": None if self.displacement is None else
@@ -141,7 +149,9 @@ class Proposal:
                    best=None if d.get("best") is None else Candidate.from_dict(d["best"]),
                    others=[Candidate.from_dict(c) for c in d.get("others", [])],
                    displacement=None if disp is None else np.array([np.nan if v is None else v for v in disp], float),
-                   flags=list(d.get("flags", [])), alignment=d.get("alignment"))
+                   flags=list(d.get("flags", [])), alignment=d.get("alignment"),
+                   known=None if d.get("known") is None else
+                   np.array([np.nan if v is None else v for v in d["known"]], float))
 
 
 # --------------------------------------------------------------------------- known points
@@ -370,6 +380,11 @@ def detect(grey: np.ndarray, valid: np.ndarray | None, head_px: tuple[float, flo
         circ = min(1.0, 4 * math.pi * area_c / max(per_c, 1e-9) ** 2)
         if circ < MIN_CIRCULARITY:
             continue
+        if area < MIN_SOLIDITY * area_c:  # holes: the frame of a coded target, a ring
+            continue
+        (_c, (rw, rh), _a) = cv2.minAreaRect(cnt)
+        if area_c / max((rw + 1.0) * (rh + 1.0), 1e-9) > MAX_FILL:  # a square outline: cells of a coded target
+            continue
         wts = np.where(comp, dark[y0:y0 + bh, x0:x0 + bw], 0).astype(np.float64)
         ys, xs = np.mgrid[0:bh, 0:bw]
         tot = wts.sum()
@@ -570,18 +585,23 @@ def find(doc: "Document", chunk, points, radius: float = 3.0, head=(0.03, 0.12),
 
 def _find_one(ch, point, src, cell, per_metre, surface, radius, head, min_contrast, min_photos, max_candidates, cams,
               unreadable, images, axes, alignment, gcp) -> Proposal:
+    from .visibility import UnreadablePhotos
+
     flags: list[str] = []
     known = _in_chunk_system(ch, point)
     z_guess = known[2] if np.isfinite(known[2]) else surface.height(known[0], known[1])
     if z_guess is None:
-        return Proposal(point, ch.key, None, flags=["no_height"], alignment=alignment)
+        return Proposal(point, ch.key, None, flags=["no_height"], alignment=alignment, known=known)
     centre = _to_file(ch, "orthomosaic", (known[0], known[1], z_guess))
     margin = BACKGROUND_HEADS * head[1] / 2.0
     got = _read_ortho(src, centre, (radius + margin) * per_metre)
     if got is None:
-        return Proposal(point, ch.key, None, flags=["outside_orthophoto"], alignment=alignment)
+        return Proposal(point, ch.key, None, flags=["outside_orthophoto"], alignment=alignment, known=known)
     grey, valid, _rgb, tr = got
     found = detect(grey, valid, (head[0] / cell, head[1] / cell), BACKGROUND_HEADS * head[1] / cell, min_contrast)
+    targets = [ch.to_world(np.asarray(m.position, float)[None])[0] for m in ch.markers
+               if m.code is not None and m.position is not None]
+    clearance = max(TARGET_CLEARANCE, head[1])
     cands = []
     for f in found:
         fx, fy = tr @ (f["x"] + 0.5, f["y"] + 0.5)
@@ -592,6 +612,8 @@ def _find_one(ch, point, src, cell, per_metre, surface, radius, head, min_contra
             ch, "orthomosaic", (fx, fy, centre[2]))
         if w is None:  # a hole of the DEM under the head: at the height of the known point
             w = _from_file(ch, "orthomosaic", (fx, fy, centre[2]))
+        if any(math.hypot(w[0] - t[0], w[1] - t[1]) < clearance for t in targets):
+            continue  # a cell of a coded target
         internal = ch.to_internal(np.asarray(w, float)[None])[0]
         diameter = f["diameter"] * cell
         cands.append(Candidate(xy_world=np.asarray(w[:2], float), internal=internal, contrast=f["contrast"],
@@ -613,7 +635,7 @@ def _find_one(ch, point, src, cell, per_metre, surface, radius, head, min_contra
         for cam in usable:
             try:
                 grey_img = images.get(cam)
-            except Exception:  # noqa: BLE001 - a photo that cannot be decoded after all: as unreadable
+            except (UnreadablePhotos, OSError, cv2.error):  # cannot be decoded after all: as unreadable
                 if "photos_unreadable" not in flags:
                     flags.append("photos_unreadable")
                 continue
@@ -639,12 +661,12 @@ def _find_one(ch, point, src, cell, per_metre, surface, radius, head, min_contra
     cands.sort(key=lambda c: -c.score)
     if not cands:
         flags.append("no_candidate")
-        return Proposal(point, ch.key, None, flags=flags, alignment=alignment)
+        return Proposal(point, ch.key, None, flags=flags, alignment=alignment, known=known)
     best = cands[0]
     if best.ortho_only:
         flags.append("ortho_only")
     disp = best.world - known
-    return Proposal(point, ch.key, best, cands[1:], disp, flags, alignment)
+    return Proposal(point, ch.key, best, cands[1:], disp, flags, alignment, known)
 
 
 # --------------------------------------------------------------------------- check
@@ -672,7 +694,8 @@ def check(proposals: list[Proposal]) -> dict:
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             a, b = items[i], items[j]
-            ka, kb = np.array(a.point.xyz, float), np.array(b.point.xyz, float)
+            ka, kb = (np.array(a.known if a.known is not None else a.point.xyz, float),
+                      np.array(b.known if b.known is not None else b.point.xyz, float))  # the chunk's system
             fa, fb = a.best.world.copy(), b.best.world.copy()
             if not (np.isfinite(ka[2]) and np.isfinite(kb[2])):
                 fa[2] = fb[2] = ka[2] = kb[2] = np.nan
@@ -724,7 +747,7 @@ def preview(chunk: "Chunk", proposal: Proposal, size: int = 256) -> np.ndarray:
 
     from ..markers import gcp
     from ..markers.refine import _pixels_per_metre
-    from .visibility import read_photo, unreadable_photos
+    from .visibility import UnreadablePhotos, read_photo, unreadable_photos
 
     size = int(size)
     left = np.full((size, size, 3), 128, np.uint8)
@@ -770,7 +793,7 @@ def preview(chunk: "Chunk", proposal: Proposal, size: int = 256) -> np.ndarray:
     if cam is not None:
         try:
             photo = read_photo(cam)
-        except Exception:  # noqa: BLE001 - unreadable after all: the grey half stays
+        except (UnreadablePhotos, OSError, cv2.error):  # unreadable after all: the grey half stays
             photo = None
         if photo is not None:
             sensor = chunk.sensor(cam)
@@ -796,7 +819,7 @@ def accept(doc: "Document", chunk, proposals: list[Proposal], names=None) -> lis
     """The proposals accepted (all with a candidate, or those of the points named in ``names``) as known ties
     (:func:`.ties.add_known`: a marker at the candidate, its reference the known coordinates, the precision the
     candidate's and the point's combined; a point without a known z takes the candidate's), the agreeing photo
-    measurements written as pinned projections of the tie's marker, then the markers triangulated
+    measurements written as pinned projections of the tie's marker, then those new markers alone triangulated
     (:func:`..markers.gcp.triangulate_markers`). ``ValueError`` when a proposal belongs to another chunk, the chunk
     was aligned again since it was found (another internal frame), or a name asked has no candidate."""
     from ..markers import gcp
@@ -821,7 +844,7 @@ def accept(doc: "Document", chunk, proposals: list[Proposal], names=None) -> lis
         missing = [n for n in wanted if n not in {p.point.name for p in chosen}]
         if missing:
             raise ValueError(f"no proposal for {', '.join(repr(n) for n in missing)}")
-    made, measured = [], False
+    made, measured = [], []
     for p in chosen:
         known = _in_chunk_system(ch, p.point)
         if not np.isfinite(known[2]):
@@ -838,10 +861,11 @@ def accept(doc: "Document", chunk, proposals: list[Proposal], names=None) -> lis
                 except KeyError:
                     continue
                 ch.add_marker_projection(marker, cam, float(ph["x"]), float(ph["y"]), pinned=True)
-                measured = True
+                if marker not in measured:
+                    measured.append(marker)
         made.append(tie)
-    if measured:
-        gcp.triangulate_markers(ch)
+    if measured:  # the new markers only: tie ends, ground control points and adjusted positions stay as they are
+        gcp.triangulate_markers(ch, only=measured)
     return made
 
 
