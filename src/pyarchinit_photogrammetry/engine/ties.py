@@ -1004,7 +1004,9 @@ class Solution:
     down), ``fitted`` (False: reported only - observations between fixed chunks, check
     points); ``redundancy``: equations - unknowns of the fitted observations (0: no check at all); ``rms`` of the fitted
     residuals; ``per_chunk``: ``kind``, ``label``, ``rotation_deg``, ``shift`` (how far its centre moves), ``scale``,
-    ``crs_before``, ``observations``; ``crs``: the system of the solve (the fixed chunks', else the known points');
+    ``crs_before``, ``observations`` (the observations with an end on the chunk: a point tie, a known point, a
+    reference or one anchor of a stable height each count one); ``crs``: the system of the solve (the fixed
+    chunks', else the known points');
     ``left_out``: ``[{"id", "name", "reason", "messages"}]`` the ties not used (``reason`` in English,
     ``messages`` the same as :func:`message`, one per reason); ``messages``: the warnings as structured
     messages (:func:`message`, Italian and English), ``warnings`` the same in English; ``previous``: the transform and CRS of
@@ -1585,10 +1587,18 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         if len(null) or dead.any():
             loose = [chunks[k].label for k in order if KINDS[kinds[k]] and
                      ((len(null) and np.abs(null[:, slices[k]]).max() > 1e-3) or dead[slices[k]].any())]
+            heights_only = [chunks[k].label for k in order if chunks[k].label in loose and any(
+                o.kind == "height" for o in fitted for e in (o.a, o.b) if e is not None and e[0] == k)]
+            hint_en = hint_it = ""
+            if heights_only:  # its stable heights fix its height only: say so
+                hint_en = (f"; a stable height fixes the height only ({', '.join(heights_only)}): add point ties "
+                           "or known points, or choose fewer unknowns (shift, height)")
+                hint_it = (f"; una quota stabile fissa solo la quota ({', '.join(heights_only)}): aggiungi legami fra "
+                           "punti o punti noti, o scegli meno incognite (solo spostamento, solo quota)")
             raise TieError(f"the ties do not determine chunk {', '.join(loose)}: points on a line, or chunks tied only "
-                           "among themselves and not to a fixed chunk or known points",
+                           f"among themselves and not to a fixed chunk or known points{hint_en}",
                            f"i legami non determinano il chunk {', '.join(loose)}: punti su una linea, o chunk legati "
-                           "solo fra loro e non a un chunk fisso o a punti noti")
+                           f"solo fra loro e non a un chunk fisso o a punti noti{hint_it}")
         # covariance of the unknowns: (J^T J)^-1 with the a-priori precisions, scaled by sigma0^2 when the residuals
         # say the ties are worse than their precision (never made smaller by residuals better than it)
         vs = vt[:len(sv)]
@@ -1631,7 +1641,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         cov = G @ covariance @ G.T
         return float(np.sqrt(max(0.0, float(np.linalg.eigvalsh((cov + cov.T) / 2).max()))))
 
-    entries, equations, remeasure = [], 0, {}
+    entries, equations, remeasure, cells = [], 0, {}, {}
     for o in obs:
         pa = geometry.apply(final[o.a[0]], o.a[1])
         pb = (geometry.apply(final[o.b[0]], o.b[1]) if o.b is not None else o.target)
@@ -1645,7 +1655,9 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         if o.kind == "height":  # z only: the move in plan since it was measured is said apart (R3)
             horizontal = float(np.hypot(r[0], r[1]))
             entry.update({"dx": 0.0, "dy": 0.0, "d": abs(float(r[2])), "horizontal": horizontal})
-            cell = _dem_cell(chunks[o.a[0]])
+            if o.a[0] not in cells:  # the DEM of A read once per solve
+                cells[o.a[0]] = _dem_cell(chunks[o.a[0]])
+            cell = cells[o.a[0]]
             limit = max(REMEASURE_CELLS * cell if cell else 0.0, REMEASURE_MIN)
             if horizontal > limit and horizontal > remeasure.get(o.tie_id, (0.0,))[0]:
                 remeasure[o.tie_id] = (horizontal, limit, o)

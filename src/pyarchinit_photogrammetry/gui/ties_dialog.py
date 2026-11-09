@@ -35,10 +35,11 @@ RED = "#c0392b"
 ORANGE = "#b9770e"
 GREY = "#7f8c8d"
 # messages of the report that point at a wrong tie or a wrong result (red); the precision warnings are advice
-ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "loo_large_solved", "residual_large", "implausible_rotation",
-          "implausible_scale", "axis_bent", "distance_scale", "distance_scale_known"}
+ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "loo_large_solved", "residual_large",
+          "height_residual_large", "implausible_rotation", "implausible_scale", "axis_bent", "distance_scale",
+          "distance_scale_known"}
 ADVICE = {"precision_spread", "precision_residuals", "precision_inherited", "not_levelled", "tilt_scale_kept",
-          "local_references", "approximated", "robust_unsettled"}
+          "local_references", "approximated", "robust_unsettled", "remeasure_height"}
 
 
 def alive(obj) -> bool:
@@ -171,12 +172,20 @@ def report_html(result: dict) -> str:
     suspect = set(rep["suspects"])
     loo = rep["loo"]
     for r in rep["residuals"]:
+        if r["kind"] == "height":  # in their own section below
+            continue
         kind = tr(ties_mod.MESSAGES["kind_check" if r["check"] else "kind_" + r["kind"]][0])
         value = loo.get(r["id"]) if r["id"] is not None else None
         gone = tr("-") if value is None else i18n.number(value, 3) + " m"
         bad = r["id"] in suspect or (r.get("fitted") and r["normalised"] > ties_mod.CHECK_FACTOR)
         out.append(line(m("line_residual", r["name"], kind, float(np.hypot(r["dx"], r["dy"])), float(r["dz"]),
                           float(r["precision"]), gone), RED if bad else None, bold=r["id"] in suspect))
+    if rep.get("heights"):
+        out.append("<br>" + line(tr("Quote stabili"), bold=True))
+        for h in rep["heights"]:
+            out.append(line(m("line_height", h["name"], h["labels"][1], h["labels"][0], float(h["dz"]),
+                              float(h["precision"]), float(h["horizontal"])),
+                            RED if h["fitted"] and h["normalised"] > ties_mod.CHECK_FACTOR else None))
     comparable = [c for c in result["checks"] if c.get("ok") is not None]
     if comparable:
         out.append("<br>" + line(m("line_distances", sum(1 for c in comparable if c["ok"]), len(comparable)),

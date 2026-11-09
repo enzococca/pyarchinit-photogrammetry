@@ -52,6 +52,8 @@ def test_plan_with_one_point_tie_and_a_height_tie(scene):
     with pytest.raises(ties.TieError) as err:
         ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "plan"})
     assert "do not determine" in str(err.value) and "equations" not in str(err.value)
+    assert "a stable height fixes the height only (2025)" in str(err.value)
+    assert "una quota stabile fissa solo la quota (2025)" in err.value.italian
     sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "shift"})
     assert sol.redundancy == 1 and all(r["d"] < 1e-3 for r in sol.residuals)
     _close(sol.transforms[b.chunk.key], b.truth, atol=1e-6)
@@ -94,6 +96,20 @@ def test_remeasure_warning_after_a_horizontal_move(scene):
     b.chunk.transform = moved
     sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "height"})
     assert not [m for m in sol.messages if m["code"] == "remeasure_height"]
+
+
+def test_the_report_of_the_window_shows_the_heights_apart(scene):
+    pytest.importorskip("PySide6")
+    from pyarchinit_photogrammetry.gui.ties_dialog import report_html
+
+    doc, a, b, _c = _three(scene, {"b": _similarity(shift=(0.1, 0.2, 0.5))})
+    _tie(doc, a, b, _world(scene, AB[0]))
+    _height(doc, a, b, _world(scene, AB[2]), name="sabbia")
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "shift"})
+    rep = ties.report(sol, [], {}, [])
+    text = report_html({"report": rep, "checks": [], "axis": None})
+    assert "Quote stabili" in text and "sabbia (2025 su 2024)" in text
+    assert text.index("Quote stabili") > text.index("Residui") and "quota stabile" not in text.split("Quote stabili")[0]
 
 
 def test_no_height_ties_changes_nothing(scene):

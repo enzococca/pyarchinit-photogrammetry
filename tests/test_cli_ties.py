@@ -359,5 +359,6 @@ def test_cli_ties_height_and_check(tmp_path, runner):
     assert len(stable_height.heights_of(ppg.Document.open(path))) == 1
 
     r = runner.invoke(app, ["ties", "remove", str(path), "sabbia"])
-    assert r.exit_code == 0, r.output and "removed" in r.output
+    assert r.exit_code == 0, r.output
+    assert "removed stable height" in r.output
     assert stable_height.heights_of(ppg.Document.open(path)) == []
