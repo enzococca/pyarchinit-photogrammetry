@@ -27,6 +27,7 @@ class Scene:
     heights: np.ndarray  # local z per texel
     targets: dict[int, tuple[float, float, float]] = field(default_factory=dict)  # code -> world xyz
     cameras: list[dict] = field(default_factory=list)
+    stakes: dict[str, tuple[float, float, float]] = field(default_factory=dict)  # name -> world xyz of the head
 
     def height_at(self, x_local: np.ndarray, y_local: np.ndarray) -> np.ndarray:
         h, w = self.heights.shape
@@ -96,6 +97,75 @@ def make_scene(size=(4.0, 3.0), texel=0.002, crs="EPSG:3004", origin=(2480000.0,
         targets[code] = (origin[0] + cx, origin[1] + cy, origin[2] + zc)
     return Scene(origin=origin, crs=crs, size=size, texel=texel, texture=tex, heights=z.astype(np.float32),
                  targets=targets)
+
+
+def _texel_of(scene: Scene, x_local: float, y_local: float) -> tuple[float, float]:
+    """(column, row) of the texture at a local point, in OpenCV pixel units (centre of the first texel at 0, 0)."""
+    return x_local / scene.texel - 0.5, (scene.size[1] - y_local) / scene.texel - 0.5
+
+
+def add_stakes(scene: Scene, xy_local, diameter: float = 0.05, value: int = 25) -> dict[str, tuple]:
+    """Dark round heads of stakes (or benchmarks) painted on the ground at the local points ``xy_local``: discs of
+    ``diameter`` metres and grey ``value``, their edge texels blended by the part of them the disc covers. Returns the
+    world xyz of each head (the surface under its centre) by name ``S1``, ``S2``... (numbered after those the scene
+    has already), kept in ``scene.stakes`` too."""
+    sub = 4  # supersampling of the edge texels
+    r = diameter / 2.0
+    out = {}
+    for x, y in np.asarray(xy_local, float).reshape(-1, 2):
+        c, rr = _texel_of(scene, x, y)
+        rad = r / scene.texel
+        c0, c1 = int(np.floor(c - rad - 1)), int(np.ceil(c + rad + 1)) + 1
+        r0, r1 = int(np.floor(rr - rad - 1)), int(np.ceil(rr + rad + 1)) + 1
+        offs = (np.arange(sub) + 0.5) / sub - 0.5
+        cols = np.arange(c0, c1)[None, :, None, None] + offs[None, None, None, :]
+        rows = np.arange(r0, r1)[:, None, None, None] + offs[None, None, :, None]
+        cover = (((cols - c) ** 2 + (rows - rr) ** 2) <= rad ** 2).mean(axis=(2, 3))
+        patch = scene.texture[r0:r1, c0:c1].astype(np.float32)
+        patch = patch * (1 - cover[..., None]) + float(value) * cover[..., None]
+        scene.texture[r0:r1, c0:c1] = np.clip(np.round(patch), 0, 255).astype(np.uint8)
+        name = f"S{len(scene.stakes) + 1}"
+        z = float(scene.height_at(np.array([x]), np.array([y]))[0])
+        scene.stakes[name] = (scene.origin[0] + float(x), scene.origin[1] + float(y), scene.origin[2] + z)
+        out[name] = scene.stakes[name]
+    return out
+
+
+def add_blotches(scene: Scene, n: int, rng: np.random.Generator) -> list[dict]:
+    """``n`` dark patches that are not stake heads: elongated ones (a root, a crack, a shadow: 0.18-0.30 m by 2.5-3.5
+    cm) and large irregular ones (0.3-0.5 m across), alternately, kept 0.35 m away from the stakes and the targets of
+    the scene. Returns ``[{"kind": "elongated"|"large", "centre": world (x, y), "extent": half its largest size in
+    metres}]``."""
+    keep_away = [(x - scene.origin[0], y - scene.origin[1]) for x, y, _ in
+                 list(scene.stakes.values()) + list(scene.targets.values())]
+    out = []
+    for i in range(int(n)):
+        kind = "elongated" if i % 2 == 0 else "large"
+        extent = 0.15 if kind == "elongated" else 0.25
+        for _ in range(200):
+            x = rng.uniform(extent + 0.1, scene.size[0] - extent - 0.1)
+            y = rng.uniform(extent + 0.1, scene.size[1] - extent - 0.1)
+            if all(np.hypot(x - a, y - b) > extent + 0.35 for a, b in keep_away):
+                break
+        else:
+            continue
+        c, r = _texel_of(scene, x, y)
+        value = int(rng.integers(20, 40))
+        if kind == "elongated":
+            length, width = rng.uniform(0.18, 0.30), rng.uniform(0.025, 0.035)
+            extent = length / 2
+            cv2.ellipse(scene.texture, (int(round(c)), int(round(r))),
+                        (int(round(length / 2 / scene.texel)), int(round(width / 2 / scene.texel))),
+                        float(rng.uniform(0, 180)), 0, 360, (value, value, value), -1, cv2.LINE_AA)
+        else:
+            angles = np.sort(rng.uniform(0, 2 * np.pi, 12))
+            radii = rng.uniform(0.15, 0.25, 12)
+            extent = float(radii.max())
+            poly = np.column_stack([c + radii / scene.texel * np.cos(angles), r + radii / scene.texel * np.sin(angles)])
+            cv2.fillPoly(scene.texture, [np.round(poly).astype(np.int32)], (value, value, value), cv2.LINE_AA)
+        keep_away.append((x, y))
+        out.append({"kind": kind, "centre": (scene.origin[0] + x, scene.origin[1] + y), "extent": extent})
+    return out
 
 
 def camera_poses(scene: Scene, height: float = 2.2, nx: int = 5, ny: int = 4, tilt_ring: bool = True):

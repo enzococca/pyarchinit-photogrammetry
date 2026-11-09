@@ -4437,6 +4437,136 @@ def ties_solve(project: Path,
         typer.echo(f"  {labels.get(int(key), key)}: build again {', '.join(stale)}")
 
 
+stakes_app = typer.Typer(help="Stakes and benchmarks: dark round heads looked for on the orthophoto (and the photos) near "
+                              "points of known coordinates, proposed as known ties; nothing is stored until accepted")
+app.add_typer(stakes_app, name="stakes")
+
+
+def _stake_line(p) -> str:
+    """One line for a proposal of engine.stakes."""
+    import numpy as np
+
+    if p.best is None:
+        why = ("no height for the point (no z and no DEM there)" if "no_height" in p.flags else
+               "outside the orthophoto" if "outside_orthophoto" in p.flags else "no head found")
+        return f"{p.point.name}: {why}"
+    b = p.best
+    where = (f"{b.agreeing} photos agree" if not b.ortho_only else
+             "ortho only" + (" (photos unreadable)" if "photos_unreadable" in p.flags else
+                             " (no aligned photos)" if "no_aligned_photos" in p.flags else ""))
+    d = p.displacement
+    shift = f"{float(np.hypot(d[0], d[1])):.3f} m from the known point" if d is not None else ""
+    return (f"{p.point.name}: head at {b.world[0]:.3f}, {b.world[1]:.3f}, {b.world[2]:.3f}, {shift}, {where}, "
+            f"precision {b.precision:.3f} m, diameter {b.diameter:.3f} m"
+            + (f", {len(p.others)} other candidates" if p.others else ""))
+
+
+@stakes_app.command("find")
+def stakes_find(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                points: str = typer.Argument(..., help="the known points: a CSV file (name,x,y[,z][,precision]), "
+                                                       "'ties' (the known ties of the project) or a chunk (its markers "
+                                                       "with coordinates)"),
+                crs: Optional[str] = typer.Option(None, "--crs", help="system of the CSV coordinates (default: the "
+                                                  "chunk's)"),
+                radius: float = typer.Option(3.0, "--radius", help="metres around each point"),
+                head: str = typer.Option("0.03,0.12", "--head", help="smallest,largest head diameter in metres"),
+                min_contrast: float = typer.Option(25, "--min-contrast", help="grey levels darker than the "
+                                                   "background"),
+                min_photos: int = typer.Option(3, "--min-photos", help="photos that must agree, else ortho only"),
+                out: Optional[Path] = typer.Option(None, "--out", help="the proposals (JSON; default proposals.json "
+                                                   "next to the project); a picture <name>.png beside it for each "
+                                                   "point")):
+    """Look for stakes and benchmarks near known points: proposals written to a JSON file with a picture each
+    (orthophoto and photo side by side); the project does not change. Accept them with ppg stakes accept."""
+    import cv2
+
+    from .engine import stakes
+    from .engine import ties as ties_mod
+
+    try:
+        lo, hi = (float(v) for v in head.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"--head is smallest,largest in metres (got {head!r})") from None
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if points == "ties":
+            known = stakes.known_points("ties", doc=doc)
+        elif Path(points).exists():
+            known = stakes.known_points(Path(points), crs=crs)
+        else:
+            known = stakes.known_points(_tie_chunk(doc, points))
+        if not known:
+            raise ValueError(f"no known points in {points}")
+        props = stakes.find(doc, ch, known, radius=radius, head=(lo, hi), min_contrast=min_contrast,
+                            min_photos=min_photos)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    for p in props:
+        typer.echo(_stake_line(p))
+    result = stakes.check(props)
+    med = result["displacement_median"]
+    if med is not None:
+        typer.echo(f"median displacement: {med[0]:+.3f}, {med[1]:+.3f}"
+                   + (f", {med[2]:+.3f}" if med[2] is not None else "") + " m")
+    if result["suspects"]:
+        typer.echo(f"suspect (distances do not agree): {', '.join(result['suspects'])}")
+    if result["outliers"]:
+        typer.echo(f"displaced unlike the others: {', '.join(result['outliers'])}")
+    out = out if out is not None else Path(project).parent / "proposals.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"project": str(Path(project).resolve()), "chunk": ch.key,
+                               "proposals": [p.to_dict() for p in props], "check": result}, indent=1),
+                   encoding="utf-8")
+    for p in props:
+        cv2.imwrite(str(out.parent / f"{stakes.file_name(p.point.name)}.png"),
+                    stakes.preview(ch, p)[..., ::-1])
+    typer.echo(f"proposals written to {out}; nothing changed in the project (ppg stakes accept)")
+
+
+@stakes_app.command("accept")
+def stakes_accept(project: Path,
+                  chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                  proposals: Path = typer.Argument(..., help="the JSON written by ppg stakes find"),
+                  ids: Optional[str] = typer.Option(None, "--ids", help="the points accepted, by name: N1,N2"),
+                  agreeing: bool = typer.Option(False, "--agreeing", help="every point confirmed by the photos "
+                                                "(not ortho only)"),
+                  yes: bool = typer.Option(False, "--yes", help="accept them (without it: only what would be done)")):
+    """Accept proposals of ppg stakes find as known ties (markers with the agreeing photo measurements)."""
+    from .engine import stakes
+    from .engine import ties as ties_mod
+
+    if (ids is None) == (not agreeing):
+        raise typer.BadParameter("give --ids N1,N2 or --agreeing")
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        data = json.loads(Path(proposals).read_text(encoding="utf-8"))
+        props = [stakes.Proposal.from_dict(d) for d in data["proposals"]]
+    except (OSError, ValueError, KeyError) as exc:
+        _ties_error(ValueError(f"cannot read the proposals {proposals}: {exc}"))
+    if ids is not None:
+        names = [n.strip() for n in ids.split(",") if n.strip()]
+    else:
+        names = [p.point.name for p in props if p.best is not None and not p.best.ortho_only]
+        if not names:
+            _ties_error(ValueError("no proposal is confirmed by the photos"))
+    chosen = [p for p in props if p.point.name in names]
+    for p in chosen:
+        typer.echo(("accept " if yes else "would accept ") + _stake_line(p))
+    if not yes:
+        typer.echo("Nothing changed: add --yes to accept them.")
+        return
+    try:
+        made = stakes.accept(doc, ch, props, names=names)
+    except (ties_mod.TieError, ValueError, KeyError) as exc:
+        _ties_error(exc)
+    doc.save()
+    for t in made:
+        typer.echo(f"added {_tie_line(doc, t)}")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 

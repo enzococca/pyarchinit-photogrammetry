@@ -1,0 +1,278 @@
+"""Stakes and benchmarks found near known points (engine/stakes): a synthetic trench whose texture has dark round heads
+and dark blotches (roots, large patches) is written as an orthophoto and a DEM; the heads are found where the known
+points fall, the blotches never; a few photos rendered from known poses confirm them; nothing is stored until
+accepted."""
+from __future__ import annotations
+
+import json
+
+import cv2
+import numpy as np
+import pytest
+
+import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry.core.geometry import look_at
+from pyarchinit_photogrammetry.engine import stakes, ties
+from pyarchinit_photogrammetry.engine.dem import NODATA, write_geotiff
+from pyarchinit_photogrammetry.testing import synthetic
+
+CRS = "EPSG:3004"
+ORTHO_CELL = 0.005
+DEM_CELL = 0.02
+HEADS = [(5.0, 1.0), (7.0, 1.4), (6.8, 4.8), (5.2, 4.6), (6.1, 3.0)]  # local, far from the targets of the scene
+
+
+@pytest.fixture(scope="module")
+def scene():
+    sc = synthetic.make_scene(size=(8.0, 6.0), texel=0.004, crs=CRS)
+    truth = synthetic.add_stakes(sc, HEADS)
+    blotches = synthetic.add_blotches(sc, 14, np.random.default_rng(3))
+    return sc, truth, blotches
+
+
+def write_products(sc, folder):
+    """The scene's texture as an orthophoto (RGBA) and its heights as a DEM, in the world of the scene."""
+    w, h = int(round(sc.size[0] / ORTHO_CELL)), int(round(sc.size[1] / ORTHO_CELL))
+    rgb = cv2.resize(sc.texture, (w, h), interpolation=cv2.INTER_AREA)[..., ::-1]
+    rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)])
+    top_left = (sc.origin[0], sc.origin[1] + sc.size[1])
+    ortho = write_geotiff(folder / "orthomosaic.tif", np.moveaxis(rgba, -1, 0), top_left, ORTHO_CELL, CRS)
+    dw, dh = int(round(sc.size[0] / DEM_CELL)), int(round(sc.size[1] / DEM_CELL))
+    z = cv2.resize(sc.heights, (dw, dh), interpolation=cv2.INTER_AREA) + np.float32(sc.origin[2])
+    dem = write_geotiff(folder / "dem.tif", z.astype(np.float32), top_left, DEM_CELL, CRS, nodata=NODATA)
+    return ortho, dem
+
+
+def project(tmp_path, sc):
+    """A document with one chunk (internal frame = the local frame of the scene) and the orthophoto and DEM."""
+    doc = ppg.Document()
+    ch = doc.add_chunk("Scavo")
+    ch.crs = CRS
+    t = np.eye(4)
+    t[:3, 3] = sc.origin
+    ch.transform = t
+    doc.save(tmp_path / "p.ppg")
+    ortho, dem = write_products(sc, ch.data_dir)
+    ch._set_product("orthomosaic", ortho)
+    ch._set_product("dem", dem)
+    return doc, ch
+
+
+def points_from(truth, shift=(0.0, 0.0, 0.0), wrong=None):
+    out = []
+    for name, xyz in truth.items():
+        p = np.asarray(xyz, float) + np.asarray(shift, float)
+        if name == wrong:
+            p = p + np.array([0.0, -1.0, 0.0])  # 1 m south: towards the edge, away from the targets
+        out.append(stakes.KnownPoint(name, p, CRS, 0.02))
+    return out
+
+
+def near_blotch(blotches, cand):
+    return any(np.hypot(*(cand.xy_world - np.asarray(b["centre"]))) < b["extent"] + 0.05 for b in blotches)
+
+
+def test_heads_found_within_2_cm_and_blotches_left_out(tmp_path, scene):
+    sc, truth, blotches = scene
+    assert len(blotches) == 14 and {b["kind"] for b in blotches} == {"elongated", "large"}
+    doc, ch = project(tmp_path, sc)
+    known = points_from(truth, shift=(0.25, -0.2, 0.0))  # the known points a little off, as a GNSS point may be
+    props = stakes.find(doc, ch, known, radius=1.0)
+    assert [p.point.name for p in props] == list(truth)
+    for p in props:
+        assert p.best is not None, p.flags
+        assert np.linalg.norm(p.best.xy_world - np.asarray(truth[p.point.name])[:2]) < 0.02
+        assert abs(p.best.world[2] - truth[p.point.name][2]) < 0.03
+        assert p.best.ortho_only and "ortho_only" in p.flags and "no_aligned_photos" in p.flags
+        assert p.best.precision == pytest.approx(ties.RASTER_PIXELS * ORTHO_CELL)
+        assert 0.04 < p.best.diameter < 0.06 and p.best.circularity >= stakes.MIN_CIRCULARITY
+        assert np.allclose(p.displacement[:2], (-0.25, 0.2), atol=0.02)
+    assert not any(near_blotch(blotches, c) for p in props for c in [p.best, *p.others][:1])
+    # the blotches are dark enough to be seen: they are left out by their shape and size, not their contrast
+    for b in blotches:
+        x, y = b["centre"]
+        bp = stakes.find(doc, ch, [stakes.KnownPoint("b", np.array([x, y, np.nan]), CRS, 0.02)], radius=0.3)[0]
+        assert bp.best is None or not near_blotch([b], bp.best), b
+    json.dumps([p.to_dict() for p in props])  # plain JSON
+    back = stakes.Proposal.from_dict(json.loads(json.dumps(props[0].to_dict())))
+    assert np.allclose(back.best.internal, props[0].best.internal) and back.point.name == props[0].point.name
+
+
+def test_a_point_with_no_head_nearby_has_no_proposal(tmp_path, scene):
+    sc, truth, blotches = scene
+    doc, ch = project(tmp_path, sc)
+    empty = (sc.origin[0] + 6.0, sc.origin[1] + 0.3, np.nan)  # bare ground (no z: read from the DEM)
+    assert all(np.hypot(empty[0] - x, empty[1] - y) > 0.8 for x, y, _ in truth.values())
+    assert all(np.hypot(empty[0] - b["centre"][0], empty[1] - b["centre"][1]) > 0.5 for b in blotches)
+    p, = stakes.find(doc, ch, [stakes.KnownPoint("vuoto", np.array(empty), None, 0.02)], radius=0.4)
+    assert p.best is None and p.others == [] and "no_candidate" in p.flags and p.displacement is None
+    outside, = stakes.find(doc, ch, [stakes.KnownPoint("fuori", np.array([sc.origin[0] - 50, sc.origin[1], 100.0]),
+                                                       None, 0.02)], radius=1.0)
+    assert outside.best is None and "outside_orthophoto" in outside.flags
+
+
+def test_rasters_built_before_a_move_are_read_where_they_were_built(tmp_path, scene):
+    """The chunk moved 0.5 m east and 0.1 m up after its orthophoto and DEM were built: the heads are found where
+    they are now (Review Focus 1, the rasters carried with the chunk through their stamps)."""
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    built = np.asarray(ch.transform, float).copy()
+    ch.meta.setdefault("built_in", {}).update(orthomosaic=built.tolist(), dem=built.tolist())
+    moved = built.copy()
+    moved[:3, 3] += (0.5, 0.0, 0.1)
+    ch.transform = moved
+    now = {n: np.asarray(xyz) + np.array([0.5, 0.0, 0.1]) for n, xyz in truth.items()}
+    props = stakes.find(doc, ch, [stakes.KnownPoint(n, p + np.array([0.1, 0.1, 0.0]), CRS, 0.02)
+                                  for n, p in now.items()], radius=0.5)
+    for p in props:
+        assert np.linalg.norm(p.best.world - now[p.point.name]) < 0.03, p.point.name
+        assert np.allclose(ch.to_world(p.best.internal[None])[0], p.best.world)
+
+
+def test_check_names_the_wrong_point(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    props = stakes.find(doc, ch, points_from(truth, wrong="S1"), radius=1.5)
+    assert all(p.best is not None for p in props)
+    result = stakes.check(props)
+    assert result["suspects"] == ["S1"]
+    assert result["outliers"] == ["S1"]
+    assert np.allclose(result["displacement_median"][:2], (0.0, 0.0), atol=0.02)
+    assert len(result["pairs"]) == 10 and sum(not c["ok"] for c in result["pairs"]) == 4
+
+
+def test_coherent_displacement_is_reported(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    props = stakes.find(doc, ch, points_from(truth, shift=(-0.7, 0.0, 0.0)), radius=1.2)
+    result = stakes.check(props)
+    assert np.allclose(result["displacement_median"][:2], (0.7, 0.0), atol=0.02)
+    assert result["suspects"] == [] and result["outliers"] == []
+    assert all(c["ok"] for c in result["pairs"])
+
+
+def with_photos(tmp_path, sc, truth, name="S5", n=6, unreadable=()):
+    """The project of :func:`project` with ``n`` photos rendered around a head from known poses (no alignment
+    needed: the poses are the truth), ``unreadable`` of them emptied as an online-only placeholder."""
+    doc, ch = project(tmp_path, sc)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    size, focal = (640, 480), 700.0
+    K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
+    head = np.asarray(truth[name], float) - np.asarray(sc.origin)
+    poses = []
+    for i in range(n):
+        a = 2 * np.pi * i / n
+        eye = head + np.array([0.5 * np.cos(a), 0.5 * np.sin(a), 1.8])
+        poses.append(look_at(eye, head + np.array([0.1 * np.sin(a), 0.1 * np.cos(a), 0.0]), up=(0, 1, 0)))
+        cv2.imwrite(str(folder / f"IMG_{i:02d}.jpg"), synthetic.render(sc, poses[-1], K, size, k1=0.0),
+                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+    cams = ch.add_photos([folder])
+    sensor = ch.sensor(cams[0])
+    sensor.model, sensor.params = "PINHOLE", [focal, focal, size[0] / 2, size[1] / 2]
+    for cam, pose in zip(sorted(cams, key=lambda c: c.label), poses):
+        cam.transform = pose
+    for i in unreadable:
+        (folder / f"IMG_{i:02d}.jpg").write_bytes(b"")
+    return doc, ch
+
+
+def test_photos_confirm_a_head(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = with_photos(tmp_path, sc, truth)
+    p, = stakes.find(doc, ch, [points_from(truth)[4]], radius=0.5)
+    assert p.best is not None and not p.best.ortho_only and p.best.agreeing >= 5, p.best
+    assert np.linalg.norm(p.best.world - np.asarray(truth["S5"])) < 0.01
+    assert p.best.precision >= stakes.MIN_PRECISION
+    assert all(ph["residual_px"] < 2.0 for ph in p.best.photos if ph["agrees"])
+    pic = stakes.preview(ch, p, size=128)
+    assert pic.shape == (128, 256, 3) and pic.dtype == np.uint8
+    assert pic[:, 128:].std() > 5  # the photo, not the grey of a missing one
+
+
+def test_unreadable_photos_fall_back_to_the_orthophoto(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = with_photos(tmp_path, sc, truth, unreadable=(0, 1, 2, 3))  # two left: fewer than three agree
+    p, = stakes.find(doc, ch, [points_from(truth)[4]], radius=0.5)
+    assert p.best is not None and p.best.ortho_only and "photos_unreadable" in p.flags and "ortho_only" in p.flags
+    assert np.linalg.norm(p.best.xy_world - np.asarray(truth["S5"])[:2]) < 0.02
+    for k in (4, 5):
+        (tmp_path / "photos" / f"IMG_{k:02d}.jpg").write_bytes(b"")
+    p, = stakes.find(doc, ch, [points_from(truth)[4]], radius=0.5)  # none readable: no crash either
+    assert p.best is not None and p.best.ortho_only and "photos_unreadable" in p.flags
+    assert stakes.preview(ch, p, size=64).shape == (64, 128, 3)
+
+
+def test_accept_makes_known_ties_and_nothing_before(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = with_photos(tmp_path, sc, truth)
+    before = json.dumps(doc.meta.get("ties"))
+    markers = len(ch.markers)
+    props = stakes.find(doc, ch, points_from(truth), radius=0.5)
+    assert json.dumps(doc.meta.get("ties")) == before and len(ch.markers) == markers  # nothing stored
+    made = stakes.accept(doc, ch, props, names=["S5", "S2"])
+    assert [t.name for t in made] == ["S2", "S5"]
+    tied = {t.name: t for t in ties.ties_of(doc)}
+    assert set(tied) == {"S2", "S5"} and all(t.b is None for t in tied.values())
+    s5 = next(m for m in ch.markers if m.key == tied["S5"].a[1])
+    assert len(s5.projections) >= 5 and all(pr.pinned is True for pr in s5.projections.values())
+    assert np.linalg.norm(ch.to_world(s5.position[None])[0] - np.asarray(truth["S5"])) < 0.01
+    s2 = next(m for m in ch.markers if m.key == tied["S2"].a[1])
+    assert not s2.projections  # orthophoto only: no photo measurements
+    assert np.allclose(tied["S5"].known, truth["S5"])
+    with pytest.raises(ValueError, match="no head|no proposal"):
+        stakes.accept(doc, ch, props, names=["Z9"])
+    ch.meta["alignment_id"] = "another"
+    with pytest.raises(ValueError, match="aligned again"):
+        stakes.accept(doc, ch, props, names=["S1"])
+
+
+def test_known_points_from_csv_chunk_and_ties(tmp_path, scene):
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    csv_path = tmp_path / "punti.csv"
+    csv_path.write_text("nome;x;y;z;precisione\nS1;10,0;20,0;;0,01\nS2;11.5;21.5;100.2\n")  # decimal commas
+    pts = stakes.known_points(csv_path, crs=CRS)
+    assert [p.name for p in pts] == ["S1", "S2"] and np.isnan(pts[0].xyz[2]) and pts[0].precision == 0.01
+    assert pts[1].precision == ties.TABLE_PRECISION and pts[1].crs == CRS
+    m = ch.add_marker("GPS 1", None, reference=truth["S1"])
+    m.reference.accuracy = [0.01, 0.01, 0.03]
+    from_chunk = stakes.known_points(ch)
+    assert [p.name for p in from_chunk] == ["GPS 1"] and from_chunk[0].precision == 0.03
+    ties.add_known(doc, ch, ch.to_internal(np.array([truth["S2"]]))[0], truth["S2"], name="S2", precision=0.02)
+    assert [p.name for p in stakes.known_points("ties", doc=doc)] == ["S2"]
+    local = stakes.KnownPoint("loc", np.array([1.0, 2.0, 3.0]), "LOCAL", 0.02)
+    with pytest.raises(ties.TieError):
+        stakes.find(doc, ch, [local])
+
+
+def test_cli_find_writes_json_and_previews(tmp_path, scene):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    sc, truth, _ = scene
+    doc, ch = project(tmp_path, sc)
+    doc.save()
+    csv_path = tmp_path / "punti.csv"
+    csv_path.write_text("name,x,y,z\n" + "".join(f"{n},{x:.3f},{y:.3f},{z:.3f}\n" for n, (x, y, z) in truth.items())
+                        + f"vuoto,{sc.origin[0] + 6.0:.3f},{sc.origin[1] + 0.3:.3f}\n")
+    out = tmp_path / "res" / "proposals.json"
+    r = CliRunner().invoke(app, ["stakes", "find", str(tmp_path / "p.ppg"), "Scavo", str(csv_path), "--radius", "0.4",
+                                 "--out", str(out)])
+    assert r.exit_code == 0, r.output
+    assert "S1" in r.output and "vuoto" in r.output and "ortho" in r.output
+    data = json.loads(out.read_text())
+    assert [d["point"]["name"] for d in data["proposals"]] == ["S1", "S2", "S3", "S4", "S5", "vuoto"]
+    for n in ["S1", "S5", "vuoto"]:
+        assert (out.parent / f"{n}.png").exists()
+    assert not ppg.Document.open(tmp_path / "p.ppg").meta.get("ties")
+    r = CliRunner().invoke(app, ["stakes", "accept", str(tmp_path / "p.ppg"), "Scavo", str(out), "--ids", "S1,S3"])
+    assert r.exit_code == 0, r.output
+    assert not ppg.Document.open(tmp_path / "p.ppg").meta.get("ties")  # without --yes nothing changes
+    r = CliRunner().invoke(app, ["stakes", "accept", str(tmp_path / "p.ppg"), "Scavo", str(out), "--ids", "S1,S3",
+                                 "--yes"])
+    assert r.exit_code == 0, r.output
+    assert [t.name for t in ties.ties_of(ppg.Document.open(tmp_path / "p.ppg"))] == ["S1", "S3"]
+    r = CliRunner().invoke(app, ["stakes", "accept", str(tmp_path / "p.ppg"), "Scavo", str(out)])
+    assert r.exit_code != 0  # --ids or --agreeing
