@@ -4261,10 +4261,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except (ties_mod.TieError, ValueError) as exc:
             self._warn(error_text(exc))
             return False
-        keep_report(self.doc, report)
         if self.history is not None:
             self.history.push(tr("Aggancia chunk con legami"), TiesStep(self, solution, changed, report),
                               document=True)
+        try:
+            keep_report(self.doc, report)  # after the step: the solve applied stays undoable whatever happens here
+        except (TypeError, ValueError) as exc:
+            log.warning("Rapporto dei legami non conservato: %s", exc)
         saved = False
         if self.doc.path:
             try:
@@ -4302,6 +4305,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(dropped)))
         self.refresh_all()
         self._draw_free()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
         dlg = getattr(self, "_ties_dialog", None)
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
@@ -4310,6 +4315,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _ties_edited(self) -> None:
         """After the undo or the redo of an edit of the ties (their markers written back in every chunk)."""
         self.refresh_all()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
         dlg = getattr(self, "_ties_dialog", None)
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
@@ -16640,7 +16647,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _script_changed(self, exc=None) -> None:
         """The entry of a script (or of an orientation) left the history: the project changed after it (said in the
         status bar and in the log)."""
-        if getattr(exc, "orientation", False):
+        if getattr(exc, "ties", False):
+            text = tr("Il passo dei legami non si può più annullare: i legami, i loro marker o i loro chunk sono "
+                      "cambiati dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.")
+        elif getattr(exc, "orientation", False):
             text = tr("L'orientamento non si può più annullare: il chunk è cambiato dopo (prodotti rifatti, nuovo "
                       "allineamento, georeferenziazione o ottimizzazione). La voce è stata tolta.")
         else:

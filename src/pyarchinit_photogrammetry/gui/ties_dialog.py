@@ -7,6 +7,7 @@ ties in red) and *Applica* (after a check; without redundancy only after its own
 *Modifica > Annulla* (:class:`TiesStep`)."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import html
 import json
@@ -24,6 +25,7 @@ from ..engine import ties as ties_mod
 from . import i18n
 from .dialogs import Field, ParamDialog, choice
 from .i18n import tr
+from .undo import ScriptChanged
 
 log = logging.getLogger(__name__)
 
@@ -173,11 +175,24 @@ def report_html(result: dict) -> str:
     return "".join(out)
 
 
-def edit_state(doc) -> dict:
-    """What an edit of the ties may change: the ties (``doc.meta["ties"]``) and the markers of every chunk (the ends
-    of the ties are markers; a known tie keeps its coordinates in its marker's reference)."""
+class TiesChanged(ScriptChanged):
+    """The ties, their markers or their chunks changed after a step of the ties with a change that is not in the
+    history: undoing it now would take back half of it. The step leaves the history instead, nothing restored."""
+
+    ties = True
+
+
+def edit_state(doc, keys=None) -> dict:
+    """What an edit of the ties may change: the ties (``doc.meta["ties"]``) and the markers of the chunks ``keys``
+    (default every chunk; the ends of the ties are markers, a known tie keeps its coordinates in its marker's
+    reference). Deep copies: nothing is shared with the live markers."""
     return {"ties": copy.deepcopy(doc.meta.get(ties_mod.META_KEY)),
-            "markers": {ch.key: [m.to_dict() for m in ch.markers] for ch in doc.chunks}}
+            "markers": {ch.key: copy.deepcopy([m.to_dict() for m in ch.markers]) for ch in doc.chunks
+                        if keys is None or ch.key in keys}}
+
+
+def _restrict(state: dict, keys) -> dict:
+    return {"ties": state["ties"], "markers": {k: v for k, v in state["markers"].items() if k in keys}}
 
 
 def fingerprint(doc) -> str:
@@ -189,9 +204,10 @@ def fingerprint(doc) -> str:
 
 class TiesEditStep:
     """An edit of the ties (import, from markers, remove, active, precision) as one step of *Modifica > Annulla*: the
-    ties and the markers of every chunk before and after it (:func:`edit_state`). Undo and redo first check that
-    the project is as the step left it (else they raise and the history drops the step), then write the other side
-    back - the ties and their markers together, in every chunk."""
+    ties and the markers of the chunks the edit changed, before and after it (:func:`edit_state`). Undo and redo first
+    check that the ties and those chunks are as the step left them (else :class:`TiesChanged`: the history drops the
+    step; a change in another chunk does not count), then write the other side back - the ties and their markers
+    together."""
 
     def __init__(self, window, before: dict, after: dict, tag=None):
         self.window, self.before, self.after, self.tag = window, before, after, tag
@@ -200,15 +216,15 @@ class TiesEditStep:
         from ..core.marker import Marker
 
         doc = self.window.doc
-        if edit_state(doc) != expected:
-            raise RuntimeError("the ties or the markers changed after the edit of the ties")
+        if edit_state(doc, set(expected["markers"])) != expected:
+            raise TiesChanged("the ties or the markers changed after the edit of the ties")
         if state["ties"]:
             doc.meta[ties_mod.META_KEY] = copy.deepcopy(state["ties"])
         else:
             doc.meta.pop(ties_mod.META_KEY, None)
         for ch in doc.chunks:
             if ch.key in state["markers"]:
-                ch.markers = [Marker.from_dict(d) for d in state["markers"][ch.key]]
+                ch.markers = [Marker.from_dict(d) for d in copy.deepcopy(state["markers"][ch.key])]
         self.window._ties_edited()
 
     def undo(self) -> None:
@@ -246,7 +262,7 @@ class TiesStep:
 
     def _check(self) -> None:
         if self._now() != self.expected:
-            raise RuntimeError("the chunks of the ties changed after the solve was applied")
+            raise TiesChanged("the chunks of the ties changed after the solve was applied")
 
     def undo(self) -> None:
         self._check()
@@ -257,7 +273,8 @@ class TiesStep:
     def redo(self) -> None:
         self._check()
         self.changed = ties_mod.apply(self.window.doc, self.solution)
-        keep_report(self.window.doc, self.report)
+        with contextlib.suppress(TypeError, ValueError):  # the report only: the solve is applied again
+            keep_report(self.window.doc, self.report)
         self.expected = self._now()
         self.window._ties_reload()
 
@@ -514,19 +531,27 @@ class TiesDialog(QDialog):
         one tie - make one step), the project modified, the last check dropped."""
         after = edit_state(self.doc)
         self.invalidate()
+        with contextlib.suppress(AttributeError, RuntimeError):  # the flags of the photo shown
+            self.window.photo_view.draw_markers()
         if after == before:
             return
         self.window.setWindowModified(True)
         history = self.window.history
         if history is None:
             return
+        keys = {k for k in after["markers"] if after["markers"][k] != before["markers"].get(k)}
         last = history.entries[-1] if history.entries and history.index == len(history.entries) else None
         step = getattr(last, "action", None)
-        if tag is not None and isinstance(step, TiesEditStep) and step.tag == tag and step.after == before:
-            step.after = after  # the same edit going on (the arrows of a precision)
+        if (tag is not None and isinstance(step, TiesEditStep) and step.tag == tag
+                and step.after == _restrict(before, set(step.after["markers"]))):
+            # the same edit going on (the arrows of a precision): the step takes the new state
+            for k in keys - set(step.before["markers"]):
+                step.before["markers"][k] = before["markers"][k]
+            step.after = _restrict(after, set(step.before["markers"]))
             history.rebase()
             return
-        history.push(text, TiesEditStep(self.window, before, after, tag), document=True)
+        history.push(text, TiesEditStep(self.window, _restrict(before, keys), _restrict(after, keys), tag),
+                     document=True)
 
     def _item_changed(self, item) -> None:
         if self._filling or item.column() != 0:
@@ -752,4 +777,4 @@ class TiesDialog(QDialog):
         super().closeEvent(ev)
 
 
-__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "edit_state", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]
+__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]

@@ -367,3 +367,36 @@ def test_precision_steps_join_and_checks_that_no_longer_hold(qapp, scene, tmp_pa
         assert dlg.result is None
     finally:
         _close_window(w)
+
+
+def test_an_edit_step_checks_only_its_chunks_and_says_a_refusal(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, c = _three(scene)
+    t1 = _tie(doc, a, b, _world(scene, AB[0]))
+    _tie(doc, a, b, _world(scene, AB[1]))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ca, cb, cc = w.doc.chunks
+        dlg = _open(w, qapp)
+        dlg.table.selectRow(dlg.row_of(t1.id))
+        dlg.remove_selected()
+        step = w.history.entries[-1].action
+        assert set(step.before["markers"]) == {ca.key, cb.key}  # the chunks the edit changed, not the third
+        cc.add_marker("altrove", c.internal(_world(scene, AB[2]))[0])  # a change outside the history, elsewhere
+        w.undo()
+        qapp.processEvents()
+        assert ties.tie_by_id(w.doc, t1.id).active and [m.label for m in cc.markers] == ["altrove"]
+        w.redo()
+        qapp.processEvents()
+        assert len(ties.ties_of(w.doc)) == 1
+
+        # a tie marker changed outside the history: the step refuses, said in the window's words, no error box
+        errors = []
+        monkeypatch.setattr(w, "_exc", lambda *a, **k: errors.append(a))
+        ca.markers[0].position = np.asarray(ca.markers[0].position, float) + 0.1
+        w.undo()
+        qapp.processEvents()
+        assert not errors and not [s for s in w.said if s[0] == "error"]
+        assert "Il passo dei legami non si può più annullare" in w.statusBar().currentMessage()
+        assert len(ties.ties_of(w.doc)) == 1 and not w.history.can_redo()
+    finally:
+        _close_window(w)

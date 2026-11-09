@@ -3158,7 +3158,8 @@
   "Precisione di un legame": "Precision of a tie",
   "Legami dai marker omonimi": "Ties from markers with the same name",
   "Importa legami": "Import ties",
-  "I legami, i marker o i chunk sono cambiati dopo il controllo: premi di nuovo Controlla.": "The ties, the markers or the chunks changed after the check: press Check again."
+  "I legami, i marker o i chunk sono cambiati dopo il controllo: premi di nuovo Controlla.": "The ties, the markers or the chunks changed after the check: press Check again.",
+  "Il passo dei legami non si può più annullare: i legami, i loro marker o i loro chunk sono cambiati dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.": "The step of the ties can no longer be undone: the ties, their markers or their chunks changed after it with a step that is not in Edit > Undo. The entry was removed."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
