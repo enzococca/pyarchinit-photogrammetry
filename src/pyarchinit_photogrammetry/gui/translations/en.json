@@ -3178,7 +3178,8 @@
   "Estremo del legame su questa foto": "End of the tie on this photo",
   "Tasto destro sul punto esatto della foto: Estremo del legame su questa foto.": "Right click on the exact point of the photo: End of the tie on this photo.",
   "Due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in ognuna, un estremo anche su una foto": "Two chunks side by side with linked views: a tie with a click on the same point in each, an end on a photo too",
-  "Due viste affiancate di due chunk, collegate: un legame con un clic in ognuna": "Two linked views of two chunks side by side: a tie with a click in each"
+  "Due viste affiancate di due chunk, collegate: un legame con un clic in ognuna": "Two linked views of two chunks side by side: a tie with a click in each",
+  "Legame a metà annullato: il suo chunk non è più in una delle due viste.": "Half tie cancelled: its chunk is no longer in either view."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4245,6 +4246,9 @@
   "{0} selezionato: trascina un estremo per spostarlo; sulle foto, tasto destro per misurarlo anche lì.": "{0} selected: drag an end to move it; on the photos, right click to measure it there too.",
   "{0}: nessuna ortofoto, DEM o rilievo da mostrare": "{0}: no orthophoto, DEM or relief to show",
   "{0}: il punto della foto non incontra la superficie (nuvola o punti di legame): misuralo anche su un'altra foto o cliccalo su un raster.": "{0}: the point of the photo meets no surface (cloud or tie points): measure it on another photo too or click it on a raster.",
-  "Estremo di «{0}» anche su questa foto": "End of «{0}» on this photo too"
+  "Estremo di «{0}» anche su questa foto": "End of «{0}» on this photo too",
+  "{0} è ora il chunk attivo: le foto del pannello sono le sue.": "{0} is now the active chunk: the photos of the pane are its own.",
+  "Stesso chunk ({0}): primo estremo spostato qui. Ora lo stesso punto nell'altro chunk.": "Same chunk ({0}): first end moved here. Now the same point in the other chunk.",
+  "Precisione del legame invariata ({0} m): cambiala in Aggancia chunk con legami se serve.": "Precision of the tie unchanged ({0} m): change it in Tie chunks together if needed."
  }
 }

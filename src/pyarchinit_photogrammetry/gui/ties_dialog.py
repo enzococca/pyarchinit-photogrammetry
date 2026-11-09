@@ -41,6 +41,23 @@ ADVICE = {"precision_spread", "precision_residuals", "precision_inherited", "not
           "local_references", "approximated", "robust_unsettled"}
 
 
+def alive(obj) -> bool:
+    """``obj`` is a Qt object not deleted yet (a dialog closed with WA_DeleteOnClose is gone in C++ while its Python
+    wrapper stays)."""
+    import shiboken6
+
+    return obj is not None and shiboken6.isValid(obj)
+
+
+def undo_shortcuts(dialog, window) -> None:
+    """Ctrl+Z / Ctrl+Shift+Z in a window of its own (not modal) undo and redo in the main window: the steps it makes
+    are steps of *Modifica > Annulla*."""
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    for keys, slot in ((QKeySequence.StandardKey.Undo, window.undo), (QKeySequence.StandardKey.Redo, window.redo)):
+        QShortcut(keys, dialog).activated.connect(slot)
+
+
 def say(m: dict) -> str:
     """A message of the engine (:func:`..engine.ties.message`) in the language of the interface."""
     args = [ties_mod.Comma(a) if i18n.current() == "it" and isinstance(a, float) else a for a in m["args"]]
@@ -413,6 +430,8 @@ class TiesDialog(QDialog):
         self.table.itemChanged.connect(self._item_changed)
         self.c_robust.toggled.connect(lambda _on: self.invalidate())
         self.c_references.toggled.connect(lambda _on: self.invalidate())
+        self.finished.connect(self._forget)  # Esc / reject: Qt closes the dialog without a closeEvent
+        undo_shortcuts(self, window)
         self.reload(kinds=default_kinds(window.doc, window.chunk))
 
     # ------------------------------------------------------------------ contents
@@ -696,9 +715,8 @@ class TiesDialog(QDialog):
     def _points_redraw(self) -> None:
         """The residuals of the view *Punti in comune* follow the check (shown, or gone with it)."""
         view = getattr(self.window, "_common_points", None)
-        if view is not None:
-            with contextlib.suppress(RuntimeError):  # already deleted
-                view.redraw()
+        if alive(view):
+            view.redraw()
 
     def _update_buttons(self, busy: bool = False) -> None:
         for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import):
@@ -792,10 +810,13 @@ class TiesDialog(QDialog):
                 return False
         return self.window.apply_ties(solution, self.result["report"])
 
-    def closeEvent(self, ev) -> None:  # noqa: N802 - Qt's name
+    def _forget(self, *_args) -> None:
         if getattr(self.window, "_ties_dialog", None) is self:
             self.window._ties_dialog = None
+
+    def closeEvent(self, ev) -> None:  # noqa: N802 - Qt's name
+        self._forget()
         super().closeEvent(ev)
 
 
-__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "record_edit", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]
+__all__ = ["alive", "undo_shortcuts", "TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "record_edit", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]

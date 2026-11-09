@@ -593,7 +593,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.photo_view.context_hook = self._photo_tie_menu  # *Estremo del legame su questa foto*
-        self._common_points = getattr(self, "_common_points", None)
+        self._common_points = None
         self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
         self.tabs.addTab(self.ortho_view, icon("view_ortho"), tr("Ortofoto / DEM"))
         self.tabs.addTab(self.photo_view, icon("view_photo"), tr("Foto"))
@@ -4232,13 +4232,31 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         if not self._two_chunks():
             return
-        dlg = getattr(self, "_ties_dialog", None)
+        dlg = self._live_ties_dialog()
         if dlg is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.raise_()
                 dlg.activateWindow()
                 return
         self._ties_dialog = TiesDialog.ask(self)
+
+    def _live_ties_dialog(self):
+        """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None and not alive(dlg):
+            self._ties_dialog = dlg = None
+        return dlg
+
+    def _live_common_points(self):
+        """The window *Punti in comune* when open (see :meth:`_live_ties_dialog`)."""
+        from .ties_dialog import alive
+
+        win = getattr(self, "_common_points", None)
+        if win is not None and not alive(win):
+            self._common_points = win = None
+        return win
 
     def common_points(self):
         """*Flusso di lavoro > Punti in comune*: two chunks side by side to place the ties
@@ -4247,7 +4265,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         if not self._two_chunks():
             return None
-        win = getattr(self, "_common_points", None)
+        win = self._live_common_points()
         if win is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
                 win.raise_()
@@ -4257,14 +4275,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         return self._common_points
 
     def _close_common_points(self) -> None:
-        win = getattr(self, "_common_points", None)
+        win = self._live_common_points()
         self._common_points = None
         if win is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
                 win.close()
 
     def _common_points_redraw(self, refresh: bool = False) -> None:
-        win = getattr(self, "_common_points", None)
+        win = self._live_common_points()
         if win is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
                 win.refresh() if refresh else win.redraw()
@@ -4278,14 +4296,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.photos.update_flags()
         if self.photo_view.camera is not None:
             self.photo_view.draw_markers()
-        dlg = getattr(self, "_ties_dialog", None)
+        dlg = self._live_ties_dialog()
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload(kinds=dlg._kinds_with_new())
 
     def _photo_tie_menu(self, menu, x: float, y: float) -> None:
         """The right-click menu of the photo view while *Punti in comune* is open: an end of a tie on this photo."""
-        win = getattr(self, "_common_points", None)
+        win = self._live_common_points()
         cam, ch = self.photo_view.camera, self.photo_view.chunk
         if win is None or cam is None or ch is None:
             return
@@ -4305,7 +4323,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def tie_end_photo(self, camera) -> None:
         """*Estremo del legame su questa foto* from the Photos pane: the photo opened on where the current transforms put
         the pending end (a red cross); a right click on the exact point there places it."""
-        win = getattr(self, "_common_points", None)
+        win = self._live_common_points()
         focus = None
         if win is not None:
             with contextlib.suppress(RuntimeError):
@@ -4315,7 +4333,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                      20000)
 
     def _close_ties_dialog(self) -> None:
-        dlg = getattr(self, "_ties_dialog", None)
+        dlg = self._live_ties_dialog()
         self._ties_dialog = None
         if dlg is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
@@ -4387,7 +4405,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._draw_free()
         if self.photo_view.camera is not None:
             self.photo_view.draw_markers()
-        dlg = getattr(self, "_ties_dialog", None)
+        dlg = self._live_ties_dialog()
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload()
@@ -4398,7 +4416,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.refresh_all()
         if self.photo_view.camera is not None:
             self.photo_view.draw_markers()
-        dlg = getattr(self, "_ties_dialog", None)
+        dlg = self._live_ties_dialog()
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload()
@@ -5963,7 +5981,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if len(cams) == 2:
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
-        if len(cams) == 1 and cams[0].aligned and getattr(self, "_common_points", None) is not None:
+        if len(cams) == 1 and cams[0].aligned and self._live_common_points() is not None:
             menu.addAction(tr("Estremo del legame su questa foto"), lambda: self.tie_end_photo(cams[0]))
         if len(cams) == 1 and cams[0].aligned:
             menu.addAction(icon("look_through"), tr("Guarda dalla foto nella vista 3D"),

@@ -229,6 +229,8 @@ def test_dragging_an_end_moves_its_marker(win, qapp):
     assert tie.id in cp._moved  # its residual is no longer drawn
     win.undo()
     np.testing.assert_allclose(a.chunk.marker_by_key(tie.a[1]).position, before)
+    cp.redraw()
+    assert tie.id not in cp._moved  # back where it was checked: its residual is drawn again
 
 
 def test_residuals_of_the_check_drawn_and_buttons(win, qapp):
@@ -258,9 +260,14 @@ def test_residuals_of_the_check_drawn_and_buttons(win, qapp):
 def test_an_end_on_a_photo_becomes_a_pinned_projection(win, qapp, tmp_path):
     from PySide6.QtWidgets import QMenu
 
+    from pyarchinit_photogrammetry.core.marker import Projection
+
     cp = _open(win, qapp)
     a, b = cp.sides
     cam = _photo(a.chunk, tmp_path)
+    # another marker of the chunk, measured on the photo but kept elsewhere: an end on a photo must not move it
+    other = a.chunk.add_marker("X", [3.0, 3.0, 1.0])
+    other.projections[cam.key] = Projection(100.0, 100.0, True)
     world = np.array([[2.3, 1.7, _surface(2.3, 1.7)]])
     (px, py), = cam.project(a.chunk.sensor(cam), world)[0]
     # the first end on B's raster, the second on a photo of A: the photo view's menu while the window is open
@@ -278,10 +285,11 @@ def test_an_end_on_a_photo_becomes_a_pinned_projection(win, qapp, tmp_path):
     pr = marker.projections[cam.key]
     assert pr.pinned is True and (pr.x, pr.y) == pytest.approx((px, py))
     np.testing.assert_allclose(marker.position, world[0], atol=0.05)  # one photo: on the surface
+    np.testing.assert_allclose(other.position, [3.0, 3.0, 1.0])
     assert tie.precision > 0
     # undo: the tie, the marker and its projection go together
     win.undo()
-    assert not ties.ties_of(win.doc) and not a.chunk.markers
+    assert not ties.ties_of(win.doc) and [m.label for m in a.chunk.markers] == ["X"]
     win.redo()
     assert ties.ties_of(win.doc)
 
@@ -316,3 +324,68 @@ def test_a_local_chunk_beside_one_in_a_system_is_superimposed(win, qapp):
     cp.clicked(a, 1.0, 1.0)
     cp.clicked(b, 1.0, 1.0)
     assert len(ties.ties_of(win.doc)) == 1  # a tie between them holds all the same
+
+
+def test_selected_tie_on_one_more_photo_keeps_a_precision_set_by_hand(win, qapp, tmp_path):
+    cp = _open(win, qapp)
+    a, b = cp.sides
+    cam = _photo(a.chunk, tmp_path)
+    cp.clicked(b, 2.0, 2.0)
+    cp.clicked(a, 2.0, 2.0)  # a raster end in A
+    (tie,) = ties.ties_of(win.doc)
+    made = tie.precision
+    (px, py), = cam.project(a.chunk.sensor(cam), np.array([[2.0, 2.0, _surface(2.0, 2.0)]]))[0]
+    cp.select(tie.id)
+    assert cp.add_photo_to_selected(a.chunk, cam, px, py)
+    (tie,) = ties.ties_of(win.doc)
+    assert tie.precision != pytest.approx(made)  # made here: this end's precision from its photo now
+    all_ties = ties.ties_of(win.doc)
+    all_ties[0].precision = 0.123  # by hand in the dialog
+    ties.save_ties(win.doc, all_ties)
+    assert cp.add_photo_to_selected(a.chunk, cam, px + 0.5, py)
+    assert ties.ties_of(win.doc)[0].precision == pytest.approx(0.123)
+    assert "invariata" in cp.status.text()
+
+
+def test_half_tie_same_chunk_and_unshown(win, qapp):
+    cp = _open(win, qapp)
+    a, b = cp.sides
+    cp.clicked(a, 1.0, 1.0)
+    cp.clicked(a, 1.5, 1.0)
+    assert "Stesso chunk" in cp.status.text() and cp.pending.internal[0] == pytest.approx(1.5)
+    cp.set_chunks(b.chunk, b.chunk)  # the half tie's chunk in neither view: dropped, said
+    qapp.processEvents()
+    assert cp.pending is None and "non è più" in cp.status.text()
+
+
+def test_esc_on_a_combo_forgets_the_window(win, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QShortcut
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMenu
+
+    cp = _open(win, qapp)
+    assert len(cp.findChildren(QShortcut)) == 2  # Ctrl+Z / Ctrl+Shift+Z: the main window's Annulla / Ripeti
+    combo = cp.sides[1].rasters
+    combo.setFocus()
+    QTest.keyClick(combo, Qt.Key.Key_Escape)  # no half tie: Esc rejects the dialog (no closeEvent in Qt 6)
+    qapp.processEvents()
+    assert win._live_common_points() is None and win._common_points is None
+    cam = _photo(cp_chunk := win.doc.chunks[0], _folder(win))
+    win.photo_view.show_camera(cp_chunk, cam)
+    menu = QMenu()
+    win._photo_tie_menu(menu, 10.0, 10.0)
+    assert not menu.actions()
+    win.refresh_all()  # nothing raises: the window no longer follows the project
+    again = win.common_points()
+    assert again is not None and again is not cp and again.isVisible()
+    # the same for the dialog of the ties
+    win.tie_chunks()
+    dlg = win._ties_dialog
+    QTest.keyClick(dlg.table, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    assert win._live_ties_dialog() is None
+
+
+def _folder(win):
+    return win.doc.path.parent

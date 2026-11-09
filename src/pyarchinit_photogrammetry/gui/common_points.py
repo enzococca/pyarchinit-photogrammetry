@@ -24,6 +24,7 @@ and *Applica* open the report of *Aggancia chunk con legami*."""
 from __future__ import annotations
 
 import contextlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,7 @@ from ..engine import ties as ties_mod
 from . import i18n
 from .i18n import tr
 from .image_views import RASTER_TITLES, RELIEF_KINDS, RasterView, polyline_path
-from .ties_dialog import edit_state, record_edit
+from .ties_dialog import alive, edit_state, record_edit, undo_shortcuts
 
 TIE_LAYER = "Legami"  # names of layers: data, as the other layers of the views
 PENDING_LAYER = "Legame a metà"
@@ -141,7 +142,7 @@ class TieRasterView(RasterView):
         self.point_menu.emit(x, y, global_pos)
 
     def tie_at(self, scene_pos: QPointF):
-        """``(tie id, "a"/"b", graphics item)`` of the end of a tie under a scene position, or None."""
+        """``(tie id, "a"/"b", graphics item, label item)`` of the end of a tie under a scene position, or None."""
         hit = self.feature_at(scene_pos)
         if hit is None or hit[0] != TIE_LAYER:
             return None
@@ -149,7 +150,8 @@ class TieRasterView(RasterView):
         features = self.layers.get(TIE_LAYER, {}).get("features", [])
         if not 0 <= attrs.get("_index", -1) < len(features):
             return None
-        return attrs["tie"], attrs["end"], features[attrs["_index"]][0]
+        item, label, _attrs = features[attrs["_index"]]
+        return attrs["tie"], attrs["end"], item, label
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802 - Qt's name
         if self.mode != "tie" or self.tr is None:
@@ -174,7 +176,9 @@ class TieRasterView(RasterView):
             return
         press["moved"] = True
         if press["hit"] is not None:  # an end of a tie follows the mouse
-            press["hit"][2].setPos(self.mapToScene(pos))
+            for it in press["hit"][2:]:  # the point and its label
+                if it is not None:
+                    it.setPos(self.mapToScene(pos))
         else:  # the raster follows the mouse
             d = pos - press["last"]
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - d.x())
@@ -187,7 +191,7 @@ class TieRasterView(RasterView):
             return super().mouseReleaseEvent(ev)
         x, y = self.world(self.mapToScene(ev.position().toPoint()))
         if press["hit"] is not None:
-            tie_id, end, _item = press["hit"]
+            tie_id, end = press["hit"][:2]
             if press["moved"]:
                 self.tie_dragged.emit(tie_id, end, x, y)
             else:
@@ -275,7 +279,11 @@ class CommonPointsWindow(QDialog):
         self.resize(1400, 820)
         self.pending: End | None = None
         self.selected: str | None = None
-        self._moved: set[str] = set()  # ties with an end moved since the last check: no residual drawn
+        # ties with an end moved since the last check -> the internal places of their ends when the residual held: no
+        # residual drawn until a new check, or until the ends are back there (an undo)
+        self._moved: dict[str, list] = {}
+        self._made: dict[str, dict] = {}  # ties made here: chunk key -> the precision of that end (metres)
+        self._signature = None  # what the views show (chunks, transforms, rasters): refresh() re-links when it changes
         self._result_seen = None
         self._syncing = False
         self._filling = False
@@ -329,6 +337,8 @@ class CommonPointsWindow(QDialog):
         self.b_apply.clicked.connect(self.apply)
         self.b_close.clicked.connect(self.close)
         window.refreshed.connect(self.refresh)
+        self.finished.connect(self._forget)  # Esc / reject: Qt closes the dialog without a closeEvent
+        undo_shortcuts(self, window)
 
         doc = window.doc
         first = window.chunk if window.chunk in doc.chunks else (doc.chunks[0] if doc.chunks else None)
@@ -354,6 +364,7 @@ class CommonPointsWindow(QDialog):
         for side in self.sides:
             self._chunk_chosen(side, sync=False)
         self._sync(self.sides[0])
+        self._signature = self.signature()
 
     def set_chunks(self, first, second) -> None:
         """The chunks of the two sides (objects or keys)."""
@@ -389,7 +400,15 @@ class CommonPointsWindow(QDialog):
         self._load(side)
         if sync:
             self._sync(self._other(side))
+            self._drop_unshown_pending()
         self._update_note()
+
+    def _drop_unshown_pending(self) -> None:
+        """A half tie whose chunk is no longer in either view is dropped (said): the next click would tie it unseen."""
+        if self.pending is not None and all(s.chunk is not self.pending.chunk for s in self.sides):
+            self.pending = None
+            self.redraw()
+            self._say(tr("Legame a metà annullato: il suo chunk non è più in una delle due viste."))
 
     def _raster_chosen(self, side) -> None:
         if self._filling:
@@ -440,9 +459,17 @@ class CommonPointsWindow(QDialog):
     def refresh(self) -> None:
         """After a change of the project (a chunk removed or renamed, a product rebuilt, a solve applied or undone):
         the lists of chunks, the frames, the rasters whose file changed and the ties drawn again."""
-        with contextlib.suppress(RuntimeError):  # already deleted
+        if not alive(self):
+            return
+        try:
             if not self.isVisible():
                 return
+        except RuntimeError:  # deleted meanwhile
+            return
+        signature = self.signature()
+        if signature == self._signature:  # nothing the views show changed: the ties only (no re-link, no re-read)
+            self.redraw()
+            return
         keys = [c.key for c in self.doc.chunks]
         listed = [self.sides[0].chunks.itemData(i) for i in range(self.sides[0].chunks.count())]
         labels = [self.sides[0].chunks.itemText(i) for i in range(self.sides[0].chunks.count())]
@@ -460,6 +487,25 @@ class CommonPointsWindow(QDialog):
             self.pending = None
         self._update_note()
         self.redraw()
+        self._signature = self.signature()
+
+    def signature(self):
+        """The chunks of the project and, for each side, its chunk's transform and system and the rasters it can show
+        (files and their times): :meth:`refresh` re-reads and re-links the views only when it changes."""
+        sides = []
+        for side in self.sides:
+            ch = self._chunk_of(side)
+            if ch is None:
+                sides.append(None)
+                continue
+            rasters = []
+            for k, path, _t in raster_choices(ch):
+                with contextlib.suppress(OSError):
+                    rasters.append((k, str(path), path.stat().st_mtime_ns))
+            sides.append((ch.key, np.asarray(ch.transform, float).tobytes(), ch.crs,
+                          json.dumps([ch.meta.get("built_in"), ch.meta.get("relief")], sort_keys=True, default=str),
+                          tuple(rasters)))
+        return tuple((c.key, c.label) for c in self.doc.chunks), tuple(sides)
 
     # ------------------------------------------------------------------ the link between the views
     def _offset(self, src, dst) -> np.ndarray:
@@ -602,6 +648,7 @@ class CommonPointsWindow(QDialog):
         if self.pending is not None and self.pending.chunk is not end.chunk:
             self._make(self.pending, end)
             return
+        again = self.pending is not None
         self.pending = end
         self.redraw()
         other = self._other(side) if side is not None else next((s for s in self.sides if s.chunk is not end.chunk
@@ -616,8 +663,12 @@ class CommonPointsWindow(QDialog):
                     other.view.centerOn(other.view.scene_pt(ox, oy))
                 finally:
                     self._syncing = False
-        self._say(tr("Primo estremo in {0}: ora lo stesso punto nell'altro chunk (vista o foto). Esc annulla.",
-                     end.chunk.label))
+        if again:
+            self._say(tr("Stesso chunk ({0}): primo estremo spostato qui. Ora lo stesso punto nell'altro chunk.",
+                         end.chunk.label))
+        else:
+            self._say(tr("Primo estremo in {0}: ora lo stesso punto nell'altro chunk (vista o foto). Esc annulla.",
+                         end.chunk.label))
 
     def cancel(self) -> None:
         """Esc: the half tie dropped."""
@@ -633,6 +684,27 @@ class CommonPointsWindow(QDialog):
         from ..markers import gcp
 
         return gcp.surface_point(end.chunk, end.camera, *end.xy)
+
+    @staticmethod
+    def _triangulate_end(chunk, marker) -> None:
+        """``marker`` triangulated from its photos (two or more), else placed on the surface (the rules of
+        :func:`..markers.gcp.triangulate_markers`); the other markers of the chunk stay where they are."""
+        import copy
+
+        kept = {id(m): copy.deepcopy(m.position) for m in chunk.markers if m is not marker}
+        chunk.triangulate_markers()
+        for m in chunk.markers:
+            if id(m) in kept:
+                m.position = kept[id(m)]
+
+    def _ends_now(self, tie) -> list:
+        """The internal places of a tie's ends now (None for an end without one)."""
+        out = []
+        for end, uid in tie.end_uids():
+            found = ties_mod.resolve_end(self.doc, end, uid)
+            p = None if found is None else ties_mod.end_internal(*found)
+            out.append(None if p is None else [round(float(v), 9) for v in p])
+        return out
 
     def _make(self, first: End, second: End):
         """The tie between two ends of two chunks: one step of Modifica > Annulla (the tie and both markers)."""
@@ -655,7 +727,7 @@ class CommonPointsWindow(QDialog):
             if end.camera is not None:
                 end.chunk.add_marker_projection(marker, end.camera, end.xy[0], end.xy[1], pinned=True)
                 gcp.exclude_photo(end.chunk, marker, end.camera.key, excluded=False)
-                end.chunk.triangulate_markers()
+                self._triangulate_end(end.chunk, marker)
                 with contextlib.suppress(Exception):  # the blue flags on the other photos: a help only
                     gcp.project_marker(end.chunk, marker)
                 precisions.append(ties_mod.end_precision(end.chunk, marker) or ties_mod.TABLE_PRECISION)
@@ -666,6 +738,7 @@ class CommonPointsWindow(QDialog):
             if t.id == tie.id:
                 t.precision = float(np.hypot.reduce(precisions))
         ties_mod.save_ties(doc, all_ties)
+        self._made[tie.id] = {first.chunk.key: precisions[0], second.chunk.key: precisions[1]}
         record_edit(self.window, tr("Legame da Punti in comune"), before)
         self.pending = None
         self.selected = tie.id
@@ -713,23 +786,33 @@ class CommonPointsWindow(QDialog):
         if found is None:
             return False
         before = edit_state(self.doc)
+        was = self._ends_now(tie)
         ch, marker = found
         ch.add_marker_projection(marker, camera, x, y, pinned=True)
         gcp.exclude_photo(ch, marker, camera.key, excluded=False)
-        ch.triangulate_markers()
+        self._triangulate_end(ch, marker)
         with contextlib.suppress(Exception):
             gcp.project_marker(ch, marker)
-        all_ties = ties_mod.ties_of(self.doc)
-        pairs = [ties_mod.resolve_end(self.doc, e, u) for e, u in tie.end_uids()]
-        for t in all_ties:
-            if t.id == tie.id and all(p is not None for p in pairs):
-                t.precision = ties_mod._default_precision(pairs)
-        ties_mod.save_ties(self.doc, all_ties)
-        self._moved.add(tie.id)
+        # the precision: this end from its photos now, the other end as it was - only for a tie made here whose
+        # precision was not changed by hand since (else it stays, said)
+        made = self._made.get(tie.id)
+        kept = made is None or abs(tie.precision - float(np.hypot.reduce(list(made.values())))) > 1e-9
+        if not kept:
+            made[ch.key] = ties_mod.end_precision(ch, marker) or ties_mod.TABLE_PRECISION
+            all_ties = ties_mod.ties_of(self.doc)
+            for t in all_ties:
+                if t.id == tie.id:
+                    t.precision = float(np.hypot.reduce(list(made.values())))
+            ties_mod.save_ties(self.doc, all_ties)
+        self._moved.setdefault(tie.id, was)
         record_edit(self.window, tr("Estremo di un legame su una foto"), before)
         self.window._ties_made()
         self.redraw()
-        self._say(tr("{0}: estremo in {1} misurato anche su {2}.", tie.name, ch.label, camera.label))
+        text = tr("{0}: estremo in {1} misurato anche su {2}.", tie.name, ch.label, camera.label)
+        if kept:
+            text += " " + tr("Precisione del legame invariata ({0} m): cambiala in Aggancia chunk con legami se serve.",
+                             i18n.number(float(tie.precision), 3))
+        self._say(text)
         return True
 
     def move_end(self, side, tie_id: str, end_name: str, x: float, y: float) -> bool:
@@ -756,8 +839,8 @@ class CommonPointsWindow(QDialog):
                                  "(costruisci il DEM del chunk).", chunk.label))
             return False
         before = edit_state(self.doc)
+        self._moved.setdefault(tie_id, self._ends_now(tie))
         marker.position = np.asarray(p, float)
-        self._moved.add(tie_id)
         self.selected = tie_id
         record_edit(self.window, tr("Sposta l'estremo di un legame"), before)
         self.window._ties_made()
@@ -769,7 +852,7 @@ class CommonPointsWindow(QDialog):
         """A tie selected (drawn in yellow, its row selected in *Aggancia chunk con legami* when open)."""
         self.selected = tie_id
         self.redraw()
-        dlg = getattr(self.window, "_ties_dialog", None)
+        dlg = self.window._live_ties_dialog()
         if dlg is not None and tie_id is not None:
             with contextlib.suppress(RuntimeError):
                 row = dlg.row_of(tie_id)
@@ -785,13 +868,18 @@ class CommonPointsWindow(QDialog):
         """The residual of each tie from the last check (the dialog's, else the solve applied last) and the suspect
         ties; the ties with an end moved since are left out."""
         result = None
-        dlg = getattr(self.window, "_ties_dialog", None)
+        dlg = self.window._live_ties_dialog()
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 result = dlg.result
         if result is not None and result is not self._result_seen:
             self._result_seen = result
             self._moved.clear()
+        if self._moved:  # an end back where it was when the residual held (an undo): its residual again
+            now = {t.id: t for t in ties_mod.ties_of(self.doc)}
+            for tid, was in list(self._moved.items()):
+                if tid not in now or self._ends_now(now[tid]) == was:
+                    del self._moved[tid]
         if result is not None:
             rows, suspects = result["report"]["residuals"], set(result["report"]["suspects"])
         else:
@@ -863,11 +951,18 @@ class CommonPointsWindow(QDialog):
         if p is None:
             p = side.to_internal(x, y)
         w = self.window
-        if side.chunk is not w.chunk and not w._activate_chunk(side.chunk):
+        switched = side.chunk is not w.chunk
+        if switched and not w._activate_chunk(side.chunk):
             return
         w.filter_photos_by_point(p)
-        self._say(tr("Foto di {0} che vedono il punto: aprine una, poi tasto destro sul punto esatto: Estremo del "
-                     "legame su questa foto.", side.chunk.label))
+        text = tr("Foto di {0} che vedono il punto: aprine una, poi tasto destro sul punto esatto: Estremo del "
+                  "legame su questa foto.", side.chunk.label)
+        if switched:  # the main window follows that chunk now: said, not silent
+            note = tr("{0} è ora il chunk attivo: le foto del pannello sono le sue.", side.chunk.label)
+            with contextlib.suppress(AttributeError):
+                w.log_pane.info(note)
+            text = note + " " + text
+        self._say(text)
 
     def predicted_point(self, chunk) -> np.ndarray | None:
         """Where the current transforms put the pending end in ``chunk`` (internal), for a photo of that chunk."""
@@ -892,14 +987,14 @@ class CommonPointsWindow(QDialog):
     def check(self) -> None:
         """*Controlla*: the report of *Aggancia chunk con legami* (its dialog opened, the check started)."""
         self.window.tie_chunks()
-        dlg = getattr(self.window, "_ties_dialog", None)
+        dlg = self.window._live_ties_dialog()
         if dlg is not None:
             dlg.run_check()
 
     def apply(self) -> None:
         """*Applica*: the last check of *Aggancia chunk con legami* applied (its dialog opened); without one, said."""
         self.window.tie_chunks()
-        dlg = getattr(self.window, "_ties_dialog", None)
+        dlg = self.window._live_ties_dialog()
         if dlg is None:
             return
         if dlg.result is None:
@@ -913,11 +1008,19 @@ class CommonPointsWindow(QDialog):
             return
         super().keyPressEvent(ev)
 
-    def closeEvent(self, ev) -> None:  # noqa: N802 - Qt's name
+    def _forget(self, *_args) -> None:
+        """The one cleanup, reached from a close and from Esc / reject (``finished``: Qt 6 closes a dialog from
+        ``done()`` without a closeEvent): the main window no longer refreshes it nor offers its photo entries. Once."""
+        if getattr(self, "_forgotten", False):
+            return
+        self._forgotten = True
         with contextlib.suppress(RuntimeError, TypeError):
             self.window.refreshed.disconnect(self.refresh)
         if getattr(self.window, "_common_points", None) is self:
             self.window._common_points = None
+
+    def closeEvent(self, ev) -> None:  # noqa: N802 - Qt's name
+        self._forget()
         super().closeEvent(ev)
 
 
