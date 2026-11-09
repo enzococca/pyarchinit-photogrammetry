@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import weakref
@@ -2237,7 +2238,7 @@ class PhotoView(_ZoomView):
     def context_hook(self, fn) -> None:
         if fn is None:
             self._context_hook = None
-        elif getattr(fn, "__self__", None) is not None:
+        elif inspect.ismethod(fn):  # a bound method (a builtin's __self__ is its module: no WeakMethod for it)
             self._context_hook = weakref.WeakMethod(fn)
         else:
             self._context_hook = lambda: fn

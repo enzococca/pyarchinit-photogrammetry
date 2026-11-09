@@ -429,4 +429,6 @@ def test_the_photo_menu_hook_does_not_hold_the_window(win):
     win.photo_view.context_hook = lambda menu, x, y: plain.append((x, y))
     win.photo_view.context_hook(None, 1, 2)
     assert plain == [(1, 2)]
+    win.photo_view.context_hook = print  # a builtin: its __self__ is its module, kept as it is (no WeakMethod)
+    assert win.photo_view.context_hook is print
     win.photo_view.context_hook = hook
