@@ -766,13 +766,19 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
 
     ``u_map`` (``[theta_deg, u]`` pairs, a cylinder): the development on the wall with THIS map instead of one
     measured again on the relief - the grid in ``u`` of an earlier build kept (the rebuild of a stale elevation,
-    the same grid across campaigns); ``scale`` is then "wall"."""
+    the same grid across campaigns); ``scale`` is then "wall". ``scale`` ``keep``: the frame as it is - a cylinder
+    with a ``u_map`` (the frame of an elevation scaled on the wall, :func:`frame_from_dict`) keeps that map, one
+    without stays on the cylinder (:func:`build_like` builds on the frame and grid of an existing elevation)."""
+    if scale == "keep":
+        if u_map is None and frame.kind == "cylinder" and getattr(frame, "u_map", None) is not None:
+            u_map = frame.u_map
+        scale = "cylinder" if u_map is None else "wall"
     if u_map is not None:
         if frame.kind != "cylinder":
             raise ValueError("a u_map is for cylindrical developments")
         scale = "wall"
     if scale not in ("cylinder", "wall"):
-        raise ValueError(f"unknown scale {scale!r}: cylinder or wall")
+        raise ValueError(f"unknown scale {scale!r}: cylinder, wall or keep")
     if scale == "wall" and frame.kind != "cylinder":
         raise ValueError("the scale on the wall is for cylindrical developments")
     if kind == "section":
@@ -874,6 +880,30 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     chunk.meta.setdefault("elevations", []).append(entry)
     progress(1.0, f"Elevation {w}x{h} px")
     return entry
+
+
+def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Progress | None = None,
+               workers: int | None = None) -> dict:
+    """An elevation of ``chunk`` on the SAME frame and grid as ``entry`` (an elevation of this chunk or of another one
+    in the same reference system: another campaign on the same wall): its frame with its ``u_map`` (a development
+    scaled on the wall keeps its length along the wall, not one measured again on this chunk's relief), resolution,
+    bounds, depth band, kind and mosaic settings - so the two orthophotos and reliefs lie on the same pixels and can be
+    compared cell by cell. ``ValueError`` when the reference systems differ. The new entry says ``grid_of`` (the id of
+    ``entry``)."""
+    theirs, mine = entry.get("crs"), getattr(chunk, "crs", None)
+    if theirs is not None and mine is not None and str(theirs) != str(mine):
+        raise ValueError(f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same "
+                         "reference system")
+    frame = frame_from_dict(entry["frame"])
+    kind = entry.get("kind", "elevation")
+    depth = entry.get("depth")
+    new = build_elevation(chunk, frame, float(entry["resolution"]), name or entry.get("name"),
+                          tuple(depth) if depth is not None else None, blending=entry.get("blending", "mosaic"),
+                          ghosting=bool(entry.get("ghosting", False)), fill_holes=bool(entry.get("fill_holes", True)),
+                          progress=progress, workers=workers, max_angle=float(entry.get("max_angle", 80.0)),
+                          bounds=tuple(entry["bounds"]), kind=kind, scale="keep")
+    new["grid_of"] = entry["id"]
+    return new
 
 
 def remove_elevation(chunk: Chunk, eid: str) -> bool:

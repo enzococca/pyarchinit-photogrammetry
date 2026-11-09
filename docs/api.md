@@ -1491,7 +1491,8 @@ ray from the viewer side on the model, kept within `depth=(dmin, dmax)` (what st
 | `with_heights(plane)`, `heights_measured(frame)` | v made the world height when the v axis is vertical within a degree; whether it is |
 | `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | the cylinder through a circle fitted to plan points; its axis by `cylinder_axis`, kept in `Cylinder.tilt` |
 | `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | the axis of a cylinder and `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder")` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]`; `kind="section"` keeps only what lies behind the plane and saves the profile |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder", u_map=None)` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]`; `kind="section"` keeps only what lies behind the plane and saves the profile |
+| `build_like(chunk, entry, name=None, progress=None, workers=None)` | an elevation of `chunk` on the frame and grid of `entry` (this chunk's or another chunk's in the same reference system): the same pixels, to compare campaigns |
 | `wall_map(surface)`, `wall_length(entry)` | the `u_map` that makes u the length along the wall; the length of the wall all round |
 | `cut_profile(chunk, frame, bounds=None, simplify=0)` | the line where a plane cuts the model, polylines of `(u, v)` |
 | `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | the profile of a section; as a DXF in the coordinates of the elevation (layers PROFILO, MARKER) |
@@ -1526,6 +1527,15 @@ degree, builds the map with the length of the wall's trace (from -180 degrees, u
 stays where it is without a map) and builds the development on it; `entry["scale"] = "wall"`. With
 `scale="cylinder"` a frame's map is left out (the development is on the cylinder, as asked). Entries
 without `tilt` and `u_map` are vertical and on the cylinder, as before 1.7.1.
+
+**The same grid in another chunk.** `scale="wall"` measures the map again on the relief of the chunk it builds
+in, so another campaign on the same wall would get another grid. To keep it: `build_elevation(..., u_map=map)`
+(the development on that map, `scale` then "wall"), `scale="keep"` (the frame as it is: a frame read with
+`frame_from_dict(entry["frame"])` keeps its map, a cylinder without one stays on the cylinder), or
+`build_like(chunk, entry)` - the frame with its map, the resolution, `bounds`, depth band, kind and mosaic settings
+of `entry`, so both orthophotos and reliefs lie on the same pixels. The chunks must be in the same reference system
+(ValueError otherwise); the new entry says `grid_of` (the id of `entry`). CLI: `ppg elevation --like ID
+[--like-chunk CHUNK]`.
 
 ### Drawings on elevations and sections
 

@@ -449,7 +449,13 @@ ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 ppg elevation scavo.ppg --circle X1,Y1,X2,Y2,X3,Y3 --outside [--axis vertical|region|crest|points]
     [--axis-points X,Y,Z,X,Y,Z] [--scale cylinder|wall]
+ppg elevation scavo.ppg --like ID [--like-chunk CHUNK] [--chunk CHUNK] [--name NAME]
 ```
+
+`--like` builds on the frame and grid of an elevation already made (its id or name; of `--like-chunk`, by default of
+the same chunk): the same plane or cylinder - a development scaled on the wall keeps its length along the wall, not
+one measured again -, resolution, bounds and depth. Another campaign on the same wall, in another chunk of the same
+reference system, then lies on the same pixels and the two compare cell by cell.
 
 ### Drawings on elevations and sections
 

@@ -1537,7 +1537,8 @@ una sezione lasciata davanti al muro - viene attraversato).
 | `with_heights(plane)`, `heights_measured(frame)` | v diventa la quota mondo quando l'asse v è verticale entro un grado; se lo è |
 | `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | il cilindro per un cerchio adattato a punti in pianta; il suo asse da `cylinder_axis`, tenuto in `Cylinder.tilt` |
 | `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | l'asse di un cilindro e `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder")` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder", u_map=None)` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `build_like(chunk, entry, name=None, progress=None, workers=None)` | un prospetto di `chunk` sul sistema e sulla griglia di `entry` (di questo chunk o di un altro nello stesso sistema di riferimento): gli stessi pixel, per confrontare le campagne |
 | `wall_map(surface)`, `wall_length(entry)` | la `u_map` che fa di u la lunghezza lungo il muro; la lunghezza del muro tutto intorno |
 | `cut_profile(chunk, frame, bounds=None, simplify=0)` | la linea dove un piano taglia il modello, polilinee di `(u, v)` |
 | `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | il profilo di una sezione; come DXF nelle coordinate del prospetto (layer PROFILO, MARKER) |
@@ -1574,6 +1575,15 @@ Senza, u = theta x raggio. `build_elevation(scale="wall")` misura la profondità
 cucitura resta dove sta senza mappa) e costruisce lo sviluppo su di essa; `entry["scale"] = "wall"`. Con
 `scale="cylinder"` la mappa di un sistema viene lasciata fuori (lo sviluppo è sul cilindro, come chiesto). Le voci
 senza `tilt` e `u_map` sono verticali e sul cilindro, come prima della 1.7.1.
+
+**La stessa griglia in un altro chunk.** `scale="wall"` misura di nuovo la mappa sul rilievo del chunk in cui
+costruisce, quindi un'altra campagna sullo stesso muro avrebbe un'altra griglia. Per tenerla:
+`build_elevation(..., u_map=mappa)` (lo sviluppo su quella mappa, `scale` allora "wall"), `scale="keep"` (il sistema
+così com'è: un sistema letto con `frame_from_dict(entry["frame"])` tiene la sua mappa, un cilindro senza resta sul
+cilindro), o `build_like(chunk, entry)` - il sistema con la sua mappa, la risoluzione, `bounds`, la fascia di
+profondità, il tipo e le impostazioni del mosaico di `entry`, così le due ortofoto e i due rilievi stanno sugli
+stessi pixel. I chunk devono essere nello stesso sistema di riferimento (altrimenti ValueError); la voce nuova dice
+`grid_of` (l'id di `entry`). Riga di comando: `ppg elevation --like ID [--like-chunk CHUNK]`.
 
 ### Disegni sui prospetti e sulle sezioni
 
