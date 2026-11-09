@@ -121,15 +121,16 @@ def water_polygons(chunk: "Chunk", water, progress: Progress | None = None) -> l
     return polys
 
 
-def edge_points(polygons, cell: float, step: int = LAND_STEP) -> np.ndarray:
-    """The points on the land side of the outline of ``polygons`` (their outer rings and their holes - islands),
-    sampled every ``cell`` metres along it and ``step`` cells away from it along its normal: (n, 2). A point whose
-    two sides are both water or both land (a narrow arm) is left out."""
+def edge_samples(polygons, cell: float, step: int = LAND_STEP) -> tuple[np.ndarray, np.ndarray]:
+    """The outline of ``polygons`` (their outer rings and their holes - islands) sampled every ``cell`` metres: the
+    points on it and the unit normals toward the land, ``(p, normal)`` each (n, 2). The land side is the side whose
+    point ``step`` cells away is not water; a point whose two sides are both water or both land (a narrow arm) is
+    left out."""
     import shapely
     from shapely.geometry import LineString
 
     water = shapely.union_all(list(polygons))
-    out = []
+    pts, nrms = [], []
     d = float(step) * float(cell)
     for poly in getattr(water, "geoms", [water]):
         for ring in [poly.exterior, *poly.interiors]:
@@ -154,18 +155,67 @@ def edge_points(polygons, cell: float, step: int = LAND_STEP) -> np.ndarray:
             in_plus = shapely.contains_xy(water, plus[:, 0], plus[:, 1])
             in_minus = shapely.contains_xy(water, minus[:, 0], minus[:, 1])
             pick = ok & (in_plus != in_minus)
-            out.append(np.where(in_plus[:, None], minus, plus)[pick])
-    return np.concatenate(out) if out else np.zeros((0, 2))
+            nrm = np.where(in_plus[:, None], -nrm, nrm)
+            pts.append(p[pick])
+            nrms.append(nrm[pick])
+    if not pts:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+    return np.concatenate(pts), np.concatenate(nrms)
+
+
+def edge_points(polygons, cell: float, step: int = LAND_STEP) -> np.ndarray:
+    """The points on the land side of the outline of ``polygons``, ``step`` cells away from it along its normal,
+    one every ``cell`` metres along it (see :func:`edge_samples`): (n, 2)."""
+    p, nrm = edge_samples(polygons, cell, step)
+    return p + float(step) * float(cell) * nrm
+
+
+def _heights_at(path, pts: np.ndarray) -> np.ndarray:
+    """The DEM ``path`` at ``pts``, interpolated between the centres of the four cells around each point (bilinear: the
+    cell holding a point alone is off by up to half a cell times the slope, and on one side of it when the points fall
+    on the cell edges). NaN where a cell around has no value and outside the grid (a DEM written without nodata would
+    give 0 there)."""
+    import rasterio
+
+    from ..core.free_drawings import raster_values
+
+    z = np.full(len(pts), np.nan)
+    if not len(pts):
+        return z
+    with rasterio.open(path) as src:
+        b, tr, shape = src.bounds, src.transform, (src.height, src.width)
+    inside = (pts[:, 0] >= b.left) & (pts[:, 0] <= b.right) & (pts[:, 1] >= b.bottom) & (pts[:, 1] <= b.top)
+    if not inside.any():
+        return z
+    a, bb, c, d, e, f = tr.a, tr.b, tr.c, tr.d, tr.e, tr.f
+    det = a * e - bb * d
+    dx, dy = pts[inside, 0] - c, pts[inside, 1] - f
+    cols, rows = (e * dx - bb * dy) / det, (a * dy - d * dx) / det
+    fc, fr = cols - 0.5, rows - 0.5  # in cell centres
+    c0, r0 = np.floor(fc).astype(int), np.floor(fr).astype(int)
+    tc, tr_ = fc - c0, fr - r0  # weights
+    c0, r0 = np.clip(c0, 0, shape[1] - 1), np.clip(r0, 0, shape[0] - 1)
+    c1, r1 = np.clip(c0 + 1, 0, shape[1] - 1), np.clip(r0 + 1, 0, shape[0] - 1)
+    corners = []
+    for rr, cc in ((r0, c0), (r0, c1), (r1, c0), (r1, c1)):
+        xy = np.column_stack([c + a * (cc + 0.5) + bb * (rr + 0.5), f + d * (cc + 0.5) + e * (rr + 0.5)])
+        corners.append(np.array([np.nan if v is None else v for v in raster_values(path, xy)], float))
+    z00, z01, z10, z11 = corners
+    z[inside] = (z00 * (1 - tc) + z01 * tc) * (1 - tr_) + (z10 * (1 - tc) + z11 * tc) * tr_
+    return z
 
 
 def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> dict:
     """The level of the water of ``chunk`` from its edge (see the module): ``water`` as :func:`water_polygons`.
-    Returns ``{"level", "spread" (NMAD), "p10", "p90", "edge_cells", "x", "y" (the centre of the water)}``; writes
-    nothing (:func:`set_level` stores it). :class:`WaterError` without a DEM, with one to rebuild, without water, or
-    when the outline of the water lies outside the DEM."""
+    Each point of the outline is read on the land side at 2 and at 4 cells of the DEM along its normal and the
+    height extrapolated to the outline (``2 z(2) - z(4)``: the rise of the bank over two cells taken away; where the
+    4-cell reading is missing - outside the DEM, or water again - the 2-cell one alone); the median is the level.
+    Returns ``{"level", "spread" (NMAD), "p10", "p90", "edge_cells", "slope_bias" (median of the 2-cell readings
+    minus the level: what the extrapolation removed), "extrapolated" (points read at 4 cells too), "x", "y" (the
+    centre of the water)}``; writes nothing (:func:`set_level` stores it). :class:`WaterError` without a DEM, with
+    one to rebuild, without water, or when the outline of the water lies outside the DEM."""
     import rasterio
-
-    from ..core.free_drawings import raster_values
+    import shapely
 
     p = as_progress(progress)
     path = _dem(chunk)
@@ -175,21 +225,28 @@ def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> 
     p(0.6, "Lettura del DEM lungo la riva...")
     with rasterio.open(path) as src:
         cell = float(min(abs(src.res[0]), abs(src.res[1])))
-    pts = edge_points(polys, cell)
-    z = np.array([np.nan if v is None else v for v in raster_values(path, pts)], float) if len(pts) else np.zeros(0)
-    z = z[np.isfinite(z)]
-    if len(z) < MIN_EDGE_CELLS:
-        raise WaterError(f"the edge of the water lies outside the DEM of {chunk.label}: {len(z)} height(s) on the "
+    edge, nrm = edge_samples(polys, cell, LAND_STEP)
+    near = edge + LAND_STEP * cell * nrm
+    far = edge + 2 * LAND_STEP * cell * nrm
+    z2, z4 = _heights_at(path, near), _heights_at(path, far)
+    if len(far):
+        wet = shapely.contains_xy(shapely.union_all(polys), far[:, 0], far[:, 1])
+        z4[wet] = np.nan  # the far reading in the water: not the bank
+    keep = np.isfinite(z2)
+    z2, z4 = z2[keep], z4[keep]
+    if len(z2) < MIN_EDGE_CELLS:
+        raise WaterError(f"the edge of the water lies outside the DEM of {chunk.label}: {len(z2)} height(s) on the "
                          f"land side (at least {MIN_EDGE_CELLS})",
-                         f"la riva dell'acqua è fuori dal DEM di {chunk.label}: {len(z)} quote dalla parte della "
+                         f"la riva dell'acqua è fuori dal DEM di {chunk.label}: {len(z2)} quote dalla parte della "
                          f"terra (almeno {MIN_EDGE_CELLS})")
+    both = np.isfinite(z4)
+    z = np.where(both, 2.0 * z2 - z4, z2)
     level = float(np.median(z))
-    import shapely
-
     c = shapely.union_all(polys).centroid
     p(1.0, "")
     return {"level": level, "spread": float(NMAD * np.median(np.abs(z - level))),
             "p10": float(np.percentile(z, 10)), "p90": float(np.percentile(z, 90)), "edge_cells": int(len(z)),
+            "slope_bias": float(np.median(z2) - level), "extrapolated": int(both.sum()),
             "x": float(c.x), "y": float(c.y)}
 
 
@@ -219,7 +276,7 @@ def set_level(chunk: "Chunk", level: float, source: str = "hand", n: float = N_S
     """Store the level of the water of ``chunk``: ``level`` a world height in its system now, ``source`` "edge" (from
     :func:`level_from_edge`, whose result goes in ``info``) or "hand", ``n`` the refractive index. ``info`` may give
     ``x``, ``y`` (where the water is: the level follows the chunk there when its transform changes; default the
-    centre of the data), ``spread``, ``p10``, ``p90``, ``edge_cells``. Returns the record (``chunk.meta["water"]``)."""
+    centre of the data), ``spread``, ``p10``, ``p90``, ``edge_cells``, ``slope_bias``. Returns the record (``chunk.meta["water"]``)."""
     from ..core import stamps
 
     level = float(level)
@@ -233,9 +290,10 @@ def set_level(chunk: "Chunk", level: float, source: str = "hand", n: float = N_S
         x, y = _centre(chunk)
     record = {"level": level, "n": n, "source": source, "spread": info.get("spread"),
               "edge_cells": info.get("edge_cells"), "p10": info.get("p10"), "p90": info.get("p90"),
+              "slope_bias": info.get("slope_bias"),
               "x": float(x), "y": float(y), "when": datetime.now().isoformat(timespec="seconds")}
     if source == "hand":
-        record.update(spread=None, edge_cells=None, p10=None, p90=None)
+        record.update(spread=None, edge_cells=None, p10=None, p90=None, slope_bias=None)
     stamps.stamp_entry(chunk, record)
     old = chunk.meta.get("water") or {}
     if old.get("correction"):  # the correction made with the earlier level stays told
@@ -286,7 +344,8 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     ``rebuild_dem``: the DEM built again from the corrected cloud, as a new version of the DEM (off by default).
     Returns ``{"points", "below", "version" (the id of the cloud kept), "name", "level", "n", "note", "dem",
     "dem_version"}``. :class:`WaterError` without a level, without a dense cloud, on a cloud already corrected, or
-    with no point below the level (nothing written)."""
+    with no point below the level (nothing written). The whole cloud is read into memory (a few copies of it): fine for
+    trenches and wrecks, heavy for clouds of tens of millions of points."""
     from ..core import versions
     from ..core.pointcloud import PointCloud
 
@@ -350,10 +409,6 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
             versions.restore(chunk, "point_cloud", kept)
         tmp.unlink(missing_ok=True)
         raise
-    if kept is not None and not kept.get("params"):
-        # an empty record of parameters is not written back when the version is made active again: the cloud kept
-        # says it is not corrected, so that making it active undoes the mark of the correction too
-        kept["params"] = {"refraction": None}
     record = {"level": L, "n": n, "source": lv.get("source"), "points": int(len(pc)), "below": nb,
               "version": kept["id"] if kept else None, "when": datetime.now().isoformat(timespec="seconds"),
               "note": NOTE}
@@ -393,5 +448,5 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     return result
 
 
-__all__ = ["N_SEA", "N_FRESH", "N_RANGE", "LAND_STEP", "MIN_EDGE_CELLS", "NOTE", "NOTE_EN", "WaterError", "corrected",
-           "water_polygons", "edge_points", "level_from_edge", "set_level", "level_of", "correct_cloud"]
+__all__ = ["N_SEA", "N_FRESH", "N_RANGE", "SOURCES", "LAND_STEP", "MIN_EDGE_CELLS", "NOTE", "NOTE_EN", "WaterError", "corrected",
+           "water_polygons", "edge_samples", "edge_points", "level_from_edge", "set_level", "level_of", "correct_cloud"]

@@ -86,22 +86,45 @@ def test_corrected_formula():
 def test_level_from_the_edge_of_a_pond(tmp_path):
     _doc, a = project(tmp_path)
     r = water.level_from_edge(a, Point(X0, Y0).buffer(RADIUS, quad_segs=64))
-    assert r["level"] == pytest.approx(LEVEL, abs=0.01)
+    assert r["level"] == pytest.approx(LEVEL, abs=0.002)
+    assert r["slope_bias"] == pytest.approx(0.2 * 2 * DEM_CELL, abs=0.002)  # the rise of the bank over 2 cells
     assert r["edge_cells"] > 1000
     assert r["spread"] < 0.005 and r["p10"] <= r["level"] <= r["p90"]
     assert (r["x"], r["y"]) == pytest.approx((X0, Y0), abs=0.01)
     assert "water" not in a.meta  # only measured
     # the same from the colours of the orthophoto
     r2 = water.level_from_edge(a, WATER_RANGE)
-    assert r2["level"] == pytest.approx(LEVEL, abs=0.01)
+    assert r2["level"] == pytest.approx(LEVEL, abs=0.01)  # the outline of the mask: within half a cell of 2 cm
     rec = water.set_level(a, r2.pop("level"), source="edge", n=water.N_FRESH, **r2)
     assert rec["source"] == "edge" and rec["n"] == water.N_FRESH and rec["built_in"] is not None
+    assert rec["slope_bias"] == pytest.approx(r2["slope_bias"])
     lv = water.level_of(a)
     assert lv == {"level": pytest.approx(rec["level"]), "n": water.N_FRESH, "source": "edge",
                   "spread": pytest.approx(r2["spread"])}
     # an island in the pond: its shore is land too (inside the hole)
     ring = Point(X0, Y0).buffer(RADIUS, quad_segs=64).difference(Point(X0 + 1.0, Y0).buffer(0.3))
-    assert water.level_from_edge(a, ring)["level"] == pytest.approx(LEVEL, abs=0.01)
+    assert water.level_from_edge(a, ring)["level"] == pytest.approx(LEVEL, abs=0.002)
+
+
+def test_level_on_a_steep_bank_of_a_coarse_dem(tmp_path):
+    """A plane rising 0.2 m/m from the water line, a DEM of 5 cm cells written WITHOUT nodata: reading 2 cells up the
+    bank alone would say 2 cm too high; the water reaches past the DEM on three sides (no reading there)."""
+    from shapely.geometry import box
+
+    doc = ppg.Document()
+    a = doc.add_chunk("A")
+    a.crs = CRS
+    doc.save(tmp_path / "p.ppg")
+    cell, edge = 0.05, X0 + 1.0
+    x, y = _grid(cell)
+    z = (LEVEL + 0.2 * (x - edge)).astype(np.float32)
+    a._set_product("dem", write_geotiff(a.data_dir / "dem.tif", z, (X0 - SIDE / 2, Y0 + SIDE / 2), cell, CRS,
+                                        nodata=None))
+    pond = box(X0 - 10.0, Y0 - 10.0, edge, Y0 + 10.0)
+    r = water.level_from_edge(a, pond)
+    assert r["level"] == pytest.approx(LEVEL, abs=0.002)
+    assert r["slope_bias"] == pytest.approx(0.2 * 2 * cell, abs=0.002)
+    assert r["extrapolated"] == r["edge_cells"] > 50
 
 
 def test_no_water_or_edge_outside_the_dem_is_an_error_and_writes_nothing(tmp_path):

@@ -4677,11 +4677,10 @@ def water_level(project: Path,
     --sample): the DEM read two cells on the land side of the outline, the median the level. Stored in the project."""
     from .engine import colour_mask, water
 
-    ways = sum(v is not None for v in (set_z, layer, hue or sat or val or None, sample))
-    if ways != 1:
-        raise typer.BadParameter("give one of --set Z, --layer NAME, --hue/--sat/--val, --sample X,Y")
     if (sat or val) and hue is None:
         raise typer.BadParameter("--sat/--val need --hue")
+    if [set_z, layer, hue, sample].count(None) != 3:
+        raise typer.BadParameter("give one of --set Z, --layer NAME, --hue/--sat/--val, --sample X,Y")
     idx = _water_n(n, sea, fresh, water.N_SEA)
     doc = Document.open(project)
     ch = _tie_chunk(doc, chunk)
@@ -4706,7 +4705,7 @@ def water_level(project: Path,
     typer.echo(_water_line(rec))
     if rec.get("edge_cells"):
         typer.echo(f"edge: {rec['edge_cells']} DEM cells on the land side, 10-90 % {rec['p10']:.3f} - "
-                   f"{rec['p90']:.3f} m")
+                   f"{rec['p90']:.3f} m; rise of the bank removed {rec.get('slope_bias') or 0.0:.3f} m")
 
 
 @water_app.command("correct")
