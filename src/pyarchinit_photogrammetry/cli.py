@@ -3945,6 +3945,330 @@ def tin_export(project: Path, out: Path = typer.Argument(..., help=".dxf, .ply, 
     typer.echo(f"TIN ({tin.n_vertices} vertices, {tin.n_triangles} triangles) -> {path}")
 
 
+# --------------------------------------------------------------------------- ties between chunks
+ties_app = typer.Typer(help="Ties between chunks: the same point in two chunks (or a point of a chunk and its known "
+                            "coordinates), then several chunks placed together in one least squares with chosen "
+                            "unknowns, checked before anything is applied")
+app.add_typer(ties_app, name="ties")
+
+UNKNOWNS_HELP = ("unknowns of each chunk of the solve, e.g. A=plan,B=similarity,C=fixed (chunk labels or keys; "
+                 "similarity 7, rigid 6, plan 4, shift 3, height 1, fixed 0)")
+
+
+def _ties_error(exc: Exception) -> NoReturn:
+    """A ValueError/KeyError/TieError of engine.ties as ``error: ...`` and exit code 1."""
+    text = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+    typer.echo(f"error: {text}", err=True)
+    raise typer.Exit(1)
+
+
+def _tie_chunk(doc, item: str):
+    from .engine.chunks import resolve_chunk
+
+    try:
+        return resolve_chunk(doc, item)
+    except (KeyError, ValueError) as exc:
+        names = ", ".join(f"{c.label!r} (key {c.key})" for c in doc.chunks)
+        raise typer.BadParameter(f"{exc.args[0] if exc.args else exc}; the chunks: {names}") from None
+
+
+def _coordinates(text: str, what: str, need_z: bool = False) -> list[Optional[float]]:
+    """``"X,Y[,Z]"`` -> ``[x, y, z or None]`` (a dot is the decimal separator: the comma separates)."""
+    parts = [p.strip() for p in text.replace(";", ",").split(",")]
+    if len(parts) not in ((3,) if need_z else (2, 3)) or not all(parts[:2]):
+        form = "X,Y,Z" if need_z else "X,Y[,Z]"
+        raise typer.BadParameter(f"{what}: coordinates as {form} (got {text!r})")
+    try:
+        values = [float(p) if p else None for p in parts] + [None] * (3 - len(parts))
+    except ValueError:
+        raise typer.BadParameter(f"{what}: coordinates are numbers with a dot as decimal separator "
+                                 f"(got {text!r})") from None
+    if need_z and values[2] is None:
+        raise typer.BadParameter(f"{what}: the height is needed (got {text!r})")
+    return values
+
+
+def _internal_point(chunk, xyz: list[Optional[float]], what: str):
+    """World coordinates of ``chunk`` (its system, its transform now) -> internal; a missing height read from the
+    chunk's DEM, as a table imported does."""
+    import numpy as np
+
+    from .core import stamps
+    from .core.free_drawings import raster_values
+
+    x, y, z = xyz
+    if z is None:
+        if chunk.dem_path is None or not chunk.dem_path.exists():
+            raise typer.BadParameter(f"{what}: no height and the chunk {chunk.label!r} has no DEM to read it from")
+        if stamps.is_stale(chunk, "dem"):
+            raise typer.BadParameter(f"{what}: no height and the DEM of {chunk.label!r} was built in another system "
+                                     "of the chunk: rebuild it first")
+        (z,) = raster_values(chunk.dem_path, [(x, y)])
+        if z is None:
+            raise typer.BadParameter(f"{what}: no height and the DEM of {chunk.label!r} has none at {x:.3f}, {y:.3f}")
+    return chunk.to_internal(np.array([[x, y, float(z)]], float))[0]
+
+
+def _tie_line(doc, t) -> str:
+    """One line of a tie: id, name, its ends (chunk / marker), precision, state."""
+    from .engine import ties as ties_mod
+
+    def end(e, uid):
+        found = ties_mod.resolve_end(doc, e, uid)
+        return f"chunk {e[0]} marker {e[1]} (gone)" if found is None else f"{found[0].label} / {found[1].label}"
+
+    a = end(t.a, t.a_uid)
+    if t.b is None:
+        known = ", ".join(f"{v:.3f}" for v in t.known) if t.known is not None else "-"
+        b = f"known {known} ({t.crs or 'LOCAL'})"
+    else:
+        b = end(t.b, t.b_uid)
+    state = "active" if t.active else ("inactive: " + t.broken if t.broken else "inactive")
+    return f"{t.id}  {t.name!r}: {a} <-> {b}, precision {t.precision:.3f} m, {state}"
+
+
+def _find_tie(doc, ref: str):
+    """A tie by id, else by its name when only one tie has it."""
+    from .engine import ties as ties_mod
+
+    all_ties = ties_mod.ties_of(doc)
+    found = [t for t in all_ties if t.id == ref] or [t for t in all_ties if t.name == ref]
+    if not found:
+        raise typer.BadParameter(f"no tie {ref!r} (ids and names: ppg ties list)")
+    if len(found) > 1:
+        raise typer.BadParameter(f"{len(found)} ties are named {ref!r}: give the id ({', '.join(t.id for t in found)})")
+    return found[0]
+
+
+def _parse_unknowns(doc, text: str) -> dict[int, str]:
+    """``"A=plan,B=similarity"`` -> ``{chunk key: kind}``."""
+    from .engine.ties import KINDS
+
+    out: dict[int, str] = {}
+    for item in (p.strip() for p in text.split(",")):
+        if not item:
+            continue
+        name, sep, kind = item.rpartition("=")
+        name, kind = name.strip(), kind.strip().lower()
+        if not sep or not name:
+            raise typer.BadParameter(f"{item!r}: write CHUNK=KIND, e.g. A=plan", param_hint="--unknowns")
+        if kind not in KINDS:
+            raise typer.BadParameter(f"{item!r}: the unknowns are one of {', '.join(KINDS)}", param_hint="--unknowns")
+        ch = _tie_chunk(doc, name)
+        if ch.key in out:
+            raise typer.BadParameter(f"chunk {ch.label!r} given twice", param_hint="--unknowns")
+        out[ch.key] = kind
+    if not out:
+        raise typer.BadParameter("no chunk given", param_hint="--unknowns")
+    return out
+
+
+def _ties_report(doc, unknowns: dict[int, str], references: bool, robust: bool):
+    """The solve and its checks: (solution, checks, leave one out, plausibility warnings)."""
+    from .engine import ties as ties_mod
+
+    solution = ties_mod.solve(doc, unknowns, references=references, robust=robust)
+    checks = ties_mod.distance_checks(doc)
+    loo = ties_mod.leave_one_out(doc, unknowns, references=references, robust=robust, solution=solution)
+    return solution, checks, loo, ties_mod.plausibility(doc, solution)
+
+
+@ties_app.command("add", context_settings={"ignore_unknown_options": True})  # "-12.5,3": a point
+def ties_add(project: Path,
+             chunk_a: str = typer.Argument(..., help="first chunk (label or key)"),
+             point_a: str = typer.Argument(..., help="X,Y[,Z] in the world coordinates of the first chunk (no Z: "
+                                                      "read from its DEM)"),
+             chunk_b: str = typer.Argument(..., help="second chunk (label or key)"),
+             point_b: str = typer.Argument(..., help="X,Y[,Z] of the same point in the world coordinates of the "
+                                                      "second chunk"),
+             precision: Optional[float] = typer.Option(None, help="precision of the tie in metres (default: two "
+                                                                  "raster cells of each chunk, else 0.05)"),
+             name: Optional[str] = typer.Option(None, help="name of the tie and of its markers (default: legame N)")):
+    """A tie: the same point in two chunks, each in its own world coordinates (a new marker in each chunk)."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    ca, cb = _tie_chunk(doc, chunk_a), _tie_chunk(doc, chunk_b)
+    pa = _internal_point(ca, _coordinates(point_a, "point of the first chunk"), "point of the first chunk")
+    pb = _internal_point(cb, _coordinates(point_b, "point of the second chunk"), "point of the second chunk")
+    try:
+        tie = ties_mod.add_tie(doc, ca, pa, cb, pb, name=name, precision=precision)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"added {_tie_line(doc, tie)}")
+
+
+@ties_app.command("known", context_settings={"ignore_unknown_options": True})  # "-12.5,3": a point
+def ties_known(project: Path,
+               chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+               point: str = typer.Argument(..., help="X,Y[,Z] in the world coordinates of the chunk (no Z: read "
+                                                     "from its DEM)"),
+               known: str = typer.Argument(..., help="E,N,H: the known coordinates of the point, in the chunk's "
+                                                     "system"),
+               precision: Optional[float] = typer.Option(None, help="precision of the known point in metres "
+                                                                    "(default 0.05)"),
+               name: Optional[str] = typer.Option(None, help="name of the tie and of its marker (default: legame N)")):
+    """A tie towards known coordinates (a GNSS point, a benchmark): a new marker with them as its reference."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    p = _internal_point(ch, _coordinates(point, "point of the chunk"), "point of the chunk")
+    xyz = _coordinates(known, "known coordinates", need_z=True)
+    try:
+        tie = ties_mod.add_known(doc, ch, p, xyz, name=name, precision=precision)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"added {_tie_line(doc, tie)}")
+
+
+@ties_app.command("from-markers")
+def ties_from_markers_cmd(project: Path,
+                          chunk_a: str = typer.Argument(..., help="first chunk (label or key)"),
+                          chunk_b: str = typer.Argument(..., help="second chunk (label or key)")):
+    """A tie for every marker label found in both chunks (no new markers; pairs tied already are kept)."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    ca, cb = _tie_chunk(doc, chunk_a), _tie_chunk(doc, chunk_b)
+    try:
+        made = ties_mod.ties_from_markers(doc, ca, cb)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    if made:
+        doc.save()
+    typer.echo(f"{len(made)} ties from the markers of {ca.label} and {cb.label}")
+    for t in made:
+        typer.echo(f"  {_tie_line(doc, t)}")
+
+
+@ties_app.command("import")
+def ties_import(project: Path,
+                table: Path = typer.Argument(..., exists=True, dir_okay=False,
+                                             help="CSV: chunk_a,x_a,y_a,z_a,chunk_b,x_b,y_b,z_b[,precision][,name] "
+                                                  "(chunk_b empty: x_b,y_b,z_b are the known coordinates of the "
+                                                  "point; z_a empty: read from the DEM)")):
+    """Ties from a table, in the world coordinates of each chunk; nothing is added when a row is wrong."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    try:
+        made = ties_mod.import_ties(doc, table)
+    except (ValueError, KeyError, OSError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"{len(made)} ties imported from {table.name}")
+    for t in made:
+        typer.echo(f"  {_tie_line(doc, t)}")
+
+
+@ties_app.command("list")
+def ties_list(project: Path,
+              as_json: bool = typer.Option(False, "--json", help="print the ties as JSON")):
+    """The ties of the project: ends, precision, active or why not."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    all_ties = ties_mod.ties_of(doc)
+    if as_json:
+        rows = []
+        for t in all_ties:
+            d = t.to_dict()
+            d["broken"] = t.broken
+            for which, end, uid in (("a", t.a, t.a_uid), ("b", t.b, t.b_uid)):
+                found = None if end is None else ties_mod.resolve_end(doc, end, uid)
+                d[f"{which}_labels"] = None if found is None else [found[0].label, found[1].label]
+                w = None if end is None else ties_mod.end_world(doc, end[0], end[1], uid)
+                d[f"{which}_world"] = None if w is None else [float(v) for v in w]
+            rows.append(d)
+        typer.echo(json.dumps(rows, indent=1))
+        return
+    if not all_ties:
+        typer.echo("no ties")
+        return
+    for t in all_ties:
+        typer.echo(_tie_line(doc, t))
+
+
+@ties_app.command("remove")
+def ties_remove(project: Path,
+                tie: str = typer.Argument(..., help="id of the tie (or its name when only one tie has it)"),
+                markers: bool = typer.Option(True, "--markers/--keep-markers",
+                                             help="remove also the markers the tie made (never the markers that "
+                                                  "were already there, nor those another tie still uses)")):
+    """Remove a tie."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    t = _find_tie(doc, tie)
+    try:
+        ties_mod.remove_tie(doc, t.id, keep_markers=not markers)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"removed {t.id} {t.name!r}" + ("" if markers and t.own_markers else ", markers kept"))
+
+
+@ties_app.command("check")
+def ties_check(project: Path,
+               unknowns: str = typer.Option(..., "--unknowns", "-u", help=UNKNOWNS_HELP),
+               robust: bool = typer.Option(False, help="Huber weights: a wrong tie weighs less"),
+               references: bool = typer.Option(True, help="the control markers of the chunks count as known points"),
+               as_json: bool = typer.Option(False, "--json", help="print the report as JSON")):
+    """The solve and its checks (residuals, redundancy, distances between ties, leave one out, plausibility):
+    a report only, nothing is changed."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    kinds = _parse_unknowns(doc, unknowns)
+    try:
+        solution, checks, loo, warnings = _ties_report(doc, kinds, references, robust)
+    except (ties_mod.TieError, ValueError, KeyError) as exc:
+        _ties_error(exc)
+    if as_json:
+        typer.echo(json.dumps(ties_mod.report(solution, checks, loo, warnings), indent=1))
+        return
+    typer.echo(ties_mod.report_text(solution, checks, loo, warnings))
+
+
+@ties_app.command("solve")
+def ties_solve(project: Path,
+               unknowns: str = typer.Option(..., "--unknowns", "-u", help=UNKNOWNS_HELP),
+               robust: bool = typer.Option(False, help="Huber weights: a wrong tie weighs less"),
+               references: bool = typer.Option(True, help="the control markers of the chunks count as known points"),
+               yes: bool = typer.Option(False, "--yes", "-y", help="apply without asking")):
+    """The solve and its checks, then the new transforms applied to the chunks (with --yes, or once confirmed) and
+    the project saved."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    kinds = _parse_unknowns(doc, unknowns)
+    try:
+        solution, checks, loo, warnings = _ties_report(doc, kinds, references, robust)
+    except (ties_mod.TieError, ValueError, KeyError) as exc:
+        _ties_error(exc)
+    typer.echo(ties_mod.report_text(solution, checks, loo, warnings))
+    moving = [solution.per_chunk[k]["label"] for k, kind in solution.unknowns.items() if kind != "fixed"]
+    if not moving:
+        typer.echo("Nothing to apply: every chunk is fixed.")
+        return
+    typer.echo("")
+    if not yes and not typer.confirm(f"Apply the solve to {', '.join(moving)}?", default=False):
+        typer.echo("Nothing applied.")
+        return
+    try:
+        changed = ties_mod.apply(doc, solution)
+    except (ties_mod.TieError, ValueError) as exc:
+        _ties_error(exc)
+    doc.save()
+    labels = {c.key: c.label for c in doc.chunks}
+    typer.echo(f"applied to {', '.join(moving)} (system {solution.crs or 'LOCAL'}); project saved")
+    for key, stale in changed["stale_products"].items():
+        typer.echo(f"  {labels.get(int(key), key)}: build again {', '.join(stale)}")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 
