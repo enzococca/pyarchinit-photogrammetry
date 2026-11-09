@@ -234,6 +234,33 @@ class TiesEditStep:
         self._put(self.before, self.after)
 
 
+def record_edit(window, text: str, before: dict, tag=None) -> bool:
+    """The ties changed from ``before`` (:func:`edit_state`, taken before the edit): one step of Modifica > Annulla
+    for the ties and the markers of the chunks the edit changed (:class:`TiesEditStep`; edits of the same ``tag`` in a
+    row - the precision of one tie - make one step), the project modified. Returns whether something changed. Used by
+    the dialog and by the view *Punti in comune* (ties made by two clicks, ends on photos, an end moved)."""
+    after = edit_state(window.doc)
+    if after == before:
+        return False
+    window.setWindowModified(True)
+    history = window.history
+    if history is None:
+        return True
+    keys = {k for k in after["markers"] if after["markers"][k] != before["markers"].get(k)}
+    last = history.entries[-1] if history.entries and history.index == len(history.entries) else None
+    step = getattr(last, "action", None)
+    if (tag is not None and isinstance(step, TiesEditStep) and step.tag == tag
+            and step.after == _restrict(before, set(step.after["markers"]))):
+        # the same edit going on (the arrows of a precision): the step takes the new state
+        for k in keys - set(step.before["markers"]):
+            step.before["markers"][k] = before["markers"][k]
+        step.after = _restrict(after, set(step.before["markers"]))
+        history.rebase()
+        return True
+    history.push(text, TiesEditStep(window, _restrict(before, keys), _restrict(after, keys), tag), document=True)
+    return True
+
+
 def keep_report(doc, report: dict | None) -> None:
     """The report of the checks (distances, leave one out, suspects, axis) kept with the solve applied in
     ``doc.meta["ties_report"]`` (JSON)."""
@@ -328,7 +355,9 @@ class TiesDialog(QDialog):
         self.b_remove = QPushButton(tr("Rimuovi"))
         self.b_from_markers = QPushButton(tr("Da marker omonimi..."))
         self.b_import = QPushButton(tr("Importa..."))
-        for b in (self.b_remove, self.b_from_markers, self.b_import):
+        self.b_points = QPushButton(tr("Punti in comune..."))
+        self.b_points.setToolTip(tr("Due viste affiancate di due chunk, collegate: un legame con un clic in ognuna"))
+        for b in (self.b_remove, self.b_from_markers, self.b_import, self.b_points):
             row.addWidget(b)
         row.addStretch(1)
         tl.addLayout(row)
@@ -380,6 +409,7 @@ class TiesDialog(QDialog):
         self.b_remove.clicked.connect(self.remove_selected)
         self.b_from_markers.clicked.connect(self.from_markers)
         self.b_import.clicked.connect(self.import_table)
+        self.b_points.clicked.connect(lambda: self.window.common_points())
         self.table.itemChanged.connect(self._item_changed)
         self.c_robust.toggled.connect(lambda _on: self.invalidate())
         self.c_references.toggled.connect(lambda _on: self.invalidate())
@@ -526,32 +556,14 @@ class TiesDialog(QDialog):
 
     # ------------------------------------------------------------------ edits of the ties
     def _edited(self, text: str, before: dict, tag=None) -> None:
-        """The ties changed from ``before`` (:func:`edit_state`): one step of Modifica > Annulla for the ties and the
-        markers of every chunk together (:class:`TiesEditStep`; edits of the same ``tag`` in a row - the precision of
-        one tie - make one step), the project modified, the last check dropped."""
-        after = edit_state(self.doc)
+        """The ties changed from ``before`` (:func:`edit_state`): one step of Modifica > Annulla
+        (:func:`record_edit`), the last check dropped, the flags of the photo shown and the view *Punti in comune*
+        drawn again."""
         self.invalidate()
         with contextlib.suppress(AttributeError, RuntimeError):  # the flags of the photo shown
             self.window.photo_view.draw_markers()
-        if after == before:
-            return
-        self.window.setWindowModified(True)
-        history = self.window.history
-        if history is None:
-            return
-        keys = {k for k in after["markers"] if after["markers"][k] != before["markers"].get(k)}
-        last = history.entries[-1] if history.entries and history.index == len(history.entries) else None
-        step = getattr(last, "action", None)
-        if (tag is not None and isinstance(step, TiesEditStep) and step.tag == tag
-                and step.after == _restrict(before, set(step.after["markers"]))):
-            # the same edit going on (the arrows of a precision): the step takes the new state
-            for k in keys - set(step.before["markers"]):
-                step.before["markers"][k] = before["markers"][k]
-            step.after = _restrict(after, set(step.before["markers"]))
-            history.rebase()
-            return
-        history.push(text, TiesEditStep(self.window, _restrict(before, keys), _restrict(after, keys), tag),
-                     document=True)
+        record_edit(self.window, text, before, tag)
+        self._points_redraw()
 
     def _item_changed(self, item) -> None:
         if self._filling or item.column() != 0:
@@ -679,6 +691,14 @@ class TiesDialog(QDialog):
         if self.report.toPlainText():
             self.report.setHtml('<div style="color:%s">%s</div>' % (GREY, html.escape(
                 tr("Il rapporto non vale più: qualcosa è cambiato dopo il controllo. Premi Controlla."))))
+        self._points_redraw()
+
+    def _points_redraw(self) -> None:
+        """The residuals of the view *Punti in comune* follow the check (shown, or gone with it)."""
+        view = getattr(self.window, "_common_points", None)
+        if view is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                view.redraw()
 
     def _update_buttons(self, busy: bool = False) -> None:
         for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import):
@@ -747,6 +767,7 @@ class TiesDialog(QDialog):
             self._filling = False
         self.report.setHtml(report_html(result))
         self._update_buttons()
+        self._points_redraw()
 
     def apply(self) -> bool:
         """The last check applied (one step of Modifica > Annulla). Without redundancy only after its own question
@@ -777,4 +798,4 @@ class TiesDialog(QDialog):
         super().closeEvent(ev)
 
 
-__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]
+__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "record_edit", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]

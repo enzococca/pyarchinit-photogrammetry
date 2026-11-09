@@ -592,6 +592,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             lambda fid: QTimer.singleShot(0, lambda: self.free_properties(fid)))
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
+        self.photo_view.context_hook = self._photo_tie_menu  # *Estremo del legame su questa foto*
+        self._common_points = getattr(self, "_common_points", None)
         self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
         self.tabs.addTab(self.ortho_view, icon("view_ortho"), tr("Ortofoto / DEM"))
         self.tabs.addTab(self.photo_view, icon("view_photo"), tr("Foto"))
@@ -984,6 +986,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Aggancia chunk con legami..."), self.tie_chunks, processing=True, icon_name="chunk",
                   tip=tr("Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte "
                          "per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare"))
+        self._act(m, tr("Punti in comune..."), self.common_points, processing=True, icon_name="chunk",
+                  tip=tr("Due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in "
+                         "ognuna, un estremo anche su una foto"))
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
                          "piano adattato: tutto quello che è nelle sue coordinate lo segue"))
@@ -1858,6 +1863,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         step = progress or (lambda *_a, **_k: None)
         self._close_orient_dialog()  # its points are of a chunk of the project left
         self._close_ties_dialog()  # its ties are of the project left
+        self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
             # RustGIS's last edits into its drawings first, then its layers go from RustGIS - not when the project left
@@ -4234,6 +4240,80 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return
         self._ties_dialog = TiesDialog.ask(self)
 
+    def common_points(self):
+        """*Flusso di lavoro > Punti in comune*: two chunks side by side to place the ties
+        (:class:`.common_points.CommonPointsWindow`, not modal), one for the project. Returns it."""
+        from .common_points import CommonPointsWindow
+
+        if not self._two_chunks():
+            return None
+        win = getattr(self, "_common_points", None)
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.raise_()
+                win.activateWindow()
+                return win
+        self._common_points = CommonPointsWindow.ask(self)
+        return self._common_points
+
+    def _close_common_points(self) -> None:
+        win = getattr(self, "_common_points", None)
+        self._common_points = None
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.close()
+
+    def _common_points_redraw(self, refresh: bool = False) -> None:
+        win = getattr(self, "_common_points", None)
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.refresh() if refresh else win.redraw()
+
+    def _ties_made(self) -> None:
+        """Ties made, moved or measured in *Punti in comune* (already a step of Modifica > Annulla): the markers shown
+        everywhere and the dialog of the ties read again (with the unknowns proposed for the chunks that had none)."""
+        self.reference.set_chunk(self.chunk, self.last_report)
+        self.workspace.populate(self.doc)
+        self._draw_markers_on_raster()
+        self.photos.update_flags()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload(kinds=dlg._kinds_with_new())
+
+    def _photo_tie_menu(self, menu, x: float, y: float) -> None:
+        """The right-click menu of the photo view while *Punti in comune* is open: an end of a tie on this photo."""
+        win = getattr(self, "_common_points", None)
+        cam, ch = self.photo_view.camera, self.photo_view.chunk
+        if win is None or cam is None or ch is None:
+            return
+        try:
+            tie = win.selected_tie()
+        except RuntimeError:  # already deleted
+            return
+        menu.addSeparator()
+        a = menu.addAction(tr("Estremo del legame su questa foto"))
+        a.setEnabled(bool(cam.aligned))
+        a.triggered.connect(lambda: win.end_on_photo(ch, cam, x, y))
+        if tie is not None and win.pending is None and any(e[0] == ch.key for e in tie.ends()):
+            b = menu.addAction(tr("Estremo di «{0}» anche su questa foto", tie.name))
+            b.setEnabled(bool(cam.aligned))
+            b.triggered.connect(lambda: win.add_photo_to_selected(ch, cam, x, y))
+
+    def tie_end_photo(self, camera) -> None:
+        """*Estremo del legame su questa foto* from the Photos pane: the photo opened on where the current transforms put
+        the pending end (a red cross); a right click on the exact point there places it."""
+        win = getattr(self, "_common_points", None)
+        focus = None
+        if win is not None:
+            with contextlib.suppress(RuntimeError):
+                focus = win.predicted_point(self.chunk)
+        self.open_photo(camera, focus=focus)
+        self.statusBar().showMessage(tr("Tasto destro sul punto esatto della foto: Estremo del legame su questa foto."),
+                                     20000)
+
     def _close_ties_dialog(self) -> None:
         dlg = getattr(self, "_ties_dialog", None)
         self._ties_dialog = None
@@ -4311,6 +4391,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload()
+        self._common_points_redraw(refresh=True)
 
     def _ties_edited(self) -> None:
         """After the undo or the redo of an edit of the ties (their markers written back in every chunk)."""
@@ -4321,6 +4402,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload()
+        self._common_points_redraw()
         self._dirty(True)
 
     def _ties_reload(self) -> None:
@@ -5881,6 +5963,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if len(cams) == 2:
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
+        if len(cams) == 1 and cams[0].aligned and getattr(self, "_common_points", None) is not None:
+            menu.addAction(tr("Estremo del legame su questa foto"), lambda: self.tie_end_photo(cams[0]))
         if len(cams) == 1 and cams[0].aligned:
             menu.addAction(icon("look_through"), tr("Guarda dalla foto nella vista 3D"),
                            lambda: self.look_through_photo(cams[0]))

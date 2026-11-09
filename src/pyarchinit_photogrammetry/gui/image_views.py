@@ -2220,6 +2220,8 @@ class PhotoView(_ZoomView):
         self._mask_poly_item = None
         self._drag = None  # the marker whose flag is being dragged
         self._drag_offset = (0.0, 0.0)  # from the mouse to the foot of the flag (image pixels)
+        # more entries of the right-click menu (the window's: an end of a tie on this photo): (menu, x, y) -> None
+        self.context_hook = None
         self.setMouseTracking(True)
 
     def show_camera(self, chunk, camera, focus=None) -> None:
@@ -2557,6 +2559,8 @@ class PhotoView(_ZoomView):
             menu.addSeparator()
             menu.addAction(tr("Guarda dalla foto nella vista 3D")).triggered.connect(
                 lambda: self.look_requested.emit(cam))
+        if self.context_hook is not None:
+            self.context_hook(menu, x, y)
         menu.exec(ev.globalPos())
 
     def _place(self, marker, x, y) -> None:
