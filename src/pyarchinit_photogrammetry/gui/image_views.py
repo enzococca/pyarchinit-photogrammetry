@@ -1017,6 +1017,11 @@ class RasterView(_ZoomView):
             self._dem_lookup = (z.filled(np.nan).astype(float), src.transform @ src.transform.scale(
                 src.width / max(1, w // 4), src.height / max(1, h // 4)))
 
+    def clear_dem(self) -> None:
+        """No elevations for the cursor readout from :meth:`set_dem` (a raster whose heights are not those of that DEM:
+        a merged orthophoto)."""
+        self._dem_lookup = None
+
     def world(self, p: QPointF) -> tuple[float, float]:
         x, y = _apply(self.tr, p.x(), p.y())
         return float(x), float(y)

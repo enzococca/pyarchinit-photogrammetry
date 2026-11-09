@@ -122,9 +122,9 @@ Il prodotto unito va nel nodo **Prodotti uniti** in fondo all'Area di lavoro e s
   progetto si chiude, i file seguono il progetto come è stato salvato l'ultima volta.
 * Se lo mostri mentre il chunk attivo è in un altro sistema, la barra di stato lo dice: i disegni del chunk non ci
   cadono sopra.
-* Su un'ortofoto unita la barra di stato non dà quote: il DEM del chunk attivo può non coprirla. Gli strumenti di
-  disegno e di misura prendono comunque le quote dal DEM del chunk attivo: disegna e misura sui prodotti di un chunk,
-  o mostra il DEM unito.
+* Su un'ortofoto unita la barra di stato non dà quote: il DEM del chunk attivo può non coprirla. Su un DEM unito solo
+  la barra di stato mostra le quote unite. Gli strumenti di disegno e di misura prendono sempre le quote dal DEM del
+  chunk attivo, anche su un DEM unito: disegna e misura sui prodotti di un chunk.
 
 I file stanno in `<progetto>.ppg.files/mosaics/<id>/`: `mosaic.tif` (RGBA per l'ortofoto, float32 con NaN per il DEM),
 `sources.tif` (il chunk di ogni cella: 0 nessuno, 1 il primo dell'elenco...), `areas.gpkg` (layer `aree`, attributi

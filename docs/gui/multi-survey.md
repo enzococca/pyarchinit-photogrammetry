@@ -122,9 +122,9 @@ with its areas (layer *aree*). Under the cursor, the status bar says **which chu
   as last saved.
 * Shown while the active chunk is in another system, the status bar says so: the drawings of the chunk do not fall on
   it.
-* Over a merged orthophoto the status bar gives no height: the DEM of the active chunk may not cover it. Drawing and
-  measuring tools still take their heights from the active chunk's DEM: draw and measure on the products of a chunk,
-  or show the merged DEM.
+* Over a merged orthophoto the status bar gives no height: the DEM of the active chunk may not cover it. Over a merged
+  DEM only the status bar shows the merged heights. Drawing and measuring tools always take their heights from the
+  active chunk's DEM, also over a merged DEM: draw and measure on the products of a chunk.
 
 The files are in `<project>.ppg.files/mosaics/<id>/`: `mosaic.tif` (RGBA for the orthophoto, float32 with NaN for the
 DEM), `sources.tif` (the chunk of each cell: 0 none, 1 the first of the list...), `areas.gpkg` (layer `aree`, attributes

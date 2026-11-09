@@ -4477,7 +4477,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         kind = "dem" if rec.get("product") == "dem" else "ortho"
         self._load_raster(kind, path, title=str(rec.get("name", mid)))
         if kind == "ortho":  # the heights of the active chunk's DEM do not belong to a merged orthophoto
-            self.ortho_view._dem_lookup = None
+            self.ortho_view.clear_dem()
         self._mosaic_view = (mid, str(path))
         view = self.ortho_view
         areas = rec.get("areas") or []
