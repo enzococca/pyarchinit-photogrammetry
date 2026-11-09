@@ -543,7 +543,8 @@ CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 ## Align and merge chunks
 
 Chunks are aligned separately (each in its own arbitrary frame), brought into one frame,
-then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
+then merged, as with *Workflow > Align Chunks* and *Merge Chunks*. Chunks with no markers, photos or surfaces in
+common are tied with points chosen by hand: [ties between chunks](gui/ties.md) (`ppg ties` below).
 
 | Call | Description |
 | --- | --- |

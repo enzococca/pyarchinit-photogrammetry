@@ -562,7 +562,9 @@ della mesh Poisson della nuvola densa: distanza mediana 0,9 mm, 90° percentile 
 ## Allineare e unire i chunk
 
 I chunk si allineano separatamente (ciascuno nel suo sistema arbitrario), si portano in un unico
-sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci chunk*.
+sistema, poi si uniscono, come con *Flusso di lavoro > Allinea chunk* e *Unisci chunk*. I chunk senza
+marker, foto o superfici in comune si legano con punti scelti a mano: [legami fra chunk](gui/ties.md) (`ppg ties` qui
+sotto).
 
 | Chiamata | Descrizione |
 | --- | --- |
