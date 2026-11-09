@@ -367,3 +367,23 @@ def test_cancel_leaves_no_folder_and_no_record(tmp_path):
         mosaic.build(doc, ["A", "B", "C"], block=32, progress=prog)
     assert not mosaic.mosaics_of(doc) and "mosaics" not in doc.meta
     assert not any((doc.files_dir / "mosaics").iterdir())
+
+
+def test_moving_the_project_folder_keeps_the_mosaic_fresh(tmp_path):
+    import shutil
+
+    doc, _c = project(tmp_path / "here")
+    rec = mosaic.build(doc, ["A", "B", "C"])
+    assert all(not v["file"].startswith("/") and v["file"].startswith(".") is False
+               for v in rec["sources"].values()), rec["sources"]
+    doc.save()
+    shutil.move(str(tmp_path / "here"), str(tmp_path / "there"))
+    moved = ppg.Document.open(tmp_path / "there" / "p.ppg")
+    rec2 = mosaic.mosaics_of(moved)[0]
+    assert mosaic.is_stale(moved, rec2) == []
+    assert mosaic.path_of(moved, rec2).exists()
+    assert mosaic.source_at(moved, rec2["id"], X0 + 1.0, Y1 - 1.0) == "A"
+    old = dict(rec2)  # a record written with absolute paths (before they were relative) of a project still in place
+    old["sources"] = {k: {"file": str(moved.files_dir / v["file"]), "mtime_ns": v["mtime_ns"]}
+                      for k, v in rec2["sources"].items()}
+    assert mosaic.is_stale(moved, old) == []

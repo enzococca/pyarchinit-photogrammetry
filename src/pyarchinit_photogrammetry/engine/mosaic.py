@@ -547,7 +547,7 @@ def _build(doc, chunks, product, areas, resolution, background, name, block, pro
             "built_in": {str(s.chunk.key): stamps.stamp_of(s.chunk, product) for s in sources},
             "moved": [int(s.chunk.key) for s in sources if s.move is not None],
             "moved_tilt_deg": {str(s.chunk.key): round(s.tilt, 3) for s in sources if s.move is not None},
-            "sources": {str(s.chunk.key): _file_state(s.path) for s in sources},
+            "sources": {str(s.chunk.key): _file_state(doc, s.path) for s in sources},
             "when": datetime.now().isoformat(timespec="seconds"),
             "counts": {str(c.key): int(counts[i]) for i, c in enumerate(chs)},
             "size": [int(width), int(height)], "bounds": [float(left), float(top - height * res),
@@ -601,14 +601,34 @@ def _label(doc, record: dict, key: int) -> str:
     return str((record.get("labels") or {}).get(str(key), key))
 
 
-def _file_state(path) -> dict:
-    """What tells a source raster from one built again later: its path and its time of change (ns)."""
+def _relative(doc, path) -> str:
+    """``path`` relative to the files folder of the project (posix separators) when it lies inside it, else absolute:
+    moving or renaming the project folder keeps the relative ones the same."""
+    path = Path(path)
+    try:
+        return path.resolve().relative_to(Path(doc.files_dir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _file_state(doc, path) -> dict:
+    """What tells a source raster from one built again later: its path (relative to the files folder of the project
+    when inside it, :func:`_relative`) and its time of change (ns)."""
     path = Path(path)
     try:
         mtime = int(path.stat().st_mtime_ns)
     except OSError:
         mtime = None
-    return {"file": str(path), "mtime_ns": mtime}
+    return {"file": _relative(doc, path), "mtime_ns": mtime}
+
+
+def _same_state(doc, was: dict, now: dict) -> bool:
+    """The recorded state of a source and the present one agree; an absolute path recorded by a build before the paths
+    were relative (or of a project moved since) is compared in its relative form too."""
+    if was.get("mtime_ns") != now.get("mtime_ns"):
+        return False
+    a, b = str(was.get("file")), str(now.get("file"))
+    return a == b or (Path(a).is_absolute() and _relative(doc, a) == b)
 
 
 def is_stale(doc: "Document", record: dict) -> list[str]:
@@ -625,10 +645,10 @@ def is_stale(doc: "Document", record: dict) -> list[str]:
         was = (record.get("sources") or {}).get(str(key))
         if not stale and was is not None:
             path = _product_path(ch, product)
-            now = _file_state(path) if path is not None else None
+            now = _file_state(doc, path) if path is not None else None
             built = (record.get("built_in") or {}).get(str(key))
             stamp = stamps.stamp_of(ch, product)
-            stale = (now is None or now != was or (built is None) != (stamp is None)
+            stale = (now is None or not _same_state(doc, was, now) or (built is None) != (stamp is None)
                      or (built is not None and not stamps.same_transform(built, stamp)))
         if stale:
             out.append(_label(doc, record, key))
