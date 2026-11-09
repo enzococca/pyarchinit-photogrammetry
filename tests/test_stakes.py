@@ -30,20 +30,21 @@ def scene():
     return sc, truth, blotches
 
 
-def write_products(sc, folder):
-    """The scene's texture as an orthophoto (RGBA) and its heights as a DEM, in the world of the scene."""
-    w, h = int(round(sc.size[0] / ORTHO_CELL)), int(round(sc.size[1] / ORTHO_CELL))
+def write_products(sc, folder, cell=ORTHO_CELL):
+    """The scene's texture as an orthophoto (RGBA, ``cell`` metres) and its heights as a DEM, in the world of the
+    scene."""
+    w, h = int(round(sc.size[0] / cell)), int(round(sc.size[1] / cell))
     rgb = cv2.resize(sc.texture, (w, h), interpolation=cv2.INTER_AREA)[..., ::-1]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)])
     top_left = (sc.origin[0], sc.origin[1] + sc.size[1])
-    ortho = write_geotiff(folder / "orthomosaic.tif", np.moveaxis(rgba, -1, 0), top_left, ORTHO_CELL, CRS)
+    ortho = write_geotiff(folder / "orthomosaic.tif", np.moveaxis(rgba, -1, 0), top_left, cell, CRS)
     dw, dh = int(round(sc.size[0] / DEM_CELL)), int(round(sc.size[1] / DEM_CELL))
     z = cv2.resize(sc.heights, (dw, dh), interpolation=cv2.INTER_AREA) + np.float32(sc.origin[2])
     dem = write_geotiff(folder / "dem.tif", z.astype(np.float32), top_left, DEM_CELL, CRS, nodata=NODATA)
     return ortho, dem
 
 
-def project(tmp_path, sc):
+def project(tmp_path, sc, cell=ORTHO_CELL):
     """A document with one chunk (internal frame = the local frame of the scene) and the orthophoto and DEM."""
     doc = ppg.Document()
     ch = doc.add_chunk("Scavo")
@@ -52,7 +53,7 @@ def project(tmp_path, sc):
     t[:3, 3] = sc.origin
     ch.transform = t
     doc.save(tmp_path / "p.ppg")
-    ortho, dem = write_products(sc, ch.data_dir)
+    ortho, dem = write_products(sc, ch.data_dir, cell)
     ch._set_product("orthomosaic", ortho)
     ch._set_product("dem", dem)
     return doc, ch
@@ -96,6 +97,40 @@ def test_heads_found_within_2_cm_and_blotches_left_out(tmp_path, scene):
     json.dumps([p.to_dict() for p in props])  # plain JSON
     back = stakes.Proposal.from_dict(json.loads(json.dumps(props[0].to_dict())))
     assert np.allclose(back.best.internal, props[0].best.internal) and back.point.name == props[0].point.name
+
+
+def _disc(d_px, ox, oy, size=80, sub=8, ground=130, head=25):
+    """A grey image with a dark disc of ``d_px`` pixels across, its centre ``ox, oy`` from the centre of a pixel,
+    each pixel the mean of ``sub`` x ``sub`` samples (as a camera or an orthophoto sees it)."""
+    c = size // 2 + ox, size // 2 + oy
+    ys, xs = np.mgrid[0:size * sub, 0:size * sub]
+    inside = ((xs + 0.5) / sub - 0.5 - c[0]) ** 2 + ((ys + 0.5) / sub - 0.5 - c[1]) ** 2 <= (d_px / 2) ** 2
+    cover = inside.reshape(size, sub, size, sub).mean(axis=(1, 3))
+    return np.round(ground * (1 - cover) + head * cover).astype(np.uint8), c
+
+
+@pytest.mark.parametrize("d_px", [3.0, 4.0, 5.0, 6.0, 7.0, 9.0])
+@pytest.mark.parametrize("offset", [(0.0, 0.0), (0.5, 0.5), (0.25, 0.7)])
+def test_small_heads_are_found_at_any_offset_in_the_pixel(d_px, offset):
+    """A head of a few pixels (5 cm on a drone orthophoto of 1-2 cm, or seen from afar in a photo): its outline on
+    the pixels depends on where its centre falls in the pixel, never enough to leave it out."""
+    img, (cx, cy) = _disc(d_px, *offset)
+    found = stakes.detect(img, None, (0.6 * d_px, 2.4 * d_px), 5 * 2.4 * d_px, 25)
+    assert len(found) == 1, (d_px, offset)
+    assert np.hypot(found[0]["x"] - cx, found[0]["y"] - cy) < 0.25
+
+
+def test_a_3_cm_head_on_a_1_cm_orthophoto(tmp_path):
+    """Three centimetres on an orthophoto of one centimetre a pixel: three pixels across, found within a pixel."""
+    sc = synthetic.make_scene(size=(4.0, 3.0), texel=0.002, crs=CRS)
+    truth = synthetic.add_stakes(sc, [(1.6, 2.5), (3.2, 2.2), (2.8, 0.8)], diameter=0.03)
+    doc, ch = project(tmp_path, sc, cell=0.01)
+    props = stakes.find(doc, ch, [stakes.KnownPoint(n, np.asarray(xyz) + np.array([0.1, 0.05, 0.0]), CRS, 0.02)
+                                  for n, xyz in truth.items()], radius=0.3)
+    for p in props:
+        assert p.best is not None, (p.point.name, p.flags)
+        assert np.linalg.norm(p.best.xy_world - np.asarray(truth[p.point.name])[:2]) < 0.01, p.point.name
+        assert 0.02 < p.best.diameter < 0.045
 
 
 def test_a_point_with_no_head_nearby_has_no_proposal(tmp_path, scene):

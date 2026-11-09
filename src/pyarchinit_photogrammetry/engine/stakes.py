@@ -45,8 +45,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..core.document import Document
 
 MIN_CIRCULARITY = 0.6  # 4 pi A / P^2 of a head: a disc is 1, a square 0.79, a stick far less
-MAX_FILL = 0.9  # the area of a head over that of its smallest enclosing rectangle: a disc 0.79, a square (a black
-#                 cell of a coded target) 1
+MAX_FILL = 0.93  # the area of a head over that of its smallest enclosing rectangle: a disc 0.79, a square (a black
+#                  cell of a coded target) 1; a disc rasterised on few pixels reaches 0.88 from 8 pixels across (up to
+#                  1.0 below, by its offset in the pixel), so the test is made only from MIN_FILL_PX
+MIN_FILL_PX = 8.0  # equivalent diameter (pixels) from which the fill ratio is tested; smaller cells of a coded target
+#                    are left out by its footprint (TARGET_CLEARANCE) and by their size
 MIN_SOLIDITY = 0.8  # the dark cells over the area within the outline: a head is solid, a target's frame is not
 TARGET_CLEARANCE = 0.10  # metres: no candidate this close to a coded target detected in the chunk (its cells)
 BACKGROUND_HEADS = 5  # the median background is taken over this many (largest) head diameters
@@ -383,7 +386,7 @@ def detect(grey: np.ndarray, valid: np.ndarray | None, head_px: tuple[float, flo
         if area < MIN_SOLIDITY * area_c:  # holes: the frame of a coded target, a ring
             continue
         (_c, (rw, rh), _a) = cv2.minAreaRect(cnt)
-        if area_c / max((rw + 1.0) * (rh + 1.0), 1e-9) > MAX_FILL:  # a square outline: cells of a coded target
+        if d_eq >= MIN_FILL_PX and area_c / max((rw + 1.0) * (rh + 1.0), 1e-9) > MAX_FILL:  # a square outline: cells of a coded target
             continue
         wts = np.where(comp, dark[y0:y0 + bh, x0:x0 + bw], 0).astype(np.float64)
         ys, xs = np.mgrid[0:bh, 0:bw]
