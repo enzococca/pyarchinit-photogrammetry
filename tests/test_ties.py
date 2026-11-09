@@ -195,3 +195,114 @@ def test_end_precision_from_the_photos_in_metres():
     p = ties.end_precision(ch, m)
     assert 0.02 < p < 0.08  # a few pixels at 10 m with f = 1000 px: centimetres
     assert ties.end_precision(ch, ch.add_marker("Q", [0, 0, 0])) is None  # not measured on photos
+
+
+def _dem(chunk, cell: float, z: float = 0.0) -> None:
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    n = int(round(40 / cell))
+    arr = np.full((n, n), z, np.float32)
+    chunk._set_product("dem", write_geotiff(chunk.data_dir / "dem.tif", arr, (-20.0, 20.0), cell, None,
+                                            nodata=-9999.0))
+
+
+def test_an_end_on_one_photo_takes_two_dem_cells(tmp_path):
+    doc = ppg.Document(tmp_path / "foto.ppg")
+    ch = _photo_chunk(doc)
+    m = ch.add_marker("P", [0.0, 0.0, 0.0])  # placed on the surface from one photo (as triangulate_markers does)
+    px, _ = ch.cameras[0].project(ch.sensor(ch.cameras[0]), np.zeros((1, 3)))
+    m.projections[0] = Projection(float(px[0, 0]), float(px[0, 1]), True)
+    assert ties.end_precision(ch, m) == pytest.approx(0.05)  # no DEM: the table default, never 1 cm
+    _dem(ch, 0.1)
+    assert ties.end_precision(ch, m) == pytest.approx(0.2)  # two cells of the DEM
+    assert ties.raster_precision(ch, "dem") == pytest.approx(0.2)
+
+
+def test_an_end_on_one_photo_without_a_surface_has_no_position():
+    doc = ppg.Document()
+    ch = _photo_chunk(doc)
+    m = ch.add_marker("P")  # measured on one photo, no cloud to put it on
+    m.projections[0] = Projection(500.0, 400.0, True)
+    assert ties.end_internal(ch, m) is None and ties.end_precision(ch, m) is None
+
+
+def test_an_end_on_one_photo_lands_on_the_surface():
+    from pyarchinit_photogrammetry.core.pointcloud import PointCloud
+
+    doc = ppg.Document()
+    ch = _photo_chunk(doc)
+    g = np.mgrid[-3:3:0.05, -3:3:0.05].reshape(2, -1).T
+    ch.tie_points = PointCloud(np.c_[g, np.full(len(g), 0.4)])
+    m = ch.add_marker("P")
+    px, _ = ch.cameras[0].project(ch.sensor(ch.cameras[0]), np.array([[0.2, 0.1, 0.4]]))
+    m.projections[0] = Projection(float(px[0, 0]), float(px[0, 1]), True)
+    np.testing.assert_allclose(ties.end_internal(ch, m), [0.2, 0.1, 0.4], atol=0.01)
+    assert m.position is None  # the marker is not changed
+
+
+def test_a_tie_never_follows_a_reused_marker_key():
+    doc, a, b = _two_chunks()
+    tie = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    b.remove_markers([tie.b[1]])  # removed from the Riferimenti pane, not with remove_tie
+    other = b.add_marker("altro", [9, 9, 9])
+    assert other.key == tie.b[1]  # the key comes back for another point
+    (got,) = ties.ties_of(doc)
+    assert not got.active and got.broken
+    assert ties.end_world(doc, *got.b, uid=got.b_uid) is None
+    report = ties.check_ends(doc)
+    assert [r["id"] for r in report] == [tie.id] and "b" in report[0]["end"]
+    assert not ties.ties_of(doc)[0].active
+    # a renamed marker is still the same end; a marker found under another key is followed
+    t2 = ties.add_tie(doc, a, [0, 0, 0], b, [1, 1, 1])
+    b.marker_by_key(t2.b[1]).label = "rinominato"
+    assert ties.ties_of(doc)[1].active
+    np.testing.assert_allclose(ties.end_world(doc, *t2.b, uid=t2.b_uid), b.to_world(np.array([[1.0, 1, 1]]))[0])
+
+
+def test_marker_uid_persists(tmp_path):
+    doc, a, b = _two_chunks(tmp_path)
+    tie = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    doc.save()
+    again = ppg.Document.open(tmp_path / "scavo.ppg")
+    assert again.chunks[0].marker_by_key(tie.a[1]).uid == tie.a_uid
+    assert ties.ties_of(again)[0].active
+
+
+def test_known_coordinates_follow_the_marker_reference():
+    doc, a, b = _two_chunks()
+    tie = ties.add_known(doc, b, [0, 0, 0], [10.0, 20.0, 1.0], "GNSS 1", 0.02)
+    m = b.marker_by_key(tie.a[1])
+    m.reference.location = [11.0, 20.0, 1.0]  # edited in the Riferimenti pane
+    m.reference.accuracy = [0.03, 0.03, 0.03]
+    got = ties.ties_of(doc)[0]
+    assert got.known == [11.0, 20.0, 1.0] and got.precision == pytest.approx(0.03)
+    got.precision = 0.04
+    got.known = [12.0, 20.0, 1.0]
+    ties.save_ties(doc, [got])  # edited in the Legami pane
+    assert m.reference.location == [12.0, 20.0, 1.0] and m.reference.accuracy == [0.04] * 3
+
+
+def test_a_given_name_never_duplicates_a_marker_label():
+    doc, a, b = _two_chunks()
+    a.add_marker("P1", [0, 0, 0])
+    tie = ties.add_tie(doc, a, [1, 1, 1], b, [2, 2, 2], name="P1")
+    assert tie.name == "P1"
+    assert [m.label for m in a.markers].count("P1") == 1
+    assert a.marker_by_key(tie.a[1]).label == "P1 (legame)" and b.marker_by_key(tie.b[1]).label == "P1"
+
+
+def test_raster_precision_chooses_the_raster_and_skips_a_stale_one(tmp_path):
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    doc, a, _ = _two_chunks(tmp_path)
+    _dem(a, 0.1)
+    a._set_product("orthomosaic", write_geotiff(a.data_dir / "orthomosaic.tif", np.zeros((3, 400, 400), np.uint8),
+                                                (-20.0, 20.0), 0.01, None))
+    assert ties.raster_precision(a) == pytest.approx(0.02)
+    assert ties.raster_precision(a, "dem") == pytest.approx(0.2)
+    assert ties.raster_precision(a, "ortho") == pytest.approx(0.02)
+    from pyarchinit_photogrammetry.core import stamps
+
+    stamps.stamp(a, "dem")
+    a.transform = _rot_z(5.0)  # the DEM is now to be rebuilt: its cells say nothing of this system
+    assert stamps.is_stale(a, "dem") and ties.raster_precision(a, "dem") is None

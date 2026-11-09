@@ -46,8 +46,11 @@ class Tie:
     """Two markers in two chunks that are the same point, or one marker and its known world coordinates.
 
     ``a``/``b``: (chunk key, marker key). ``b`` None -> ``known`` holds the world coordinates of ``a``'s point in
-    ``crs`` (the chunk's system when the tie was made). ``own_markers``: the markers of the ends were made by the tie
-    (removed with it); False for markers the user had already (:func:`ties_from_markers`, :func:`link_markers`)."""
+    ``crs`` (the chunk's system; read from the marker's reference, which is the one copy that counts). ``own_markers``:
+    the markers of the ends were made by the tie (removed with it); False for markers the user had already
+    (:func:`ties_from_markers`, :func:`link_markers`). ``a_uid``/``b_uid``: the identity (``Marker.uid``) of each
+    end's marker, so that a key given again to another marker (the old one removed) is never taken for the end.
+    ``broken``: set on read when an end's chunk or marker is gone (the tie is then inactive); not stored."""
 
     id: str
     a: tuple[int, int]
@@ -58,9 +61,16 @@ class Tie:
     active: bool = True
     crs: str | None = None
     own_markers: bool = True
+    a_uid: str | None = None
+    b_uid: str | None = None
+    broken: str | None = None
 
     def ends(self) -> list[tuple[int, int]]:
         return [self.a] if self.b is None else [self.a, self.b]
+
+    def end_uids(self) -> list[tuple[tuple[int, int], str | None]]:
+        """The ends with the identity of their markers: ``[(end, uid), ...]``."""
+        return [(self.a, self.a_uid)] if self.b is None else [(self.a, self.a_uid), (self.b, self.b_uid)]
 
     def chunk_keys(self) -> set[int]:
         return {k for k, _ in self.ends()}
@@ -70,8 +80,9 @@ class Tie:
              "known": None if self.known is None else [float(v) for v in self.known],
              "precision": float(self.precision), "name": self.name, "active": bool(self.active),
              "own_markers": bool(self.own_markers)}
-        if self.crs is not None:
-            d["crs"] = self.crs
+        for key in ("crs", "a_uid", "b_uid"):
+            if getattr(self, key) is not None:
+                d[key] = getattr(self, key)
         return d
 
     @classmethod
@@ -82,21 +93,91 @@ class Tie:
                    b=None if b is None else (int(b[0]), int(b[1])),
                    known=None if known is None else [float(v) for v in known],
                    precision=float(d.get("precision", TABLE_PRECISION)), name=str(d.get("name", "")),
-                   active=bool(d.get("active", True)), crs=d.get("crs"), own_markers=bool(d.get("own_markers", True)))
+                   active=bool(d.get("active", True)), crs=d.get("crs"), own_markers=bool(d.get("own_markers", True)),
+                   a_uid=d.get("a_uid"), b_uid=d.get("b_uid"))
 
 
 # --------------------------------------------------------------------------- storage
 def ties_of(doc: "Document") -> list[Tie]:
-    """The ties of the document (new objects: change them and give them back with :func:`save_ties`)."""
-    return [Tie.from_dict(d) for d in (doc.meta.get(META_KEY) or [])]
+    """The ties of the document (new objects: change them and give them back with :func:`save_ties`), with their
+    ends checked against the markers (:func:`_settle`): an end whose marker moved to another key is followed, a tie
+    with an end gone is inactive and says why in ``broken``; a known tie takes its coordinates and precision from its
+    marker's reference."""
+    ties = [Tie.from_dict(d) for d in (doc.meta.get(META_KEY) or [])]
+    for t in ties:
+        _settle(doc, t)
+    return ties
 
 
 def save_ties(doc: "Document", ties: list[Tie]) -> None:
-    """The ties written in ``doc.meta["ties"]`` (plain JSON); no key when there are none."""
+    """The ties written in ``doc.meta["ties"]`` (plain JSON); no key when there are none. The known coordinates and
+    the precision of a known tie are written to its marker's reference too (one value in both panes)."""
+    for t in ties:
+        if t.b is None and t.known is not None:
+            found = resolve_end(doc, t.a, t.a_uid)
+            if found is not None:
+                marker = found[1]
+                marker.reference.location = [float(v) for v in t.known]
+                marker.reference.accuracy = [float(t.precision)] * 3
     if ties:
         doc.meta[META_KEY] = [t.to_dict() for t in ties]
     else:
         doc.meta.pop(META_KEY, None)
+
+
+def resolve_end(doc: "Document", end, uid: str | None = None):
+    """``(chunk, marker)`` of an end, or None when its chunk or marker is gone. With ``uid`` the marker must be the
+    one with that identity: the marker at the key if it has it, else the marker of the chunk that has it (its key
+    changed); a marker at the key with another identity is another point, never the end."""
+    chunk_key, marker_key = int(end[0]), int(end[1])
+    chunk = next((c for c in doc.chunks if c.key == chunk_key), None)
+    if chunk is None:
+        return None
+    at_key = next((m for m in chunk.markers if m.key == marker_key), None)
+    if uid is None:
+        return None if at_key is None else (chunk, at_key)
+    if at_key is not None and at_key.uid == uid:
+        return chunk, at_key
+    moved = next((m for m in chunk.markers if m.uid == uid), None)
+    return None if moved is None else (chunk, moved)
+
+
+def _settle(doc: "Document", tie: Tie) -> None:
+    """The ends of ``tie`` checked against the markers (see :func:`ties_of`)."""
+    reasons = []
+    for which in ("a", "b"):
+        end = getattr(tie, which)
+        if end is None:
+            continue
+        uid = getattr(tie, f"{which}_uid")
+        found = resolve_end(doc, end, uid)
+        if found is None:
+            chunk = next((c for c in doc.chunks if c.key == end[0]), None)
+            reasons.append(f"{which}: chunk {end[0]} removed" if chunk is None else
+                           f"{which}: marker {end[1]} of chunk {chunk.label!r} removed or replaced")
+            continue
+        chunk, marker = found
+        if marker.key != end[1]:
+            setattr(tie, which, (chunk.key, marker.key))
+        if which == "a" and tie.b is None and marker.reference.location:
+            tie.known = [float(v) for v in marker.reference.location]
+            tie.precision = float(max(marker.reference.accuracy or [tie.precision]))
+            tie.crs = chunk.crs
+    if reasons:
+        tie.broken = "; ".join(reasons)
+        tie.active = False
+
+
+def check_ends(doc: "Document") -> list[dict]:
+    """The ties with an end gone (chunk removed, marker removed or replaced by another under its key): made inactive
+    and stored so; returns ``[{"id", "name", "end", "reason"}]`` for the report. Ends whose marker moved to another
+    key are stored with the new key."""
+    ties = ties_of(doc)
+    out = [{"id": t.id, "name": t.name, "end": t.broken.split(":")[0] if t.broken else "", "reason": t.broken}
+           for t in ties if t.broken]
+    if ties:
+        save_ties(doc, ties)
+    return out
 
 
 def tie_by_id(doc: "Document", tie_id: str) -> Tie:
@@ -133,6 +214,26 @@ def _marker(chunk: "Chunk", ref) -> Marker:
     return chunk._marker_ref(ref)
 
 
+def _uid(marker: Marker) -> str:
+    """The identity of a marker, given now when it has none."""
+    if not marker.uid:
+        marker.uid = uuid.uuid4().hex
+    return marker.uid
+
+
+def _free_label(chunk: "Chunk", name: str) -> str:
+    """``name`` for a new marker of ``chunk``, made unique there ("P1 (legame)", "P1 (legame 2)"): two markers with
+    one label would be read as the first by *Allinea chunk* and :func:`ties_from_markers`."""
+    taken = {m.label for m in chunk.markers}
+    if name not in taken:
+        return name
+    n, label = 1, f"{name} ({LABEL})"
+    while label in taken:
+        n += 1
+        label = f"{name} ({LABEL} {n})"
+    return label
+
+
 # --------------------------------------------------------------------------- ends
 def end_internal(chunk: "Chunk", marker: Marker) -> np.ndarray | None:
     """The internal position of an end, without changing the marker: its own position, else triangulated from two
@@ -157,16 +258,14 @@ def end_internal(chunk: "Chunk", marker: Marker) -> np.ndarray | None:
     return None
 
 
-def end_world(doc: "Document", chunk_key: int, marker_key: int) -> np.ndarray | None:
+def end_world(doc: "Document", chunk_key: int, marker_key: int, uid: str | None = None) -> np.ndarray | None:
     """The world coordinates (the chunk's system, its current transform) of an end; None when the chunk, the marker
-    or its position is missing."""
-    chunk = next((c for c in doc.chunks if c.key == int(chunk_key)), None)
-    if chunk is None:
+    or its position is missing. Give ``uid`` (``tie.a_uid``/``tie.b_uid``) so that another marker that took the key
+    is never read as the end (:func:`resolve_end`)."""
+    found = resolve_end(doc, (chunk_key, marker_key), uid)
+    if found is None:
         return None
-    try:
-        marker = chunk.marker_by_key(int(marker_key))
-    except KeyError:
-        return None
+    chunk, marker = found
     p = end_internal(chunk, marker)
     return None if p is None else chunk.to_world(p[None])[0]
 
@@ -174,7 +273,9 @@ def end_world(doc: "Document", chunk_key: int, marker_key: int) -> np.ndarray | 
 def end_precision(chunk: "Chunk", marker: Marker) -> float | None:
     """The precision (metres) of an end measured on photos: the RMS of its reprojection errors turned into metres at
     the distance of each photo (pixels x depth / focal length, x the chunk's scale), at least
-    :data:`MIN_PHOTO_PRECISION`. None when no aligned photo measures it."""
+    :data:`MIN_PHOTO_PRECISION`. Measured on one photo only, the end lies on the surface and its error is the
+    surface's: two DEM cells of the chunk (:func:`raster_precision` ``"dem"``), else :data:`TABLE_PRECISION`. None
+    when no aligned photo measures it or it has no position."""
     pos = end_internal(chunk, marker)
     if pos is None:
         return None
@@ -196,19 +297,34 @@ def end_precision(chunk: "Chunk", marker: Marker) -> float | None:
         errors.append(err_px * float(depth[0]) / sensor.focal_px)
     if not errors:
         return None
+    if len(errors) < 2:
+        return raster_precision(chunk, "dem") or TABLE_PRECISION
     metres = float(np.sqrt(np.mean(np.square(errors)))) * float(chunk.scale)
     return max(MIN_PHOTO_PRECISION, metres)
 
 
-def raster_precision(chunk: "Chunk") -> float | None:
-    """Two cells of the orthophoto (else of the DEM) of the chunk, in world units: the precision of an end clicked on
-    it. None without either raster."""
-    for path in (chunk.orthomosaic_path, chunk.dem_path):
-        if path is not None and Path(path).exists():
-            import rasterio
+def raster_precision(chunk: "Chunk", source: str = "auto") -> float | None:
+    """Two cells of a raster of the chunk, in metres: the precision of an end clicked on it. ``source`` ``"ortho"``,
+    ``"dem"`` or ``"auto"`` (the orthophoto, else the DEM). A raster built in another system of the chunk (to be
+    rebuilt) does not count; cells in degrees (a geographic system) are turned into metres (1 degree = 111 320 m:
+    the latitude side, close enough for a weight). None without a raster to use."""
+    from ..core import crs as crs_mod
+    from ..core import stamps
 
-            with rasterio.open(path) as src:
-                return RASTER_PIXELS * float(max(abs(src.res[0]), abs(src.res[1])))
+    if source not in ("auto", "ortho", "dem"):
+        raise ValueError(f"source is 'auto', 'ortho' or 'dem' (got {source!r})")
+    products = {"auto": ("orthomosaic", "dem"), "ortho": ("orthomosaic",), "dem": ("dem",)}[source]
+    for product in products:
+        path = chunk.product_path(product)
+        if path is None or not Path(path).exists() or stamps.is_stale(chunk, product):
+            continue
+        import rasterio
+
+        with rasterio.open(path) as src:
+            cell = float(max(abs(src.res[0]), abs(src.res[1])))
+        if crs_mod.is_geographic(chunk.crs):
+            cell *= 111_320.0
+        return RASTER_PIXELS * cell
     return None
 
 
@@ -244,6 +360,7 @@ def link_markers(doc: "Document", chunk_a, marker_a, chunk_b, marker_b, name: st
     if ca is cb:
         raise ValueError("a tie links two different chunks")
     ma, mb = _marker(ca, marker_a), _marker(cb, marker_b)
+    ua, ub = _uid(ma), _uid(mb)
     ties = ties_of(doc)
     ends = {(ca.key, ma.key), (cb.key, mb.key)}
     for t in ties:
@@ -256,7 +373,7 @@ def link_markers(doc: "Document", chunk_a, marker_a, chunk_b, marker_b, name: st
             return t
     p = _check_precision(precision) if precision is not None else _default_precision([(ca, ma), (cb, mb)])
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ca.key, ma.key), b=(cb.key, mb.key), known=None, precision=p,
-              name=name or ma.label, own_markers=False)
+              name=name or ma.label, own_markers=False, a_uid=ua, b_uid=ub)
     save_ties(doc, ties + [tie])
     return tie
 
@@ -274,12 +391,12 @@ def add_tie(doc: "Document", chunk_a, point_a_internal, chunk_b, point_b_interna
     if precision is not None:
         precision = _check_precision(precision)
     label = name or next_name(doc)
-    ma, mb = ca.add_marker(label, pa), cb.add_marker(label, pb)
+    ma, mb = ca.add_marker(_free_label(ca, label), pa), cb.add_marker(_free_label(cb, label), pb)
     if precision is None:
         precision = _combined(raster_precision(ca), raster_precision(cb)) or TABLE_PRECISION
     ties = ties_of(doc)
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ca.key, ma.key), b=(cb.key, mb.key), known=None,
-              precision=precision, name=label)
+              precision=precision, name=label, a_uid=_uid(ma), b_uid=_uid(mb))
     save_ties(doc, ties + [tie])
     return tie
 
@@ -294,11 +411,11 @@ def add_known(doc: "Document", chunk, point_internal, world_xyz, name: str | Non
     known = [float(v) for v in _point(world_xyz)]
     precision = _check_precision(precision) if precision is not None else TABLE_PRECISION
     label = name or next_name(doc)
-    m = ch.add_marker(label, p, reference=known)
+    m = ch.add_marker(_free_label(ch, label), p, reference=known)
     m.reference.accuracy = [precision] * 3
     ties = ties_of(doc)
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ch.key, m.key), b=None, known=known, precision=precision,
-              name=label, crs=ch.crs)
+              name=label, crs=ch.crs, a_uid=_uid(m))
     save_ties(doc, ties + [tie])
     return tie
 
@@ -323,7 +440,8 @@ def ties_from_markers(doc: "Document", chunk_a, chunk_b) -> list[Tie]:
         if frozenset({(ca.key, m.key), (cb.key, other.key)}) in tied:
             continue
         tie = Tie(id=_new_id({t.id for t in ties + made}), a=(ca.key, m.key), b=(cb.key, other.key), known=None,
-                  precision=_default_precision([(ca, m), (cb, other)]), name=m.label, own_markers=False)
+                  precision=_default_precision([(ca, m), (cb, other)]), name=m.label, own_markers=False,
+                  a_uid=_uid(m), b_uid=_uid(other))
         made.append(tie)
     if made:
         save_ties(doc, ties + made)
@@ -342,12 +460,11 @@ def remove_tie(doc: "Document", tie_id: str, keep_markers: bool = False) -> Tie:
     if keep_markers or not tie.own_markers:
         return tie
     used = {e for t in rest for e in t.ends()}
-    for chunk_key, marker_key in tie.ends():
-        if (chunk_key, marker_key) in used:
+    for end, uid in tie.end_uids():
+        found = resolve_end(doc, end, uid)  # never another marker that took the key
+        if found is None or (found[0].key, found[1].key) in used:
             continue
-        chunk = next((c for c in doc.chunks if c.key == chunk_key), None)
-        if chunk is not None and any(m.key == marker_key for m in chunk.markers):
-            chunk.remove_markers([marker_key])
+        found[0].remove_markers([found[1].key])
     return tie
 
 
@@ -444,4 +561,4 @@ def import_ties(doc: "Document", path) -> list[Tie]:
 
 __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "add_known", "link_markers",
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
-           "remove_tie", "TABLE_PRECISION", "MIN_PHOTO_PRECISION"]
+           "remove_tie", "resolve_end", "check_ends", "TABLE_PRECISION", "MIN_PHOTO_PRECISION"]
