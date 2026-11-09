@@ -126,7 +126,9 @@ Il rapporto dà:
     * **togli un legame per volta**: ogni legame viene tolto a turno e gli altri ne collocano gli estremi; quando
       finiscono lontani (più di 3 volte la sua precisione combinata con la precisione con cui li collocano gli altri
       da soli - un chunk tenuto da pochi legami vicini fra loro è collocato male lontano da loro), il legame è
-      indicato;
+      indicato. Così un piccolo errore su un legame molto preciso (sotto circa 4-5 volte la precisione combinata) può
+      non essere indicato qui quando il suo chunk ha le incognite **rigido**; le incognite **similitudine** lo
+      indicano, e possono farlo anche le distanze fra legami e i residui;
     * **residui grandi**: un legame con un residuo oltre 3 volte la sua precisione;
     * **movimenti non plausibili**: un chunk georeferenziato da GPS o GNSS ruotato di più di 5 gradi, o scalato fuori
       da 0,98-1,02. Un chunk in un sistema locale non ha limiti;

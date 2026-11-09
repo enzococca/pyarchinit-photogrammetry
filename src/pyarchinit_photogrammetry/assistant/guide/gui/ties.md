@@ -120,7 +120,9 @@ The report gives:
       **probably wrong**;
     * **leave one out**: each tie is taken away in turn and the others place its ends; when they end up far apart
       (more than 3 times its precision combined with how precisely the others alone place them - a chunk held by a
-      few ties close together is placed loosely far from them), the tie is named;
+      few ties close together is placed loosely far from them), the tie is named. So a small error on a very precise
+      tie (below about 4-5 times the combined precision) may not be named here when its chunk has the **rigid**
+      unknowns; the **similarity** unknowns name it, and so may the distances between ties and the residuals;
     * **large residuals**: a tie with a residual over 3 times its precision;
     * **implausible movements**: a chunk georeferenced by GPS or GNSS turned by more than 5 degrees, or scaled
       outside 0.98-1.02. A chunk in a local frame has no limit;
