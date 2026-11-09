@@ -54,12 +54,16 @@ There are four ways:
   empty `chunk_b` means the second point is known coordinates; an empty z is read from the DEM of the chunk;
 * the **command line**: `ppg ties add`, `ppg ties known` (see [the command line](#command-line)).
 
+Two more kinds of record join chunks without picking points by hand: a **stable height** (the height of one chunk on
+another where the ground did not change, [below](#stable-height)) and the **stakes and benchmarks** found by
+themselves near points of known coordinates ([below](#benchmarks-and-stakes)).
+
 ## The ties window
 
 *Workflow > Tie chunks together...* opens the window of the ties. It is not modal: you can keep it open while you work
 in the main window and in *Common points*.
 
-![The ties window after Check: the wrong tie in red](../img/gui/ties-dialog.png)
+![The ties window after Check: the wrong tie in red, a stable height (orange: to be measured again after Apply)](../img/gui/ties-dialog.png)
 
 **Ties.** One row per tie: *Active*, name, the two ends (`chunk / marker`, or the known coordinates), *Precision (m)*
 (editable), *Residual (m)* of the last check and *State*. A tie with an end that is gone (a marker removed, a
@@ -76,6 +80,9 @@ removed - make them again on the merged chunk. *Append projects* copies the chun
 markers and the ties between the chunks you take; a tie to a chunk you leave out is not copied (the summary names
 it). A project with ties saved by an older version (1.7.5 or before) keeps its ties: they are
 recognised again by the key and the label of their markers.
+
+**Stable heights.** Under the ties, the table of the stable heights with *Measure stable height...*, *Measure again*
+and *Remove* (see [stable height](#stable-height)).
 
 **Unknowns per chunk.** For each chunk, what the solve may change:
 
@@ -189,6 +196,110 @@ triangulated; on one photo it is placed on the surface (cloud or tie points).
 **Two different systems.** A chunk in a local frame next to a chunk in a system of the world cannot be linked: the
 views are superimposed (middle on middle), and an orange note says so. Ties can still be made.
 
+## Stable height
+
+Two surveys of the same site often agree in plan - the GPS of a drone puts them within a few centimetres - and not in
+height: tens of centimetres, sometimes metres. Where the ground did not change between them (the sand or the field
+around an excavation, a road, a pavement) their DEMs must be at the same height. A **stable height** measures how
+much higher one chunk is than another there, and gives the solve that height only.
+
+*Workflow > Measure stable height...* (or *Measure stable height...* under the table *Stable heights* of the ties
+window) asks:
+
+* the **chunk** (B) and the chunk it is measured **against** (A): both need a DEM;
+* the **area**: *Automatic* (gentle slopes and cells that agree, over the whole overlap) or a polygon layer of the
+  free drawings - draw the ground you know did not change, or use a colour mask of it;
+* what to **leave out** (optional): a layer of polygons over the pits, the spoil heaps, the vegetation;
+* **plane**: a plane (height and tilt, three anchors) instead of a single offset. Use it when the two surveys may be
+  tilted against each other (a drone with GPS only) and the stable ground spreads over the site.
+
+The two DEMs are read as they are placed now: no shift in plan is measured or made. A DEM built before a solve moved
+its chunk is moved with the chunk, as the 2D view shows it. A chunk in a local frame and one in a system of the world
+are refused, as for the ties.
+
+The measure runs in the background and adds a row to the table **Stable heights**: name ("quota stabile N"), the two
+chunks, *dz* (how much higher B is than A), the NMAD of the differences on the stable ground, the stable cells,
+*Plane*, *Active*, the *Residual* of the last check and *State*. Its **precision** is the NMAD divided by the square
+root of the cells, with at most 100 cells counted (neighbouring cells are not independent: a large sand surface must
+not outweigh every tie), and at least 5 mm; each anchor of a plane counts √3 times that. Measuring, measuring again,
+removing and switching a stable height on or off are each one step of *Edit > Undo*.
+
+**In the solve.** A stable height joins the chunks in z only: the check and the solve use the active ones between
+chunks of the solve, and their residuals are in the report (section *Stable heights*). A chunk held only by stable
+heights is proposed as **height only**. They are never in the distances between ties or in *leave one out*: they have
+no partner points.
+
+**Measuring again.** A stable height was measured where the chunks stood in plan at that moment. When a solve moves
+them against each other in plan by more than 2 cells of A's DEM (and at least 10 cm), the row turns orange and *State*
+says by how much: after a check, "to be measured again after Apply"; after *Apply*, "to be measured again". So the
+usual order is: tie the chunks in plan first (ties, *Apply*), then press **Measure again**: the selected heights (none
+selected: those in orange) are measured again where the chunks are now, with the same chunks, areas and kind, and
+keep their name and state.
+
+## Benchmarks and stakes
+
+Benchmarks, GNSS points and the stakes of the excavation grid are often in the photos: a dark round head on the
+ground, with known coordinates in the table of the surveyor. *Find stakes...* looks for them near those coordinates
+and proposes each one as a **known tie** - a point of the chunk with known coordinates. Nothing is added until you
+accept it.
+
+![Find stakes: the proposals, one 40 cm off in red, and the head on the orthophoto and on a photo](../img/gui/stakes-dialog.png)
+
+Open it with **Find stakes...** in the [*Reference*](panes.md#reference) pane or from *Workflow > Find stakes...*. It
+is not modal.
+
+**First detect the coded targets** (*Workflow > Detect coded markers...*). Their footprint is left out of the search,
+but on a coarse orthophoto (about 1 cm a pixel or coarser) the black cells of a target that was not detected are as
+small as a head and can be proposed.
+
+**Known points**, from one of:
+
+* a **CSV file**: `name,x,y[,z][,precision]`, separated by commas, semicolons, tabs or spaces, a header line allowed
+  (a decimal comma works when the separator is not a comma). The coordinates are in the system of the chunk, or in the
+  one written in *System of the CSV* (an EPSG code). Without z the height comes from the DEM; without precision 5 cm;
+* the **known ties of the project**;
+* the **markers with coordinates** of a chunk (its control points, for instance from another survey).
+
+Then choose the **chunk** (it needs an orthophoto), the **radius** around each point (default 3 m) and the **head
+diameter** (default 3 to 12 cm), and press **Search**. In the background, near every point:
+
+1. on the orthophoto: dark spots at least 25 grey levels darker than their surroundings, round (circularity at least
+   0.6), solid and of the head size; long roots, large patches and the cells of coded targets are left out;
+2. on the photos: each candidate is looked for in the photos that see it (at most 12). When at least **3 photos
+   agree** (within 2 pixels, or a quarter of the head) the point is triangulated from them, with the precision of the
+   photos; otherwise it is proposed as **orthophoto only**, with the precision of 2 pixels of the orthophoto. Missing
+   or unreadable photos (0-byte placeholders of an "online only" folder) leave a proposal orthophoto only, never an error;
+3. at most 5 candidates per point, the photo-confirmed ones first, then by darkness, roundness and distance.
+
+**The table.** One row per known point: the proposal (x, y, z), the *Agreeing photos* (or *orthophoto only*), the
+*Contrast*, the *Displacement* from the known point and a *Warning*: *no head found*, *outside the orthophoto*, *no
+aligned photos*, *unreadable photos*, the other candidates. The proposals are checked against each other before any
+is accepted, as the ties are: the **distances** between every two found heads must agree with those between their
+known points (a point that disagrees with most of the others is **suspect**), and the **displacement** of each must
+agree with the median of all (a whole survey shifted shows as the median, written under the table; a wrong point -
+a typing error, another stake - as a point **displaced unlike the others**). These rows are in red: check them before
+accepting.
+
+On the right, the **picture** of the selected proposal: the orthophoto around it and the photo that sees it best, a
+red cross on the proposed head. Look at it before accepting.
+
+| Button | What it does |
+| --- | --- |
+| *Accept selected* | the selected proposals become known ties |
+| *Accept the agreeing ones* | the proposals confirmed by the photos and not in red |
+| *Discard* | takes the selected proposals out of the list; the project does not change |
+| *Choose another candidate* | the selected proposal moves to the next head found near its point (when there is one) |
+
+**Accepting** makes, for each proposal, a known tie named as the point: a marker of the chunk on the head, with the
+known coordinates as its reference (a point without z takes the height of the head) and the precision of the head and
+of the point combined. The photos that agreed become measurements of the marker (pinned flags), and the new markers
+alone are triangulated: the other markers of the chunk stay where they are. The whole acceptance is **one step** of
+*Edit > Undo*. The accepted proposals leave the list; the ties appear in the ties window, to be checked and applied as
+any other.
+
+A proposal belongs to the alignment it was found in: after a new alignment of the photos of the chunk, accepting it
+is refused - search again.
+
 ## Command line
 
 ```bash
@@ -198,9 +309,22 @@ ppg ties from-markers scavo.ppg 2024 2025                   # markers with the s
 ppg ties import scavo.ppg ties.csv
 ppg ties list scavo.ppg [--json]
 ppg ties confirm scavo.ppg [TIE ...]                        # ends still right after a new alignment
+ppg ties height scavo.ppg 2025 2024 [--layer Sabbia | --area stabile.gpkg] [--exclude Scavo] [--plane]
+ppg ties heights scavo.ppg [--json]                         # the stable heights
+ppg ties remeasure scavo.ppg "quota stabile 1"              # measured again where the chunks are now
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
+ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
+ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # or --agreeing: those confirmed by the photos
 ```
+
+`ppg ties height` measures how much higher CHUNK is than REFERENCE on the stable ground (a polygon layer of the free
+drawings with `--layer`, a GeoPackage, GeoJSON or DXF file with `--area`; neither: found by itself) and keeps it as a
+stable height; `check` and `solve` use the active ones. `ppg stakes find` takes as known points a CSV file, `ties` (the
+known ties of the project) or the name of a chunk (its markers with coordinates); it prints one line per point and the
+check (median displacement, suspects, points displaced unlike the others), and writes the proposals to a JSON file with
+a picture `<point>.png` for each beside it. The project does not change. `ppg stakes accept` prints what it would do
+and changes nothing without `--yes`.
 
 `check` prints the same report as the window, without the straight axis (in English), and changes nothing. `solve` asks before applying (or `--yes`); with
 redundancy 0 it asks a question of its own, and `--yes` needs `--accept-no-check` too. Negative coordinates are

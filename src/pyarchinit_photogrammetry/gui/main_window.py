@@ -697,6 +697,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.reference.move3d_requested.connect(self.move_marker_in_3d)
         self.reference.remove_requested.connect(self.remove_markers)
         self.reference.precision_requested.connect(self.estimate_precision)
+        self.reference.stakes_requested.connect(self.find_stakes)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
@@ -999,6 +1000,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Misura quota stabile..."), self.measure_stable_height, processing=True, icon_name="chunk",
                   tip=tr("La quota di un chunk rispetto a un altro sul terreno che non è cambiato (confronto dei DEM): "
                          "una quota stabile nella finestra dei legami"))
+        self._act(m, tr("Cerca picchetti..."), self.find_stakes, processing=True, icon_name="markers",
+                  tip=tr("Picchetti e capisaldi cercati sull'ortofoto e sulle foto vicino a punti di coordinate note: "
+                         "proposte da accettare come legami a coordinate note"))
         self._act(m, tr("Punti in comune..."), self.common_points, processing=True, icon_name="chunk",
                   tip=tr("Due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in "
                          "ognuna, un estremo anche su una foto"))
@@ -1876,6 +1880,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         step = progress or (lambda *_a, **_k: None)
         self._close_orient_dialog()  # its points are of a chunk of the project left
         self._close_ties_dialog()  # its ties are of the project left
+        self._close_stakes_dialog()  # its proposals are of a chunk of the project left
         self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
@@ -4277,6 +4282,34 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None:
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.ask_measure()
+
+    def find_stakes(self):
+        """*Cerca picchetti* (Riferimenti pane, *Flusso di lavoro*): stakes and benchmarks near known points proposed
+        for confirmation (:class:`.stakes_dialog.StakesDialog`, not modal), one for the project. Returns it."""
+        from .stakes_dialog import StakesDialog, _chunks_with_ortho
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_stakes_dialog", None)
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        if not _chunks_with_ortho(self.doc):
+            self._warn(tr("Cerca picchetti: nessun chunk ha un'ortofoto. Costruiscila prima (Flusso di lavoro > "
+                          "Costruisci ortofoto)."))
+            return None
+        self._stakes_dialog = StakesDialog.ask(self)
+        return self._stakes_dialog
+
+    def _close_stakes_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_stakes_dialog", None)
+        self._stakes_dialog = None
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
 
     def _live_ties_dialog(self):
         """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""

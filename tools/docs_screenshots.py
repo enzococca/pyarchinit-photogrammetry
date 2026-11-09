@@ -471,6 +471,9 @@ def _worker(args) -> int:
     # ---- ties between chunks: a clone of the demo with a second campaign moved by a known error, deleted after
     if wanted("ties-dialog") or wanted("ties-common-points"):
         _ties_shots(w, args.demo, pump, save, wanted)
+    # ---- stakes near known points: a clone of the demo with stake heads painted on its orthophoto and photos
+    if wanted("stakes-dialog"):
+        _stakes_shots(w, args.demo, pump, save)
 
     guard.stop()
     w.setWindowModified(False)
@@ -589,7 +592,8 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
     """*Aggancia chunk con legami* and *Punti in comune* on a clone of the demo: the chunk duplicated as a second
     campaign "2025" (its DEM and orthophoto copied, built where it was), then moved as a drone GPS would put it (1.5
     degrees, some decimetres); five ties on the trench, one of them 30 cm off. The dialog after *Controlla* (the wrong
-    tie in red, robust weights) and the two linked views with the residuals. The clone is deleted after; nothing is saved."""
+    tie in red, robust weights; a stable height of 2025 on 2024 in its own table) and the two linked views with the
+    residuals. The clone is deleted after; nothing is saved."""
     import shutil
 
     import numpy as np
@@ -598,7 +602,7 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
     from pyarchinit_photogrammetry.core import stamps
     from pyarchinit_photogrammetry.core.camera import Reference
     from pyarchinit_photogrammetry.core.document import Document
-    from pyarchinit_photogrammetry.engine import ties
+    from pyarchinit_photogrammetry.engine import stable_height, ties
 
     folder = _clone(demo, "ties_clone")
     try:
@@ -630,13 +634,15 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
         moved[:2, :2] = [[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]
         moved[:3, 3] = centre - moved[:3, :3] @ centre + np.array([0.35, -0.2, 0.12])
         b.transform = moved @ np.asarray(b.transform, float)
+        # a stable height of 2025 on 2024 (their DEMs on the ground that did not change): a row of *Quote stabili*
+        stable_height.add(doc, stable_height.measure(doc, b, a))
         doc.chunk = a
         w.set_document(doc)
         pump(1500)
         w.tie_chunks()
         pump(600)
         dlg = w._live_ties_dialog()
-        dlg.resize(1100, 820)
+        dlg.resize(1100, 900)
         dlg.c_robust.setChecked(True)  # Huber weights: the wrong tie alone stands out
         dlg.run_check()
         for _ in range(200):  # the check runs in the worker
@@ -658,6 +664,92 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
             save(cp.grab(), "ties-common-points")
             w._close_common_points()
         w._close_ties_dialog()
+        pump(300)
+        w.setWindowModified(False)
+        w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after
+        pump(800)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _stakes_shots(w, demo: Path, pump, save) -> None:
+    """*Cerca picchetti* on a clone of the demo: four stake heads (5 cm, dark) painted on its orthophoto and on every
+    aligned photo that sees them (projected through the cameras), a table of known points a few centimetres off as a
+    GNSS survey gives them, one of them 0.4 m off (in red after the search); the window after *Cerca* with a head
+    confirmed by the photos selected. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import cv2
+    import numpy as np
+    import rasterio
+    from rasterio.windows import Window
+
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.engine import stakes
+    from pyarchinit_photogrammetry.markers.refine import _pixels_per_metre
+
+    folder = _clone(demo, "stakes_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        ch = doc.chunk
+        diameter = 0.05
+        with rasterio.open(ch.dem_path) as src:
+            left, bottom, right, top = src.bounds
+            spots = [(0.15, 0.15), (0.88, 0.2), (0.8, 0.78), (0.18, 0.8)]  # the ground around the trench
+            heads = []
+            for fx, fy in spots:
+                x, y = left + fx * (right - left), bottom + fy * (top - bottom)
+                heads.append((x, y, float(next(src.sample([(x, y)]))[0])))
+        with rasterio.open(ch.product_path("orthomosaic"), "r+") as src:
+            cell = abs(src.res[0])
+            r = int(np.ceil(diameter / cell)) + 2
+            for x, y, _z in heads:
+                col, row = ~src.transform * (x, y)
+                win = Window(int(col) - r, int(row) - r, 2 * r + 1, 2 * r + 1)
+                data = np.ascontiguousarray(np.moveaxis(src.read([1, 2, 3], window=win), 0, -1))
+                centre = (int(round((col - 0.5 - win.col_off) * 16)), int(round((row - 0.5 - win.row_off) * 16)))
+                cv2.circle(data, centre, int(round(diameter / 2 / cell * 16)), (38, 34, 30), -1, cv2.LINE_AA, 4)
+                src.write(np.moveaxis(data, -1, 0), [1, 2, 3], window=win)
+        axes = stakes._plane_axes(ch)
+        internals = ch.to_internal(np.array(heads, float))
+        for cam in ch.aligned_cameras:
+            img = cv2.imread(str(cam.path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            if img is None:
+                continue
+            px, depth = cam.project(ch.sensor(cam), internals)
+            drawn = False
+            for X, (u, v), d in zip(internals, px, depth):
+                if d <= 0 or not (0 <= u < img.shape[1] and 0 <= v < img.shape[0]):
+                    continue
+                ppm = _pixels_per_metre(ch, cam, X, *axes) / max(float(ch.scale), 1e-12)
+                centre = (int(round((u - 0.5) * 16)), int(round((v - 0.5) * 16)))
+                cv2.circle(img, centre, max(16, int(round(diameter / 2 * ppm * 16))), (30, 34, 38), -1, cv2.LINE_AA, 4)
+                drawn = True
+            if drawn:
+                cv2.imwrite(str(cam.path), img, [cv2.IMWRITE_JPEG_QUALITY, 97])
+        offsets = [(0.03, -0.02), (-0.02, 0.04), (-0.4, 0.05), (0.01, 0.03)]  # the third point given 40 cm off
+        table = folder / "punti_noti.csv"
+        lines = ["nome,x,y,z,precisione"]
+        for i, ((x, y, z), (dx, dy)) in enumerate(zip(heads, offsets), start=1):
+            lines.append(f"CS{i},{x + dx:.3f},{y + dy:.3f},{z:.3f},0.03")
+        table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        w.set_document(doc)
+        pump(1500)
+        dlg = w.find_stakes()
+        dlg.resize(1400, 720)
+        dlg.set_csv(table)
+        dlg.s_radius.setValue(1.0)
+        dlg.search()
+        for _ in range(300):  # the search runs in the worker
+            pump(100)
+            if dlg.proposals:
+                break
+        dlg.e_file.setText("~/ppg_demo/punti_noti.csv")
+        confirmed = [p.point.name for p in dlg.proposals if p.best is not None and not p.best.ortho_only]
+        dlg.select(confirmed[:1] or [dlg.proposals[0].point.name])
+        pump(600)
+        save(dlg.grab(), "stakes-dialog")
+        w._close_stakes_dialog()
         pump(300)
         w.setWindowModified(False)
         w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after

@@ -927,6 +927,7 @@ class ReferencePane(QWidget):
     move3d_requested = Signal(int)  # key of the marker to place again in the 3D view
     remove_requested = Signal(object)  # keys of the markers to delete
     scalebar_import_requested = Signal()
+    stakes_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
                 "Errore (m)"]
@@ -964,7 +965,13 @@ class ReferencePane(QWidget):
         bar.addWidget(self.b_bar)
         bar.addWidget(self.b_bar_import)
         bar.addWidget(self.b_est)
+        self.b_stakes = _tool("markers", tr("Cerca picchetti..."), tr("Picchetti e capisaldi cercati sull'ortofoto e "
+                                                                      "sulle foto vicino a punti di coordinate note: "
+                                                                      "proposte da accettare come legami a "
+                                                                      "coordinate note"))
+        bar.addWidget(self.b_stakes)
         lay.addLayout(bar)
+        self.b_stakes.clicked.connect(self.stakes_requested)
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
         self.b_opt.clicked.connect(self.optimize_requested)

@@ -140,6 +140,7 @@ foto, o aggiunto sul modello o sull'ortofoto.
 | *Precisione* | la precisione di camere, marker e punti di legame ([precisione](processing.md#precisione)) |
 | *Barra di scala...*, *Importa barre...* | una distanza nota tra due marker, o un elenco da un CSV |
 | *Coordinate stimate* | come *View Estimated* di Metashape: le colonne X, Y, Z mostrano le coordinate stimate invece di quelle di riferimento (attivo da solo quando nessun marker ha coordinate di riferimento) |
+| *Cerca picchetti...* | picchetti e capisaldi vicino a punti di coordinate note, proposti come legami a coordinate note ([capisaldi e picchetti](ties.md#capisaldi-e-picchetti)) |
 
 Il clic destro sui marker filtra le foto che li vedono, affina le loro bandierine blu, li unisce (un target
 codificato e il GCP messo a mano sopra), ne sposta uno nella vista 3D, crea una barra di scala tra due di loro e

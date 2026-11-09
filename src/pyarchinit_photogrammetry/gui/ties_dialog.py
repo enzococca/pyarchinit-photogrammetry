@@ -417,6 +417,7 @@ class TiesDialog(QDialog):
         self.heights.verticalHeader().setVisible(False)
         self.heights.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.heights.horizontalHeader().setStretchLastSection(True)
+        self.heights.setMaximumHeight(120)  # a few rows: the ties above keep the room
         tl.addWidget(self.heights)
         hrow = QHBoxLayout()
         self.b_measure_height = QPushButton(tr("Misura quota stabile..."))
@@ -440,6 +441,7 @@ class TiesDialog(QDialog):
         self.chunks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.chunks.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.chunks.horizontalHeader().setStretchLastSection(True)
+        self.chunks.setMaximumHeight(160)  # the ties above keep the room; more chunks scroll
         tl.addWidget(self.chunks)
         opts = QHBoxLayout()
         self.c_robust = QCheckBox(tr("Robusto"))

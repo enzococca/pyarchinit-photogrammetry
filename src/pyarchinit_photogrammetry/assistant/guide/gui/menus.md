@@ -117,6 +117,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds; the summary gives, for each chunk, the share of its points on the reference and their median distance ([several chunks together](view3d.md#several-chunks-together)) |
 | **Tie chunks together...** | several chunks solved together from points in common (ties) and known points, with the unknowns chosen for each chunk and a report that shows the wrong ties before applying ([ties between chunks](ties.md)) |
+| **Measure stable height...** | the height of a chunk on another where the ground did not change (their DEMs compared): a stable height in the ties window, z only ([stable height](ties.md#stable-height)) |
+| **Find stakes...** | stakes and benchmarks looked for on the orthophoto and the photos near points of known coordinates, proposed to accept as known ties ([benchmarks and stakes](ties.md#benchmarks-and-stakes)) |
 | **Common points...** | two chunks side by side with linked views: a tie with a click on the same point in each, an end on a photo too ([common points](ties.md#common-points)) |
 | **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
 | **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order; one step of *Edit > Undo* |

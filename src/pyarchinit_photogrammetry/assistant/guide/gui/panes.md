@@ -137,6 +137,7 @@ or added on the model or the orthophoto.
 | *Precision* | the precision of cameras, markers and tie points ([precision](processing.md#precision)) |
 | *Scale bar...*, *Import bars...* | a known distance between two markers, or a list of them from a CSV |
 | *Estimated coordinates* | as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates instead of the reference ones (on by itself when no marker has reference coordinates) |
+| *Find stakes...* | stakes and benchmarks near points of known coordinates, proposed as known ties ([benchmarks and stakes](ties.md#benchmarks-and-stakes)) |
 
 The right click on the markers filters the photos on them, refines their blue flags, merges them (a coded
 target and the GCP placed by hand on it), moves one again in the 3D view, creates a scale bar between two of

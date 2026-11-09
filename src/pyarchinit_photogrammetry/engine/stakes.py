@@ -45,9 +45,10 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..core.document import Document
 
 MIN_CIRCULARITY = 0.6  # 4 pi A / P^2 of a head: a disc is 1, a square 0.79, a stick far less
-MAX_FILL = 0.93  # the area of a head over that of its smallest enclosing rectangle: a disc 0.79, a square (a black
-#                  cell of a coded target) 1; a disc rasterised on few pixels reaches 0.88 from 8 pixels across (up to
-#                  1.0 below, by its offset in the pixel), so the test is made only from MIN_FILL_PX
+MAX_FILL = 0.97  # the area of a head over that of its smallest enclosing rectangle: a disc 0.79, a square (a black
+#                  cell of a coded target) 1; a disc rasterised on few pixels reaches 0.95 from 8 pixels across (8.5-9
+#                  pixels centred on a pixel corner; up to 1.0 below, by its offset in the pixel), so the test is made
+#                  only from MIN_FILL_PX
 MIN_FILL_PX = 8.0  # equivalent diameter (pixels) from which the fill ratio is tested; smaller cells of a coded target
 #                    are left out by its footprint (TARGET_CLEARANCE) and by their size
 MIN_SOLIDITY = 0.8  # the dark cells over the area within the outline: a head is solid, a target's frame is not
@@ -670,6 +671,21 @@ def _find_one(ch, point, src, cell, per_metre, surface, radius, head, min_contra
         flags.append("ortho_only")
     disp = best.world - known
     return Proposal(point, ch.key, best, cands[1:], disp, flags, alignment, known)
+
+
+def next_candidate(proposal: Proposal) -> Proposal:
+    """The same proposal with its next candidate as the proposed one (the proposed one goes last among the others):
+    *Scegli un altro candidato* when the best is the wrong head. The displacement and the flag ``ortho_only`` follow
+    the new candidate. Unchanged without other candidates."""
+    if proposal.best is None or not proposal.others:
+        return proposal
+    others = list(proposal.others)
+    best = others.pop(0)
+    others.append(proposal.best)
+    flags = [f for f in proposal.flags if f != "ortho_only"] + (["ortho_only"] if best.ortho_only else [])
+    known = proposal.known if proposal.known is not None else np.asarray(proposal.point.xyz, float)
+    disp = None if best.world is None else np.asarray(best.world, float) - np.asarray(known, float)
+    return Proposal(proposal.point, proposal.chunk, best, others, disp, flags, proposal.alignment, proposal.known)
 
 
 # --------------------------------------------------------------------------- check

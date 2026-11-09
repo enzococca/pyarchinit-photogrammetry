@@ -384,3 +384,33 @@ def test_cli_find_writes_json_and_previews(tmp_path, scene):
     assert [t.name for t in ties.ties_of(ppg.Document.open(tmp_path / "p.ppg"))] == ["S1", "S3"]
     r = CliRunner().invoke(app, ["stakes", "accept", str(tmp_path / "p.ppg"), "Scavo", str(out)])
     assert r.exit_code != 0  # --ids or --agreeing
+
+
+@pytest.mark.parametrize("d_px", [8.625, 8.75, 8.875, 9.0])
+def test_a_head_of_9_pixels_centred_on_a_pixel_corner(d_px):
+    """A disc of about 9 pixels across centred on a pixel corner fills 0.95 of its enclosing rectangle on the pixels:
+    still a head (a square cell of a coded target fills 1.0 and stays out)."""
+    img, (cx, cy) = _disc(d_px, 0.5, 0.5, sub=1)  # each pixel in or out by its centre: the hardest outline
+    found = stakes.detect(img, None, (0.6 * d_px, 2.4 * d_px), 5 * 2.4 * d_px, 25)
+    assert len(found) == 1
+    assert np.hypot(found[0]["x"] - cx, found[0]["y"] - cy) < 0.25
+    square = np.full((80, 80), 130, np.uint8)
+    square[36:45, 36:45] = 25
+    assert stakes.detect(square, None, (0.6 * 9, 2.4 * 9), 5 * 2.4 * 9, 25) == []
+
+
+def test_next_candidate_cycles_the_others(tmp_path, scene):
+    sc, truth, _blotches = scene
+    doc, ch = project(tmp_path, sc)
+    name, xyz = next(iter(truth.items()))
+    p = stakes.find(doc, ch, [stakes.KnownPoint(name, np.asarray(xyz, float), CRS, 0.02)], radius=3.0)[0]
+    assert p.best is not None and p.others
+    q = stakes.next_candidate(p)
+    assert q.best is p.others[0] and q.others[-1] is p.best and len(q.others) == len(p.others)
+    assert np.allclose(q.displacement, q.best.world - p.known)
+    back = p
+    for _ in range(len(p.others) + 1):
+        back = stakes.next_candidate(back)
+    assert back.best is p.best  # round the cycle
+    alone = stakes.Proposal(p.point, p.chunk, p.best, [], p.displacement, p.flags, p.alignment, p.known)
+    assert stakes.next_candidate(alone) is alone

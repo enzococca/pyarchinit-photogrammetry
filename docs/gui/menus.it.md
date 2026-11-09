@@ -117,6 +117,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte; il riepilogo dà, per ogni chunk, la quota dei suoi punti sul riferimento e la loro distanza mediana ([più chunk insieme](view3d.md#piu-chunk-insieme)) |
 | **Aggancia chunk con legami...** | più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare ([legami fra chunk](ties.md)) |
+| **Misura quota stabile...** | la quota di un chunk rispetto a un altro dove il terreno non è cambiato (confronto dei DEM): una quota stabile nella finestra dei legami, solo in z ([quota da una superficie stabile](ties.md#quota-da-una-superficie-stabile)) |
+| **Cerca picchetti...** | picchetti e capisaldi cercati sull'ortofoto e sulle foto vicino a punti di coordinate note, proposti da accettare come legami a coordinate note ([capisaldi e picchetti](ties.md#capisaldi-e-picchetti)) |
 | **Punti in comune...** | due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in ognuna, un estremo anche su una foto ([punti in comune](ties.md#punti-in-comune)) |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
 | **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
