@@ -4751,6 +4751,100 @@ def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (
                    f"{corr['below']} points below); note: {water.NOTE_EN}")
 
 
+def _axis_of(text: str) -> tuple:
+    try:
+        x1, y1, x2, y2 = (float(v) for v in text.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"--axis is X1,Y1,X2,Y2 (got {text!r})") from None
+    return (x1, y1), (x2, y2)
+
+
+@app.command("classify-lines")
+def classify_lines(project: Path,
+                   chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                   layer: Optional[str] = typer.Option(None, "--layer", help="the lines and polygons of a layer of "
+                                                       "free drawings (plan x, y)"),
+                   file: Optional[Path] = typer.Option(None, "--file", help="the lines and polygons of a GeoPackage, "
+                                                       "GeoJSON or DXF"),
+                   elevation: Optional[str] = typer.Option(None, "--elevation", help="the drawings of an elevation "
+                                                           "(its id) in its (u, v)"),
+                   axis: Optional[str] = typer.Option(None, "--axis", help="X1,Y1,X2,Y2: the axis the lines are "
+                                                      "sorted by (default with --elevation: its u axis, 0,0,1,0)"),
+                   axis_from: Optional[str] = typer.Option(None, "--axis-from", help="the axis of a plan drawing "
+                                                           "along the horizontal of a flat elevation (its id)"),
+                   param: Optional[list[str]] = typer.Option(None, "--param", help="NAME=VALUE over the defaults "
+                                                             "(repeatable): simplify, min_length, along_deg, "
+                                                             "across_deg, join_deg, join_offset, join_gap, "
+                                                             "across_bin, pair_deg, pair_min, pair_max, "
+                                                             "pair_overlap"),
+                   plate: Optional[Path] = typer.Option(None, "--plate", help="the check plate (.png or .svg)"),
+                   json_out: Optional[Path] = typer.Option(None, "--json", help="the classification as JSON"),
+                   layers: bool = typer.Option(False, "--layers", help="write the elements as layers of free "
+                                               "drawings, one per group (plan drawings only; heights from the DEM)")):
+    """A drawing classified by its orientation along an axis: lines along it, across it, pairs of parallel lines
+    (the two sides of one element) and the rest. The program does not name the elements: the plugins do."""
+    import json as _json
+
+    import numpy as np
+
+    from .engine import orient_lines
+
+    if [layer, file, elevation].count(None) != 2:
+        raise typer.BadParameter("give one of --layer NAME, --file F, --elevation EID")
+    if axis is not None and axis_from is not None:
+        raise typer.BadParameter("give --axis or --axis-from, not both")
+    if axis is None and axis_from is None and elevation is None:
+        raise typer.BadParameter("give --axis X1,Y1,X2,Y2 (or --axis-from EID)")
+    params = {}
+    for item in param or []:
+        if "=" not in item:
+            raise typer.BadParameter(f"--param is NAME=VALUE (got {item!r})")
+        k, v = item.split("=", 1)
+        params[k.strip()] = v.strip()
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if layer is not None:
+            lines = orient_lines.lines_from_layer(ch, layer)
+        elif file is not None:
+            lines = orient_lines.lines_from_file(file)
+        else:
+            lines = orient_lines.lines_from_elevation(ch, elevation)
+        if axis is not None:
+            ax = _axis_of(axis)
+        elif axis_from is not None:
+            if elevation is not None:
+                raise typer.BadParameter("--axis-from is for a plan drawing: an elevation's drawing is sorted along "
+                                         "its own u axis")
+            ax = orient_lines.elevation_axis(ch, axis_from)
+        else:
+            ax = ((0.0, 0.0), (1.0, 0.0))
+        result = orient_lines.classify(lines, ax, params, frame=elevation)
+        if plate is not None:
+            result.plate(plate, language="en")
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(_json.dumps(result.to_dict(), indent=1), encoding="utf-8")
+        written = orient_lines.to_layers(ch, result) if layers else {}
+    except ValueError as exc:
+        _ties_error(exc)
+    if written:
+        doc.save()
+    counts = result.counts()
+    typer.echo(f"{len(lines)} line(s), {len(result.segments)} straight piece(s), {len(result.elements)} element(s)")
+    for g in orient_lines.GROUPS:
+        typer.echo(f"  {orient_lines.GROUP_LABELS[g][1]}: {counts[g]}")
+    widths = [e.width for e in result.elements if e.width is not None]
+    if widths:
+        typer.echo(f"pairs: width {min(widths):.3f} - {max(widths):.3f} m (median {float(np.median(widths)):.3f})")
+    if plate is not None:
+        typer.echo(f"plate: {plate}")
+    if json_out is not None:
+        typer.echo(f"json: {json_out}")
+    for name, n in written.items():
+        typer.echo(f"layer {name!r}: {n} drawing(s)")
+
+
 mosaic_app = typer.Typer(help="The orthophoto or the DEM of several tied chunks merged into one raster")
 app.add_typer(mosaic_app, name="mosaic")
 

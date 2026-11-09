@@ -734,6 +734,37 @@ disegno; un disegno senza nessun vertice sul DEM resta fuori); il layer viene da
 altrimenti dalla colonna `layer` del file, altrimenti dal nome del file; un'identità che il chunk
 ha già ne riceve una nuova. Un poligono tiene solo il contorno: i suoi buchi vengono contati.
 
+## Un disegno classificato per orientamento
+
+Il motore di [*Classifica un disegno*](gui/drawing.md#un-disegno-classificato-per-orientamento) (applicazione 1.7.7,
+`engine/orient_lines.py`): polilinee 2D su un piano divise secondo la loro direzione rispetto a un asse. Il programma
+non dà nomi agli elementi; i plugin Relitti e Murature danno loro un significato. Gli errori sono `OrientLinesError`
+(un `ValueError`) con il messaggio in inglese (`str()`) e in italiano (`.italian`).
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.orient_lines.DEFAULTS` | i parametri: `simplify` 0,01 m, `min_length` 0,05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0,02 m, `join_gap` 0,10 m, `across_bin` 0,10 m, `pair_deg` 5, `pair_min` 0,02 m, `pair_max` 0,50 m, `pair_overlap` 0,5 |
+| `engine.orient_lines.lines_from_layer(chunk, layer)` | le linee e i poligoni di un layer di disegni liberi, array `(n, 2)` di x, y del mondo attuale del chunk; un poligono come anello chiuso |
+| `engine.orient_lines.lines_from_elevation(chunk, eid)` | i disegni di un prospetto nel suo `(u, v)`: le sue linee e gli anelli delle sue unità (senza le pietre) |
+| `engine.orient_lines.lines_from_file(path)` | le linee e i poligoni di un GeoPackage, GeoJSON o DXF |
+| `engine.orient_lines.elevation_axis(chunk, eid)` | l'orizzontale di un prospetto piano sulla pianta, `((x1, y1), (x2, y2))` a un metro di distanza |
+| `engine.orient_lines.classify(lines, axis, params=None, frame=None)` | una `Classification`: `axis`, `params`, `segments`, `elements`, `frame` (None per la pianta, l'id del prospetto); rifiutata per un asse più corto di 1e-6, nessuna linea, un parametro fuori intervallo |
+| `Classification.counts()` / `.to_dict()` / `.plate(path, size=(2000, 1400), language="it", names=None)` | gli elementi per gruppo (`along`, `across`, `pair_along`, `pair_across`, `other`); pronta per il JSON; la tavola di controllo in PNG o SVG (`names`: testo scritto al posto del numero di un elemento) |
+| `engine.orient_lines.to_layers(chunk, result, prefix="Classificato")` | gli elementi di un disegno della pianta come disegni liberi, un layer per gruppo, con le quote del DEM e gli attributi `gruppo`, `elemento`, `angolo`, `larghezza`; `{layer: numero}` |
+| `ppg classify-lines progetto.ppg CHUNK (--layer NOME \| --file F \| --elevation ID) (--axis X1,Y1,X2,Y2 \| --axis-from ID) [--param nome=valore ...] [--plate out.png] [--json out.json] [--layers]` | riga di comando: i conteggi per gruppo; la tavola, il JSON, i layer (il progetto viene salvato solo con `--layers`) |
+
+Un `Segment` è un tratto dritto: `id`, `source` (l'indice della sua linea), `p0`, `p1`, `length`, `angle` (gradi
+dall'asse, da -90 a 90), `s0`, `s1` (posizioni lungo l'asse), `t` (scarto con segno di traverso, positivo a sinistra),
+`group`. Un `Element` è quello che legge un plugin: `id`, `group`, `segments`, `geometry` (una LineString di shapely,
+o un Polygon per una coppia, nel piano dei dati), `position` (lungo l'asse), `side` (-1, 0, 1), `width` (di una
+coppia), `angle`, `offset` (di traverso), `length`.
+
+I pezzi di una linea disegnata restano una linea. Pezzi separati si uniscono quando angolo, scarto laterale e
+distanza stanno entro `join_deg`, `join_offset` e `join_gap`. Due linee parallele sono una coppia solo se ognuna è la
+più vicina dell'altra e la successiva linea dello stesso gruppo accanto a ognuna è almeno `PAIR_ISOLATION` (1,5)
+volte più lontana, così le linee a passo regolare non diventano coppie. Le linee di traverso rimaste si raggruppano
+ogni `across_bin` lungo l'asse e per lato, quando si seguono una dopo l'altra.
+
 ## Prodotti da classi di punti scelte
 
 Le classi della nuvola densa (regole, lazo, classificatore addestrato o unità stratigrafiche)

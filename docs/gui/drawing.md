@@ -199,6 +199,56 @@ GeoJSON or DXF ([exports](exports.md#3d-drawings)). With the live link they reac
 the QGIS project was built need it built again (*QGIS > Open in QGIS*), as for the elevations. From the command
 line: `ppg drawings3d project.ppg list | export --out FILE | import FILE`.
 
+## A drawing classified by orientation
+
+*Strumenti > Classifica un disegno...* sorts the lines of a drawing by their direction to an axis. It is the first
+step for the plugins that read a drawing by hand: the frames and the seams of a hull ([Shipwreck](../plugins/shipwreck.md)),
+the courses and the joints of a wall ([Masonry](../plugins/masonry.md)). The program never names what it finds: it
+only says which lines go which way. The meaning comes from the plugins, after you have checked the plate.
+
+**The drawing.** A layer of [free drawings](#free-drawings-2d-and-3d) on the plan, the drawings of an
+[elevation](processing.md#drawings-on-elevations-and-sections) (its lines and the outlines of its units, in its own `(u, v)`), or a file: GeoPackage,
+GeoJSON or DXF. Every line is simplified (1 cm by default) and cut into its straight pieces: a closed polygon counts
+by its sides, the closing one too, and a curve by its straight pieces.
+
+**The axis.** Two points, typed (X1, Y1, X2, Y2) or with *Asse con due clic* on the view (the plan for a plan drawing,
+the elevation shown for an elevation's), or *Dall'orizzontale di un prospetto...*: the horizontal of a flat elevation
+drawn on the plan. A drawing of an elevation is sorted along its own u axis. The two points must be apart: an axis
+with no length is refused.
+
+**The groups.**
+
+| Group | What it is |
+| --- | --- |
+| along the axis | lines within 15 degrees of the axis; the pieces of one line (broken, or kinked by the simplification) joined into one |
+| across the axis | lines within 15 degrees of the perpendicular; the pieces of one line, end to end, at the same place along the axis and on the same side, joined |
+| pairs along / across the axis | two parallel lines 2-50 cm apart that overlap for at least half of the shorter, each the nearest line of the other, and with no other line of the same group close beside them (the next one at least 1.5 times farther): the two sides of one element, a polygon with its **width** |
+| other directions | every other straight piece |
+
+Lines evenly spaced (the beds of a wall, every 25 cm) are not pairs: each has two neighbours at the same distance.
+
+**Parameters** (*Avanzate*, with *Valori predefiniti*): simplification 0.01 m, shortest piece 0.05 m, along within
+15 degrees, across within 15 degrees, joining pieces at most 5 degrees apart, 0.02 m sideways and 0.10 m of gap,
+across lines grouped every 0.10 m along the axis, pairs parallel within 5 degrees, 0.02 to 0.50 m apart, overlapping
+for 0.5 of the shorter.
+
+**The plate.** *Classifica* runs in the background and shows the plate in the window: each element in the colour of
+its group with its number, the axis dashed with an arrow, the counts in the legend. *Salva la tavola...* writes it as
+PNG or SVG.
+
+![The plate of a hull drawing: frames as pairs across the axis, strakes along it](../img/gui/orient-lines-plate.png)
+
+**The layers.** *Scrivi i layer* writes the elements of a plan drawing as free drawings, one layer per group
+(*Classificato - lungo l'asse*, *Classificato - coppie di traverso*, ...; the prefix can be changed), with the heights
+of the DEM and the attributes `gruppo`, `elemento`, `angolo` and, for a pair, `larghezza`. It is one step of
+*Modifica > Annulla*. Writing again replaces the earlier classification in those layers; drawings made by hand there
+stay. An element wholly outside the DEM takes the median height of the others. A drawing of an elevation is not
+written on the plan: the plugins read its classification directly.
+
+From the command line: `ppg classify-lines project.ppg CHUNK (--layer NAME | --file F | --elevation ID) --axis
+X1,Y1,X2,Y2 [--param name=value ...] [--plate plate.png] [--json out.json] [--layers]`
+([Python API](../api.md#a-drawing-classified-by-orientation)).
+
 ## Sections
 
 1. **Section**, then two clicks on the orthophoto: the model is cut along the trace.

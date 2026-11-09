@@ -1322,6 +1322,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Ortofoto e DEM uniti..."), self.open_mosaic, processing=True, icon_name="merge",
                   tip=tr("Le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, per priorità o per "
                          "aree, con il chunk da cui viene ogni cella"))
+        self._act(m, tr("Classifica un disegno..."), self.open_orient_lines, processing=True, icon_name="classify",
+                  tip=tr("Le linee di un disegno della pianta o di un prospetto divise per orientamento rispetto a un "
+                         "asse: lungo l'asse, di traverso, coppie di linee parallele; la tavola di controllo e i "
+                         "layer per gruppo"))
         self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
                   tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
                          "nuvola densa e modello restano dentro il suo spessore"))
@@ -1894,6 +1898,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._close_colour_mask_dialog()  # its preview is of a chunk of the project left
         self._close_water_dialog()  # its level is of a chunk of the project left
         self._close_mosaic_dialog()  # its list is of the project left
+        self._close_orient_lines_dialog()  # its drawing is of a chunk of the project left
         self._mosaic_view = None
         self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
@@ -4423,6 +4428,33 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return None
         self._mosaic_dialog = MosaicDialog.ask(self)
         return self._mosaic_dialog
+
+    def open_orient_lines(self):
+        """*Strumenti > Classifica un disegno*: the lines of a drawing of the active chunk sorted by orientation along
+        an axis (:class:`.orient_lines_dialog.OrientLinesDialog`, not modal), one at a time. Returns it."""
+        from .orient_lines_dialog import OrientLinesDialog
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_orient_lines_dialog", None)
+        if dlg is not None and alive(dlg) and dlg.chunk is self.chunk:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        self._close_orient_lines_dialog()
+        if not self._need_chunk():
+            return None
+        self._orient_lines_dialog = OrientLinesDialog.ask(self)
+        return self._orient_lines_dialog
+
+    def _close_orient_lines_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_orient_lines_dialog", None)
+        self._orient_lines_dialog = None
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
 
     def _close_mosaic_dialog(self) -> None:
         from .ties_dialog import alive

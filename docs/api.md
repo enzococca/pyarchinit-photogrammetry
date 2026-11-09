@@ -713,6 +713,37 @@ along the drawing; a drawing with no vertex on the DEM is skipped); the layer co
 `--layer`, else from the file's `layer` column, else from the name of the file; an identity
 already in the chunk gets a new one. A polygon keeps its outline only: its holes are counted.
 
+## A drawing classified by orientation
+
+The engine of [*Classifica un disegno*](gui/drawing.md#a-drawing-classified-by-orientation) (application 1.7.7,
+`engine/orient_lines.py`): 2-D polylines in one plane sorted by their direction to an axis. The program never names
+the elements; the Shipwreck and Masonry plugins give them their meaning. Errors are `OrientLinesError` (a
+`ValueError`) with the message in English (`str()`) and in Italian (`.italian`).
+
+| Call | Description |
+| --- | --- |
+| `engine.orient_lines.DEFAULTS` | the parameters: `simplify` 0.01 m, `min_length` 0.05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0.02 m, `join_gap` 0.10 m, `across_bin` 0.10 m, `pair_deg` 5, `pair_min` 0.02 m, `pair_max` 0.50 m, `pair_overlap` 0.5 |
+| `engine.orient_lines.lines_from_layer(chunk, layer)` | the lines and polygons of a layer of free drawings, `(n, 2)` arrays of world x, y in the current world of the chunk; a polygon as its ring closed |
+| `engine.orient_lines.lines_from_elevation(chunk, eid)` | the drawings of an elevation in its `(u, v)`: its lines and the rings of its units (the stones left out) |
+| `engine.orient_lines.lines_from_file(path)` | the lines and polygons of a GeoPackage, GeoJSON or DXF |
+| `engine.orient_lines.elevation_axis(chunk, eid)` | the horizontal of a flat elevation on the plan, `((x1, y1), (x2, y2))` one metre apart |
+| `engine.orient_lines.classify(lines, axis, params=None, frame=None)` | a `Classification`: `axis`, `params`, `segments`, `elements`, `frame` (None for a plan, the elevation's id); refused for an axis shorter than 1e-6, no line, a parameter out of range |
+| `Classification.counts()` / `.to_dict()` / `.plate(path, size=(2000, 1400), language="it", names=None)` | elements per group (`along`, `across`, `pair_along`, `pair_across`, `other`); JSON-ready; the check plate as PNG or SVG (`names`: text written instead of an element's id) |
+| `engine.orient_lines.to_layers(chunk, result, prefix="Classificato")` | the elements of a plan drawing as free drawings, one layer per group, with the heights of the DEM and the attributes `gruppo`, `elemento`, `angolo`, `larghezza`; `{layer: count}` |
+| `ppg classify-lines project.ppg CHUNK (--layer NAME \| --file F \| --elevation ID) (--axis X1,Y1,X2,Y2 \| --axis-from ID) [--param name=value ...] [--plate out.png] [--json out.json] [--layers]` | command line: the counts per group; the plate, the JSON, the layers (the project saved only with `--layers`) |
+
+A `Segment` is one straight piece: `id`, `source` (the index of its line), `p0`, `p1`, `length`, `angle` (degrees
+from the axis, -90 to 90), `s0`, `s1` (positions along the axis), `t` (signed offset across it, positive on the
+left), `group`. An `Element` is what a plugin reads: `id`, `group`, `segments`, `geometry` (a shapely LineString, or a
+Polygon for a pair, in the plane of the input), `position` (along the axis), `side` (-1, 0, 1), `width` (of a pair),
+`angle`, `offset` (across the axis), `length`.
+
+The pieces of one drawn line stay one line. Separate pieces are joined when their angle, sideways offset and gap are
+within `join_deg`, `join_offset` and `join_gap`. Two parallel lines form a pair only when each is the nearest of the
+other and the next line of the same group beside each is at least `PAIR_ISOLATION` (1.5) times farther, so that
+evenly spaced lines are not paired. The across lines left are grouped by `across_bin` along the axis and by side, when
+they follow each other end to end.
+
 ## Products from chosen point classes
 
 The classes of the dense cloud (rules, lasso, trained classifier or stratigraphic units)
