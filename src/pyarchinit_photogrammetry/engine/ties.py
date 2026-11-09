@@ -65,6 +65,7 @@ class Tie:
     a_uid: str | None = None
     b_uid: str | None = None
     broken: str | None = None
+    broken_parts: list | None = None  # the reasons of ``broken`` as (message code, *args), for the report; not stored
 
     def ends(self) -> list[tuple[int, int]]:
         return [self.a] if self.b is None else [self.a, self.b]
@@ -139,7 +140,7 @@ def resolve_end(doc: "Document", end, uid: str | None = None):
 
 def _settle(doc: "Document", tie: Tie) -> None:
     """The ends of ``tie`` checked against the markers (see :func:`ties_of`)."""
-    reasons = []
+    reasons, parts = [], []
     for which in ("a", "b"):
         end = getattr(tie, which)
         if end is None:
@@ -150,6 +151,8 @@ def _settle(doc: "Document", tie: Tie) -> None:
             chunk = next((c for c in doc.chunks if c.key == end[0]), None)
             reasons.append(f"{which}: chunk {end[0]} removed" if chunk is None else
                            f"{which}: marker {end[1]} of chunk {chunk.label!r} removed or replaced")
+            parts.append(("out_chunk_removed", end[0]) if chunk is None else
+                         ("out_marker_removed", end[1], chunk.label))
             continue
         chunk, marker = found
         if marker.key != end[1]:
@@ -157,12 +160,14 @@ def _settle(doc: "Document", tie: Tie) -> None:
         if which == "a" and tie.b is None:
             if not marker.reference.location:  # cleared by the user: no known point any more (never put back)
                 reasons.append(f"a: marker {marker.label!r} of chunk {chunk.label!r} has no reference any more")
+                parts.append(("out_reference_cleared", marker.label, chunk.label))
                 continue
             tie.known = [float(v) for v in marker.reference.location]
             tie.precision = float(max(marker.reference.accuracy or [tie.precision]))  # read only: per axis it stays
             tie.crs = chunk.crs
     if reasons:
         tie.broken = "; ".join(reasons)
+        tie.broken_parts = parts
         tie.active = False
 
 
@@ -660,7 +665,41 @@ MESSAGES: dict[str, tuple[str, str]] = {
                   "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m)"),
     "axis_bent": ("Asse dritto: {0} e {1} formano un angolo di {2:.1f}° (in pianta {3:.1f}°, in quota {4:.1f}°)",
                   "Straight axis: {0} and {1} meet at {2:.1f}° (in plan {3:.1f}°, in height {4:.1f}°)"),
-    "left_out": ("Escluso «{0}»: {1}", "Left out «{0}»: {1}"),
+    "out_no_such_tie": ("Escluso «{0}»: nessun legame con questo identificativo", "Left out «{0}»: no such tie"),
+    "out_broken": ("Escluso «{0}»: un estremo non c'è più", "Left out «{0}»: an end is gone"),
+    "out_chunk_removed": ("Escluso «{0}»: il chunk {1} non c'è più", "Left out «{0}»: chunk {1} removed"),
+    "out_marker_removed": ("Escluso «{0}»: il marker {1} del chunk {2} è stato tolto o sostituito",
+                           "Left out «{0}»: marker {1} of chunk {2} removed or replaced"),
+    "out_reference_cleared": ("Escluso «{0}»: il marker {1} del chunk {2} non ha più un riferimento",
+                              "Left out «{0}»: marker {1} of chunk {2} has no reference any more"),
+    "out_inactive": ("Escluso «{0}»: non attivo", "Left out «{0}»: inactive"),
+    "out_outside": ("Escluso «{0}»: il chunk {1} non è nella stima", "Left out «{0}»: chunk {1} not in the solve"),
+    "out_no_position": ("Escluso «{0}»: il marker {1} del chunk {2} non ha una posizione",
+                        "Left out «{0}»: marker {1} of chunk {2} has no position"),
+    "out_reference_disabled": ("Escluso «{0}»: il suo riferimento è disattivato",
+                               "Left out «{0}»: its reference is disabled"),
+    "out_reference_no_position": ("Escluso «{0}»: riferimento del chunk {1} senza posizione",
+                                  "Left out «{0}»: reference of chunk {1} without a position"),
+    "out_reference_other_system": ("Escluso «{0}»: riferimento del chunk {1} in {2}, non in {3}",
+                                   "Left out «{0}»: reference of chunk {1} in {2}, not in {3}"),
+    "out_check_other_system": ("Escluso «{0}»: punto di verifica del chunk {1} in {2}, non in {3}",
+                               "Left out «{0}»: check point of chunk {1} in {2}, not in {3}"),
+    "distances_no_scale": ("Distanze fra i legami di {0} e {1} non confrontabili: un chunk non ha una scala in metri "
+                           "- servono almeno {2} legami",
+                           "Distances between the ties of {0} and {1} cannot be compared: a chunk has no metric "
+                           "scale - at least {2} ties are needed"),
+    "distances_no_scale_known": ("Distanze fra i punti noti di {0} non confrontabili: il chunk non ha una scala in "
+                                 "metri - servono almeno {1} punti",
+                                 "Distances between the known points of {0} cannot be compared: the chunk has no "
+                                 "metric scale - at least {1} points are needed"),
+    "distances_degrees": ("Distanze fra i legami di {0} non confrontabili: coordinate in gradi ({1})",
+                          "Distances between the ties of {0} cannot be compared: coordinates in degrees ({1})"),
+    "distance_scale": ("Le distanze in {1} sono {2:.4f} volte quelle in {0}: le scale dei due chunk differiscono",
+                       "Distances in {1} are {2:.4f} times those in {0}: the scales of the two chunks differ"),
+    "distance_scale_known": ("Le distanze fra le coordinate note sono {1:.4f} volte quelle in {0}: la scala del chunk "
+                             "non è quella dei punti noti",
+                             "Distances between the known coordinates are {1:.4f} times those in {0}: the chunk's "
+                             "scale is not the known points'"),
     # lines of the report text
     "line_system": ("Sistema della stima: {0}", "System of the solve: {0}"),
     "line_redundancy": ("Gradi di libertà in avanzo: {0}", "Redundancy: {0}"),
@@ -719,6 +758,14 @@ def _text(code: str, language: str, *args) -> str:
     return render(message(code, *args), language)
 
 
+def _out(tie_id: str | None, name: str, *parts, reason: str) -> dict:
+    """An entry of ``Solution.left_out``: ``id``, ``name``, ``reason`` (English, for the command line) and
+    ``messages`` (one :func:`message` per reason, the name of the tie - or its id - first)."""
+    label = name or tie_id or ""
+    return {"id": tie_id, "name": name, "reason": reason,
+            "messages": [message(code, label, *args) for code, *args in parts]}
+
+
 class TieError(ValueError):
     """A solve that cannot be made: ``str()`` is the English message, ``italian`` the Italian one (the window shows
     the Italian one, the command line the English one)."""
@@ -766,7 +813,8 @@ class Solution:
     points); ``redundancy``: equations - unknowns of the fitted observations (0: no check at all); ``rms`` of the fitted
     residuals; ``per_chunk``: ``kind``, ``label``, ``rotation_deg``, ``shift`` (how far its centre moves), ``scale``,
     ``crs_before``, ``observations``; ``crs``: the system of the solve (the fixed chunks', else the known points');
-    ``left_out``: ``[{"id", "name", "reason"}]`` the ties not used; ``messages``: the warnings as structured
+    ``left_out``: ``[{"id", "name", "reason", "messages"}]`` the ties not used (``reason`` in English,
+    ``messages`` the same as :func:`message`, one per reason); ``messages``: the warnings as structured
     messages (:func:`message`, Italian and English), ``warnings`` the same in English; ``previous``: the transform and CRS of
     each chunk when it was solved (:func:`apply` refuses when they changed)."""
 
@@ -957,7 +1005,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
     every_tie = ties_of(doc)
     if wanted is not None:
         ids = {t.id for t in every_tie}
-        missing_ids = [{"id": i, "name": "", "reason": "no such tie"} for i in sorted(wanted - ids)]
+        missing_ids = [_out(i, "", ("out_no_such_tie",), reason="no such tie") for i in sorted(wanted - ids)]
     # the reference of a known tie's marker counts through the tie only: never also as a reference, even when the
     # tie is off, broken or not among ``ties``
     known_ends = {t.a for t in every_tie if t.b is None}
@@ -966,31 +1014,33 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         if wanted is not None and t.id not in wanted:
             continue
         if t.broken:
-            left_out.append({"id": t.id, "name": t.name, "reason": t.broken})
+            left_out.append(_out(t.id, t.name, *(t.broken_parts or [("out_broken",)]), reason=t.broken))
             continue
         if not t.active:
-            left_out.append({"id": t.id, "name": t.name, "reason": "inactive"})
+            left_out.append(_out(t.id, t.name, ("out_inactive",), reason="inactive"))
             continue
         outside = [doc_chunk.label for k, _ in t.ends() if k not in chunks
                    for doc_chunk in doc.chunks if doc_chunk.key == k]
         if outside:
-            left_out.append({"id": t.id, "name": t.name,
-                             "reason": f"chunk {', '.join(outside)} not in the solve"})
+            left_out.append(_out(t.id, t.name, ("out_outside", ", ".join(outside)),
+                                 reason=f"chunk {', '.join(outside)} not in the solve"))
             continue
         points, missing = [], []
         for end, uid in t.end_uids():
             chunk, marker = resolve_end(doc, end, uid)
             p = end_internal(chunk, marker)
             if p is None:
-                missing.append(f"marker {marker.label!r} of chunk {chunk.label!r}")
+                missing.append((marker.label, chunk.label))
             points.append((chunk.key, p))
         if missing:
-            left_out.append({"id": t.id, "name": t.name, "reason": f"no position for {', '.join(missing)}"})
+            left_out.append(_out(t.id, t.name, *[("out_no_position", m, c) for m, c in missing],
+                                 reason="no position for " + ", ".join(f"marker {m!r} of chunk {c!r}"
+                                                                      for m, c in missing)))
             continue
         if t.b is None:
             chunk, marker = resolve_end(doc, t.a, t.a_uid)
             if not marker.reference.enabled:  # switched off in the Riferimenti pane
-                left_out.append({"id": t.id, "name": t.name, "reason": "its reference is disabled"})
+                left_out.append(_out(t.id, t.name, ("out_reference_disabled",), reason="its reference is disabled"))
                 continue
             sigma = _sigma3(marker.reference.accuracy, t.precision)
             observations.append(("known", t, points[0], None, np.asarray(t.known, float), t.crs, sigma,
@@ -1006,8 +1056,8 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                     continue
                 p = end_internal(ch, m)
                 if p is None:
-                    left_out.append({"id": None, "name": m.label,
-                                     "reason": f"reference of chunk {ch.label!r} without a position"})
+                    left_out.append(_out(None, m.label, ("out_reference_no_position", ch.label),
+                                         reason=f"reference of chunk {ch.label!r} without a position"))
                     continue
                 observations.append(("reference", m, (key, p), None, np.asarray(m.reference.location, float), ch.crs,
                                      _sigma3(m.reference.accuracy, TABLE_PRECISION), bool(m.checkpoint), ch))
@@ -1039,9 +1089,11 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
             # a check point, or a reference of a chunk that leaves its own frame: it cannot be measured here
             observations.remove(o)
             what = "check point" if o[7] else "reference"
-            left_out.append({"id": o[1].id if o[0] == "known" else None, "name": o[1].name if o[0] == "known"
-                             else o[1].label, "reason": f"{what} of chunk {o[8].label!r} in {o[5] or 'LOCAL'}, "
-                             f"not in {system or 'LOCAL'}"})
+            left_out.append(_out(o[1].id if o[0] == "known" else None,
+                                 o[1].name if o[0] == "known" else o[1].label,
+                                 ("out_check_other_system" if o[7] else "out_reference_other_system", o[8].label,
+                                  o[5] or "LOCAL", system or "LOCAL"),
+                                 reason=f"{what} of chunk {o[8].label!r} in {o[5] or 'LOCAL'}, not in {system or 'LOCAL'}"))
 
     messages: list[dict] = []
     # each chunk: internal -> world of the solve, as it is now (a chunk in another projected system carried as a
@@ -1470,15 +1522,33 @@ def _usable_ends(doc: "Document", ties=None) -> list[tuple[Tie, tuple, np.ndarra
     return out
 
 
+def _metric(chunk: "Chunk") -> bool:
+    """World units of the chunk are metres: a projected system, a transform with a scale (references, scale bars, a
+    kept georeference) or data measured in metres (``meta["metric"]``), as for *Allinea chunk*."""
+    from .chunks import _is_scaled
+
+    return _is_scaled(chunk)
+
+
 def distance_checks(doc: "Document", ties=None, free_scale: bool | None = None) -> list[dict]:
     """The distances between the points of every two ties that link the same two chunks (or the same chunk and its
     known coordinates), measured in one chunk and in the other: they do not depend on how the chunks are placed, so a
     wrong tie shows before any solve. One dict per pair: ``ties`` (ids), ``names``, ``chunks`` ([A, B], B None for
-    known points), ``distance_a``, ``distance_b`` (each in its chunk's world, as it is now), ``scale`` (the ratio of
-    the scales of B and A taken out: measured as the median over the ties of the median ratio of their pairs when
-    there are at least :data:`FREE_SCALE_TIES` ties, else 1; ``free_scale`` False never, True from 3 ties),
-    ``difference`` (``distance_b / scale - distance_a``), ``precision`` (the two ties' precisions combined),
-    ``tolerance`` (:data:`CHECK_FACTOR` x it), ``ok``. Inactive, broken ties and ends without a position are skipped."""
+    known points), ``labels``, ``distance_a``, ``distance_b`` (each in its chunk's world, as it is now), ``scale``,
+    ``scale_free``, ``metric``, ``difference`` (``distance_b / scale - distance_a``), ``precision`` (the two ties'
+    precisions combined), ``tolerance`` (:data:`CHECK_FACTOR` x it), ``comparable``, ``why``, ``ok``.
+
+    The scale: when both sides are in metres (``metric``) the ratio of the scales of B and A is measured from
+    :data:`FREE_SCALE_TIES` ties (the median over the ties of the median ratio of their pairs, pairs shorter than 10 x
+    their precision left out of it) and taken out, so that the pairs name the wrong tie; :func:`report` still says
+    when the ratio is not 1. Fewer ties: compared as they are (a scale difference makes the pairs fail). ``free_scale``
+    False never measures it, True from 3 ties. When a side has no metric scale (a local frame aligned without
+    references), the ratio is always measured; with fewer ties the distances cannot be compared: ``comparable``
+    False, ``why`` "no_scale", ``ok`` None. A side in a geographic system (degrees): ``why`` "degrees", ``ok`` None.
+    Inactive, broken ties and ends without a position are skipped."""
+    from ..core import crs as crs_mod
+
+    chunks = {c.key: c for c in doc.chunks}
     groups: dict[tuple, list] = {}
     for item in _usable_ends(doc, ties):
         groups.setdefault(item[1], []).append(item)
@@ -1487,32 +1557,47 @@ def distance_checks(doc: "Document", ties=None, free_scale: bool | None = None) 
         n = len(items)
         if n < 2:
             continue
+        ca, cb = chunks[group[0]], chunks.get(group[1]) if group[1] is not None else None
+        systems = [ca.crs] + ([cb.crs] if cb is not None else [t.crs for t, *_ in items])
+        degrees = any(crs_mod.is_geographic(s) for s in systems)
+        metric = _metric(ca) and (cb is None or _metric(cb))
         pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
         da = {p: float(np.linalg.norm(items[p[0]][2] - items[p[1]][2])) for p in pairs}
         db = {p: float(np.linalg.norm(items[p[0]][3] - items[p[1]][3])) for p in pairs}
+        prec = {p: float(np.hypot(items[p[0]][0].precision, items[p[1]][0].precision)) for p in pairs}
+        need = 3 if free_scale else FREE_SCALE_TIES
+        free = free_scale is not False and n >= need
+        comparable, why = not degrees, "degrees" if degrees else None
+        if comparable and not metric and not free and free_scale is not False:
+            comparable, why = False, "no_scale"
         scale = 1.0
-        if free_scale is not False and n >= (3 if free_scale else FREE_SCALE_TIES):
+        if free and comparable:
             per_tie = []
             for k in range(n):
-                r = [db[p] / da[p] for p in pairs if k in p and da[p] > 0]
-                if r:
-                    per_tie.append(float(np.median(r)))
+                mine = [p for p in pairs if k in p and da[p] > 0]
+                long = [p for p in mine if da[p] >= 10 * prec[p]] or mine  # short pairs give noisy ratios
+                if long:
+                    per_tie.append(float(np.median([db[p] / da[p] for p in long])))
             if per_tie:
                 scale = float(np.median(per_tie))
         for p in pairs:
             ti, tj = items[p[0]][0], items[p[1]][0]
-            precision = float(np.hypot(ti.precision, tj.precision))
             diff = db[p] / scale - da[p]
             checks.append({"ties": [ti.id, tj.id], "names": [ti.name, tj.name], "chunks": [group[0], group[1]],
-                           "distance_a": da[p], "distance_b": db[p], "scale": scale, "difference": float(diff),
-                           "precision": precision, "tolerance": CHECK_FACTOR * precision,
-                           "ok": bool(abs(diff) <= CHECK_FACTOR * precision)})
+                           "labels": [ca.label, cb.label if cb is not None else None], "systems": systems,
+                           "distance_a": da[p], "distance_b": db[p], "scale": scale,
+                           "scale_free": bool(free and comparable), "metric": bool(metric),
+                           "difference": float(diff) if comparable else None, "precision": prec[p],
+                           "tolerance": CHECK_FACTOR * prec[p], "comparable": bool(comparable), "why": why,
+                           "ok": bool(abs(diff) <= CHECK_FACTOR * prec[p]) if comparable else None})
     return checks
 
 
 def _distance_counts(checks: list[dict]) -> dict[str, list[int]]:
     counts: dict[str, list[int]] = {}
     for ch in checks:
+        if ch.get("ok") is None:  # not comparable
+            continue
         for tid in ch["ties"]:
             c = counts.setdefault(tid, [0, 0])
             c[1] += 1
@@ -1521,9 +1606,9 @@ def _distance_counts(checks: list[dict]) -> dict[str, list[int]]:
 
 
 def suspects(checks: list[dict]) -> list[str]:
-    """The ties most likely wrong: those of which more than half the pairs fail (:func:`distance_checks`), the
-    worst first. One wrong tie among n fails all its n - 1 pairs, a right one only its pair with the wrong one; with
-    two ties alone both are named (a single pair cannot say which)."""
+    """The ties most likely wrong: those of which more than half the pairs fail (:func:`distance_checks`; pairs that
+    cannot be compared do not count), the worst first. One wrong tie among n fails all its n - 1 pairs, a right one
+    only its pair with the wrong one; with two ties alone both are named (a single pair cannot say which)."""
     counts = _distance_counts(checks)
     bad = [(tid, f, n) for tid, (f, n) in counts.items() if f and f > n / 2]
     order = {tid: i for i, tid in enumerate(counts)}
@@ -1532,12 +1617,18 @@ def suspects(checks: list[dict]) -> list[str]:
 
 
 def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool = True,
-                  robust: bool = False) -> dict[str, float]:
+                  robust: bool = False, solution: Solution | None = None) -> dict[str, float]:
     """For each tie of the solve (two-chunk ties and known points), the solve made again without it: how far apart
     the others put its ends (for a known point: from its coordinates). A wrong tie is far from where the others put
     it. Only ties after whose removal some redundancy is left (>= 1); the others are not in the result. Nothing is
-    changed. :class:`TieError` when the solve with every tie cannot be made."""
-    full = solve(doc, unknowns, ties=ties, references=references, robust=robust)
+    changed. ``solution``: the solve with every tie, when the caller already has it (made with the same arguments).
+    :class:`TieError` when the solve with every tie cannot be made.
+
+    One solve per tie (each up to 30 robust rounds with ``robust``): the window runs it in its worker. The value is
+    a distance, without the propagated precision of the reduced solve (:func:`report` compares it with 3 x the
+    tie's precision and names only the ties near the worst: fix the worst one, solve again)."""
+    full = solution if solution is not None else solve(doc, unknowns, ties=ties, references=references,
+                                                       robust=robust)
     ids = [r["id"] for r in full.residuals if r["id"] is not None and r["fitted"]]
     out: dict[str, float] = {}
     if full.redundancy < 4:  # a tie takes 3 equations away: nothing would be left to check it
@@ -1555,17 +1646,30 @@ def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool =
     return out
 
 
+def _held_by_references(chunk: "Chunk") -> bool:
+    """The chunk's georeference comes from its own references: at least three enabled camera positions (GPS/GNSS)
+    or control markers - not from an earlier solve or *Allinea chunk* only."""
+    cams = sum(1 for c in chunk.cameras if c.reference.enabled and c.reference.location)
+    ctrl = sum(1 for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location)
+    return cams >= 3 or ctrl >= 3
+
+
 def plausibility(doc: "Document", solution: Solution) -> list[dict]:
-    """Warnings (:func:`message`) for a chunk georeferenced before the solve (a projected system: GPS, GNSS or
-    control points) that the solve turns by more than :data:`ROTATION_LIMIT` degrees or scales outside
-    :data:`SCALE_LIMITS`; none for a chunk in a local frame (its rotation and scale were arbitrary)."""
+    """Warnings (:func:`message`) for a chunk georeferenced before the solve by its own references (a projected
+    system and GPS/GNSS camera positions or control markers: :func:`_held_by_references`) that the solve turns by
+    more than :data:`ROTATION_LIMIT` degrees or scales outside :data:`SCALE_LIMITS`; none for a chunk in a local
+    frame (its rotation and scale were arbitrary) or one placed in its system only by an earlier solve. The rotation
+    is measured after the chunk is carried into the system of the solve (a chunk from another UTM zone does not
+    count the grid convergence)."""
     from ..core import crs as crs_mod
 
+    chunks = {c.key: c for c in doc.chunks}
     out = []
     for key, kind in solution.unknowns.items():
         pc = solution.per_chunk.get(key, {})
         before = pc.get("crs_before")
-        if kind == "fixed" or not before or crs_mod.is_local(before):
+        ch = chunks.get(key)
+        if kind == "fixed" or not before or crs_mod.is_local(before) or ch is None or not _held_by_references(ch):
             continue
         if pc["rotation_deg"] > ROTATION_LIMIT:
             out.append(message("implausible_rotation", pc["label"], float(pc["rotation_deg"]), ROTATION_LIMIT, before,
@@ -1642,6 +1746,8 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
     ``suspects``, ``loo``, ``left_out``, ``axis`` and ``messages`` (:func:`message`, the most important first:
     no check at all, suspect ties, large leave-one-out moves, large residuals, implausible moves, a bent axis, the
     warnings of the solve, what was left out). ``warnings``: :func:`plausibility`."""
+    from ..core import crs as crs_mod
+
     suspect = suspects(checks)
     counts = _distance_counts(checks)
     labels = {k: v["label"] for k, v in solution.per_chunk.items()}
@@ -1665,9 +1771,29 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
     for tid in suspect:
         f, n = counts[tid]
         msgs.append(message("distance_suspect", names.get(tid, tid), f, n))
-    failed = sum(1 for ch in checks if not ch["ok"])
+    comparable = [ch for ch in checks if ch.get("ok") is not None]
+    failed = sum(1 for ch in comparable if not ch["ok"])
     if failed and not suspect:
-        msgs.append(message("distance_failed", failed, len(checks)))
+        msgs.append(message("distance_failed", failed, len(comparable)))
+    groups: dict[tuple, list] = {}
+    for ch in checks:
+        groups.setdefault(tuple(ch["chunks"]), []).append(ch)
+    for (ka, kb), pairs_of in groups.items():
+        first = pairs_of[0]
+        la, lb = first.get("labels") or [ka, kb]
+        if first.get("why") == "degrees":
+            msgs.append(message("distances_degrees", la if kb is None else f"{la} / {lb}",
+                                ", ".join(sorted({str(x) for x in first.get("systems", [])
+                                                  if crs_mod.is_geographic(x)}))))
+        elif first.get("why") == "no_scale":
+            msgs.append(message("distances_no_scale_known", la, FREE_SCALE_TIES) if kb is None else
+                        message("distances_no_scale", la, lb, FREE_SCALE_TIES))
+        elif first.get("scale_free") and first.get("metric"):
+            # the ratio was taken out to name the wrong tie: a real difference of scale is said here
+            spread = abs(first["scale"] - 1.0) * max(r["distance_a"] for r in pairs_of)
+            if spread > float(np.median([r["tolerance"] for r in pairs_of])):
+                msgs.append(message("distance_scale_known", la, first["scale"]) if kb is None else
+                            message("distance_scale", la, lb, first["scale"]))
     precision = {r["id"]: r["precision"] for r in rows}
     worst = max(loo.values()) if loo else 0.0
     for tid, value in sorted(loo.items(), key=lambda kv: -kv[1]):
@@ -1687,7 +1813,7 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
                                     p["height_deg"]))
     msgs.extend(solution.messages)
     for x in solution.left_out:
-        msgs.append(message("left_out", x["name"] or x["id"] or "", x["reason"]))
+        msgs.extend(x.get("messages") or [])
     chunks = [{"key": k, "label": v["label"], "kind": v["kind"], "rotation_deg": v["rotation_deg"],
                "shift": v["shift"], "scale": v["scale"], "precision_m": v.get("precision_m", 0.0),
                "precision_cause": v.get("precision_cause"), "crs_before": v["crs_before"], "crs": v["crs"]}
@@ -1725,8 +1851,9 @@ def report_text(solution: Solution, checks: list[dict], loo: dict[str, float], w
         left = _text("no_value", language) if value is None else _metres(value, language) + " m"
         lines.append("  " + _text("line_residual", language, r["name"], kind, float(np.hypot(r["dx"], r["dy"])),
                                   float(r["dz"]), float(r["precision"]), left))
-    if checks:
-        lines += ["", _text("line_distances", language, sum(1 for c in checks if c["ok"]), len(checks))]
+    comparable = [c for c in checks if c.get("ok") is not None]
+    if comparable:
+        lines += ["", _text("line_distances", language, sum(1 for c in comparable if c["ok"]), len(comparable))]
     if axis is not None:
         if axis["max_before_deg"] is None:
             lines.append(_text("line_axis_no_before", language, float(axis["max_deg"])))

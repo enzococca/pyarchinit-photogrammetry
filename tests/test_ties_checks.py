@@ -5,6 +5,7 @@ Synthetic chunks of the trench as in ``test_ties_solve``."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -113,23 +114,38 @@ def test_leave_one_out_without_redundancy_left_is_skipped(scene):
     assert set(loo) == {t.id for t in made} and max(loo.values()) < 1e-4
 
 
+def _held_by_references(survey, scene):
+    """Three control markers where the survey's (wrong) georeference puts them: a chunk held by its own GPS/GCPs."""
+    for i, xy in enumerate([(0.3, 0.3), (3.7, 0.4), (2.0, 2.8)]):
+        w = _world(scene, xy)[0]
+        p = survey.internal(w)[0]
+        survey.chunk.add_marker(f"gps {i}", p, reference=survey.chunk.to_world(p[None])[0].tolist())
+
+
 def test_plausibility_warns_on_rotation_and_scale(scene):
     doc, a, b, _c = _three(scene, {"b": _similarity(deg_z=8.0, scale=1.03, shift=(0.4, -0.3, 0.6))})
     for xy in FIVE:
         _tie(doc, a, b, _world(scene, xy))
+    _held_by_references(b, scene)
     unknowns = {a.chunk.key: "fixed", b.chunk.key: "similarity"}
-    sol = ties.solve(doc, unknowns)
+    sol = ties.solve(doc, unknowns, references=False)
     warns = ties.plausibility(doc, sol)
     codes = sorted(w["code"] for w in warns)
     assert codes == ["implausible_rotation", "implausible_scale"]
     assert all(w["chunk"] == b.chunk.key for w in warns)
     assert "8.0" in ties.render(warns[0]) or "8.0" in ties.render(warns[1])
     assert "8,0" in " ".join(ties.render(w, "it") for w in warns)
+    # the same chunk in UTM but placed there by an earlier solve (no references of its own): no limits
+    for m in list(b.chunk.markers):
+        if m.label.startswith("gps "):
+            m.reference.location = None
+    assert ties.plausibility(doc, sol) == []
     # small moves: nothing
     doc, a, b, _c = _three(scene)
     for xy in FIVE:
         _tie(doc, a, b, _world(scene, xy))
-    assert ties.plausibility(doc, ties.solve(doc, unknowns)) == []
+    _held_by_references(b, scene)
+    assert ties.plausibility(doc, ties.solve(doc, unknowns, references=False)) == []
     # a chunk in a local frame: no limits at all
     doc, a, b, _c = _three(scene, {"b": _similarity(deg_z=40.0, scale=2.0)})
     b.chunk.crs = "LOCAL"
@@ -234,5 +250,102 @@ def test_every_message_has_its_translation_in_the_catalog():
     of en.json with the same English text."""
     formats = json.loads(EN_JSON.read_text(encoding="utf-8"))["formats"]
     texts = json.loads(EN_JSON.read_text(encoding="utf-8"))["texts"]
+    field = re.compile(r"\{\d+[^{}]*\}")
     for code, (it, en) in ties.MESSAGES.items():
-        assert formats.get(it, texts.get(it)) == en, code
+        if field.search(it):  # tr(template, *args) looks among the formats
+            assert formats.get(it) == en, code
+        else:
+            assert texts.get(it) == en, code
+
+
+# --------------------------------------------------------------------------- fix round 1
+def _unscaled(scene, n, factor=0.37):
+    """B in a local frame without a metric scale: its internal units are ``factor`` x metres and its transform has
+    no scale (as COLMAP leaves a chunk aligned without references)."""
+    doc, a, b, _c = _three(scene, {"b": np.eye(4)})
+    b.truth = b.truth @ np.diag([factor, factor, factor, 1.0])
+    made = [_tie(doc, a, b, _world(scene, xy), precision=0.01) for xy in FIVE[:n]]
+    rigid = b.truth.copy()
+    rigid[:3, :3] /= factor
+    b.chunk.transform = rigid
+    b.chunk.crs = "LOCAL"
+    return doc, a, b, made
+
+
+def test_an_unscaled_chunk_with_three_ties_is_not_called_wrong(scene):
+    doc, a, b, made = _unscaled(scene, 3)
+    checks = ties.distance_checks(doc)
+    assert len(checks) == 3 and all(c["ok"] is None and not c["comparable"] for c in checks)
+    assert ties.suspects(checks) == []
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    rep = ties.report(sol, checks, {}, [])
+    codes = [m["code"] for m in rep["messages"]]
+    assert "distances_no_scale" in codes and "distance_suspect" not in codes and "distance_failed" not in codes
+    # with five ties the ratio is measured (1 / 0.37) and taken out: every pair agrees, nothing said of the scale
+    doc, a, b, made = _unscaled(scene, 5)
+    checks = ties.distance_checks(doc)
+    assert all(c["ok"] for c in checks) and checks[0]["scale"] == pytest.approx(1 / 0.37, rel=1e-6)
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    codes = [m["code"] for m in ties.report(sol, checks, {}, [])["messages"]]
+    assert not [c for c in codes if c.startswith("distance")]
+
+
+def test_a_scale_difference_between_metric_chunks_is_reported(scene):
+    doc, a, b, _c = _three(scene, {"b": _similarity(scale=1.015)})
+    for xy in FIVE:
+        _tie(doc, a, b, _world(scene, xy), precision=0.005)
+    checks = ties.distance_checks(doc)
+    assert all(c["ok"] for c in checks) and ties.suspects(checks) == []
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "rigid"})
+    rep = ties.report(sol, checks, {}, [])
+    m = next(m for m in rep["messages"] if m["code"] == "distance_scale")
+    assert "1.0150" in ties.render(m) and "1,0150" in ties.render(m, "it") and "2025" in ties.render(m)
+    assert "1.0150" in ties.report_text(sol, checks, {}, [])
+
+
+def test_known_points_in_degrees_are_not_compared(scene):
+    doc, a, b, _c = _three(scene)
+    for xy in FIVE:
+        w = _world(scene, xy)[0]
+        ties.add_known(doc, a.chunk, a.internal(w)[0], w, precision=0.01)
+    a.chunk.crs = "EPSG:4326"  # the known coordinates are read in the chunk's system: degrees
+    checks = ties.distance_checks(doc)
+    assert checks and all(c["ok"] is None and c["why"] == "degrees" for c in checks)
+    assert ties.suspects(checks) == []
+
+
+def test_left_out_reasons_are_messages_in_both_languages(scene):
+    doc, a, b, c = _three(scene)
+    for xy in AB:
+        _tie(doc, a, b, _world(scene, xy))
+    off = _tie(doc, a, b, _world(scene, FIVE[4]))
+    every = ties.ties_of(doc)
+    for t in every:
+        if t.id == off.id:
+            t.active = False
+    ties.save_ties(doc, every)
+    other = _tie(doc, a, c, _world(scene, (2.0, 2.0)))
+    broken = _tie(doc, a, b, _world(scene, (2.5, 1.5)))
+    b.chunk.remove_markers([broken.b[1]])
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "rigid"}, ties=[t.id for t in ties.ties_of(doc)] + ["t-x"])
+    by_id = {x["id"]: x for x in sol.left_out}
+    assert [m["code"] for m in by_id[off.id]["messages"]] == ["out_inactive"]
+    assert [m["code"] for m in by_id[other.id]["messages"]] == ["out_outside"]
+    assert [m["code"] for m in by_id[broken.id]["messages"]] == ["out_marker_removed"]
+    assert [m["code"] for m in by_id["t-x"]["messages"]] == ["out_no_such_tie"]
+    rep = ties.report(sol, [], {}, [])
+    italian = [ties.render(m, "it") for m in rep["messages"] if m["code"].startswith("out_")]
+    assert len(italian) == 4 and not any(w in " ".join(italian) for w in ("inactive", "removed", "not in the solve"))
+    assert any("non attivo" in t for t in italian) and any("non è nella stima" in t for t in italian)
+    assert by_id[off.id]["reason"] == "inactive"  # the English reason stays for the command line
+
+
+def test_leave_one_out_takes_the_solution_already_made(scene, monkeypatch):
+    doc, a, b, _c, made = _five_with_a_wrong_one(scene)
+    unknowns = {a.chunk.key: "fixed", b.chunk.key: "similarity"}
+    sol = ties.solve(doc, unknowns)
+    calls = []
+    real = ties.solve
+    monkeypatch.setattr(ties, "solve", lambda *a, **k: calls.append(k.get("check_ties")) or real(*a, **k))
+    loo = ties.leave_one_out(doc, unknowns, solution=sol)
+    assert len(loo) == 5 and all(c for c in calls) and len(calls) == 5

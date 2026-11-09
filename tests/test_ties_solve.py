@@ -532,7 +532,8 @@ def test_unknown_tie_ids_are_listed(scene):
     doc, a, b, _c = _three(scene)
     made = [_tie(doc, a, b, _world(scene, xy)) for xy in AB]
     sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "rigid"}, ties=[t.id for t in made] + ["t-nope"])
-    assert {"id": "t-nope", "name": "", "reason": "no such tie"} in sol.left_out
+    out = next(x for x in sol.left_out if x["id"] == "t-nope")
+    assert out["name"] == "" and out["reason"] == "no such tie"
 
 
 def test_apply_restores_cameras_and_says_which_products_are_stale():
