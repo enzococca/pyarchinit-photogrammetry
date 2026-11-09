@@ -488,3 +488,23 @@ def test_import_errors_name_the_line_of_the_file(tmp_path):
                      encoding="utf-8")
     with pytest.raises(ValueError, match="line 4"):
         ties.import_ties(doc, table)
+
+
+@pytest.mark.parametrize("bad", [{"id": "x1", "a": []}, {"id": "x2", "a": None}, "not a tie"])
+def test_a_tie_that_cannot_be_read_never_stops_the_project_from_opening(tmp_path, bad, caplog):
+    """A tie written by hand that cannot be read (IndexError, TypeError, AttributeError): kept as it is and logged;
+    the project opens and the other ties are settled."""
+    import json
+
+    doc, a, b = _two_chunks(tmp_path)
+    good = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    doc.save()
+    payload = json.loads((tmp_path / "scavo.ppg").read_text())
+    payload["meta"]["ties"][0].pop("b_label")
+    payload["meta"]["ties"].append(bad)
+    (tmp_path / "scavo.ppg").write_text(json.dumps(payload))
+    with caplog.at_level("WARNING", logger="pyarchinit_photogrammetry"):
+        opened = ppg.Document.open(tmp_path / "scavo.ppg")
+    assert opened.meta["ties"][1] == bad and opened.meta["ties"][0]["b_label"] == "legame 1"
+    assert opened.meta["ties"][0]["id"] == good.id and "non leggibile" in caplog.text
+    opened.save()

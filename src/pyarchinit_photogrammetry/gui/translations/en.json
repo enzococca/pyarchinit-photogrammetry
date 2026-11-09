@@ -53,6 +53,7 @@
   "%s: avvio": "%s: start",
   "%s: completato in %s": "%s: done in %s",
   "Legame «%s» di %s non copiato: va verso un chunk non aggiunto": "Tie «%s» of %s not copied: it goes to a chunk not appended",
+  "Legame non leggibile lasciato com'è: %s": "Unreadable tie left as it is: %s",
   "%s: errore dopo %s\n%s": "%s: error after %s\n%s",
   "&Aiuto": "&Help",
   "&Modifica": "&Edit",

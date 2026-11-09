@@ -21,6 +21,7 @@ its triangulation in metres, at least 1 cm); an end clicked on an orthophoto or 
 from __future__ import annotations
 
 import csv
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from ..core.marker import Marker
 if TYPE_CHECKING:  # pragma: no cover
     from ..core.chunk import Chunk
     from ..core.document import Document
+
+log = logging.getLogger("pyarchinit_photogrammetry")
 
 META_KEY = "ties"
 LABEL = "legame"  # the label of the markers a tie makes: data of the project (as the names of the layers), not UI text
@@ -142,14 +145,20 @@ def settle_stored(doc: "Document") -> bool:
     label of each end's marker (renamed since, or never written by a development build), the alignment of an end
     not known yet (the current one), a key followed. Called when a project is opened and saved, so that the file
     always has what an older version needs to recognise the ends again (:func:`resolve_end`) and what a later
-    alignment needs to see them stale. A broken tie keeps the state the user gave it. True when something changed."""
+    alignment needs to see them stale. A broken tie keeps the state the user gave it. A tie that cannot be read (written
+    by hand) is left as it is and logged: opening a project never depends on it. True when something changed."""
     stored = doc.meta.get(META_KEY)
-    if not stored:
+    if not stored or not isinstance(stored, list):
         return False
-    try:
-        now = [t.to_dict() for t in ties_of(doc)]
-    except (KeyError, TypeError, ValueError):  # pragma: no cover - a tie written by hand that cannot be read
-        return False
+    now = []
+    for d in stored:
+        try:
+            t = Tie.from_dict(d)
+            _settle(doc, t)
+            now.append(t.to_dict())
+        except Exception as exc:  # noqa: BLE001 - a tie that cannot be read never stops the project from opening
+            log.warning("Legame non leggibile lasciato com'è: %s", exc)
+            now.append(d)
     if now == stored:
         return False
     doc.meta[META_KEY] = now
@@ -330,8 +339,8 @@ def update_known(doc: "Document", tie_id: str, known=None, precision: float | No
 
 def check_ends(doc: "Document") -> list[dict]:
     """The ties with an end gone (chunk removed, marker removed or replaced by another under its key, reference of a
-    known point cleared): made inactive
-    and stored so; returns ``[{"id", "name", "end", "reason"}]`` for the report. Ends whose marker moved to another
+    known point cleared): inactive while broken (the stored state is the user's: active again when the end comes
+    back); returns ``[{"id", "name", "end", "reason"}]`` for the report. Ends whose marker moved to another
     key are stored with the new key."""
     ties = ties_of(doc)
     out = [{"id": t.id, "name": t.name, "end": t.broken.split(":")[0] if t.broken else "", "reason": t.broken}
