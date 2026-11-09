@@ -317,8 +317,8 @@ def _carry_ties(doc, src, src_ties, pairs, prefix: str) -> tuple[int, list[str]]
     (``pairs``: (source chunk, new chunk)) added to the ties of ``doc``, their ends on the new chunks. The markers of
     the new chunks get a new identity (``Marker.uid``) and the ties follow it, so an identity never stands for two
     points of the document (the same project appended twice). A tie id already in ``doc`` takes a new one, a name
-    already taken gets `` (<prefix>)``. Ties with a chunk not appended are not copied: their names are returned
-    (and logged). Returns (copied, dropped names)."""
+    already taken gets `` (<prefix>)``. Ties with a chunk not appended are not copied: the names of those with an end
+    on a chunk appended are returned (and logged); ties between chunks all left out are not mentioned. Returns (copied, dropped names)."""
     from ..engine import ties as ties_mod
 
     mapping = {sc.key: ch.key for sc, ch in pairs}
@@ -332,8 +332,9 @@ def _carry_ties(doc, src, src_ties, pairs, prefix: str) -> tuple[int, list[str]]
     copied, dropped = [], []
     for t in src_ties:
         if not t.chunk_keys() <= set(mapping):
-            dropped.append(t.name or t.id)
-            log.info("Legame «%s» di %s non copiato: va verso un chunk non aggiunto", t.name or t.id, src.path)
+            if t.chunk_keys() & set(mapping):  # a tie between chunks left out has nothing to do with this append
+                dropped.append(t.name or t.id)
+                log.info("Legame «%s» di %s non copiato: va verso un chunk non aggiunto", t.name or t.id, src.path)
             continue
         new = ties_mod.Tie.from_dict(t.to_dict())
         for which in ("a", "b"):

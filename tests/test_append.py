@@ -522,6 +522,9 @@ def test_ties_between_chunks_appended_come_with_them(tmp_path):
     assert len({t.name for t in every}) == 7  # "picchetto (legami 2)"
     doc.save()
     assert len(ties.ties_of(ppg.Document.open(doc.path))) == 7
+    # A alone: the ties A-B are said, the tie B-C (no end on A) is not
+    (res3,) = append_projects(doc, [src], chunks=["A"])
+    assert res3.ties == 1 and sorted(res3.ties_dropped) == ["legame 1", "picchetto"]  # GNSS 1 copied
 
 
 def test_a_cancelled_append_takes_its_ties_away_too(tmp_path):
