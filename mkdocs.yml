@@ -82,6 +82,7 @@ plugins:
             Architectural elements: Elementi architettonici
             Masonry: Murature
             Conservation: Conservazione
+            Flight plans: Piani di volo
             Guide: Guida
             Desktop interface: Interfaccia
             Menus: Menu
@@ -168,6 +169,7 @@ nav:
       - Masonry: plugins/masonry.md
       - Conservation: plugins/conservation.md
       - PhotoCAD: plugins/photocad.md
+      - Flight plans: plugins/flightplan.md
   - Guide:
       - Desktop interface:
           - gui/index.md
