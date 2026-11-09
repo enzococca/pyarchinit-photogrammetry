@@ -392,6 +392,27 @@ def test_build_like_across_local_chunks_needs_the_same_frame_said(oval, tower_ba
     assert "grid_of_stale" not in again
 
 
+def test_build_like_an_entry_without_crs_of_this_chunk(oval, tower_base, tmp_path):
+    """An elevation built before 1.7.0 has no ``crs`` in its entry: of this chunk (or of ``source``) the chunk's own
+    system is taken; staleness is read on the chunk the entry belongs to, never on another one."""
+    import numpy as np
+
+    first_ch, circle = oval
+    first = E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    first.pop("crs")                                        # as saved before 1.7.0 (the entry in the meta itself)
+    again = E.build_like(first_ch, first)
+    assert again["size"] == first["size"] and again["grid_of"] == first["id"]
+    second_ch, _xy = _oval_chunk(tower_base, tmp_path / "seconda")
+    other = E.build_like(second_ch, first, source=first_ch)
+    assert other["size"] == first["size"]
+    with pytest.raises(ValueError, match="source"):
+        E.build_like(second_ch, first)                      # no crs, not of this chunk, no source: unknown system
+    # stale on its own chunk only: an entry of another chunk, built in another scale there, is not judged here
+    stale = dict(first, crs=first_ch.crs)
+    stale["built_in"] = (np.diag([2.0, 2.0, 2.0, 1.0]) @ np.asarray(second_ch.transform, float).reshape(4, 4)).tolist()
+    assert "grid_of_stale" not in E.build_like(second_ch, stale)
+
+
 def test_u_map_covers_a_full_turn_and_takes_scalars():
     with pytest.raises(ValueError, match="full turn"):
         E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=[[0, 0], [180, 9.0]])

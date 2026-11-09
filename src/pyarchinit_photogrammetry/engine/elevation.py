@@ -930,22 +930,31 @@ def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Pro
     ``same_frame=True`` says the two chunks are in the same frame (aligned, merged, or oriented on the same markers).
 
     ``name``: by default the source's, made distinct among this chunk's elevations. A source built in a transform of
-    another scale (stale, :func:`..core.stamps.entry_stale`) is said in the log and in ``entry["grid_of_stale"]``."""
+    another scale (stale, :func:`..core.stamps.entry_stale`, read on the chunk the entry belongs to: ``source``, or this
+    chunk when it is one of its elevations) is said in the log and in ``entry["grid_of_stale"]``. An entry without
+    ``crs`` (built before 1.7.0) takes the system of its chunk; one of an unknown chunk is refused."""
     from ..core import crs as crs_mod
 
-    theirs = entry.get("crs") if entry.get("crs") is not None else (getattr(source, "crs", None) if source else None)
     mine = getattr(chunk, "crs", None)
+    own_ids = {e.get("id") for e in elevations(chunk)}
+    # the chunk the entry belongs to: ``source``, else this chunk when the entry is among its elevations, else unknown
+    owner = source if source is not None else (chunk if entry.get("id") in own_ids else None)
+    theirs = entry.get("crs")
+    if theirs is None:  # an entry saved before 1.7.0: the system of its chunk
+        if owner is None:
+            raise ValueError("the elevation says no reference system (built before 1.7.0) and is not one of this "
+                             "chunk's: give its chunk as source")
+        theirs = getattr(owner, "crs", None)
     if not same_crs(theirs, mine):
         raise ValueError(f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same "
                          "reference system")
-    own_ids = {e.get("id") for e in elevations(chunk)}
-    other = (source is not None and source is not chunk) or (source is None and entry.get("id") not in own_ids)
+    other = owner is not chunk
     if other and crs_mod.is_local(mine) and not same_frame:
         raise ValueError("the elevation is of another chunk and both are in a local frame: their worlds need not "
                          "agree, and the grid would be empty or misplaced. If the two chunks are in the same frame "
                          "(aligned, merged, oriented on the same markers), say it with same_frame=True "
                          "(ppg elevation --same-frame)")
-    stale = stamps.entry_stale(source if source is not None else chunk, entry, scale_only=True)
+    stale = owner is not None and stamps.entry_stale(owner, entry, scale_only=True)
     if stale:
         log.warning("Elevation %s (%s) is stale: built in a transform of another scale - its grid is used as it is",
                     entry.get("name"), entry.get("id"))
