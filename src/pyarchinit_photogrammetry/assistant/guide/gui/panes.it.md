@@ -85,6 +85,8 @@ tiene i pulsanti che non ci stanno):
 | *Camere*, *Marker*, *Barre di scala* | la rimozione di tutto ciò che contengono |
 | più elementi | *Attiva*, *Disattiva*, *Rimuovi N elementi* |
 | il progetto | *Aggiungi chunk*, *Aggiungi progetti...* |
+| *Prodotti uniti* | *Ortofoto e DEM uniti...* |
+| un prodotto unito | *Mostra*, *Apri la cartella*, *Rimuovi* ([prodotti uniti](multi-survey.md#ortofoto-e-dem-uniti)) |
 
 I comandi lavorano anche sui chunk che non sono quello attivo: rimuovere, rinominare, attivare e disattivare
 agiscono sul chunk dell'elemento e lasciano com'è il chunk attivo, mentre mostrare un elemento e i comandi
@@ -177,6 +179,7 @@ patch.
 * La spunta mostra o nasconde un layer, il doppio clic ingrandisce su di esso (un layer o un singolo
   elemento), *Rimuovi* lo toglie; *Tutti* e *Nessuno* spuntano tutti i layer disegnati (un solo passo di *Modifica >
   Annulla*) e lasciano lo sfondo com'è.
+* Il tasto destro su un layer di disegni liberi con poligoni ha *Ritaglia con questa maschera...* (una [maschera dal colore](multi-survey.md#maschera-dal-colore)) o *Ritaglia con i poligoni di questo layer...*: il ritaglio dei prodotti con la loro unione.
 * In modalità *Sposta / interroga* un clic su un elemento mostra i suoi attributi (US, area, m2, quota di una
   curva...) qui e nella barra di stato.
 * **Modificare gli attributi**: doppio clic su un valore sotto *Attributi* per cambiarlo (US, area, tipo,

@@ -650,6 +650,30 @@ ha CRS, trasformazione e sistema interno del primo chunk, e contiene:
 DEM, ortofoto e texture non vengono uniti. `merged.meta["merge"]` elenca i chunk di origine, le
 foto trovate in più di un chunk e gli avvisi.
 
+## Più rilievi: maschere, acqua, prodotti uniti
+
+Il motore di [più rilievi](gui/multi-survey.md) (applicazione 1.7.7): maschere da un colore dell'ortofoto, livello
+dell'acqua con la correzione della rifrazione, ortofoto e DEM uniti di più chunk. Gli errori sono `ValueError` con il
+messaggio in inglese (`str()`) e in italiano (`.italian`): `MaskError`, `WaterError`, `MosaicError`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.colour_mask.HsvRange(hue=(lo, hi), sat=(lo, hi), val=(lo, hi))` | un intervallo di colori: tinta in gradi 0-360 (minimo sopra il massimo passa per lo 0, i rossi), saturazione e valore in % |
+| `engine.colour_mask.sample(chunk, x, y, radius=0.1, tolerance=(15, 20, 20))` | l'intervallo attorno al colore dell'ortofoto in un cerchio in `(x, y)` (mondo) |
+| `engine.colour_mask.mask(chunk, rng, opening=0.05, fill_holes=True, keep="largest", min_area=0.05, margin=0.0, bounds=None, progress=None)` | le celle dell'ortofoto dentro `rng` (letta al massimo a `MASK_SIDE` = 4000 pixel di lato), pulite: un `MaskResult` (`polygons`, `area`, `share`, `cell`, `holes`), niente scritto |
+| `engine.colour_mask.to_layer(chunk, result, layer=None, replace=True)` | la maschera come poligoni di un layer di disegni liberi (di solito `Maschera colore N`), quote dal DEM; una maschera precedente del layer sostituita, i disegni a mano tenuti; gli id |
+| `engine.colour_mask.union(chunk, layer)` | l'unione dei poligoni di un layer nel mondo attuale del chunk (shapely) |
+| `engine.water.level_from_edge(chunk, water, progress=None)` | il livello dell'acqua dal suo bordo: `water` un poligono, una lista, un `HsvRange` o il nome di un layer; il DEM letto dal lato della terra a 2 e 4 celle dal contorno, la mediana di `2 z2 - z4`: `level`, `spread` (NMAD), `p10`, `p90`, `edge_cells`, `slope_bias`; niente scritto |
+| `engine.water.set_level(chunk, level, source="hand", n=1.34, **info)` / `water.level_of(chunk)` | il livello conservato in `chunk.meta["water"]` (con il timbro della trasformazione); il livello nel mondo attuale del chunk (`level`, `n`, `source`, `spread`) o None |
+| `engine.water.correct_cloud(chunk, n=None, rebuild_dem=False, progress=None)` | la nuvola densa sotto il livello corretta (`z' = L - n (L - z)`, parassiale) come nuova versione, la nuvola di prima tenuta; `rebuild_dem` anche una nuova versione del DEM |
+| `engine.mosaic.build(doc, chunks, product="orthomosaic", areas=None, resolution=None, background="faded", name=None, progress=None)` | le ortofoto (o `product="dem"`) di `chunks` (in ordine di priorità) unite nel sistema del primo: le `areas` `[(chunk, poligono)]` vincono sull'elenco al loro interno, `background` `"faded"` o `"none"` fuori; ogni sorgente collocata dalla trasformazione in cui è stata costruita; file in `<progetto>.ppg.files/mosaics/<id>/` (`mosaic.tif`, `sources.tif`, `areas.gpkg`, `mosaic.json`), il record aggiunto a `doc.meta["mosaics"]` e restituito (il documento non salvato) |
+| `engine.mosaic.mosaics_of(doc)` / `record_of(doc, id)` / `remove(doc, id, delete_files=True)` | i prodotti uniti; uno; uno tolto (la cartella cancellata, o tenuta con `delete_files=False`) |
+| `engine.mosaic.is_stale(doc, record)` / `source_at(doc, id, x, y)` / `read_areas(doc, path, system)` | i chunk da unire di nuovo (spostati, sorgente ricostruita, tolti); il chunk da cui viene una cella; le aree di un GeoPackage (attributo `chunk`, `priority` facoltativo) |
+| `core.removal.MosaicRemoval(doc, ids)` | prodotti uniti tolti con le loro cartelle messe da parte, come fa la finestra (`apply`, `undo`, `redo`; `MosaicRemoval.added(doc, ids)` annulla una costruzione) |
+| `ppg mask colour progetto.ppg CHUNK (--hue A,B [--sat A,B] [--val A,B] \| --sample X,Y [--radius R]) [--opening M] [--holes] [--all] [--min-area A] [--margin M] [--layer NOME]` | riga di comando: la maschera come layer di disegni liberi |
+| `ppg water level progetto.ppg CHUNK (--set Z \| --layer NOME \| --hue A,B [--sat A,B] [--val A,B] \| --sample X,Y) [--n N \| --sea \| --fresh]` / `ppg water correct progetto.ppg CHUNK [--n N] [--dem]` / `ppg water show progetto.ppg CHUNK` | riga di comando: il livello a mano o dal bordo dell'acqua; la nuvola densa corretta (una nuova versione); il livello adesso |
+| `ppg mosaic build progetto.ppg --chunks A,B[,C] [--dem] [--areas FILE.gpkg] [--resolution R] [--background faded\|none] [--name N]` / `ppg mosaic list progetto.ppg [--json]` / `ppg mosaic remove progetto.ppg ID` | riga di comando: un prodotto unito costruito (i chunk collocati dal loro timbro e quelli inclinati segnalati); l'elenco con i chunk da unire di nuovo; uno tolto con i suoi file |
+
 ## Orientare un chunk locale
 
 Un chunk in un sistema locale (senza coordinate del mondo: un oggetto, un rilievo senza GNSS né

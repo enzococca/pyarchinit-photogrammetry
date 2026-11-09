@@ -125,7 +125,7 @@ def _tool(name: str, text: str, tip: str = "") -> QToolButton:
 
 # the kinds of the items of the workspace that can be removed (Rimuovi, the Delete key)
 REMOVABLE = {"chunk", "product", "version", "elevation", "camera", "cameras", "marker", "markers", "scalebar",
-             "scalebars"}
+             "scalebars", "mosaic"}
 
 
 COMPASS = {"it": ["N", "NE", "E", "SE", "S", "SO", "O", "NO"], "en": ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]}
@@ -481,6 +481,10 @@ class WorkspaceTree(QTreeWidget):
                 cnode.setExpanded(True)
             self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
+        merged = self._mosaics_item(document)
+        if merged is not None:
+            root.addChild(merged)
+            merged.setExpanded(True)
         root.setExpanded(True)
         if opened:  # filled again (something removed, a product built): the nodes as the user left them,
             for item in self._walk():  # the active chunk open
@@ -613,6 +617,44 @@ class WorkspaceTree(QTreeWidget):
         if data and data[0] == "plugin":
             return ("plugin", data[1], self._plugin_items[data[2]])
         return data
+
+    @staticmethod
+    def _mosaics_item(document):
+        """"Prodotti uniti (n)" at the level of the document (:mod:`..engine.mosaic`), a child for each merged
+        orthophoto or DEM with its chunks; one to merge again (a chunk moved, rebuilt or gone) marked "da rifare".
+        Double click: shown in the 2D view (a merged product) or the window *Ortofoto e DEM uniti* (the node)."""
+        from ..engine import mosaic
+
+        records = mosaic.mosaics_of(document)
+        if not records:
+            return None
+        node = QTreeWidgetItem([tr("Prodotti uniti  ({0})", len(records))])
+        node.setIcon(0, icon("merge"))
+        node.setData(0, Qt.ItemDataRole.UserRole, ("mosaics", None, None))
+        node.setToolTip(0, tr("Ortofoto e DEM di più chunk uniti in uno. Doppio clic: Ortofoto e DEM uniti"))
+        for rec in records:
+            mid = str(rec.get("id"))
+            labels = rec.get("labels") or {}
+            names = ", ".join(str(labels.get(str(k), k)) for k in rec.get("chunks") or [])
+            try:
+                stale = mosaic.is_stale(document, rec)
+            except Exception:  # a broken record: said as one to make again
+                stale = ["?"]
+            res = rec.get("resolution")
+            text = tr("{0}  ({1}; {2} cm)", rec.get("name", mid), names, number(float(res) * 100, 1)) if res else \
+                tr("{0}  ({1})", rec.get("name", mid), names)
+            if stale:
+                text += tr("  -  da rifare")
+            it = QTreeWidgetItem([text])
+            it.setIcon(0, icon("warning") if stale else icon("dem" if rec.get("product") == "dem" else "orthomosaic"))
+            it.setData(0, Qt.ItemDataRole.UserRole, ("mosaic", None, mid))
+            tip = tr("Doppio clic per vederlo nella vista 2D; tasto destro: mostra, apri la cartella, rimuovi")
+            if stale:
+                it.setForeground(0, QColor(PALETTE["red"]))
+                tip = tr("Da rifare: {0} spostati, ricostruiti o tolti dopo l'unione", ", ".join(stale)) + "\n" + tip
+            it.setToolTip(0, tip)
+            node.addChild(it)
+        return node
 
     @staticmethod
     def _water_item(ch):

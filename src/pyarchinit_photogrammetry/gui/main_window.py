@@ -1319,6 +1319,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Livello dell'acqua e rifrazione..."), self.open_water, processing=True, icon_name="water",
                   tip=tr("Il livello dell'acqua di uno scavo allagato o di un relitto, dal suo bordo o a mano, e la "
                          "nuvola densa corretta per la rifrazione sotto di esso"))
+        self._act(m, tr("Ortofoto e DEM uniti..."), self.open_mosaic, processing=True, icon_name="merge",
+                  tip=tr("Le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, per priorità o per "
+                         "aree, con il chunk da cui viene ogni cella"))
         self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
                   tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
                          "nuvola densa e modello restano dentro il suo spessore"))
@@ -1890,6 +1893,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._close_stakes_dialog()  # its proposals are of a chunk of the project left
         self._close_colour_mask_dialog()  # its preview is of a chunk of the project left
         self._close_water_dialog()  # its level is of a chunk of the project left
+        self._close_mosaic_dialog()  # its list is of the project left
+        self._mosaic_view = None
         self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
@@ -1997,6 +2002,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._update_rebuild_action()
         self._update_workflow_states()
         self._refresh_water_dialog()
+        self._refresh_mosaic_dialog()
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None, title: str | None = None) -> None:
@@ -2006,6 +2012,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         (by default the kind's, with the name of the file when it is not the chunk's product)."""
         self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
         self._set_drawings_frame(None)  # a raster of the plan: the drawings of the plan
+        self._mosaic_view = None  # a merged product shown is no longer (show_mosaic sets it after this)
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
         if path is None:
@@ -4395,6 +4402,167 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None and alive(dlg):
             with contextlib.suppress(RuntimeError):
                 dlg.refresh()
+
+    # ---------------------------------------------------------------- merged products (engine.mosaic)
+    def open_mosaic(self):
+        """*Strumenti > Ortofoto e DEM uniti*: the orthophotos or DEMs of several chunks merged
+        (:class:`.mosaic_dialog.MosaicDialog`, not modal), one at a time. Returns it."""
+        from .mosaic_dialog import MosaicDialog
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_mosaic_dialog", None)
+        if dlg is not None and alive(dlg) and dlg.doc is self.doc:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        self._close_mosaic_dialog()
+        if not any(c.orthomosaic_path or c.dem_path for c in self.doc.chunks):
+            self._warn(tr("Ortofoto e DEM uniti: nessun chunk ha un'ortofoto o un DEM. Costruiscili prima (Flusso di "
+                          "lavoro)."))
+            return None
+        self._mosaic_dialog = MosaicDialog.ask(self)
+        return self._mosaic_dialog
+
+    def _close_mosaic_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_mosaic_dialog", None)
+        self._mosaic_dialog = None
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def _refresh_mosaic_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_mosaic_dialog", None)
+        if dlg is not None and alive(dlg) and not dlg.working:
+            with contextlib.suppress(RuntimeError):
+                dlg.refresh()
+
+    def _mosaic_on_view(self) -> dict | None:
+        """The record of the merged product the 2D view shows, or None."""
+        from ..engine import mosaic
+
+        shown = getattr(self, "_mosaic_view", None)
+        if shown is None:
+            return None
+        mid, path = shown
+        if self.ortho_view.path is None or Path(self.ortho_view.path) != Path(path):
+            self._mosaic_view = None
+            return None
+        try:
+            return mosaic.record_of(self.doc, mid)
+        except ValueError:
+            return None
+
+    def show_mosaic(self, mid: str) -> bool:
+        """The merged product ``mid`` in the 2D view, with its areas (layer ``aree``) and, under the cursor, the chunk
+        each cell comes from; a note in the status bar when it is to be merged again or in another system than the
+        active chunk. Returns whether it is shown."""
+        from shapely import wkt
+
+        from ..engine import mosaic
+
+        try:
+            rec = mosaic.record_of(self.doc, mid)
+        except ValueError as exc:
+            self._warn(tr("Ortofoto e DEM uniti: {0}", self._mosaic_error(exc)))
+            return False
+        path = mosaic.path_of(self.doc, rec)
+        if path is None or not path.exists():
+            self._warn(tr("Ortofoto e DEM uniti: il file di «{0}» non c'è più", rec.get("name", mid)))
+            return False
+        kind = "dem" if rec.get("product") == "dem" else "ortho"
+        self._load_raster(kind, path, title=str(rec.get("name", mid)))
+        self._mosaic_view = (mid, str(path))
+        view = self.ortho_view
+        areas = rec.get("areas") or []
+        if areas:
+            labels = rec.get("labels") or {}
+            with view.batch():
+                for a in areas:
+                    geom = wkt.loads(a["wkt"])
+                    name = labels.get(str(a.get("chunk")), a.get("chunk"))
+                    label = tr("{0} (priorità {1})", name, a.get("priority"))
+                    for pg in getattr(geom, "geoms", [geom]):
+                        view.add_polygon(np.asarray(pg.exterior.coords, float)[:-1], label=label, color="#e07000",
+                                         fill_alpha=0, layer=mosaic.AREAS_LAYER,
+                                         attrs={"chunk": labels.get(str(a.get("chunk")), ""),
+                                                "priority": a.get("priority")})
+        self.show_view(view)
+        notes = []
+        stale = mosaic.is_stale(self.doc, rec)
+        if stale:
+            notes.append(tr("da rifare: {0} spostati, ricostruiti o tolti dopo l'unione", ", ".join(stale)))
+        if self.chunk is not None and rec.get("crs") != self.chunk.crs:
+            notes.append(tr("è in {0}, il chunk attivo in {1}: i disegni del chunk non coincidono", rec.get("crs"),
+                            self.chunk.crs))
+        if notes:
+            self.statusBar().showMessage(tr("«{0}»: {1}", rec.get("name", mid), "; ".join(notes)), 20000)
+        return True
+
+    @staticmethod
+    def _mosaic_error(exc) -> str:
+        from .mosaic_dialog import error_text
+
+        return error_text(exc)
+
+    def _mosaic_coords(self, rec: dict, x: float, y: float, z) -> None:
+        """The status bar over a merged product: the chunk the cell comes from."""
+        from ..engine import mosaic
+
+        try:
+            src = mosaic.source_at(self.doc, rec["id"], x, y)
+        except Exception:  # noqa: BLE001 - the file gone meanwhile: nothing said
+            src = None
+        zt = f"  Z {z:.3f}" if rec.get("product") == "dem" and z is not None and np.isfinite(z) else ""
+        st = tr("  da {0}", src) if src else tr("  nessun chunk")
+        self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}{st}   [{rec.get('crs')}]")
+
+    def _mosaic_release(self, ids) -> None:
+        """Before the folders of the merged products ``ids`` move: the 2D view no longer shows them (Windows does not
+        move a file in use)."""
+        shown = getattr(self, "_mosaic_view", None)
+        if shown is not None and shown[0] in set(ids):
+            self._load_raster()
+
+    def _mosaics_changed(self) -> None:
+        """Merged products built, removed or back: the tree and the window of the merge."""
+        self.workspace.populate(self.doc)
+        self._refresh_mosaic_dialog()
+
+    def _mosaic_built(self, record: dict) -> None:
+        """A merged product just built: one step of *Modifica > Annulla* (undo puts its folder aside), in the tree
+        and shown."""
+        from ..core import removal
+        from .mosaic_dialog import MosaicBuiltStep
+
+        mid = record["id"]
+        r = removal.MosaicRemoval.added(self.doc, [mid])
+        if self.doc.path is not None:  # run_task saved the project with it
+            r.mark_saved()
+        if self.history is not None:
+            self.history.push(tr("Ortofoto e DEM uniti"), MosaicBuiltStep(self, r, mid))
+        self._mosaics_changed()
+        self.show_mosaic(mid)
+        counts = record.get("counts") or {}
+        labels = record.get("labels") or {}
+        parts = ", ".join(f"{labels.get(k, k)} {number(v)}" for k, v in counts.items())
+        self.log_pane.info(tr("{0}: {1} x {2} celle di {3} m (celle per chunk: {4})", record.get("name", mid),
+                              record["size"][0], record["size"][1], number(float(record["resolution"]), 4), parts))
+        if record.get("moved"):
+            self.log_pane.info(tr("{0}: {1} collocati dalla loro trasformazione di costruzione (costruiti prima "
+                                  "dell'ultimo aggancio)", record.get("name", mid),
+                                  ", ".join(str(labels.get(str(k), k)) for k in record["moved"])))
+        from ..engine import mosaic
+
+        for key, deg in (record.get("moved_tilt_deg") or {}).items():
+            if deg >= mosaic.TILT_NOTE_DEG:
+                self.log_pane.warning(tr("{0}: {1} è inclinato di {2}° da quando il suo raster è stato costruito: "
+                                         "collocato solo in pianta, ricostruiscilo", record.get("name", mid),
+                                         labels.get(str(key), key), number(float(deg), 1)))
 
     def crop_with_layer(self, layer: str) -> None:
         """*Ritaglia con questa maschera* (Layer pane): the products cut by the polygons of the free-drawing layer
@@ -9343,6 +9511,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.set_crs()
         elif kind == "water":
             self.open_water()
+        elif kind == "mosaic":
+            self.show_mosaic(payload)
+        elif kind == "mosaics":
+            self.open_mosaic()
         elif kind in ("scalebar", "scalebars"):
             self._show_pane(self.left_tabs, self.reference)
         elif kind == "product" and payload == "depth_maps":
@@ -9513,6 +9685,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                          else tr("Miniature delle foto pronte ({0})", total), 3000)
 
     def _show_coords(self, x: float, y: float, z) -> None:
+        merged = self._mosaic_on_view()
+        if merged is not None:
+            self._mosaic_coords(merged, x, y, z)
+            return
         kind = getattr(self.ortho_view, "kind", None)
         if self.chunk is not None and kind in ("thermal", "thermal_anomaly", "reflectance", "index", "ortho", "dem"):
             # the values of the products at full resolution (the view shows a reduced copy)
@@ -15272,6 +15448,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if kind == "document":
             menu.addAction(icon("add_chunk"), tr("Aggiungi chunk"), self.add_chunk)
             menu.addAction(icon("append"), tr("Aggiungi progetti..."), self.append_projects)
+        elif kind == "mosaics":
+            menu.addAction(icon("merge"), tr("Ortofoto e DEM uniti..."), self.open_mosaic)
+        elif kind == "mosaic":
+            from ..engine import mosaic as mosaic_mod
+
+            menu.addAction(icon("ortho"), tr("Mostra"), lambda: self.show_mosaic(payload))
+            menu.addAction(icon("folder"), tr("Apri la cartella"), lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(mosaic_mod.folder(self.doc, payload)))))
+            remove(tr("Rimuovi"))
         elif kind == "chunk":
             a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
             a.setEnabled(chunk is not self.chunk)
@@ -15389,6 +15574,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return any(obj is x or (isinstance(obj, (str, tuple)) and obj == x) for x in seq)
 
         chunks = [c for c in doc.chunks if any(k == "chunk" and ch is c for k, ch, _p in items)]
+        from ..engine import mosaic
+
+        present = {r.get("id") for r in mosaic.mosaics_of(doc)}
+        mosaics = []
+        for k, _ch, payload in items:
+            if k == "mosaic" and payload in present and payload not in mosaics:
+                mosaics.append(payload)
         per: list = []
         for kind, ch, payload in items:
             if ch is None or has(chunks, ch) or not has(doc.chunks, ch):
@@ -15414,7 +15606,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             for v in values:
                 if not has(entry[group], v):
                     entry[group].append(v)
-        return {"chunks": chunks, "items": [(c, e) for c, e in per if any(e.values())]}
+        return {"chunks": chunks, "items": [(c, e) for c, e in per if any(e.values())], "mosaics": mosaics}
 
     @staticmethod
     def _removable(chunk, kind: str, payload) -> bool:
@@ -15494,6 +15686,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if e["markers"] and any(sb.marker_a in {m.key for m in e["markers"]} or sb.marker_b in {m.key for m in e["markers"]}
                                     for sb in ch.scalebars):
                 notes.append(tr("Le barre di scala che finiscono sui marker rimossi vanno con loro."))
+        if plan.get("mosaics"):
+            from ..engine import mosaic
+
+            merged = [tr("il prodotto unito «{0}»", mosaic.record_of(self.doc, m).get("name", m))
+                      for m in plan["mosaics"]]
+            lines += ["• " + w for w in merged]
+            names += merged
         files = tr("I file restano nella cartella del progetto finché è aperto: Modifica > Annulla rimette tutto "
                    "com'era. Quando lo chiudi vengono cancellati, se il progetto è salvato senza di loro.")
         question = "\n\n".join([tr("Rimuovere dal progetto:") + "\n" + "\n".join(lines)] + (["\n".join(notes)] if notes
@@ -15529,7 +15728,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return False
         plan = self._removal_plan(items)
-        if not plan["chunks"] and not plan["items"]:
+        if not plan["chunks"] and not plan["items"] and not plan["mosaics"]:
             self.statusBar().showMessage(tr("Niente da rimuovere: scegli chunk, prodotti, versioni, foto, marker o "
                                             "barre di scala"), 8000)
             return False
@@ -15556,6 +15755,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 done.append(r)
             if plan["chunks"]:
                 r = removal.ChunkRemoval(doc, plan["chunks"])
+                r.apply()
+                done.append(r)
+            if plan["mosaics"]:
+                self._mosaic_release(plan["mosaics"])
+                r = removal.MosaicRemoval(doc, plan["mosaics"])
                 r.apply()
                 done.append(r)
         except Exception as exc:  # noqa: BLE001 - what was moved goes back, the project as it was
@@ -15676,6 +15880,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._store_drawings()
         if touched:
             self._release_views()
+        self._mosaic_release([i for r in step.removals for i in getattr(r, "ids", [])])
         for r in step.removals:
             r.redo()
         if leaving:

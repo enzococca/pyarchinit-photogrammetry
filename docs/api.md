@@ -629,6 +629,30 @@ the CRS, transform and internal frame of the first chunk, and contains:
 DEMs, orthomosaics and textures are not merged. `merged.meta["merge"]` lists the source
 chunks, the photos found in more than one chunk and warnings.
 
+## Several surveys: masks, water, merged products
+
+The engine of [several surveys](gui/multi-survey.md) (application 1.7.7): masks from a colour of the orthophoto, the
+water level with the refraction correction, the merged orthophoto and DEM of several chunks. Errors are `ValueError`s
+with the message in English (`str()`) and in Italian (`.italian`): `MaskError`, `WaterError`, `MosaicError`.
+
+| Call | Description |
+| --- | --- |
+| `engine.colour_mask.HsvRange(hue=(lo, hi), sat=(lo, hi), val=(lo, hi))` | a range of colours: hue in degrees 0-360 (low above high goes through 0, the reds), saturation and value in % |
+| `engine.colour_mask.sample(chunk, x, y, radius=0.1, tolerance=(15, 20, 20))` | the range around the colour of the orthophoto in a disc at `(x, y)` (world) |
+| `engine.colour_mask.mask(chunk, rng, opening=0.05, fill_holes=True, keep="largest", min_area=0.05, margin=0.0, bounds=None, progress=None)` | the cells of the orthophoto within `rng` (read at most `MASK_SIDE` = 4000 pixels a side), cleaned: a `MaskResult` (`polygons`, `area`, `share`, `cell`, `holes`), nothing written |
+| `engine.colour_mask.to_layer(chunk, result, layer=None, replace=True)` | the mask as polygons of a layer of free drawings (default `Maschera colore N`), heights from the DEM; an earlier mask of the layer replaced, drawings by hand kept; the ids |
+| `engine.colour_mask.union(chunk, layer)` | the union of the polygons of a layer in the current world of the chunk (shapely) |
+| `engine.water.level_from_edge(chunk, water, progress=None)` | the water level from its edge: `water` a polygon, a list of them, an `HsvRange` or a layer name; the DEM read on the land side 2 and 4 cells from the outline, the median of `2 z2 - z4`: `level`, `spread` (NMAD), `p10`, `p90`, `edge_cells`, `slope_bias`; nothing written |
+| `engine.water.set_level(chunk, level, source="hand", n=1.34, **info)` / `water.level_of(chunk)` | the level kept in `chunk.meta["water"]` (stamped with the transform); the level in the current world of the chunk (`level`, `n`, `source`, `spread`) or None |
+| `engine.water.correct_cloud(chunk, n=None, rebuild_dem=False, progress=None)` | the dense cloud below the level corrected (`z' = L - n (L - z)`, paraxial) as a new version, the cloud before kept; `rebuild_dem` a new version of the DEM too |
+| `engine.mosaic.build(doc, chunks, product="orthomosaic", areas=None, resolution=None, background="faded", name=None, progress=None)` | the orthophotos (or `product="dem"`) of `chunks` (in their order of priority) merged in the system of the first: `areas` `[(chunk, polygon)]` win over the list inside them, `background` `"faded"` or `"none"` outside them; each source placed through the transform it was built in; files in `<project>.ppg.files/mosaics/<id>/` (`mosaic.tif`, `sources.tif`, `areas.gpkg`, `mosaic.json`), the record appended to `doc.meta["mosaics"]` and returned (the document not saved) |
+| `engine.mosaic.mosaics_of(doc)` / `record_of(doc, id)` / `remove(doc, id, delete_files=True)` | the merged products; one; one taken out (its folder deleted, or kept with `delete_files=False`) |
+| `engine.mosaic.is_stale(doc, record)` / `source_at(doc, id, x, y)` / `read_areas(doc, path, system)` | the chunks to merge again (moved, source rebuilt, gone); the chunk a cell comes from; the areas of a GeoPackage (attribute `chunk`, optional `priority`) |
+| `core.removal.MosaicRemoval(doc, ids)` | merged products taken out with their folders put aside, as the window does (`apply`, `undo`, `redo`; `MosaicRemoval.added(doc, ids)` undoes a build) |
+| `ppg mask colour project.ppg CHUNK (--hue A,B [--sat A,B] [--val A,B] \| --sample X,Y [--radius R]) [--opening M] [--holes] [--all] [--min-area A] [--margin M] [--layer NAME]` | command line: the mask as a layer of free drawings |
+| `ppg water level project.ppg CHUNK (--set Z \| --layer NAME \| --hue A,B [--sat A,B] [--val A,B] \| --sample X,Y) [--n N \| --sea \| --fresh]` / `ppg water correct project.ppg CHUNK [--n N] [--dem]` / `ppg water show project.ppg CHUNK` | command line: the level by hand or from the edge of the water; the dense cloud corrected (a new version); the level now |
+| `ppg mosaic build project.ppg --chunks A,B[,C] [--dem] [--areas FILE.gpkg] [--resolution R] [--background faded\|none] [--name N]` / `ppg mosaic list project.ppg [--json]` / `ppg mosaic remove project.ppg ID` | command line: a merged product built (the chunks placed through their stamp and the tilted ones noted); listed with the chunks to merge again; removed with its files |
+
 ## Orienting a local chunk
 
 A chunk in a local system (no coordinates of the world: an object, a survey without GNSS or

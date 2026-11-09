@@ -84,6 +84,8 @@ buttons that do not fit):
 | *Cameras*, *Markers*, *Scale bars* | the removal of all they hold |
 | several items | *Enable*, *Disable*, *Remove N items* |
 | the project | *Add chunk*, *Append projects...* |
+| *Merged products* | *Merged orthophoto and DEM...* |
+| a merged product | *Show*, *Open the folder*, *Remove* ([merged products](multi-survey.md#merged-orthophoto-and-dem)) |
 
 The commands work on chunks that are not the active one too: removing, renaming, enabling and disabling act
 on the chunk of the item and leave the active chunk as it is, while showing an item and the commands of its
@@ -171,6 +173,7 @@ stones, patches.
 
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
   *All* and *None* tick every drawn layer (one step of *Edit > Undo*) and leave the background as it is.
+* The right click on a layer of free drawings with polygons has *Crop with this mask...* (a [colour mask](multi-survey.md#mask-from-a-colour)) or *Crop with the polygons of this layer...*: the crop of the products with their union.
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,

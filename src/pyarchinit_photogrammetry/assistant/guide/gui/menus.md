@@ -216,6 +216,9 @@ thermal and satellite captures, plugins.
 | **Calibrate the colour with the colour chart...** | a ColorChecker photographed in the trench makes the Munsell colours comparable |
 | **Relief visualisations...** | sky-view factor, openness, local and multi-scale relief, hillshades ([relief](archaeology.md#relief-visualisations)) |
 | **Raster calculator...** | formulas on the rasters of the project, those of the plugins too, as in QGIS ([calculator](archaeology.md#raster-calculator)) |
+| **Mask from colour...** | the cells of the orthophoto within a range of colours (water, a tarpaulin, the sand) as the polygons of a layer of free drawings, for the crop, the stable height and the water level ([mask from a colour](multi-survey.md#mask-from-a-colour)) |
+| **Water level and refraction...** | the level of the water from its edge or by hand, and the dense cloud below it corrected for the refraction as a new version ([water level](multi-survey.md#water-level-and-refraction)) |
+| **Merged orthophoto and DEM...** | the orthophotos or DEMs of several tied chunks merged into one raster, by priority or by areas, with the chunk each cell comes from ([merged products](multi-survey.md#merged-orthophoto-and-dem)) |
 | **Region on markers...** | a thin reconstruction region on the plane of three markers (a wall, an object), its thickness along the normal: depth maps, dense cloud and model stay inside it |
 | **Normal map...** | the normals of the surface (model or DEM) on the grid of the orthophoto, red east, green north, blue up; shown in the 2D view and listed in the Workspace |
 | **Section options...** · **Plan slice (horizontal slice)...** | what the sections cut (model or cloud, classes); a plan at a height |

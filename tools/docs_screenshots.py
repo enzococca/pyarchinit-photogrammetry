@@ -474,6 +474,9 @@ def _worker(args) -> int:
     # ---- stakes near known points: a clone of the demo with stake heads painted on its orthophoto and photos
     if wanted("stakes-dialog"):
         _stakes_shots(w, args.demo, pump, save)
+    # ---- colour mask, water level, merged products: a clone of the demo with a pond and a second campaign
+    if any(wanted(n) for n in ("colour-mask-dialog", "water-dialog", "mosaic-dialog", "mosaic-view")):
+        _multi_survey_shots(w, args.demo, pump, save, wanted)
 
     guard.stop()
     w.setWindowModified(False)
@@ -757,6 +760,138 @@ def _stakes_shots(w, demo: Path, pump, save) -> None:
         pump(800)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def _multi_survey_shots(w, demo: Path, pump, save, wanted) -> None:
+    """*Maschera dal colore*, *Livello dell'acqua e rifrazione* and *Ortofoto e DEM uniti* on a clone of the demo: a
+    blue pond painted on the ground of its orthophoto, the mask of its colour, the level measured from its edge; the
+    chunk duplicated as a second campaign "2025" (its orthophoto copied and warmed, so the merge shows which cells come
+    from it) and the two merged with an area each. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import cv2
+    import numpy as np
+    import rasterio
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.engine import mosaic
+
+    def wait() -> None:
+        for _ in range(600):
+            pump(100)
+            if not w.runner.busy:
+                break
+        pump(400)
+
+    folder = _clone(demo, "multi_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        a = doc.chunk
+        a.label = "2024"
+        with rasterio.open(a.dem_path) as src:
+            left, bottom, right, top = src.bounds
+        pond = (left + 0.84 * (right - left), bottom + 0.22 * (top - bottom))  # on the ground beside the trench
+        with rasterio.open(a.product_path("orthomosaic"), "r+") as src:
+            cell = abs(src.res[0])
+            data = np.ascontiguousarray(np.moveaxis(src.read([1, 2, 3]), 0, -1))
+            col, row = ~src.transform * pond
+            axes = (int(round(0.22 / cell * 16)), int(round(0.14 / cell * 16)))
+            cv2.ellipse(data, (int(round(col * 16)), int(round(row * 16))), axes, 20, 0, 360, (40, 110, 160), -1,
+                        cv2.LINE_AA, 4)
+            src.write(np.moveaxis(data, -1, 0), [1, 2, 3])
+            factors = src.overviews(1)
+            if factors:  # the reduced copies (the preview of the mask, the 2D view) see the pond too
+                from rasterio.enums import Resampling
+
+                src.build_overviews(factors, Resampling.average)
+        b = doc.duplicate_chunk(a, label="2025")
+        for name in ("dem", "orthomosaic"):
+            target = b.data_dir / Path(a.product_path(name)).name
+            b.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(a.product_path(name), target)
+            b._set_product(name, target)
+            stamps.stamp(b, name)
+        with rasterio.open(b.product_path("orthomosaic"), "r+") as src:  # the other campaign: warmer light
+            rgb = src.read([1, 2, 3]).astype(np.float32)
+            rgb[0] *= 1.12
+            rgb[2] *= 0.82
+            src.write(np.clip(rgb, 0, 255).astype(np.uint8), [1, 2, 3])
+            factors = src.overviews(1)
+            if factors:
+                from rasterio.enums import Resampling
+
+                src.build_overviews(factors, Resampling.average)
+        doc.chunk = a
+        w.set_document(doc)
+        pump(1500)
+        w._show_raster("ortho")
+        pump(800)
+        mask = w.open_colour_mask()
+        mask.sampled(np.array([pond]))
+        mask.s_opening.setValue(0.02)
+        pump(800)
+        mask.update_preview()
+        if wanted("colour-mask-dialog"):
+            save(mask.grab(), "colour-mask-dialog")
+        mask.create()
+        wait()
+        layer = next(iter(fd_layers(a)), None)
+        w._close_colour_mask_dialog()
+        water = w.open_water()
+        if layer is not None:
+            water.r_layer.setChecked(True)
+            water.c_layer.setCurrentText(layer)
+        water.measure()
+        wait()
+        if wanted("water-dialog"):
+            save(water.grab(), "water-dialog")
+        w._close_water_dialog()
+        dlg = w.open_mosaic()
+        dlg.resize(760, 640)
+        dlg.set_order(["2024", "2025"])
+        mid_x = (left + right) / 2
+        dlg.set_area(a.key, box(left + 0.12 * (right - left), bottom + 0.15 * (top - bottom), mid_x,
+                                bottom + 0.85 * (top - bottom)), _drawn())
+        dlg.set_area(b.key, box(mid_x, bottom + 0.15 * (top - bottom), left + 0.88 * (right - left),
+                                bottom + 0.85 * (top - bottom)), _drawn())
+        dlg.table.selectRow(1)
+        pump(600)
+        if wanted("mosaic-dialog"):
+            save(dlg.grab(), "mosaic-dialog")
+        dlg.build()
+        wait()
+        w._close_mosaic_dialog()
+        pump(600)
+        assert mosaic.mosaics_of(doc), "the merged product was not built"
+        w._show_coords(left + 0.7 * (right - left), bottom + 0.5 * (top - bottom), None)
+        from PySide6.QtCore import Qt
+
+        for item in w.workspace._walk():  # the chunks closed: the node of the merged products in sight
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[0] == "chunk":
+                item.setExpanded(False)
+        pump(400)
+        if wanted("mosaic-view"):
+            save(w.grab(), "mosaic-view")
+        w.setWindowModified(False)
+        w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after
+        pump(800)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _drawn() -> str:
+    from pyarchinit_photogrammetry.gui.i18n import tr
+
+    return tr("disegnata")
+
+
+def fd_layers(chunk) -> list[str]:
+    from pyarchinit_photogrammetry.gui.water_dialog import polygon_layers
+
+    return polygon_layers(chunk)
 
 
 def _orient_clone(demo: Path) -> Path:
