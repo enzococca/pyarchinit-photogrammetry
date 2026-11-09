@@ -56,7 +56,8 @@ class Tie:
     ``a_label``/``b_label``: its label, to recognise it when a version before 1.7.6 saved the project and lost the
     identity (:func:`resolve_end`). ``a_alignment``/``b_alignment``: the alignment of its chunk (``meta
     ["alignment_id"]``) each end was placed in. ``broken``: set on read when an end's chunk or marker is gone (the tie
-    is then inactive); ``stale``: the ends placed without photos in an earlier alignment (:func:`stale_ends`: left out
+    is then inactive; ``wanted`` keeps the state the user gave it, the one stored, so that the tie is active again as
+    it was when the end comes back - a marker removal undone); ``stale``: the ends placed without photos in an earlier alignment (:func:`stale_ends`: left out
     of the solve until placed again or confirmed); neither is stored."""
 
     id: str
@@ -75,6 +76,7 @@ class Tie:
     a_alignment: str | None = None  # the alignment of its chunk each end was placed in ("" none yet; None: not known)
     b_alignment: str | None = None
     broken: str | None = None
+    wanted: bool | None = None  # while broken: the active state the user gave it, stored and given back with the end
     broken_parts: list | None = None  # the reasons of ``broken`` as (message code, *args), for the report; not stored
     stale: list | None = None  # the ends ("a"/"b") placed without photos in an earlier alignment; not stored
     stale_parts: list | None = None  # their reasons as (message code, *args); not stored
@@ -92,7 +94,8 @@ class Tie:
     def to_dict(self) -> dict:
         d = {"id": self.id, "a": list(self.a), "b": None if self.b is None else list(self.b),
              "known": None if self.known is None else [float(v) for v in self.known],
-             "precision": float(self.precision), "name": self.name, "active": bool(self.active),
+             "precision": float(self.precision), "name": self.name,
+             "active": bool(self.wanted if self.broken and self.wanted is not None else self.active),
              "own_markers": bool(self.own_markers)}
         for key in ("crs", "a_uid", "b_uid", "a_label", "b_label", "a_alignment", "b_alignment"):
             if getattr(self, key) is not None:
@@ -132,6 +135,25 @@ def save_ties(doc: "Document", ties: list[Tie]) -> None:
         doc.meta[META_KEY] = [t.to_dict() for t in ties]
     else:
         doc.meta.pop(META_KEY, None)
+
+
+def settle_stored(doc: "Document") -> bool:
+    """The ties of ``doc`` written back as :func:`ties_of` reads them, when that differs from what is stored: the
+    label of each end's marker (renamed since, or never written by a development build), the alignment of an end
+    not known yet (the current one), a key followed. Called when a project is opened and saved, so that the file
+    always has what an older version needs to recognise the ends again (:func:`resolve_end`) and what a later
+    alignment needs to see them stale. A broken tie keeps the state the user gave it. True when something changed."""
+    stored = doc.meta.get(META_KEY)
+    if not stored:
+        return False
+    try:
+        now = [t.to_dict() for t in ties_of(doc)]
+    except (KeyError, TypeError, ValueError):  # pragma: no cover - a tie written by hand that cannot be read
+        return False
+    if now == stored:
+        return False
+    doc.meta[META_KEY] = now
+    return True
 
 
 def resolve_end(doc: "Document", end, uid: str | None = None, label: str | None = None):
@@ -199,6 +221,8 @@ def _settle(doc: "Document", tie: Tie) -> None:
     if reasons:
         tie.broken = "; ".join(reasons)
         tie.broken_parts = parts
+        if tie.wanted is None:
+            tie.wanted = tie.active  # the user's choice, stored: active again as it was when the end comes back
         tie.active = False
     tie.stale = stale or None
     tie.stale_parts = stale_parts or None

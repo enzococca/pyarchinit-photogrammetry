@@ -338,13 +338,14 @@ def test_ties_survive_a_save_by_an_older_version(tmp_path):
     ma, mb = a.add_marker("P1", [0, 0, 0]), b.add_marker("P1", [1, 0, 0])
     t2 = ties.link_markers(doc, a, ma, b, mb)
     doc.save()
-    old = ppg.Document.open(tmp_path / "scavo.ppg")
-    for ch in old.chunks:
-        for m in ch.markers:
-            m.uid = None  # what an older version writes: no "uid" in the markers
-    old.save()
-    again = ppg.Document.open(tmp_path / "scavo.ppg")
-    assert all(m.uid is None for ch in again.chunks for m in ch.markers)
+    import json
+
+    payload = json.loads((tmp_path / "scavo.ppg").read_text())
+    for c in payload["chunks"]:
+        for m in c["markers"]:
+            m.pop("uid", None)  # what an older version writes: no "uid" in the markers
+    (tmp_path / "scavo.ppg").write_text(json.dumps(payload))
+    again = ppg.Document.open(tmp_path / "scavo.ppg")  # the identities are given back when it is opened
     got = {t.id: t for t in ties.ties_of(again)}
     for t in (t1, t2):
         assert got[t.id].active and not got[t.id].broken, got[t.id].broken
@@ -361,6 +362,65 @@ def test_ties_survive_a_save_by_an_older_version(tmp_path):
     assert other.key == t.b[1] and other.uid is None
     (got2,) = ties.ties_of(doc2)
     assert got2.broken and other.uid is None
+
+
+def test_labels_and_alignments_of_the_ends_are_written_back_on_open_and_save(tmp_path):
+    """The file always has the label of each end's marker (an older version recognises the ends by it) and the
+    alignment each end was placed in (a later alignment flags the ends without photos), also for a marker renamed
+    after the last tie edit and for ties written by a development build without them."""
+    import json
+
+    doc, a, b = _two_chunks(tmp_path)
+    b.meta["alignment_id"] = "primo"
+    tie = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    b.marker_by_key(tie.b[1]).label = "picchetto"  # renamed (a script): no tie edit since
+    doc.save()
+    (stored,) = json.loads((tmp_path / "scavo.ppg").read_text())["meta"]["ties"]
+    assert stored["b_label"] == "picchetto" and stored["b_alignment"] == "primo"
+    saved = (tmp_path / "scavo.ppg").read_text()
+    # saved again by 1.7.5 (markers without uid): the renamed end is recognised by its label
+    payload = json.loads(saved)
+    for c in payload["chunks"]:
+        for m in c["markers"]:
+            m.pop("uid", None)
+    (tmp_path / "scavo.ppg").write_text(json.dumps(payload))
+    got = ties.ties_of(ppg.Document.open(tmp_path / "scavo.ppg"))[0]
+    assert got.active and not got.broken
+    # a tie of a development build: no labels, no alignments; the chunk realigned before any tie edit
+    payload = json.loads(saved)
+    for key in ("a_label", "b_label", "a_alignment", "b_alignment"):
+        payload["meta"]["ties"][0].pop(key, None)
+    (tmp_path / "scavo.ppg").write_text(json.dumps(payload))
+    opened = ppg.Document.open(tmp_path / "scavo.ppg")  # written back on open, in memory
+    (now,) = opened.meta["ties"]
+    assert now["a_label"] == "legame 1" and now["b_label"] == "picchetto" and now["b_alignment"] == "primo"
+    opened.chunks[1].meta["alignment_id"] = "secondo"  # a new alignment: the end typed in is stale
+    assert ties.ties_of(opened)[0].stale == ["b"]
+    opened.save()
+    assert json.loads((tmp_path / "scavo.ppg").read_text())["meta"]["ties"][0]["b_alignment"] == "primo"
+    assert ties.settle_stored(opened) is False  # nothing more to write
+
+
+def test_a_tie_broken_by_a_removed_marker_is_active_again_when_it_comes_back(tmp_path):
+    """A marker removed and given back (Modifica > Annulla) makes its tie whole again, active as the user had it;
+    a tie the user had switched off stays off."""
+    doc, a, b = _two_chunks(tmp_path)
+    on = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    off = ties.add_tie(doc, a, [0, 0, 0], b, [1, 1, 1])
+    stored = ties.ties_of(doc)
+    stored[1].active = False
+    ties.save_ties(doc, stored)
+    gone = [b.marker_by_key(on.b[1]), b.marker_by_key(off.b[1])]
+    b.remove_markers([m.key for m in gone])
+    assert all(t.broken and not t.active for t in ties.ties_of(doc))
+    ties.check_ends(doc)  # stored while broken
+    doc.save()
+    doc = ppg.Document.open(tmp_path / "scavo.ppg")
+    assert all(t.broken and not t.active for t in ties.ties_of(doc))
+    doc.chunks[1].markers.extend(gone)  # back with their keys and identities
+    got = {t.id: t for t in ties.ties_of(doc)}
+    assert got[on.id].active and not got[on.id].broken
+    assert not got[off.id].active and not got[off.id].broken
 
 
 def test_a_new_alignment_leaves_ends_without_photos_out_until_placed_again_or_confirmed(tmp_path):

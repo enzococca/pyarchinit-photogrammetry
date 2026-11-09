@@ -204,6 +204,7 @@ class Document:
                     shutil.copytree(old_files, new_files, dirs_exist_ok=True)
         if self._path is None:
             raise ValueError("save() needs a path for a new document")
+        self._settle_ties()
         payload = {"format": "pyarchinit-photogrammetry", "version": FORMAT_VERSION, "meta": self.meta,
                    "chunks": [c.to_dict() for c in self.chunks]}
         tmp = self._path.with_suffix(".ppg.tmp")
@@ -221,6 +222,15 @@ class Document:
         self.meta = data.get("meta", {})
         self.chunks = [Chunk.from_dict(c, document=self) for c in data.get("chunks", [])]
         self._drop_missing_versions()
+        self._settle_ties()
+
+    def _settle_ties(self) -> None:
+        """The ties between chunks as they are read now (labels of their markers, alignments of their ends), written
+        back in ``meta`` (:func:`..engine.ties.settle_stored`): on open and on every save."""
+        if self.meta.get("ties"):
+            from ..engine.ties import settle_stored
+
+            settle_stored(self)
 
     def _drop_missing_versions(self) -> None:
         """A kept version listed without its main file (an interrupted session) is not listed any more."""
