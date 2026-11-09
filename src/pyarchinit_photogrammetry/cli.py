@@ -4751,6 +4751,94 @@ def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (
                    f"{corr['below']} points below); note: {water.NOTE_EN}")
 
 
+mosaic_app = typer.Typer(help="The orthophoto or the DEM of several tied chunks merged into one raster")
+app.add_typer(mosaic_app, name="mosaic")
+
+
+def _mosaic_line(rec: dict, stale: list) -> str:
+    what = "DEM" if rec.get("product") == "dem" else "orthophoto"
+    w, h = rec.get("size") or (0, 0)
+    labels = rec.get("labels") or {}
+    names = ", ".join(str(labels.get(str(k), k)) for k in rec.get("chunks") or [])
+    line = (f"{rec['id']}  {rec.get('name')}: {what} of {names}, {w} x {h} cells of {rec['resolution']:.4f} m "
+            f"({rec.get('crs') or 'LOCAL'})")
+    if rec.get("areas"):
+        line += f", {len(rec['areas'])} area(s), background {rec.get('background')}"
+    if stale:
+        line += f"; to build again: {', '.join(stale)} moved since"
+    return line
+
+
+@mosaic_app.command("build")
+def mosaic_build(project: Path,
+                 chunks: str = typer.Option(..., "--chunks", help="the chunks in their order of priority (labels or "
+                                            "keys, separated by commas): the first decides the system"),
+                 dem: bool = typer.Option(False, "--dem", help="merge the DEMs (default: the orthophotos)"),
+                 areas: Optional[Path] = typer.Option(None, "--areas", help="a GeoPackage of polygons with the "
+                                                      "attribute 'chunk' (and 'priority'): inside an area its chunk "
+                                                      "comes first"),
+                 resolution: Optional[float] = typer.Option(None, "--resolution", help="the cell (m; default the "
+                                                            "finest of the sources)"),
+                 background: str = typer.Option("faded", "--background", help="outside the areas: faded (the list, "
+                                                "the orthophoto blended toward white) or none (empty)"),
+                 name: Optional[str] = typer.Option(None, "--name", help="the name of the merged product")):
+    """The orthophotos (or DEMs) of several tied chunks merged into one raster, each placed where its chunk is now,
+    with the source of every cell (sources.tif). Stored in the project."""
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    items = [c.strip() for c in chunks.split(",") if c.strip()]
+    chs = [_tie_chunk(doc, c) for c in items]
+    try:
+        area_list = mosaic.read_areas(doc, areas, chs[0].crs if chs else None) if areas is not None else None
+        rec = mosaic.build(doc, chs, product="dem" if dem else "orthomosaic", areas=area_list, resolution=resolution,
+                           background=background, name=name, progress=print_progress)
+    except (ValueError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(_mosaic_line(rec, []))
+    labels = rec.get("labels") or {}
+    for key, n in (rec.get("counts") or {}).items():
+        typer.echo(f"  {labels.get(key, key)}: {n} cells")
+    if rec.get("moved"):
+        typer.echo("placed with their chunk (built before the last change of its transform): "
+                   + ", ".join(str(labels.get(str(k), k)) for k in rec["moved"]))
+    typer.echo(f"files: {mosaic.folder(doc, rec['id'])}")
+
+
+@mosaic_app.command("list")
+def mosaic_list(project: Path, as_json: bool = typer.Option(False, "--json", help="the records as JSON")):
+    """The merged products of the project."""
+    import json as _json
+
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    recs = mosaic.mosaics_of(doc)
+    if as_json:
+        typer.echo(_json.dumps([dict(r, stale=mosaic.is_stale(doc, r)) for r in recs], indent=1))
+        return
+    if not recs:
+        typer.echo("no merged products")
+        return
+    for r in recs:
+        typer.echo(_mosaic_line(r, mosaic.is_stale(doc, r)))
+
+
+@mosaic_app.command("remove")
+def mosaic_remove(project: Path, mid: str = typer.Argument(..., help="the id of the merged product")):
+    """A merged product taken out of the project, its files deleted."""
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    try:
+        rec = mosaic.remove(doc, mid)
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"removed {rec['id']} ({rec.get('name')})")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 
