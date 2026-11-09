@@ -4491,7 +4491,7 @@
   "Ortofoto e DEM uniti: {0}": "Merged orthophoto and DEM: {0}",
   "{0} (priorità {1})": "{0} (priority {1})",
   "{0}, {1} m2": "{0}, {1} m2",
-  "Layer di {0}:": "Layers of {0}:",
+  "Layer di {0}:": "Layer of {0}:",
   "dal layer {0}": "from the layer {0}",
   "Ortofoto e DEM uniti: la vista 2D è in {0}, il primo chunk dell'elenco ({1}) in {2}. Mostra un prodotto di un chunk in quel sistema per disegnare l'area.": "Merged orthophoto and DEM: the 2D view is in {0}, the first chunk of the list ({1}) in {2}. Show a product of a chunk in that system to draw the area.",
   "L'area di {0}: clic sui vertici, doppio clic o Invio per chiudere (Esc annulla)": "The area of {0}: click the vertices, double click or Enter to close (Esc cancels)",
@@ -4501,6 +4501,8 @@
   "{0}  ({1}; {2} cm)": "{0}  ({1}; {2} cm)",
   "{0}  ({1})": "{0}  ({1})",
   "Da rifare: {0} spostati, ricostruiti o tolti dopo l'unione": "To merge again: {0} moved, rebuilt or removed after the merge",
-  "{0}: {1} è inclinato di {2}° da quando il suo raster è stato costruito: collocato solo in pianta, ricostruiscilo": "{0}: {1} is tilted {2}° since its raster was built: placed in plan only, build it again"
+  "{0}: {1} è inclinato di {2}° da quando il suo raster è stato costruito: collocato solo in pianta, ricostruiscilo": "{0}: {1} is tilted {2}° since its raster was built: placed in plan only, build it again",
+  " (in {0}: riproiettata nel sistema del primo chunk)": " (in {0}: reprojected into the system of the first chunk)",
+  " (in {0}: non si può usare con il primo chunk)": " (in {0}: cannot be used with the first chunk)"
  }
 }

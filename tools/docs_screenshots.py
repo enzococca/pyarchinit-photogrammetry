@@ -829,6 +829,7 @@ def _multi_survey_shots(w, demo: Path, pump, save, wanted) -> None:
         w._show_raster("ortho")
         pump(800)
         mask = w.open_colour_mask()
+        mask.resize(760, mask.height())  # the buttons with their whole text
         mask.sampled(np.array([pond]))
         mask.s_opening.setValue(0.02)
         pump(800)
@@ -840,6 +841,7 @@ def _multi_survey_shots(w, demo: Path, pump, save, wanted) -> None:
         layer = next(iter(fd_layers(a)), None)
         w._close_colour_mask_dialog()
         water = w.open_water()
+        water.resize(780, water.height())
         if layer is not None:
             water.r_layer.setChecked(True)
             water.c_layer.setCurrentText(layer)

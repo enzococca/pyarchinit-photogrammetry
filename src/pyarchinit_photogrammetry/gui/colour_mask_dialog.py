@@ -154,6 +154,8 @@ class ColourMaskDialog(QDialog):
         buttons.addWidget(self.b_close)
         lay.addLayout(buttons)
         undo_shortcuts(self, window)
+        for button in self.findChildren(QPushButton):  # Enter in a field does not press a button (nor makes it
+            button.setAutoDefault(False)  # the default one, in bold: its text would no longer fit)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)

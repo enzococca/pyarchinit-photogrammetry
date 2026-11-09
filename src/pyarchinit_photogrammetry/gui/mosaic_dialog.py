@@ -78,7 +78,8 @@ class MosaicDialog(QDialog):
         self.setModal(False)
         self.setWindowTitle(tr("Ortofoto e DEM uniti"))
         self.working = False
-        self.areas: dict[int, tuple[object, str]] = {}  # chunk key -> (polygon in the system of the view, where from)
+        # chunk key -> (polygon, where from, the system it is in): carried into the system of the first chunk at the build
+        self.areas: dict[int, tuple[object, str, str | None]] = {}
 
         lay = QVBoxLayout(self)
         intro = QLabel(tr("Le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, nel sistema del primo "
@@ -148,6 +149,8 @@ class MosaicDialog(QDialog):
         buttons.addWidget(self.b_close)
         lay.addLayout(buttons)
         undo_shortcuts(self, window)
+        for button in self.findChildren(QPushButton):  # Enter in a field does not press a button (nor makes it
+            button.setAutoDefault(False)  # the default one, in bold: its text would no longer fit)
 
         self.b_up.clicked.connect(lambda: self.move(-1))
         self.b_down.clicked.connect(lambda: self.move(1))
@@ -210,8 +213,16 @@ class MosaicDialog(QDialog):
         area = self.areas.get(chunk.key)
         if area is None:
             return tr("nessuna")
-        poly, source = area
-        return tr("{0}, {1} m2", source, number(float(poly.area), 2))
+        poly, source, system = area
+        text = tr("{0}, {1} m2", source, number(float(poly.area), 2))
+        chosen = self.chosen()
+        if chosen and not self._same(system, chosen[0].crs):
+            try:
+                self.area_in(chunk.key, chosen[0].crs)
+                text += tr(" (in {0}: riproiettata nel sistema del primo chunk)", system or "LOCAL")
+            except ValueError:
+                text += tr(" (in {0}: non si può usare con il primo chunk)", system or "LOCAL")
+        return text
 
     def refresh(self, *_a) -> None:
         """The list again (another product, a chunk built or removed), the order and the ticks kept."""
@@ -262,6 +273,12 @@ class MosaicDialog(QDialog):
             self.b_layer.setEnabled(not self.working and current is not None and bool(polygon_layers(current)))
             self.b_clear.setEnabled(not self.working and current is not None and current.key in self.areas)
             chosen = self.chosen()
+            self.table.blockSignals(True)  # the areas said against the first chunk ticked now
+            for r in range(self.table.rowCount()):
+                ch, it = self._chunk(r), self.table.item(r, 2)
+                if ch is not None and it is not None:
+                    it.setText(self._area_text(ch))
+            self.table.blockSignals(False)
             self.c_background.setEnabled(any(c.key in self.areas for c in chosen))
             self.b_build.setEnabled(not self.working and bool(chosen))
             if not chosen:
@@ -279,29 +296,50 @@ class MosaicDialog(QDialog):
             return shown.get("crs")
         return self.window.chunk.crs if self.window.chunk is not None else None
 
-    def _same_system(self, chunk) -> bool:
-        chosen = self.chosen()
-        first = chosen[0] if chosen else chunk
-        if self._view_system() != first.crs:
-            self.window._warn(tr("Ortofoto e DEM uniti: la vista 2D è in {0}, il primo chunk dell'elenco ({1}) in "
-                                 "{2}. Mostra un prodotto di un chunk in quel sistema per disegnare l'area.",
-                                 self._view_system(), first.label, first.crs))
-            return False
-        return True
+    @staticmethod
+    def _same(a: str | None, b: str | None) -> bool:
+        """Two systems whose coordinates need no conversion: the same, or two local frames (as the ties take them)."""
+        from ..core import crs as crs_mod
+
+        return a == b or (crs_mod.is_local(a) and crs_mod.is_local(b))
+
+    def area_in(self, key, system: str | None):
+        """The area of the chunk ``key`` in ``system``: carried there from the system it was drawn or taken in when
+        both are systems of the world; :class:`..engine.mosaic.MosaicError` for a local frame with a system of the
+        world, or two frames only PROJ's approximation would join."""
+        import shapely
+
+        from ..core import crs as crs_mod
+
+        poly, _source, have = self.areas[key]
+        if self._same(have, system):
+            return poly
+        label = next((c.label for c in self.doc.chunks if c.key == key), str(key))
+        if crs_mod.is_local(have) or crs_mod.is_local(system):
+            raise mosaic.MosaicError(
+                f"the area of {label} is in {have or 'LOCAL'} and the first chunk in {system or 'LOCAL'}: a local "
+                "frame and a system of the world cannot be joined. Draw the area again, or put a chunk in its system "
+                "first", f"l'area di {label} è in {have or 'LOCAL'} e il primo chunk in {system or 'LOCAL'}: un "
+                "sistema locale e uno del mondo non si uniscono. Disegna di nuovo l'area, o metti primo un chunk nel "
+                "suo sistema")
+        if mosaic.frame_problem(have, system):
+            raise mosaic._frame_error(f"the area of {label}", f"l'area di {label}", have, system)
+        chunk = next((c for c in self.doc.chunks if c.key == key), None)
+        return shapely.transform(poly, lambda xy: mosaic._to_system(xy, have, system, False, chunk))
 
     def start_area(self) -> bool:
         """A polygon drawn on the 2D view (:meth:`MainWindow.request_geometry`): the area of the chunk selected."""
         ch = self._current()
-        if self._gone() or ch is None or self.window._plan_only() or not self._same_system(ch):
+        if self._gone() or ch is None or self.window._plan_only():
             return False
-        key = ch.key
+        key, system = ch.key, self._view_system()  # the coordinates of the view: carried at the build if need be
         return self.window.request_geometry(
-            "polygon", lambda xy: self.set_area(key, xy, tr("disegnata")),
+            "polygon", lambda xy: self.set_area(key, xy, tr("disegnata"), system),
             hint=tr("L'area di {0}: clic sui vertici, doppio clic o Invio per chiudere (Esc annulla)", ch.label))
 
-    def set_area(self, key, xy, source: str) -> None:
-        """The area of the chunk ``key``: a polygon (``(n, 2+)`` vertices, or a shapely polygon) in the system of the
-        merge."""
+    def set_area(self, key, xy, source: str, system: str | None = None) -> None:
+        """The area of the chunk ``key``: a polygon (``(n, 2+)`` vertices, or a shapely polygon) in ``system`` (by
+        default the system of the 2D view), carried into the system of the first chunk at the build."""
         from shapely.geometry import Polygon
 
         if self._gone():
@@ -312,7 +350,7 @@ class MosaicDialog(QDialog):
         if poly.is_empty or poly.area <= 0:
             self.window._warn(tr("Ortofoto e DEM uniti: l'area è vuota"))
             return
-        self.areas[key] = (poly, source)
+        self.areas[key] = (poly, source, self._view_system() if system is None else system)
         self.refresh()
         self._draw_areas()
 
@@ -330,12 +368,6 @@ class MosaicDialog(QDialog):
         ch = self._current()
         if self._gone() or ch is None:
             return False
-        chosen = self.chosen()
-        first = chosen[0] if chosen else ch
-        if ch.crs != first.crs:
-            self.window._warn(tr("Ortofoto e DEM uniti: {0} è in {1}, il primo chunk dell'elenco in {2}: le aree si "
-                                 "prendono dai chunk nel suo sistema", ch.label, ch.crs, first.crs))
-            return False
         layer = self.choose_layer(ch)
         if not layer:
             return False
@@ -344,7 +376,7 @@ class MosaicDialog(QDialog):
         except ValueError as exc:
             self.window._warn(tr("Ortofoto e DEM uniti: {0}", error_text(exc)))
             return False
-        self.set_area(ch.key, poly, tr("dal layer {0}", layer))
+        self.set_area(ch.key, poly, tr("dal layer {0}", layer), ch.crs)  # the layer is in the world of its chunk
         return True
 
     def clear_area(self) -> None:
@@ -360,8 +392,13 @@ class MosaicDialog(QDialog):
         if self.window.drawings_frame is not None or view.tr is None or not self.areas:
             return
         labels = {c.key: c.label for c in self.doc.chunks}
+        shown = self._view_system()
         with view.batch():
-            for key, (poly, _src) in self.areas.items():
+            for key in list(self.areas):
+                try:  # in the coordinates of the view
+                    poly = self.area_in(key, shown)
+                except ValueError:
+                    continue
                 for pg in getattr(poly, "geoms", [poly]):
                     view.add_polygon(np.asarray(pg.exterior.coords, float)[:-1], label=labels.get(key, ""),
                                      color=AREA_COLOUR, fill_alpha=40, layer=AREAS_VIEW_LAYER)
@@ -381,7 +418,12 @@ class MosaicDialog(QDialog):
         chunks = self.chosen()
         if not chunks:
             return False
-        areas = [(c, self.areas[c.key][0]) for c in chunks if c.key in self.areas]
+        try:  # each area in the system of the first chunk
+            areas = [(c, self.area_in(c.key, chunks[0].crs)) for c in chunks if c.key in self.areas]
+        except ValueError as exc:
+            self.window._warn(tr("Ortofoto e DEM uniti: {0}", error_text(exc)))
+            self.refresh()
+            return False
         product = self.c_product.currentData()
         res = self.s_res.value() or None
         background = self.c_background.currentData()
@@ -397,6 +439,7 @@ class MosaicDialog(QDialog):
 
         self.working = True
         self._update_buttons()
+        self._saves = doc.saves  # the save run_task makes after the build: the product then in the file
         started = self.window.run_task("Ortofoto e DEM uniti", work, self._built)
         if not started:
             self.working = False
@@ -421,7 +464,7 @@ class MosaicDialog(QDialog):
         if isinstance(result, dict) and "error" in result:
             self.window._warn(tr("Ortofoto e DEM uniti: {0}", error_text(result["error"])))
             return
-        self.window._mosaic_built(result)
+        self.window._mosaic_built(result, saved=self.doc.saves > getattr(self, "_saves", self.doc.saves))
         with contextlib.suppress(RuntimeError):
             self._draw_areas()
 

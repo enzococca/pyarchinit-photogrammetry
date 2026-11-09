@@ -94,7 +94,10 @@ once tied in one system can give one orthophoto or one DEM. *Tools > Merged orth
 * an **area** for a chunk (optional): select its row, then *Draw the area* (a polygon on the 2D view) or *Area from a
   layer...* (the polygons of one of its layers of free drawings: a colour mask, a drawing). Inside its area the chunk
   wins over the list; where areas overlap, the first area in the order of the list wins. *Remove the area* takes it
-  away;
+  away. An area keeps the system it was drawn in (that of the 2D view) or taken in (that of its chunk): when another
+  chunk, in another system of the world, is put first, the area is carried into its system at the build ("reprojected"
+  in its row); a local frame with a system of the world cannot be joined, and the build is refused until the area is
+  drawn again or the order changed;
 * **Product** (*Orthophoto* or *DEM*), **Resolution** (default the finest of the sources), **Background** with areas:
   *Faded* (outside every area the cells come from the list, blended halfway toward white in the orthophoto; the DEM
   keeps its heights) or *None* (only the areas: the rest stays empty), **Name** (default *Ortofoto unita N* /
@@ -119,6 +122,9 @@ with its areas (layer *aree*). Under the cursor, the status bar says **which chu
   as last saved.
 * Shown while the active chunk is in another system, the status bar says so: the drawings of the chunk do not fall on
   it.
+* Over a merged orthophoto the status bar gives no height: the DEM of the active chunk may not cover it. Drawing and
+  measuring tools still take their heights from the active chunk's DEM: draw and measure on the products of a chunk,
+  or show the merged DEM.
 
 The files are in `<project>.ppg.files/mosaics/<id>/`: `mosaic.tif` (RGBA for the orthophoto, float32 with NaN for the
 DEM), `sources.tif` (the chunk of each cell: 0 none, 1 the first of the list...), `areas.gpkg` (layer `aree`, attributes

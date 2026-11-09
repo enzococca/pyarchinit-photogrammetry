@@ -189,6 +189,8 @@ class WaterDialog(QDialog):
         buttons.addWidget(self.b_close)
         lay.addLayout(buttons)
         undo_shortcuts(self, window)
+        for button in self.findChildren(QPushButton):  # Enter in a field does not press a button (nor makes it
+            button.setAutoDefault(False)  # the default one, in bold: its text would no longer fit)
 
         self.r_edge.toggled.connect(self._update_buttons)
         self.r_layer.toggled.connect(self._update_buttons)

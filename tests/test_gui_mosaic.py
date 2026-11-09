@@ -240,3 +240,69 @@ def test_source_under_the_cursor(qapp, tmp_path, monkeypatch):
         assert "EPSG:3003" in w.statusBar().currentMessage()
     finally:
         _close(w)
+
+
+def test_an_area_follows_the_system_of_the_first_chunk(qapp, tmp_path, monkeypatch):
+    """An area drawn while a chunk in EPSG:3004 is first, then another chunk in EPSG:3003 put first: the area is
+    carried into EPSG:3003 and lands on the same ground; a local frame first refuses it."""
+    from test_mosaic import COLOURS, RES, _ortho
+
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    doc, c = project(tmp_path)
+    ch = c["C"]
+    ch.crs = "EPSG:3003"
+    p = crs_mod.transform_points(np.array([[X0 + 4.0, Y1, 0.0]]), "EPSG:3004", "EPSG:3003")[0]
+    ch._set_product("orthomosaic", write_geotiff(ch.data_dir / "ortho.tif", _ortho(COLOURS["C"], 80, 80),
+                                                 (p[0], p[1]), RES, "EPSG:3003"))
+    doc.save()
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _open(w, qapp)
+        dlg.set_order(["A", "B", "C"])
+        row = next(r for r in range(dlg.table.rowCount()) if dlg._chunk(r) is c["B"])
+        dlg.table.selectRow(row)
+        ring = [[X0 + 4.5, Y1 - 3.0], [X0 + 5.5, Y1 - 3.0], [X0 + 5.5, Y1 - 1.0], [X0 + 4.5, Y1 - 1.0]]
+        monkeypatch.setattr(w, "request_geometry", lambda kind, done, *a, **k: (done(np.array(ring)), True)[1])
+        assert dlg.start_area() and dlg.areas[c["B"].key][2] == "EPSG:3004"
+        dlg.set_order(["C", "B"])  # C, in another system, first: the area of B is carried into it
+        assert "riproiettata" in dlg.table.item(1, 2).text()
+        assert dlg.build()
+        _wait(w, qapp)
+        rec = mosaic.mosaics_of(w.doc)[-1]
+        assert rec["crs"] == "EPSG:3003", w.said
+        import rasterio
+
+        def colour_at(x, y):
+            q = crs_mod.transform_points(np.array([[X0 + x, Y1 - y, 0.0]]), "EPSG:3004", "EPSG:3003")[0]
+            with rasterio.open(mosaic.path_of(w.doc, rec)) as src:
+                return tuple(int(v) for v in next(src.sample([(q[0], q[1])]))[:3])
+
+        assert colour_at(5.0, 2.0) == COLOURS["B"]  # inside the area of B, on the same ground
+        assert colour_at(5.8, 2.0) != COLOURS["B"]  # outside it: C first (faded)
+        # a local frame first: the area cannot be carried there, nothing built
+        ch.crs = "LOCAL"
+        dlg._update_buttons()
+        assert "non si può usare" in dlg.table.item(1, 2).text()
+        w.said.clear()
+        assert not dlg.build()
+        assert any(k == "warn" and "sistema locale" in t for k, t in w.said) and len(mosaic.mosaics_of(w.doc)) == 1
+    finally:
+        _close(w)
+
+
+def test_a_build_whose_save_failed_is_not_kept_at_closing(qapp, tmp_path, monkeypatch):
+    doc, _c = project(tmp_path)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        rec = mosaic.build(w.doc, ["A", "B"])
+        w._mosaic_built(rec, saved=False)  # run_task's save failed: the file does not list it
+        r = w.doc.removals[-1]
+        assert r.saved == "removed" and r.state == "restored"
+        assert w._mosaic_on_view()["id"] == rec["id"]
+        w._load_raster()
+        w.doc.settle_removals()
+        assert not mosaic.folder(w.doc, rec["id"]).exists()
+    finally:
+        _close(w)

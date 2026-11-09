@@ -95,7 +95,10 @@ volta agganciati in un sistema solo possono dare un'ortofoto o un DEM unico. *St
 * un'**area** per un chunk (facoltativa): seleziona la sua riga, poi *Disegna l'area* (un poligono sulla vista 2D) o
   *Area da un layer...* (i poligoni di uno dei suoi layer di disegni liberi: una maschera dal colore, un disegno).
   Dentro la sua area il chunk vince sull'elenco; dove le aree si sovrappongono vince la prima nell'ordine dell'elenco.
-  *Togli l'area* la toglie;
+  *Togli l'area* la toglie. Un'area tiene il sistema in cui è stata disegnata (quello della vista 2D) o presa (quello
+  del suo chunk): se metti primo un chunk in un altro sistema del mondo, alla costruzione l'area viene portata nel suo
+  sistema ("riproiettata" nella sua riga); un sistema locale e uno del mondo non si uniscono, e la costruzione viene
+  rifiutata finché non ridisegni l'area o cambi l'ordine;
 * **Prodotto** (*Ortofoto* o *DEM*), **Risoluzione** (di solito la più fine delle sorgenti), **Sfondo** con delle aree:
   *Sfumato* (fuori da tutte le aree le celle vengono dall'elenco, schiarite a metà verso il bianco nell'ortofoto; il DEM
   tiene le quote) o *Nessuno* (solo le aree: il resto rimane vuoto), **Nome** (di solito *Ortofoto unita N* / *DEM unito
@@ -119,6 +122,9 @@ Il prodotto unito va nel nodo **Prodotti uniti** in fondo all'Area di lavoro e s
   progetto si chiude, i file seguono il progetto come è stato salvato l'ultima volta.
 * Se lo mostri mentre il chunk attivo è in un altro sistema, la barra di stato lo dice: i disegni del chunk non ci
   cadono sopra.
+* Su un'ortofoto unita la barra di stato non dà quote: il DEM del chunk attivo può non coprirla. Gli strumenti di
+  disegno e di misura prendono comunque le quote dal DEM del chunk attivo: disegna e misura sui prodotti di un chunk,
+  o mostra il DEM unito.
 
 I file stanno in `<progetto>.ppg.files/mosaics/<id>/`: `mosaic.tif` (RGBA per l'ortofoto, float32 con NaN per il DEM),
 `sources.tif` (il chunk di ogni cella: 0 nessuno, 1 il primo dell'elenco...), `areas.gpkg` (layer `aree`, attributi
