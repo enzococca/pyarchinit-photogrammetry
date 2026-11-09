@@ -46,6 +46,7 @@ class Marker:
     reference: Reference = field(default_factory=Reference)
     checkpoint: bool = False  # used only to assess accuracy, not for georeferencing
     orientation: bool = False  # one of the three markers that keep the orientation of a local system
+    uid: str | None = None  # an identity that never comes back for another point (a tie names its ends by it)
 
     def to_dict(self) -> dict:
         d = {
@@ -56,6 +57,8 @@ class Marker:
         }
         if self.orientation:  # written only when set: the files of the markers before 1.7.2 unchanged
             d["orientation"] = True
+        if self.uid:  # likewise: only markers that end a tie have one
+            d["uid"] = self.uid
         return d
 
     @classmethod
@@ -66,7 +69,7 @@ class Marker:
             projections={int(k): Projection(*v) for k, v in d.get("projections", {}).items()},
             position=None if pos is None else np.asarray(pos, float),
             reference=Reference.from_dict(d.get("reference")), checkpoint=d.get("checkpoint", False),
-            orientation=bool(d.get("orientation", False)),
+            orientation=bool(d.get("orientation", False)), uid=d.get("uid") or None,
         )
 
 
