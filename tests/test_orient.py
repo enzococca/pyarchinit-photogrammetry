@@ -646,7 +646,8 @@ def test_unstamped_elevation_is_stale_after_a_scale(processed, tmp_path):
 
 
 # keys written on objects that are not chunks (photos, the document)
-NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "rolling_shutter", "face"}
+NOT_CHUNK_KEYS = {"active_chunk", "sito", "bands", "capture", "reference_crs", "rolling_shutter", "face",
+                  "ties", "ties_report"}  # the last two: of the document (engine/ties.py), not of a chunk
 
 
 def _meta_writes(tree) -> set:
