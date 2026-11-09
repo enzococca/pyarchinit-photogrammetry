@@ -238,24 +238,30 @@ def _along_the_wall(step: float):
     return _ellipse(np.interp(np.arange(0, s[-1] - step / 2, step), s, t))
 
 
+def _oval_chunk(tower_base, folder, stretch=(1.0, 1.0)):
+    """A copy of the processed project in ``folder`` whose model is the oval tower, its plan stretched by
+    ``stretch``; the chunk and the plan points of the tower at mid height."""
+    import pyarchinit_photogrammetry as ppg
+
+    folder.mkdir()
+    shutil.copy2(tower_base, folder / tower_base.name)
+    files = tower_base.parent / (tower_base.name + ".files")
+    shutil.copytree(files, folder / files.name)
+    (folder / "photos").symlink_to(tower_base.parent / "photos")
+    doc = ppg.Document.open(folder / tower_base.name)
+    ch = doc.chunk
+    t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+    xy = _ellipse(t) * list(stretch) + BASE[:2]
+    rings = np.stack([np.column_stack([xy, np.full(len(t), BASE[2] + z)]) for z in np.linspace(0, HEIGHT, 31)])
+    _write_tower(ch, rings)
+    return ch, xy
+
+
 @pytest.fixture
 def oval(tower_base, tmp_path):
     """A chunk whose model is an upright oval tower (ellipse 3 x 2.4 m, 3 m tall) and the cylinder of the circle
     fitted to plan points around it."""
-    import pyarchinit_photogrammetry as ppg
-
-    d = tmp_path / "ovale"
-    d.mkdir()
-    shutil.copy2(tower_base, d / tower_base.name)
-    files = tower_base.parent / (tower_base.name + ".files")
-    shutil.copytree(files, d / files.name)
-    (d / "photos").symlink_to(tower_base.parent / "photos")
-    doc = ppg.Document.open(d / tower_base.name)
-    ch = doc.chunk
-    t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
-    xy = _ellipse(t) + BASE[:2]
-    rings = np.stack([np.column_stack([xy, np.full(len(t), BASE[2] + z)]) for z in np.linspace(0, HEIGHT, 31)])
-    _write_tower(ch, rings)
+    ch, xy = _oval_chunk(tower_base, tmp_path / "ovale")
     circle = E.cylinder_from_circle(ch, xy[::20], inside=False)
     return ch, circle
 
@@ -314,6 +320,99 @@ def test_a_given_u_map_keeps_the_wall_grid(oval):
         E.build_elevation(ch, E.Plane(BASE, [1, 0, 0], [0, 0, 1]), u_map=kept)
 
 
+def test_another_chunk_builds_on_the_same_wall_grid(oval, tower_base, tmp_path):
+    """Two chunks of the same wall (two campaigns: the second tower a little wider): the second development, built on
+    the first one's frame (``build_like``, ``scale="keep"``), keeps its ``u_map`` and lies on the same pixels -
+    while ``scale="wall"`` would measure another map on the second chunk's relief."""
+    import rasterio
+
+    first_ch, circle = oval
+    first = E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    second_ch, _xy = _oval_chunk(tower_base, tmp_path / "seconda", stretch=(1.0, 1.1))
+    assert second_ch.data_dir != first_ch.data_dir
+    again = E.build_like(second_ch, first)
+    assert again["scale"] == "wall" and again["grid_of"] == first["id"]
+    assert np.array_equal(E.frame_from_dict(again["frame"]).u_map, E.frame_from_dict(first["frame"]).u_map)
+    assert again["bounds"] == first["bounds"] and again["size"] == first["size"]
+    assert again["resolution"] == first["resolution"] and again["depth"] == first["depth"]
+    for key in ("orthophoto", "relief"):
+        with rasterio.open(first_ch.data_dir / first[key]) as a, rasterio.open(second_ch.data_dir / again[key]) as b:
+            assert a.transform == b.transform and a.shape == b.shape
+    # the frame of the first, kept as it is, without build_like: the same
+    kept = E.build_elevation(second_ch, E.frame_from_dict(first["frame"]), resolution=0.1, depth=tuple(first["depth"]),
+                             max_angle=89.0, bounds=first["bounds"], scale="keep")
+    assert np.array_equal(E.frame_from_dict(kept["frame"]).u_map, E.frame_from_dict(first["frame"]).u_map)
+    # measured again on the second chunk: another map
+    measured = E.build_elevation(second_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    other = E.frame_from_dict(measured["frame"]).u_map
+    assert other.shape != E.frame_from_dict(first["frame"]).u_map.shape or \
+        not np.allclose(other, E.frame_from_dict(first["frame"]).u_map, atol=0.01)
+    # a cylinder without a map stays on the cylinder; another reference system is refused
+    plain = E.build_like(second_ch, E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8),
+                                                      max_angle=89.0))
+    assert "scale" not in plain and E.frame_from_dict(plain["frame"]).u_map is None
+    with pytest.raises(ValueError, match="reference system"):
+        E.build_like(second_ch, {**first, "crs": "EPSG:32633" if str(second_ch.crs) != "EPSG:32633" else "EPSG:4326"})
+
+
+def test_build_like_across_local_chunks_needs_the_same_frame_said(oval, tower_base, tmp_path, caplog):
+    """Two local chunks (no reference system) have worlds of their own: an elevation of one, rebuilt in the other, would
+    be empty or misplaced in silence. It is refused unless ``same_frame=True`` says the two are in the same frame; a
+    CRS written differently but meaning the same system passes; the colour correction is copied; without a name the
+    new one gets a name of its own; a stale source is said."""
+    from pyarchinit_photogrammetry.core import stamps
+
+    first_ch, circle = oval
+    first = E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    second_ch, _xy = _oval_chunk(tower_base, tmp_path / "locale")
+    first_ch.crs = second_ch.crs = "LOCAL"
+    entry = {**first, "crs": "LOCAL"}
+    with pytest.raises(ValueError, match="same_frame"):
+        E.build_like(second_ch, entry, source=first_ch)
+    with pytest.raises(ValueError, match="same_frame"):
+        E.build_like(second_ch, entry)                       # not an elevation of this chunk: another chunk's
+    again = E.build_like(second_ch, entry, source=first_ch, same_frame=True)
+    assert again["size"] == first["size"]
+    assert again["colour_correction"] == first["colour_correction"]
+    # the same chunk: no flag needed; the default name differs from the source's
+    second_ch.meta.setdefault("elevations", []).append(dict(again, id="sorgente", name="Torre"))
+    twin = E.build_like(second_ch, dict(again, id="sorgente", name="Torre"))
+    assert twin["name"] != "Torre" and twin["name"].startswith("Torre")
+    other = E.build_like(second_ch, dict(again, id="sorgente", name="Torre"))
+    assert other["name"] not in ("Torre", twin["name"])
+    # EPSG written two ways: the same system
+    assert E.same_crs("EPSG:32633", "epsg:32633") and not E.same_crs("EPSG:32633", "EPSG:32634")
+    assert not E.same_crs("LOCAL", "EPSG:32633")
+    # a stale source (built in a transform of another scale): said in the entry and the log
+    stale = dict(first, crs="LOCAL")
+    stale["built_in"] = (np.diag([2.0, 2.0, 2.0, 1.0]) @ np.asarray(first_ch.transform, float).reshape(4, 4)).tolist()
+    assert stamps.entry_stale(first_ch, stale, scale_only=True)
+    made = E.build_like(second_ch, stale, source=first_ch, same_frame=True)
+    assert made["grid_of_stale"] is True and "stale" in caplog.text.lower()
+    assert "grid_of_stale" not in again
+
+
+def test_build_like_an_entry_without_crs_of_this_chunk(oval, tower_base, tmp_path):
+    """An elevation built before 1.7.0 has no ``crs`` in its entry: of this chunk (or of ``source``) the chunk's own
+    system is taken; staleness is read on the chunk the entry belongs to, never on another one."""
+    import numpy as np
+
+    first_ch, circle = oval
+    first = E.build_elevation(first_ch, circle, resolution=0.1, depth=(-0.8, 0.8), max_angle=89.0, scale="wall")
+    first.pop("crs")                                        # as saved before 1.7.0 (the entry in the meta itself)
+    again = E.build_like(first_ch, first)
+    assert again["size"] == first["size"] and again["grid_of"] == first["id"]
+    second_ch, _xy = _oval_chunk(tower_base, tmp_path / "seconda")
+    other = E.build_like(second_ch, first, source=first_ch)
+    assert other["size"] == first["size"]
+    with pytest.raises(ValueError, match="source"):
+        E.build_like(second_ch, first)                      # no crs, not of this chunk, no source: unknown system
+    # stale on its own chunk only: an entry of another chunk, built in another scale there, is not judged here
+    stale = dict(first, crs=first_ch.crs)
+    stale["built_in"] = (np.diag([2.0, 2.0, 2.0, 1.0]) @ np.asarray(second_ch.transform, float).reshape(4, 4)).tolist()
+    assert "grid_of_stale" not in E.build_like(second_ch, stale)
+
+
 def test_u_map_covers_a_full_turn_and_takes_scalars():
     with pytest.raises(ValueError, match="full turn"):
         E.Cylinder(BASE, [0, 0, 1], 3.0, u_map=[[0, 0], [180, 9.0]])
@@ -362,6 +461,30 @@ def test_cli_cylinder_axis_and_scale(tower):
     assert r.exit_code != 0 and "region" in r.output
     r = runner.invoke(app, ["elevation", str(path), "--trace", "1,2,3,4", "--scale", "wall"])
     assert r.exit_code != 0 and "--circle" in r.output
+    # --like: the frame and grid of the wall-scaled one, its u_map kept (the same chunk here; --like-chunk another)
+    wall = next(e for e in ppg.Document.open(path).chunk.meta["elevations"] if e.get("scale") == "wall")
+    r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], "--name", "Seconda campagna"])
+    assert r.exit_code == 0, r.output
+    assert "on the grid of" in r.output
+    entry = ppg.Document.open(path).chunk.meta["elevations"][-1]
+    assert entry["grid_of"] == wall["id"] and entry["name"] == "Seconda campagna" and entry["scale"] == "wall"
+    assert entry["bounds"] == wall["bounds"] and entry["size"] == wall["size"]
+    assert entry["frame"]["u_map"] == wall["frame"]["u_map"]
+    r = runner.invoke(app, ["elevation", str(path), "--like", "nessuno"])
+    assert r.exit_code != 0 and "no elevation" in r.output
+    r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], "--trace", "1,2,3,4"])
+    assert r.exit_code != 0 and "--like" in r.output
+    r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], "--like-chunk", "nessuno"])
+    assert r.exit_code != 0 and "--like-chunk" in r.output
+    for extra in (["--axis", "crest"], ["--scale", "wall"], ["--front", "1"], ["--outside"]):
+        r = runner.invoke(app, ["elevation", str(path), "--like", wall["id"], *extra])
+        assert r.exit_code != 0 and extra[0] in r.output, extra
+    # no --name: a name of its own, so --like by name stays unambiguous
+    for _ in range(2):
+        r = runner.invoke(app, ["elevation", str(path), "--like", "Seconda campagna"])
+        assert r.exit_code == 0, r.output
+    names = [e["name"] for e in ppg.Document.open(path).chunk.meta["elevations"]]
+    assert names.count("Seconda campagna") == 1 and "Seconda campagna (2)" in names and "Seconda campagna (3)" in names
 
 
 # ---------------------------------------------------------------- the axis through the tower's own centre

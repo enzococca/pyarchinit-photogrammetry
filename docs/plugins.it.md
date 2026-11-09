@@ -226,6 +226,10 @@ istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo a
   la modifica dell'utente a cui il plugin ha reagito - o il passo di un altro plugin spinto in quel giro, che allora
   prende il cambiamento senza annullarlo. Un dialogo modale (`exec`, `ParamDialog.ask`, `message`) fra il cambiamento
   e il segno, o fra la fine di un lavoro in background e il push, chiude il giro: il segno diventa un passo a sé.
+- **Un segno mentre un'elaborazione finisce non è un passo.** Segnato mentre finisce un'elaborazione del programma
+  (il suo salvataggio e aggiornamento: un plugin che aggiorna i suoi dati su `context.on_refresh`, per esempio) o
+  mentre gira uno script della console, il cambiamento fa parte dell'elaborazione - un passo di elaborazione senza
+  annullamento (`run_task` senza `undo`): la cronologia riparte da lì, non si annulla - o del passo dello script.
 - **Una chiave coperta dai passi di un plugin è lasciata a loro.** Un plugin che tiene l'annullamento nei suoi passi
   dice quali chiavi di `chunk.meta` coprono: un attributo `meta_keys` della classe del passo (`meta_keys = ("mia",)`;
   i programmi precedenti lo ignorano) o `window.history.push(testo, passo, document=False, keys=["mia"])` (solo dalla

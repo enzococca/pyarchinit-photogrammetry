@@ -13,6 +13,7 @@ front of ``dmax`` (scaffolding, a section left in front of the wall) is passed t
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 import warnings
@@ -24,6 +25,8 @@ import numpy as np
 from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
+
+log = logging.getLogger("pyarchinit_photogrammetry")
 
 
 def _unit(v) -> np.ndarray:
@@ -766,13 +769,19 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
 
     ``u_map`` (``[theta_deg, u]`` pairs, a cylinder): the development on the wall with THIS map instead of one
     measured again on the relief - the grid in ``u`` of an earlier build kept (the rebuild of a stale elevation,
-    the same grid across campaigns); ``scale`` is then "wall"."""
+    the same grid across campaigns); ``scale`` is then "wall". ``scale`` ``keep``: the frame as it is - a cylinder
+    with a ``u_map`` (the frame of an elevation scaled on the wall, :func:`frame_from_dict`) keeps that map, one
+    without stays on the cylinder (:func:`build_like` builds on the frame and grid of an existing elevation)."""
+    if scale == "keep":
+        if u_map is None and frame.kind == "cylinder" and getattr(frame, "u_map", None) is not None:
+            u_map = frame.u_map
+        scale = "cylinder" if u_map is None else "wall"
     if u_map is not None:
         if frame.kind != "cylinder":
             raise ValueError("a u_map is for cylindrical developments")
         scale = "wall"
     if scale not in ("cylinder", "wall"):
-        raise ValueError(f"unknown scale {scale!r}: cylinder or wall")
+        raise ValueError(f"unknown scale {scale!r}: cylinder, wall or keep")
     if scale == "wall" and frame.kind != "cylinder":
         raise ValueError("the scale on the wall is for cylindrical developments")
     if kind == "section":
@@ -874,6 +883,95 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     chunk.meta.setdefault("elevations", []).append(entry)
     progress(1.0, f"Elevation {w}x{h} px")
     return entry
+
+
+def same_crs(a, b) -> bool:
+    """Whether two reference systems of chunks are the same system - by meaning, not by text (``EPSG:32633`` and
+    ``epsg:32633``, a code and its WKT). Two local frames are the same system only in name: whether their worlds agree
+    is not known from here (:func:`build_like` asks to say it)."""
+    from ..core import crs as crs_mod
+
+    if crs_mod.is_local(a) or crs_mod.is_local(b):
+        return crs_mod.is_local(a) and crs_mod.is_local(b)
+    if str(a) == str(b):
+        return True
+    try:
+        return crs_mod.to_pyproj(str(a)) == crs_mod.to_pyproj(str(b))
+    except Exception:
+        return False
+
+
+def _free_name(chunk: Chunk, name: str) -> str:
+    taken = {e.get("name") for e in elevations(chunk)}
+    if name not in taken:
+        return name
+    n = 2
+    while f"{name} ({n})" in taken:
+        n += 1
+    return f"{name} ({n})"
+
+
+def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Progress | None = None,
+               workers: int | None = None, source: Chunk | None = None, same_frame: bool = False) -> dict:
+    """An elevation of ``chunk`` on the SAME frame and grid as ``entry`` (an elevation of this chunk, or of ``source``,
+    another chunk: another campaign on the same wall), so the two orthophotos and reliefs lie on the same pixels and
+    can be compared cell by cell. The new entry says ``grid_of`` (the id of ``entry``).
+
+    Copied from ``entry``: the frame with its ``u_map`` (a development scaled on the wall keeps its length along the
+    wall, not one measured again on this chunk's relief), the resolution, bounds, depth band, kind (a section stays a
+    section), blending, colour correction (on or off, measured again on this chunk's photos), ghosting filter, hole
+    filling and maximum angle. Not copied: the patches (``frame_patches``) and the drawings of the elevation, which
+    belong to the source.
+
+    The frame is in world coordinates: the chunks must be in the same reference system (compared by meaning,
+    :func:`same_crs`), else ``ValueError``. Two LOCAL chunks have arbitrary worlds of their own - two campaigns of a
+    tower not aligned to each other would give an empty or misplaced grid in silence - so an elevation of another
+    chunk (``source``, or an ``entry`` that is not among this chunk's elevations) with a local frame is refused unless
+    ``same_frame=True`` says the two chunks are in the same frame (aligned, merged, or oriented on the same markers).
+
+    ``name``: by default the source's, made distinct among this chunk's elevations. A source built in a transform of
+    another scale (stale, :func:`..core.stamps.entry_stale`, read on the chunk the entry belongs to: ``source``, or this
+    chunk when it is one of its elevations) is said in the log and in ``entry["grid_of_stale"]``. An entry without
+    ``crs`` (built before 1.7.0) takes the system of its chunk; one of an unknown chunk is refused."""
+    from ..core import crs as crs_mod
+
+    mine = getattr(chunk, "crs", None)
+    own_ids = {e.get("id") for e in elevations(chunk)}
+    # the chunk the entry belongs to: ``source``, else this chunk when the entry is among its elevations, else unknown
+    owner = source if source is not None else (chunk if entry.get("id") in own_ids else None)
+    theirs = entry.get("crs")
+    if theirs is None:  # an entry saved before 1.7.0: the system of its chunk
+        if owner is None:
+            raise ValueError("the elevation says no reference system (built before 1.7.0) and is not one of this "
+                             "chunk's: give its chunk as source")
+        theirs = getattr(owner, "crs", None)
+    if not same_crs(theirs, mine):
+        raise ValueError(f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same "
+                         "reference system")
+    other = owner is not chunk
+    if other and crs_mod.is_local(mine) and not same_frame:
+        raise ValueError("the elevation is of another chunk and both are in a local frame: their worlds need not "
+                         "agree, and the grid would be empty or misplaced. If the two chunks are in the same frame "
+                         "(aligned, merged, oriented on the same markers), say it with same_frame=True "
+                         "(ppg elevation --same-frame)")
+    stale = owner is not None and stamps.entry_stale(owner, entry, scale_only=True)
+    if stale:
+        log.warning("Elevation %s (%s) is stale: built in a transform of another scale - its grid is used as it is",
+                    entry.get("name"), entry.get("id"))
+    frame = frame_from_dict(entry["frame"])
+    kind = entry.get("kind", "elevation")
+    depth = entry.get("depth")
+    new = build_elevation(chunk, frame, float(entry["resolution"]),
+                          name or _free_name(chunk, entry.get("name") or "Prospetto"),
+                          tuple(depth) if depth is not None else None, blending=entry.get("blending", "mosaic"),
+                          colour_correction=bool(entry.get("colour_correction", False)),
+                          ghosting=bool(entry.get("ghosting", False)), fill_holes=bool(entry.get("fill_holes", True)),
+                          progress=progress, workers=workers, max_angle=float(entry.get("max_angle", 80.0)),
+                          bounds=tuple(entry["bounds"]), kind=kind, scale="keep")
+    new["grid_of"] = entry["id"]
+    if stale:
+        new["grid_of_stale"] = True
+    return new
 
 
 def remove_elevation(chunk: Chunk, eid: str) -> bool:

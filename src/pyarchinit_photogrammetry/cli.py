@@ -210,7 +210,7 @@ def cut_model_cmd(project: Path,
 
 
 @app.command("elevation")
-def elevation_cmd(project: Path,
+def elevation_cmd(ctx: typer.Context, project: Path,
                   trace: Optional[str] = typer.Option(None, help="vertical plane on the trace X1,Y1,X2,Y2 (chunk CRS)"),
                   side: Optional[str] = typer.Option(None, help="with --trace: a point X,Y on the viewer's side "
                                                      "(default: where the photos are)"),
@@ -240,11 +240,23 @@ def elevation_cmd(project: Path,
                   front: float = typer.Option(0.5, help="metres kept in front of the plane (not for a section)"),
                   back: float = typer.Option(0.5, help="metres kept behind the plane"),
                   resolution: Optional[float] = typer.Option(None, help="metres per pixel (default: the GSD)"),
+                  like: Optional[str] = typer.Option(None, help="the frame and grid of an existing elevation (id or "
+                                                     "name): the same plane or cylinder - a development scaled on the "
+                                                     "wall keeps its length along the wall -, resolution, bounds, depth "
+                                                     "(--front/--back taken from it), kind and mosaic settings, so the "
+                                                     "two compare pixel by pixel (another campaign); no other option "
+                                                     "of the surface with it"),
+                  like_chunk: Optional[str] = typer.Option(None, help="with --like: the chunk of that elevation "
+                                                           "(label or key; default --chunk)"),
+                  same_frame: bool = typer.Option(False, help="with --like and two LOCAL chunks: they are in the same "
+                                                  "frame (aligned, merged, oriented on the same markers); without it "
+                                                  "an elevation of another local chunk is refused"),
                   name: Optional[str] = None, chunk: Optional[str] = None):
     """Orthophoto and relief of the model on a plane - an elevation or a section: on a trace, on the
     plane of markers with the axes chosen, or on the plane of a view - or on a cylinder (--circle: a
     well, a tower; its axis vertical, the region's, the crest's or through two points; scaled on the
-    cylinder or on the wall). With --facing the whole model is kept (a section: all behind the plane)."""
+    cylinder or on the wall). With --facing the whole model is kept (a section: all behind the plane).
+    With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk)."""
     import numpy as np
 
     from .engine import elevation as E
@@ -255,8 +267,47 @@ def elevation_cmd(project: Path,
             raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
         return np.asarray(values)
 
+    if like is not None:
+        given = [("--inside/--outside" if n == "inside" else f"--{n.replace('_', '-')}") for n in ("trace", "side", "markers", "vertical", "facing", "centre", "up",
+                                                       "circle", "inside", "axis", "axis_points", "scale", "section",
+                                                       "front", "back", "resolution")
+                 if getattr(ctx.get_parameter_source(n), "name", "DEFAULT") not in ("DEFAULT", "DEFAULT_MAP")]
+        if given:
+            raise typer.BadParameter(f"--like takes the surface, grid, depth and kind of that elevation: not with "
+                                     f"{', '.join(given)}")
+        doc, ch = _open(project, chunk)
+        source = ch
+        if like_chunk is not None:
+            source = next((c for c in doc.chunks if c.label == like_chunk or str(c.key) == like_chunk), None)
+            if source is None:
+                raise typer.BadParameter(f"no chunk {like_chunk!r} in the project", param_hint="--like-chunk")
+        found = [e for e in E.elevations(source) if e.get("id") == like] or \
+            [e for e in E.elevations(source) if e.get("name") == like]
+        if len(found) != 1:
+            names = ", ".join(f"{e.get('name')!r} ({e.get('id')})" for e in E.elevations(source)) or "none"
+            raise typer.BadParameter(f"{'no' if not found else 'more than one'} elevation {like!r} in the chunk "
+                                     f"{source.label!r}; its elevations: {names}", param_hint="--like")
+        try:
+            entry = E.build_like(ch, found[0], name=name, progress=print_progress, source=source,
+                                 same_frame=same_frame)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1)
+        doc.save()
+        ortho, relief = E.elevation_paths(ch, entry)
+        w, h = entry["size"]
+        typer.echo(f"{entry['name']}: {w} x {h} px at {entry['resolution']:.4g} m/px on the grid of "
+                   f"{found[0].get('name')!r} ({found[0]['id']})"
+                   + (f"; scaled on the wall, {E.wall_length(entry):.3f} m all round" if entry.get("scale") == "wall"
+                      else "")
+                   + ("; the source is stale (built in a transform of another scale)" if entry.get("grid_of_stale")
+                      else ""))
+        typer.echo(f"{ortho}\n{relief}")
+        return
+    if like_chunk is not None or same_frame:
+        raise typer.BadParameter("--like-chunk and --same-frame go with --like")
     if sum(v is not None for v in (trace, markers, facing, circle)) != 1:
-        raise typer.BadParameter("give one surface: --trace, --markers, --facing or --circle")
+        raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle or --like")
     if circle is None and (axis != "vertical" or axis_points is not None or scale != "cylinder"):
         raise typer.BadParameter("--axis, --axis-points and --scale are for a cylinder: give --circle")
     if axis not in E.AXIS_METHODS:

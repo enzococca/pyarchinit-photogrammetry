@@ -2026,16 +2026,21 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.history.record()
 
     def mark_modified(self) -> None:
-        """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
-        shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
-        take it back - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`)
-        are a part of its snapshots, "Dati dei plugin" (not the plugin's files). Called in the same turn as the last
-        entry - whatever made it: a step the plugin pushed with ``history.push``, units it added, the user's edit,
-        another plugin's step - the change joins that entry. A key of ``chunk.meta`` covered by a step of the plugin
-        (its ``meta_keys``, ``history.push(..., keys=)``, or else the keys the step changed in its turn) is the
-        plugin's from that step until another project is opened: its steps undo it, a change of it without a step (a
-        cache) is no entry - and what the plugin keeps there and its steps do not undo is no longer undoable
-        (``gui.undo``, docs/plugins.md)."""
+        """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title shows it,
+        *Salva* and the question at closing take it into account. What Modifica > Annulla does with it:
+
+        - the keys of ``chunk.meta`` that are not the program's (:data:`..engine.orient.PROGRAM_KEYS`) are a part of
+          its snapshots, "Dati dei plugin"; the plugin's files are not (they stay as they are on undo);
+        - marked by itself, the change of those keys is an entry of its own, "Dati dei plugin";
+        - marked in the same turn as the last entry - whatever made it: a step the plugin pushed with
+          ``history.push``, units it added, the user's edit, another plugin's step - it joins that entry;
+        - marked while a processing step ends (:meth:`run_task` without ``undo``: its save and refresh, a plugin's
+          ``on_refresh``) or while a script of the console runs, it is no entry of its own: a part of the processing
+          (the history starts again from it, not undoable) or of the script's step;
+        - a key covered by a step of the plugin (its ``meta_keys``, ``history.push(..., keys=)``, or else the keys
+          the step changed in its turn) is the plugin's from that step until another project is opened: its steps
+          undo it, a change of it without a step (a cache) is no entry - and what the plugin keeps there and its
+          steps do not undo is no longer undoable (``gui.undo``, docs/plugins.md)."""
         self._dirty(True)
 
     def call_in_gui(self, function, *args, **kwargs) -> None:

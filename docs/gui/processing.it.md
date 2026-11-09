@@ -461,7 +461,17 @@ ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
 ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
 ppg elevation scavo.ppg --circle X1,Y1,X2,Y2,X3,Y3 --outside [--axis vertical|region|crest|points]
     [--axis-points X,Y,Z,X,Y,Z] [--scale cylinder|wall]
+ppg elevation scavo.ppg --like ID [--like-chunk CHUNK] [--same-frame] [--chunk CHUNK] [--name NOME]
 ```
+
+`--like` costruisce sul sistema e sulla griglia di un prospetto già fatto (il suo id o nome; di `--like-chunk`, se no
+dello stesso chunk): lo stesso piano o cilindro - uno sviluppo in scala sulla parete tiene la sua lunghezza lungo il
+muro, non una misurata di nuovo -, risoluzione, limiti, profondità (`--front`/`--back` vengono da lì), tipo e
+impostazioni del mosaico (correzione del colore attiva o no come lì); non le sue patch né i suoi disegni. Nessun'altra
+opzione della superficie va con lui. Un'altra campagna sullo stesso muro, in un altro chunk nello stesso sistema di
+riferimento, sta allora sugli stessi pixel e i due si confrontano cella per cella. Due chunk in un sistema LOCAL hanno
+mondi propri: `--same-frame` dice che stanno nello stesso sistema (allineati, uniti, orientati sugli stessi marker),
+senza il comando rifiuta. Senza `--name` il prospetto nuovo prende il nome di partenza reso distinto ("Torre (2)").
 
 ### Disegni sui prospetti e sulle sezioni
 
