@@ -4,7 +4,9 @@ A tie is made of markers: each end is a :class:`~..core.marker.Marker` of its ch
 "legame N" or the name given, or a marker the user had already), so photos, triangulation, the 3D pick, the
 refinement by correlation and the blue flags already work for its ends. The ends are kept as (chunk key, marker key)
 and the markers hold their positions in the internal frame of their chunk: a tie survives every new transform of the
-chunks it links. The ties belong to the document (``doc.meta["ties"]``), not to a chunk: they link different chunks.
+chunks it links. A new alignment of the photos of a chunk is a new internal frame: the ends measured on photos are
+triangulated again, the others (clicked on a raster, typed, from a table) are stale until placed again or confirmed
+(:func:`stale_ends`). The ties belong to the document (``doc.meta["ties"]``), not to a chunk: they link different chunks.
 
 A tie towards known coordinates (a GNSS point, a benchmark) has one end only (``b`` None) and ``known``: world
 coordinates in the system ``crs`` of the chunk when the tie was made; its marker also gets them as its reference,
@@ -50,8 +52,12 @@ class Tie:
     ``crs`` (the chunk's system; read from the marker's reference, which is the one copy that counts). ``own_markers``:
     the markers of the ends were made by the tie (removed with it); False for markers the user had already
     (:func:`ties_from_markers`, :func:`link_markers`). ``a_uid``/``b_uid``: the identity (``Marker.uid``) of each
-    end's marker, so that a key given again to another marker (the old one removed) is never taken for the end.
-    ``broken``: set on read when an end's chunk or marker is gone (the tie is then inactive); not stored."""
+    end's marker, so that a key given again to another marker (the old one removed) is never taken for the end;
+    ``a_label``/``b_label``: its label, to recognise it when a version before 1.7.6 saved the project and lost the
+    identity (:func:`resolve_end`). ``a_alignment``/``b_alignment``: the alignment of its chunk (``meta
+    ["alignment_id"]``) each end was placed in. ``broken``: set on read when an end's chunk or marker is gone (the tie
+    is then inactive); ``stale``: the ends placed without photos in an earlier alignment (:func:`stale_ends`: left out
+    of the solve until placed again or confirmed); neither is stored."""
 
     id: str
     a: tuple[int, int]
@@ -64,8 +70,14 @@ class Tie:
     own_markers: bool = True
     a_uid: str | None = None
     b_uid: str | None = None
+    a_label: str | None = None  # the label of each end's marker (recognised by it when an older version lost the uid)
+    b_label: str | None = None
+    a_alignment: str | None = None  # the alignment of its chunk each end was placed in ("" none yet; None: not known)
+    b_alignment: str | None = None
     broken: str | None = None
     broken_parts: list | None = None  # the reasons of ``broken`` as (message code, *args), for the report; not stored
+    stale: list | None = None  # the ends ("a"/"b") placed without photos in an earlier alignment; not stored
+    stale_parts: list | None = None  # their reasons as (message code, *args); not stored
 
     def ends(self) -> list[tuple[int, int]]:
         return [self.a] if self.b is None else [self.a, self.b]
@@ -82,7 +94,7 @@ class Tie:
              "known": None if self.known is None else [float(v) for v in self.known],
              "precision": float(self.precision), "name": self.name, "active": bool(self.active),
              "own_markers": bool(self.own_markers)}
-        for key in ("crs", "a_uid", "b_uid"):
+        for key in ("crs", "a_uid", "b_uid", "a_label", "b_label", "a_alignment", "b_alignment"):
             if getattr(self, key) is not None:
                 d[key] = getattr(self, key)
         return d
@@ -96,7 +108,8 @@ class Tie:
                    known=None if known is None else [float(v) for v in known],
                    precision=float(d.get("precision", TABLE_PRECISION)), name=str(d.get("name", "")),
                    active=bool(d.get("active", True)), crs=d.get("crs"), own_markers=bool(d.get("own_markers", True)),
-                   a_uid=d.get("a_uid"), b_uid=d.get("b_uid"))
+                   a_uid=d.get("a_uid"), b_uid=d.get("b_uid"), a_label=d.get("a_label"), b_label=d.get("b_label"),
+                   a_alignment=d.get("a_alignment"), b_alignment=d.get("b_alignment"))
 
 
 # --------------------------------------------------------------------------- storage
@@ -121,10 +134,14 @@ def save_ties(doc: "Document", ties: list[Tie]) -> None:
         doc.meta.pop(META_KEY, None)
 
 
-def resolve_end(doc: "Document", end, uid: str | None = None):
+def resolve_end(doc: "Document", end, uid: str | None = None, label: str | None = None):
     """``(chunk, marker)`` of an end, or None when its chunk or marker is gone. With ``uid`` the marker must be the
     one with that identity: the marker at the key if it has it, else the marker of the chunk that has it (its key
-    changed); a marker at the key with another identity is another point, never the end."""
+    changed); a marker at the key with another identity is another point, never the end.
+
+    A marker at the key without any identity and with ``label`` (the end's label kept in the tie), when no marker of
+    the chunk has ``uid``, is the end that lost it: the project was saved by a version before 1.7.6, which does not
+    know ``Marker.uid``. It gets ``uid`` back, so the tie is whole again (:func:`ties_of` does it for every tie)."""
     chunk_key, marker_key = int(end[0]), int(end[1])
     chunk = next((c for c in doc.chunks if c.key == chunk_key), None)
     if chunk is None:
@@ -135,18 +152,24 @@ def resolve_end(doc: "Document", end, uid: str | None = None):
     if at_key is not None and at_key.uid == uid:
         return chunk, at_key
     moved = next((m for m in chunk.markers if m.uid == uid), None)
-    return None if moved is None else (chunk, moved)
+    if moved is not None:
+        return chunk, moved
+    if at_key is not None and not at_key.uid and label is not None and at_key.label == label:
+        at_key.uid = uid  # saved by an older version: the identity given back
+        return chunk, at_key
+    return None
 
 
 def _settle(doc: "Document", tie: Tie) -> None:
-    """The ends of ``tie`` checked against the markers (see :func:`ties_of`)."""
-    reasons, parts = [], []
+    """The ends of ``tie`` checked against the markers (see :func:`ties_of`); an end placed without photos in an
+    earlier alignment of its chunk is stale (:func:`stale_ends`)."""
+    reasons, parts, stale, stale_parts = [], [], [], []
     for which in ("a", "b"):
         end = getattr(tie, which)
         if end is None:
             continue
         uid = getattr(tie, f"{which}_uid")
-        found = resolve_end(doc, end, uid)
+        found = resolve_end(doc, end, uid, getattr(tie, f"{which}_label"))
         if found is None:
             chunk = next((c for c in doc.chunks if c.key == end[0]), None)
             reasons.append(f"{which}: chunk {end[0]} removed" if chunk is None else
@@ -157,6 +180,14 @@ def _settle(doc: "Document", tie: Tie) -> None:
         chunk, marker = found
         if marker.key != end[1]:
             setattr(tie, which, (chunk.key, marker.key))
+        setattr(tie, f"{which}_label", marker.label)
+        now = _alignment(chunk)
+        placed_in = getattr(tie, f"{which}_alignment")
+        if placed_in is None or placed_in != now and _measured(marker):
+            setattr(tie, f"{which}_alignment", now)  # not known yet, or re-triangulated from its photos: current
+        elif placed_in != now:
+            stale.append(which)
+            stale_parts.append(("out_stale", marker.label, chunk.label))
         if which == "a" and tie.b is None:
             if not marker.reference.location:  # cleared by the user: no known point any more (never put back)
                 reasons.append(f"a: marker {marker.label!r} of chunk {chunk.label!r} has no reference any more")
@@ -169,6 +200,84 @@ def _settle(doc: "Document", tie: Tie) -> None:
         tie.broken = "; ".join(reasons)
         tie.broken_parts = parts
         tie.active = False
+    tie.stale = stale or None
+    tie.stale_parts = stale_parts or None
+
+
+def _alignment(chunk: "Chunk") -> str:
+    """The alignment of ``chunk`` now (``meta["alignment_id"]``, given anew by every alignment of its photos and by a
+    reset of the alignment: a new internal frame); "" for a chunk never aligned by this program."""
+    return str(chunk.meta.get("alignment_id") or "")
+
+
+def _measured(marker: Marker) -> bool:
+    """The marker is measured on photos: an alignment of its chunk triangulates it again in the new frame."""
+    return any(p.measured for p in marker.projections.values())
+
+
+def _stamp(doc: "Document", tie: Tie) -> Tie:
+    """The labels and the alignment of the ends of a tie made now (they were placed in the current alignment)."""
+    for which, end, uid in (("a", tie.a, tie.a_uid), ("b", tie.b, tie.b_uid)):
+        found = None if end is None else resolve_end(doc, end, uid)
+        if found is not None:
+            setattr(tie, f"{which}_label", found[1].label)
+            setattr(tie, f"{which}_alignment", _alignment(found[0]))
+    return tie
+
+
+def stale_ends(doc: "Document") -> list[dict]:
+    """The ends of ties placed without photos (clicked on a raster, typed, from a table) in an earlier alignment of
+    their chunk: an alignment of the photos puts the chunk in a new internal frame, re-triangulates the markers
+    measured on photos and leaves the others at their old internal numbers - in the new frame they are somewhere
+    else, all by the same motion, so no check of the solve could see it. Such a tie is left out of the solve until
+    its end is placed again (*Punti in comune*, or measured on photos) or confirmed (:func:`confirm_ends`). One dict
+    per end: ``id``, ``name``, ``end`` ("a"/"b"), ``chunk``, ``marker`` (labels), ``message`` (:func:`message`)."""
+    out = []
+    for t in ties_of(doc):
+        for which, (_code, marker, chunk) in zip(t.stale or [], t.stale_parts or []):
+            out.append({"id": t.id, "name": t.name, "end": which, "chunk": chunk, "marker": marker,
+                        "message": message("out_stale", t.name or t.id, marker, chunk)})
+    return out
+
+
+def confirm_ends(doc: "Document", tie_ids=None) -> list[str]:
+    """The stale ends of the ties ``tie_ids`` (default every tie) taken as right in the current alignment of their
+    chunk: the user checked that they are still where they should be. Returns the ids of the ties confirmed."""
+    wanted = None if tie_ids is None else {t if isinstance(t, str) else t.id for t in tie_ids}
+    ties = ties_of(doc)
+    done = []
+    for t in ties:
+        if not t.stale or (wanted is not None and t.id not in wanted):
+            continue
+        for which in t.stale:
+            end, uid = (t.a, t.a_uid) if which == "a" else (t.b, t.b_uid)
+            found = resolve_end(doc, end, uid)
+            if found is not None:
+                setattr(t, f"{which}_alignment", _alignment(found[0]))
+        t.stale, t.stale_parts = None, None
+        done.append(t.id)
+    if done:
+        save_ties(doc, ties)
+    return done
+
+
+def place_end(doc: "Document", tie_id: str, which: str, point_internal) -> Tie:
+    """An end of a tie placed again at ``point_internal`` (internal coordinates of its chunk, now): its marker's
+    position, and the end belongs to the current alignment (no longer stale)."""
+    ties = ties_of(doc)
+    tie = next((t for t in ties if t.id == tie_id), None)
+    if tie is None:
+        raise KeyError(f"no tie {tie_id!r} in the document")
+    end, uid = (tie.a, tie.a_uid) if which == "a" else (tie.b, tie.b_uid)
+    found = None if end is None else resolve_end(doc, end, uid)
+    if found is None:
+        raise ValueError(f"the tie {tie.name!r} has no end {which!r}")
+    found[1].position = _point(point_internal)
+    setattr(tie, f"{which}_alignment", _alignment(found[0]))
+    for t in ties:
+        _settle(doc, t)
+    save_ties(doc, ties)
+    return next(t for t in ties if t.id == tie_id)
 
 
 def update_known(doc: "Document", tie_id: str, known=None, precision: float | None = None) -> Tie:
@@ -402,7 +511,7 @@ def link_markers(doc: "Document", chunk_a, marker_a, chunk_b, marker_b, name: st
     p = _check_precision(precision) if precision is not None else _default_precision([(ca, ma), (cb, mb)])
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ca.key, ma.key), b=(cb.key, mb.key), known=None, precision=p,
               name=name or ma.label, own_markers=False, a_uid=ua, b_uid=ub)
-    save_ties(doc, ties + [tie])
+    save_ties(doc, ties + [_stamp(doc, tie)])
     return tie
 
 
@@ -425,7 +534,7 @@ def add_tie(doc: "Document", chunk_a, point_a_internal, chunk_b, point_b_interna
     ties = ties_of(doc)
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ca.key, ma.key), b=(cb.key, mb.key), known=None,
               precision=precision, name=label, a_uid=_uid(ma), b_uid=_uid(mb))
-    save_ties(doc, ties + [tie])
+    save_ties(doc, ties + [_stamp(doc, tie)])
     return tie
 
 
@@ -444,7 +553,7 @@ def add_known(doc: "Document", chunk, point_internal, world_xyz, name: str | Non
     ties = ties_of(doc)
     tie = Tie(id=_new_id({t.id for t in ties}), a=(ch.key, m.key), b=None, known=known, precision=precision,
               name=label, crs=ch.crs, a_uid=_uid(m))
-    save_ties(doc, ties + [tie])
+    save_ties(doc, ties + [_stamp(doc, tie)])
     return tie
 
 
@@ -470,7 +579,7 @@ def ties_from_markers(doc: "Document", chunk_a, chunk_b) -> list[Tie]:
         tie = Tie(id=_new_id({t.id for t in ties + made}), a=(ca.key, m.key), b=(cb.key, other.key), known=None,
                   precision=_default_precision([(ca, m), (cb, other)]), name=m.label, own_markers=False,
                   a_uid=_uid(m), b_uid=_uid(other))
-        made.append(tie)
+        made.append(_stamp(doc, tie))
     if made:
         save_ties(doc, ties + made)
     return made
@@ -513,16 +622,19 @@ def _number(text: str, decimal_comma: bool) -> float | None:
     return float(text)
 
 
-def _rows(path: Path) -> tuple[list[list[str]], bool]:
-    """The rows of a table (commas, semicolons or tabs; a header line skipped) and whether its numbers may use a
-    decimal comma (any delimiter but the comma)."""
+def _rows(path: Path) -> tuple[list[tuple[int, list[str]]], bool]:
+    """The rows of a table (commas, semicolons or tabs; a header line skipped), each with its line number in the
+    file (as an editor counts them: blank lines and the header too), and whether its numbers may use a decimal comma
+    (any delimiter but the comma)."""
     text = Path(path).read_text(encoding="utf-8-sig")
-    first = next((ln for ln in text.splitlines() if ln.strip()), "")
+    lines = text.splitlines()
+    first = next((ln for ln in lines if ln.strip()), "")
     delimiter = "\t" if "\t" in first else (";" if ";" in first else ",")
-    rows = [r for r in csv.reader(text.splitlines(), delimiter=delimiter) if any(c.strip() for c in r)]
+    rows = [(n, r) for n, line in enumerate(lines, start=1)
+            for r in csv.reader([line], delimiter=delimiter) if any(c.strip() for c in r)]
     if rows:
         try:
-            _number(rows[0][1], delimiter != ",")
+            _number(rows[0][1][1], delimiter != ",")
         except (ValueError, IndexError):
             rows = rows[1:]  # a header
     return rows, delimiter != ","
@@ -562,39 +674,39 @@ def import_ties(doc: "Document", path) -> list[Tie]:
     with decimal commas allowed; a header line is skipped). Chunks by label (or key), points in the world coordinates
     of each chunk, converted to internal; an empty ``z`` is read from the chunk's DEM. A row with ``chunk_b`` empty is
     a point of ``chunk_a`` with known coordinates ``x_b, y_b, z_b`` (:func:`add_known`). Precision default
-    :data:`TABLE_PRECISION`. The table is read whole first: a ValueError naming the row, and nothing added, when a
+    :data:`TABLE_PRECISION`. The table is read whole first: a ValueError naming the line of the file, and nothing added, when a
     row is wrong."""
     rows, comma = _rows(Path(path))
     planned = []
-    for i, row in enumerate(rows, start=1):
+    for i, row in rows:
         cells = [c.strip() for c in row] + [""] * 10
         try:
             ca = _chunk(doc, cells[0])
             cb = _chunk(doc, cells[4]) if cells[4] else None
         except (KeyError, ValueError) as exc:
-            raise ValueError(f"row {i}: {exc}") from None
+            raise ValueError(f"line {i}: {exc}") from None
         try:
             xyz_a = [_number(c, comma) for c in cells[1:4]]
             xyz_b = [_number(c, comma) for c in cells[5:8]]
             precision = _number(cells[8], comma)
         except ValueError:
-            raise ValueError(f"row {i}: a coordinate or the precision is not a number") from None
+            raise ValueError(f"line {i}: a coordinate or the precision is not a number") from None
         if precision is not None and not precision > 0:
-            raise ValueError(f"row {i}: the precision must be positive")
+            raise ValueError(f"line {i}: the precision must be positive")
         ends = []
         for chunk, xyz in ((ca, xyz_a), (cb, xyz_b)):
             if xyz[0] is None or xyz[1] is None:
-                raise ValueError(f"row {i}: x and y are needed")
+                raise ValueError(f"line {i}: x and y are needed")
             if xyz[2] is None:
                 if chunk is None:
-                    raise ValueError(f"row {i}: the known point needs its z")
+                    raise ValueError(f"line {i}: the known point needs its z")
                 try:
                     xyz = [xyz[0], xyz[1], dem_height(chunk, xyz[0], xyz[1])]
                 except ValueError as exc:
-                    raise ValueError(f"row {i}: {exc}") from None
+                    raise ValueError(f"line {i}: {exc}") from None
             ends.append(np.asarray(xyz, float))
         if cb is ca:
-            raise ValueError(f"row {i}: a tie links two different chunks")
+            raise ValueError(f"line {i}: a tie links two different chunks")
         planned.append((ca, ends[0], cb, ends[1], precision, cells[9] or None))
     made = []
     for ca, wa, cb, wb, precision, name in planned:
@@ -693,6 +805,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "out_reference_cleared": ("Escluso «{0}»: il marker {1} del chunk {2} non ha più un riferimento",
                               "Left out «{0}»: marker {1} of chunk {2} has no reference any more"),
     "out_inactive": ("Escluso «{0}»: non attivo", "Left out «{0}»: inactive"),
+    "out_stale": ("Escluso «{0}»: il marker {1} del chunk {2} è da rimisurare dopo il riallineamento (rimettilo in "
+                  "Punti in comune, misuralo sulle foto o conferma che è giusto)",
+                  "Left out «{0}»: marker {1} of chunk {2} to be measured again after the new alignment (place it "
+                  "again in Common points, measure it on photos or confirm it is right)"),
     "out_outside": ("Escluso «{0}»: il chunk {1} non è nella stima", "Left out «{0}»: chunk {1} not in the solve"),
     "out_no_position": ("Escluso «{0}»: il marker {1} del chunk {2} non ha una posizione",
                         "Left out «{0}»: marker {1} of chunk {2} has no position"),
@@ -1041,6 +1157,11 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
             continue
         if not t.active:
             left_out.append(_out(t.id, t.name, ("out_inactive",), reason="inactive"))
+            continue
+        if t.stale:
+            left_out.append(_out(t.id, t.name, *t.stale_parts,
+                                 reason="; ".join(f"marker {m!r} of chunk {c!r} to be placed again after the new "
+                                                  "alignment" for _code, m, c in t.stale_parts)))
             continue
         outside = [doc_chunk.label for k, _ in t.ends() if k not in chunks
                    for doc_chunk in doc.chunks if doc_chunk.key == k]
@@ -1528,7 +1649,7 @@ def _usable_ends(doc: "Document", ties=None) -> list[tuple[Tie, tuple, np.ndarra
     order = {c.key: i for i, c in enumerate(doc.chunks)}
     out = []
     for t in ties_of(doc):
-        if (wanted is not None and t.id not in wanted) or t.broken or not t.active:
+        if (wanted is not None and t.id not in wanted) or t.broken or t.stale or not t.active:
             continue
         if t.b is None:
             pa = end_world(doc, t.a[0], t.a[1], t.a_uid)

@@ -145,7 +145,7 @@ def test_import_table(scene, tmp_path, runner):
     bad = tmp_path / "bad.csv"
     bad.write_text("2024,1,2,3,nessuno,1,2,3\n", encoding="utf-8")
     r = runner.invoke(app, ["ties", "import", str(path), str(bad)])
-    assert r.exit_code == 1 and "row 1" in r.output
+    assert r.exit_code == 1 and "line 1" in r.output
     assert len(ties.ties_of(ppg.Document.open(path))) == 5
 
 
@@ -295,3 +295,23 @@ def test_no_check_at_all_needs_its_own_confirmation(scene, tmp_path, runner):
     r = runner.invoke(app, args + ["--yes", "--accept-no-check"])
     assert r.exit_code == 0 and "applied to 2025" in r.output
     assert ppg.Document.open(path).chunks[1].meta["chunk_alignment"]["redundancy"] == 0
+
+
+def test_ends_after_a_new_alignment_are_listed_and_confirmed(scene, tmp_path, runner):
+    path, a, b, _c = _project(scene, tmp_path)
+    w = _world(scene, AB[0])[0]
+    assert _add(runner, path, a, b, w, "--name", "picchetto 1").exit_code == 0
+    doc = ppg.Document.open(path)
+    doc.chunks[1].meta["alignment_id"] = "nuovo"  # 2025 aligned again: a new internal frame
+    doc.save()
+    r = runner.invoke(app, ["ties", "list", str(path)])
+    assert r.exit_code == 0 and "to be measured again after the new alignment" in _said(r)
+    r = runner.invoke(app, ["ties", "list", str(path), "--json"])
+    assert json.loads(r.output)[0]["stale"] == ["b"]
+    r = runner.invoke(app, ["ties", "check", str(path), "--unknowns", "2024=fixed,2025=shift"])
+    assert r.exit_code == 1  # its only tie left out: nothing places 2025
+    r = runner.invoke(app, ["ties", "confirm", str(path), "picchetto 1"])
+    assert r.exit_code == 0 and "confirmed 1 ties" in r.output
+    assert ties.stale_ends(ppg.Document.open(path)) == []
+    r = runner.invoke(app, ["ties", "confirm", str(path)])
+    assert r.exit_code == 0 and "no tie with an end" in r.output

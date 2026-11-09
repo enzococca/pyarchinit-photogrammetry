@@ -328,3 +328,103 @@ def test_raster_precision_chooses_the_raster_and_skips_a_stale_one(tmp_path):
     stamps.stamp(a, "dem")
     a.transform = _rot_z(5.0)  # the DEM is now to be rebuilt: its cells say nothing of this system
     assert stamps.is_stale(a, "dem") and ties.raster_precision(a, "dem") is None
+
+
+def test_ties_survive_a_save_by_an_older_version(tmp_path):
+    """A project with ties saved by 1.7.5 or earlier: the markers lose their identity (the old ``Marker.to_dict``
+    does not know ``uid``), the ties keep theirs. The marker at the key with the end's label is the end again."""
+    doc, a, b = _two_chunks(tmp_path)
+    t1 = ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    ma, mb = a.add_marker("P1", [0, 0, 0]), b.add_marker("P1", [1, 0, 0])
+    t2 = ties.link_markers(doc, a, ma, b, mb)
+    doc.save()
+    old = ppg.Document.open(tmp_path / "scavo.ppg")
+    for ch in old.chunks:
+        for m in ch.markers:
+            m.uid = None  # what an older version writes: no "uid" in the markers
+    old.save()
+    again = ppg.Document.open(tmp_path / "scavo.ppg")
+    assert all(m.uid is None for ch in again.chunks for m in ch.markers)
+    got = {t.id: t for t in ties.ties_of(again)}
+    for t in (t1, t2):
+        assert got[t.id].active and not got[t.id].broken, got[t.id].broken
+    assert again.chunks[1].marker_by_key(t1.b[1]).uid == t1.b_uid  # the identity given back
+    np.testing.assert_allclose(ties.end_world(again, *t1.b, uid=t1.b_uid),
+                               again.chunks[1].to_world(np.array([[4.0, 5, 6]]))[0])
+    again.save()
+    assert ties.ties_of(ppg.Document.open(tmp_path / "scavo.ppg"))[0].active
+    # a marker without identity at the key but with another label is another point: never the end
+    doc2, a2, b2 = _two_chunks()
+    t = ties.add_tie(doc2, a2, [1, 2, 3], b2, [4, 5, 6])
+    b2.remove_markers([t.b[1]])
+    other = b2.add_marker("altro", [9, 9, 9])
+    assert other.key == t.b[1] and other.uid is None
+    (got2,) = ties.ties_of(doc2)
+    assert got2.broken and other.uid is None
+
+
+def test_a_new_alignment_leaves_ends_without_photos_out_until_placed_again_or_confirmed(tmp_path):
+    """An alignment of the photos is a new internal frame: an end placed without photos keeps its old internal
+    numbers, wrong by the same motion as all the others of its chunk - no check could see it. It is stale: left out of
+    the solve and said, until placed again or confirmed. An end measured on photos is triangulated again: current."""
+    doc, a, b = _two_chunks(tmp_path)
+    true = [np.array(p, float) for p in ([0, 0, 0], [6, 0, 0], [0, 5, 1], [6, 5, 0.5])]
+    made = [ties.add_tie(doc, a, p, b, geometry_inv(b, a.to_world(p[None])[0]), precision=0.01) for p in true]
+    assert all(t.b_alignment == "" for t in made)
+    b.meta["alignment_id"] = "nuovo"  # what Chunk.align_cameras / reset_alignment do
+    got = ties.ties_of(doc)
+    assert all(t.stale == ["b"] for t in got) and all(t.active and not t.broken for t in got)
+    stale = ties.stale_ends(doc)
+    assert [s["id"] for s in stale] == [t.id for t in made] and stale[0]["end"] == "b"
+    assert "riallineamento" in ties.render(stale[0]["message"], "it")
+    assert "new alignment" in ties.render(stale[0]["message"])
+    assert ties._usable_ends(doc) == []
+    with pytest.raises(ties.TieError):
+        ties.solve(doc, {a.key: "fixed", b.key: "shift"})  # nothing left to place B
+    doc.save()
+    assert all(t.stale == ["b"] for t in ties.ties_of(ppg.Document.open(tmp_path / "scavo.ppg")))
+
+    # three ends placed again in the new frame; the fourth still out, said why
+    for t, p in zip(made[:3], true[:3]):
+        ties.place_end(doc, t.id, "b", geometry_inv(b, a.to_world(p[None])[0]))
+    sol = ties.solve(doc, {a.key: "fixed", b.key: "shift"})
+    assert sorted(r["id"] for r in sol.residuals) == sorted(t.id for t in made[:3])
+    (out,) = sol.left_out
+    assert out["id"] == made[3].id and out["messages"][0]["code"] == "out_stale"
+    # confirmed: in again
+    assert ties.confirm_ends(doc, [made[3].id]) == [made[3].id]
+    assert ties.stale_ends(doc) == [] and not ties.solve(doc, {a.key: "fixed", b.key: "shift"}).left_out
+    assert ties.confirm_ends(doc) == []
+
+    # an end measured on photos is triangulated again by the new alignment: never stale
+    ch = _photo_chunk(doc)
+    m = ch.add_marker("F", [0.0, 0.0, 0.0])
+    for cam in ch.cameras:
+        px, _ = cam.project(ch.sensor(cam), np.zeros((1, 3)))
+        m.projections[cam.key] = Projection(float(px[0, 0]), float(px[0, 1]), True)
+    tf = ties.link_markers(doc, a, a.add_marker("F", [0, 0, 0]), ch, m)
+    ch.meta["alignment_id"] = "altro"
+    got = ties.tie_by_id(doc, tf.id)
+    assert not got.stale and got.b_alignment == "altro"
+
+
+def geometry_inv(chunk, world) -> np.ndarray:
+    """The internal point of ``chunk`` at the world point ``world``."""
+    return chunk.to_internal(np.asarray(world, float)[None])[0]
+
+
+def test_align_cameras_and_reset_give_a_new_alignment():
+    doc, a, _b = _two_chunks()
+    a.reset_alignment()
+    first = a.meta["alignment_id"]
+    a.reset_alignment()
+    assert first and a.meta["alignment_id"] != first
+
+
+def test_import_errors_name_the_line_of_the_file(tmp_path):
+    doc, a, b = _two_chunks()
+    table = tmp_path / "legami.csv"
+    table.write_text("chunk_a,x,y,z,chunk_b,x,y,z\n\n2024,1,2,3,2025,1,2,3\n2024,1,2,3,nessuno,1,2,3\n",
+                     encoding="utf-8")
+    with pytest.raises(ValueError, match="line 4"):
+        ties.import_ties(doc, table)

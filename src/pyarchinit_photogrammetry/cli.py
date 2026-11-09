@@ -1159,6 +1159,15 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
                          ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
+    _say_stale_ends(doc)
+
+
+def _say_stale_ends(doc) -> None:
+    """The ends of ties left out after a new alignment (placed without photos in the old frame), said."""
+    from .engine import ties as ties_mod
+
+    for item in ties_mod.stale_ends(doc):
+        typer.echo("warning: " + ties_mod.render(item["message"]) + f" - ppg ties confirm {item['id']}")
 
 
 @app.command()
@@ -4014,6 +4023,10 @@ def _tie_line(doc, t) -> str:
     else:
         b = end(t.b, t.b_uid)
     state = "active" if t.active else ("inactive: " + t.broken if t.broken else "inactive")
+    if t.stale:
+        state += "; left out: " + "; ".join(
+            f"marker {m!r} of chunk {c!r} to be measured again after the new alignment (ppg ties confirm)"
+            for _code, m, c in t.stale_parts)
     return f"{t.id}  {t.name!r}: {a} <-> {b}, precision {t.precision:.3f} m, {state}"
 
 
@@ -4172,6 +4185,7 @@ def ties_list(project: Path,
         for t in all_ties:
             d = t.to_dict()
             d["broken"] = t.broken
+            d["stale"] = t.stale or []
             for which, end, uid in (("a", t.a, t.a_uid), ("b", t.b, t.b_uid)):
                 found = None if end is None else ties_mod.resolve_end(doc, end, uid)
                 d[f"{which}_labels"] = None if found is None else [found[0].label, found[1].label]
@@ -4204,6 +4218,27 @@ def ties_remove(project: Path,
         _ties_error(exc)
     doc.save()
     typer.echo(f"removed {t.id} {t.name!r}" + ("" if markers and t.own_markers else ", markers kept"))
+
+
+@ties_app.command("confirm")
+def ties_confirm(project: Path,
+                 tie: Optional[list[str]] = typer.Argument(None, help="ids (or names) of the ties; none: every tie with an end "
+                                                            "to be measured again")):
+    """Take the ends of ties placed without photos as still right after a new alignment of their chunk.
+
+    A new alignment of the photos puts a chunk in a new internal frame: ends measured on photos are triangulated
+    again, the others keep their old numbers and are left out of the solve until confirmed (or placed again). Confirm
+    only an end you checked: in the new frame it must still be on its point."""
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    ids = None if not tie else [_find_tie(doc, ref).id for ref in tie]
+    done = ties_mod.confirm_ends(doc, ids)
+    if not done:
+        typer.echo("no tie with an end to be measured again")
+        return
+    doc.save()
+    typer.echo(f"confirmed {len(done)} ties: {', '.join(done)}")
 
 
 @ties_app.command("check")
