@@ -435,3 +435,150 @@ def test_a_known_tie_left_out_does_not_come_back_as_a_reference(scene):
     sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"}, ties=chosen)
     assert all(r["kind"] == "tie" for r in sol.residuals)
     _close(sol.transforms[b.chunk.key], b.truth)
+
+
+# --------------------------------------------------------------------------- fix round 1
+def _far_turned(scene):
+    """B turned 170 degrees, tied to the fixed A by one tie only and to C by four; C tied to A by four (the order
+    of the document reaches B first)."""
+    doc, a, b, c = _three(scene, {"b": _similarity(deg_z=170.0, scale=1.02, shift=(3.0, -2.0, 0.5))})
+    _tie(doc, a, b, _world(scene, AB[0]))
+    for xy in [(2.6, 0.6), (3.5, 1.2), (3.2, 2.5), (2.2, 2.0)]:
+        _tie(doc, b, c, _world(scene, xy))
+    for xy in [(3.6, 0.3), (1.5, 2.4), (0.5, 2.2), (1.8, 0.5)]:
+        _tie(doc, a, c, _world(scene, xy))
+    return doc, a, b, c
+
+
+def test_a_chunk_far_turned_and_tied_once_to_the_fixed_one_is_placed_from_all_its_ties(scene):
+    doc, a, b, c = _far_turned(scene)
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity", c.chunk.key: "similarity"})
+    _close(sol.transforms[b.chunk.key], b.truth)
+    _close(sol.transforms[c.chunk.key], c.truth)
+    assert sol.converged
+
+
+def test_a_solve_that_does_not_converge_says_so(scene, monkeypatch):
+    """With no first position at all (the start 170 degrees off) the solve finds the truth or says it did not
+    converge - never that the ties do not determine the chunk."""
+    doc, a, b, c = _far_turned(scene)
+    monkeypatch.setattr(ties, "_initial", lambda kind, src, dst, w: np.eye(4))
+    try:
+        sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity", c.chunk.key: "similarity"})
+    except ties.TieError as err:
+        assert "did not converge" in str(err) and "non converge" in err.italian
+    else:
+        _close(sol.transforms[b.chunk.key], b.truth)
+
+
+def test_nearly_collinear_ties_give_a_poor_chunk_precision_and_a_warning(scene):
+    doc, a, b, _c = _three(scene)
+    rng = np.random.default_rng(11)
+    for i, x in enumerate((0.5, 1.5, 2.5, 3.5)):
+        w = _world(scene, (x, 1.0))[0] * [1, 1, 0] + [0, 0, 100.0]
+        if i == 2:
+            w = w + [0.0, 0.01, 0.0]  # 1 cm off the line
+        noise = rng.normal(0, 0.005, 3)
+        ties.add_tie(doc, a.chunk, a.internal(w)[0], b.chunk, b.internal(w + noise)[0], precision=0.005)
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "rigid"})
+    pc = sol.per_chunk[b.chunk.key]
+    assert pc["precision_m"] > 0.1 and pc["precision_m"] > pc["precision_limit"]
+    assert any("2025" in w and "precision" in w for w in sol.warnings)
+
+
+def test_well_spread_ties_give_a_good_chunk_precision(scene):
+    doc, a, b, _c = _three(scene)
+    rng = np.random.default_rng(12)
+    for xy in AB + [(3.0, 1.0)]:
+        w = _world(scene, xy)[0]
+        ties.add_tie(doc, a.chunk, a.internal(w)[0], b.chunk, b.internal(w + rng.normal(0, 0.005, 3))[0],
+                     precision=0.005)
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    pc = sol.per_chunk[b.chunk.key]
+    assert 0 < pc["precision_m"] < pc["precision_limit"]
+    assert sol.per_chunk[a.chunk.key]["precision_m"] == 0.0
+    assert not sol.warnings
+
+
+def test_local_references_of_a_chunk_leaving_its_frame_are_left_out(scene):
+    doc, a, b, _c = _three(scene)
+    b.chunk.crs = "LOCAL"
+    for xy in AB:
+        _tie(doc, a, b, _world(scene, xy))
+    b.chunk.add_marker("vecchio caposaldo", [0.0, 0.0, 0.0], reference=[10.0, 20.0, 1.0])
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    _close(sol.transforms[b.chunk.key], b.truth)
+    out = next(x for x in sol.left_out if x["name"] == "vecchio caposaldo")
+    assert "LOCAL" in out["reason"]
+
+
+def test_a_known_tie_follows_its_reference_switches(scene):
+    doc, a, b, _c = _three(scene)
+    for xy in AB:
+        _tie(doc, a, b, _world(scene, xy))
+    w1, w2 = _world(scene, BC[0])[0], _world(scene, BC[1])[0]
+    k1 = ties.add_known(doc, b.chunk, b.internal(w1)[0], w1 + [0, 0, 0.3])
+    k2 = ties.add_known(doc, b.chunk, b.internal(w2)[0], w2 + [0, 0, 0.3])
+    b.chunk.marker_by_key(k1.a[1]).checkpoint = True
+    b.chunk.marker_by_key(k2.a[1]).reference.enabled = False
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    _close(sol.transforms[b.chunk.key], b.truth)
+    e1 = next(r for r in sol.residuals if r["id"] == k1.id)
+    assert e1["check"] and not e1["fitted"] and e1["dz"] == pytest.approx(-0.3, abs=1e-6)
+    assert "disabled" in next(x for x in sol.left_out if x["id"] == k2.id)["reason"]
+
+
+def test_unknown_tie_ids_are_listed(scene):
+    doc, a, b, _c = _three(scene)
+    made = [_tie(doc, a, b, _world(scene, xy)) for xy in AB]
+    sol = ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "rigid"}, ties=[t.id for t in made] + ["t-nope"])
+    assert {"id": "t-nope", "name": "", "reason": "no such tie"} in sol.left_out
+
+
+def test_apply_restores_cameras_and_says_which_products_are_stale():
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+    from pyarchinit_photogrammetry.core.camera import Camera, Reference
+
+    doc = ppg.Document()
+    a, b = doc.add_chunk("33"), doc.add_chunk("32")
+    a.crs, b.crs = "EPSG:32633", "EPSG:32632"
+    origin33 = np.array([258000.0, 4642000.0, 50.0])
+    a.transform = geometry_translate(origin33)
+    world33 = origin33 + np.random.default_rng(4).uniform([-20, -20, -2], [20, 20, 2], (4, 3))
+    world32 = crs_mod.transform_points(world33, "EPSG:32633", "EPSG:32632")
+    origin32 = np.round(world32.mean(0))
+    b.transform = geometry_translate(origin32 + [0.5, -0.4, 0.3])
+    for w33, w32 in zip(world33, world32):
+        ties.add_tie(doc, a, w33 - origin33, b, w32 - origin32)
+    b.cameras.append(Camera(key=0, label="c0", path="c0.jpg", sensor_key=0,
+                            reference=Reference(location=list(world32[0]))))
+    b.products["dem"] = "dem.tif"
+    sol = ties.solve(doc, {a.key: "fixed", b.key: "rigid"})
+    changed = ties.apply(doc, sol)
+    assert changed["stale_products"] == {b.key: ["dem"]}
+    assert doc.meta["ties_report"]["per_chunk"][str(b.key)]["stale_products"] == ["dem"]
+    assert b.cameras[0].meta.get("reference_crs") == "EPSG:32632"
+    ties.restore(doc, changed)
+    assert "reference_crs" not in b.cameras[0].meta and b.crs == "EPSG:32632"
+
+
+def test_ties_on_a_slanted_line_are_refused(scene):
+    doc, a, b, _c = _three(scene)
+    for t in (0.0, 1.0, 2.5):
+        w = np.array([scene.origin[0] + 0.5 + t, scene.origin[1] + 0.4 + 0.7 * t, 100.0 + 0.2 * t])
+        _tie(doc, a, b, w)
+    with pytest.raises(ties.TieError) as err:
+        ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    assert "line" in str(err.value)
+
+
+def test_a_scale_beyond_the_bound_is_a_solve_that_did_not_converge(scene, monkeypatch):
+    doc, a, b, _c = _three(scene, {"b": _similarity(scale=0.05)})  # 20 times too small
+    for xy in AB:
+        _tie(doc, a, b, _world(scene, xy))
+    _close(ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"}).transforms[b.chunk.key], b.truth)
+    monkeypatch.setattr(ties, "_initial", lambda kind, src, dst, w: np.eye(4))  # no first position: x20 to find
+    with pytest.raises(ties.TieError) as err:
+        ties.solve(doc, {a.chunk.key: "fixed", b.chunk.key: "similarity"})
+    assert "did not converge" in str(err.value) and "2025" in str(err.value)
+    assert "non converge" in err.value.italian
