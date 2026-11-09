@@ -3188,7 +3188,29 @@
   "Nessun legame da rimisurare dopo il riallineamento.": "No tie to be measured again after the new alignment.",
   "Un'elaborazione è in corso (per esempio il controllo dei legami): aspetta che finisca, poi riprova.": "A task is running (for example the check of the ties): wait for it to finish, then try again.",
   "Quote stabili": "Stable heights",
-  "quota stabile": "stable height"
+  "quota stabile": "stable height",
+  "Misura quota stabile...": "Measure stable height...",
+  "Misura quota stabile": "Measure stable height",
+  "La quota di un chunk rispetto a un altro sul terreno che non è cambiato (confronto dei DEM): fissa solo la quota, nella stima con i legami": "The height of a chunk against another on ground that did not change (the DEMs compared): it fixes the height only, in the solve with the ties",
+  "La quota di un chunk rispetto a un altro sul terreno che non è cambiato (confronto dei DEM): una quota stabile nella finestra dei legami": "The height of a chunk against another on ground that did not change (the DEMs compared): a stable height in the ties window",
+  "Rimisura": "Measure again",
+  "Le quote stabili scelte (nessuna scelta: quelle da rimisurare) misurate di nuovo dove i chunk sono adesso": "The stable heights chosen (none chosen: those to be measured again) measured again where the chunks are now",
+  "Rimisura quota stabile": "Measure stable height again",
+  "Rimuovi quote stabili": "Remove stable heights",
+  "Quota stabile attiva o no": "Stable height active or not",
+  "Rispetto a": "Against",
+  "dz (m)": "dz (m)",
+  "NMAD (m)": "NMAD (m)",
+  "Una quota stabile confronta i DEM di due chunk: servono almeno due chunk con il DEM.": "A stable height compares the DEMs of two chunks: at least two chunks with a DEM are needed.",
+  "Il DEM del chunk confrontato con quello del riferimento dove il terreno non è cambiato: la differenza di quota diventa una quota stabile, usata dalla stima con i legami. Nulla viene applicato finché non premi Applica.": "The DEM of the chunk compared with that of the reference where the ground did not change: the difference in height becomes a stable height, used by the solve with the ties. Nothing is applied until you press Apply.",
+  "Scegli nella tabella le quote stabili da rimisurare.": "Choose in the table the stable heights to measure again.",
+  "Scegli nella tabella le quote stabili da rimuovere.": "Choose in the table the stable heights to remove.",
+  "Chunk da agganciare in quota": "Chunk to tie in height",
+  "Terreno stabile": "Stable ground",
+  "Escludi": "Leave out",
+  "Piano (anche l'inclinazione) invece di uno scostamento": "Plane (the tilt too) instead of an offset",
+  "Automatica (pendenze basse, celle concordi)": "Automatic (low slopes, agreeing cells)",
+  "niente": "nothing"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4270,6 +4292,12 @@
   "{0} ({1} su {2}): in quota {3:+.3f} m, precisione {4:.3f} m, spostamento in pianta {5:.3f} m": "{0} ({1} on {2}): height {3:+.3f} m, precision {4:.3f} m, moved in plan {5:.3f} m",
   "Escluso «{0}»: quota stabile senza punti di ancoraggio": "Left out «{0}»: stable height without anchors",
   "{0} quote stabili fra i chunk aggiunti, copiate con loro": "{0} stable heights between the chunks appended, copied with them",
-  "{0}: quota stabile «{1}» non copiata: va verso un chunk non aggiunto": "{0}: stable height «{1}» not copied: it goes to a chunk not appended"
+  "{0}: quota stabile «{1}» non copiata: va verso un chunk non aggiunto": "{0}: stable height «{1}» not copied: it goes to a chunk not appended",
+  "Quota stabile «{0}»: dz {1} m, NMAD {2} m su {3} celle stabili": "Stable height «{0}»: dz {1} m, NMAD {2} m on {3} stable cells",
+  "da rimisurare: spostati di {0} m in pianta": "to be measured again: moved {0} m apart in plan",
+  "Quota stabile: {0}": "Stable height: {0}",
+  "Quota stabile «{0}»: {1}": "Stable height «{0}»: {1}",
+  "Quota stabile «{0}» rimisurata: dz {1} m, NMAD {2} m": "Stable height «{0}» measured again: dz {1} m, NMAD {2} m",
+  "chunk {0} (non c'è più)": "chunk {0} (no longer there)"
  }
 }

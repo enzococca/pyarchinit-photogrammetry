@@ -469,5 +469,26 @@ def remeasure(doc: "Document", tie_id: str, progress: Progress | None = None) ->
     return new
 
 
+def horizontal_move(doc: "Document", tie: HeightTie) -> tuple[float, float] | None:
+    """How far apart in plan the anchors of ``tie`` are now (the largest, in the system of A) and the limit past which
+    it is to be measured again (R3: ``max(2 DEM cells of A, 0.10 m)``, as the solve says it with ``remeasure_height``);
+    None when a chunk is gone, has no anchors or the two systems do not mix."""
+    chunks = {c.key: c for c in doc.chunks}
+    ca, cb = chunks.get(int(tie.a)), chunks.get(int(tie.b))
+    if ca is None or cb is None or not tie.anchors or not ties._compatible(cb.crs, ca.crs):
+        return None
+    worst = 0.0
+    try:
+        for x in tie.anchors:
+            wa = ca.to_world(np.array([x["a"]], float))[0]
+            wb = ties._to_system(cb.to_world(np.array([x["b"]], float)), cb.crs, ca.crs, cb,
+                                 "the anchors of a stable height")[0]
+            worst = max(worst, float(np.hypot(wb[0] - wa[0], wb[1] - wa[1])))
+    except (ValueError, ties.TieError):
+        return None
+    cell = ties._dem_cell(ca)
+    return worst, max(ties.REMEASURE_CELLS * cell if cell else 0.0, ties.REMEASURE_MIN)
+
+
 __all__ = ["META_KEY", "LABEL", "MIN_PRECISION", "HeightTie", "dem_in_world", "measure", "add", "heights_of",
-           "save_heights", "remove", "remeasure"]
+           "save_heights", "remove", "remeasure", "horizontal_move"]

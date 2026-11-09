@@ -996,6 +996,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Aggancia chunk con legami..."), self.tie_chunks, processing=True, icon_name="chunk",
                   tip=tr("Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte "
                          "per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare"))
+        self._act(m, tr("Misura quota stabile..."), self.measure_stable_height, processing=True, icon_name="chunk",
+                  tip=tr("La quota di un chunk rispetto a un altro sul terreno che non è cambiato (confronto dei DEM): "
+                         "una quota stabile nella finestra dei legami"))
         self._act(m, tr("Punti in comune..."), self.common_points, processing=True, icon_name="chunk",
                   tip=tr("Due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in "
                          "ognuna, un estremo anche su una foto"))
@@ -4265,6 +4268,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 dlg.activateWindow()
                 return
         self._ties_dialog = TiesDialog.ask(self)
+
+    def measure_stable_height(self) -> None:
+        """*Flusso di lavoro > Misura quota stabile*: the dialog of the ties opened and its *Misura quota stabile...*
+        asked (a stable height is a record of the ties: it lives in that window)."""
+        self.tie_chunks()
+        dlg = self._live_ties_dialog()
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.ask_measure()
 
     def _live_ties_dialog(self):
         """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""
