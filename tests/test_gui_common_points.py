@@ -339,6 +339,12 @@ def test_selected_tie_on_one_more_photo_keeps_a_precision_set_by_hand(win, qapp,
     assert cp.add_photo_to_selected(a.chunk, cam, px, py)
     (tie,) = ties.ties_of(win.doc)
     assert tie.precision != pytest.approx(made)  # made here: this end's precision from its photo now
+    from_photo = tie.precision
+    win.undo()  # the photo taken away: the precision the program gave it before comes back
+    assert ties.ties_of(win.doc)[0].precision == pytest.approx(made)
+    cp.select(tie.id)
+    assert cp.add_photo_to_selected(a.chunk, cam, px, py)  # the precision is still the program's: it follows
+    assert ties.ties_of(win.doc)[0].precision == pytest.approx(from_photo) and "invariata" not in cp.status.text()
     all_ties = ties.ties_of(win.doc)
     all_ties[0].precision = 0.123  # by hand in the dialog
     ties.save_ties(win.doc, all_ties)

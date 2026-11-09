@@ -283,7 +283,9 @@ class CommonPointsWindow(QDialog):
         # ties with an end moved since the last check -> the internal places of their ends when the residual held: no
         # residual drawn until a new check, or until the ends are back there (an undo)
         self._moved: dict[str, list] = {}
-        self._made: dict[str, dict] = {}  # ties made here: chunk key -> the precision of that end (metres)
+        # ties made here: every precision they were given by the program, as {chunk key: precision of that end
+        # (metres)} - the latest last; an undo brings one of them back, so it is still the program's, not one by hand
+        self._made: dict[str, list[dict]] = {}
         self._signature = None  # what the views show (chunks, transforms, rasters): refresh() re-links when it changes
         self._result_seen = None
         self._syncing = False
@@ -474,7 +476,8 @@ class CommonPointsWindow(QDialog):
         keys = [c.key for c in self.doc.chunks]
         listed = [self.sides[0].chunks.itemData(i) for i in range(self.sides[0].chunks.count())]
         labels = [self.sides[0].chunks.itemText(i) for i in range(self.sides[0].chunks.count())]
-        if keys != listed or labels != [c.label for c in self.doc.chunks]:
+        chosen_again = keys != listed or labels != [c.label for c in self.doc.chunks]
+        if chosen_again:
             chunks = {c.key: c for c in self.doc.chunks}
             first = chunks.get(self.sides[0].chunks.currentData())
             second = chunks.get(self.sides[1].chunks.currentData())
@@ -488,7 +491,8 @@ class CommonPointsWindow(QDialog):
             self.pending = None
         self._update_note()
         self.redraw()
-        self._signature = self.signature()
+        # the same chunks shown: re-linking them changes nothing the signature has; else other chunks were chosen
+        self._signature = signature if not chosen_again else self.signature()
 
     def signature(self):
         """The chunks of the project and, for each side, its chunk's transform and system and the rasters it can show
@@ -751,7 +755,7 @@ class CommonPointsWindow(QDialog):
             if t.id == tie.id:
                 t.precision = float(np.hypot.reduce(precisions))
         ties_mod.save_ties(doc, all_ties)
-        self._made[tie.id] = {first.chunk.key: precisions[0], second.chunk.key: precisions[1]}
+        self._made[tie.id] = [{first.chunk.key: precisions[0], second.chunk.key: precisions[1]}]
         record_edit(self.window, tr("Legame da Punti in comune"), before)
         self.pending = None
         self.selected = tie.id
@@ -808,10 +812,12 @@ class CommonPointsWindow(QDialog):
             gcp.project_marker(ch, marker)
         # the precision: this end from its photos now, the other end as it was - only for a tie made here whose
         # precision was not changed by hand since (else it stays, said)
-        made = self._made.get(tie.id)
-        kept = made is None or abs(tie.precision - float(np.hypot.reduce(list(made.values())))) > 1e-9
+        made = next((dict(m) for m in reversed(self._made.get(tie.id, []))
+                     if abs(tie.precision - float(np.hypot.reduce(list(m.values())))) <= 1e-9), None)
+        kept = made is None
         if not kept:
             made[ch.key] = ties_mod.end_precision(ch, marker) or ties_mod.TABLE_PRECISION
+            self._made[tie.id].append(made)
             all_ties = ties_mod.ties_of(self.doc)
             for t in all_ties:
                 if t.id == tie.id:
