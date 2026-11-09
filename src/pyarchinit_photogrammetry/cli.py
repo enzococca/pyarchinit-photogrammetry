@@ -3990,23 +3990,13 @@ def _coordinates(text: str, what: str, need_z: bool = False) -> list[Optional[fl
 
 def _internal_point(chunk, xyz: list[Optional[float]], what: str):
     """World coordinates of ``chunk`` (its system, its transform now) -> internal; a missing height read from the
-    chunk's DEM, as a table imported does."""
-    import numpy as np
+    chunk's DEM, as a table imported does (:func:`engine.ties.world_to_internal`)."""
+    from .engine.ties import world_to_internal
 
-    from .core import stamps
-    from .core.free_drawings import raster_values
-
-    x, y, z = xyz
-    if z is None:
-        if chunk.dem_path is None or not chunk.dem_path.exists():
-            raise typer.BadParameter(f"{what}: no height and the chunk {chunk.label!r} has no DEM to read it from")
-        if stamps.is_stale(chunk, "dem"):
-            raise typer.BadParameter(f"{what}: no height and the DEM of {chunk.label!r} was built in another system "
-                                     "of the chunk: rebuild it first")
-        (z,) = raster_values(chunk.dem_path, [(x, y)])
-        if z is None:
-            raise typer.BadParameter(f"{what}: no height and the DEM of {chunk.label!r} has none at {x:.3f}, {y:.3f}")
-    return chunk.to_internal(np.array([[x, y, float(z)]], float))[0]
+    try:
+        return world_to_internal(chunk, xyz)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{what}: {exc}") from None
 
 
 def _tie_line(doc, t) -> str:
@@ -4077,7 +4067,8 @@ def _ties_report(doc, unknowns: dict[int, str], references: bool, robust: bool):
 def ties_add(project: Path,
              chunk_a: str = typer.Argument(..., help="first chunk (label or key)"),
              point_a: str = typer.Argument(..., help="X,Y[,Z] in the world coordinates of the first chunk (no Z: "
-                                                      "read from its DEM)"),
+                                                      "read from its DEM; negative values are accepted as they "
+                                                      "are, or put -- before the arguments)"),
              chunk_b: str = typer.Argument(..., help="second chunk (label or key)"),
              point_b: str = typer.Argument(..., help="X,Y[,Z] of the same point in the world coordinates of the "
                                                       "second chunk"),
@@ -4103,7 +4094,8 @@ def ties_add(project: Path,
 def ties_known(project: Path,
                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
                point: str = typer.Argument(..., help="X,Y[,Z] in the world coordinates of the chunk (no Z: read "
-                                                     "from its DEM)"),
+                                                     "from its DEM; negative values are accepted as they are, or "
+                                                     "put -- before the arguments)"),
                known: str = typer.Argument(..., help="E,N,H: the known coordinates of the point, in the chunk's "
                                                      "system"),
                precision: Optional[float] = typer.Option(None, help="precision of the known point in metres "
@@ -4158,7 +4150,8 @@ def ties_import(project: Path,
         made = ties_mod.import_ties(doc, table)
     except (ValueError, KeyError, OSError) as exc:
         _ties_error(exc)
-    doc.save()
+    if made:
+        doc.save()
     typer.echo(f"{len(made)} ties imported from {table.name}")
     for t in made:
         typer.echo(f"  {_tie_line(doc, t)}")
@@ -4166,7 +4159,9 @@ def ties_import(project: Path,
 
 @ties_app.command("list")
 def ties_list(project: Path,
-              as_json: bool = typer.Option(False, "--json", help="print the ties as JSON")):
+              as_json: bool = typer.Option(False, "--json", help="print the ties as JSON, with the world position of "
+                                           "each end (an end measured on one photo is placed on the surface: the "
+                                           "chunk's cloud is read once)")):
     """The ties of the project: ends, precision, active or why not."""
     from .engine import ties as ties_mod
 
@@ -4238,9 +4233,13 @@ def ties_solve(project: Path,
                unknowns: str = typer.Option(..., "--unknowns", "-u", help=UNKNOWNS_HELP),
                robust: bool = typer.Option(False, help="Huber weights: a wrong tie weighs less"),
                references: bool = typer.Option(True, help="the control markers of the chunks count as known points"),
-               yes: bool = typer.Option(False, "--yes", "-y", help="apply without asking")):
+               yes: bool = typer.Option(False, "--yes", "-y", help="apply without asking"),
+               accept_no_check: bool = typer.Option(False, "--accept-no-check",
+                                                    help="with --yes: apply even with redundancy 0 (no check at "
+                                                         "all: a wrong tie cannot be seen)")):
     """The solve and its checks, then the new transforms applied to the chunks (with --yes, or once confirmed) and
-    the project saved."""
+    the project saved. A solve without redundancy (no check at all) asks its own confirmation, and with --yes it
+    needs --accept-no-check too."""
     from .engine import ties as ties_mod
 
     doc = Document.open(project)
@@ -4255,7 +4254,18 @@ def ties_solve(project: Path,
         typer.echo("Nothing to apply: every chunk is fixed.")
         return
     typer.echo("")
-    if not yes and not typer.confirm(f"Apply the solve to {', '.join(moving)}?", default=False):
+    unchecked = solution.redundancy <= 0
+    if yes:
+        if unchecked and not accept_no_check:
+            typer.echo("error: no check at all (redundancy 0): a wrong tie cannot be seen. Nothing applied; add ties "
+                       "or known points, or give --accept-no-check with --yes to apply anyway", err=True)
+            raise typer.Exit(1)
+    elif unchecked:
+        if not typer.confirm(f"No check at all (redundancy 0): a wrong tie cannot be seen. Apply the solve to "
+                             f"{', '.join(moving)} anyway?", default=False):
+            typer.echo("Nothing applied.")
+            return
+    elif not typer.confirm(f"Apply the solve to {', '.join(moving)}?", default=False):
         typer.echo("Nothing applied.")
         return
     try:

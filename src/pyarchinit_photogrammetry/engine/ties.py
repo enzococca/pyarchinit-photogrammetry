@@ -528,6 +528,35 @@ def _rows(path: Path) -> tuple[list[list[str]], bool]:
     return rows, delimiter != ","
 
 
+def dem_height(chunk: "Chunk", x: float, y: float) -> float:
+    """The height of the chunk's DEM at world ``x, y`` (the chunk's system): the z of a point given without one.
+    ValueError (saying why) when the chunk has no DEM, its DEM was built in another system of the chunk, or it has
+    no height there."""
+    from ..core import stamps
+    from ..core.free_drawings import raster_values
+
+    if chunk.dem_path is None or not chunk.dem_path.exists():
+        raise ValueError(f"no z and the chunk {chunk.label!r} has no DEM to read it from")
+    if stamps.is_stale(chunk, "dem"):
+        raise ValueError(f"no z and the DEM of {chunk.label!r} was built in another system of the chunk: rebuild it "
+                         "first")
+    (z,) = raster_values(chunk.dem_path, [(x, y)])
+    if z is None:
+        raise ValueError(f"no z and the DEM of {chunk.label!r} has no height at {x:.3f}, {y:.3f}")
+    return float(z)
+
+
+def world_to_internal(chunk: "Chunk", xyz) -> np.ndarray:
+    """World coordinates of ``chunk`` (its system, its transform now) to internal; ``xyz[2]`` None -> read from the
+    chunk's DEM (:func:`dem_height`, ValueError when it cannot be)."""
+    x, y, z = (list(xyz) + [None])[:3]
+    if x is None or y is None:
+        raise ValueError("x and y are needed")
+    if z is None:
+        z = dem_height(chunk, float(x), float(y))
+    return chunk.to_internal(np.array([[float(x), float(y), float(z)]], float))[0]
+
+
 def import_ties(doc: "Document", path) -> list[Tie]:
     """Ties from a table: ``chunk_a,x_a,y_a,z_a,chunk_b,x_b,y_b,z_b[,precision][,name]`` (commas, or semicolons or tabs
     with decimal commas allowed; a header line is skipped). Chunks by label (or key), points in the world coordinates
@@ -535,9 +564,6 @@ def import_ties(doc: "Document", path) -> list[Tie]:
     a point of ``chunk_a`` with known coordinates ``x_b, y_b, z_b`` (:func:`add_known`). Precision default
     :data:`TABLE_PRECISION`. The table is read whole first: a ValueError naming the row, and nothing added, when a
     row is wrong."""
-    from ..core import stamps
-    from ..core.free_drawings import raster_values
-
     rows, comma = _rows(Path(path))
     planned = []
     for i, row in enumerate(rows, start=1):
@@ -562,16 +588,10 @@ def import_ties(doc: "Document", path) -> list[Tie]:
             if xyz[2] is None:
                 if chunk is None:
                     raise ValueError(f"row {i}: the known point needs its z")
-                if chunk.dem_path is None or not chunk.dem_path.exists():
-                    raise ValueError(f"row {i}: no z and the chunk {chunk.label!r} has no DEM to read it from")
-                if stamps.is_stale(chunk, "dem"):
-                    raise ValueError(f"row {i}: no z and the DEM of {chunk.label!r} was built in another system of the "
-                                     "chunk: rebuild it first")
-                (z,) = raster_values(chunk.dem_path, [xyz[:2]])
-                if z is None:
-                    raise ValueError(f"row {i}: no z and the DEM of {chunk.label!r} has no height at "
-                                     f"{xyz[0]:.3f}, {xyz[1]:.3f}")
-                xyz = [xyz[0], xyz[1], z]
+                try:
+                    xyz = [xyz[0], xyz[1], dem_height(chunk, xyz[0], xyz[1])]
+                except ValueError as exc:
+                    raise ValueError(f"row {i}: {exc}") from None
             ends.append(np.asarray(xyz, float))
         if cb is ca:
             raise ValueError(f"row {i}: a tie links two different chunks")
@@ -1867,6 +1887,6 @@ def report_text(solution: Solution, checks: list[dict], loo: dict[str, float], w
 
 __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "add_known", "link_markers",
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
-           "remove_tie", "resolve_end", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION",
+           "remove_tie", "resolve_end", "dem_height", "world_to_internal", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION",
            "KINDS", "TieError", "Solution", "solve", "apply", "restore", "MESSAGES", "message", "render",
            "distance_checks", "suspects", "leave_one_out", "plausibility", "axis_check", "report", "report_text"]

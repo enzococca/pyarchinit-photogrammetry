@@ -247,3 +247,51 @@ def test_a_negative_coordinate_is_a_point_not_an_option(scene, tmp_path, runner)
     doc = ppg.Document.open(path)
     (t,) = ties.ties_of(doc)
     _close(doc.chunks[0].to_world(doc.chunks[0].marker(t.a[1]).position[None])[0], [-1.5, 2.0, 3.0], atol=1e-6)
+
+
+def test_a_known_point_with_negative_coordinates(scene, tmp_path, runner):
+    path, *_ = _project(scene, tmp_path)
+    r = runner.invoke(app, ["ties", "known", str(path), "2024", "-1.5,2,3", "-10.5,-20,3"])
+    assert r.exit_code == 0, r.output
+    (t,) = ties.ties_of(ppg.Document.open(path))
+    _close(t.known, [-10.5, -20.0, 3.0])
+
+
+def test_a_mistyped_option_writes_nothing(scene, tmp_path, runner):
+    """``add``/``known`` take unknown options as arguments (negative points): a typo must still fail, untouched."""
+    path, *_ = _project(scene, tmp_path)
+    before = path.read_bytes()
+    for args in (["add", str(path), "2024", "1,2,3", "2025", "1,2,3", "--precison", "0.02"],
+                 ["add", str(path), "2024", "1,2,3", "--nme", "x"],
+                 ["known", str(path), "2024", "1,2,3", "1,2,3", "--precison", "0.02"]):
+        r = runner.invoke(app, ["ties", *args])
+        assert r.exit_code == 2, (args, r.output)
+    assert path.read_bytes() == before
+
+
+def test_an_empty_table_leaves_the_project_as_it_is(scene, tmp_path, runner):
+    path, *_ = _project(scene, tmp_path)
+    before = path.read_bytes()
+    table = tmp_path / "vuota.csv"
+    table.write_text("chunk_a,x_a,y_a,z_a,chunk_b,x_b,y_b,z_b\n", encoding="utf-8")
+    r = runner.invoke(app, ["ties", "import", str(path), str(table)])
+    assert r.exit_code == 0 and "0 ties imported" in r.output
+    assert path.read_bytes() == before
+
+
+def test_no_check_at_all_needs_its_own_confirmation(scene, tmp_path, runner):
+    """One tie and ``shift``: redundancy 0. ``--yes`` alone refuses; ``--accept-no-check`` applies; asked, the
+    question says so."""
+    path, a, b, _c = _project(scene, tmp_path)
+    assert _add(runner, path, a, b, _world(scene, AB[0])[0]).exit_code == 0
+    before = path.read_bytes()
+    args = ["ties", "solve", str(path), "-u", "2024=fixed,2025=shift"]
+    r = runner.invoke(app, args + ["--yes"])
+    assert r.exit_code == 1 and "--accept-no-check" in _said(r) and "redundancy 0" in _said(r)
+    assert path.read_bytes() == before
+    r = runner.invoke(app, args, input="n\n")
+    assert r.exit_code == 0 and "No check at all (redundancy 0)" in _said(r) and "Nothing applied." in r.output
+    assert path.read_bytes() == before
+    r = runner.invoke(app, args + ["--yes", "--accept-no-check"])
+    assert r.exit_code == 0 and "applied to 2025" in r.output
+    assert ppg.Document.open(path).chunks[1].meta["chunk_alignment"]["redundancy"] == 0
