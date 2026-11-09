@@ -252,10 +252,41 @@ def _area_spec(area) -> dict | None:
     return {"layer": str(area)}
 
 
+def _file_rings(path, chunks: list, system: str | None, what: str) -> list[np.ndarray]:
+    """The polygons of an area file in ``system`` (the system of the first of ``chunks`` that is in it), checked and
+    reprojected as the import of free drawings does (:func:`..io.free_drawings._systems`): a DXF is taken in the system
+    of the chunks; a GeoJSON without a system whose coordinates are all longitudes and latitudes is read as WGS 84
+    (RFC 7946); a file in another projected system is reprojected (frames and epochs as :func:`..core.crs.
+    transform_points` with the points of a drawing); a GeoJSON or GeoPackage that says no system with projected
+    chunks, one in a real system with local chunks, one in a local frame with projected chunks, one naming a system
+    PROJ cannot read: ``ValueError``."""
+    from ..io import free_drawings as io_free
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    records = [r for r in io_free.read(path) if r["kind"] == "polygon"]
+    if not records:
+        raise ValueError(f"no polygon in the file {path.name} ({what} area)")
+    local_chunks = crs_mod.is_local(system)
+    for r in records:
+        r["xyz"] = [[p[0], p[1], None] for p in r["xyz"]]  # the plan only: the heights of an area are not used
+        named = r.get("crs")
+        if named and crs_mod.is_local(named):  # a file that says it is in a local frame
+            if not local_chunks:
+                raise ValueError(f"the file {path.name} is in a local frame and the chunks are in {system}")
+            r["crs"] = None  # local with local chunks: taken as it is
+    chunk = next((c for c in chunks if c.crs == system), chunks[0])
+    try:
+        io_free._systems(chunk, path, records)
+    except io_free.ForeignCrs as exc:
+        raise ValueError(f"{exc} ({what} area)") from None
+    return [np.array([[p[0], p[1], 0.0] for p in r["xyz"]], float) for r in records]
+
+
 def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | None, what: str):
-    """The shapely geometry (in ``system``) of an area ``spec``; None for None. A file that says no system (a DXF, a
-    GeoJSON without one) is taken in the system of the chunks; one in a local frame with projected chunks, or the
-    reverse, is refused."""
+    """The shapely geometry (in ``system``) of an area ``spec``; None for None. A layer is taken in the world of its
+    chunk; a file is checked and reprojected as the import of free drawings does (:func:`_file_rings`)."""
     import shapely
     from shapely.geometry import Polygon
 
@@ -273,27 +304,7 @@ def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | No
         if not rings:
             raise ValueError(f"no polygon in the layer {spec['layer']!r} of the chunks measured ({what} area)")
     else:
-        from ..io import free_drawings as io_free
-
-        path = Path(spec["file"])
-        if not path.exists():
-            raise FileNotFoundError(path)
-        for rec in io_free.read(path):
-            if rec["kind"] != "polygon":
-                continue
-            xy = np.array([[p[0], p[1], 0.0] for p in rec["xyz"]], float)
-            src = rec.get("crs") or rec.get("crs_unreadable")
-            if rec.get("crs_unreadable"):
-                raise ValueError(f"the file {path.name} names a system PROJ cannot read: {rec['crs_unreadable']}")
-            if src and crs_mod.is_local(src) and not crs_mod.is_local(system):
-                raise ValueError(f"the file {path.name} is in a local frame and the chunks are in {system}")
-            if src and not crs_mod.is_local(system) and src != system:
-                xy = crs_mod.transform_points(xy, crs_mod.horizontal(src), crs_mod.horizontal(system))
-            elif src and crs_mod.is_local(system):
-                raise ValueError(f"the file {path.name} is in {src} and the chunks are in a local frame")
-            rings.append(xy)
-        if not rings:
-            raise ValueError(f"no polygon in the file {path.name} ({what} area)")
+        rings = _file_rings(spec["file"], chunks, system, what)
     polys = [Polygon(r[:, :2]) for r in rings if len(r) >= 3]
     polys = [p if p.is_valid else p.buffer(0) for p in polys]
     return shapely.union_all([p for p in polys if not p.is_empty])

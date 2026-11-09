@@ -314,3 +314,40 @@ def test_a_local_area_file_with_projected_chunks_is_refused(tmp_path, monkeypatc
     monkeypatch.setattr(io_free, "read", lambda p: [{"kind": "polygon", "xyz": ring, "crs": "LOCAL"}])
     with pytest.raises(ValueError, match="is in a local frame and the chunks are in EPSG:3004"):
         stable_height.measure(doc, "B", "A", area=path)
+
+
+def test_area_files_are_put_in_the_chunks_system_as_the_import_of_drawings_does(tmp_path):
+    # the stable strip of test_measure_inside_a_polygon_layer as files: in another projected system (reprojected), in
+    # longitude and latitude without a crs member (RFC 7946), in projected numbers without a member (refused), and a
+    # DXF (taken in the system of the chunks)
+    from pyproj import Transformer
+
+    split = X0 + 0.4 * SIZE
+    doc, a, b = project(tmp_path, extra=lambda x, y: np.where(x > split, 0.10, 0.0))
+    ring = np.array([[X0 + 0.1, Y1 - 0.1], [split - 0.1, Y1 - 0.1], [split - 0.1, Y1 - SIZE + 0.1],
+                     [X0 + 0.1, Y1 - SIZE + 0.1], [X0 + 0.1, Y1 - 0.1]])
+
+    def geojson(name, coords, crs=None):
+        data = {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [coords]}}]}
+        if crs:
+            data["crs"] = {"type": "name", "properties": {"name": crs}}
+        path = tmp_path / name
+        path.write_text(json.dumps(data))
+        return path
+
+    utm = Transformer.from_crs(CRS, "EPSG:32633", always_xy=True).transform(ring[:, 0], ring[:, 1])
+    other = geojson("utm.geojson", [[float(x), float(y)] for x, y in zip(*utm)], "EPSG:32633")
+    assert abs(stable_height.measure(doc, "B", "A", area=other).dz - BIAS) < 0.002
+    lonlat = Transformer.from_crs(CRS, "EPSG:4326", always_xy=True).transform(ring[:, 0], ring[:, 1])
+    rfc = geojson("lonlat.geojson", [[float(x), float(y)] for x, y in zip(*lonlat)])
+    assert abs(stable_height.measure(doc, "B", "A", area=rfc).dz - BIAS) < 0.002
+    bare = geojson("bare.geojson", ring.tolist())
+    with pytest.raises(ValueError, match="says no coordinate system"):
+        stable_height.measure(doc, "B", "A", area=bare)
+    import ezdxf
+
+    dxf = ezdxf.new()
+    dxf.modelspace().add_lwpolyline(ring[:-1].tolist(), close=True)
+    dxf.saveas(tmp_path / "area.dxf")
+    assert abs(stable_height.measure(doc, "B", "A", area=tmp_path / "area.dxf").dz - BIAS) < 0.002
