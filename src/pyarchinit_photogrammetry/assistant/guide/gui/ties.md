@@ -14,7 +14,16 @@ A tie is **the same point in two chunks**: a corner of a wall, a stone, the head
 Each end is a **marker** of its chunk, made by itself and named "legame N" (or the name you give). So everything a
 marker can do, the end of a tie does too: it can be measured on the photos, triangulated, placed on the surface,
 refined. The ends keep their position in the internal coordinates of their chunk: a tie survives every new
-alignment and every new solve.
+transform of its chunks (*Align chunks*, a solve, the orientation of a local frame).
+
+A new **alignment of the photos** of a chunk is different: it puts the chunk in a new internal frame. The ends
+measured on photos are triangulated again and stay right. The ends placed without photos - clicked on a raster,
+typed on the command line, read from a table - keep their old internal numbers, which in the new frame are somewhere
+else, all moved the same way: no check of the solve could see it. So after a new alignment those ends are **to be
+measured again**: the tie stays in the list, in orange, with the reason in *State*, and is left out of the solve
+(the log of the window says it too). Drag the end to its point again in *Common points*, measure it on photos, or -
+only if you checked that it is still right - select the tie and press **Confirm ends**
+(`ppg ties confirm` on the command line).
 
 A tie can also join a point of a chunk to **known coordinates** (a GNSS point, a benchmark): that end is a marker
 with the coordinates as its reference.
@@ -52,7 +61,16 @@ in the main window and in *Common points*.
 **Ties.** One row per tie: *Active*, name, the two ends (`chunk / marker`, or the known coordinates), *Precision (m)*
 (editable), *Residual (m)* of the last check and *State*. A tie with an end that is gone (a marker removed, a
 chunk removed, a reference cleared) is grey and cannot be ticked; *State* says why. An inactive tie stays in the
-list: tick it again to use it. *Remove* deletes the selected ties and the markers they made.
+list: tick it again to use it. A tie with an end to be measured again after a new alignment is orange (see
+[above](#what-a-tie-is)): *Confirm ends* confirms the ends of the selected ties (none selected: of all of them).
+*Remove* deletes the selected ties and the markers they made. The window follows the chunks added, removed or renamed
+in the workspace.
+
+**Ties and changes of the chunks.** Removing a chunk leaves its ties in the list, grey (*chunk removed*): remove them
+by hand. *Merge chunks* makes a new chunk: the ties still point to the source chunks, and are broken once those are
+removed - make them again on the merged chunk. *Append projects* copies the chunks of another project with their
+markers, but not its ties. A project with ties saved by an older version (1.7.5 or before) keeps its ties: they are
+recognised again by the key and the label of their markers.
 
 **Unknowns per chunk.** For each chunk, what the solve may change:
 
@@ -171,10 +189,11 @@ ppg ties known scavo.ppg 2025 5.0,2.0,1.1 100.0,200.0,10.5 # a point with known 
 ppg ties from-markers scavo.ppg 2024 2025                   # markers with the same name
 ppg ties import scavo.ppg ties.csv
 ppg ties list scavo.ppg [--json]
+ppg ties confirm scavo.ppg [TIE ...]                        # ends still right after a new alignment
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
 ```
 
-`check` prints the same report as the window (in English) and changes nothing. `solve` asks before applying (or `--yes`); with
+`check` prints the same report as the window, without the straight axis (in English), and changes nothing. `solve` asks before applying (or `--yes`); with
 redundancy 0 it asks a question of its own, and `--yes` needs `--accept-no-check` too. Negative coordinates are
 written as they are, or after `--`. All the options are in the [Python API](../api.md#align-and-merge-chunks).

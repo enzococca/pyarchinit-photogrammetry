@@ -14,7 +14,17 @@ Un legame è **lo stesso punto in due chunk**: l'angolo di un muro, una pietra, 
 tutti e due i rilievi. Ogni estremo è un **marker** del suo chunk, creato da solo e chiamato "legame N" (o con il nome
 che dai). Così tutto quello che fa un marker lo fa anche l'estremo di un legame: si misura sulle foto, si triangola,
 si mette sulla superficie, si affina. Gli estremi tengono la loro posizione nelle coordinate interne del loro chunk: un
-legame sopravvive a ogni nuovo allineamento e a ogni nuova stima.
+legame sopravvive a ogni nuova trasformazione dei suoi chunk (*Allinea chunk*, una stima, l'orientamento di un sistema
+locale).
+
+Un nuovo **allineamento delle foto** di un chunk è un'altra cosa: mette il chunk in un nuovo sistema interno. Gli
+estremi misurati sulle foto vengono triangolati di nuovo e restano giusti. Gli estremi messi senza foto - cliccati su
+un raster, scritti dalla riga di comando, letti da una tabella - tengono i loro vecchi numeri interni, che nel nuovo
+sistema sono da un'altra parte, tutti spostati allo stesso modo: nessun controllo della stima potrebbe vederlo. Così,
+dopo un nuovo allineamento, quegli estremi sono **da rimisurare**: il legame resta nell'elenco, in arancione, con il
+motivo in *Stato*, ed è escluso dalla stima (lo dice anche il registro della finestra). Trascina di nuovo l'estremo sul
+suo punto in *Punti in comune*, misuralo sulle foto o - solo se hai controllato che è ancora giusto - seleziona il
+legame e premi **Conferma estremi** (`ppg ties confirm` dalla riga di comando).
 
 Un legame può anche unire un punto di un chunk a **coordinate note** (un punto GNSS, un caposaldo): quell'estremo è
 un marker con le coordinate come riferimento.
@@ -54,8 +64,16 @@ lavori nella finestra principale e in *Punti in comune*.
 **Legami.** Una riga per legame: *Attivo*, nome, i due estremi (`chunk / marker`, o le coordinate note),
 *Precisione (m)* (modificabile), *Residuo (m)* dell'ultimo controllo e *Stato*. Un legame con un estremo che non c'è
 più (un marker tolto, un chunk tolto, un riferimento cancellato) è grigio e non si può spuntare; *Stato* dice perché.
-Un legame non attivo resta nell'elenco: spuntalo di nuovo per usarlo. *Rimuovi* cancella i legami selezionati e i
-marker che avevano creato.
+Un legame non attivo resta nell'elenco: spuntalo di nuovo per usarlo. Un legame con un estremo da rimisurare dopo un
+nuovo allineamento è arancione (vedi [sopra](#che-cose-un-legame)): *Conferma estremi* conferma gli estremi dei legami
+selezionati (se nessuno è selezionato, di tutti). *Rimuovi* cancella i legami selezionati e i marker che avevano
+creato. La finestra segue i chunk aggiunti, tolti o rinominati nell'area di lavoro.
+
+**I legami e i cambiamenti dei chunk.** Togliere un chunk lascia i suoi legami nell'elenco, grigi (*chunk tolto*):
+rimuovili a mano. *Unisci chunk* crea un chunk nuovo: i legami puntano ancora ai chunk di partenza e si rompono quando
+questi vengono tolti - rifalli sul chunk unito. *Aggiungi progetti* copia i chunk di un altro progetto con i loro
+marker, ma non i suoi legami. Un progetto con legami salvato da una versione precedente (1.7.5 o prima) tiene i suoi
+legami: vengono riconosciuti di nuovo dalla chiave e dal nome dei loro marker.
 
 **Incognite per chunk.** Per ogni chunk, che cosa la stima può cambiare:
 
@@ -179,10 +197,11 @@ ppg ties known scavo.ppg 2025 5.0,2.0,1.1 100.0,200.0,10.5 # un punto con coordi
 ppg ties from-markers scavo.ppg 2024 2025                   # marker con lo stesso nome
 ppg ties import scavo.ppg legami.csv
 ppg ties list scavo.ppg [--json]
+ppg ties confirm scavo.ppg [LEGAME ...]                     # estremi ancora giusti dopo un nuovo allineamento
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
 ```
 
-`check` stampa lo stesso rapporto della finestra (in inglese) e non cambia niente. `solve` chiede prima di applicare (o `--yes`);
+`check` stampa lo stesso rapporto della finestra, senza l'asse dritto (in inglese), e non cambia niente. `solve` chiede prima di applicare (o `--yes`);
 con avanzo 0 fa una domanda a parte, e `--yes` richiede anche `--accept-no-check`. Le coordinate negative si scrivono
 come sono, o dopo `--`. Tutte le opzioni sono nell'[API Python](../api.md#allineare-e-unire-i-chunk).
