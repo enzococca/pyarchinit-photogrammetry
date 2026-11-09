@@ -85,7 +85,7 @@ def default_kinds(doc, active=None) -> dict[int, str]:
     *similitudine*."""
     counts: dict[int, int] = {}
     for t in ties_mod.ties_of(doc):
-        if t.active and not t.broken:
+        if t.active and not t.broken and not t.stale:
             for k in t.chunk_keys():
                 counts[k] = counts.get(k, 0) + 1
     fixed = active.key if active is not None and active in doc.chunks else \
@@ -345,6 +345,7 @@ class TiesDialog(QDialog):
         self._generation = 0  # bumped by every change: a check started before one is not taken
         self._fingerprint: str | None = None  # the project when the last check started (fingerprint)
         self._filling = False
+        self.checking = False  # a check of this dialog runs in the worker
 
         lay = QVBoxLayout(self)
         intro = QLabel(tr("Un legame è lo stesso punto in due chunk (due marker), o un marker con coordinate note. "
@@ -374,7 +375,10 @@ class TiesDialog(QDialog):
         self.b_import = QPushButton(tr("Importa..."))
         self.b_points = QPushButton(tr("Punti in comune..."))
         self.b_points.setToolTip(tr("Due viste affiancate di due chunk, collegate: un legame con un clic in ognuna"))
-        for b in (self.b_remove, self.b_from_markers, self.b_import, self.b_points):
+        self.b_confirm = QPushButton(tr("Conferma estremi"))
+        self.b_confirm.setToolTip(tr("Dopo un nuovo allineamento delle foto: gli estremi senza foto dei legami scelti "
+                                     "(o di tutti) sono ancora giusti; confermali solo dopo averli controllati"))
+        for b in (self.b_remove, self.b_from_markers, self.b_import, self.b_points, self.b_confirm):
             row.addWidget(b)
         row.addStretch(1)
         tl.addLayout(row)
@@ -427,12 +431,14 @@ class TiesDialog(QDialog):
         self.b_from_markers.clicked.connect(self.from_markers)
         self.b_import.clicked.connect(self.import_table)
         self.b_points.clicked.connect(lambda: self.window.common_points())
+        self.b_confirm.clicked.connect(self.confirm_selected)
         self.table.itemChanged.connect(self._item_changed)
         self.c_robust.toggled.connect(lambda _on: self.invalidate())
         self.c_references.toggled.connect(lambda _on: self.invalidate())
         self.finished.connect(self._forget)  # Esc / reject: Qt closes the dialog without a closeEvent
         undo_shortcuts(self, window)
         self.reload(kinds=default_kinds(window.doc, window.chunk))
+        window.refreshed.connect(self.follow_chunks)  # chunks added, removed or renamed in the workspace
 
     # ------------------------------------------------------------------ contents
     @property
@@ -479,11 +485,11 @@ class TiesDialog(QDialog):
                 self.table.setCellWidget(i, 4, spin)
                 self.table.setItem(i, 5, QTableWidgetItem(""))
                 self.table.setItem(i, 6, QTableWidgetItem(self._state_text(t)))
-                if t.broken:
+                if t.broken or t.stale:
                     for c in range(len(self.COLS)):
                         item = self.table.item(i, c)
                         if item is not None:
-                            item.setForeground(QColor(GREY))
+                            item.setForeground(QColor(GREY if t.broken else ORANGE))
             self.chunks.setRowCount(len(self.doc.chunks))
             for i, ch in enumerate(self.doc.chunks):
                 name = QTableWidgetItem(ch.label + (" " + tr("(attivo)") if ch is self.window.chunk else ""))
@@ -507,14 +513,44 @@ class TiesDialog(QDialog):
                     self.chunks.setCellWidget(i, col, mc)
         finally:
             self._filling = False
-        self._update_buttons()
+        self._chunks_seen = self._chunk_names()
+        self._update_buttons(busy=self.checking)
         self.invalidate()
 
     def _state_text(self, t) -> str:
         if t.broken:
             return "; ".join(say(ties_mod.message(code, t.name, *args)) for code, *args in (t.broken_parts or [
                 ("out_broken",)]))
-        return tr("attivo") if t.active else tr("non attivo")
+        state = tr("attivo") if t.active else tr("non attivo")
+        if t.stale:
+            ends = ", ".join(f"{chunk} / {marker}" for _code, marker, chunk in t.stale_parts)
+            state += " - " + tr("da rimisurare dopo il riallineamento: {0}", ends)
+        return state
+
+    def _chunk_names(self) -> tuple:
+        """The chunks (key, label) and the state of the ties (broken, stale ends): what a refresh of the window may
+        change under the tables."""
+        doc = self.doc
+        if doc is None:
+            return (), ()
+        return (tuple((ch.key, ch.label) for ch in doc.chunks),
+                tuple((t.id, t.broken, tuple(t.stale or ())) for t in ties_mod.ties_of(doc)))
+
+    def follow_chunks(self) -> None:
+        """The window refreshed: the tables reloaded when chunks were added, removed or renamed or a tie changed state
+        (a new alignment, a chunk removed). A check of chunks that changed would fail on a chunk that is gone, and the
+        new ones would be missing; the unknowns chosen are kept, a new chunk gets the proposal."""
+        if not alive(self):
+            return
+        seen = self._chunk_names()
+        if seen == getattr(self, "_chunks_seen", seen):
+            return
+        self._chunks_seen = seen
+        known = {k for k, _label in seen[0]}
+        kinds = {k: v for k, v in self.kinds(include_out=True).items() if k in known}
+        for key, kind in default_kinds(self.doc, self.window.chunk).items():
+            kinds.setdefault(key, kind)
+        self.reload(kinds=kinds)
 
     def _axis_choices(self) -> dict:
         out = {}
@@ -621,6 +657,21 @@ class TiesDialog(QDialog):
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
         return [self.table.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in rows]
 
+    def confirm_selected(self) -> None:
+        """*Conferma estremi*: the ends to be measured again of the selected ties (none selected: of every tie) taken
+        as right in the new alignment of their chunk; one step of Modifica > Annulla."""
+        ids = self.selected_ids() or None
+        stale = [t for t in ties_mod.ties_of(self.doc) if t.stale and (ids is None or t.id in ids)]
+        if not stale:
+            self.window._info(tr("Conferma estremi"), tr("Nessun legame da rimisurare dopo il riallineamento."))
+            return
+        before = edit_state(self.doc)
+        done = ties_mod.confirm_ends(self.doc, [t.id for t in stale])
+        self.window.log_pane.info(tr("Estremi confermati nel nuovo allineamento: {0}", ", ".join(
+            t.name for t in stale if t.id in done)))
+        self._edited(tr("Conferma estremi"), before)
+        self.reload()
+
     def remove_selected(self) -> None:
         ids = self.selected_ids()
         if not ids:
@@ -719,7 +770,8 @@ class TiesDialog(QDialog):
             view.redraw()
 
     def _update_buttons(self, busy: bool = False) -> None:
-        for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import):
+        self.checking = busy
+        for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import, self.b_confirm):
             b.setEnabled(not busy)
         self.b_apply.setEnabled(not busy and self.result is not None)
 
@@ -811,6 +863,12 @@ class TiesDialog(QDialog):
         return self.window.apply_ties(solution, self.result["report"])
 
     def _forget(self, *_args) -> None:
+        """Reached from a close and from Esc / reject (``finished``); the window no longer refreshes it. Once."""
+        if getattr(self, "_forgotten", False):
+            return
+        self._forgotten = True
+        with contextlib.suppress(RuntimeError, TypeError):
+            self.window.refreshed.disconnect(self.follow_chunks)
         if getattr(self.window, "_ties_dialog", None) is self:
             self.window._ties_dialog = None
 

@@ -400,3 +400,64 @@ def test_an_edit_step_checks_only_its_chunks_and_says_a_refusal(qapp, scene, tmp
         assert len(ties.ties_of(w.doc)) == 1 and not w.history.can_redo()
     finally:
         _close_window(w)
+
+
+def test_ends_to_measure_again_after_a_new_alignment_are_said_and_confirmed(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, _c = _three(scene)
+    made = [_tie(doc, a, b, _world(scene, p)) for p in FIVE]
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ka, kb = w.doc.chunks[0].key, w.doc.chunks[1].key
+        dlg = _open(w, qapp)
+        assert "riallineamento" not in dlg.table.item(dlg.row_of(made[0].id), 6).text()
+        w.doc.chunks[1].meta["alignment_id"] = "nuovo"  # 2025 aligned again
+        w._say_stale_ties()
+        w.refresh_all()  # the dialog follows the state of the ties
+        qapp.processEvents()
+        state = dlg.table.item(dlg.row_of(made[0].id), 6).text()
+        assert "da rimisurare dopo il riallineamento" in state and "2025" in state
+        assert dlg.table.item(dlg.row_of(made[0].id), 1).foreground().color().name() == "#b9770e"
+        dlg.set_kind(ka, "fixed")
+        dlg.set_kind(kb, "plan")
+        _check(w, dlg, qapp)
+        assert dlg.result is None  # every tie left out: nothing places 2025
+        dlg.table.selectRow(dlg.row_of(made[0].id))
+        dlg.confirm_selected()
+        assert w.history.undo_text() == "Conferma estremi"
+        assert [s["id"] for s in ties.stale_ends(w.doc)] == [t.id for t in made[1:]]
+        dlg.table.clearSelection()
+        dlg.confirm_selected()  # none selected: every tie
+        assert ties.stale_ends(w.doc) == []
+        assert "riallineamento" not in dlg.table.item(dlg.row_of(made[0].id), 6).text()
+        w.undo()
+        qapp.processEvents()
+        assert len(ties.stale_ends(w.doc)) == len(made) - 1
+    finally:
+        _close_window(w)
+
+
+def test_the_dialog_follows_chunks_removed_and_added(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, c = _three(scene)
+    for p in AB:
+        _tie(doc, a, b, _world(scene, p))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _open(w, qapp)
+        assert dlg.chunks.rowCount() == 3
+        dlg.set_kind(w.doc.chunks[0].key, "fixed")
+        dlg.set_kind(w.doc.chunks[1].key, "plan")
+        w.doc.remove_chunk(w.doc.chunks[2])
+        w.refresh_all()
+        qapp.processEvents()
+        assert dlg.chunks.rowCount() == 2
+        assert dlg.kinds() == {w.doc.chunks[0].key: "fixed", w.doc.chunks[1].key: "plan"}  # choices kept
+        w.doc.add_chunk("2027")
+        w.refresh_all()
+        qapp.processEvents()
+        assert dlg.chunks.rowCount() == 3
+        dlg.close()
+        qapp.processEvents()
+        w.refresh_all()  # disconnected: nothing reaches the closed dialog
+        qapp.processEvents()
+    finally:
+        _close_window(w)

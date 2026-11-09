@@ -12,7 +12,8 @@ transform it was built in (its stamp, :mod:`..core.stamps`), so a click on it is
 marker in each chunk, the height read from the chunk's DEM, precision two cells of each raster shown, combined);
 after the first click the other view jumps to where the current transforms put that point; Esc cancels the half tie.
 Dragging the empty raster pans, dragging an end of a tie moves it (its marker's position; its residual is no longer
-drawn). The ties are drawn as points with the residual vector of the last check (x :data:`RESIDUAL_SCALE`), the
+drawn; an end placed without photos before a new alignment of its chunk - drawn grey, to be measured again - is
+placed again by dragging it). The ties are drawn as points with the residual vector of the last check (x :data:`RESIDUAL_SCALE`), the
 suspect ones in red; a click selects one.
 
 Ends on photos: the right-click menu of the photo view has *Estremo del legame su questa foto* while this window is
@@ -706,10 +707,22 @@ class CommonPointsWindow(QDialog):
             out.append(None if p is None else [round(float(v), 9) for v in p])
         return out
 
+    def _blocked(self) -> bool:
+        """An elaboration runs in the worker (the check of the ties reads the markers and the ties there): no tie is
+        made, moved or measured until it ends, said."""
+        runner = getattr(self.window, "runner", None)
+        if runner is None or not runner.busy:
+            return False
+        self._say(tr("Un'elaborazione è in corso (per esempio il controllo dei legami): aspetta che finisca, poi "
+                     "riprova."))
+        return True
+
     def _make(self, first: End, second: End):
         """The tie between two ends of two chunks: one step of Modifica > Annulla (the tie and both markers)."""
         from ..markers import gcp
 
+        if self._blocked():
+            return None
         doc = self.doc
         points = []
         for end in (first, second):
@@ -779,7 +792,7 @@ class CommonPointsWindow(QDialog):
         from ..markers import gcp
 
         tie = self.selected_tie()
-        if tie is None or not getattr(camera, "aligned", False):
+        if tie is None or not getattr(camera, "aligned", False) or self._blocked():
             return False
         end = next(((e, u) for e, u in tie.end_uids() if e[0] == chunk.key), None)
         found = None if end is None else ties_mod.resolve_end(self.doc, *end)
@@ -819,7 +832,7 @@ class CommonPointsWindow(QDialog):
         """An end of a tie dragged on ``side``'s raster: its marker at the new point (height from the DEM); one step of
         Modifica > Annulla. An end measured on photos stays: its flags on the photos say where it is."""
         tie = next((t for t in ties_mod.ties_of(self.doc) if t.id == tie_id), None)
-        if tie is None or (end_name == "b" and tie.b is None):
+        if tie is None or (end_name == "b" and tie.b is None) or self._blocked():
             self.redraw()
             return False
         end, uid = (tie.a, tie.a_uid) if end_name == "a" else (tie.b, tie.b_uid)
@@ -840,7 +853,7 @@ class CommonPointsWindow(QDialog):
             return False
         before = edit_state(self.doc)
         self._moved.setdefault(tie_id, self._ends_now(tie))
-        marker.position = np.asarray(p, float)
+        ties_mod.place_end(self.doc, tie_id, end_name, p)  # placed again now: no longer stale after a new alignment
         self.selected = tie_id
         record_edit(self.window, tr("Sposta l'estremo di un legame"), before)
         self.window._ties_made()
@@ -909,7 +922,8 @@ class CommonPointsWindow(QDialog):
                 if p is None:
                     continue
                 x, y = side.to_raster(p)[0, :2]
-                colour = (COLOURS["selected"] if t.id == self.selected else COLOURS["off"] if (t.broken or not t.active)
+                colour = (COLOURS["selected"] if t.id == self.selected
+                          else COLOURS["off"] if (t.broken or t.stale or not t.active)
                           else COLOURS["suspect"] if t.id in suspects else COLOURS["tie"])
                 points.append((float(x), float(y), colour, t.name, {"tie": t.id, "end": name, "legame": t.name}))
                 r = residuals.get(t.id)

@@ -6761,8 +6761,21 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self.last_report = self.chunk.update_transform()
             return n
 
-        self.run_task("Allineamento", job, lambda n: self.statusBar().showMessage(
-            tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000))
+        def done(n) -> None:
+            self.statusBar().showMessage(tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000)
+            self._say_stale_ties()
+
+        self.run_task("Allineamento", job, done)
+
+    def _say_stale_ties(self) -> None:
+        """After a new alignment: the ends of ties placed without photos in the old frame, said in the log (they are
+        left out of the solve until placed again or confirmed in *Aggancia chunk con legami*)."""
+        from ..engine import ties as ties_mod
+
+        from .ties_dialog import say
+
+        for item in ties_mod.stale_ends(self.doc):
+            self.log_pane.warning(say(item["message"]))
 
     def import_reference(self) -> None:
         if not self._need_chunk():

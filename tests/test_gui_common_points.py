@@ -389,3 +389,44 @@ def test_esc_on_a_combo_forgets_the_window(win, qapp):
 
 def _folder(win):
     return win.doc.path.parent
+
+
+def test_no_tie_edit_while_a_check_runs_and_a_stale_end_placed_again(win, qapp):
+    cp = _open(win, qapp)
+    a, b = cp.sides
+    win.runner.thread = object()  # a task (the check of the ties) runs in the worker
+    try:
+        cp.clicked(a, 1.2, 1.4)
+        cp.clicked(b, 1.2, 1.4)
+        assert not ties.ties_of(win.doc)
+        assert "aspetta che finisca" in cp.status.text()
+    finally:
+        win.runner.thread = None
+    cp.cancel()
+    cp.clicked(a, 1.2, 1.4)
+    cp.clicked(b, 1.2, 1.4)
+    (tie,) = ties.ties_of(win.doc)
+    b.chunk.meta["alignment_id"] = "nuovo"  # 2025 aligned again: its end, clicked on a raster, is stale
+    assert ties.tie_by_id(win.doc, tie.id).stale == ["b"]
+    win.runner.thread = object()
+    try:
+        assert not cp.move_end(b, tie.id, "b", 1.5, 1.5)
+    finally:
+        win.runner.thread = None
+    assert cp.move_end(b, tie.id, "b", 1.3, 1.4)  # placed again in the new frame
+    assert not ties.tie_by_id(win.doc, tie.id).stale
+    win.undo()  # the old place and the old alignment of the end come back together
+    assert ties.tie_by_id(win.doc, tie.id).stale == ["b"]
+
+
+def test_the_photo_menu_hook_does_not_hold_the_window(win):
+    import weakref
+
+    hook = win.photo_view.context_hook
+    assert hook is not None and hook.__self__ is win
+    assert isinstance(win.photo_view._context_hook, weakref.WeakMethod)
+    plain = []
+    win.photo_view.context_hook = lambda menu, x, y: plain.append((x, y))
+    win.photo_view.context_hook(None, 1, 2)
+    assert plain == [(1, 2)]
+    win.photo_view.context_hook = hook

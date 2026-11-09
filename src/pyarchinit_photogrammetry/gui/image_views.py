@@ -7,6 +7,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import weakref
 
 import numpy as np
 from PySide6.QtCore import QLineF, QObject, QPointF, QRectF, Qt, QTimer, Signal
@@ -2223,6 +2224,23 @@ class PhotoView(_ZoomView):
         # more entries of the right-click menu (the window's: an end of a tie on this photo): (menu, x, y) -> None
         self.context_hook = None
         self.setMouseTracking(True)
+
+    @property
+    def context_hook(self):
+        """The extra entries of the right-click menu: a callable ``(menu, x, y)``, or None. A bound method (the main
+        window's) is held weakly: a child widget holding its window would make a cycle only the garbage collector
+        frees, possibly from a worker thread."""
+        ref = self._context_hook
+        return None if ref is None else ref()
+
+    @context_hook.setter
+    def context_hook(self, fn) -> None:
+        if fn is None:
+            self._context_hook = None
+        elif getattr(fn, "__self__", None) is not None:
+            self._context_hook = weakref.WeakMethod(fn)
+        else:
+            self._context_hook = lambda: fn
 
     def show_camera(self, chunk, camera, focus=None) -> None:
         """Show a photo; with ``focus`` (a marker) centred on it at full resolution."""
