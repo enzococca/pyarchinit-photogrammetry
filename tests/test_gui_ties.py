@@ -1,0 +1,284 @@
+"""Flusso di lavoro > Aggancia chunk con legami: the ties of the project in the dialog, the unknowns per chunk, the
+check in the worker with the report that names a wrong tie, the apply as one step of Modifica > Annulla (undone and
+done again exactly), the separate question without redundancy, a solve refused said in the window's words, a broken
+tie shown with why. Synthetic surveys of the trench of ``test_ties_solve`` only (no real coordinates)."""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pytest
+
+pytest.importorskip("PySide6")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("PPG_RENDERER", "software")
+
+from PySide6.QtCore import Qt  # noqa: E402
+from test_ties_solve import AB, _close, _three, _tie, _world  # noqa: E402
+
+from pyarchinit_photogrammetry.engine import ties  # noqa: E402
+
+FIVE = AB + [(3.0, 1.0)]
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(scope="module")
+def scene():
+    from pyarchinit_photogrammetry.testing.synthetic import make_scene
+
+    return make_scene(texel=0.01)
+
+
+def _window(qapp, doc, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+    from pyarchinit_photogrammetry.gui import ties_dialog
+    from pyarchinit_photogrammetry.gui.main_window import MainWindow
+
+    doc.save(tmp_path / "ties.ppg")
+    said: list = []
+    monkeypatch.setattr(mwmod, "message", lambda *a, **k: said.append(("message", a[2] if len(a) > 2 else "")))
+    monkeypatch.setattr(mwmod, "choice", lambda *a, **k: said.append(("choice", a[2] if len(a) > 2 else "")))
+    answers: list = []
+
+    def asked(parent, kind, title, text, options, default=0, cancel="Annulla"):
+        said.append(("ask", text, default))
+        return answers.pop(0) if answers else None
+
+    monkeypatch.setattr(ties_dialog, "choice", asked)
+    w = MainWindow(doc, autoconnect=False)
+    w.said, w.answers = said, answers
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(("warn", text)))
+    monkeypatch.setattr(w, "_info", lambda title, text: said.append(("info", text)))
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: said.append(("error", summary)))
+    w.runner.show_dialog = False
+    w.show()
+    qapp.processEvents()
+    return w
+
+
+def _close_window(w):
+    w._close_ties_dialog()
+    w.photos.stop()
+    w.setWindowModified(False)
+    w.close()
+
+
+def _open(w, qapp):
+    w.tie_chunks()
+    qapp.processEvents()
+    dlg = w._ties_dialog
+    assert dlg is not None and dlg.isVisible()
+    return dlg
+
+
+def _check(w, dlg, qapp):
+    assert dlg.run_check()
+    w.runner.wait()
+    qapp.processEvents()
+
+
+def _red(item) -> bool:
+    return item.foreground().color().name() == "#c0392b"
+
+
+def test_check_names_a_wrong_tie_then_apply_and_undo(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, c = _three(scene)
+    for xy in FIVE[:4]:
+        _tie(doc, a, b, _world(scene, xy))
+    w5 = _world(scene, FIVE[4])[0]
+    wrong = ties.add_tie(doc, a.chunk, a.internal(w5)[0], b.chunk, b.internal(w5 + np.array([1.0, 0.0, 0.0]))[0],
+                         name="sbagliato")
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        doc = w.doc
+        ka, kb, kc = (ch.key for ch in doc.chunks)
+        dlg = _open(w, qapp)
+        assert dlg.table.rowCount() == 5
+        kinds = dlg.kinds(include_out=True)
+        assert kinds[kb] == "similarity" and kinds[kc] == ""  # C has no ties: out of the solve
+        assert w.chunk is doc.chunks[0] and kinds[ka] == "fixed"  # the active chunk fixed
+        dlg.set_kind(ka, "fixed")
+        dlg.set_kind(kb, "similarity")
+        assert not dlg.b_apply.isEnabled()
+
+        _check(w, dlg, qapp)
+        assert dlg.result is not None and dlg.b_apply.isEnabled()
+        rep = dlg.result["report"]
+        assert wrong.id in rep["suspects"]
+        row = dlg.row_of(wrong.id)
+        assert _red(dlg.table.item(row, 1))
+        text = dlg.report.toPlainText()
+        assert "sbagliato" in text and "probabilmente sbagliato" in text
+        assert dlg.table.item(row, 5).text()  # its residual
+
+        # the wrong tie switched off: the check no longer holds, a new one is clean
+        dlg.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+        qapp.processEvents()
+        assert not ties.tie_by_id(w.doc, wrong.id).active
+        assert dlg.result is None and not dlg.b_apply.isEnabled()
+        _check(w, dlg, qapp)
+        assert dlg.result["report"]["suspects"] == []
+        assert "non attivo" in dlg.table.item(row, 6).text()
+
+        before = {ch.key: (np.asarray(ch.transform, float).copy(), ch.crs) for ch in w.doc.chunks}
+        ties_before = [t.to_dict() for t in ties.ties_of(w.doc)]
+        markers_before = {ch.key: len(ch.markers) for ch in w.doc.chunks}
+        assert dlg.apply()
+        qapp.processEvents()
+        _close(w.doc.chunks[1].transform, b.truth, atol=1e-4)
+        np.testing.assert_array_equal(w.doc.chunks[0].transform, before[ka][0])
+        assert w.doc.meta.get("ties_report") is not None
+        assert not [s for s in w.said if s[0] == "ask"]  # with redundancy: no question
+        assert w.history.can_undo()
+
+        w.undo()
+        qapp.processEvents()
+        for ch in w.doc.chunks:
+            np.testing.assert_array_equal(np.asarray(ch.transform, float), before[ch.key][0])
+            assert ch.crs == before[ch.key][1]
+        assert [t.to_dict() for t in ties.ties_of(w.doc)] == ties_before
+        assert w.doc.meta.get("ties_report") is None
+
+        w.redo()
+        qapp.processEvents()
+        _close(w.doc.chunks[1].transform, b.truth, atol=1e-4)
+        assert {ch.key: len(ch.markers) for ch in w.doc.chunks} == markers_before  # no end duplicated
+        w.undo()
+        qapp.processEvents()
+        np.testing.assert_array_equal(np.asarray(w.doc.chunks[1].transform, float), before[kb][0])
+    finally:
+        _close_window(w)
+
+
+def test_no_redundancy_asks_its_own_question_default_no(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, _c = _three(scene)
+    _tie(doc, a, b, _world(scene, AB[0]))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ka, kb = w.doc.chunks[0].key, w.doc.chunks[1].key
+        dlg = _open(w, qapp)
+        dlg.set_kind(ka, "fixed")
+        dlg.set_kind(kb, "shift")
+        _check(w, dlg, qapp)
+        assert dlg.result["solution"].redundancy == 0
+        assert "Nessun controllo" in dlg.report.toPlainText()
+        before = np.asarray(w.doc.chunks[1].transform, float).copy()
+        w.answers.append(1)  # Non applicare
+        assert not dlg.apply()
+        asked = [s for s in w.said if s[0] == "ask"]
+        assert len(asked) == 1 and asked[0][2] == 1  # the default is No
+        np.testing.assert_array_equal(w.doc.chunks[1].transform, before)
+        w.answers.append(None)  # closed: not applied either
+        assert not dlg.apply()
+        np.testing.assert_array_equal(w.doc.chunks[1].transform, before)
+        w.answers.append(0)  # Applica senza controllo
+        assert dlg.apply()
+        assert not np.array_equal(w.doc.chunks[1].transform, before)
+    finally:
+        _close_window(w)
+
+
+def test_refused_solve_and_broken_tie_are_said(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, _c = _three(scene)
+    t1 = _tie(doc, a, b, _world(scene, AB[0]))
+    _tie(doc, a, b, _world(scene, AB[1]))
+    t3 = _tie(doc, a, b, _world(scene, AB[2]))
+    b.chunk.markers.remove(b.chunk.marker(t3.b[1]))  # an end gone: the tie is broken
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ka, kb = w.doc.chunks[0].key, w.doc.chunks[1].key
+        dlg = _open(w, qapp)
+        row = dlg.row_of(t3.id)
+        assert "tolto o sostituito" in dlg.table.item(row, 6).text()
+        assert not dlg.table.item(row, 0).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        dlg.set_kind(ka, "fixed")
+        dlg.set_kind(kb, "similarity")  # 2 ties: 6 equations for 7 unknowns
+        _check(w, dlg, qapp)
+        assert dlg.result is None and not dlg.b_apply.isEnabled()
+        assert "equazioni per 7 incognite" in dlg.report.toPlainText()
+        dlg.set_kind(kb, "plan")
+        _check(w, dlg, qapp)
+        assert dlg.result is not None
+        text = dlg.report.toPlainText()
+        assert "Esclusi" in text and t3.name in text
+        assert dlg.table.item(dlg.row_of(t1.id), 5).text()
+    finally:
+        _close_window(w)
+
+
+def test_menu_command_and_remove(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, _c = _three(scene)
+    t1 = _tie(doc, a, b, _world(scene, AB[0]))
+    _tie(doc, a, b, _world(scene, AB[1]))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        from pyarchinit_photogrammetry.gui.command_search import menu_commands
+
+        assert any("Aggancia chunk con legami" in k for k in menu_commands(w.menuBar()))
+        dlg = _open(w, qapp)
+        n_markers = len(w.doc.chunks[0].markers)
+        dlg.table.selectRow(dlg.row_of(t1.id))
+        w.answers.append(None)  # cancelled: nothing removed
+        dlg.remove_selected()
+        assert len(ties.ties_of(w.doc)) == 2
+        w.answers.append(0)
+        dlg.remove_selected()
+        assert [t.id for t in ties.ties_of(w.doc)] != [t1.id] and len(ties.ties_of(w.doc)) == 1
+        assert len(w.doc.chunks[0].markers) == n_markers - 1
+        assert dlg.table.rowCount() == 1
+        assert not w.history.can_undo()  # editing the ties is no step: only the apply is
+    finally:
+        _close_window(w)
+
+
+def test_precision_from_markers_and_import(qapp, scene, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gui import ties_dialog
+
+    doc, a, b, c = _three(scene)
+    for i, xy in enumerate(AB[:3]):
+        p = _world(scene, xy)[0]
+        a.chunk.add_marker(f"T{i}", a.internal(p)[0])
+        b.chunk.add_marker(f"T{i}", b.internal(p)[0])
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ka, kb, kc = (ch.key for ch in w.doc.chunks)
+        dlg = _open(w, qapp)
+        assert dlg.table.rowCount() == 0 and dlg.kinds(include_out=True)[kb] == ""
+        monkeypatch.setattr(ties_dialog.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"a": ka, "b": kb}))
+        dlg.from_markers()
+        assert sorted(t.name for t in ties.ties_of(w.doc)) == ["T0", "T1", "T2"]
+        assert dlg.table.rowCount() == 3 and dlg.kinds()[kb] == "plan"  # 3 ties: proposed in plan
+        assert not w.history.can_undo()
+
+        _check(w, dlg, qapp)
+        assert dlg.b_apply.isEnabled()
+        tid = dlg.table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+        dlg.table.cellWidget(0, 4).setValue(0.123)
+        assert ties.tie_by_id(w.doc, tid).precision == pytest.approx(0.123)
+        assert not dlg.b_apply.isEnabled()  # the check no longer holds
+
+        # a table: chunk A, x, y, z, chunk B, x, y, z (each in its own world) -> a tie to the third chunk too
+        p = _world(scene, AB[3])[0]
+        cc = w.doc.chunks[2]
+        pa = w.doc.chunks[0].to_world(a.internal(p))[0]
+        pc = cc.to_world(c.internal(p))[0]
+        csv = tmp_path / "legami.csv"
+        csv.write_text("chunk_a,x_a,y_a,z_a,chunk_b,x_b,y_b,z_b,precision,name\n"
+                       f"2024,{pa[0]},{pa[1]},{pa[2]},2026,{pc[0]},{pc[1]},{pc[2]},0.02,picchetto\n")
+        dlg.import_table(str(csv))
+        assert dlg.table.rowCount() == 4
+        assert dlg.kinds()[kc] == "plan" and dlg.kinds()[kb] == "plan"
+        dlg.import_table(str(tmp_path / "nessuno.csv"))
+        assert any(s[0] == "warn" and "Tabella dei legami" in s[1] for s in w.said)
+    finally:
+        _close_window(w)

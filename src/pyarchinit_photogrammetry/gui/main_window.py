@@ -981,6 +981,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
         self._act(m, tr("Aggiungi chunk"), self.add_chunk, processing=True, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
+        self._act(m, tr("Aggancia chunk con legami..."), self.tie_chunks, processing=True, icon_name="chunk",
+                  tip=tr("Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte "
+                         "per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare"))
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
                          "piano adattato: tutto quello che è nelle sue coordinate lo segue"))
@@ -1854,6 +1857,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """Show a project. ``progress(fraction, text)`` follows the loading of the views."""
         step = progress or (lambda *_a, **_k: None)
         self._close_orient_dialog()  # its points are of a chunk of the project left
+        self._close_ties_dialog()  # its ties are of the project left
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
             # RustGIS's last edits into its drawings first, then its layers go from RustGIS - not when the project left
@@ -4213,6 +4217,92 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                       lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p,
                                                  check=True),
                       done)
+
+    # ---------------------------------------------------------------- Aggancia chunk con legami
+    def tie_chunks(self) -> None:
+        """*Flusso di lavoro > Aggancia chunk con legami*: the dialog of the ties (:class:`.ties_dialog.TiesDialog`,
+        not modal), one for the project."""
+        from .ties_dialog import TiesDialog
+
+        if not self._two_chunks():
+            return
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return
+        self._ties_dialog = TiesDialog.ask(self)
+
+    def _close_ties_dialog(self) -> None:
+        dlg = getattr(self, "_ties_dialog", None)
+        self._ties_dialog = None
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def apply_ties(self, solution, report: dict | None = None) -> bool:
+        """A solve of the ties (:func:`..engine.ties.solve`, checked) applied to its chunks: the drawings the window
+        holds stored first, the transforms changed (:func:`..engine.ties.apply`), one step of *Modifica > Annulla*
+        (:class:`.ties_dialog.TiesStep`), the project saved, the views and the Layer pane read again, what changed said
+        in the log and in a box. Returns whether it was applied."""
+        from ..engine import ties as ties_mod
+        from .ties_dialog import TiesStep, error_text
+
+        moved = [k for k, kind in solution.unknowns.items() if kind != "fixed"]
+        active_moves = self.chunk is not None and self.chunk.key in moved
+        if active_moves:
+            self._rustgis_leave()
+            self._store_drawings()
+            self._save_sections()
+        try:
+            changed = ties_mod.apply(self.doc, solution)
+        except (ties_mod.TieError, ValueError) as exc:
+            self._warn(error_text(exc))
+            return False
+        if self.history is not None:
+            self.history.push(tr("Aggancia chunk con legami"), TiesStep(self, solution, changed), document=True)
+        saved = False
+        if self.doc.path:
+            try:
+                self.doc.save()
+                saved = True
+            except Exception as exc:  # noqa: BLE001 - the solve is applied: the project stays to be saved
+                log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
+        self._ties_shown(active_moves)
+        self.setWindowModified(not saved)
+        if self.history is not None:
+            self.history.rebase()
+        labels = {c.key: c.label for c in self.doc.chunks}
+        lines = [tr("Stima applicata a {0} (sistema {1}).", ", ".join(labels.get(k, str(k)) for k in moved),
+                    solution.crs or "LOCAL")]
+        for key, stale in (changed.get("stale_products") or {}).items():
+            lines.append(tr("{0}: da ricostruire {1}", labels.get(int(key), key), ", ".join(stale)))
+        text = "\n".join(lines)
+        for line in lines:
+            self.log_pane.info(line)
+        self.statusBar().showMessage(lines[0], 15000)
+        self._info(tr("Aggancia chunk con legami"), text)
+        return True
+
+    def _ties_shown(self, active_moved: bool) -> None:
+        """The views after the chunks moved by the ties: the line layers of the old frame taken away when the active
+        chunk moved, everything read again, the open dialog of the ties told that its check no longer holds."""
+        if active_moved:
+            dropped = self._orient_read_again()
+            if dropped:
+                self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(dropped)))
+        self.refresh_all()
+        self._draw_free()
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload()
+
+    def _ties_reload(self) -> None:
+        """After the undo or the redo of a solve of the ties."""
+        self._ties_shown(True)
+        self._dirty(True)
 
     def _chunk_shown_in_3d(self, chunk, shown: bool) -> None:
         """A chunk ticked or unticked in the workspace: drawn or no longer drawn in the 3D view with the active one
