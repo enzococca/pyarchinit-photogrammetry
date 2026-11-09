@@ -25,7 +25,8 @@ ppg plugins install flightplan
 ```
 
 or *Tools > Plugins...* in the program ([Installing a plugin](guides.md#install)). The plugin needs nothing beyond the
-program. The network is used only for the public terrain tiles, when you choose them (see [Terrain](#terrain)).
+program. The network is used only for the public terrain tiles: when you choose them, or with the project DEM where it
+ends (see [Terrain](#terrain)). The tiles fetched are kept on disk in the plugin's folder.
 
 ## What it needs
 
@@ -113,16 +114,23 @@ On the 2D view the layers *Piano di volo: area*, *strisciate*, *scatti*, *decoll
 the GSD - stays the same uphill and downhill: height = height above the ground + (ground at the point - ground at the
 takeoff), kept between 10 m and 500 m above the takeoff.
 
-- **Project DEM**: the DEM of the chunk. Where the DEM ends, the plugin uses the public tiles shifted by the median
-  difference measured where both exist; if the two never overlap under the flight the project DEM is left out (heights
-  of different references are not mixed) and a warning says so.
+- **Project DEM**: the DEM of the chunk. A DEM under the whole flight sends nothing to the network. Only where the DEM
+  ends does the plugin ask the public tiles, shifted by the median difference measured where both exist; if the two
+  never overlap under the flight the project DEM is left out (heights of different references are not mixed) and a
+  warning says so.
 - **Public tiles (network)**: the free terrain tiles of AWS (Terrain Tiles, Mapzen terrarium), with a detail of
   *Normal detail*, *Fine detail* or *Finest detail*. They need the network; they are kept in a cache.
 - **Remove** goes back to one height per block.
 
 The takeoff is measured with the same source as the waypoints; a takeoff farther than 2000 m from the flight is
-ignored. When the area, the takeoff or the DEM change, the heights become old: every export **recomputes them first**,
-and says why if it cannot.
+ignored. When the area, the takeoff or the DEM change, the heights become old: every export **recomputes them first**
+with the source the plan was computed with (tiles stay tiles, the project DEM stays the DEM). When the takeoff moved,
+every block that follows the terrain is recomputed. If the ground under a takeoff cannot be measured again (no network
+for the tiles, the takeoff off the DEM, the DEM gone) the export is **refused** and says why: a file never carries
+heights, or descents of the special points, counted from the old takeoff.
+
+The warnings of *Design* (GSD, overlap, distance from the ground) read the ground from the project DEM; they ask the
+public tiles only when the plan's heights come from them.
 
 ### 6. Coverage { #coverage }
 
@@ -157,7 +165,8 @@ down.
 Choose the format and press **Export...**; **Excel sheet** and **HTML sheet** write the flight sheet; **Open in QGIS**
 opens the plan in QGIS. *File > Export* of the program has five of them - the DJI KMZ, the QGroundControl plan, the
 Litchi CSV, the GeoPackage and the Excel sheet; the other formats are here and on the command line. Formats that hold one leg write **one
-file per leg** next to the name you chose (or a zip). See [Exports per drone family](#exports).
+file per leg** next to the name you chose (or a zip); files of an earlier export with the same names are replaced, and
+the export says how many. See [Exports per drone family](#exports).
 
 **Copy into DJI Fly...** puts the legs into the missions of DJI Fly on the remote controller (see [DJI Fly](#djifly)).
 
@@ -210,8 +219,10 @@ The drone never reads KML, GeoJSON or GeoPackage: they are for looking at the pl
 The other files follow each format's specification and are checked by the tests, but they **have not been imported in
 the real apps yet**: WPML in DJI Pilot 2 and FlightHub 2, Litchi, QGroundControl, Mission Planner, Parrot and the area
 KML. In particular the **one height per point** that QGroundControl, Mission Planner, Parrot and Litchi get from a plan
-that follows the terrain has not been tried in those apps: the export warns about it. **Try every file in the real app,
-and look at the route there, before flying.**
+that follows the terrain has not been tried in those apps: the export warns about it. The same holds for DJI Pilot 2 and
+FlightHub 2: the WPML KMZ of the Enterprise drones carries the height of every point both in the route that is flown
+(`waylines.wpml`) and in the template that Pilot 2 edits (`template.kml`), but **the heights per point in Pilot 2 are
+untried**. **Try every file in the real app, and look at the route there, before flying.**
 
 How to load them (the steps of the apps may change with their versions):
 
@@ -237,8 +248,8 @@ from the computer). The plugin replaces those files with the legs:
 2. Connect the remote controller to the computer. **Copy into DJI Fly...** finds the waypoint folder by itself when the
    device is visible as a path (Linux, an SD card, a path you paste); on Windows it reaches the MTP device through the
    system shell (PowerShell).
-3. The plugin fills the safe slots first (placeholder missions, its own earlier legs), says what each slot holds, asks
-   before overwriting a mission of yours, and keeps a copy of every file it replaces in
+3. The plugin fills the safe slots first (placeholder missions, the earlier legs of this plan), says what each slot
+   holds, asks before overwriting a mission of yours or a leg of another plan, and keeps a copy of every file it replaces in
    `<chunk data>/flightplan/djifly_backup/`.
 4. Where there is no path (a Mac with the RC 2), export **DJI Fly: ready folders to drag (zip)** and drag the folders
    into the waypoint folder with a file manager for Android devices.

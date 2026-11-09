@@ -24,7 +24,8 @@ ppg plugins install flightplan
 ```
 
 oppure *Strumenti > Plugin...* nel programma ([Installare un plugin](guides.md#install)). Il plugin non chiede niente
-oltre al programma. La rete serve solo per le tegole pubbliche del terreno, quando le scegli (vedi [Terreno](#terrain)).
+oltre al programma. La rete serve solo per le tegole pubbliche del terreno: quando le scegli, o con il DEM del progetto
+dove finisce (vedi [Terreno](#terrain)). Le tegole scaricate restano su disco nella cartella del plugin.
 
 ## Cosa serve
 
@@ -114,16 +115,23 @@ Sulla vista 2D i layer *Piano di volo: area*, *strisciate*, *scatti*, *decollo*,
 stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - suolo al decollo), tenuta fra 10 m e
 500 m sul decollo.
 
-- **DEM del progetto**: il DEM del chunk. Dove il DEM finisce, il plugin usa le tegole pubbliche spostate dello scarto
-  mediano misurato dove ci sono entrambi; se i due non si sovrappongono mai sotto il volo il DEM del progetto resta fuori
-  (quote di riferimenti diversi non si mescolano) e un avviso lo dice.
+- **DEM del progetto**: il DEM del chunk. Un DEM sotto tutto il volo non manda nulla in rete. Solo dove il DEM finisce
+  il plugin chiede le tegole pubbliche, spostate dello scarto mediano misurato dove ci sono entrambi; se i due non si
+  sovrappongono mai sotto il volo il DEM del progetto resta fuori (quote di riferimenti diversi non si mescolano) e un
+  avviso lo dice.
 - **Tegole pubbliche (rete)**: le tegole libere del terreno di AWS (Terrain Tiles, terrarium di Mapzen), con dettaglio
   *Dettaglio normale*, *Dettaglio fine* o *Dettaglio finissimo*. Serve la rete; restano in una cache.
 - **Togli** torna a una quota per blocco.
 
 Il decollo si misura con la stessa sorgente dei waypoint; un decollo a più di 2000 m dal volo si ignora. Quando
-cambiano l'area, il decollo o il DEM, le quote diventano vecchie: ogni esportazione **le ricalcola prima**, e dice
-perché se non ci riesce.
+cambiano l'area, il decollo o il DEM, le quote diventano vecchie: ogni esportazione **le ricalcola prima** con la
+sorgente con cui il piano è stato calcolato (le tegole restano tegole, il DEM del progetto resta il DEM). Se il decollo
+è stato spostato si ricalcolano tutti i blocchi che seguono il terreno. Se il suolo sotto un decollo non si riesce a
+rimisurare (niente rete per le tegole, il decollo fuori dal DEM, il DEM che non c'è più) l'esportazione **si rifiuta**
+e dice perché: un file non porta mai quote, o discese dei punti speciali, contate dal decollo di prima.
+
+Gli avvisi di *Progetta* (GSD, sovrapposizione, distanza dal suolo) leggono il suolo dal DEM del progetto; chiedono le
+tegole pubbliche solo quando le quote del piano vengono da lì.
 
 ### 6. Copertura { #coverage }
 
@@ -157,8 +165,8 @@ base: da lì un target A4 si legge) e fa una scala di foto con la camera dritta 
 Scegli il formato e premi **Esporta...**; **Scheda Excel** e **Scheda HTML** scrivono la scheda del volo; **Apri in
 QGIS** apre il piano in QGIS. *File > Esporta* del programma ne ha cinque - il KMZ DJI, il piano QGroundControl, il CSV
 di Litchi, il GeoPackage e la scheda Excel; gli altri formati sono qui e sulla riga di comando. I formati che contengono una
-tratta scrivono **un file per tratta** accanto al nome scelto (o uno zip). Vedi [Esportazioni per famiglia di
-droni](#exports).
+tratta scrivono **un file per tratta** accanto al nome scelto (o uno zip); i file di un'esportazione precedente con gli
+stessi nomi vengono sostituiti, e l'esportazione dice quanti. Vedi [Esportazioni per famiglia di droni](#exports).
 
 **Copia in DJI Fly...** mette le tratte nelle missioni di DJI Fly sul telecomando (vedi [DJI Fly](#djifly)).
 
@@ -212,8 +220,10 @@ Il drone non legge mai KML, GeoJSON o GeoPackage: servono a guardare il piano e 
 drone vero. Gli altri file seguono la specifica di ciascun formato e sono controllati dai test, ma **non sono ancora
 stati importati nelle app vere**: WPML in DJI Pilot 2 e FlightHub 2, Litchi, QGroundControl, Mission Planner, Parrot e
 il KML delle aree. In particolare la **quota per punto** che QGroundControl, Mission Planner, Parrot e Litchi ricevono
-da un piano che segue il terreno non è stata provata in quelle app: l'esportazione lo avvisa. **Prova ogni file nell'app
-vera, e guarda lì la rotta, prima di volare.**
+da un piano che segue il terreno non è stata provata in quelle app: l'esportazione lo avvisa. Lo stesso vale per DJI
+Pilot 2 e FlightHub 2: il KMZ WPML dei droni Enterprise porta la quota di ogni punto sia nella rotta che si vola
+(`waylines.wpml`) sia nel modello che Pilot 2 modifica (`template.kml`), ma **le quote per punto in Pilot 2 non sono
+provate**. **Prova ogni file nell'app vera, e guarda lì la rotta, prima di volare.**
 
 Come caricarli (i passi delle app possono cambiare con le loro versioni):
 
@@ -237,8 +247,8 @@ computer). Il plugin sostituisce quei file con le tratte:
 2. Collega il telecomando al computer. **Copia in DJI Fly...** trova da solo la cartella dei waypoint quando il
    dispositivo è visibile come percorso (Linux, una scheda SD, un percorso che incolli); su Windows raggiunge il
    dispositivo MTP attraverso la shell del sistema (PowerShell).
-3. Il plugin riempie prima gli spazi sicuri (missioni fittizie, sue tratte di prima), dice cosa contiene ogni spazio,
-   chiede prima di sovrascrivere una tua missione, e tiene una copia di ogni file che sostituisce in
+3. Il plugin riempie prima gli spazi sicuri (missioni fittizie, tratte di prima di questo piano), dice cosa contiene
+   ogni spazio, chiede prima di sovrascrivere una tua missione o una tratta di un altro piano, e tiene una copia di ogni file che sostituisce in
    `<dati del chunk>/flightplan/djifly_backup/`.
 4. Dove non c'è un percorso (un Mac con l'RC 2), esporta **DJI Fly: cartelle pronte da trascinare (zip)** e trascina le
    cartelle nella cartella dei waypoint con un programma per i file dei dispositivi Android.
