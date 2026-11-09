@@ -12,8 +12,8 @@ Produce la tavola in scala, il DXF, le tabelle e l'IFC del muro.
 Le misure dicono come sta un muro. Non lo giudicano mai: uno strapiombo è un numero con la sua direzione, e un tipo è
 quello che le misure *suggeriscono*, con le regole che lo suggeriscono.
 
-Questa pagina descrive la versione 0.1.0 del plugin, che **richiede pyarchinit-photogrammetry 1.7.0** (i disegni
-tenuti con i prospetti). Il README e il codice sono nel [repository dei
+Questa pagina descrive la versione 0.1.3 del plugin, che **richiede pyarchinit-photogrammetry 1.7.0** (i disegni
+tenuti con i prospetti); corsi e giunti da un disegno classificato vogliono la 1.7.7. Il README e il codice sono nel [repository dei
 plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/masonry).
 
 <figure markdown="span">
@@ -40,7 +40,8 @@ plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main
    un'abside usa **Faccia su un cilindro...**; per una torre poligonale usa **Torre poligonale...**.
 3. **Forma**: strapiombo e spanciamento, con lo spanciamento sopra il prospetto. Poi **Sezioni...** e **Asse della
    torre...**; **Confronta rilievi...** se un altro chunk contiene un secondo rilievo dello stesso muro.
-4. **Trova le pietre...** (lo strumento Pietre del programma sulla faccia), poi **Misura le pietre**.
+4. **Trova le pietre...** (lo strumento Pietre del programma sulla faccia), oppure disegna letti e giunti e usa
+   **Corsi e giunti da un disegno classificato...**; poi **Misura le pietre**.
 5. Disegna le USM sulla faccia con *Disegna US* del programma, poi **Proponi rapporti...** e spunta quelli che hai
    verificato. **Salva in PyArchInit** li scrive.
 6. Esporta la faccia con **Tavola...** o **Esporta tutto...**, il muro con **IFC del muro...**, oppure apri la faccia
@@ -221,6 +222,41 @@ segue il disegno; nei test, su pietre disegnate, sta entro il 3 %.
   (giallo).</figcaption>
 </figure>
 
+### Corsi e giunti da un disegno classificato
+
+Col programma **1.7.7 o successivo** (con un programma più vecchio il pulsante è nascosto), **Corsi e giunti da un
+disegno classificato...** trasforma le linee disegnate sulla faccia in filari e pietre. Disegna i letti e i giunti sul
+prospetto della faccia con gli strumenti di linea del programma, oppure dai un GeoPackage, GeoJSON o DXF già nelle
+`(u, v)` della faccia. Il programma classifica le linee lungo l'orizzontale della faccia ([Un disegno classificato per
+orientamento](../gui/drawing.md#un-disegno-classificato-per-orientamento)); il significato dei gruppi lo dà il plugin:
+
+| Gruppo della classificazione | Nel muro |
+|---|---|
+| linee lungo l'asse | **letti**: i giunti orizzontali fra due filari |
+| coppie lungo l'asse (due linee vicine, anche una fascia tracciata come poligono) | un **filare** di spessore noto: le sue due linee sono i letti sotto e sopra |
+| linee di traverso | **giunti**: i giunti verticali fra due pietre di un filare |
+| coppie di traverso | due giunti (un giunto largo disegnato sui due lati lascia fra le due linee una cella troppo stretta per essere una pietra) |
+| altre direzioni | lasciate fuori, e contate |
+
+Un filare sta fra un letto e il letto subito sopra, nel tratto che coprono tutti e due. Le sue pietre sono le celle
+del filare divise dai giunti che ne coprono **almeno metà dell'altezza**; un giunto così vale per tutto il filare. Un
+giunto alla fine di un filare lo chiude. Le celle più strette o più basse della **pietra più piccola** (5 cm) non sono
+pietre. I contorni delle USM disegnate sulla faccia restano fuori, salvo che tu li spunti. Un giunto rettilineo
+disegnato con una sola linea attraverso più filari li divide tutti.
+
+Niente si scrive prima della **tavola di controllo**. Mostra le pietre proposte, numerate, i letti in blu, i giunti
+che dividono un filare in arancione e quelli che non ne dividono nessuno tratteggiati in grigio, il nome di ogni filare
+a sinistra, con la sintesi: filari, quota media, spessore e pietre. **Aggiungi le pietre** le accoda alle pietre della
+faccia, le stesse che tiene lo strumento Pietre del programma: *Misura le pietre* le legge e puoi correggerle a mano.
+Una pietra proposta che si sovrappone per più di metà a una pietra già sulla faccia viene saltata, e la tavola e la
+barra di stato dicono quante: ripetere lo stesso disegno, o ridisegnarlo spostato di qualche millimetro, non aggiunge
+nulla. La casella **Sostituisci le pietre della faccia** le mette al loro posto. L'aggiunta è un passo di *Modifica >
+Annulla*.
+
+La tavola si scrive in `<dati del chunk>/masonry/<muro>/<faccia>/classificato/tavola_controllo.png`. Da riga di
+comando `ppg plugin masonry classified` stampa filari e pietre (e scrive la tavola con `--plate`); senza `--accept`
+non salva niente, e con `--accept` le pietre doppie vengono saltate allo stesso modo.
+
 ## USM e rapporti
 
 Disegna le unità sulla faccia con *Disegna US* del programma (`unita_tipo` USM) e compila i campi. **Proponi
@@ -302,6 +338,8 @@ ppg plugin masonry face PROGETTO Torre --kind tower --polygon 314.0 [--min-side 
 ppg plugin masonry shape PROGETTO "Muro nord" [FACCIA] [--sections Z1,Z2 --stations U1,U2] [--compare CHUNK]
 ppg plugin masonry shape PROGETTO Torre --axis [--heights Z1,Z2,Z3]
 ppg plugin masonry stones PROGETTO "Muro nord" [FACCIA] [--region "POLYGON((u v, ...))"] [--export CARTELLA]
+ppg plugin masonry classified PROGETTO "Muro nord" [FACCIA] [--file DISEGNO] [--plate tavola.png] [--accept [--replace]]
+    [--joint-cover 0.5] [--min-stone 0.05] [--pair-isolation 1.5] [--with-units] [--param CHIAVE=VALORE ...]
 ppg plugin masonry usm PROGETTO "Muro nord" [FACCIA] [--accept all|1,3] [--write --config config.cfg]
 ppg plugin masonry plate|export PROGETTO "Muro nord" [FACCIA] --out CARTELLA [--scale 20]
 ppg plugin masonry ifc PROGETTO "Muro nord" --out muro.ifc [--thickness 0.6]
