@@ -1316,6 +1316,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Maschera dal colore..."), self.open_colour_mask, processing=True, icon_name="colour",
                   tip=tr("Le celle dell'ortofoto in un intervallo di colori (acqua, un telo, la sabbia) come poligoni "
                          "di un layer di disegni liberi: per ritagliare i prodotti e per la quota stabile"))
+        self._act(m, tr("Livello dell'acqua e rifrazione..."), self.open_water, processing=True, icon_name="water",
+                  tip=tr("Il livello dell'acqua di uno scavo allagato o di un relitto, dal suo bordo o a mano, e la "
+                         "nuvola densa corretta per la rifrazione sotto di esso"))
         self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
                   tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
                          "nuvola densa e modello restano dentro il suo spessore"))
@@ -1886,6 +1889,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._close_ties_dialog()  # its ties are of the project left
         self._close_stakes_dialog()  # its proposals are of a chunk of the project left
         self._close_colour_mask_dialog()  # its preview is of a chunk of the project left
+        self._close_water_dialog()  # its level is of a chunk of the project left
         self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
@@ -1992,6 +1996,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._capture_states()
         self._update_rebuild_action()
         self._update_workflow_states()
+        self._refresh_water_dialog()
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None, title: str | None = None) -> None:
@@ -4349,6 +4354,48 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.close()
 
+    def open_water(self):
+        """*Strumenti > Livello dell'acqua e rifrazione*: the water level of the active chunk and the refraction
+        correction of its dense cloud (:class:`.water_dialog.WaterDialog`, not modal), one at a time. Returns it."""
+        from .ties_dialog import alive
+        from .water_dialog import WaterDialog
+
+        dlg = getattr(self, "_water_dialog", None)
+        if dlg is not None and alive(dlg) and dlg.chunk is self.chunk:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        self._close_water_dialog()
+        if not self._need_chunk():
+            return None
+        path = self.chunk.dem_path
+        cloud = self.chunk.product_path("point_cloud")
+        if (path is None or not path.exists()) and (cloud is None or not cloud.exists()):
+            self._warn(tr("Livello dell'acqua: il chunk attivo non ha né un DEM né una nuvola densa. Costruiscili "
+                          "prima (Flusso di lavoro)."))
+            return None
+        self._water_dialog = WaterDialog.ask(self)
+        return self._water_dialog
+
+    def _close_water_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_water_dialog", None)
+        self._water_dialog = None
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def _refresh_water_dialog(self) -> None:
+        """The window of the water shown again as the chunk is (after Annulla, a build, a version made active)."""
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_water_dialog", None)
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):
+                dlg.refresh()
+
     def crop_with_layer(self, layer: str) -> None:
         """*Ritaglia con questa maschera* (Layer pane): the products cut by the polygons of the free-drawing layer
         ``layer`` of the active chunk (:func:`..engine.colour_mask.union`, :meth:`crop_products`)."""
@@ -6216,6 +6263,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             state.update(markers=[m.to_dict() for m in ch.markers], scalebars=[sb.to_dict() for sb in ch.scalebars],
                          excluded=ch.meta.get("marker_excluded"),
                          patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"),
+                         water=ch.meta.get("water"),
                          frame_patches={e["id"]: e["patches"] for e in ch.meta.get("elevations") or []
                                         if e.get("id") and e.get("patches")},
                          free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
@@ -6399,6 +6447,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             else:
                 ch.meta.pop("region", None)
             self._region_changed("Regione di ricostruzione come prima")
+        if ch is not None and "water" in state:
+            if state["water"]:
+                ch.meta["water"] = state["water"]
+            else:
+                ch.meta.pop("water", None)
+            self.workspace.populate(self.doc)  # the tree says the level
+            self._refresh_water_dialog()
         if ch is not None and parts & {"patches", "frame_patches"}:
             self._undo_patches(state)
         if ch is not None and "free" in state:
@@ -9286,6 +9341,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self.open_photo(cams[0])
         elif kind == "crs":
             self.set_crs()
+        elif kind == "water":
+            self.open_water()
         elif kind in ("scalebar", "scalebars"):
             self._show_pane(self.left_tabs, self.reference)
         elif kind == "product" and payload == "depth_maps":

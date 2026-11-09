@@ -388,6 +388,9 @@ class WorkspaceTree(QTreeWidget):
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "dem_precision"))
                 it.setToolTip(0, tr("Doppio clic per vederla: deviazione standard delle quote, dai punti di legame"))
                 ci.addChild(it)
+            wnode = self._water_item(ch)
+            if wnode is not None:
+                ci.addChild(wnode)
             elevations = (ch.meta or {}).get("elevations") or []
             if elevations:
                 el = QTreeWidgetItem([tr("Prospetti  ({0})", len(elevations))])
@@ -610,6 +613,29 @@ class WorkspaceTree(QTreeWidget):
         if data and data[0] == "plugin":
             return ("plugin", data[1], self._plugin_items[data[2]])
         return data
+
+    @staticmethod
+    def _water_item(ch):
+        """"Acqua: livello z, n" when the chunk has a water level (:func:`..engine.water.level_of`: in the world of the
+        chunk now); double click: the window of the water."""
+        if not isinstance((ch.meta or {}).get("water"), dict):
+            return None
+        from ..engine import water
+
+        try:
+            lv = water.level_of(ch)
+        except Exception:  # a broken record: not in the tree
+            return None
+        if lv is None:
+            return None
+        it = QTreeWidgetItem([tr("Acqua: livello {0} m, n {1}", number(lv["level"], 3), number(lv["n"], 2))])
+        it.setIcon(0, icon("water"))
+        it.setData(0, Qt.ItemDataRole.UserRole, ("water", ch, None))
+        tip = tr("Dal bordo dell'acqua") if lv["source"] == "edge" else tr("A mano")
+        if (ch.meta.get("dense") or {}).get("refraction"):
+            tip += "\n" + tr("Nuvola densa corretta per la rifrazione")
+        it.setToolTip(0, tip + "\n" + tr("Doppio clic: Livello dell'acqua e rifrazione"))
+        return it
 
     def _double(self, item, _col) -> None:
         data = self._data(item)

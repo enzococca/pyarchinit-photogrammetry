@@ -1140,6 +1140,24 @@ class RasterView(_ZoomView):
         self._register(layer, "line", item, None, {"etichetta": "", **(attrs or {})})
         return item
 
+    def add_dots(self, xy, color: str = "#00a5e0", layer: str = "Punti", attrs: dict | None = None,
+                 size: float = 5.0):
+        """Many points ((n, 2) world XY: the cells of the edge of the water read for its level) as one feature of
+        ``layer``, painted with one call (:class:`SegmentsItem` without segments): drawn and hidden at once, over the
+        raster, never picked (:data:`NOT_PICKED`), no geometry of their own for QGIS."""
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        inv = self._inverse()
+        cols = inv.a * xy[:, 0] + inv.b * xy[:, 1] + inv.c
+        rows = inv.d * xy[:, 0] + inv.e * xy[:, 1] + inv.f
+        dot = QPen(QColor(color), size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        dot.setCosmetic(True)
+        item = SegmentsItem(np.zeros((0, 2, 2)), dot, dots=np.column_stack([cols, rows]), dot_pen=dot)
+        self.scene().addItem(item)
+        item.setZValue(-0.5)
+        item.setData(NOT_PICKED, True)
+        self._register(layer, "point", item, None, {"etichetta": "", **(attrs or {})})
+        return item
+
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
                   attrs: dict | None = None):
         mark = QGraphicsEllipseItem(-5, -5, 10, 10)

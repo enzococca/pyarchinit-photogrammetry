@@ -209,14 +209,15 @@ def _heights_at(path, pts: np.ndarray) -> np.ndarray:
     return z
 
 
-def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> dict:
+def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None, points: bool = False) -> dict:
     """The level of the water of ``chunk`` from its edge (see the module): ``water`` as :func:`water_polygons`.
     Each point of the outline is read on the land side at 2 and at 4 cells of the DEM along its normal and the
     height extrapolated to the outline (``2 z(2) - z(4)``: the rise of the bank over two cells taken away; where the
     4-cell reading is missing - outside the DEM, or water again - the 2-cell one alone); the median is the level.
     Returns ``{"level", "spread" (NMAD), "p10", "p90", "edge_cells", "slope_bias" (median of the 2-cell readings
     minus the level: what the extrapolation removed), "extrapolated" (points read at 4 cells too), "x", "y" (the
-    centre of the water)}``; writes nothing (:func:`set_level` stores it). :class:`WaterError` without a DEM, with
+    centre of the water)}`` and, with ``points``, ``"points"``: the (n, 2) world positions of the heights read 2 cells
+    up the bank that made the level (to show them); writes nothing (:func:`set_level` stores it). :class:`WaterError` without a DEM, with
     one to rebuild, without water, or when the outline of the water lies outside the DEM."""
     import rasterio
     import shapely
@@ -238,7 +239,7 @@ def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> 
         wet = shapely.contains_xy(shapely.union_all(polys), far[:, 0], far[:, 1])
         z4[wet] = np.nan  # the far reading in the water: not the bank
     keep = np.isfinite(z2)
-    z2, z4 = z2[keep], z4[keep]
+    z2, z4, near = z2[keep], z4[keep], near[keep]
     if len(z2) < MIN_EDGE_CELLS:
         raise WaterError(f"the edge of the water lies outside the DEM of {chunk.label}: {len(z2)} height(s) on the "
                          f"land side (at least {MIN_EDGE_CELLS})",
@@ -249,10 +250,13 @@ def level_from_edge(chunk: "Chunk", water, progress: Progress | None = None) -> 
     level = float(np.median(z))
     c = shapely.union_all(polys).centroid
     p(1.0, "")
-    return {"level": level, "spread": float(NMAD * np.median(np.abs(z - level))),
-            "p10": float(np.percentile(z, 10)), "p90": float(np.percentile(z, 90)), "edge_cells": int(len(z)),
-            "slope_bias": float(np.median(z2) - level), "extrapolated": int(both.sum()),
-            "x": float(c.x), "y": float(c.y)}
+    out = {"level": level, "spread": float(NMAD * np.median(np.abs(z - level))),
+           "p10": float(np.percentile(z, 10)), "p90": float(np.percentile(z, 90)), "edge_cells": int(len(z)),
+           "slope_bias": float(np.median(z2) - level), "extrapolated": int(both.sum()),
+           "x": float(c.x), "y": float(c.y)}
+    if points:
+        out["points"] = near
+    return out
 
 
 # ------------------------------------------------------------------ the stored level
