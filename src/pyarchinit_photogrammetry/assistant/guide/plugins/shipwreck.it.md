@@ -91,6 +91,13 @@ Dalla versione 0.5.0, con pyarchinit-photogrammetry 1.7.7 o successivo, un livel
 livello suo: lo stato del passo lo dice ("livello dell'acqua del chunk"), la correzione resta spenta e il livello diventa quello del
 plugin quando confermi la finestra. Un livello del plugin vince sempre.
 
+!!! warning "Non correggere la rifrazione due volte"
+    Il programma può correggere da sé la nuvola densa (*Strumenti > Livello dell'acqua e rifrazione*, *Correggi la
+    nuvola*). Un modello costruito da quella nuvola corretta ha già il fondo alla sua profondità vera: lascia **spenta**
+    la correzione del plugin. Accendila solo per un modello costruito da una nuvola non corretta. Quando la nuvola attiva
+    del chunk è una versione corretta, la finestra chiede prima di accendere la correzione, e `water --on` dalla riga di
+    comando stampa un avviso.
+
 <figure markdown="span">
   ![Una sezione come misurata e corretta](../img/plugins/shipwreck/water.it.png)
   <figcaption>Due stazioni dello scafo sintetico come misurate (grigio) e corrette (blu) sotto un livello di -0,10 m, con la
@@ -374,7 +381,9 @@ Niente entra nel catalogo prima della **tavola di controllo**: mostra ogni eleme
 e una casella per tipo con il suo numero. *Nel catalogo* aggiunge i tipi spuntati come legni misurati (sorgente `orient:<disegno>:<id>`),
 un passo di *Modifica > Annulla*; *Annulla* lascia il catalogo com'era. Importando di nuovo lo stesso disegno, o un disegno
 cresciuto, entra solo il nuovo: un legno già nel catalogo da un disegno classificato (stesso tipo, stessi vertici) viene
-saltato, e la finestra e la riga di comando dicono quanti. La tavola resta in `shipwreck/classified/plate.png`.
+saltato, e la finestra e la riga di comando dicono quanti. Un elemento modificato dopo l'importazione (un vertice
+spostato, una linea allungata, un poligono ridisegnato) ha vertici nuovi, quindi entra di nuovo come legno nuovo accanto
+al vecchio: togli prima il vecchio legno dal catalogo. La tavola resta in `shipwreck/classified/plate.png`.
 
 !!! tip "Ordinate disegnate come linee sciolte"
     Un poligono ricalcato è sempre un elemento solo: quando puoi, disegna ordinate e fasce come poligoni. Ordinate disegnate

@@ -245,11 +245,15 @@ courses, their mean height, thickness and stones. **Add the stones** appends the
 the program's stone tool keeps, so *Measure the stones* reads them and you can correct them by hand. A proposed stone
 that overlaps a stone already on the face by more than half is skipped, and the plate and the status bar say how many:
 taking the same drawing again, or a redrawing a few millimetres off, adds nothing. The box **Replace the stones of the
-face** puts the proposal in their place. The addition is one step of *Edit > Undo*.
+face** puts the proposal in their place. The addition is one step of *Edit > Undo*, which puts back the whole list of
+stones of the face as it was: stones you corrected by hand after the import go back too. Run from a script of the
+console, the import makes no step of its own.
 
 The plate is written in `<chunk data>/masonry/<wall>/<face>/classificato/tavola_controllo.png`. On the command line
 `ppg plugin masonry classified` prints the courses and stones (and writes the plate with `--plate`); without
-`--accept` nothing is saved, and with `--accept` the duplicates are skipped the same way.
+`--accept` nothing is saved, and with `--accept` the duplicates are skipped the same way. Here `--accept` takes no
+value; for `usm` it needs one (`all` or the numbers of the proposals): a bare `--accept` there is an error, so that
+no relationship is accepted by mistake.
 
 ## USM and their relationships
 

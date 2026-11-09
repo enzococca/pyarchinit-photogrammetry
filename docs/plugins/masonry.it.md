@@ -251,11 +251,14 @@ faccia, le stesse che tiene lo strumento Pietre del programma: *Misura le pietre
 Una pietra proposta che si sovrappone per più di metà a una pietra già sulla faccia viene saltata, e la tavola e la
 barra di stato dicono quante: ripetere lo stesso disegno, o ridisegnarlo spostato di qualche millimetro, non aggiunge
 nulla. La casella **Sostituisci le pietre della faccia** le mette al loro posto. L'aggiunta è un passo di *Modifica >
-Annulla*.
+Annulla*, che rimette tutto l'elenco delle pietre della faccia com'era: anche le pietre corrette a mano dopo
+l'importazione tornano indietro. Lanciata da uno script della console, l'importazione non fa un passo suo.
 
 La tavola si scrive in `<dati del chunk>/masonry/<muro>/<faccia>/classificato/tavola_controllo.png`. Da riga di
 comando `ppg plugin masonry classified` stampa filari e pietre (e scrive la tavola con `--plate`); senza `--accept`
-non salva niente, e con `--accept` le pietre doppie vengono saltate allo stesso modo.
+non salva niente, e con `--accept` le pietre doppie vengono saltate allo stesso modo. Qui `--accept` non prende un
+valore; per `usm` ne vuole uno (`all` o i numeri delle proposte): un `--accept` da solo lì è un errore, così nessun
+rapporto viene accettato per sbaglio.
 
 ## USM e rapporti
 

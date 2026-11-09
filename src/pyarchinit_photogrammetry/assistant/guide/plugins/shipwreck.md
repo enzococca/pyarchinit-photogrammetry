@@ -91,6 +91,12 @@ From version 0.5.0, with pyarchinit-photogrammetry 1.7.7 or later, a water level
 has no level of its own: the state of the step says so ("the water level of the chunk"), the correction stays off, and the
 level becomes the plugin's own when you confirm the form. A level of the plugin always wins.
 
+!!! warning "Do not correct the refraction twice"
+    The program can correct the dense cloud itself (*Tools > Water level and refraction*, *Correct the cloud*). A model
+    built from that corrected cloud already has the bottom at its true depth: leave the correction of the plugin **off**.
+    Switch it on only for a model built from an uncorrected cloud. When the active cloud of the chunk is a corrected
+    version, the window asks before switching the correction on, and `water --on` on the command line prints a warning.
+
 <figure markdown="span">
   ![A section as measured and corrected](../img/plugins/shipwreck/water.png)
   <figcaption>Two stations of the synthetic hull as measured (grey) and corrected (blue) under a level of -0.10 m, with the
@@ -370,7 +376,9 @@ Nothing enters the catalogue before the **check plate**: it shows every element 
 and a box per kind with its count. *Into the catalogue* adds the kinds ticked as measured timbers (source `orient:<drawing>:<id>`),
 one step of *Edit > Undo*; *Cancel* leaves the catalogue as it was. Importing the same drawing again, or a drawing
 that grew, adds only what is new: a timber already in the catalogue from a classified drawing (same kind, same vertices) is
-skipped, and the window and the command line say how many. The plate is kept in `shipwreck/classified/plate.png`.
+skipped, and the window and the command line say how many. An element edited after its import (a vertex moved, a
+line extended, a polygon reshaped) has new vertices, so it comes in again as a new timber beside the old one: remove
+the old timber from the catalogue first. The plate is kept in `shipwreck/classified/plate.png`.
 
 !!! tip "Frames drawn as loose lines"
     A traced polygon is always one element: draw frames and strakes as polygons when you can. Frames drawn as **two loose
