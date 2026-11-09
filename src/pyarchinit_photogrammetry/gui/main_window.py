@@ -3348,12 +3348,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return False
             self._store_drawings()
             self._prune_frames()
+            clean = self.history is not None and self.history.unchanged()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
             self._store_drawings()
             self._prune_frames()
+            clean = self.history is not None and self.history.unchanged()
             self.doc.save()
+        if clean:  # saving writes the ties back as they are read (a marker given its identity back): not an edit
+            self.history.rebase()
         self._dirty(False)
         self.refresh_all()
         self.statusBar().showMessage(tr("Salvato {0}", self.doc.path), 5000)

@@ -461,3 +461,26 @@ def test_the_dialog_follows_chunks_removed_and_added(qapp, scene, tmp_path, monk
         qapp.processEvents()
     finally:
         _close_window(w)
+
+
+def test_saving_writes_the_ties_back_without_an_edit_in_the_history(qapp, scene, tmp_path, monkeypatch):
+    """Saving gives a marker of a tie its identity back (``ties.settle_stored``): the history is rebased, so it is
+    still unchanged after the save and the next edit carries nothing of it."""
+    doc, a, b, _c = _three(scene)
+    tie = _tie(doc, a, b, _world(scene, AB[0]))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        assert w.chunk is a.chunk and w.history is not None
+        end = a.chunk.marker_by_key(tie.a[1])
+        end.uid = None  # as a project saved by 1.7.5 would have it, until the ties are read again
+        w.history.rebase()
+        assert w.history.unchanged()
+        assert w.save_document()
+        assert end.uid == tie.a_uid  # given back by the save
+        assert w.history.unchanged()
+        w.sections.append({"label": "Sezione 1", "p1": [0, 0], "p2": [1, 1]})
+        assert w.history.record()
+        assert w.history.undo_text() == "Sezioni"  # no "Marker" part from the save
+    finally:
+        w.sections.clear()
+        _close_window(w)
