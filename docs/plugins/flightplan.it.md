@@ -12,7 +12,7 @@ HTML. **Dopo il volo** confronta il piano con le foto scattate e la copertura ot
     gru), il meteo né le regole del tuo paese. Controllare che il volo sia consentito e sicuro, e chiedere i permessi,
     spetta al pilota. Guarda la rotta sulla mappa e nell'app di volo prima di decollare.
 
-Questa pagina descrive la versione 0.1.0 del plugin, che **richiede pyarchinit-photogrammetry 1.7.4**. Il pianificatore -
+Questa pagina descrive la versione 0.1.1 del plugin, che **richiede pyarchinit-photogrammetry 1.7.4**. Il pianificatore -
 griglie a serpentina, anelli, percorsi punto per punto, tratte che stanno in una batteria, i profili delle camere -
 viene dal pianificatore di Photo3D dello stesso autore. Il README e il codice sono nel [repository dei
 plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/flightplan).
@@ -80,7 +80,7 @@ tecniche. Una camera che non è nell'elenco non si inventa mai; prendila:
 - **A mano...**: larghezza e altezza del sensore in mm, focale in mm, pixel sul lato lungo. I campi partono dalla camera
   scelta nell'elenco.
 
-**Alta risoluzione** usa la modalità ad alta risoluzione delle camere che l'hanno (48, 50 o 100 MP, come dice l'elenco delle camere); **Batteria** sono i
+**Alta risoluzione** (spenta di base) usa la modalità ad alta risoluzione delle camere che l'hanno (48, 50 o 100 MP, come dice l'elenco delle camere): a parità di GSD il drone vola più in alto; **Batteria** sono i
 minuti di volo su cui conti per una batteria: un piano più lungo si divide in tratte.
 
 ### 3. Parametri
@@ -298,7 +298,7 @@ su un telecomando vero**.
 
 ```bash
 ppg plugin flightplan cameras                                   # le camere dell'elenco
-ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain   # --battery 18 (minuti), --low-res, --name
+ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain   # --battery 18 (minuti), --high-res, --name
 ppg plugin flightplan design scavo.ppg --xy "x,y;x,y;x,y" --camera mini4pro --margin 10 --double
 ppg plugin flightplan design scavo.ppg --bbox O,S,E,N --exif foto.jpg --takeoff LAT,LON
 ppg plugin flightplan show scavo.ppg                            # i numeri del piano (JSON)
@@ -338,5 +338,5 @@ rifanno quando il piano cambia. Le esportazioni vanno dove scegli; le copie dell
   provali prima di volare.
 - La copertura ottenuta non è ancora stata provata su un volo vero allineato.
 - Senza un'ortofoto nel progetto le mappe delle tratte hanno lo **sfondo grigio** (nessuna tegola di mappe di terzi).
-- Le **riprese ravvicinate** (una trincea, una parete) non sono nella 0.1.0.
+- Le **riprese ravvicinate** (una trincea, una parete) non sono nella 0.1.
 - Spazio aereo, permessi, ostacoli e meteo sono del pilota.

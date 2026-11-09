@@ -13,7 +13,7 @@ the coverage obtained.
     buildings, cranes), the weather or the rules of your country. Checking that the flight is allowed and safe, and
     asking for the permits, is the pilot's job. Look at the route on the map and in the flight app before taking off.
 
-This page describes version 0.1.0 of the plugin, which **requires pyarchinit-photogrammetry 1.7.4**. The planner -
+This page describes version 0.1.1 of the plugin, which **requires pyarchinit-photogrammetry 1.7.4**. The planner -
 serpentine grids, rings, routes given point by point, legs that fit a battery, the camera profiles - is ported from the
 author's Photo3D planner. The README and the code are in the [plugin
 repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/flightplan).
@@ -80,7 +80,7 @@ spec sheets. A camera that is not in the list is never invented; take it:
 - **By hand...**: sensor width and height in mm, focal length in mm, pixels on the long side. The fields start from
   the camera chosen in the list.
 
-**High resolution** uses the high-resolution mode of the cameras that have one (48, 50 or 100 MP, as the camera list says); **Battery** is the
+**High resolution** (off by default) uses the high-resolution mode of the cameras that have one (48, 50 or 100 MP, as the camera list says): for the same GSD the drone flies higher; **Battery** is the
 minutes of flight you count on for one battery: a plan longer than that is split into legs.
 
 ### 3. Parameters
@@ -298,7 +298,7 @@ controller**.
 
 ```bash
 ppg plugin flightplan cameras                                   # the cameras of the list
-ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain   # --battery 18 (minutes), --low-res, --name
+ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain   # --battery 18 (minutes), --high-res, --name
 ppg plugin flightplan design scavo.ppg --xy "x,y;x,y;x,y" --camera mini4pro --margin 10 --double
 ppg plugin flightplan design scavo.ppg --bbox W,S,E,N --exif foto.jpg --takeoff LAT,LON
 ppg plugin flightplan show scavo.ppg                            # the numbers of the plan (JSON)
@@ -337,5 +337,5 @@ are made again when the plan changes. The exports go where you choose; the copie
   them before flying.
 - The obtained coverage has not yet been tried on a real aligned flight.
 - Without an orthophoto in the project the maps of the legs have a **grey background** (no third-party map tiles).
-- **Close-up shooting** (a trench, a wall face) is not in 0.1.0.
+- **Close-up shooting** (a trench, a wall face) is not in 0.1.
 - Airspace, permits, obstacles and weather are the pilot's.
