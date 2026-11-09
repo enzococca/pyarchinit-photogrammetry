@@ -429,7 +429,8 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     other than this project's. ``report["sections"]``: the sections of the source (:func:`source_sections`). The
     ties of the source between chunks all appended are copied with them (:func:`_carry_ties`: ``report["ties"]``
     how many, ``report["ties_dropped"]`` the names of those to a chunk not appended), the height ties too
-    (:func:`_carry_heights`: ``report["heights"]``, ``report["heights_dropped"]``).
+    (:func:`_carry_heights`: ``report["heights"]``, ``report["heights_dropped"]``). The merged products of the source
+    (``doc.meta["mosaics"]``) are not carried: those built from a chunk appended are named in ``report["warnings"]``.
     Returns the new chunks; on an error those it made are taken away again, with the ties copied."""
     from .document import Document
 
@@ -512,6 +513,13 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
         if pairs:
             report["ties"], report["ties_dropped"] = _carry_ties(doc, src, src_ties, pairs, path.stem)
             report["heights"], report["heights_dropped"] = _carry_heights(doc, src_heights, pairs, path.stem)
+            appended = {sc.key for sc, _ch in pairs}
+            merged = [m for m in src.meta.get("mosaics") or [] if isinstance(m, dict)
+                      and set(m.get("chunks") or []) & appended]
+            if merged:  # files of the source project, built from its chunks: not carried, built again here
+                names = ", ".join(f"«{m.get('name') or m.get('id')}»" for m in merged)
+                warnings.append(f"{path.name}: {len(merged)} prodotti uniti (ortofoto e DEM uniti) non sono copiati "
+                                f"({names}): costruiscili di nuovo qui con Strumenti > Ortofoto e DEM uniti...")
         site, mine = src.meta.get("sito"), doc.meta.get("sito")
         if site and site != mine:
             warnings.append(f"{path.name}: è del sito «{site}», questo progetto " + (f"del sito «{mine}»" if mine else

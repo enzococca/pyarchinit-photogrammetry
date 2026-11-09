@@ -205,6 +205,10 @@ Che cos'altro arriva con i chunk di un `.ppg`:
 * il sito di questo progetto (*PyArchInit*) non cambia: il riepilogo dice quando la sorgente è di un altro sito;
 * i disegni già pubblicati in PyArchInit tengono il collegamento alle schede che hanno scritto.
 
+**Ortofoto e DEM uniti** del progetto di origine ([*Strumenti > Ortofoto e DEM uniti...*](gui/multi-survey.md#ortofoto-e-dem-uniti))
+non vengono copiati: sono file del progetto di origine, fatti dai suoi chunk dove si trovavano allora. Il riepilogo nomina
+quelli costruiti da un chunk che aggiungi; costruiscili di nuovo qui una volta agganciati i chunk.
+
 Mentre l'aggiunta lavora, i chunk del progetto non si possono aggiungere, rendere attivi, rinominare, attivare o disattivare.
 Il progetto risulta modificato, non salvato. *Modifica > Annulla* toglie in un passo tutti i chunk aggiunti (con le
 sezioni che hanno portato) e *Ripeti* li rimette; le loro cartelle seguono il progetto come è stato salvato l'ultima
