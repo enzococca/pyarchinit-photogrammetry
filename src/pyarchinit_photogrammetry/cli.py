@@ -1623,6 +1623,10 @@ def append(project: Path,
             typer.echo(f"  warning: {w}")
         for name in r.ties_dropped:
             typer.echo(f"  warning: tie «{name}» not copied: it goes to a chunk not appended")
+        if r.heights:
+            typer.echo(f"{r.path.name}: {r.heights} stable heights between the chunks appended, copied with them")
+        for name in r.heights_dropped:
+            typer.echo(f"  warning: stable height «{name}» not copied: it goes to a chunk not appended")
     typer.echo("Nothing was aligned: use align-chunks or merge-chunks to bring the chunks together.")
     if any(r.error for r in results):
         raise typer.Exit(1)
@@ -4034,17 +4038,48 @@ def _tie_line(doc, t) -> str:
     return f"{t.id}  {t.name!r}: {a} <-> {b}, precision {t.precision:.3f} m, {state}"
 
 
-def _find_tie(doc, ref: str):
-    """A tie by id, else by its name when only one tie has it."""
+def _find_tie(doc, ref: str, heights: bool = False):
+    """A tie by id, else by its name when only one tie has it; ``heights``: the height ties count too (a tie or a
+    :class:`engine.stable_height.HeightTie`)."""
+    from .engine import stable_height
     from .engine import ties as ties_mod
 
-    all_ties = ties_mod.ties_of(doc)
+    all_ties = ties_mod.ties_of(doc) + (stable_height.heights_of(doc) if heights else [])
     found = [t for t in all_ties if t.id == ref] or [t for t in all_ties if t.name == ref]
     if not found:
-        raise typer.BadParameter(f"no tie {ref!r} (ids and names: ppg ties list)")
+        where = "ppg ties list, ppg ties heights" if heights else "ppg ties list"
+        raise typer.BadParameter(f"no tie {ref!r} (ids and names: {where})")
     if len(found) > 1:
         raise typer.BadParameter(f"{len(found)} ties are named {ref!r}: give the id ({', '.join(t.id for t in found)})")
     return found[0]
+
+
+def _find_height(doc, ref: str):
+    """A height tie by id, else by its name when only one has it."""
+    from .engine import stable_height
+
+    every = stable_height.heights_of(doc)
+    found = [t for t in every if t.id == ref] or [t for t in every if t.name == ref]
+    if not found:
+        raise typer.BadParameter(f"no stable height {ref!r} (ids and names: ppg ties heights)")
+    if len(found) > 1:
+        raise typer.BadParameter(f"{len(found)} stable heights are named {ref!r}: give the id "
+                                 f"({', '.join(t.id for t in found)})")
+    return found[0]
+
+
+def _height_labels(doc, h) -> tuple[str, str]:
+    labels = {c.key: c.label for c in doc.chunks}
+    return labels.get(h.b, f"chunk {h.b} (gone)"), labels.get(h.a, f"chunk {h.a} (gone)")
+
+
+def _height_line(doc, h) -> str:
+    """One line of a height tie: id, name, B on A, dz, NMAD, cells, precision, state."""
+    b, a = _height_labels(doc, h)
+    precision = min((x["precision"] for x in h.anchors), default=0.0)
+    kind = "plane, 3 anchors" if h.plane else "offset"
+    return (f"{h.id}  {h.name!r}: {b} on {a}, dz {h.dz:+.4f} m, NMAD {h.nmad:.4f} m, {h.cells} stable cells, "
+            f"precision {precision:.4f} m ({kind}), {'active' if h.active else 'inactive'}")
 
 
 def _parse_unknowns(doc, text: str) -> dict[int, str]:
@@ -4207,15 +4242,22 @@ def ties_list(project: Path,
 
 @ties_app.command("remove")
 def ties_remove(project: Path,
-                tie: str = typer.Argument(..., help="id of the tie (or its name when only one tie has it)"),
+                tie: str = typer.Argument(..., help="id of the tie or of the stable height (or its name when only "
+                                                    "one has it)"),
                 markers: bool = typer.Option(True, "--markers/--keep-markers",
                                              help="remove also the markers the tie made (never the markers that "
                                                   "were already there, nor those another tie still uses)")):
-    """Remove a tie."""
+    """Remove a tie, or a stable height (ppg ties heights)."""
+    from .engine import stable_height
     from .engine import ties as ties_mod
 
     doc = Document.open(project)
-    t = _find_tie(doc, tie)
+    t = _find_tie(doc, tie, heights=True)
+    if isinstance(t, stable_height.HeightTie):
+        stable_height.remove(doc, t.id)
+        doc.save()
+        typer.echo(f"removed stable height {t.id} {t.name!r}")
+        return
     try:
         ties_mod.remove_tie(doc, t.id, keep_markers=not markers)
     except (ValueError, KeyError) as exc:
@@ -4245,6 +4287,82 @@ def ties_confirm(project: Path,
     typer.echo(f"confirmed {len(done)} ties: {', '.join(done)}")
 
 
+@ties_app.command("height")
+def ties_height(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk whose height is measured (B: label or key)"),
+                reference: str = typer.Argument(..., help="the reference chunk (A): B is measured against it"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the stable ground: a polygon layer of the "
+                                                    "free drawings (of A, else of B)"),
+                area: Optional[Path] = typer.Option(None, "--area", help="the stable ground: polygons of a GeoPackage, "
+                                                    "GeoJSON or DXF file"),
+                exclude: Optional[str] = typer.Option(None, "--exclude", help="ground left out: a polygon layer, or "
+                                                      "a file (.gpkg, .geojson, .json, .dxf)"),
+                plane: bool = typer.Option(False, "--plane", help="a plane (offset and tilt, three anchors) instead "
+                                           "of an offset"),
+                name: Optional[str] = typer.Option(None, help="name of the stable height (default: quota stabile N)")):
+    """Measure how much higher CHUNK is than REFERENCE on stable ground (their DEMs as they are placed now: no
+    horizontal shift) and keep it as a stable height, a z-only tie used by ppg ties check/solve. Without --layer or
+    --area the stable ground is found by itself (gentle slopes, cells that agree)."""
+    from .engine import stable_height
+    from .engine import ties as ties_mod
+
+    if layer is not None and area is not None:
+        raise typer.BadParameter("give --layer or --area, not both")
+    doc = Document.open(project)
+    cb, ca = _tie_chunk(doc, chunk), _tie_chunk(doc, reference)
+    where = {"layer": layer} if layer is not None else {"file": str(area)} if area is not None else None
+    try:
+        h = stable_height.measure(doc, cb, ca, area=where, exclude=exclude, plane=plane, name=name)
+        h = stable_height.add(doc, h)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"{cb.label} on {ca.label}: dz {h.dz:+.4f} m, NMAD {h.nmad:.4f} m, {h.cells} stable cells")
+    typer.echo(f"added {_height_line(doc, h)}")
+
+
+@ties_app.command("heights")
+def ties_heights(project: Path,
+                 as_json: bool = typer.Option(False, "--json", help="print the stable heights as JSON")):
+    """The stable heights of the project: chunks, dz, NMAD, cells, precision, active or not."""
+    from .engine import stable_height
+
+    doc = Document.open(project)
+    every = stable_height.heights_of(doc)
+    if as_json:
+        rows = []
+        for h in every:
+            d = h.to_dict()
+            d["chunks"] = list(_height_labels(doc, h))
+            rows.append(d)
+        typer.echo(json.dumps(rows, indent=1))
+        return
+    if not every:
+        typer.echo("no stable heights")
+        return
+    for h in every:
+        typer.echo(_height_line(doc, h))
+
+
+@ties_app.command("remeasure")
+def ties_remeasure(project: Path,
+                   height: str = typer.Argument(..., help="id of the stable height (or its name when only one has "
+                                                          "it)")):
+    """Measure a stable height again where its chunks are now (same chunks, areas and kind): needed when a solve
+    moved them in plan against each other since it was measured."""
+    from .engine import stable_height
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    h = _find_height(doc, height)
+    try:
+        new = stable_height.remeasure(doc, h.id)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"measured again {_height_line(doc, new)} (before: dz {h.dz:+.4f} m)")
+
+
 @ties_app.command("check")
 def ties_check(project: Path,
                unknowns: str = typer.Option(..., "--unknowns", "-u", help=UNKNOWNS_HELP),
@@ -4252,7 +4370,8 @@ def ties_check(project: Path,
                references: bool = typer.Option(True, help="the control markers of the chunks count as known points"),
                as_json: bool = typer.Option(False, "--json", help="print the report as JSON")):
     """The solve and its checks (residuals, redundancy, distances between ties, leave one out, plausibility):
-    a report only, nothing is changed."""
+    a report only, nothing is changed. The active stable heights (ppg ties heights) between chunks of the solve take
+    part as z-only ties."""
     from .engine import ties as ties_mod
 
     doc = Document.open(project)

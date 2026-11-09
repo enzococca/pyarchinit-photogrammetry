@@ -315,3 +315,49 @@ def test_ends_after_a_new_alignment_are_listed_and_confirmed(scene, tmp_path, ru
     assert ties.stale_ends(ppg.Document.open(path)) == []
     r = runner.invoke(app, ["ties", "confirm", str(path)])
     assert r.exit_code == 0 and "no tie with an end" in r.output
+
+
+def test_cli_ties_height_and_check(tmp_path, runner):
+    """``ppg ties height`` measures and keeps a height tie; ``heights`` lists it, ``check`` reports it, ``remeasure``
+    measures it again, ``remove`` takes it away."""
+    from test_stable_height import BIAS, pit, project
+
+    from pyarchinit_photogrammetry.engine import stable_height
+
+    doc, _a, _b = project(tmp_path, extra=lambda x, y: -pit(x, y))
+    doc.save()
+    path = tmp_path / "p.ppg"
+    r = runner.invoke(app, ["ties", "height", str(path), "B", "A", "--name", "sabbia"])
+    assert r.exit_code == 0, r.output
+    assert "dz +0.37" in r.output and "NMAD" in r.output and "stable cells" in r.output
+    (h,) = stable_height.heights_of(ppg.Document.open(path))
+    assert h.name == "sabbia" and abs(h.dz - BIAS) < 0.002 and not h.plane
+
+    r = runner.invoke(app, ["ties", "heights", str(path), "--json"])
+    assert r.exit_code == 0, r.output
+    (row,) = json.loads(r.output)
+    assert row["id"] == h.id and row["chunks"] == ["B", "A"] and row["dz"] == pytest.approx(h.dz)
+    r = runner.invoke(app, ["ties", "heights", str(path)])
+    assert h.id in r.output and "sabbia" in r.output
+
+    r = runner.invoke(app, ["ties", "check", str(path), "-u", "A=fixed,B=height"])
+    assert r.exit_code == 0, r.output
+    assert "Stable heights" in r.output and "sabbia (B on A)" in r.output
+    r = runner.invoke(app, ["ties", "check", str(path), "-u", "A=fixed,B=height", "--json"])
+    rep = json.loads(r.output)
+    assert [x["id"] for x in rep["heights"]] == [h.id] and abs(rep["heights"][0]["dz"]) < 1e-6
+
+    r = runner.invoke(app, ["ties", "remeasure", str(path), h.id])
+    assert r.exit_code == 0, r.output
+    (again,) = stable_height.heights_of(ppg.Document.open(path))
+    assert again.id == h.id and again.name == "sabbia"
+    r = runner.invoke(app, ["ties", "remeasure", str(path), "nessuna"])
+    assert r.exit_code == 2
+
+    r = runner.invoke(app, ["ties", "height", str(path), "B", "A", "--plane", "--exclude", "scavo"])
+    assert r.exit_code == 1 and "scavo" in _said(r)  # no such layer: nothing added
+    assert len(stable_height.heights_of(ppg.Document.open(path))) == 1
+
+    r = runner.invoke(app, ["ties", "remove", str(path), "sabbia"])
+    assert r.exit_code == 0, r.output and "removed" in r.output
+    assert stable_height.heights_of(ppg.Document.open(path)) == []

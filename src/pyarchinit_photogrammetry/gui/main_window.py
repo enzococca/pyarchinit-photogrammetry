@@ -459,7 +459,8 @@ class _Appended:
         self.inner = _Removed(window, [removal])
         self.inner.after = before
         self.sections = list(sections)  # the sections of the projects appended, merged into the window's
-        self.ties = ties  # doc.meta["ties"] before and after: the ties copied with the chunks come and go with them
+        self.ties = ties  # the ties and height ties before and after (core.append.ties_state): copied with the
+        # chunks, they come and go with them
 
     def _ties(self, which: int) -> None:
         from ..core.append import _restore_ties
@@ -4075,7 +4076,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         doc = self.doc
         before = self.chunk
         self._store_drawings()
-        ties_before = copy.deepcopy(doc.meta.get("ties"))
+        from ..core.append import ties_state
+
+        ties_before = ties_state(doc)
 
         def job(p):
             return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
@@ -4096,7 +4099,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     self._set_sections(self.sections + added)
                     self.log_pane.info(tr("{0} sezioni aggiunte dai progetti", len(added)))
                 step = _Appended(self, results.journal, before, added,
-                                 ties=(ties_before, copy.deepcopy(doc.meta.get("ties"))))
+                                 ties=(ties_before, ties_state(doc)))
                 if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
                     active = new[0]
                     self._activate_chunk(active)
@@ -4132,6 +4135,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             warnings += [f"{r.path.name}: {w}" for w in r.warnings]
             warnings += [tr("{0}: legame «{1}» non copiato: va verso un chunk non aggiunto", r.path.name, name)
                          for name in getattr(r, "ties_dropped", [])]
+            if getattr(r, "heights", 0):
+                lines.append("  " + tr("{0} quote stabili fra i chunk aggiunti, copiate con loro", r.heights))
+            warnings += [tr("{0}: quota stabile «{1}» non copiata: va verso un chunk non aggiunto", r.path.name, name)
+                         for name in getattr(r, "heights_dropped", [])]
         added = sum(len(r.chunks) for r in results)
         text = "\n".join(lines)
         if added:

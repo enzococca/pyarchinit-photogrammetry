@@ -44,6 +44,8 @@ class Appended:
     warnings: list = field(default_factory=list)
     ties: int = 0  # ties between chunks of the source copied with them
     ties_dropped: list = field(default_factory=list)  # names of the ties to a chunk not appended: not copied
+    heights: int = 0  # height ties (stable heights) between chunks of the source copied with them
+    heights_dropped: list = field(default_factory=list)  # names of the height ties to a chunk not appended
 
 
 def source_kind(path, webodm: bool = False) -> str:
@@ -362,12 +364,59 @@ def _carry_ties(doc, src, src_ties, pairs, prefix: str) -> tuple[int, list[str]]
     return len(copied), dropped
 
 
+def _carry_heights(doc, src_heights, pairs, prefix: str) -> tuple[int, list[str]]:
+    """The height ties of the source (:mod:`..engine.stable_height`) between chunks all appended added to ``doc``, on
+    the new chunks (their anchors are internal points: they hold as they are), as :func:`_carry_ties` does: a new id
+    when the id is taken, `` (<prefix>)`` after a name taken; those with one chunk not appended are not copied and
+    their names returned (and logged). Returns (copied, dropped names)."""
+    from ..engine import stable_height
+
+    mapping = {sc.key: ch.key for sc, ch in pairs}
+    mine = stable_height.heights_of(doc)
+    ids, names = {t.id for t in mine}, {t.name for t in mine}
+    copied, dropped = [], []
+    for t in src_heights:
+        keys = {t.a, t.b}
+        if not keys <= set(mapping):
+            if keys & set(mapping):
+                dropped.append(t.name or t.id)
+                log.info("Quota stabile «%s» non copiata: va verso un chunk non aggiunto", t.name or t.id)
+            continue
+        new = stable_height.HeightTie.from_dict(t.to_dict())
+        new.a, new.b = mapping[t.a], mapping[t.b]
+        while not new.id or new.id in ids:
+            new.id = "h" + uuid.uuid4().hex[:8]
+        if new.name in names:
+            name, n = f"{new.name} ({prefix})", 1
+            while name in names:
+                n += 1
+                name = f"{new.name} ({prefix} {n})"
+            new.name = name
+        ids.add(new.id)
+        names.add(new.name)
+        copied.append(new)
+    if copied:
+        stable_height.save_heights(doc, mine + copied)
+    return len(copied), dropped
+
+
+TIE_KEYS = ("ties", "height_ties")  # the records of doc.meta an append may add to (ties, stable heights)
+
+
+def ties_state(doc) -> dict:
+    """A copy of the ties and height ties of ``doc`` (:data:`TIE_KEYS`), for :func:`_restore_ties`."""
+    return {k: copy.deepcopy(doc.meta.get(k)) for k in TIE_KEYS}
+
+
 def _restore_ties(doc, saved) -> None:
-    """``doc.meta["ties"]`` back to ``saved`` (a copy taken before an append that is being undone)."""
-    if saved:
-        doc.meta["ties"] = copy.deepcopy(saved)
-    else:
-        doc.meta.pop("ties", None)
+    """The ties of ``doc`` back to ``saved``: a :func:`ties_state` (ties and height ties), or the list of
+    ``doc.meta["ties"]`` alone (a copy taken before an append that is being undone)."""
+    state = saved if isinstance(saved, dict) else {"ties": saved}
+    for key, value in state.items():
+        if value:
+            doc.meta[key] = copy.deepcopy(value)
+        else:
+            doc.meta.pop(key, None)
 
 
 def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dict | None = None) -> list:
@@ -379,7 +428,8 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     ``report["warnings"]``, with the files of the source project the chunks still point to and a site of the source
     other than this project's. ``report["sections"]``: the sections of the source (:func:`source_sections`). The
     ties of the source between chunks all appended are copied with them (:func:`_carry_ties`: ``report["ties"]``
-    how many, ``report["ties_dropped"]`` the names of those to a chunk not appended).
+    how many, ``report["ties_dropped"]`` the names of those to a chunk not appended), the height ties too
+    (:func:`_carry_heights`: ``report["heights"]``, ``report["heights_dropped"]``).
     Returns the new chunks; on an error those it made are taken away again, with the ties copied."""
     from .document import Document
 
@@ -389,11 +439,13 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     path = Path(path).resolve()
     if doc.path is not None and Path(doc.path).resolve() == path:
         raise ValueError("è il progetto aperto: non si può aggiungere a sé stesso")
+    from ..engine.stable_height import heights_of
     from ..engine.ties import ties_of
 
     src = Document(path)  # only read: nothing of it is written
     src_ties = ties_of(src)  # before the markers are copied: the ends recognised (identities given back)
-    ties_before = copy.deepcopy(doc.meta.get("ties"))
+    src_heights = heights_of(src)
+    ties_before = ties_state(doc)
     picked = [src.chunks[i] for i in _chosen([c.label for c in src.chunks], chunks)]
     src_files = os.path.abspath(path.with_name(path.name + ".files"))
     added, pairs = [], []
@@ -459,6 +511,7 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
             sub(1.0, f"{ch.label}: {len(ch.cameras)} foto")
         if pairs:
             report["ties"], report["ties_dropped"] = _carry_ties(doc, src, src_ties, pairs, path.stem)
+            report["heights"], report["heights_dropped"] = _carry_heights(doc, src_heights, pairs, path.stem)
         site, mine = src.meta.get("sito"), doc.meta.get("sito")
         if site and site != mine:
             warnings.append(f"{path.name}: è del sito «{site}», questo progetto " + (f"del sito «{mine}»" if mine else
@@ -491,13 +544,14 @@ def append_projects(doc, sources, chunks=None, webodm: bool = False, progress=No
     it made - only those - and the others go on (its ``error``); a cancellation (:class:`.progress.Cancelled`) takes
     away every chunk this call made and goes on. A journal left with no chunk is discarded. The active chunk is not
     changed and ``doc`` is not saved. The ties of a ``.ppg`` between chunks all appended come with them
-    (``Appended.ties``; ``Appended.ties_dropped``: those to a chunk left out, not copied). Returns :class:`Results`."""
+    (``Appended.ties``; ``Appended.ties_dropped``: those to a chunk left out, not copied), the height ties too
+    (``Appended.heights``, ``Appended.heights_dropped``). Returns :class:`Results`."""
     from .removal import ChunkRemoval
 
     progress = as_progress(progress)
     journal = journal if journal is not None else ChunkRemoval.added(doc)
     sources = [Path(s) for s in sources]
-    ties_before = copy.deepcopy(doc.meta.get("ties"))
+    ties_before = ties_state(doc)
     results = Results()
     results.sections = []
     made_all: list = []
@@ -523,6 +577,8 @@ def append_projects(doc, sources, chunks=None, webodm: bool = False, progress=No
                     result.chunks = append_ppg(doc, path, wanted, progress=sub, on_chunk=on_chunk, report=report)
                     result.warnings += report.get("warnings", [])
                     result.ties, result.ties_dropped = report.get("ties", 0), list(report.get("ties_dropped", []))
+                    result.heights = report.get("heights", 0)
+                    result.heights_dropped = list(report.get("heights_dropped", []))
                     if report.get("sections"):
                         results.sections.append((path.stem, report["sections"]))
                 elif kind == "psx":
