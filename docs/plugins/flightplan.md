@@ -51,6 +51,11 @@ At the top, **Plan:** chooses the active plan of the chunk; **Remove** takes it 
 its files; the files are deleted for good the next time the project is opened). The steps follow in order; under each
 step a line says its state - what is there, what is missing, what must be done again.
 
+<figure markdown="span">
+  ![The Flight plans pane with a plan designed](../img/plugins/flightplan/pane-design.png)
+  <figcaption>The pane after <em>Design</em> on a made-up hill: the area with its margin, the camera, the parameters and the line that explains the height chosen, then the plan with its block and its three legs, the warnings and the totals.</figcaption>
+</figure>
+
 ### 1. Area
 
 - **Draw on the view**: click the vertices of the polygon on the 2D view (orthophoto, DEM), double click or Enter to
@@ -108,11 +113,21 @@ terrain falls below the takeoff.
 
 On the 2D view the layers *Piano di volo: area*, *strisciate*, *scatti*, *decollo*, *target* show the plan.
 
+<figure markdown="span">
+  ![The plan on the orthophoto](../img/plugins/flightplan/plan-view.png)
+  <figcaption>The plan on the orthophoto of the 2D view: the area drawn and the block with its margin (light blue), the legs (red, blue, green) with a dot for every shot, the takeoff and the targets T1-T6 with the route that goes down to them.</figcaption>
+</figure>
+
 ### 5. Terrain { #terrain }
 
 **Follow the terrain** gives every point its own height above the takeoff, so that the height above the ground - and
 the GSD - stays the same uphill and downhill: height = height above the ground + (ground at the point - ground at the
 takeoff), kept between 10 m and 500 m above the takeoff.
+
+<figure markdown="span">
+  ![Heights along a strip that crosses the hill](../img/plugins/flightplan/terrain-profile.jpg)
+  <figcaption>Along the strip that crosses the top of the hill: with one height for the block (grey) the drone gets nearer the ground on the hill and the GSD gets finer there; following the terrain (blue) every shot has its own height and stays at the same distance from the ground.</figcaption>
+</figure>
 
 - **Project DEM**: the DEM of the chunk. A DEM under the whole flight sends nothing to the network. Only where the DEM
   ends does the plugin ask the public tiles, shifted by the median difference measured where both exist; if the two
@@ -154,6 +169,11 @@ percentile, the share of the area under the **Threshold** (5 photos by default),
 - **Limits**: there is **no occlusion** - walls and trees do not hide the ground behind them. Cells outside the DEM are
   taken **flat at the takeoff**. A plan changed after the computation makes the coverage *To do again*.
 
+<figure markdown="span">
+  ![The predicted coverage of the plan](../img/plugins/flightplan/coverage.png)
+  <figcaption>The predicted coverage with a threshold of 9 photos: green above twice the threshold, yellow-green up to it, the cells under it outlined in red - at the corners and the edges of the area. The dots of the shots are hidden here to show the cells.</figcaption>
+</figure>
+
 ### 7. Targets
 
 GNSS targets on the ground become **special points**: the drone goes over each target, descends to **Metres above the
@@ -170,6 +190,11 @@ down.
 The descents need the ground under the targets. It is read from the project DEM; in a chunk without a DEM the plugin
 asks whether to use the **public tiles (network)** (on the command line, `--tiles`). Without either, the export is
 refused and says to choose the tiles or add a DEM: the network is never asked for it unasked.
+
+<figure markdown="span">
+  ![The steps Terrain, Coverage and Targets of the pane](../img/plugins/flightplan/pane-terrain.png)
+  <figcaption>Steps 5 to 7 of the pane: the flight follows the project DEM, the coverage computed (median photos per cell, 10th percentile, share under the threshold, GSD) and six targets read from a CSV.</figcaption>
+</figure>
 
 ### 8. Export
 

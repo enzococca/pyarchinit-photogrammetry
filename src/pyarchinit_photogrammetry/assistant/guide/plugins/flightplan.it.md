@@ -51,6 +51,11 @@ In alto, **Piano:** sceglie il piano attivo del chunk; **Rimuovi** lo toglie (*M
 suoi file; i file si cancellano davvero alla prossima apertura del progetto). Seguono i passi in ordine; sotto ogni
 passo una riga ne dice lo stato: cosa c'è, cosa manca, cosa va rifatto.
 
+<figure markdown="span">
+  ![Il pannello Piani di volo con un piano progettato](../img/plugins/flightplan/pane-design.png)
+  <figcaption>Il pannello dopo <em>Progetta</em> su una collina inventata: l'area con il suo margine, la camera, i parametri e la riga che spiega la quota scelta, poi il piano con il suo blocco e le sue tre tratte, gli avvisi e i totali.</figcaption>
+</figure>
+
 ### 1. Area
 
 - **Disegna sulla vista**: clic sui vertici del poligono sulla vista 2D (ortofoto, DEM), doppio clic o Invio per
@@ -109,11 +114,21 @@ sotto il decollo.
 
 Sulla vista 2D i layer *Piano di volo: area*, *strisciate*, *scatti*, *decollo*, *target* mostrano il piano.
 
+<figure markdown="span">
+  ![Il piano sull'ortofoto](../img/plugins/flightplan/plan-view.png)
+  <figcaption>Il piano sull'ortofoto della vista 2D: l'area disegnata e il blocco con il suo margine (azzurro), le tratte (rosso, blu, verde) con un punto per ogni scatto, il decollo e i target T1-T6 con il percorso che scende su di loro.</figcaption>
+</figure>
+
 ### 5. Terreno { #terrain }
 
 **Segui il terreno** dà a ogni punto una quota propria sul decollo, così l'altezza dal suolo - e il GSD - resta la
 stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - suolo al decollo), tenuta fra 10 m e
 500 m sul decollo.
+
+<figure markdown="span">
+  ![Quote lungo una strisciata che attraversa la collina](../img/plugins/flightplan/terrain-profile.jpg)
+  <figcaption>Lungo la strisciata che attraversa la cima della collina: con una quota per il blocco (grigio) il drone si avvicina al suolo sulla collina e lì il GSD diventa più fine; seguendo il terreno (blu) ogni scatto ha la sua quota e resta alla stessa distanza dal suolo.</figcaption>
+</figure>
 
 - **DEM del progetto**: il DEM del chunk. Un DEM sotto tutto il volo non manda nulla in rete. Solo dove il DEM finisce
   il plugin chiede le tegole pubbliche, spostate dello scarto mediano misurato dove ci sono entrambi; se i due non si
@@ -155,6 +170,11 @@ foto vedono ogni cella** e il GSD più fine che una foto dà lì. La riga di sta
 - **Limiti**: **nessuna occlusione** - muri e alberi non nascondono il suolo dietro di loro. Le celle fuori dal DEM si
   prendono **piane al decollo**. Un piano cambiato dopo il calcolo rende la copertura *Da rifare*.
 
+<figure markdown="span">
+  ![La copertura prevista del piano](../img/plugins/flightplan/coverage.png)
+  <figcaption>La copertura prevista con una soglia di 9 foto: verde oltre il doppio della soglia, giallo-verde fino al doppio, le celle sotto la soglia contornate di rosso - agli angoli e ai bordi dell'area. Qui i punti degli scatti sono nascosti per mostrare le celle.</figcaption>
+</figure>
+
 ### 7. Target
 
 I target GNSS a terra diventano **punti speciali**: il drone va sopra ogni target, scende a **Metri dal suolo** (10 m di
@@ -171,6 +191,11 @@ Le discese hanno bisogno del suolo sotto i target. Si legge dal DEM del progetto
 chiede se usare le **tegole pubbliche (rete)** (sulla riga di comando, `--tiles`). Senza l'uno né le altre
 l'esportazione si rifiuta e dice di scegliere le tegole o aggiungere un DEM: la rete non si chiede mai senza che tu lo
 voglia.
+
+<figure markdown="span">
+  ![I passi Terreno, Copertura e Target del pannello](../img/plugins/flightplan/pane-terrain.png)
+  <figcaption>I passi da 5 a 7 del pannello: il volo segue il DEM del progetto, la copertura calcolata (mediana delle foto per cella, 10° percentile, parte sotto la soglia, GSD) e sei target letti da un CSV.</figcaption>
+</figure>
 
 ### 8. Esporta
 
