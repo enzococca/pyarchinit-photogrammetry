@@ -7,7 +7,9 @@ ties in red) and *Applica* (after a check; without redundancy only after its own
 *Modifica > Annulla* (:class:`TiesStep`)."""
 from __future__ import annotations
 
+import copy
 import html
+import json
 import logging
 
 import numpy as np
@@ -39,7 +41,7 @@ ADVICE = {"precision_spread", "precision_residuals", "precision_inherited", "not
 
 def say(m: dict) -> str:
     """A message of the engine (:func:`..engine.ties.message`) in the language of the interface."""
-    args = [ties_mod._Comma(a) if i18n.current() == "it" and isinstance(a, float) else a for a in m["args"]]
+    args = [ties_mod.Comma(a) if i18n.current() == "it" and isinstance(a, float) else a for a in m["args"]]
     return tr(m["it"], *args)
 
 
@@ -55,7 +57,7 @@ def kind_name(kind: str) -> str:
 
 
 def _held(chunk) -> bool:
-    return not crs_mod.is_local(chunk.crs) and ties_mod._held_by_references(chunk)
+    return not crs_mod.is_local(chunk.crs) and ties_mod.held_by_references(chunk)
 
 
 def default_kinds(doc, active=None) -> dict[int, str]:
@@ -171,6 +173,58 @@ def report_html(result: dict) -> str:
     return "".join(out)
 
 
+def edit_state(doc) -> dict:
+    """What an edit of the ties may change: the ties (``doc.meta["ties"]``) and the markers of every chunk (the ends
+    of the ties are markers; a known tie keeps its coordinates in its marker's reference)."""
+    return {"ties": copy.deepcopy(doc.meta.get(ties_mod.META_KEY)),
+            "markers": {ch.key: [m.to_dict() for m in ch.markers] for ch in doc.chunks}}
+
+
+def fingerprint(doc) -> str:
+    """The ties, the markers and the place of every chunk, as text: a check holds while it does not change."""
+    state = edit_state(doc)
+    state["chunks"] = {ch.key: [np.asarray(ch.transform, float).tolist(), ch.crs] for ch in doc.chunks}
+    return json.dumps(state, sort_keys=True, default=str)
+
+
+class TiesEditStep:
+    """An edit of the ties (import, from markers, remove, active, precision) as one step of *Modifica > Annulla*: the
+    ties and the markers of every chunk before and after it (:func:`edit_state`). Undo and redo first check that
+    the project is as the step left it (else they raise and the history drops the step), then write the other side
+    back - the ties and their markers together, in every chunk."""
+
+    def __init__(self, window, before: dict, after: dict, tag=None):
+        self.window, self.before, self.after, self.tag = window, before, after, tag
+
+    def _put(self, expected: dict, state: dict) -> None:
+        from ..core.marker import Marker
+
+        doc = self.window.doc
+        if edit_state(doc) != expected:
+            raise RuntimeError("the ties or the markers changed after the edit of the ties")
+        if state["ties"]:
+            doc.meta[ties_mod.META_KEY] = copy.deepcopy(state["ties"])
+        else:
+            doc.meta.pop(ties_mod.META_KEY, None)
+        for ch in doc.chunks:
+            if ch.key in state["markers"]:
+                ch.markers = [Marker.from_dict(d) for d in state["markers"][ch.key]]
+        self.window._ties_edited()
+
+    def undo(self) -> None:
+        self._put(self.after, self.before)
+
+    def redo(self) -> None:
+        self._put(self.before, self.after)
+
+
+def keep_report(doc, report: dict | None) -> None:
+    """The report of the checks (distances, leave one out, suspects, axis) kept with the solve applied in
+    ``doc.meta["ties_report"]`` (JSON)."""
+    if report is not None and isinstance(doc.meta.get("ties_report"), dict):
+        doc.meta["ties_report"]["checks"] = json.loads(json.dumps(report, default=float))
+
+
 class TiesStep:
     """A solve applied (:func:`..engine.ties.apply`) as one step of *Modifica > Annulla*: undone, what it changed is
     put back (:func:`..engine.ties.restore`: transforms, systems, references, the last report); done again, the same
@@ -178,8 +232,8 @@ class TiesStep:
     meanwhile it raises and the history drops the step - never a transform of before put back on a chunk aligned
     since."""
 
-    def __init__(self, window, solution, changed: dict):
-        self.window, self.solution, self.changed = window, solution, changed
+    def __init__(self, window, solution, changed: dict, report: dict | None = None):
+        self.window, self.solution, self.changed, self.report = window, solution, changed, report
         self.expected = self._now()
 
     def _chunks(self) -> dict:
@@ -203,6 +257,7 @@ class TiesStep:
     def redo(self) -> None:
         self._check()
         self.changed = ties_mod.apply(self.window.doc, self.solution)
+        keep_report(self.window.doc, self.report)
         self.expected = self._now()
         self.window._ties_reload()
 
@@ -226,6 +281,8 @@ class TiesDialog(QDialog):
         self.setWindowTitle(tr("Aggancia chunk con legami"))
         self.resize(1100, 760)
         self.result: dict | None = None  # the last check, while nothing changed after it
+        self._generation = 0  # bumped by every change: a check started before one is not taken
+        self._fingerprint: str | None = None  # the project when the last check started (fingerprint)
         self._filling = False
 
         lay = QVBoxLayout(self)
@@ -451,18 +508,31 @@ class TiesDialog(QDialog):
         return -1
 
     # ------------------------------------------------------------------ edits of the ties
-    def _changed(self) -> None:
-        """The ties of the project changed: modified, no step of Modifica > Annulla (the ties and their markers span
-        chunks: only the apply is a step); the last check dropped."""
-        self.window.setWindowModified(True)
-        if self.window.history is not None:
-            self.window.history.rebase()
+    def _edited(self, text: str, before: dict, tag=None) -> None:
+        """The ties changed from ``before`` (:func:`edit_state`): one step of Modifica > Annulla for the ties and the
+        markers of every chunk together (:class:`TiesEditStep`; edits of the same ``tag`` in a row - the precision of
+        one tie - make one step), the project modified, the last check dropped."""
+        after = edit_state(self.doc)
         self.invalidate()
+        if after == before:
+            return
+        self.window.setWindowModified(True)
+        history = self.window.history
+        if history is None:
+            return
+        last = history.entries[-1] if history.entries and history.index == len(history.entries) else None
+        step = getattr(last, "action", None)
+        if tag is not None and isinstance(step, TiesEditStep) and step.tag == tag and step.after == before:
+            step.after = after  # the same edit going on (the arrows of a precision)
+            history.rebase()
+            return
+        history.push(text, TiesEditStep(self.window, before, after, tag), document=True)
 
     def _item_changed(self, item) -> None:
         if self._filling or item.column() != 0:
             return
         tid = item.data(Qt.ItemDataRole.UserRole)
+        before = edit_state(self.doc)
         ties = ties_mod.ties_of(self.doc)
         t = next((x for x in ties if x.id == tid), None)
         if t is None or t.broken:
@@ -474,11 +544,12 @@ class TiesDialog(QDialog):
             self.table.item(self.row_of(tid), 6).setText(self._state_text(t))
         finally:
             self._filling = False
-        self._changed()
+        self._edited(tr("Legame attivo o no"), before)
 
     def _precision_changed(self, tie_id: str, value: float) -> None:
         if self._filling:
             return
+        before = edit_state(self.doc)
         ties = ties_mod.ties_of(self.doc)
         t = next((x for x in ties if x.id == tie_id), None)
         if t is None:
@@ -488,7 +559,7 @@ class TiesDialog(QDialog):
         else:
             t.precision = float(value)
             ties_mod.save_ties(self.doc, ties)
-        self._changed()
+        self._edited(tr("Precisione di un legame"), before, tag=("precision", tie_id))
 
     def selected_ids(self) -> list[str]:
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
@@ -499,14 +570,10 @@ class TiesDialog(QDialog):
         if not ids:
             self.window._warn(tr("Scegli nella tabella i legami da rimuovere."))
             return
-        names = [self.table.item(self.row_of(i), 1).text() for i in ids]
-        if choice(self, "question", tr("Rimuovi legami"),
-                  tr("Rimuovere {0} legami ({1})? I marker fatti dai legami vengono tolti con loro.", len(ids),
-                     ", ".join(names)), [tr("Rimuovi")], cancel=tr("Annulla")) != 0:
-            return
+        before = edit_state(self.doc)
         for tid in ids:
             ties_mod.remove_tie(self.doc, tid)
-        self._changed()
+        self._edited(tr("Rimuovi legami"), before)
         self.window.refresh_all()
         self.reload()
 
@@ -526,6 +593,7 @@ class TiesDialog(QDialog):
         if v["a"] == v["b"]:
             self.window._warn(tr("Scegli due chunk diversi."))
             return
+        before = edit_state(self.doc)
         try:
             made = ties_mod.ties_from_markers(self.doc, v["a"], v["b"])
         except (ties_mod.TieError, ValueError, KeyError) as exc:
@@ -533,7 +601,7 @@ class TiesDialog(QDialog):
             return
         self.window.log_pane.info(tr("Legami dai marker omonimi: {0}", len(made)))
         if made:
-            self._changed()
+            self._edited(tr("Legami dai marker omonimi"), before)
             self.reload(kinds=self._kinds_with_new())
         else:
             self.window._info(tr("Da marker omonimi"), tr("Nessun marker con lo stesso nome nei due chunk, o già legati."))
@@ -544,6 +612,7 @@ class TiesDialog(QDialog):
                                                   tr("Tabelle (*.csv *.txt)"))
             if not path:
                 return
+        before = edit_state(self.doc)
         try:
             made = ties_mod.import_ties(self.doc, path)
         except (ties_mod.TieError, ValueError, KeyError, OSError) as exc:
@@ -551,7 +620,7 @@ class TiesDialog(QDialog):
             return
         self.window.log_pane.info(tr("Legami importati: {0}", len(made)))
         if made:
-            self._changed()
+            self._edited(tr("Importa legami"), before)
             self.window.refresh_all()
             self.reload(kinds=self._kinds_with_new())
 
@@ -569,6 +638,7 @@ class TiesDialog(QDialog):
     # ------------------------------------------------------------------ check and apply
     def invalidate(self) -> None:
         """Something changed: the last check no longer holds (Applica off, residuals cleared)."""
+        self._generation += 1
         if self.result is None and not self.b_apply.isEnabled():
             return
         self.result = None
@@ -599,10 +669,11 @@ class TiesDialog(QDialog):
         robust, references, axes = self.c_robust.isChecked(), self.c_references.isChecked(), self.axes()
         doc = self.doc
         self.invalidate()
+        generation, self._fingerprint = self._generation, fingerprint(doc)
         self._update_buttons(busy=True)
         started = self.window.runner.run(tr("Controllo dei legami"),
                                          lambda p: check(doc, unknowns, robust, references, axes, p),
-                                         self._checked, self._failed)
+                                         lambda result: self._checked(result, generation), self._failed)
         if not started:
             self._update_buttons()
         return started
@@ -611,10 +682,14 @@ class TiesDialog(QDialog):
         self._update_buttons()
         self.window._error(summary, details)
 
-    def _checked(self, result: dict) -> None:
+    def _checked(self, result: dict, generation: int | None = None) -> None:
         try:
             self.isVisible()
         except RuntimeError:  # the dialog was closed meanwhile
+            return
+        if generation is not None and generation != self._generation:  # something changed while it ran
+            self._update_buttons()
+            self.invalidate()
             return
         if "error" in result:
             self.result = None
@@ -653,6 +728,11 @@ class TiesDialog(QDialog):
         (default No). Returns whether it was applied."""
         if self.result is None:
             return False
+        if self._fingerprint is not None and fingerprint(self.doc) != self._fingerprint:
+            self.invalidate()
+            self.window._warn(tr("I legami, i marker o i chunk sono cambiati dopo il controllo: premi di nuovo "
+                                 "Controlla."))
+            return False
         solution = self.result["solution"]
         moving = [solution.per_chunk[k]["label"] for k, kind in solution.unknowns.items() if kind != "fixed"]
         if not moving:
@@ -672,4 +752,4 @@ class TiesDialog(QDialog):
         super().closeEvent(ev)
 
 
-__all__ = ["TiesDialog", "TiesStep", "check", "report_html", "default_kinds", "say", "error_text"]
+__all__ = ["TiesDialog", "TiesStep", "TiesEditStep", "edit_state", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]

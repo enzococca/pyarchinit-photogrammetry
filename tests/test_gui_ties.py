@@ -137,7 +137,7 @@ def test_check_names_a_wrong_tie_then_apply_and_undo(qapp, scene, tmp_path, monk
         qapp.processEvents()
         _close(w.doc.chunks[1].transform, b.truth, atol=1e-4)
         np.testing.assert_array_equal(w.doc.chunks[0].transform, before[ka][0])
-        assert w.doc.meta.get("ties_report") is not None
+        assert wrong.id not in w.doc.meta["ties_report"]["checks"]["suspects"]  # the report of the checks kept
         assert not [s for s in w.said if s[0] == "ask"]  # with redundancy: no question
         assert w.history.can_undo()
 
@@ -228,15 +228,21 @@ def test_menu_command_and_remove(qapp, scene, tmp_path, monkeypatch):
         dlg = _open(w, qapp)
         n_markers = len(w.doc.chunks[0].markers)
         dlg.table.selectRow(dlg.row_of(t1.id))
-        w.answers.append(None)  # cancelled: nothing removed
-        dlg.remove_selected()
-        assert len(ties.ties_of(w.doc)) == 2
-        w.answers.append(0)
         dlg.remove_selected()
         assert [t.id for t in ties.ties_of(w.doc)] != [t1.id] and len(ties.ties_of(w.doc)) == 1
         assert len(w.doc.chunks[0].markers) == n_markers - 1
         assert dlg.table.rowCount() == 1
-        assert not w.history.can_undo()  # editing the ties is no step: only the apply is
+        # one step brings the tie and its markers back together, in both chunks
+        assert w.history.undo_text() == "Rimuovi legami"
+        w.undo()
+        qapp.processEvents()
+        back = ties.tie_by_id(w.doc, t1.id)
+        assert back.active and not back.broken
+        assert len(w.doc.chunks[0].markers) == n_markers and dlg.table.rowCount() == 2
+        w.redo()
+        qapp.processEvents()
+        assert len(ties.ties_of(w.doc)) == 1 and len(w.doc.chunks[0].markers) == n_markers - 1
+        assert len(w.doc.chunks[1].markers) == 1
     finally:
         _close_window(w)
 
@@ -258,7 +264,7 @@ def test_precision_from_markers_and_import(qapp, scene, tmp_path, monkeypatch):
         dlg.from_markers()
         assert sorted(t.name for t in ties.ties_of(w.doc)) == ["T0", "T1", "T2"]
         assert dlg.table.rowCount() == 3 and dlg.kinds()[kb] == "plan"  # 3 ties: proposed in plan
-        assert not w.history.can_undo()
+        assert w.history.undo_text() == "Legami dai marker omonimi"
 
         _check(w, dlg, qapp)
         assert dlg.b_apply.isEnabled()
@@ -280,5 +286,84 @@ def test_precision_from_markers_and_import(qapp, scene, tmp_path, monkeypatch):
         assert dlg.kinds()[kc] == "plan" and dlg.kinds()[kb] == "plan"
         dlg.import_table(str(tmp_path / "nessuno.csv"))
         assert any(s[0] == "warn" and "Tabella dei legami" in s[1] for s in w.said)
+    finally:
+        _close_window(w)
+
+
+def _table(tmp_path, w, a, c, scene, xy, name="picchetto"):
+    p = _world(scene, xy)[0]
+    pa = w.doc.chunks[0].to_world(a.internal(p))[0]
+    pc = w.doc.chunks[2].to_world(c.internal(p))[0]
+    csv = tmp_path / f"{name}.csv"
+    csv.write_text("chunk_a,x_a,y_a,z_a,chunk_b,x_b,y_b,z_b,precision,name\n"
+                   f"2024,{pa[0]},{pa[1]},{pa[2]},2026,{pc[0]},{pc[1]},{pc[2]},0.02,{name}\n")
+    return csv
+
+
+def test_undo_of_an_import_takes_the_ties_and_their_markers_only(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, c = _three(scene)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        ca, cc = w.doc.chunks[0], w.doc.chunks[2]
+        ca.add_marker("mio", a.internal(_world(scene, AB[1]))[0])  # the user's marker: an entry of the snapshots
+        w._dirty(True)
+        assert w.history.can_undo()
+        dlg = _open(w, qapp)
+        dlg.import_table(str(_table(tmp_path, w, a, c, scene, AB[0])))
+        assert [m.label for m in ca.markers] == ["mio", "picchetto"] and len(cc.markers) == 1
+        assert w.history.undo_text() == "Importa legami"  # on top of the older entry of the markers
+        w.undo()
+        qapp.processEvents()
+        assert ties.ties_of(w.doc) == [] and [m.label for m in w.doc.chunks[0].markers] == ["mio"]
+        assert w.doc.chunks[2].markers == [] and dlg.table.rowCount() == 0
+        w.redo()
+        qapp.processEvents()
+        (t,) = ties.ties_of(w.doc)
+        assert not t.broken and [m.label for m in w.doc.chunks[0].markers] == ["mio", "picchetto"]
+        assert len(w.doc.chunks[2].markers) == 1 and dlg.table.rowCount() == 1
+        w.undo()
+        w.undo()  # now the older entry: the user's marker, nothing else to lose
+        qapp.processEvents()
+        assert w.doc.chunks[0].markers == [] and ties.ties_of(w.doc) == []
+    finally:
+        _close_window(w)
+
+
+def test_precision_steps_join_and_checks_that_no_longer_hold(qapp, scene, tmp_path, monkeypatch):
+    doc, a, b, _c = _three(scene)
+    for xy in FIVE:
+        _tie(doc, a, b, _world(scene, xy))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        kb = w.doc.chunks[1].key
+        dlg = _open(w, qapp)
+        tid = dlg.table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+        spin = dlg.table.cellWidget(0, 4)
+        for v in (0.06, 0.07, 0.08):
+            spin.setValue(v)
+        assert len(w.history.entries) == 1 and w.history.undo_text() == "Precisione di un legame"
+        w.undo()
+        qapp.processEvents()
+        assert ties.tie_by_id(w.doc, tid).precision == pytest.approx(0.05)
+
+        # a change while the check runs: its result is not taken
+        dlg = w._ties_dialog
+        assert dlg.run_check()
+        dlg.set_kind(kb, "rigid")
+        w.runner.wait()
+        qapp.processEvents()
+        assert dlg.result is None and not dlg.b_apply.isEnabled()
+
+        # a marker moved outside the dialog after the check: Applica refuses
+        _check(w, dlg, qapp)
+        assert dlg.b_apply.isEnabled()
+        t = ties.tie_by_id(w.doc, tid)
+        m = w.doc.chunks[1].marker(t.b[1])
+        m.position = np.asarray(m.position, float) + 0.5
+        before = np.asarray(w.doc.chunks[1].transform, float).copy()
+        assert not dlg.apply()
+        assert any(s[0] == "warn" and "dopo il controllo" in s[1] for s in w.said)
+        np.testing.assert_array_equal(w.doc.chunks[1].transform, before)
+        assert dlg.result is None
     finally:
         _close_window(w)

@@ -767,6 +767,9 @@ class _Comma(float):
         return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
+Comma = _Comma  # public name: the window writes the numbers of a message with the decimal comma too
+
+
 def render(m: dict, language: str = "en") -> str:
     """A message (:func:`message`) as text: English, or Italian (``"it"``, decimal comma)."""
     template = m["it"] if language == "it" else m["en"]
@@ -1674,6 +1677,9 @@ def _held_by_references(chunk: "Chunk") -> bool:
     return cams >= 3 or ctrl >= 3
 
 
+held_by_references = _held_by_references  # public name (the window proposes the unknowns from it)
+
+
 def plausibility(doc: "Document", solution: Solution) -> list[dict]:
     """Warnings (:func:`message`) for a chunk georeferenced before the solve by its own references (a projected
     system and GPS/GNSS camera positions or control markers: :func:`_held_by_references`) that the solve turns by
@@ -1888,5 +1894,5 @@ def report_text(solution: Solution, checks: list[dict], loo: dict[str, float], w
 __all__ = ["Tie", "ties_of", "save_ties", "tie_by_id", "next_name", "add_tie", "add_known", "link_markers",
            "ties_from_markers", "import_ties", "end_world", "end_internal", "end_precision", "raster_precision",
            "remove_tie", "resolve_end", "dem_height", "world_to_internal", "check_ends", "update_known", "TABLE_PRECISION", "MIN_PHOTO_PRECISION",
-           "KINDS", "TieError", "Solution", "solve", "apply", "restore", "MESSAGES", "message", "render",
+           "KINDS", "TieError", "Solution", "solve", "Comma", "held_by_references", "apply", "restore", "MESSAGES", "message", "render",
            "distance_checks", "suspects", "leave_one_out", "plausibility", "axis_check", "report", "report_text"]

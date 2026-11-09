@@ -3153,7 +3153,12 @@
   "Incognite per chunk": "Unknowns per chunk",
   "Il rapporto non vale più: qualcosa è cambiato dopo il controllo. Premi Controlla.": "The report no longer holds: something changed after the check. Press Check.",
   "(attivo)": "(active)",
-  "Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare": "Several chunks solved together from common points (ties) and known points, with the unknowns chosen for each chunk and a report that shows wrong ties before applying"
+  "Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare": "Several chunks solved together from common points (ties) and known points, with the unknowns chosen for each chunk and a report that shows wrong ties before applying",
+  "Legame attivo o no": "Tie active or not",
+  "Precisione di un legame": "Precision of a tie",
+  "Legami dai marker omonimi": "Ties from markers with the same name",
+  "Importa legami": "Import ties",
+  "I legami, i marker o i chunk sono cambiati dopo il controllo: premi di nuovo Controlla.": "The ties, the markers or the chunks changed after the check: press Check again."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4202,7 +4207,6 @@
   "chunk {0}, marker {1} (non c'è più)": "chunk {0}, marker {1} (gone)",
   "Legami dai marker omonimi: {0}": "Ties from markers with the same name: {0}",
   "Legami importati: {0}": "Ties imported: {0}",
-  "Rimuovere {0} legami ({1})? I marker fatti dai legami vengono tolti con loro.": "Remove {0} ties ({1})? The markers the ties made are removed with them.",
   "coordinate note {0} ({1})": "known coordinates {0} ({1})",
   "Tabella dei legami: {0}": "Table of ties: {0}",
   "Gradi di libertà in avanzo 0: nessun controllo, un legame sbagliato non si vede. Applicare comunque la stima a {0}?": "Redundancy 0: no check at all, a wrong tie cannot be seen. Apply the solve to {0} anyway?",

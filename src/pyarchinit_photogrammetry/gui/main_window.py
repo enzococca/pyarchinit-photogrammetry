@@ -4246,8 +4246,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         holds stored first, the transforms changed (:func:`..engine.ties.apply`), one step of *Modifica > Annulla*
         (:class:`.ties_dialog.TiesStep`), the project saved, the views and the Layer pane read again, what changed said
         in the log and in a box. Returns whether it was applied."""
+        from ..core import stamps
         from ..engine import ties as ties_mod
-        from .ties_dialog import TiesStep, error_text
+        from .ties_dialog import TiesStep, error_text, keep_report
 
         moved = [k for k, kind in solution.unknowns.items() if kind != "fixed"]
         active_moves = self.chunk is not None and self.chunk.key in moved
@@ -4260,8 +4261,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         except (ties_mod.TieError, ValueError) as exc:
             self._warn(error_text(exc))
             return False
+        keep_report(self.doc, report)
         if self.history is not None:
-            self.history.push(tr("Aggancia chunk con legami"), TiesStep(self, solution, changed), document=True)
+            self.history.push(tr("Aggancia chunk con legami"), TiesStep(self, solution, changed, report),
+                              document=True)
         saved = False
         if self.doc.path:
             try:
@@ -4276,8 +4279,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         labels = {c.key: c.label for c in self.doc.chunks}
         lines = [tr("Stima applicata a {0} (sistema {1}).", ", ".join(labels.get(k, str(k)) for k in moved),
                     solution.crs or "LOCAL")]
-        for key, stale in (changed.get("stale_products") or {}).items():
-            lines.append(tr("{0}: da ricostruire {1}", labels.get(int(key), key), ", ".join(stale)))
+        for ch in self.doc.chunks:
+            if ch.key not in moved:
+                continue
+            stale = [translate(x["name"]) for x in stamps.stale_products(ch)] or \
+                [translate(stamps.NAMES.get(k, k)) for k in (changed.get("stale_products") or {}).get(ch.key, [])]
+            if stale:
+                lines.append(tr("{0}: da ricostruire {1}", labels.get(ch.key, ch.key), ", ".join(stale)))
         text = "\n".join(lines)
         for line in lines:
             self.log_pane.info(line)
@@ -4298,6 +4306,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None:
             with contextlib.suppress(RuntimeError):
                 dlg.reload()
+
+    def _ties_edited(self) -> None:
+        """After the undo or the redo of an edit of the ties (their markers written back in every chunk)."""
+        self.refresh_all()
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload()
+        self._dirty(True)
 
     def _ties_reload(self) -> None:
         """After the undo or the redo of a solve of the ties."""
