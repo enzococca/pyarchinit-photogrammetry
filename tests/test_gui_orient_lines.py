@@ -91,6 +91,38 @@ def test_dialog_classifies_a_layer_and_writes_layers_undoably(qapp, tmp_path, mo
         w.redo()
         qapp.processEvents()
         assert len(free_drawings.features(w.chunk, "Classificato - coppie di traverso")) == 24
+        # the plate follows a resize of the window
+        width = dlg.l_plate.pixmap().width()
+        dlg.resize(dlg.width() + 300, dlg.height() + 200)
+        qapp.processEvents()
+        assert dlg.l_plate.pixmap().width() != width
+        # the isolation of the pairs is among the advanced parameters (an option beyond R9's twelve)
+        assert dlg.params()["pair_isolation"] == pytest.approx(1.5)
+        # the world of the chunk moved after the classification: the layers are not written in the old one
+        assert dlg.classify()
+        w.runner.wait()
+        qapp.processEvents()
+        t = np.array(a.transform, float)
+        moved = t.copy()
+        moved[:3, 3] += [0.5, 0.0, 0.0]
+        a.transform = moved
+        w.said.clear()
+        n_steps = len(w.history.entries)
+        assert dlg.write_layers() is None
+        assert any("cambiato" in text for _k, text in w.said), w.said
+        assert dlg.result is None and len(w.history.entries) == n_steps
+        a.transform = t
+        # a file source is read in the system of the chunk
+        seen = []
+        from pyarchinit_photogrammetry.engine import orient_lines as ol
+
+        with monkeypatch.context() as mp:
+            mp.setattr(ol, "lines_from_file", lambda path, chunk=None: seen.append(chunk) or [])
+            assert dlg.set_source("file", tmp_path / "x.geojson")
+            dlg.classify()
+            w.runner.wait()
+            qapp.processEvents()
+        assert seen == [a]
         # an elevation's drawing: along its u axis, no layers on the plan
         assert dlg.set_source("elevation", "e1")
         assert dlg.axis() == ((0.0, 0.0), (1.0, 0.0)) and not dlg.s_axis[0].isEnabled()

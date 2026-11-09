@@ -216,12 +216,12 @@ def test_lines_from_elevation_and_file(tmp_path):
                                        "v_axis": [0.0, 0.0, 1.0]}}]
     a.meta.setdefault("drawings", {})["frames"] = {"e1": {
         "lines": [{"id": "l1", "kind": "breakline", "coords": [[0, 0, None], [2, 0, None]], "attributes": {}}],
-        "units": [{"wkt": "POLYGON ((0 0.5, 1 0.5, 1 1, 0 1, 0 0.5))"}],
+        "units": [{"wkt": "POLYGON ((0 1.2, 1 1.2, 1 1.9, 0 1.9, 0 1.2))"}],
         "stones": {"e1": ["POLYGON ((5 5, 6 5, 6 6, 5 5))"]}}}
     lines = orient_lines.lines_from_elevation(a, "e1")
     assert len(lines) == 2 and lines[1].shape == (5, 2)  # the stones left out
     r = orient_lines.classify(lines, axis=((0, 0), (1, 0)), frame="e1")
-    assert r.counts()["along"] == 3 and r.counts()["across"] == 2, r.counts()
+    assert r.counts()["along"] == 3 and r.counts()["across"] == 2, r.counts()  # a 0.7 m polygon: no pair
     assert orient_lines.elevation_axis(a, "e1") == ((10.0, 20.0), (10.6, 20.8))
     with pytest.raises(OrientLinesError):
         orient_lines.lines_from_elevation(a, "nope")
@@ -273,3 +273,130 @@ def test_cli_classify_lines(tmp_path):
     res = runner.invoke(app, ["classify-lines", str(doc.path), "A", "--layer", "Rilievo", "--axis", axis,
                               "--param", "nope=1"])
     assert res.exit_code == 1 and "unknown parameter" in res.output
+
+
+# ---------------------------------------------------------------- fix round 1: planks, duplicates, isolation, files
+
+def _planks(gap):
+    """4 plank polygons 3 x 0.2 m along the axis, ``gap`` apart (0: sharing their edges)."""
+    return [np.array([(0, y), (3, y), (3, y + 0.2), (0, y + 0.2), (0, y)], float)
+            for y in (0.2 + gap) * np.arange(4)]
+
+
+@pytest.mark.parametrize("gap", [0.0, 0.01])
+def test_traced_planks_touching_or_close_are_pairs(gap):
+    r = orient_lines.classify(_planks(gap), axis=((0, 0), (1, 0)))
+    counts = r.counts()
+    assert counts["pair_along"] == 4 and counts["along"] == 0, counts
+    planks = sorted((e for e in r.elements if e.group == "pair_along"), key=lambda e: e.offset)
+    assert [round(e.width, 3) for e in planks] == [0.2] * 4
+    assert np.allclose([e.offset for e in planks], 0.1 + (0.2 + gap) * np.arange(4))
+    assert all(len(e.segments) == 2 for e in planks)  # a shared edge counted once, with its own plank
+    # the ends of the planks, drawn end to end at the same place: one across line at each end
+    assert counts["across"] == 2, counts
+    # traced planks also as noisy hand drawings
+    rng = np.random.default_rng(4)
+    noisy = [_noisy(rng, p, steps=8) for p in _planks(gap)]
+    for ln in noisy:
+        ln[-1] = ln[0]  # still closed
+    assert orient_lines.classify(noisy, axis=((0, 0), (1, 0))).counts()["pair_along"] == 4
+
+
+def test_frames_as_close_as_their_width_need_the_isolation_lowered():
+    """Frames 0.12 m wide every 0.25 m drawn as loose lines: their gaps (0.13 m) are about their widths, like evenly
+    spaced lines; with ``pair_isolation`` 1 (the nearest line only) or 0 (nearest first) they are pairs."""
+    lines = []
+    for k in range(10):
+        for ds in (0.0, 0.12):
+            lines.append(np.array([(0.25 * k + ds, 0.1), (0.25 * k + ds, 1.0)]))
+    ax = ((0, 0), (1, 0))
+    assert orient_lines.classify(lines, ax).counts()["pair_across"] == 0
+    for iso in (1.0, 0.0):
+        r = orient_lines.classify(lines, ax, params={"pair_isolation": iso})
+        assert r.counts()["pair_across"] == 10, (iso, r.counts())
+        assert all(abs(e.width - 0.12) < 1e-6 for e in r.elements)
+        assert r.params["pair_isolation"] == iso
+    # the same frames traced as polygons: pairs with the defaults
+    polys = [np.array([(0.25 * k, 0.1), (0.25 * k + 0.12, 0.1), (0.25 * k + 0.12, 1.0), (0.25 * k, 1.0),
+                       (0.25 * k, 0.1)]) for k in range(10)]
+    assert orient_lines.classify(polys, ax).counts()["pair_across"] == 10
+    # the masonry beds and joints stay as they were with the defaults
+    m = orient_lines.classify(masonry_lines(), axis=((0, 0), (2.4, 0))).counts()
+    assert m["along"] == 7 and m["across"] == 30 and m["pair_along"] == 0 and m["pair_across"] == 0, m
+    with pytest.raises(OrientLinesError):
+        orient_lines.classify(lines, ax, params={"pair_isolation": -1})
+    assert set(orient_lines.DEFAULTS) == {"simplify", "min_length", "along_deg", "across_deg", "join_deg",
+                                          "join_offset", "join_gap", "across_bin", "pair_deg", "pair_min",
+                                          "pair_max", "pair_overlap"}
+
+
+def test_a_line_drawn_twice_counts_once():
+    plank = _planks(0)[0]
+    again = np.array([(0.0, 0.2005), (3.0, 0.2005)])  # its top edge drawn again as a line
+    r = orient_lines.classify([plank, again], axis=((0, 0), (1, 0)))
+    assert r.counts()["pair_along"] == 1 and r.counts()["along"] == 0, r.counts()
+    assert len(r.elements[0].segments) + sum(len(e.segments) for e in r.elements[1:]) == len(r.segments)
+    pair = next(e for e in r.elements if e.group == "pair_along")
+    assert len(pair.segments) == 3
+    # two loose lines drawn twice each, 0.1 m apart: one pair of the two
+    lines = [np.array([(0, 0), (2, 0)]), np.array([(0, 0.004), (2, 0.004)]), np.array([(0, 0.1), (2, 0.1)]),
+             np.array([(0, 0.103), (2, 0.103)])]
+    r = orient_lines.classify(lines, axis=((0, 0), (1, 0)))
+    assert r.counts()["pair_along"] == 1 and sum(r.counts().values()) == 1, r.counts()
+
+
+def test_a_line_drawn_out_and_back_is_two_runs():
+    hairpin = np.array([(0, 0), (2, 0), (1.0, 0.15)])  # out along the axis, back beside itself
+    r = orient_lines.classify([hairpin], axis=((0, 0), (1, 0)))
+    along = [e for e in r.elements if e.group == "along"]
+    assert len(along) == 2 and max(e.length for e in along) == pytest.approx(2.0, abs=1e-6), r.counts()
+    # back over itself (1 cm beside): the return counts once with the line, which does not fold on itself
+    hairpin = np.array([(0, 0), (2, 0), (1.0, 0.01)])
+    r = orient_lines.classify([hairpin], axis=((0, 0), (1, 0)))
+    assert r.counts()["along"] == 1 and sum(r.counts().values()) == 1, r.counts()
+    assert r.elements[0].geometry.length == pytest.approx(2.0, abs=1e-6)
+    assert len(r.elements[0].segments) == 2
+
+
+def test_across_pieces_either_side_of_a_bin_boundary_are_one():
+    pieces = [np.array([(0.099, 0.1), (0.099, 0.5)]), np.array([(0.101, 0.55), (0.101, 1.0)])]
+    r = orient_lines.classify(pieces, axis=((0, 0), (1, 0)))
+    assert r.counts()["across"] == 1, r.counts()
+
+
+def _geojson(path, coords_list, crs=None):
+    data = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"layer": "L"}, "geometry": {"type": "LineString", "coordinates": c}}
+        for c in coords_list]}
+    if crs:
+        data["crs"] = {"type": "name", "properties": {"name": crs}}
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_a_file_in_another_system_is_put_in_the_chunks(tmp_path):
+    from pyproj import Transformer
+    from test_colour_mask import X0, Y1, project
+
+    import pyarchinit_photogrammetry as ppg
+
+    doc, a = project(tmp_path)
+    pts = np.array([(X0 + 0.5, Y1 - 1.0), (X0 + 2.5, Y1 - 1.0)])
+    for target, crs in (("EPSG:32633", "EPSG:32633"), ("EPSG:4326", None)):
+        t = Transformer.from_crs("EPSG:3004", target, always_xy=True)
+        x, y = t.transform(pts[:, 0], pts[:, 1])
+        path = _geojson(tmp_path / f"{target.replace(':', '_')}.geojson",
+                        [[[float(a_), float(b_)] for a_, b_ in zip(x, y)]], crs)
+        raw = orient_lines.lines_from_file(path)  # no chunk: as the file has them
+        assert not np.allclose(raw[0], pts, atol=1.0)
+        got = orient_lines.lines_from_file(path, chunk=a)[0]
+        assert np.allclose(got, pts, atol=0.05), (target, got - pts)
+    # a file in a real system with a local chunk; a file with no system with a chunk in one
+    local = ppg.Document().add_chunk("L")
+    with pytest.raises(OrientLinesError) as exc:
+        orient_lines.lines_from_file(tmp_path / "EPSG_32633.geojson", chunk=local)
+    assert "locale" in exc.value.italian
+    bare = _geojson(tmp_path / "bare.geojson", [[[X0, Y1], [X0 + 1, Y1]]])
+    with pytest.raises(OrientLinesError) as exc:
+        orient_lines.lines_from_file(bare, chunk=a)
+    assert "sistema" in exc.value.italian

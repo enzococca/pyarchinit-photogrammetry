@@ -3400,7 +3400,9 @@
   "di traverso": "across the axis",
   "coppie lungo l'asse": "pairs along the axis",
   "coppie di traverso": "pairs across the axis",
-  "altre direzioni": "other directions"
+  "altre direzioni": "other directions",
+  "Coppie di linee sciolte: la vicina successiva almeno (volte)": "Pairs of loose lines: the next neighbour at least (times)",
+  "Linee sciolte (non poligoni): due parallele sono una coppia se la linea successiva accanto a ognuna è almeno questo numero di volte più lontana. 1: basta che siano le più vicine (ordinate larghe quanto il loro intervallo); 0: le più vicine per prime": "Loose lines (not polygons): two parallel lines are a pair when the next line beside each is at least this many times farther. 1: being the nearest is enough (frames as wide as their gaps); 0: the nearest first"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4555,6 +4557,7 @@
   "Classifica un disegno: layer {0}, {1} disegni": "Classify a drawing: layer {0}, {1} drawings",
   "{0} tratti dritti, {1} elementi. ": "{0} straight pieces, {1} elements. ",
   ". Larghezza delle coppie: da {0} a {1} m": ". Width of the pairs: from {0} to {1} m",
-  "File: {0}": "File: {0}"
+  "File: {0}": "File: {0}",
+  "Classifica un disegno: il sistema del chunk {0} è cambiato dopo la classificazione. Classifica di nuovo prima di scrivere i layer.": "Classify a drawing: the system of the chunk {0} changed after the classification. Classify again before writing the layers."
  }
 }

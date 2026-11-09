@@ -10,10 +10,14 @@ polygon gives its edges, a curve of many vertices its straight pieces. A segment
 axis is within ``along_deg``, *across* when within ``across_deg`` of 90 degrees, else *other*. Pieces of one line
 (angle within ``join_deg``, lateral offset within ``join_offset``, gap up to ``join_gap``) are joined. Two parallel
 lines (within ``pair_deg``) ``pair_min``-``pair_max`` apart whose extents overlap by ``pair_overlap`` of the shorter
-are a pair when each is the other's nearest line and the next line of the same group beside each is at least
-:data:`PAIR_ISOLATION` times farther (evenly spaced lines - the beds of a wall - are not pairs). The across lines left
-are grouped by their position along the axis (bins of ``across_bin``) and side: the pieces of one frame drawn broken
-(end to end, gaps up to ``join_gap``) become one element.
+are a pair: first the two sides of one closed polygon (a traced plank or frame *is* the element, also when it shares
+its edges with the next one); then a line closer than ``pair_min`` and ``join_offset`` to another (drawn twice, a
+shared edge) counts once; then the loose lines, nearest first, when each is the other's nearest line and the next line
+of the same group beside each is at least ``pair_isolation`` (:data:`EXTRA_DEFAULTS`, 1.5; 0 = no such check) times
+farther - evenly spaced lines, the beds of a wall, are not pairs. The across lines left are grouped by their position
+along the axis (within ``across_bin`` of each other) and side: the pieces of one frame drawn broken (end to end, gaps
+up to ``join_gap``) become one element, and so do joints that continue each other across several courses (a straight
+joint).
 
 No Qt here. Since 1.7.7."""
 from __future__ import annotations
@@ -51,7 +55,11 @@ GROUP_LABELS = {  # (Italian, English)
 }
 GROUP_COLOURS = {"along": "#1f77b4", "across": "#ff7f0e", "pair_along": "#2ca02c", "pair_across": "#d62728",
                  "other": "#8c8c8c"}
-PAIR_ISOLATION = 1.5  # the next parallel line of each line of a pair is at least this many times farther
+EXTRA_DEFAULTS: dict = {  # options beyond the parameters of the plan (R9)
+    "pair_isolation": 1.5,  # loose lines: the next line of the same group beside each of a pair at least this many
+    # times farther than the pair's distance; 0 = off (nearest first only)
+}
+PAIR_ISOLATION = EXTRA_DEFAULTS["pair_isolation"]
 MIN_AXIS = 1e-6  # m, an axis shorter than this has no direction
 SOURCE_KEY, SOURCE_VALUE = "classificazione", "orientamento"  # the attribute of the drawings written by to_layers
 DEFAULT_PREFIX = "Classificato"
@@ -223,9 +231,20 @@ def lines_from_elevation(chunk, eid: str) -> list[np.ndarray]:
     return out
 
 
-def lines_from_file(path) -> list[np.ndarray]:
+_FOREIGN = {  # io.free_drawings.ForeignCrs reasons in Italian
+    "file_unknown": "il file non dice il suo sistema di coordinate e il chunk è in {chunk}",
+    "chunk_local": "i disegni sono in {file} e il chunk è in un sistema locale",
+    "unreadable": "il file nomina un sistema di coordinate che PROJ non sa leggere: {file}",
+}
+
+
+def lines_from_file(path, chunk=None) -> list[np.ndarray]:
     """The lines and polygons of a GeoPackage, GeoJSON or DXF (:func:`..io.free_drawings.read`) as ``(n, 2)`` arrays
-    of x, y as the file has them (polygons closed). OrientLinesError when it has none."""
+    (polygons closed). With ``chunk`` (a plan drawing) they are put in its system as the import of free drawings does:
+    reprojected from the system the file says, a GeoJSON in longitude and latitude read as WGS 84, a DXF taken as it
+    is; OrientLinesError for a file that cannot be (no system with a chunk in a real one, a real one with a local
+    chunk, a system PROJ cannot read). Without ``chunk`` (the ``(u, v)`` of an elevation) the x, y as the file has them.
+    OrientLinesError when it has no line."""
     from ..io import free_drawings as io_free
 
     path = Path(path)
@@ -233,6 +252,14 @@ def lines_from_file(path) -> list[np.ndarray]:
         records = io_free.read(path)
     except FileNotFoundError:
         raise _error(f"no file {path}", f"il file {path} non c'è") from None
+    if chunk is not None and records:
+        for r in records:  # the plan only: the heights are not read here
+            r["xyz"] = [[c[0], c[1], None] for c in r["xyz"]]
+        try:
+            io_free._systems(chunk, path, records)
+        except io_free.ForeignCrs as exc:
+            italian = _FOREIGN.get(exc.reason, "{file}").format(file=exc.file_crs, chunk=exc.chunk_crs)
+            raise _error(str(exc), f"{path.name}: {italian}") from None
     out = []
     for r in records:
         xy = np.array([[float(c[0]), float(c[1])] for c in r["xyz"]], float)
@@ -267,13 +294,13 @@ def elevation_axis(chunk, eid: str) -> tuple:
 # ---------------------------------------------------------------- parameters and geometry helpers
 
 def checked_params(params: dict | None) -> dict:
-    """:data:`DEFAULTS` updated with ``params`` (values as numbers); OrientLinesError for an unknown name or a value
-    out of range."""
-    out = dict(DEFAULTS)
+    """:data:`DEFAULTS` and :data:`EXTRA_DEFAULTS` updated with ``params`` (values as numbers); OrientLinesError for
+    an unknown name or a value out of range."""
+    out = {**DEFAULTS, **EXTRA_DEFAULTS}
+    names = ", ".join(out)
     for k, v in (params or {}).items():
-        if k not in DEFAULTS:
-            raise _error(f"unknown parameter {k}: one of {', '.join(DEFAULTS)}",
-                         f"parametro sconosciuto {k}: uno di {', '.join(DEFAULTS)}")
+        if k not in out:
+            raise _error(f"unknown parameter {k}: one of {names}", f"parametro sconosciuto {k}: uno di {names}")
         try:
             out[k] = float(v)
         except (TypeError, ValueError):
@@ -354,11 +381,13 @@ def checked_axis(axis) -> tuple:
 
 # ---------------------------------------------------------------- segments
 
-def _segments(lines, frame: _Frame, p: dict) -> list[Segment]:
+def _segments(lines, frame: _Frame, p: dict) -> tuple[list[Segment], set]:
+    """The straight pieces of ``lines`` and the indices of the lines that are closed rings (polygons)."""
     import shapely
     from shapely.geometry import LineString
 
     out: list[Segment] = []
+    closed: set = set()
     for src, line in enumerate(lines):
         xy = np.asarray(line, float)
         if xy.ndim != 2 or xy.shape[0] < 2 or xy.shape[1] < 2:
@@ -367,6 +396,8 @@ def _segments(lines, frame: _Frame, p: dict) -> list[Segment]:
         xy = xy[np.all(np.isfinite(xy), axis=1)]
         if len(xy) < 2:
             continue
+        if len(xy) >= 4 and np.allclose(xy[0], xy[-1], rtol=0.0, atol=1e-9):
+            closed.add(src)
         if p["simplify"] > 0:
             simple = shapely.simplify(LineString(xy), p["simplify"], preserve_topology=False)
             if not simple.is_empty and simple.geom_type == "LineString":
@@ -387,7 +418,7 @@ def _segments(lines, frame: _Frame, p: dict) -> list[Segment]:
                 group = "other"
             out.append(Segment(len(out), src, np.array(a), np.array(b), length, ang, float(sa[0]), float(sb[0]),
                                float((sa[1] + sb[1]) / 2), group))
-    return out
+    return out, closed
 
 
 @dataclass
@@ -414,19 +445,25 @@ def _cross(a, b) -> float:
     return float(a[0] * b[1] - a[1] * b[0])
 
 
-def _runs(segs: list[Segment]) -> list[list[Segment]]:
-    """The segments that follow each other on one drawn line (same source, a vertex in common): one run each. What
-    was drawn as one line in one group stays one line, also where the simplification left a small kink."""
+def _runs(segs: list[Segment], g: np.ndarray, tol: float) -> list[list[Segment]]:
+    """The segments that follow each other on one drawn line (same source, a vertex in common) and go on along ``g``
+    (their extents along it overlap by ``tol`` at most: a line drawn out and back is two): one run each. What was drawn
+    as one line in one group stays one line, also where the simplification left a small kink."""
     runs: list[list[Segment]] = []
+    span: list[float] = []  # the extent of the last run along g
     for seg in sorted(segs, key=lambda s: s.id):
+        a0, a1 = sorted((float(seg.p0 @ g), float(seg.p1 @ g)))
         if runs:
             prev = runs[-1][-1]
             ends = (prev.p0, prev.p1)
             if prev.source == seg.source and seg.id == prev.id + 1 and \
-                    any(np.array_equal(e, q) for e in ends for q in (seg.p0, seg.p1)):
+                    any(np.array_equal(e, q) for e in ends for q in (seg.p0, seg.p1)) and \
+                    min(a1, span[1]) - max(a0, span[0]) <= tol:
                 runs[-1].append(seg)
+                span = [min(span[0], a0), max(span[1], a1)]
                 continue
         runs.append([seg])
+        span = [a0, a1]
     return runs
 
 
@@ -440,7 +477,7 @@ def _join(segs: list[Segment], g: np.ndarray, frame: "_Frame", p: dict) -> list[
     position along ``g`` (the group's direction) when the angle between them is within ``join_deg``, the lateral
     offset within ``join_offset`` and the gap up to ``join_gap`` (angles as the mean of the pieces, by length)."""
     items = []
-    for run in _runs(segs):
+    for run in _runs(segs, g, p["join_offset"]):
         ends = np.array([q for s in run for q in (s.p0, s.p1)])
         proj = ends @ g
         ang = _mean_angle([s.angle for s in run], [s.length for s in run])
@@ -498,19 +535,26 @@ def _unit(group: str, segs: list[Segment], g: np.ndarray) -> _Unit:
 
 # ---------------------------------------------------------------- pairs
 
-def _pairs(units: list[_Unit], frame: _Frame, p: dict) -> list[tuple[int, int, float, np.ndarray]]:
-    """The pairs among ``units``: ``(i, j, width, corners)`` (corners of the polygon over the common extent)."""
+def _pairs(units: list[_Unit], frame: _Frame, p: dict, closed: set) -> tuple[list, dict]:
+    """The pairs among ``units``: ``[(i, j, width, corners)]`` (corners of the polygon over the common extent) and
+    ``{unit: host unit}`` of the lines that count once with another (closer than ``pair_min`` and ``join_offset``:
+    drawn twice, a shared edge). The two sides of one closed polygon of ``closed`` first, then the coincident lines,
+    then the loose lines nearest first with the isolation of ``pair_isolation`` (see the module)."""
     n = len(units)
     if n < 2:
-        return []
+        return [], {}
     import shapely
     from shapely.geometry import LineString
 
+    iso = float(p.get("pair_isolation", PAIR_ISOLATION))
     dirs = np.array([_direction(u.angle, frame) for u in units])
     angles = np.array([u.angle for u in units])
+    sources = [({s.source for s in u.segs} or {None}) for u in units]
+    src_of = [next(iter(x)) if len(x) == 1 else None for x in sources]
     near: list[list[tuple[float, int]]] = [[] for _ in range(n)]  # the lines beside each line, of its group
-    info: dict = {}
-    reach = PAIR_ISOLATION * p["pair_max"]  # farther lines matter neither for a pair nor for its isolation
+    info: dict = {}  # parallel lines beside each other: (distance, corners)
+    coincident: list = []  # (distance, i, j) of parallel lines closer than pair_min
+    reach = max(iso, 1.0) * p["pair_max"]  # farther lines matter neither for a pair nor for its isolation
     shapes = [LineString(u.points) for u in units]
     tree = shapely.STRtree(shapes)
     for i in range(n):
@@ -520,8 +564,7 @@ def _pairs(units: list[_Unit], frame: _Frame, p: dict) -> list[tuple[int, int, f
             if j <= i or units[i].group != units[j].group:
                 continue
             m_ang = _mean_angle([angles[i], angles[j]], [1.0, 1.0])
-            rad = math.radians(m_ang)
-            m = frame.u * math.cos(rad) + frame.n * math.sin(rad)
+            m = _direction(m_ang, frame)
             nm = np.array([-m[1], m[0]])
             xi, xj = units[i].points @ m, units[j].points @ m
             lo, hi = max(xi.min(), xj.min()), min(xi.max(), xj.max())
@@ -535,39 +578,64 @@ def _pairs(units: list[_Unit], frame: _Frame, p: dict) -> list[tuple[int, int, f
 
             ends = [(at(i, lo), at(j, lo)), (at(i, hi), at(j, hi))]
             dist = float(np.mean([abs((a - b) @ nm) for a, b in ends]))
+            parallel = _angle_diff(angles[i], angles[j]) <= p["pair_deg"]
             if dist < p["pair_min"]:
-                continue  # one line drawn twice, not two sides
+                if parallel and dist < min(p["pair_min"], p["join_offset"]):  # within the width of one line
+                    coincident.append((dist, i, j))
+                continue
             near[i].append((dist, j))
             near[j].append((dist, i))
-            if _angle_diff(angles[i], angles[j]) <= p["pair_deg"]:  # a pair only of parallel lines
+            if parallel:  # a pair only of parallel lines
                 info[(i, j)] = (dist, np.array([ends[0][0], ends[1][0], ends[1][1], ends[0][1]]))
-    for lst in near:
-        lst.sort()
-    cands = []
-    for (i, j), (dist, corners) in info.items():
-        if dist > p["pair_max"]:
-            continue
-        ok = True
-        for a, b in ((i, j), (j, i)):
-            lst = near[a]
-            if lst[0][1] != b and lst[0][0] < dist:
-                ok = False
-                break
-            others = [d for d, k in lst if k != b]
-            if others and others[0] < PAIR_ISOLATION * dist:
-                ok = False
-                break
-        if ok:
-            cands.append((dist, i, j, corners))
-    cands.sort(key=lambda c: c[0])
     used: set = set()
     out = []
-    for dist, i, j, corners in cands:
-        if i in used or j in used:
+
+    def take(cands):
+        for dist, i, j, corners in sorted(cands, key=lambda c: c[0]):
+            if i in used or j in used:
+                continue
+            used.update((i, j))
+            out.append((i, j, dist, corners))
+
+    # 1. the two sides of one closed polygon
+    take([(d, i, j, c) for (i, j), (d, c) in info.items()
+          if d <= p["pair_max"] and src_of[i] is not None and src_of[i] == src_of[j] and src_of[i] in closed])
+    # 2. a line closer than pair_min to another counts once: with the line of a pair, or with the longer one
+    host: dict = {}
+
+    def root(k):
+        while k in host:
+            k = host[k]
+        return k
+
+    for _d, i, j in sorted(coincident):
+        a, b = root(i), root(j)
+        if a == b or (a in used and b in used):
             continue
-        used |= {i, j}
-        out.append((i, j, dist, corners))
-    return out
+        if b in used or (a not in used and units[b].length > units[a].length):
+            a, b = b, a
+        host[b] = a
+    gone = set(host)
+    # 3. the loose lines, nearest first
+    cands = []
+    for (i, j), (dist, corners) in info.items():
+        if dist > p["pair_max"] or i in used or j in used or i in gone or j in gone:
+            continue
+        ok = True
+        if iso > 0:
+            for a, b in ((i, j), (j, i)):
+                lst = sorted((d, k) for d, k in near[a] if k not in gone)
+                if lst[0][1] != b and lst[0][0] < dist:
+                    ok = False
+                    break
+                others = [d for d, k in lst if k != b]
+                if others and others[0] < iso * dist:
+                    ok = False
+                    break
+        if ok:
+            cands.append((dist, i, j, corners))
+    take(cands)
+    return out, {k: root(k) for k in host}
 
 
 # ---------------------------------------------------------------- classify
@@ -594,7 +662,7 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
     lines = list(lines or [])
     if not lines:
         raise _error("no line to classify", "nessuna linea da classificare")
-    segs = _segments(lines, fr, p)
+    segs, closed = _segments(lines, fr, p)
     if not segs:
         raise _error(f"no straight piece of {p['min_length']:g} m or more in the lines",
                      f"nessun tratto dritto di {p['min_length']:g} m o più nelle linee")
@@ -605,7 +673,11 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
     raw: list[dict] = []
     paired: set = set()
     tol = p["join_offset"]
-    for i, j, width, corners in _pairs(units, fr, p):
+    pairs, hosts = _pairs(units, fr, p, closed)
+    guests: dict = {}  # host unit -> the segments of the lines that count once with it
+    for k, h in hosts.items():
+        guests.setdefault(h, []).extend(units[k].segs)
+    for i, j, width, corners in pairs:
         paired |= {i, j}
         ui, uj = units[i], units[j]
         st = fr.st(corners)
@@ -613,38 +685,51 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
         poly = Polygon(corners)
         c = np.asarray(poly.centroid.coords[0])
         cst = fr.st(c)
-        raw.append({"group": group, "segments": sorted(s.id for s in ui.segs + uj.segs), "geometry": poly,
+        members = ui.segs + uj.segs + guests.get(i, []) + guests.get(j, [])
+        raw.append({"group": group, "segments": sorted(s.id for s in members), "geometry": poly,
                     "position": float(cst[0]), "offset": float(cst[1]), "side": _side(st[:, 1], tol),
                     "width": float(width), "angle": _mean_angle([ui.angle, uj.angle], [ui.length, uj.length]),
                     "length": float(np.mean([np.hypot(*(corners[1] - corners[0])),
                                              np.hypot(*(corners[2] - corners[3]))]))})
-    # across lines left: grouped by position along the axis and side, joined when their extents across meet
-    bins: dict = {}
+    # across lines left: on the same side, within across_bin of each other along the axis and end to end across it
+    # (a small overlap allowed, not side by side): one element
+    sides: dict = {}
     for k, u in enumerate(units):
-        if k in paired:
+        if k in paired or k in hosts:
             continue
         st = fr.st(u.points)
         if u.group == "along":
-            raw.append(_line_element(u, st, tol))
+            raw.append(_line_element(u, st, tol, guests.get(k, [])))
             continue
-        key = (math.floor(float(np.mean(st[:, 0])) / p["across_bin"]), _side(st[:, 1], tol))
-        bins.setdefault(key, []).append((float(st[:, 1].min()), float(st[:, 1].max()), u))
-    for key in sorted(bins):
-        items = sorted(bins[key], key=lambda x: x[0])
-        groups: list[list] = []
-        for lo, hi, u in items:  # end to end (a small overlap allowed), not side by side
-            if groups and -p["join_offset"] <= lo - groups[-1][1] <= p["join_gap"]:
-                groups[-1][1] = max(groups[-1][1], hi)
-                groups[-1][2].append(u)
-            else:
-                groups.append([lo, hi, [u]])
-        for _lo, _hi, us in groups:
-            if len(us) == 1:
-                u = us[0]
+        sides.setdefault(_side(st[:, 1], tol), []).append(
+            (float(np.mean(st[:, 0])), float(st[:, 1].min()), float(st[:, 1].max()), k))
+    for side in sorted(sides):
+        items = sorted(sides[side])
+        parent = list(range(len(items)))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for a, (sa, loa, hia, _ka) in enumerate(items):
+            for b in range(a + 1, len(items)):
+                sb, lob, hib, _kb = items[b]
+                if sb - sa > p["across_bin"]:
+                    break
+                if -tol <= lob - hia <= p["join_gap"] or -tol <= loa - hib <= p["join_gap"]:
+                    parent[find(b)] = find(a)
+        groups: dict = {}
+        for a, item in enumerate(items):
+            groups.setdefault(find(a), []).append(item[3])
+        for ks in groups.values():
+            extra = [s for k in ks for s in guests.get(k, [])]
+            if len(ks) == 1:
+                u = units[ks[0]]
             else:  # one element through the pieces, in their order across the axis
-                segs_ = [s for x in us for s in x.segs]
-                u = _unit("across", segs_, fr.n)
-            raw.append(_line_element(u, fr.st(u.points), tol))
+                u = _unit("across", [s for k in ks for s in units[k].segs], fr.n)
+            raw.append(_line_element(u, fr.st(u.points), tol, extra))
     for s in segs:
         if s.group == "other":
             st = fr.st(np.array([s.p0, s.p1]))
@@ -659,11 +744,12 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
                           frame)
 
 
-def _line_element(u: _Unit, st: np.ndarray, tol: float) -> dict:
+def _line_element(u: _Unit, st: np.ndarray, tol: float, guests=()) -> dict:
     from shapely.geometry import LineString
 
     c = st.mean(axis=0)
-    return {"group": u.group, "segments": sorted(s.id for s in u.segs), "geometry": LineString(u.points),
+    return {"group": u.group, "segments": sorted(s.id for s in list(u.segs) + list(guests)),
+            "geometry": LineString(u.points),
             "position": float(c[0]), "offset": float(c[1]), "side": _side(st[:, 1], tol), "width": None,
             "angle": u.angle, "length": float(LineString(u.points).length)}
 
@@ -821,4 +907,4 @@ def _plate(result: Classification, path: Path, size, language: str, names: dict 
 
 __all__ = ["DEFAULTS", "GROUPS", "GROUP_LABELS", "GROUP_COLOURS", "PAIR_ISOLATION", "OrientLinesError", "Segment",
            "Element", "Classification", "lines_from_layer", "lines_from_elevation", "lines_from_file",
-           "elevation_axis", "checked_axis", "checked_params", "classify", "to_layers", "layer_name"]
+           "elevation_axis", "checked_axis", "checked_params", "EXTRA_DEFAULTS", "classify", "to_layers", "layer_name"]

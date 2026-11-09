@@ -4776,7 +4776,8 @@ def classify_lines(project: Path,
                                                              "(repeatable): simplify, min_length, along_deg, "
                                                              "across_deg, join_deg, join_offset, join_gap, "
                                                              "across_bin, pair_deg, pair_min, pair_max, "
-                                                             "pair_overlap"),
+                                                             "pair_overlap; pair_isolation (1.5; 1: the nearest "
+                                                             "line only, 0: off)"),
                    plate: Optional[Path] = typer.Option(None, "--plate", help="the check plate (.png or .svg)"),
                    json_out: Optional[Path] = typer.Option(None, "--json", help="the classification as JSON"),
                    layers: bool = typer.Option(False, "--layers", help="write the elements as layers of free "
@@ -4807,7 +4808,7 @@ def classify_lines(project: Path,
         if layer is not None:
             lines = orient_lines.lines_from_layer(ch, layer)
         elif file is not None:
-            lines = orient_lines.lines_from_file(file)
+            lines = orient_lines.lines_from_file(file, chunk=ch)  # put in the chunk's system
         else:
             lines = orient_lines.lines_from_elevation(ch, elevation)
         if axis is not None:

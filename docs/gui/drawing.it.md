@@ -211,7 +211,9 @@ il controllo sulla tavola.
 
 **Il disegno.** Un layer di [disegni liberi](#disegni-liberi-2d-e-3d) sulla pianta, i disegni di un
 [prospetto](processing.md#disegni-sui-prospetti-e-sulle-sezioni) (le sue linee e i contorni delle sue unità, nel suo `(u, v)`) o un file: GeoPackage,
-GeoJSON o DXF. Ogni linea viene semplificata (1 cm in modo predefinito) e divisa nei suoi tratti dritti: un poligono
+GeoJSON o DXF; un file viene messo nel sistema del chunk come fa *File > Importa > Disegni 3D...* (riproiettato dal
+sistema che dichiara, un GeoJSON in longitudine e latitudine letto come WGS 84, rifiutato quando non si può: nessun
+sistema con un chunk in uno reale, un sistema reale con un chunk locale). Ogni linea viene semplificata (1 cm in modo predefinito) e divisa nei suoi tratti dritti: un poligono
 chiuso conta per i suoi lati, anche quello che lo chiude, una curva per i suoi tratti dritti.
 
 **L'asse.** Due punti, scritti (X1, Y1, X2, Y2) o con *Asse con due clic* sulla vista (la pianta per un disegno della
@@ -224,16 +226,21 @@ devono essere distinti: un asse senza lunghezza viene rifiutato.
 | Gruppo | Che cosa è |
 | --- | --- |
 | lungo l'asse | linee entro 15 gradi dall'asse; i pezzi di una linea (spezzata, o con una piega lasciata dalla semplificazione) uniti in una |
-| di traverso | linee entro 15 gradi dalla perpendicolare; i pezzi di una linea, uno dopo l'altro, nello stesso punto dell'asse e dalla stessa parte, uniti |
-| coppie lungo l'asse / di traverso | due linee parallele a 2-50 cm che si sovrappongono almeno per metà della più corta, ognuna la più vicina all'altra, senza un'altra linea dello stesso gruppo vicina accanto (la successiva almeno 1,5 volte più lontana): i due lati di un elemento, un poligono con la sua **larghezza** |
+| di traverso | linee entro 15 gradi dalla perpendicolare; i pezzi di una linea, uno dopo l'altro, entro 10 cm lungo l'asse e dalla stessa parte, uniti - anche i giunti che proseguono uno nell'altro per più corsi (un giunto passante) |
+| coppie lungo l'asse / di traverso | due linee parallele a 2-50 cm che si sovrappongono almeno per metà della più corta: prima i due lati di un poligono chiuso (un fasciame o un'ordinata tracciati come poligono, anche a contatto con il successivo); poi le linee sciolte, ognuna la più vicina all'altra e senza un'altra linea dello stesso gruppo vicina accanto (la successiva almeno 1,5 volte più lontana). I due lati di un elemento: un poligono con la sua **larghezza** |
 | altre direzioni | ogni altro tratto dritto |
 
 Le linee a passo regolare (i letti di un muro, ogni 25 cm) non sono coppie: ognuna ha due vicine alla stessa distanza.
+Una linea disegnata due volte, o il lato che due poligoni tracciati hanno in comune, conta una volta (più vicine di
+2 cm). Le ordinate disegnate come linee sciolte con intervalli larghi quanto le ordinate (12 cm ogni 25 cm) sembrano
+linee a passo regolare: tracciale come poligoni, oppure abbassa *Coppie di linee sciolte* a 1 (basta la linea più
+vicina) o a 0 (le più vicine per prime).
 
 **Parametri** (*Avanzate*, con *Valori predefiniti*): semplificazione 0,01 m, tratto più corto 0,05 m, lungo l'asse
 entro 15 gradi, di traverso entro 15 gradi, unione dei pezzi con al massimo 5 gradi di differenza, 0,02 m di scarto
-laterale e 0,10 m di distanza, linee di traverso raggruppate ogni 0,10 m lungo l'asse, coppie parallele entro 5 gradi,
-distanti da 0,02 a 0,50 m, sovrapposte per 0,5 della più corta.
+laterale e 0,10 m di distanza, linee di traverso raggruppate entro 0,10 m lungo l'asse, coppie parallele entro 5 gradi,
+distanti da 0,02 a 0,50 m, sovrapposte per 0,5 della più corta; per le linee sciolte, la vicina successiva almeno 1,5
+volte più lontana.
 
 **La tavola.** *Classifica* lavora in sottofondo e mostra la tavola nella finestra: ogni elemento nel colore del suo
 gruppo con il suo numero, l'asse tratteggiato con una freccia, i conteggi nella legenda. *Salva la tavola...* la

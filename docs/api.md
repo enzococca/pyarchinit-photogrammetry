@@ -722,10 +722,10 @@ the elements; the Shipwreck and Masonry plugins give them their meaning. Errors 
 
 | Call | Description |
 | --- | --- |
-| `engine.orient_lines.DEFAULTS` | the parameters: `simplify` 0.01 m, `min_length` 0.05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0.02 m, `join_gap` 0.10 m, `across_bin` 0.10 m, `pair_deg` 5, `pair_min` 0.02 m, `pair_max` 0.50 m, `pair_overlap` 0.5 |
+| `engine.orient_lines.DEFAULTS` | the parameters: `simplify` 0.01 m, `min_length` 0.05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0.02 m, `join_gap` 0.10 m, `across_bin` 0.10 m, `pair_deg` 5, `pair_min` 0.02 m, `pair_max` 0.50 m, `pair_overlap` 0.5 (the twelve of the plan); `EXTRA_DEFAULTS`: `pair_isolation` 1.5 (1: the nearest line is enough, 0: nearest first) |
 | `engine.orient_lines.lines_from_layer(chunk, layer)` | the lines and polygons of a layer of free drawings, `(n, 2)` arrays of world x, y in the current world of the chunk; a polygon as its ring closed |
 | `engine.orient_lines.lines_from_elevation(chunk, eid)` | the drawings of an elevation in its `(u, v)`: its lines and the rings of its units (the stones left out) |
-| `engine.orient_lines.lines_from_file(path)` | the lines and polygons of a GeoPackage, GeoJSON or DXF |
+| `engine.orient_lines.lines_from_file(path, chunk=None)` | the lines and polygons of a GeoPackage, GeoJSON or DXF; with `chunk` put in its system as the import of free drawings does (refused when they cannot be), without as the file has them (an elevation's `(u, v)`) |
 | `engine.orient_lines.elevation_axis(chunk, eid)` | the horizontal of a flat elevation on the plan, `((x1, y1), (x2, y2))` one metre apart |
 | `engine.orient_lines.classify(lines, axis, params=None, frame=None)` | a `Classification`: `axis`, `params`, `segments`, `elements`, `frame` (None for a plan, the elevation's id); refused for an axis shorter than 1e-6, no line, a parameter out of range |
 | `Classification.counts()` / `.to_dict()` / `.plate(path, size=(2000, 1400), language="it", names=None)` | elements per group (`along`, `across`, `pair_along`, `pair_across`, `other`); JSON-ready; the check plate as PNG or SVG (`names`: text written instead of an element's id) |
@@ -739,10 +739,12 @@ Polygon for a pair, in the plane of the input), `position` (along the axis), `si
 `angle`, `offset` (across the axis), `length`.
 
 The pieces of one drawn line stay one line. Separate pieces are joined when their angle, sideways offset and gap are
-within `join_deg`, `join_offset` and `join_gap`. Two parallel lines form a pair only when each is the nearest of the
-other and the next line of the same group beside each is at least `PAIR_ISOLATION` (1.5) times farther, so that
-evenly spaced lines are not paired. The across lines left are grouped by `across_bin` along the axis and by side, when
-they follow each other end to end.
+within `join_deg`, `join_offset` and `join_gap`; a line drawn out and back over itself is two. Pairs: first the two
+sides of one closed polygon; then a line closer than `pair_min` and `join_offset` to another (drawn twice, a shared
+edge) counts once with it; then loose lines, nearest first, when each is the nearest of the other and the next line of
+the same group beside each is at least `pair_isolation` (1.5) times farther, so that evenly spaced lines are not
+paired. The across lines left are joined when they are on the same side, within `across_bin` of each other along the
+axis and end to end.
 
 ## Products from chosen point classes
 

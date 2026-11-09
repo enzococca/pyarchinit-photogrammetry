@@ -41,6 +41,7 @@ PARAM_FIELDS = (  # name, label, decimals, maximum, suffix
     ("pair_min", "Coppie: distanza da", 3, 10.0, " m"),
     ("pair_max", "Coppie: distanza fino a", 3, 10.0, " m"),
     ("pair_overlap", "Coppie: sovrapposizione (quota della più corta)", 2, 1.0, ""),
+    ("pair_isolation", "Coppie di linee sciolte: la vicina successiva almeno (volte)", 2, 10.0, ""),
 )
 GROUP_TEXTS = {"along": "lungo l'asse", "across": "di traverso", "pair_along": "coppie lungo l'asse",
                "pair_across": "coppie di traverso", "other": "altre direzioni"}
@@ -89,6 +90,8 @@ class OrientLinesDialog(QDialog):
         self.setWindowTitle(tr("Classifica un disegno"))
         self.working = False
         self.result: orient_lines.Classification | None = None
+        self._transform = None  # the transform of the chunk when the result was classified
+        self._pixmap: QPixmap | None = None
         self.file: Path | None = None
         self._tmp = Path(tempfile.mkdtemp(prefix="ppg-plate-"))
 
@@ -149,9 +152,13 @@ class OrientLinesDialog(QDialog):
             s.setRange(0.0, top)
             s.setDecimals(decimals)
             s.setSingleStep(10 ** -decimals * (5 if decimals else 1))
-            s.setValue(orient_lines.DEFAULTS[name])
+            s.setValue(self._default(name))
             s.setSuffix(suffix)
             s.setToolTip(name)
+            if name == "pair_isolation":
+                s.setToolTip(tr("Linee sciolte (non poligoni): due parallele sono una coppia se la linea successiva "
+                                "accanto a ognuna è almeno questo numero di volte più lontana. 1: basta che siano le "
+                                "più vicine (ordinate larghe quanto il loro intervallo); 0: le più vicine per prime"))
             adv.addRow(tr(label), s)
             self.s_params[name] = s
         self.b_defaults = QPushButton(tr("Valori predefiniti"))
@@ -262,9 +269,13 @@ class OrientLinesDialog(QDialog):
     def params(self) -> dict:
         return {name: s.value() for name, s in self.s_params.items()}
 
+    @staticmethod
+    def _default(name: str) -> float:
+        return {**orient_lines.DEFAULTS, **orient_lines.EXTRA_DEFAULTS}[name]
+
     def reset_params(self) -> None:
         for name, s in self.s_params.items():
-            s.setValue(orient_lines.DEFAULTS[name])
+            s.setValue(self._default(name))
 
     def _toggle_advanced(self, on: bool) -> None:
         self.w_advanced.setVisible(on)
@@ -337,7 +348,7 @@ class OrientLinesDialog(QDialog):
             return orient_lines.lines_from_elevation(self.chunk, value), value
         if self.file is None:
             raise orient_lines.OrientLinesError("choose a file first", "scegli prima un file")
-        return orient_lines.lines_from_file(self.file), None
+        return orient_lines.lines_from_file(self.file, chunk=self.chunk), None  # in the chunk's system
 
     # ------------------------------------------------------------------ classify
     def classify(self) -> bool:
@@ -389,6 +400,7 @@ class OrientLinesDialog(QDialog):
             self.window._warn(tr("Classifica un disegno: {0}", error_text(result["error"])))
             return
         self.result = result
+        self._transform = np.array(self.chunk.transform, float)
         self._show_result(plate)
 
     def _show_result(self, plate: Path | None = None) -> None:
@@ -396,6 +408,7 @@ class OrientLinesDialog(QDialog):
             r = self.result
             if r is None:
                 self.l_result.setText("")
+                self._pixmap = None
                 self.l_plate.clear()
             else:
                 counts = r.counts()
@@ -406,11 +419,22 @@ class OrientLinesDialog(QDialog):
                     text += tr(". Larghezza delle coppie: da {0} a {1} m", f"{min(widths):.3f}", f"{max(widths):.3f}")
                 self.l_result.setText(text)
                 if plate is not None and plate.exists():
-                    pix = QPixmap(str(plate))
-                    self.l_plate.setPixmap(pix.scaled(self.l_plate.width(), self.l_plate.height(),
-                                                      Qt.AspectRatioMode.KeepAspectRatio,
-                                                      Qt.TransformationMode.SmoothTransformation))
+                    self._pixmap = QPixmap(str(plate))
+                    self._fit_plate()
             self._update_buttons()
+
+    def _fit_plate(self) -> None:
+        """The plate scaled to the size of its label now (also after a resize of the window)."""
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        with contextlib.suppress(RuntimeError):
+            self.l_plate.setPixmap(self._pixmap.scaled(self.l_plate.width(), self.l_plate.height(),
+                                                       Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802 - Qt's name
+        super().resizeEvent(ev)
+        self._fit_plate()
 
     def save_plate(self, path=None) -> Path | None:
         """The plate of the classification written as PNG or SVG (``path``: without asking)."""
@@ -441,6 +465,17 @@ class OrientLinesDialog(QDialog):
         w = self.window
         if w.chunk is not self.chunk:  # another chunk active: the step of Annulla would be lost with its history
             w._warn(tr("Classifica un disegno: rendi attivo il chunk {0} per scrivere i layer.", self.chunk.label))
+            return None
+        from ..core import stamps
+
+        if self.result.frame is None and self._transform is not None and \
+                not stamps.same_transform(np.asarray(self.chunk.transform, float), self._transform):
+            # the world of the chunk moved (a solve of the ties, an orientation) after the classification: the x, y
+            # of the result are those of the world before
+            self.result = None
+            self._show_result()
+            w._warn(tr("Classifica un disegno: il sistema del chunk {0} è cambiato dopo la classificazione. "
+                       "Classifica di nuovo prima di scrivere i layer.", self.chunk.label))
             return None
         prefix = self.e_prefix.text().strip() or orient_lines.DEFAULT_PREFIX
         try:

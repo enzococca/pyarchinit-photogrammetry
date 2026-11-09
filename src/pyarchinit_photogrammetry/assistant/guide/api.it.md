@@ -743,10 +743,10 @@ non dà nomi agli elementi; i plugin Relitti e Murature danno loro un significat
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `engine.orient_lines.DEFAULTS` | i parametri: `simplify` 0,01 m, `min_length` 0,05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0,02 m, `join_gap` 0,10 m, `across_bin` 0,10 m, `pair_deg` 5, `pair_min` 0,02 m, `pair_max` 0,50 m, `pair_overlap` 0,5 |
+| `engine.orient_lines.DEFAULTS` | i parametri: `simplify` 0,01 m, `min_length` 0,05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0,02 m, `join_gap` 0,10 m, `across_bin` 0,10 m, `pair_deg` 5, `pair_min` 0,02 m, `pair_max` 0,50 m, `pair_overlap` 0,5 (i dodici del piano); `EXTRA_DEFAULTS`: `pair_isolation` 1,5 (1: basta la linea più vicina, 0: le più vicine per prime) |
 | `engine.orient_lines.lines_from_layer(chunk, layer)` | le linee e i poligoni di un layer di disegni liberi, array `(n, 2)` di x, y del mondo attuale del chunk; un poligono come anello chiuso |
 | `engine.orient_lines.lines_from_elevation(chunk, eid)` | i disegni di un prospetto nel suo `(u, v)`: le sue linee e gli anelli delle sue unità (senza le pietre) |
-| `engine.orient_lines.lines_from_file(path)` | le linee e i poligoni di un GeoPackage, GeoJSON o DXF |
+| `engine.orient_lines.lines_from_file(path, chunk=None)` | le linee e i poligoni di un GeoPackage, GeoJSON o DXF; con `chunk` messi nel suo sistema come fa l'importazione dei disegni liberi (rifiutati quando non si può), senza così come li ha il file (l'`(u, v)` di un prospetto) |
 | `engine.orient_lines.elevation_axis(chunk, eid)` | l'orizzontale di un prospetto piano sulla pianta, `((x1, y1), (x2, y2))` a un metro di distanza |
 | `engine.orient_lines.classify(lines, axis, params=None, frame=None)` | una `Classification`: `axis`, `params`, `segments`, `elements`, `frame` (None per la pianta, l'id del prospetto); rifiutata per un asse più corto di 1e-6, nessuna linea, un parametro fuori intervallo |
 | `Classification.counts()` / `.to_dict()` / `.plate(path, size=(2000, 1400), language="it", names=None)` | gli elementi per gruppo (`along`, `across`, `pair_along`, `pair_across`, `other`); pronta per il JSON; la tavola di controllo in PNG o SVG (`names`: testo scritto al posto del numero di un elemento) |
@@ -760,10 +760,13 @@ o un Polygon per una coppia, nel piano dei dati), `position` (lungo l'asse), `si
 coppia), `angle`, `offset` (di traverso), `length`.
 
 I pezzi di una linea disegnata restano una linea. Pezzi separati si uniscono quando angolo, scarto laterale e
-distanza stanno entro `join_deg`, `join_offset` e `join_gap`. Due linee parallele sono una coppia solo se ognuna è la
-più vicina dell'altra e la successiva linea dello stesso gruppo accanto a ognuna è almeno `PAIR_ISOLATION` (1,5)
-volte più lontana, così le linee a passo regolare non diventano coppie. Le linee di traverso rimaste si raggruppano
-ogni `across_bin` lungo l'asse e per lato, quando si seguono una dopo l'altra.
+distanza stanno entro `join_deg`, `join_offset` e `join_gap`; una linea disegnata andata e ritorno su se stessa sono
+due. Coppie: prima i due lati di un poligono chiuso; poi una linea più vicina di `pair_min` e di `join_offset` a
+un'altra (disegnata due volte, un lato in comune) conta una volta con quella; poi le linee sciolte, le più vicine per
+prime, se ognuna è la più vicina dell'altra e la successiva linea dello stesso gruppo accanto a ognuna è almeno
+`pair_isolation` (1,5) volte più lontana, così le linee a passo regolare non diventano coppie. Le linee di traverso
+rimaste si uniscono quando stanno dalla stessa parte, entro `across_bin` l'una dall'altra lungo l'asse e una dopo
+l'altra.
 
 ## Prodotti da classi di punti scelte
 

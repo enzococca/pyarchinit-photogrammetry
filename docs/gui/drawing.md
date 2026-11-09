@@ -208,7 +208,9 @@ only says which lines go which way. The meaning comes from the plugins, after yo
 
 **The drawing.** A layer of [free drawings](#free-drawings-2d-and-3d) on the plan, the drawings of an
 [elevation](processing.md#drawings-on-elevations-and-sections) (its lines and the outlines of its units, in its own `(u, v)`), or a file: GeoPackage,
-GeoJSON or DXF. Every line is simplified (1 cm by default) and cut into its straight pieces: a closed polygon counts
+GeoJSON or DXF; a file is put in the system of the chunk as *File > Import > 3D drawings...* does (reprojected from
+the system it says, a GeoJSON in longitude and latitude read as WGS 84, refused when it cannot be: no system with a
+chunk in a real one, a real system with a local chunk). Every line is simplified (1 cm by default) and cut into its straight pieces: a closed polygon counts
 by its sides, the closing one too, and a curve by its straight pieces.
 
 **The axis.** Two points, typed (X1, Y1, X2, Y2) or with *Asse con due clic* on the view (the plan for a plan drawing,
@@ -221,16 +223,19 @@ with no length is refused.
 | Group | What it is |
 | --- | --- |
 | along the axis | lines within 15 degrees of the axis; the pieces of one line (broken, or kinked by the simplification) joined into one |
-| across the axis | lines within 15 degrees of the perpendicular; the pieces of one line, end to end, at the same place along the axis and on the same side, joined |
-| pairs along / across the axis | two parallel lines 2-50 cm apart that overlap for at least half of the shorter, each the nearest line of the other, and with no other line of the same group close beside them (the next one at least 1.5 times farther): the two sides of one element, a polygon with its **width** |
+| across the axis | lines within 15 degrees of the perpendicular; the pieces of one line, end to end, within 10 cm of each other along the axis and on the same side, joined - also joints that continue each other across several courses (a straight joint) |
+| pairs along / across the axis | two parallel lines 2-50 cm apart that overlap for at least half of the shorter: first the two sides of one closed polygon (a plank or a frame traced as a polygon, also touching the next one); then loose lines, each the nearest line of the other and with no other line of the same group close beside them (the next one at least 1.5 times farther). The two sides of one element: a polygon with its **width** |
 | other directions | every other straight piece |
 
 Lines evenly spaced (the beds of a wall, every 25 cm) are not pairs: each has two neighbours at the same distance.
+A line drawn twice, or the edge two traced polygons share, counts once (closer than 2 cm). Frames drawn as loose lines
+whose gaps are about as wide as the frames (12 cm wide every 25 cm) look like evenly spaced lines: trace them as
+polygons, or lower *Coppie di linee sciolte* to 1 (the nearest line is enough) or 0 (nearest first).
 
 **Parameters** (*Avanzate*, with *Valori predefiniti*): simplification 0.01 m, shortest piece 0.05 m, along within
 15 degrees, across within 15 degrees, joining pieces at most 5 degrees apart, 0.02 m sideways and 0.10 m of gap,
-across lines grouped every 0.10 m along the axis, pairs parallel within 5 degrees, 0.02 to 0.50 m apart, overlapping
-for 0.5 of the shorter.
+across lines grouped within 0.10 m along the axis, pairs parallel within 5 degrees, 0.02 to 0.50 m apart, overlapping
+for 0.5 of the shorter; for loose lines, the next neighbour at least 1.5 times farther.
 
 **The plate.** *Classifica* runs in the background and shows the plate in the window: each element in the colour of
 its group with its number, the axis dashed with an arrow, the counts in the legend. *Salva la tavola...* writes it as
