@@ -2137,6 +2137,7 @@ class LayersPane(QWidget):
     chunk_overlay_changed = Signal(int, bool, float)  # another chunk's raster: key, shown, opacity (0-1)
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
+    layer_actions = None  # callable(layer name) -> [(text, icon name, slot)]: the window's commands in the layer menu
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2442,6 +2443,8 @@ class LayersPane(QWidget):
         menu = QMenu(self)
         self._add_label_actions(menu, name, index)
         menu.addSeparator()
+        for text, icon_name, slot in (self.layer_actions(name) if self.layer_actions is not None else []):
+            menu.addAction(icon(icon_name), text).triggered.connect(lambda _=False, f=slot: f())
         a = menu.addAction(icon("excel"), tr("Esporta gli attributi di {0} in Excel...", translate(name)))
         a.triggered.connect(lambda _=False: self.export_layer(name))
         a.setEnabled(self.view is not None and bool(self.view.features(name)))

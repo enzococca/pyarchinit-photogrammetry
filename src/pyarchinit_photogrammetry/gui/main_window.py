@@ -721,6 +721,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
+        self.layers_pane.layer_actions = self._layer_actions
         self.layers_pane.chunk_overlay_changed.connect(self._chunk_overlay_changed)
         self._overlay_cache: dict = {}  # reduced copies of the other chunks' rasters (chunk_views.overlay_image)
         self._overlay_drawn: dict = {}  # chunk key -> the copy drawn on the view now
@@ -1312,6 +1313,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._act(m, tr("Calcolatore raster..."), lambda: self.raster_calculator(), processing=True,
                   icon_name="calculator",
                   tip=tr("Formule sui raster del progetto, anche quelli dei plugin, come nel calcolatore raster di QGIS"))
+        self._act(m, tr("Maschera dal colore..."), self.open_colour_mask, processing=True, icon_name="colour",
+                  tip=tr("Le celle dell'ortofoto in un intervallo di colori (acqua, un telo, la sabbia) come poligoni "
+                         "di un layer di disegni liberi: per ritagliare i prodotti e per la quota stabile"))
         self._act(m, tr("Regione sui marker..."), self.region_from_markers, processing=True, icon_name="crop",
                   tip=tr("Regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto): depth map, "
                          "nuvola densa e modello restano dentro il suo spessore"))
@@ -1881,6 +1885,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._close_orient_dialog()  # its points are of a chunk of the project left
         self._close_ties_dialog()  # its ties are of the project left
         self._close_stakes_dialog()  # its proposals are of a chunk of the project left
+        self._close_colour_mask_dialog()  # its preview is of a chunk of the project left
         self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
@@ -4310,6 +4315,65 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if dlg is not None and alive(dlg):
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.close()
+
+    def open_colour_mask(self):
+        """*Strumenti > Maschera dal colore*: the cells of the orthophoto of the active chunk within a colour range as
+        a layer of free drawings (:class:`.colour_mask_dialog.ColourMaskDialog`, not modal), one at a time. Returns
+        it."""
+        from .colour_mask_dialog import ColourMaskDialog
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_colour_mask_dialog", None)
+        if dlg is not None and alive(dlg) and dlg.chunk is self.chunk:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        self._close_colour_mask_dialog()
+        if not self._need_chunk():
+            return None
+        path = self.chunk.orthomosaic_path
+        if path is None or not path.exists():
+            self._warn(tr("Maschera dal colore: il chunk attivo non ha un'ortofoto. Costruiscila prima (Flusso di "
+                          "lavoro > Costruisci ortofoto)."))
+            return None
+        self._colour_mask_dialog = ColourMaskDialog.ask(self)
+        return self._colour_mask_dialog
+
+    def _close_colour_mask_dialog(self) -> None:
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_colour_mask_dialog", None)
+        self._colour_mask_dialog = None
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def crop_with_layer(self, layer: str) -> None:
+        """*Ritaglia con questa maschera* (Layer pane): the products cut by the polygons of the free-drawing layer
+        ``layer`` of the active chunk (:func:`..engine.colour_mask.union`, :meth:`crop_products`)."""
+        if not self._need_chunk() or self._plan_only():
+            return
+        from ..engine import colour_mask
+
+        try:
+            geom = colour_mask.union(self.chunk, layer)
+        except ValueError:
+            self._warn(tr("Il layer {0} non ha poligoni da usare per il ritaglio.", layer))
+            return
+        self.crop_products(geom)
+
+    def _layer_actions(self, name: str) -> list:
+        """The commands of the context menu of the layer ``name`` of the Layer pane that are the window's: a layer of
+        free drawings with polygons cuts the products (*Ritaglia con questa maschera*)."""
+        from ..core import free_drawings
+
+        if not name.startswith(LAYER_PREFIX) or self.chunk is None:
+            return []
+        layer = name[len(LAYER_PREFIX):]
+        if not any(f["kind"] == "polygon" for f in free_drawings.features(self.chunk, layer)):
+            return []
+        return [(tr("Ritaglia con questa maschera..."), "crop", lambda: self.crop_with_layer(layer))]
 
     def _live_ties_dialog(self):
         """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""

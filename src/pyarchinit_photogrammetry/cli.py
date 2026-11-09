@@ -4567,6 +4567,75 @@ def stakes_accept(project: Path,
         typer.echo(f"added {_tie_line(doc, t)}")
 
 
+mask_app = typer.Typer(help="Masks of the orthophoto written as layers of free drawings")
+app.add_typer(mask_app, name="mask")
+
+
+def _range_of(text: Optional[str], what: str, top: float) -> Optional[tuple[float, float]]:
+    """``"A,B"`` -> ``(a, b)`` (None for None)."""
+    if text is None:
+        return None
+    try:
+        lo, hi = (float(v) for v in text.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"{what} is low,high (got {text!r})") from None
+    if not (0 <= lo <= top and 0 <= hi <= top):
+        raise typer.BadParameter(f"{what}: from 0 to {top:g} (got {text!r})")
+    return lo, hi
+
+
+@mask_app.command("colour")
+def mask_colour(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                hue: Optional[str] = typer.Option(None, "--hue", help="hue low,high in degrees 0-360 (low above high "
+                                                  "goes through 0: the reds, e.g. 350,10)"),
+                sat: Optional[str] = typer.Option(None, "--sat", help="saturation low,high in % (default 0,100)"),
+                val: Optional[str] = typer.Option(None, "--val", help="value (brightness) low,high in % (default "
+                                                  "0,100)"),
+                sample: Optional[str] = typer.Option(None, "--sample", help="X,Y: the range around the colour of the "
+                                                     "orthophoto there (instead of --hue/--sat/--val)"),
+                radius: float = typer.Option(0.1, "--radius", help="metres of the disc sampled"),
+                opening: float = typer.Option(0.05, "--opening", help="specks smaller than this (metres) dropped"),
+                margin: float = typer.Option(0.0, "--margin", help="metres added around the polygons (negative: "
+                                             "taken away)"),
+                keep_all: bool = typer.Option(False, "--all", help="every region of --min-area or more (default: the "
+                                              "largest only)"),
+                min_area: float = typer.Option(0.05, "--min-area", help="smallest region kept, m2"),
+                holes: bool = typer.Option(False, "--holes", help="keep the holes of the mask (default: filled)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the layer of free drawings (default "
+                                                    "'Maschera colore N'; an earlier mask in it is replaced)")):
+    """The cells of the orthophoto within a colour range as polygons of a layer of free drawings (heights from the
+    DEM): for the crop of the products, the stable height of ppg ties, every export of the free drawings."""
+    from .engine import colour_mask
+    from .engine import ties as ties_mod
+
+    if sample is not None and (hue or sat or val):
+        raise typer.BadParameter("give --sample or --hue/--sat/--val, not both")
+    if sample is None and hue is None:
+        raise typer.BadParameter("give --hue (with --sat, --val) or --sample X,Y")
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if sample is not None:
+            x, y, _z = _coordinates(sample, "--sample")
+            rng = colour_mask.sample(ch, x, y, radius=radius)
+            typer.echo(f"sampled: {rng.text()}")
+        else:
+            rng = colour_mask.HsvRange(_range_of(hue, "--hue", 360), _range_of(sat, "--sat", 100) or (0.0, 100.0),
+                                       _range_of(val, "--val", 100) or (0.0, 100.0))
+        result = colour_mask.mask(ch, rng, opening=opening, fill_holes=not holes,
+                                  keep="all" if keep_all else "largest", min_area=min_area, margin=margin,
+                                  progress=print_progress)
+        name = (layer or "").strip() or colour_mask.next_layer_name(ch)
+        ids = colour_mask.to_layer(ch, result, layer=name)
+    except (ties_mod.TieError, ValueError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"layer {name!r}: {len(ids)} polygon(s), {result.area:.3f} m2 ({100 * result.share:.1f} % of the "
+               f"orthophoto read), cells of {result.cell:.4f} m"
+               + (f", {result.holes} hole(s) left out" if result.holes else ""))
+
+
 def main():  # pragma: no cover - console entry point
     app()
 
