@@ -6717,8 +6717,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                   tip="Ogni foto abbinata alle 20 più vicine per posizione, o a quelle scattate prima e dopo; "
                       "insieme alla generica si abbinano le coppie di entrambe"),
             Field("reset", "Azzera l'allineamento attuale", True,
-                  tip="Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che "
-                      "resta com'è"),
+                  tip="Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che parte "
+                      "dalle pose attuali ma viene compensato di nuovo (scala e posizione interne cambiano: DEM, "
+                      "ortofoto e gli estremi dei legami messi senza foto vanno rifatti)"),
             Field("advanced", "Avanzate", kind="heading"),
             Field("keypoint_limit", "Limite punti chiave", 40000, minimum=1000, maximum=200000),
             Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000),

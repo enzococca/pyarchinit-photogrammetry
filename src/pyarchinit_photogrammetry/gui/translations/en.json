@@ -2269,7 +2269,7 @@
   "Sovrascrivila": "Overwrite it",
   "Spazio su disco esaurito: libera spazio nella cartella del progetto.": "Out of disk space: free some space in the project folder.",
   "Spenta (solo CPU)": "Off (CPU only)",
-  "Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che resta com'è": "Off: the photos added since the last alignment join the existing block, which stays as it is",
+  "Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che parte dalle pose attuali ma viene compensato di nuovo (scala e posizione interne cambiano: DEM, ortofoto e gli estremi dei legami messi senza foto vanno rifatti)": "Off: the photos added since the last alignment join the existing block, which starts from its current poses but is adjusted again (its internal scale and position change: DEM, orthophoto and the tie ends placed without photos must be made again)",
   "Spessore (m)": "Thickness (m)",
   "Spessore costante": "Constant thickness",
   "Spessore della fetta (m)": "Thickness of the slice (m)",
