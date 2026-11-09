@@ -200,10 +200,11 @@ def _elevation_entry(chunk, eid: str) -> dict:
     raise _error(f"{chunk.label} has no elevation {eid}", f"{chunk.label} non ha il prospetto {eid}")
 
 
-def lines_from_elevation(chunk, eid: str) -> list[np.ndarray]:
-    """The drawings kept with the elevation ``eid`` as ``(n, 2)`` arrays of ``(u, v)``: its lines and the outlines of
-    its units (rings closed, holes too). The stones are left out (they are what a plugin makes from a classification).
-    OrientLinesError for an unknown elevation or one with no line."""
+def lines_from_elevation(chunk, eid: str, units: bool = True) -> list[np.ndarray]:
+    """The drawings kept with the elevation ``eid`` as ``(n, 2)`` arrays of ``(u, v)``: its lines and, with ``units``,
+    the outlines of its units (rings closed, holes too). The stones are left out (they are what a plugin makes from a
+    classification). OrientLinesError for an unknown elevation or one with no line (said apart when only the outlines
+    of units, left out, are drawn on it)."""
     from shapely import wkt
 
     from ..archaeo import breaklines
@@ -215,7 +216,11 @@ def lines_from_elevation(chunk, eid: str) -> list[np.ndarray]:
     for rec in data.get("lines") or []:
         if breaklines.valid(rec):
             out.append(np.array([[float(c[0]), float(c[1])] for c in rec["coords"]]))
+    outlines = 0
     for rec in data.get("units") or []:
+        if not units:
+            outlines += 1
+            continue
         try:
             geom = wkt.loads(rec["wkt"])
         except Exception:  # noqa: BLE001 - a broken record is left out
@@ -225,6 +230,9 @@ def lines_from_elevation(chunk, eid: str) -> list[np.ndarray]:
                 continue
             for ring in [pg.exterior, *pg.interiors]:
                 out.append(np.asarray(ring.coords, float)[:, :2])
+    if not out and outlines:
+        raise _error(f"no line drawn on the elevation {eid} of {chunk.label}, only the outlines of its units",
+                     f"nessuna linea disegnata sul prospetto {eid} di {chunk.label}, solo i contorni delle sue unità")
     if not out:
         raise _error(f"no line drawn on the elevation {eid} of {chunk.label}",
                      f"nessuna linea disegnata sul prospetto {eid} di {chunk.label}")

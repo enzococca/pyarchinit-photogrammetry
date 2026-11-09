@@ -220,6 +220,14 @@ def test_lines_from_elevation_and_file(tmp_path):
         "stones": {"e1": ["POLYGON ((5 5, 6 5, 6 6, 5 5))"]}}}
     lines = orient_lines.lines_from_elevation(a, "e1")
     assert len(lines) == 2 and lines[1].shape == (5, 2)  # the stones left out
+    alone = orient_lines.lines_from_elevation(a, "e1", units=False)  # the outlines of the units left out too
+    assert len(alone) == 1 and np.array_equal(alone[0], lines[0])
+    a.meta["drawings"]["frames"]["e1"]["lines"] = []
+    with pytest.raises(OrientLinesError, match="only the outlines of its units"):
+        orient_lines.lines_from_elevation(a, "e1", units=False)
+    assert len(orient_lines.lines_from_elevation(a, "e1")) == 1
+    a.meta["drawings"]["frames"]["e1"]["lines"] = [
+        {"id": "l1", "kind": "breakline", "coords": [[0, 0, None], [2, 0, None]], "attributes": {}}]
     r = orient_lines.classify(lines, axis=((0, 0), (1, 0)), frame="e1")
     assert r.counts()["along"] == 3 and r.counts()["across"] == 2, r.counts()  # a 0.7 m polygon: no pair
     assert orient_lines.elevation_axis(a, "e1") == ((10.0, 20.0), (10.6, 20.8))
