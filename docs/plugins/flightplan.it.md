@@ -125,8 +125,10 @@ stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - su
 
 Il decollo si misura con la stessa sorgente dei waypoint; un decollo a più di 2000 m dal volo si ignora. Quando
 cambiano l'area, il decollo o il DEM, le quote diventano vecchie: ogni esportazione **le ricalcola prima** con la
-sorgente con cui il piano è stato calcolato (le tegole restano tegole, il DEM del progetto resta il DEM). Se il decollo
-è stato spostato si ricalcolano tutti i blocchi che seguono il terreno. Se il suolo sotto un decollo non si riesce a
+sorgente con cui il piano è stato calcolato (le tegole restano tegole, il DEM del progetto resta il DEM). Le quote di
+ogni blocco ricordano il decollo da cui sono contate: se il decollo è stato spostato si ricalcolano tutti i blocchi che
+seguono il terreno, anche quelli spenti. Un piano del pianificatore senza sorgente delle quote si ricalcola solo sul DEM
+del progetto, mai sulle tegole se non le scegli. Se il suolo sotto un decollo non si riesce a
 rimisurare (niente rete per le tegole, il decollo fuori dal DEM, il DEM che non c'è più) l'esportazione **si rifiuta**
 e dice perché: un file non porta mai quote, o discese dei punti speciali, contate dal decollo di prima.
 
@@ -159,6 +161,11 @@ base: da lì un target A4 si legge) e fa una scala di foto con la camera dritta 
 - **Dai marker del chunk**: i marker con coordinate misurate. In un chunk non georeferenziato le posizioni dei marker
   sono **stimate** dal rilievo: vanno bene per sorvolarli, **mai come GCP**.
 - **Togli** toglie i target dal piano.
+
+Le discese hanno bisogno del suolo sotto i target. Si legge dal DEM del progetto; in un chunk senza DEM il plugin
+chiede se usare le **tegole pubbliche (rete)** (sulla riga di comando, `--tiles`). Senza l'uno né le altre
+l'esportazione si rifiuta e dice di scegliere le tegole o aggiungere un DEM: la rete non si chiede mai senza che tu lo
+voglia.
 
 ### 8. Esporta
 
@@ -265,9 +272,9 @@ ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --t
 ppg plugin flightplan design scavo.ppg --xy "x,y;x,y;x,y" --camera mini4pro --margin 10 --double
 ppg plugin flightplan design scavo.ppg --bbox O,S,E,N --exif foto.jpg --takeoff LAT,LON
 ppg plugin flightplan show scavo.ppg                            # i numeri del piano (JSON)
-ppg plugin flightplan terrain scavo.ppg --detail fine           # --off: di nuovo una quota per blocco
+ppg plugin flightplan terrain scavo.ppg --detail fine           # --tiles: tegole pubbliche; --off: di nuovo una quota per blocco
 ppg plugin flightplan targets scavo.ppg --csv target.csv --epsg 3003 --metres 10
-ppg plugin flightplan targets scavo.ppg --markers               # --estimated, --remove
+ppg plugin flightplan targets scavo.ppg --markers               # --estimated, --remove, --tiles (suolo sulle tegole)
 ppg plugin flightplan coverage scavo.ppg --cell 0.5 --low 5
 ppg plugin flightplan export scavo.ppg --format kmz-zip --out volo.zip
 ppg plugin flightplan djifly scavo.ppg --zip pronte.zip --missions UUID,UUID

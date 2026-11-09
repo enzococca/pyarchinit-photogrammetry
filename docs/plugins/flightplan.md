@@ -124,8 +124,10 @@ takeoff), kept between 10 m and 500 m above the takeoff.
 
 The takeoff is measured with the same source as the waypoints; a takeoff farther than 2000 m from the flight is
 ignored. When the area, the takeoff or the DEM change, the heights become old: every export **recomputes them first**
-with the source the plan was computed with (tiles stay tiles, the project DEM stays the DEM). When the takeoff moved,
-every block that follows the terrain is recomputed. If the ground under a takeoff cannot be measured again (no network
+with the source the plan was computed with (tiles stay tiles, the project DEM stays the DEM). The heights of each block
+remember the takeoff they were counted from: when the takeoff moved, every block that follows the terrain is
+recomputed, a block switched off included. A plan of the planner without a height source is recomputed on the project
+DEM only, never on the tiles unless you choose them. If the ground under a takeoff cannot be measured again (no network
 for the tiles, the takeoff off the DEM, the DEM gone) the export is **refused** and says why: a file never carries
 heights, or descents of the special points, counted from the old takeoff.
 
@@ -159,6 +161,10 @@ down.
 - **From the chunk's markers**: the markers with measured coordinates. In a chunk that is not georeferenced the
   markers' positions are **estimated** by the survey: they are good to fly over, **never as GCPs**.
 - **Remove** takes the targets out of the plan.
+
+The descents need the ground under the targets. It is read from the project DEM; in a chunk without a DEM the plugin
+asks whether to use the **public tiles (network)** (on the command line, `--tiles`). Without either, the export is
+refused and says to choose the tiles or add a DEM: the network is never asked for it unasked.
 
 ### 8. Export
 
@@ -266,9 +272,9 @@ ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --t
 ppg plugin flightplan design scavo.ppg --xy "x,y;x,y;x,y" --camera mini4pro --margin 10 --double
 ppg plugin flightplan design scavo.ppg --bbox W,S,E,N --exif foto.jpg --takeoff LAT,LON
 ppg plugin flightplan show scavo.ppg                            # the numbers of the plan (JSON)
-ppg plugin flightplan terrain scavo.ppg --detail fine           # --off: one height per block again
+ppg plugin flightplan terrain scavo.ppg --detail fine           # --tiles: public tiles; --off: one height per block again
 ppg plugin flightplan targets scavo.ppg --csv target.csv --epsg 3003 --metres 10
-ppg plugin flightplan targets scavo.ppg --markers               # --estimated, --remove
+ppg plugin flightplan targets scavo.ppg --markers               # --estimated, --remove, --tiles (ground on the tiles)
 ppg plugin flightplan coverage scavo.ppg --cell 0.5 --low 5
 ppg plugin flightplan export scavo.ppg --format kmz-zip --out volo.zip
 ppg plugin flightplan djifly scavo.ppg --zip pronte.zip --missions UUID,UUID
