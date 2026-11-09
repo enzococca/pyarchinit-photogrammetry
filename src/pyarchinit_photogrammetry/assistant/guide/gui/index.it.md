@@ -11,6 +11,7 @@ pagina mostra la finestra e come è organizzata; le altre pagine di questa sezio
 - :material-rotate-3d-variant: **[Vista 3D e trackball](view3d.md)** - ruotare, spostare, avvicinare, il centro di rotazione, tasti
 - :material-camera-marker: **[Foto e marker](photos-markers.md)** - foto, maschere, marker, barre di scala
 - :material-cog-play: **[Elaborazione](processing.md)** - dall'allineamento all'ortofoto, versioni, pulizia
+- :material-link-variant: **[Legami fra chunk](ties.md)** - più rilievi messi insieme con punti in comune, controllati prima di applicare
 - :material-draw: **[Disegno e misure](drawing.md)** - unità, sezioni, quote, misure, SAM
 - :material-shovel: **[Strumenti per l'archeologia](archaeology.md)** - PyArchInit, QGIS, proxy, matrix, fasi, ceramica
 - :material-leaf: **[Multispettrale e termico](multispectral.md)** - riflettanza, indici, temperature

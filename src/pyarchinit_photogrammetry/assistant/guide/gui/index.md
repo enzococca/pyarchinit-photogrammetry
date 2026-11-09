@@ -12,6 +12,7 @@ part.
 - :material-rotate-3d-variant: **[3D view and trackball](view3d.md)** - turning, panning, zooming, the centre of rotation, keys
 - :material-camera-marker: **[Photos and markers](photos-markers.md)** - photos, masks, markers, scale bars
 - :material-cog-play: **[Processing](processing.md)** - from the alignment to the orthophoto, versions, cleaning
+- :material-link-variant: **[Ties between chunks](ties.md)** - several surveys put together with points in common, checked before applying
 - :material-draw: **[Drawing and measures](drawing.md)** - units, sections, spot heights, measures, SAM
 - :material-shovel: **[Tools for archaeology](archaeology.md)** - PyArchInit, QGIS, proxies, matrix, phases, pottery
 - :material-leaf: **[Multispectral and thermal](multispectral.md)** - reflectance, indices, temperatures

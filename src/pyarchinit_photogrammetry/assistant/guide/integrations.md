@@ -183,6 +183,11 @@ What else comes with the chunks of a `.ppg`:
   coregistration or a US proxy used) point at the copies. A link to a chunk *not* appended is dropped and said in the
   summary (never a link to a different chunk of this project); a file of a chunk not appended is left where it is,
   read and never changed, and the summary names it;
+* the [ties between chunks](gui/ties.md) of the source between chunks appended together come with them, on the new
+  chunks (one more step of *Edit > Undo* takes them away with the chunks); a tie whose name is already used gets the
+  name of the file after it (`picchetto (scavo)`). A tie to a chunk *not* appended is not copied, and the summary
+  names it; the two chunks of a tie must come in the same append (appending A, then B in another one, leaves the
+  tie behind both times: make it again, or append both together);
 * the GeoPackages of the multispectral zonings, written beside the source project, are copied into the folder of the
   chunk (QGIS edits the copy);
 * the sections of the source project (`sezioni/sezioni.json` beside it) join this project's sections, their SVG and

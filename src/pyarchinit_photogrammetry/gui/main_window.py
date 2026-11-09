@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -453,20 +454,28 @@ class _Appended:
     folders unless the project as last saved lists them. ``before``: the active chunk before, active again when
     the undo takes away the active one."""
 
-    def __init__(self, window, removal, before=None, sections=()):
+    def __init__(self, window, removal, before=None, sections=(), ties=(None, None)):
         self.window = window
         self.inner = _Removed(window, [removal])
         self.inner.after = before
         self.sections = list(sections)  # the sections of the projects appended, merged into the window's
+        self.ties = ties  # doc.meta["ties"] before and after: the ties copied with the chunks come and go with them
+
+    def _ties(self, which: int) -> None:
+        from ..core.append import _restore_ties
+
+        _restore_ties(self.window.doc, self.ties[which])
 
     def undo(self) -> None:
         current = self.window.chunk
         self.inner.active = current if any(current is c for c in self.inner.removals[0].chunks) else None
+        self._ties(0)
         self.window._redo_removed(self.inner)
         if self.sections:
             self.window._set_sections([s for s in self.window.sections if not any(s is x for x in self.sections)])
 
     def redo(self) -> None:
+        self._ties(1)
         self.window._undo_removed(self.inner)
         if self.sections:
             self.window._set_sections(self.window.sections + [s for s in self.sections
@@ -592,6 +601,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             lambda fid: QTimer.singleShot(0, lambda: self.free_properties(fid)))
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
+        self.photo_view.context_hook = self._photo_tie_menu  # *Estremo del legame su questa foto*
+        self._common_points = None
         self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
         self.tabs.addTab(self.ortho_view, icon("view_ortho"), tr("Ortofoto / DEM"))
         self.tabs.addTab(self.photo_view, icon("view_photo"), tr("Foto"))
@@ -981,6 +992,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
         self._act(m, tr("Aggiungi chunk"), self.add_chunk, processing=True, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
+        self._act(m, tr("Aggancia chunk con legami..."), self.tie_chunks, processing=True, icon_name="chunk",
+                  tip=tr("Più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte "
+                         "per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare"))
+        self._act(m, tr("Punti in comune..."), self.common_points, processing=True, icon_name="chunk",
+                  tip=tr("Due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in "
+                         "ognuna, un estremo anche su una foto"))
         self._act(m, tr("Orienta il sistema locale..."), self.orient_local, processing=True, icon_name="chunk",
                   tip=tr("Origine, asse x e piano orizzontale di un chunk in coordinate locali da tre punti o da un "
                          "piano adattato: tutto quello che è nelle sue coordinate lo segue"))
@@ -1854,6 +1871,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """Show a project. ``progress(fraction, text)`` follows the loading of the views."""
         step = progress or (lambda *_a, **_k: None)
         self._close_orient_dialog()  # its points are of a chunk of the project left
+        self._close_ties_dialog()  # its ties are of the project left
+        self._close_common_points()
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
             # RustGIS's last edits into its drawings first, then its layers go from RustGIS - not when the project left
@@ -3329,12 +3348,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return False
             self._store_drawings()
             self._prune_frames()
+            clean = self.history is not None and self.history.unchanged()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
             self._store_drawings()
             self._prune_frames()
+            clean = self.history is not None and self.history.unchanged()
             self.doc.save()
+        if clean:  # saving writes the ties back as they are read (a marker given its identity back): not an edit
+            self.history.rebase()
         self._dirty(False)
         self.refresh_all()
         self.statusBar().showMessage(tr("Salvato {0}", self.doc.path), 5000)
@@ -4052,6 +4075,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         doc = self.doc
         before = self.chunk
         self._store_drawings()
+        ties_before = copy.deepcopy(doc.meta.get("ties"))
 
         def job(p):
             return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
@@ -4071,7 +4095,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 if added:
                     self._set_sections(self.sections + added)
                     self.log_pane.info(tr("{0} sezioni aggiunte dai progetti", len(added)))
-                step = _Appended(self, results.journal, before, added)
+                step = _Appended(self, results.journal, before, added,
+                                 ties=(ties_before, copy.deepcopy(doc.meta.get("ties"))))
                 if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
                     active = new[0]
                     self._activate_chunk(active)
@@ -4102,7 +4127,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or tr("nessuno")
                 lines.append("  " + tr("«{0}»: {1} foto, prodotti: {2}, CRS {3}", ch.label, len(ch.cameras),
                                        products, ch.crs))
+            if getattr(r, "ties", 0):
+                lines.append("  " + tr("{0} legami fra i chunk aggiunti, copiati con loro", r.ties))
             warnings += [f"{r.path.name}: {w}" for w in r.warnings]
+            warnings += [tr("{0}: legame «{1}» non copiato: va verso un chunk non aggiunto", r.path.name, name)
+                         for name in getattr(r, "ties_dropped", [])]
         added = sum(len(r.chunks) for r in results)
         text = "\n".join(lines)
         if added:
@@ -4213,6 +4242,210 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                       lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p,
                                                  check=True),
                       done)
+
+    # ---------------------------------------------------------------- Aggancia chunk con legami
+    def tie_chunks(self) -> None:
+        """*Flusso di lavoro > Aggancia chunk con legami*: the dialog of the ties (:class:`.ties_dialog.TiesDialog`,
+        not modal), one for the project."""
+        from .ties_dialog import TiesDialog
+
+        if not self._two_chunks():
+            return
+        dlg = self._live_ties_dialog()
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.raise_()
+                dlg.activateWindow()
+                return
+        self._ties_dialog = TiesDialog.ask(self)
+
+    def _live_ties_dialog(self):
+        """The dialog of the ties when open (a dialog closed with Esc is deleted without a closeEvent: forgotten)."""
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_ties_dialog", None)
+        if dlg is not None and not alive(dlg):
+            self._ties_dialog = dlg = None
+        return dlg
+
+    def _live_common_points(self):
+        """The window *Punti in comune* when open (see :meth:`_live_ties_dialog`)."""
+        from .ties_dialog import alive
+
+        win = getattr(self, "_common_points", None)
+        if win is not None and not alive(win):
+            self._common_points = win = None
+        return win
+
+    def common_points(self):
+        """*Flusso di lavoro > Punti in comune*: two chunks side by side to place the ties
+        (:class:`.common_points.CommonPointsWindow`, not modal), one for the project. Returns it."""
+        from .common_points import CommonPointsWindow
+
+        if not self._two_chunks():
+            return None
+        win = self._live_common_points()
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.raise_()
+                win.activateWindow()
+                return win
+        self._common_points = CommonPointsWindow.ask(self)
+        return self._common_points
+
+    def _close_common_points(self) -> None:
+        win = self._live_common_points()
+        self._common_points = None
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.close()
+
+    def _common_points_redraw(self, refresh: bool = False) -> None:
+        win = self._live_common_points()
+        if win is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                win.refresh() if refresh else win.redraw()
+
+    def _ties_made(self) -> None:
+        """Ties made, moved or measured in *Punti in comune* (already a step of Modifica > Annulla): the markers shown
+        everywhere and the dialog of the ties read again (with the unknowns proposed for the chunks that had none)."""
+        self.reference.set_chunk(self.chunk, self.last_report)
+        self.workspace.populate(self.doc)
+        self._draw_markers_on_raster()
+        self.photos.update_flags()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
+        dlg = self._live_ties_dialog()
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload(kinds=dlg._kinds_with_new())
+
+    def _photo_tie_menu(self, menu, x: float, y: float) -> None:
+        """The right-click menu of the photo view while *Punti in comune* is open: an end of a tie on this photo."""
+        win = self._live_common_points()
+        cam, ch = self.photo_view.camera, self.photo_view.chunk
+        if win is None or cam is None or ch is None:
+            return
+        try:
+            tie = win.selected_tie()
+        except RuntimeError:  # already deleted
+            return
+        menu.addSeparator()
+        a = menu.addAction(tr("Estremo del legame su questa foto"))
+        a.setEnabled(bool(cam.aligned))
+        a.triggered.connect(lambda: win.end_on_photo(ch, cam, x, y))
+        if tie is not None and win.pending is None and any(e[0] == ch.key for e in tie.ends()):
+            b = menu.addAction(tr("Estremo di «{0}» anche su questa foto", tie.name))
+            b.setEnabled(bool(cam.aligned))
+            b.triggered.connect(lambda: win.add_photo_to_selected(ch, cam, x, y))
+
+    def tie_end_photo(self, camera) -> None:
+        """*Estremo del legame su questa foto* from the Photos pane: the photo opened on where the current transforms put
+        the pending end (a red cross); a right click on the exact point there places it."""
+        win = self._live_common_points()
+        focus = None
+        if win is not None:
+            with contextlib.suppress(RuntimeError):
+                focus = win.predicted_point(self.chunk)
+        self.open_photo(camera, focus=focus)
+        self.statusBar().showMessage(tr("Tasto destro sul punto esatto della foto: Estremo del legame su questa foto."),
+                                     20000)
+
+    def _close_ties_dialog(self) -> None:
+        dlg = self._live_ties_dialog()
+        self._ties_dialog = None
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted
+                dlg.close()
+
+    def apply_ties(self, solution, report: dict | None = None) -> bool:
+        """A solve of the ties (:func:`..engine.ties.solve`, checked) applied to its chunks: the drawings the window
+        holds stored first, the transforms changed (:func:`..engine.ties.apply`), one step of *Modifica > Annulla*
+        (:class:`.ties_dialog.TiesStep`), the project saved, the views and the Layer pane read again, what changed said
+        in the log and in a box. Returns whether it was applied."""
+        from ..core import stamps
+        from ..engine import ties as ties_mod
+        from .ties_dialog import TiesStep, error_text, keep_report
+
+        moved = [k for k, kind in solution.unknowns.items() if kind != "fixed"]
+        active_moves = self.chunk is not None and self.chunk.key in moved
+        if active_moves:
+            self._rustgis_leave()
+            self._store_drawings()
+            self._save_sections()
+        try:
+            changed = ties_mod.apply(self.doc, solution)
+        except (ties_mod.TieError, ValueError) as exc:
+            self._warn(error_text(exc))
+            return False
+        if self.history is not None:
+            self.history.push(tr("Aggancia chunk con legami"), TiesStep(self, solution, changed, report),
+                              document=True)
+        try:
+            keep_report(self.doc, report)  # after the step: the solve applied stays undoable whatever happens here
+        except (TypeError, ValueError) as exc:
+            log.warning("Rapporto dei legami non conservato: %s", exc)
+        saved = False
+        if self.doc.path:
+            try:
+                self.doc.save()
+                saved = True
+            except Exception as exc:  # noqa: BLE001 - the solve is applied: the project stays to be saved
+                log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
+        self._ties_shown(active_moves)
+        self.setWindowModified(not saved)
+        if self.history is not None:
+            self.history.rebase()
+        labels = {c.key: c.label for c in self.doc.chunks}
+        lines = [tr("Stima applicata a {0} (sistema {1}).", ", ".join(labels.get(k, str(k)) for k in moved),
+                    solution.crs or "LOCAL")]
+        for ch in self.doc.chunks:
+            if ch.key not in moved:
+                continue
+            stale = [translate(x["name"]) for x in stamps.stale_products(ch)] or \
+                [translate(stamps.NAMES.get(k, k)) for k in (changed.get("stale_products") or {}).get(ch.key, [])]
+            if stale:
+                lines.append(tr("{0}: da ricostruire {1}", labels.get(ch.key, ch.key), ", ".join(stale)))
+        text = "\n".join(lines)
+        for line in lines:
+            self.log_pane.info(line)
+        self.statusBar().showMessage(lines[0], 15000)
+        self._info(tr("Aggancia chunk con legami"), text)
+        return True
+
+    def _ties_shown(self, active_moved: bool) -> None:
+        """The views after the chunks moved by the ties: the line layers of the old frame taken away when the active
+        chunk moved, everything read again, the open dialog of the ties told that its check no longer holds."""
+        if active_moved:
+            dropped = self._orient_read_again()
+            if dropped:
+                self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(dropped)))
+        self.refresh_all()
+        self._draw_free()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
+        dlg = self._live_ties_dialog()
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload()
+        self._common_points_redraw(refresh=True)
+
+    def _ties_edited(self) -> None:
+        """After the undo or the redo of an edit of the ties (their markers written back in every chunk)."""
+        self.refresh_all()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
+        dlg = self._live_ties_dialog()
+        if dlg is not None:
+            with contextlib.suppress(RuntimeError):
+                dlg.reload()
+        self._common_points_redraw()
+        self._dirty(True)
+
+    def _ties_reload(self) -> None:
+        """After the undo or the redo of a solve of the ties."""
+        self._ties_shown(True)
+        self._dirty(True)
 
     def _chunk_shown_in_3d(self, chunk, shown: bool) -> None:
         """A chunk ticked or unticked in the workspace: drawn or no longer drawn in the 3D view with the active one
@@ -5767,6 +6000,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         if len(cams) == 2:
             menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
+        if len(cams) == 1 and cams[0].aligned and self._live_common_points() is not None:
+            menu.addAction(tr("Estremo del legame su questa foto"), lambda: self.tie_end_photo(cams[0]))
         if len(cams) == 1 and cams[0].aligned:
             menu.addAction(icon("look_through"), tr("Guarda dalla foto nella vista 3D"),
                            lambda: self.look_through_photo(cams[0]))
@@ -6482,8 +6717,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                   tip="Ogni foto abbinata alle 20 più vicine per posizione, o a quelle scattate prima e dopo; "
                       "insieme alla generica si abbinano le coppie di entrambe"),
             Field("reset", "Azzera l'allineamento attuale", True,
-                  tip="Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che "
-                      "resta com'è"),
+                  tip="Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che parte "
+                      "dalle pose attuali ma viene compensato di nuovo (scala e posizione interne cambiano: DEM, "
+                      "ortofoto e gli estremi dei legami messi senza foto vanno rifatti)"),
             Field("advanced", "Avanzate", kind="heading"),
             Field("keypoint_limit", "Limite punti chiave", 40000, minimum=1000, maximum=200000),
             Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000),
@@ -6545,8 +6781,21 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self.last_report = self.chunk.update_transform()
             return n
 
-        self.run_task("Allineamento", job, lambda n: self.statusBar().showMessage(
-            tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000))
+        def done(n) -> None:
+            self.statusBar().showMessage(tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000)
+            self._say_stale_ties()
+
+        self.run_task("Allineamento", job, done)
+
+    def _say_stale_ties(self) -> None:
+        """After a new alignment: the ends of ties placed without photos in the old frame, said in the log (they are
+        left out of the solve until placed again or confirmed in *Aggancia chunk con legami*)."""
+        from ..engine import ties as ties_mod
+
+        from .ties_dialog import say
+
+        for item in ties_mod.stale_ends(self.doc):
+            self.log_pane.warning(say(item["message"]))
 
     def import_reference(self) -> None:
         if not self._need_chunk():
@@ -16533,7 +16782,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _script_changed(self, exc=None) -> None:
         """The entry of a script (or of an orientation) left the history: the project changed after it (said in the
         status bar and in the log)."""
-        if getattr(exc, "orientation", False):
+        if getattr(exc, "ties", False):
+            text = tr("Il passo dei legami non si può più annullare: i legami, i loro marker o i loro chunk sono "
+                      "cambiati dopo, con un passo che non è in Modifica > Annulla. La voce è stata tolta.")
+        elif getattr(exc, "orientation", False):
             text = tr("L'orientamento non si può più annullare: il chunk è cambiato dopo (prodotti rifatti, nuovo "
                       "allineamento, georeferenziazione o ottimizzazione). La voce è stata tolta.")
         else:

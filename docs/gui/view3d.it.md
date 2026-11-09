@@ -99,7 +99,8 @@ vista, non passi di *Modifica > Annulla*. Mentre si vede una versione conservata
 *Flusso di lavoro > Allinea chunk...* ora finisce con lo stesso controllo: per ogni chunk allineato, la quota dei suoi
 punti entro la soglia e la sua distanza mediana dal riferimento ([riga di comando](../api.md#allineare-e-unire-i-chunk):
 `ppg align-chunks ... --check`, `ppg chunk-distances`). I DEM e le ortofoto dei chunk si confrontano nella vista 2D:
-vedi il [pannello Layer](panes.md#layer).
+vedi il [pannello Layer](panes.md#layer). Quando marker, foto e nuvole non bastano ad allineare i chunk, legali con
+punti scelti da te: [legami fra chunk](ties.md).
 
 ## Guardare da una foto
 

@@ -468,6 +468,9 @@ def _worker(args) -> int:
     # ---- free drawings in 3D: a clone of the demo with a few of them, deleted after
     if wanted("free-3d") or wanted("free-plan") or wanted("free-form"):
         _free_shots(w, args.demo, pump, lambda img, name: save(img, name, ORIENT_OUT), wanted)
+    # ---- ties between chunks: a clone of the demo with a second campaign moved by a known error, deleted after
+    if wanted("ties-dialog") or wanted("ties-common-points"):
+        _ties_shots(w, args.demo, pump, save, wanted)
 
     guard.stop()
     w.setWindowModified(False)
@@ -578,6 +581,87 @@ def _free_shots(w, demo: Path, pump, save, wanted) -> None:
             save(dlg.grab(), "free-form")
             dlg.close()
         w.setWindowModified(False)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
+    """*Aggancia chunk con legami* and *Punti in comune* on a clone of the demo: the chunk duplicated as a second
+    campaign "2025" (its DEM and orthophoto copied, built where it was), then moved as a drone GPS would put it (1.5
+    degrees, some decimetres); five ties on the trench, one of them 30 cm off. The dialog after *Controlla* (the wrong
+    tie in red, robust weights) and the two linked views with the residuals. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import numpy as np
+    import rasterio
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.core.camera import Reference
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.engine import ties
+
+    folder = _clone(demo, "ties_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        a = doc.chunk
+        a.label = "2024"
+        b = doc.duplicate_chunk(a, label="2025")
+        for m in b.markers:  # the second campaign: no control points, the drone's GPS only
+            m.reference = Reference()
+        for name in ("dem", "orthomosaic"):  # its rasters, built before it moved (to be rebuilt after the solve)
+            target = b.data_dir / Path(a.product_path(name)).name
+            b.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(a.product_path(name), target)
+            b._set_product(name, target)
+            stamps.stamp(b, name)
+        with rasterio.open(a.dem_path) as src:
+            left, bottom, right, top = src.bounds
+        spots = [(0.25, 0.3), (0.75, 0.3), (0.5, 0.55), (0.25, 0.8), (0.75, 0.8)]
+        for i, (fx, fy) in enumerate(spots, start=1):
+            x, y = left + fx * (right - left), bottom + fy * (top - bottom)
+            p = ties.world_to_internal(a, (x, y, None))
+            q = p.copy()
+            if i == 3:  # the wrong one: the point picked 30 cm away in the other campaign
+                q[:2] += np.array([0.3, 0.0]) / float(a.scale)
+            ties.add_tie(doc, a, p, b, q, name=f"P{i}")
+        centre = np.array([(left + right) / 2, (bottom + top) / 2, 0.0])
+        t = np.radians(1.5)
+        moved = np.eye(4)  # 1.5 degrees about the middle of the trench and a shift, in the world of the chunk
+        moved[:2, :2] = [[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]
+        moved[:3, 3] = centre - moved[:3, :3] @ centre + np.array([0.35, -0.2, 0.12])
+        b.transform = moved @ np.asarray(b.transform, float)
+        doc.chunk = a
+        w.set_document(doc)
+        pump(1500)
+        w.tie_chunks()
+        pump(600)
+        dlg = w._live_ties_dialog()
+        dlg.resize(1100, 820)
+        dlg.c_robust.setChecked(True)  # Huber weights: the wrong tie alone stands out
+        dlg.run_check()
+        for _ in range(200):  # the check runs in the worker
+            pump(100)
+            if dlg.result is not None:
+                break
+        pump(400)
+        if wanted("ties-dialog"):
+            save(dlg.grab(), "ties-dialog")
+        if wanted("ties-common-points"):
+            cp = w.common_points()
+            cp.resize(1400, 760)
+            pump(1200)
+            side = cp.sides[0]
+            v = side.view
+            cx, cy = (left + right) / 2, bottom + 0.55 * (top - bottom)
+            cp.centre_on(side, cx, cy)
+            pump(1200)
+            save(cp.grab(), "ties-common-points")
+            w._close_common_points()
+        w._close_ties_dialog()
+        pump(300)
+        w.setWindowModified(False)
+        w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after
+        pump(800)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 

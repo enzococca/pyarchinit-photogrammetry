@@ -9,6 +9,8 @@ Metashape and WebODM go through their importers (:func:`..integrations.metashape
 :func:`..integrations.webodm.import_task_into`).
 
 Nothing is aligned: the chunks keep their own frame and CRS (Flusso di lavoro > Allinea chunk / Unisci chunk next).
+The ties between chunks of a ``.ppg`` (:mod:`..engine.ties`) come with the chunks they link when all of them are
+appended (:func:`_carry_ties`); a tie to a chunk left out is not copied, said.
 A source that fails leaves no chunk behind and does not stop the others; a cancellation takes away every chunk
 appended by the call. The document is not saved.
 """
@@ -19,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +42,8 @@ class Appended:
     chunks: list = field(default_factory=list)
     error: str | None = None
     warnings: list = field(default_factory=list)
+    ties: int = 0  # ties between chunks of the source copied with them
+    ties_dropped: list = field(default_factory=list)  # names of the ties to a chunk not appended: not copied
 
 
 def source_kind(path, webodm: bool = False) -> str:
@@ -307,6 +312,64 @@ def write_sections(doc, sections: list[dict], prefix: str) -> list[dict]:
     return new
 
 
+def _carry_ties(doc, src, src_ties, pairs, prefix: str) -> tuple[int, list[str]]:
+    """The ties of the source ``src`` (read before its chunks were copied: ``src_ties``) between chunks all appended
+    (``pairs``: (source chunk, new chunk)) added to the ties of ``doc``, their ends on the new chunks. The markers of
+    the new chunks get a new identity (``Marker.uid``) and the ties follow it, so an identity never stands for two
+    points of the document (the same project appended twice). A tie id already in ``doc`` takes a new one, a name
+    already taken gets `` (<prefix>)``. Ties with a chunk not appended are not copied: the names of those with an end
+    on a chunk appended are returned (and logged); ties between chunks all left out are not mentioned. Returns (copied, dropped names)."""
+    from ..engine import ties as ties_mod
+
+    mapping = {sc.key: ch.key for sc, ch in pairs}
+    uids: dict[tuple[int, str], str] = {}
+    for _sc, ch in pairs:
+        for m in ch.markers:
+            if m.uid:
+                uids[(ch.key, m.uid)] = m.uid = uuid.uuid4().hex
+    mine = ties_mod.ties_of(doc)
+    ids, names = {t.id for t in mine}, {t.name for t in mine}
+    copied, dropped = [], []
+    for t in src_ties:
+        if not t.chunk_keys() <= set(mapping):
+            if t.chunk_keys() & set(mapping):  # a tie between chunks left out has nothing to do with this append
+                dropped.append(t.name or t.id)
+                log.info("Legame «%s» di %s non copiato: va verso un chunk non aggiunto", t.name or t.id, src.path)
+            continue
+        new = ties_mod.Tie.from_dict(t.to_dict())
+        for which in ("a", "b"):
+            end = getattr(new, which)
+            if end is None:
+                continue
+            key = mapping[end[0]]
+            setattr(new, which, (key, end[1]))
+            old = getattr(new, f"{which}_uid")
+            if old:
+                setattr(new, f"{which}_uid", uids.get((key, old), old))
+        if new.id in ids:
+            new.id = ties_mod._new_id(ids)
+        if new.name in names:
+            name, n = f"{new.name} ({prefix})", 1
+            while name in names:
+                n += 1
+                name = f"{new.name} ({prefix} {n})"
+            new.name = name
+        ids.add(new.id)
+        names.add(new.name)
+        copied.append(new)
+    if copied:
+        ties_mod.save_ties(doc, mine + copied)
+    return len(copied), dropped
+
+
+def _restore_ties(doc, saved) -> None:
+    """``doc.meta["ties"]`` back to ``saved`` (a copy taken before an append that is being undone)."""
+    if saved:
+        doc.meta["ties"] = copy.deepcopy(saved)
+    else:
+        doc.meta.pop("ties", None)
+
+
 def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dict | None = None) -> list:
     """The chunks of the project ``path`` (all, or those named or numbered in ``chunks``) as new chunks of ``doc``,
     each with a copy of its data folder. ``on_chunk(chunk)``: called for each new chunk as soon as it is in ``doc``,
@@ -314,8 +377,10 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     appended point at the copies, the zoning GeoPackages are copied, the keys of chunks kept in the settings
     (*Allinea chunk*, coregistration) turned into the new ones - or dropped when that chunk is not appended, said in
     ``report["warnings"]``, with the files of the source project the chunks still point to and a site of the source
-    other than this project's. ``report["sections"]``: the sections of the source (:func:`source_sections`).
-    Returns the new chunks; on an error those it made are taken away again."""
+    other than this project's. ``report["sections"]``: the sections of the source (:func:`source_sections`). The
+    ties of the source between chunks all appended are copied with them (:func:`_carry_ties`: ``report["ties"]``
+    how many, ``report["ties_dropped"]`` the names of those to a chunk not appended).
+    Returns the new chunks; on an error those it made are taken away again, with the ties copied."""
     from .document import Document
 
     progress = as_progress(progress)
@@ -324,7 +389,11 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     path = Path(path).resolve()
     if doc.path is not None and Path(doc.path).resolve() == path:
         raise ValueError("è il progetto aperto: non si può aggiungere a sé stesso")
+    from ..engine.ties import ties_of
+
     src = Document(path)  # only read: nothing of it is written
+    src_ties = ties_of(src)  # before the markers are copied: the ends recognised (identities given back)
+    ties_before = copy.deepcopy(doc.meta.get("ties"))
     picked = [src.chunks[i] for i in _chosen([c.label for c in src.chunks], chunks)]
     src_files = os.path.abspath(path.with_name(path.name + ".files"))
     added, pairs = [], []
@@ -388,6 +457,8 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
                 warnings.append(f"«{ch.label}»: usa {len(foreign)} file di chunk del progetto di origine non aggiunti "
                                 f"(per esempio {foreign[0]}): restano lì, letti e mai modificati")
             sub(1.0, f"{ch.label}: {len(ch.cameras)} foto")
+        if pairs:
+            report["ties"], report["ties_dropped"] = _carry_ties(doc, src, src_ties, pairs, path.stem)
         site, mine = src.meta.get("sito"), doc.meta.get("sito")
         if site and site != mine:
             warnings.append(f"{path.name}: è del sito «{site}», questo progetto " + (f"del sito «{mine}»" if mine else
@@ -396,6 +467,7 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
             report["sections"] = source_sections(doc, path)
     except BaseException:
         _take_away(doc, added)
+        _restore_ties(doc, ties_before)
         raise
     return added
 
@@ -418,12 +490,14 @@ def append_projects(doc, sources, chunks=None, webodm: bool = False, progress=No
     crash, deletes the folders of those the project as saved does not list. A source that fails takes away the chunks
     it made - only those - and the others go on (its ``error``); a cancellation (:class:`.progress.Cancelled`) takes
     away every chunk this call made and goes on. A journal left with no chunk is discarded. The active chunk is not
-    changed and ``doc`` is not saved. Returns :class:`Results`."""
+    changed and ``doc`` is not saved. The ties of a ``.ppg`` between chunks all appended come with them
+    (``Appended.ties``; ``Appended.ties_dropped``: those to a chunk left out, not copied). Returns :class:`Results`."""
     from .removal import ChunkRemoval
 
     progress = as_progress(progress)
     journal = journal if journal is not None else ChunkRemoval.added(doc)
     sources = [Path(s) for s in sources]
+    ties_before = copy.deepcopy(doc.meta.get("ties"))
     results = Results()
     results.sections = []
     made_all: list = []
@@ -448,6 +522,7 @@ def append_projects(doc, sources, chunks=None, webodm: bool = False, progress=No
                     report: dict = {}
                     result.chunks = append_ppg(doc, path, wanted, progress=sub, on_chunk=on_chunk, report=report)
                     result.warnings += report.get("warnings", [])
+                    result.ties, result.ties_dropped = report.get("ties", 0), list(report.get("ties_dropped", []))
                     if report.get("sections"):
                         results.sections.append((path.stem, report["sections"]))
                 elif kind == "psx":
@@ -476,6 +551,7 @@ def append_projects(doc, sources, chunks=None, webodm: bool = False, progress=No
                 result.error = str(exc) or type(exc).__name__
     except BaseException:
         _take_away(doc, made_all)
+        _restore_ties(doc, ties_before)  # the ties copied with them go too
         journal.forget(made_all)
         journal.discard()
         raise

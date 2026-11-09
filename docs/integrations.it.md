@@ -190,6 +190,11 @@ Che cos'altro arriva con i chunk di un `.ppg`:
   fratello (il DEM usato da una coregistrazione o da un proxy US) puntano alle copie. Un collegamento a un chunk *non*
   aggiunto viene tolto e detto nel riepilogo (mai un collegamento a un altro chunk di questo progetto); un file di un
   chunk non aggiunto resta dov'è, letto e mai modificato, e il riepilogo lo nomina;
+* i [legami fra chunk](gui/ties.md) della sorgente fra chunk aggiunti insieme arrivano con loro, sui chunk nuovi
+  (lo stesso passo di *Modifica > Annulla* li toglie con i chunk); un legame con un nome già usato prende dopo il nome
+  del file (`picchetto (scavo)`). Un legame verso un chunk *non* aggiunto non viene copiato, e il riepilogo lo nomina;
+  i due chunk di un legame devono arrivare nella stessa aggiunta (aggiungendo A e poi B in un'altra, il legame resta
+  fuori entrambe le volte: rifallo, o aggiungili insieme);
 * i GeoPackage delle zonizzazioni multispettrali, scritti accanto al progetto di origine, vengono copiati nella
   cartella del chunk (QGIS modifica la copia);
 * le sezioni del progetto di origine (`sezioni/sezioni.json` accanto a lui) si uniscono a quelle di questo progetto,

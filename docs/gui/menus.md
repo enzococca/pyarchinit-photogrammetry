@@ -116,6 +116,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Relink photos (another folder)...** | finds the photos with the same names in another folder (moved, on another disk, "online only" on Dropbox) |
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds; the summary gives, for each chunk, the share of its points on the reference and their median distance ([several chunks together](view3d.md#several-chunks-together)) |
+| **Tie chunks together...** | several chunks solved together from points in common (ties) and known points, with the unknowns chosen for each chunk and a report that shows the wrong ties before applying ([ties between chunks](ties.md)) |
+| **Common points...** | two chunks side by side with linked views: a tie with a click on the same point in each, an end on a photo too ([common points](ties.md#common-points)) |
 | **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
 | **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order; one step of *Edit > Undo* |
 | **When rebuilding, keep the active DEM and orthomosaic as versions** | a toggle (off by default): the rebuild leaves the DEM and orthophoto of before among the versions |

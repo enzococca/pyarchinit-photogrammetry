@@ -98,7 +98,8 @@ the view, not steps of *Edit > Undo*. While a kept version is shown, only the ac
 *Workflow > Align chunks...* now ends with the same check: for each chunk aligned, the share of its points within the
 threshold and its median distance from the reference ([command line](../api.md#align-and-merge-chunks):
 `ppg align-chunks ... --check`, `ppg chunk-distances`). The DEMs and orthophotos of the chunks can be compared in the 2D
-view: see the [Layer pane](panes.md#layer).
+view: see the [Layer pane](panes.md#layer). When markers, photos and clouds cannot align the chunks, tie them with
+points you choose: [ties between chunks](ties.md).
 
 ## Looking through a photo
 
