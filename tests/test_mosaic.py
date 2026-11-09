@@ -300,3 +300,70 @@ def test_a_moved_dem_in_another_projected_system(tmp_path):
     assert at(z, tr, 5.5, 2.0)[0] == pytest.approx(30.5, abs=1e-4)
     assert np.isnan(at(z, tr, 4.5, 2.0)[0])  # where C was built, before the move: nothing now
     assert rec["moved"] == [ch.key] and rec["crs"] == CRS
+
+
+def test_frames_only_proj_would_join_are_refused(tmp_path):
+    doc, c = project(tmp_path, crs={"A": "EPSG:6708", "B": "EPSG:8401", "C": "EPSG:9989"})
+    with pytest.raises(mosaic.MosaicError) as err:  # RDN2008 (ETRF2000) with ETRF2014
+        mosaic.build(doc, ["A", "B"])
+    assert "approximate transformation" in str(err.value) and "trasformazione approssimata" in err.value.italian
+    with pytest.raises(mosaic.MosaicError):  # ITRF2020 with anything else
+        mosaic.build(doc, ["C", "A"])
+    assert not mosaic.mosaics_of(doc)
+    assert not (doc.files_dir / "mosaics").exists() or not any((doc.files_dir / "mosaics").iterdir())
+    assert not mosaic.frame_problem(CRS, "EPSG:3003") and not mosaic.frame_problem("EPSG:6708", "EPSG:6708")
+    from pyarchinit_photogrammetry.io import gpkg
+
+    square = [(box(0, 0, 1, 1), {"chunk": "A"})]
+    gpkg.write_table(tmp_path / "etrf2014.gpkg", "aree", "POLYGON", {"chunk": "TEXT"}, square, "EPSG:8401")
+    with pytest.raises(mosaic.MosaicError, match="approximate transformation"):
+        mosaic.read_areas(doc, tmp_path / "etrf2014.gpkg", "EPSG:6708")
+    gpkg.write_table(tmp_path / "nosystem.gpkg", "aree", "POLYGON", {"chunk": "TEXT"}, square, None)
+    with pytest.raises(mosaic.MosaicError, match="says no system"):
+        mosaic.read_areas(doc, tmp_path / "nosystem.gpkg", CRS)
+    assert len(mosaic.read_areas(doc, tmp_path / "nosystem.gpkg", "LOCAL")) == 1
+
+
+def test_tilted_source_noted_and_rebuilt_source_stale(tmp_path):
+    import os
+
+    doc, c = project(tmp_path)
+    b = c["B"]
+    b.meta.setdefault("built_in", {})["orthomosaic"] = np.eye(4).tolist()
+    a = np.radians(1.0)  # a tilt of one degree about the y axis, through the middle of B
+    m = np.eye(4)
+    m[[0, 0, 2, 2], [0, 2, 0, 2]] = np.cos(a), np.sin(a), -np.sin(a), np.cos(a)
+    centre = np.array([X0 + 4.0, Y1 - 2.0, 20.0])
+    m[:3, 3] = centre - m[:3, :3] @ centre
+    b.transform = m
+    rec = mosaic.build(doc, ["A", "B", "C"])
+    assert rec["moved_tilt_deg"][str(b.key)] == pytest.approx(1.0, abs=1e-3)
+    assert mosaic.is_stale(doc, rec) == []
+    path = c["C"].orthomosaic_path  # C's orthophoto built again after the mosaic
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    assert mosaic.is_stale(doc, rec) == ["C"]
+    c["A"].meta.setdefault("built_in", {})["orthomosaic"] = (np.eye(4) * 2).tolist()  # another stamp
+    assert mosaic.is_stale(doc, rec) == ["A", "C"]
+    doc.save()
+    runner = CliRunner()
+    res = runner.invoke(app, ["mosaic", "build", str(tmp_path / "p.ppg"), "--chunks", "B,C"])
+    assert res.exit_code == 0 and "tilted 1.0 degrees" in res.output, res.output
+
+
+def test_cancel_leaves_no_folder_and_no_record(tmp_path):
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    doc, c = project(tmp_path)
+    calls = []
+
+    def cb(_fraction, message):
+        calls.append(message)
+        if message.startswith("Unione") and len(calls) > 3:
+            prog.cancel()
+
+    prog = Progress(cb)
+    with pytest.raises(Cancelled):
+        mosaic.build(doc, ["A", "B", "C"], block=32, progress=prog)
+    assert not mosaic.mosaics_of(doc) and "mosaics" not in doc.meta
+    assert not any((doc.files_dir / "mosaics").iterdir())

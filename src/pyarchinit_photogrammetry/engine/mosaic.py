@@ -9,7 +9,9 @@ raster is placed through its stamp (:mod:`..core.stamps`): one built in another 
 after it) is moved with the chunk - in plan by ``T_now inv(T_built)``, the heights of a DEM by ``z' = m20 x + m21 y +
 m22 z + m23`` - as the 2D view places it (``gui.chunk_views.overlay_image``), never used where it was built. Between
 two projected systems it is reprojected; a local frame and a projected system are refused with the words of the ties
-(:class:`.ties.TieError`). Every source is read through a ``rasterio.vrt.WarpedVRT`` on the grid of the merged raster,
+(:class:`.ties.TieError`), and so are two frames that the program joins through their epochs and PROJ only by an
+approximation (ITRF2020 with any other, ETRF2014/2020 with ETRF2000: :func:`frame_problem`), since GDAL would warp the
+pixels by that approximation. Every source is read through a ``rasterio.vrt.WarpedVRT`` on the grid of the merged raster,
 :data:`MOSAIC_BLOCK` cells a side at a time: the memory is bounded by the block, never by the rasters (a DEM of 150 M
 cells is never loaded whole). The cell size is by default the finest of the sources.
 
@@ -56,7 +58,10 @@ MAX_CHUNKS = 254  # the sources band is uint8: 0 none, 1..254 the chunks of the 
 SNAP = 1e-6  # of a cell: the grid snapped to whole cells within this
 EDGE_POINTS = 9  # points per side of a source raster carried into the system for its extent
 ALPHA_VALID = 128  # an orthophoto cell is data when its alpha (after the resampling) is at least this
-WARP_TOLERANCE = 1e-9  # pixels: the warp all but exact, the same cells whatever the block (0 is refused by rasterio)
+WARP_TOLERANCE = 1e-9  # pixels: the warp all but exact, the same cells whatever the block (0 is refused by rasterio).
+# It makes GDAL check its approximation at every pixel: a reprojected source warps slower than with GDAL's 0.125 px.
+GDAL_CACHE_MB = 256  # GDAL's block cache during a build: each window is read once, a larger cache would not help
+TILT_NOTE_DEG = 0.5  # a stale source tilted more than this is placed in plan only: noted, as in the 2D view
 LABELS = {"orthomosaic": "Ortofoto unita", "dem": "DEM unito"}  # data names (as the labels of the ties), not UI text
 FILES = {"mosaic": "mosaic.tif", "sources": "sources.tif", "areas": "areas.gpkg", "record": "mosaic.json"}
 AREAS_LAYER = "aree"
@@ -88,6 +93,7 @@ class _Source:
     count: int
     alpha: int  # 1-based band of its alpha (0: none)
     nodata: float | None
+    tilt: float = 0.0  # degrees of tilt of the move (placed in plan only)
 
 
 def _dummy_crs():
@@ -109,11 +115,40 @@ def _vrt_crs(src_crs: str | None, dst_crs: str | None, same: bool):
             rasterio.crs.CRS.from_user_input(crs_mod.horizontal(dst_crs)))
 
 
-def _to_system(xy: np.ndarray, src_crs: str | None, dst_crs: str | None, same: bool) -> np.ndarray:
+def _to_system(xy: np.ndarray, src_crs: str | None, dst_crs: str | None, same: bool, chunk=None) -> np.ndarray:
+    """Plan positions from ``src_crs`` to ``dst_crs`` by the program's route (as ``ties._to_system``: positions that
+    carry no epoch, a :class:`..gnss.frames.Legacy`); only pairs that :func:`frame_problem` lets through come here."""
     if same:
         return np.asarray(xy, float)
+    from ..gnss.frames import Legacy
+
     pts = np.column_stack([xy, np.zeros(len(xy))])
-    return crs_mod.transform_points(pts, crs_mod.horizontal(src_crs), crs_mod.horizontal(dst_crs))[:, :2]
+    return crs_mod.transform_points(pts, crs_mod.horizontal(src_crs), crs_mod.horizontal(dst_crs),
+                                    legacy=Legacy("the cells of a merged raster", chunk))[:, :2]
+
+
+def frame_problem(src: str | None, dst: str | None) -> bool:
+    """Between ``src`` and ``dst`` GDAL would warp the pixels by PROJ's own transformation where the program goes by
+    the frames and their epochs (:func:`..core.crs.transform_points`): a system in ITRF2020 (positions that move with
+    time) with any other, or two different European frames (ETRF2014/ETRF2020 and ETRF2000 - RDN2008, ETRS89): PROJ's
+    ballpark or null, centimetres to a metre off. Such a pair is refused, never warped silently."""
+    if src == dst or crs_mod.is_local(src) or crs_mod.is_local(dst):
+        return False
+    from ..gnss import frames
+
+    a, b = crs_mod.horizontal(src), crs_mod.horizontal(dst)
+    return bool(frames.dynamic(a) or frames.dynamic(b) or frames.dynamic(src) or frames.dynamic(dst)
+                or frames.european_hop(a, b) or frames.european_hop(src, dst))
+
+
+def _frame_error(what_en: str, what_it: str, src: str | None, dst: str | None) -> MosaicError:
+    return MosaicError(f"{what_en} is in {src} and the merged product in {dst}: between these two frames the pixels "
+                       "would be placed by PROJ's approximate transformation (centimetres to a metre off), not by "
+                       "the epoch of the survey. Put the chunk in the system of the first (or make that chunk first), "
+                       "then build again",
+                       f"{what_it} è in {src} e il prodotto unito in {dst}: fra questi due sistemi i pixel sarebbero "
+                       "collocati dalla trasformazione approssimata di PROJ (da centimetri a un metro di errore), non "
+                       "all'epoca del rilievo. Porta il chunk nel sistema del primo (o mettilo primo), poi ricostruisci")
 
 
 def _product_path(chunk, product: str) -> Path | None:
@@ -141,22 +176,27 @@ def _source(chunk, index: int, product: str, system: str | None) -> _Source:
     alpha = next((i + 1 for i, c in enumerate(interp) if c == ColorInterp.alpha), 0)
     built = stamps.stamp_of(chunk, product)
     move = None
+    tilt = 0.0
     if built is not None and not stamps.same_transform(built, chunk.transform):
         move = np.asarray(chunk.transform, float) @ np.linalg.inv(np.asarray(built, float))
+        from ..core import geometry
+
+        rot = geometry.decompose_similarity(move)[1]
+        tilt = float(np.degrees(np.arccos(np.clip(rot[2, 2], -1.0, 1.0))))
         tr = Affine(move[0, 0], move[0, 1], move[0, 3], move[1, 0], move[1, 1], move[1, 3]) @ tr
     same = chunk.crs == system or (crs_mod.is_local(chunk.crs) and crs_mod.is_local(system))
     t = np.linspace(0.0, 1.0, EDGE_POINTS)
     edge = np.concatenate([np.column_stack([t * w, np.zeros_like(t)]), np.column_stack([t * w, np.full_like(t, h)]),
                            np.column_stack([np.zeros_like(t), t * h]), np.column_stack([np.full_like(t, w), t * h])])
     cr = np.array([tr @ (c, r) for c, r in edge], float)
-    pts = _to_system(cr, chunk.crs, system, same)
+    pts = _to_system(cr, chunk.crs, system, same, chunk)
     centre = np.array([tr @ (w / 2, h / 2), tr @ (w / 2 + 1, h / 2), tr @ (w / 2, h / 2 + 1)], float)
-    c3 = _to_system(centre, chunk.crs, system, same)
+    c3 = _to_system(centre, chunk.crs, system, same, chunk)
     du, dv = c3[1] - c3[0], c3[2] - c3[0]
     cell = math.sqrt(abs(du[0] * dv[1] - du[1] * dv[0]))
     bounds = (float(pts[:, 0].min()), float(pts[:, 1].min()), float(pts[:, 0].max()), float(pts[:, 1].max()))
     return _Source(chunk=chunk, index=index, path=Path(path), move=move, src_transform=tr, same=same, bounds=bounds,
-                   cell=float(cell), count=int(count), alpha=alpha, nodata=nodata)
+                   cell=float(cell), count=int(count), alpha=alpha, nodata=nodata, tilt=tilt)
 
 
 class _Reader:
@@ -219,7 +259,8 @@ class _Reader:
             y0 = inv[1, 0] * dx[None, :] + inv[1, 1] * dy[:, None]
         else:
             X, Y = np.meshgrid(xs, ys)
-            xy = _to_system(np.column_stack([X.ravel(), Y.ravel()]), self.system, self.s.chunk.crs, False)
+            xy = _to_system(np.column_stack([X.ravel(), Y.ravel()]), self.system, self.s.chunk.crs, False,
+                            self.s.chunk)
             del X, Y
             xy -= m[:2, 3]
             x0 = (inv[0, 0] * xy[:, 0] + inv[0, 1] * xy[:, 1]).reshape(h, w)
@@ -322,6 +363,8 @@ def _check_chunks(doc, chunks) -> list:
     for ch in out[1:]:
         if not ties._compatible(ch.crs, first.crs):
             raise ties._not_same_frame(ch.label, ch.crs, first.label, first.crs)
+        if frame_problem(ch.crs, first.crs):
+            raise _frame_error(f"the chunk {ch.label}", f"il chunk {ch.label}", ch.crs, first.crs)
     return out
 
 
@@ -333,9 +376,17 @@ def build(doc: "Document", chunks: list, product: str = "orthomosaic", areas: li
     WKT or an ``(n, 2+)`` ring, in the system of the first chunk) in their order of priority; ``resolution``: the cell
     (default the finest of the sources); ``background``: "faded" or "none" (the cells outside every area, with areas).
     The record (``id, name, product, chunks, labels, areas, resolution, crs, files, placed, when, counts, background,
-    size, bounds``) is appended to ``doc.meta["mosaics"]`` and returned; the document is not saved.
-    :class:`MosaicError` for what cannot be merged, :class:`.ties.TieError` for a local frame with a projected
-    system."""
+    size, bounds, moved, moved_tilt_deg, sources``) is appended to ``doc.meta["mosaics"]`` and returned; the document
+    is not saved. :class:`MosaicError` for what cannot be merged (also two frames that only PROJ's approximation would
+    join: :func:`frame_problem`), :class:`.ties.TieError` for a local frame with a projected system. GDAL's block cache
+    is held at :data:`GDAL_CACHE_MB` meanwhile."""
+    import rasterio
+
+    with rasterio.Env(GDAL_CACHEMAX=GDAL_CACHE_MB):
+        return _build(doc, chunks, product, areas, resolution, background, name, block, progress)
+
+
+def _build(doc, chunks, product, areas, resolution, background, name, block, progress) -> dict:
     import rasterio
     from affine import Affine
     from rasterio import features
@@ -495,6 +546,8 @@ def build(doc: "Document", chunks: list, product: str = "orthomosaic", areas: li
             "placed": {str(c.key): np.asarray(c.transform, float).tolist() for c in chs},
             "built_in": {str(s.chunk.key): stamps.stamp_of(s.chunk, product) for s in sources},
             "moved": [int(s.chunk.key) for s in sources if s.move is not None],
+            "moved_tilt_deg": {str(s.chunk.key): round(s.tilt, 3) for s in sources if s.move is not None},
+            "sources": {str(s.chunk.key): _file_state(s.path) for s in sources},
             "when": datetime.now().isoformat(timespec="seconds"),
             "counts": {str(c.key): int(counts[i]) for i, c in enumerate(chs)},
             "size": [int(width), int(height)], "bounds": [float(left), float(top - height * res),
@@ -548,15 +601,36 @@ def _label(doc, record: dict, key: int) -> str:
     return str((record.get("labels") or {}).get(str(key), key))
 
 
+def _file_state(path) -> dict:
+    """What tells a source raster from one built again later: its path and its time of change (ns)."""
+    path = Path(path)
+    try:
+        mtime = int(path.stat().st_mtime_ns)
+    except OSError:
+        mtime = None
+    return {"file": str(path), "mtime_ns": mtime}
+
+
 def is_stale(doc: "Document", record: dict) -> list[str]:
-    """The labels of the chunks of ``record`` placed elsewhere since it was built (their transform differs from the
-    one recorded) or no longer in the document: the merged product is to be built again when any."""
+    """The labels of the chunks of ``record`` to merge again: placed elsewhere since it was built (their transform
+    differs from the one recorded), no longer in the document, or with a source raster built again (another file,
+    another time of change, another stamp; records without ``sources`` are checked on the transforms only)."""
     chunks = {int(c.key): c for c in doc.chunks}
+    product = record.get("product") or "orthomosaic"
     out = []
     for key in record.get("chunks") or []:
         ch = chunks.get(int(key))
         placed = (record.get("placed") or {}).get(str(key))
-        if ch is None or placed is None or not stamps.same_transform(placed, ch.transform):
+        stale = ch is None or placed is None or not stamps.same_transform(placed, ch.transform)
+        was = (record.get("sources") or {}).get(str(key))
+        if not stale and was is not None:
+            path = _product_path(ch, product)
+            now = _file_state(path) if path is not None else None
+            built = (record.get("built_in") or {}).get(str(key))
+            stamp = stamps.stamp_of(ch, product)
+            stale = (now is None or now != was or (built is None) != (stamp is None)
+                     or (built is not None and not stamps.same_transform(built, stamp)))
+        if stale:
             out.append(_label(doc, record, key))
     return out
 
@@ -608,6 +682,10 @@ def read_areas(doc: "Document", path, system: str | None) -> list[tuple[object, 
     finally:
         con.close()
     target = crs_mod.epsg_code(system)
+    if not crs_mod.is_local(system) and target is None:
+        raise MosaicError(f"the chunks are in {system}, which a GeoPackage cannot name: the areas of {path.name} cannot "
+                          "be checked against it", f"i chunk sono in {system}, che un GeoPackage non sa indicare: le "
+                          f"aree di {path.name} non si possono verificare")
     found = []
     for table, srs in tables:
         for geom, values in gpkg.read_table(path, table):
@@ -622,14 +700,21 @@ def read_areas(doc: "Document", path, system: str | None) -> list[tuple[object, 
             except (KeyError, ValueError):
                 raise MosaicError(f"no chunk {item!r} for an area of {path.name}",
                                   f"nessun chunk {item!r} per un'area di {path.name}") from None
-            if srs is not None and srs > 0:
+            if srs is None or srs <= 0:  # a table that says no system: only for chunks in a local frame
+                if not crs_mod.is_local(system):
+                    raise MosaicError(f"the table {table} of {path.name} says no system and the chunks are in "
+                                      f"{system}: save it in their system", f"la tabella {table} di {path.name} non "
+                                      f"indica un sistema e i chunk sono in {system}: salvala nel loro sistema")
+            else:
                 if crs_mod.is_local(system):
                     raise MosaicError(f"{path.name} is in EPSG:{srs} and the chunks are in a local frame",
                                       f"{path.name} è in EPSG:{srs} e i chunk sono in un sistema locale")
-                if target is not None and srs != target:
+                if srs != target:
                     src = f"EPSG:{srs}"
-                    geom = shapely.transform(geom, lambda xy, s=src: crs_mod.transform_points(
-                        np.column_stack([xy, np.zeros(len(xy))]), s, crs_mod.horizontal(system))[:, :2])
+                    if frame_problem(src, system):
+                        raise _frame_error(f"the table {table} of {path.name}", f"la tabella {table} di {path.name}",
+                                           src, system)
+                    geom = shapely.transform(geom, lambda xy, s=src, c=ch: _to_system(xy, s, system, False, c))
             prio = values.get("priority")
             try:
                 prio = float(prio) if prio is not None else math.inf
@@ -643,4 +728,4 @@ def read_areas(doc: "Document", path, system: str | None) -> list[tuple[object, 
 
 
 __all__ = ["META_KEY", "MOSAIC_BLOCK", "FADE", "PRODUCTS", "BACKGROUNDS", "MosaicError", "build", "mosaics_of",
-           "record_of", "remove", "is_stale", "source_at", "folder", "path_of", "read_areas"]
+           "record_of", "remove", "is_stale", "source_at", "folder", "path_of", "read_areas", "frame_problem"]

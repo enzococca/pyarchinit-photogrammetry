@@ -4793,7 +4793,7 @@ def mosaic_build(project: Path,
         area_list = mosaic.read_areas(doc, areas, chs[0].crs if chs else None) if areas is not None else None
         rec = mosaic.build(doc, chs, product="dem" if dem else "orthomosaic", areas=area_list, resolution=resolution,
                            background=background, name=name, progress=print_progress)
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, OSError) as exc:  # OSError: a missing or unreadable file (RasterioIOError among them)
         _ties_error(exc)
     doc.save()
     typer.echo(_mosaic_line(rec, []))
@@ -4803,6 +4803,10 @@ def mosaic_build(project: Path,
     if rec.get("moved"):
         typer.echo("placed with their chunk (built before the last change of its transform): "
                    + ", ".join(str(labels.get(str(k), k)) for k in rec["moved"]))
+        for key, deg in (rec.get("moved_tilt_deg") or {}).items():
+            if deg >= mosaic.TILT_NOTE_DEG:
+                typer.echo(f"note: {labels.get(key, key)} is tilted {deg:.1f} degrees since its raster was built: "
+                           "placed in plan only, the plan is approximate - build it again")
     typer.echo(f"files: {mosaic.folder(doc, rec['id'])}")
 
 
@@ -4833,7 +4837,7 @@ def mosaic_remove(project: Path, mid: str = typer.Argument(..., help="the id of 
     doc = Document.open(project)
     try:
         rec = mosaic.remove(doc, mid)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         _ties_error(exc)
     doc.save()
     typer.echo(f"removed {rec['id']} ({rec.get('name')})")
