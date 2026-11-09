@@ -227,7 +227,7 @@ devono essere distinti: un asse senza lunghezza viene rifiutato.
 | --- | --- |
 | lungo l'asse | linee entro 15 gradi dall'asse; i pezzi di una linea (spezzata, o con una piega lasciata dalla semplificazione) uniti in una |
 | di traverso | linee entro 15 gradi dalla perpendicolare; i pezzi di una linea, uno dopo l'altro, entro 10 cm lungo l'asse e dalla stessa parte, uniti - anche i giunti che proseguono uno nell'altro per più corsi (un giunto passante) |
-| coppie lungo l'asse / di traverso | due linee parallele a 2-50 cm che si sovrappongono almeno per metà della più corta: prima i due lati di un poligono chiuso (un fasciame o un'ordinata tracciati come poligono, anche a contatto con il successivo); poi le linee sciolte, ognuna la più vicina all'altra e senza un'altra linea dello stesso gruppo vicina accanto (la successiva almeno 1,5 volte più lontana). I due lati di un elemento: un poligono con la sua **larghezza** |
+| coppie lungo l'asse / di traverso | due linee parallele a 2-50 cm che si sovrappongono almeno per metà della più corta: prima i due lati di un poligono chiuso (un fasciame o un'ordinata tracciati come poligono, anche a contatto con il successivo; gli altri lati, le teste, ne fanno parte); poi le linee sciolte, ognuna la più vicina all'altra e senza un'altra linea dello stesso gruppo vicina accanto (la successiva almeno 1,5 volte più lontana). I due lati di un elemento: un poligono con la sua **larghezza** |
 | altre direzioni | ogni altro tratto dritto |
 
 Le linee a passo regolare (i letti di un muro, ogni 25 cm) non sono coppie: ognuna ha due vicine alla stessa distanza.

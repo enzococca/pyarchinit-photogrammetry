@@ -655,7 +655,7 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
     ((x1, y1), (x2, y2)) with ``params`` over :data:`DEFAULTS` (see the module). ``frame``: the id of the elevation
     when the lines are its ``(u, v)`` (None: a plan). OrientLinesError (a ValueError) for an axis shorter than
     :data:`MIN_AXIS`, no line with a segment of ``min_length``, a parameter out of range."""
-    from shapely.geometry import LineString, Polygon
+    from shapely.geometry import LineString, Point, Polygon
 
     p = checked_params(params)
     fr = _Frame(axis)
@@ -677,6 +677,7 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
     guests: dict = {}  # host unit -> the segments of the lines that count once with it
     for k, h in hosts.items():
         guests.setdefault(h, []).extend(units[k].segs)
+    taken: set = set()  # segments of a traced polygon that belong to its pair (its ends)
     for i, j, width, corners in pairs:
         paired |= {i, j}
         ui, uj = units[i], units[j]
@@ -686,6 +687,18 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
         c = np.asarray(poly.centroid.coords[0])
         cst = fr.st(c)
         members = ui.segs + uj.segs + guests.get(i, []) + guests.get(j, [])
+        src = {sg.source for sg in ui.segs + uj.segs}
+        if len(src) == 1 and next(iter(src)) in closed:
+            # the other edges of a traced polygon paired by its two sides (the ends of a frame or a plank) are part
+            # of the element, not lines of their own
+            src = next(iter(src))
+            inside = poly.buffer(tol)
+            have = {sg.id for sg in members}
+            for sg in segs:
+                if sg.source == src and sg.id not in have and sg.id not in taken and \
+                        inside.covers(Point(*((sg.p0 + sg.p1) / 2))):
+                    members.append(sg)
+                    taken.add(sg.id)
         raw.append({"group": group, "segments": sorted(s.id for s in members), "geometry": poly,
                     "position": float(cst[0]), "offset": float(cst[1]), "side": _side(st[:, 1], tol),
                     "width": float(width), "angle": _mean_angle([ui.angle, uj.angle], [ui.length, uj.length]),
@@ -693,6 +706,16 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
                                              np.hypot(*(corners[2] - corners[3]))]))})
     # across lines left: on the same side, within across_bin of each other along the axis and end to end across it
     # (a small overlap allowed, not side by side): one element
+    if taken:
+        guests = {h: [sg for sg in g_ if sg.id not in taken] for h, g_ in guests.items()}
+        for k, u in enumerate(units):
+            if k in paired or k in hosts:
+                continue
+            left = [sg for sg in u.segs if sg.id not in taken]
+            if not left:
+                hosts[k] = k  # nothing left of it: no element of its own
+            elif len(left) < len(u.segs):
+                units[k] = _unit(u.group, left, fr.u if u.group == "along" else fr.n)
     sides: dict = {}
     for k, u in enumerate(units):
         if k in paired or k in hosts:
@@ -731,7 +754,7 @@ def classify(lines, axis, params=None, frame: str | None = None) -> Classificati
                 u = _unit("across", [s for k in ks for s in units[k].segs], fr.n)
             raw.append(_line_element(u, fr.st(u.points), tol, extra))
     for s in segs:
-        if s.group == "other":
+        if s.group == "other" and s.id not in taken:
             st = fr.st(np.array([s.p0, s.p1]))
             mid = st.mean(axis=0)
             raw.append({"group": "other", "segments": [s.id], "geometry": LineString([s.p0, s.p1]),

@@ -100,7 +100,7 @@ def test_polygons_and_curves_are_split_into_straight_segments():
     # a narrow closed polygon (a plank 0.2 m wide): its two long edges are a pair along the axis
     plank = np.array([(0, 2), (3, 2), (3, 2.2), (0, 2.2), (0, 2)], float)
     r = orient_lines.classify([plank], axis=((0, 0), (1, 0)))
-    assert r.counts()["pair_along"] == 1 and r.counts()["across"] == 2, r.counts()
+    assert r.counts()["pair_along"] == 1 and r.counts()["across"] == 0, r.counts()  # its ends are part of it
     pair = next(e for e in r.elements if e.group == "pair_along")
     assert pair.width == pytest.approx(0.2, abs=1e-6) and pair.geometry.area == pytest.approx(0.6, abs=1e-6)
     # a half circle of 200 vertices: straight pieces within the simplification, sorted by their direction
@@ -291,9 +291,9 @@ def test_traced_planks_touching_or_close_are_pairs(gap):
     planks = sorted((e for e in r.elements if e.group == "pair_along"), key=lambda e: e.offset)
     assert [round(e.width, 3) for e in planks] == [0.2] * 4
     assert np.allclose([e.offset for e in planks], 0.1 + (0.2 + gap) * np.arange(4))
-    assert all(len(e.segments) == 2 for e in planks)  # a shared edge counted once, with its own plank
-    # the ends of the planks, drawn end to end at the same place: one across line at each end
-    assert counts["across"] == 2, counts
+    assert all(len(e.segments) == 4 for e in planks)  # its 4 edges; a shared edge counted once, with its own plank
+    # the ends of the planks belong to their planks: no across line of their own
+    assert counts["across"] == 0 and sum(counts.values()) == 4, counts
     # traced planks also as noisy hand drawings
     rng = np.random.default_rng(4)
     noisy = [_noisy(rng, p, steps=8) for p in _planks(gap)]
@@ -316,10 +316,15 @@ def test_frames_as_close_as_their_width_need_the_isolation_lowered():
         assert r.counts()["pair_across"] == 10, (iso, r.counts())
         assert all(abs(e.width - 0.12) < 1e-6 for e in r.elements)
         assert r.params["pair_isolation"] == iso
-    # the same frames traced as polygons: pairs with the defaults
+    # the same frames traced as polygons: pairs with the defaults, their 12 cm ends inside them (no seams)
     polys = [np.array([(0.25 * k, 0.1), (0.25 * k + 0.12, 0.1), (0.25 * k + 0.12, 1.0), (0.25 * k, 1.0),
                        (0.25 * k, 0.1)]) for k in range(10)]
-    assert orient_lines.classify(polys, ax).counts()["pair_across"] == 10
+    r = orient_lines.classify(polys, ax)
+    assert r.counts()["pair_across"] == 10 and r.counts()["along"] == 0 and sum(r.counts().values()) == 10, r.counts()
+    assert all(len(e.segments) == 4 for e in r.elements)
+    # with a loose seam line drawn across them: the seam stays a line of its own
+    r = orient_lines.classify(polys + [np.array([(0.0, 0.55), (2.4, 0.55)])], ax)
+    assert r.counts()["pair_across"] == 10 and r.counts()["along"] == 1, r.counts()
     # the masonry beds and joints stay as they were with the defaults
     m = orient_lines.classify(masonry_lines(), axis=((0, 0), (2.4, 0))).counts()
     assert m["along"] == 7 and m["across"] == 30 and m["pair_along"] == 0 and m["pair_across"] == 0, m
@@ -337,7 +342,7 @@ def test_a_line_drawn_twice_counts_once():
     assert r.counts()["pair_along"] == 1 and r.counts()["along"] == 0, r.counts()
     assert len(r.elements[0].segments) + sum(len(e.segments) for e in r.elements[1:]) == len(r.segments)
     pair = next(e for e in r.elements if e.group == "pair_along")
-    assert len(pair.segments) == 3
+    assert len(pair.segments) == 5
     # two loose lines drawn twice each, 0.1 m apart: one pair of the two
     lines = [np.array([(0, 0), (2, 0)]), np.array([(0, 0.004), (2, 0.004)]), np.array([(0, 0.1), (2, 0.1)]),
              np.array([(0, 0.103), (2, 0.103)])]

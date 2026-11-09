@@ -224,7 +224,7 @@ with no length is refused.
 | --- | --- |
 | along the axis | lines within 15 degrees of the axis; the pieces of one line (broken, or kinked by the simplification) joined into one |
 | across the axis | lines within 15 degrees of the perpendicular; the pieces of one line, end to end, within 10 cm of each other along the axis and on the same side, joined - also joints that continue each other across several courses (a straight joint) |
-| pairs along / across the axis | two parallel lines 2-50 cm apart that overlap for at least half of the shorter: first the two sides of one closed polygon (a plank or a frame traced as a polygon, also touching the next one); then loose lines, each the nearest line of the other and with no other line of the same group close beside them (the next one at least 1.5 times farther). The two sides of one element: a polygon with its **width** |
+| pairs along / across the axis | two parallel lines 2-50 cm apart that overlap for at least half of the shorter: first the two sides of one closed polygon (a plank or a frame traced as a polygon, also touching the next one; its other edges, the ends, are part of it); then loose lines, each the nearest line of the other and with no other line of the same group close beside them (the next one at least 1.5 times farther). The two sides of one element: a polygon with its **width** |
 | other directions | every other straight piece |
 
 Lines evenly spaced (the beds of a wall, every 25 cm) are not pairs: each has two neighbours at the same distance.

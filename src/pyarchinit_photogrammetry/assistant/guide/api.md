@@ -740,7 +740,7 @@ Polygon for a pair, in the plane of the input), `position` (along the axis), `si
 
 The pieces of one drawn line stay one line. Separate pieces are joined when their angle, sideways offset and gap are
 within `join_deg`, `join_offset` and `join_gap`; a line drawn out and back over itself is two. Pairs: first the two
-sides of one closed polygon; then a line closer than `pair_min` and `join_offset` to another (drawn twice, a shared
+sides of one closed polygon (its other edges inside the pair are part of it); then a line closer than `pair_min` and `join_offset` to another (drawn twice, a shared
 edge) counts once with it; then loose lines, nearest first, when each is the nearest of the other and the next line of
 the same group beside each is at least `pair_isolation` (1.5) times farther, so that evenly spaced lines are not
 paired. The across lines left are joined when they are on the same side, within `across_bin` of each other along the
