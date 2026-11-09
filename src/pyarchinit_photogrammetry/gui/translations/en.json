@@ -3210,7 +3210,8 @@
   "Escludi": "Leave out",
   "Piano (anche l'inclinazione) invece di uno scostamento": "Plane (the tilt too) instead of an offset",
   "Automatica (pendenze basse, celle concordi)": "Automatic (low slopes, agreeing cells)",
-  "niente": "nothing"
+  "niente": "nothing",
+  "Rimuovi le quote stabili scelte nella tabella": "Remove the stable heights chosen in the table"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4298,6 +4299,7 @@
   "Quota stabile: {0}": "Stable height: {0}",
   "Quota stabile «{0}»: {1}": "Stable height «{0}»: {1}",
   "Quota stabile «{0}» rimisurata: dz {1} m, NMAD {2} m": "Stable height «{0}» measured again: dz {1} m, NMAD {2} m",
-  "chunk {0} (non c'è più)": "chunk {0} (no longer there)"
+  "chunk {0} (non c'è più)": "chunk {0} (no longer there)",
+  "da rimisurare dopo Applica: la stima li sposta di {0} m in pianta": "to be measured again after Apply: the solve moves them {0} m apart in plan"
  }
 }

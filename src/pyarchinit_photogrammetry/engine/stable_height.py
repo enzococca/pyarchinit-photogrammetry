@@ -463,7 +463,16 @@ def remeasure(doc: "Document", tie_id: str, progress: Progress | None = None) ->
     old = existing[i]
     new = measure(doc, old.b, old.a, area=old.area, exclude=old.exclude, plane=old.plane, name=old.name,
                   progress=progress)
-    new.id, new.active = old.id, old.active
+    return replace(doc, tie_id, new)
+
+
+def replace(doc: "Document", tie_id: str, new: HeightTie) -> HeightTie:
+    """The height tie ``tie_id`` replaced by the new measure ``new`` (of the same chunks: :func:`remeasure`, or a
+    measure made in a worker with the same parameters), its id, name and state kept; stored and returned. KeyError
+    when there is none."""
+    existing, i = _find(doc, tie_id)
+    old = existing[i]
+    new.id, new.name, new.active = old.id, old.name, old.active
     existing[i] = new
     save_heights(doc, existing)
     return new
@@ -491,4 +500,4 @@ def horizontal_move(doc: "Document", tie: HeightTie) -> tuple[float, float] | No
 
 
 __all__ = ["META_KEY", "LABEL", "MIN_PRECISION", "HeightTie", "dem_in_world", "measure", "add", "heights_of",
-           "save_heights", "remove", "remeasure", "horizontal_move"]
+           "save_heights", "remove", "remeasure", "replace", "horizontal_move"]

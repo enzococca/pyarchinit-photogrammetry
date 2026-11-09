@@ -217,3 +217,48 @@ def test_remeasure_after_apply_turns_the_row_back(qapp, tmp_path, monkeypatch):
         assert w._ties_dialog.height_stale(h.id)
     finally:
         _close_window(w)
+
+
+def test_amber_of_a_check_by_id_and_gone_with_the_check(qapp, tmp_path, monkeypatch):
+    """A check whose solve would move a height's chunks apart in plan turns that row amber (by its id: another height
+    with the same name and chunks stays as it is), says why, and the amber goes with the check; *Rimisura* with
+    nothing selected does not take it (nothing moved yet)."""
+    doc, _a, _b = project(tmp_path)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _open(w, qapp)
+        _measure(w, dlg, qapp)
+        _measure(w, dlg, qapp)
+        first, second = stable_height.heights_of(w.doc)
+        twin = stable_height.heights_of(w.doc)
+        twin[1].name = first.name  # the same name and chunks (a CLI or an appended project may give that)
+        stable_height.save_heights(w.doc, twin)
+        dlg.reload()
+        rep = {"heights": [
+            {"id": first.id, "dz": 0.001, "fitted": True, "normalised": 0.5, "horizontal": 0.5},
+            {"id": second.id, "dz": 0.001, "fitted": True, "normalised": 0.5, "horizontal": 0.0}],
+            "messages": []}
+        dlg._filling = True
+        try:
+            dlg._checked_heights(rep, {})
+        finally:
+            dlg._filling = False
+        r1, r2 = dlg.height_row_of(first.id), dlg.height_row_of(second.id)
+        assert dlg.height_predicted(first.id) and not dlg.height_predicted(second.id)
+        assert not dlg.height_stale(first.id)  # nothing moved yet
+        assert dlg.heights.item(r1, 0).foreground().color().name() == ORANGE
+        assert dlg.heights.item(r2, 0).foreground().color().name() != ORANGE
+        assert "dopo Applica" in dlg.heights.item(r1, 9).text()
+        assert dlg.heights.item(r1, 8).text() == "0,001"
+
+        steps = len(w.history.entries)
+        assert not dlg.remeasure_selected()  # none selected and none moved: nothing to measure again
+        assert len(w.history.entries) == steps
+
+        dlg.result = {"report": {}}  # a check held: invalidate drops it and what it wrote
+        dlg.invalidate()
+        assert not dlg.height_predicted(first.id)
+        assert dlg.heights.item(r1, 0).foreground().color().name() != ORANGE
+        assert "dopo Applica" not in dlg.heights.item(r1, 9).text() and dlg.heights.item(r1, 8).text() == ""
+    finally:
+        _close_window(w)
