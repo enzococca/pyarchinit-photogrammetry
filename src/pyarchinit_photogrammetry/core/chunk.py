@@ -338,7 +338,10 @@ class Chunk:
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
                               ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
-        self.meta["alignment_id"] = uuid.uuid4().hex  # a new frame: what was kept in the old one knows it
+        # a new frame: what was kept in the old one knows it. Also with reset=False (photos added to the block):
+        # COLMAP continues from the old model but its mapper scales and moves it again (the cameras of the test
+        # trench moved by a similarity of scale 0.90), so the old internal coordinates are not the new ones
+        self.meta["alignment_id"] = uuid.uuid4().hex
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()

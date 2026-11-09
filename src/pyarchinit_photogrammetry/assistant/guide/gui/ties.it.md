@@ -24,7 +24,10 @@ sistema sono da un'altra parte, tutti spostati allo stesso modo: nessun controll
 dopo un nuovo allineamento, quegli estremi sono **da rimisurare**: il legame resta nell'elenco, in arancione, con il
 motivo in *Stato*, ed è escluso dalla stima (lo dice anche il registro della finestra). Trascina di nuovo l'estremo sul
 suo punto in *Punti in comune*, misuralo sulle foto o - solo se hai controllato che è ancora giusto - seleziona il
-legame e premi **Conferma estremi** (`ppg ties confirm` dalla riga di comando).
+legame e premi **Conferma estremi** (`ppg ties confirm` dalla riga di comando). Aggiungere foto a un
+allineamento (*Allinea foto* senza *Azzera l'allineamento attuale*) conta anch'esso come un nuovo allineamento: COLMAP
+riparte dal blocco vecchio ma lo scala e lo sposta di nuovo (sulla trincea di prova le camere vecchie si sono mosse di
+una similitudine di scala 0,90), quindi gli estremi senza foto sono da rimisurare allo stesso modo.
 
 Un legame può anche unire un punto di un chunk a **coordinate note** (un punto GNSS, un caposaldo): quell'estremo è
 un marker con le coordinate come riferimento.
@@ -64,6 +67,7 @@ lavori nella finestra principale e in *Punti in comune*.
 **Legami.** Una riga per legame: *Attivo*, nome, i due estremi (`chunk / marker`, o le coordinate note),
 *Precisione (m)* (modificabile), *Residuo (m)* dell'ultimo controllo e *Stato*. Un legame con un estremo che non c'è
 più (un marker tolto, un chunk tolto, un riferimento cancellato) è grigio e non si può spuntare; *Stato* dice perché.
+Quando l'estremo torna (*Modifica > Annulla* della rimozione) il legame è di nuovo intero, attivo o no come era.
 Un legame non attivo resta nell'elenco: spuntalo di nuovo per usarlo. Un legame con un estremo da rimisurare dopo un
 nuovo allineamento è arancione (vedi [sopra](#che-cose-un-legame)): *Conferma estremi* conferma gli estremi dei legami
 selezionati (se nessuno è selezionato, di tutti). *Rimuovi* cancella i legami selezionati e i marker che avevano
@@ -72,7 +76,8 @@ creato. La finestra segue i chunk aggiunti, tolti o rinominati nell'area di lavo
 **I legami e i cambiamenti dei chunk.** Togliere un chunk lascia i suoi legami nell'elenco, grigi (*chunk tolto*):
 rimuovili a mano. *Unisci chunk* crea un chunk nuovo: i legami puntano ancora ai chunk di partenza e si rompono quando
 questi vengono tolti - rifalli sul chunk unito. *Aggiungi progetti* copia i chunk di un altro progetto con i loro
-marker, ma non i suoi legami. Un progetto con legami salvato da una versione precedente (1.7.5 o prima) tiene i suoi
+marker e i legami fra i chunk che prendi; un legame verso un chunk che lasci fuori non viene copiato (il riepilogo lo
+nomina). Un progetto con legami salvato da una versione precedente (1.7.5 o prima) tiene i suoi
 legami: vengono riconosciuti di nuovo dalla chiave e dal nome dei loro marker.
 
 **Incognite per chunk.** Per ogni chunk, che cosa la stima può cambiare:

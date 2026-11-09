@@ -23,7 +23,10 @@ else, all moved the same way: no check of the solve could see it. So after a new
 measured again**: the tie stays in the list, in orange, with the reason in *State*, and is left out of the solve
 (the log of the window says it too). Drag the end to its point again in *Common points*, measure it on photos, or -
 only if you checked that it is still right - select the tie and press **Confirm ends**
-(`ppg ties confirm` on the command line).
+(`ppg ties confirm` on the command line). Adding photos to an alignment (*Align photos* without *Reset current
+alignment*) counts as a new alignment too: COLMAP continues from the old block but scales and moves it again (on the
+test trench the old cameras moved by a similarity of scale 0.90), so the ends without photos are to be measured
+again in the same way.
 
 A tie can also join a point of a chunk to **known coordinates** (a GNSS point, a benchmark): that end is a marker
 with the coordinates as its reference.
@@ -60,7 +63,8 @@ in the main window and in *Common points*.
 
 **Ties.** One row per tie: *Active*, name, the two ends (`chunk / marker`, or the known coordinates), *Precision (m)*
 (editable), *Residual (m)* of the last check and *State*. A tie with an end that is gone (a marker removed, a
-chunk removed, a reference cleared) is grey and cannot be ticked; *State* says why. An inactive tie stays in the
+chunk removed, a reference cleared) is grey and cannot be ticked; *State* says why. When the end comes back (*Edit >
+Undo* of the removal) the tie is whole again, active or not as it was. An inactive tie stays in the
 list: tick it again to use it. A tie with an end to be measured again after a new alignment is orange (see
 [above](#what-a-tie-is)): *Confirm ends* confirms the ends of the selected ties (none selected: of all of them).
 *Remove* deletes the selected ties and the markers they made. The window follows the chunks added, removed or renamed
@@ -69,7 +73,8 @@ in the workspace.
 **Ties and changes of the chunks.** Removing a chunk leaves its ties in the list, grey (*chunk removed*): remove them
 by hand. *Merge chunks* makes a new chunk: the ties still point to the source chunks, and are broken once those are
 removed - make them again on the merged chunk. *Append projects* copies the chunks of another project with their
-markers, but not its ties. A project with ties saved by an older version (1.7.5 or before) keeps its ties: they are
+markers and the ties between the chunks you take; a tie to a chunk you leave out is not copied (the summary names
+it). A project with ties saved by an older version (1.7.5 or before) keeps its ties: they are
 recognised again by the key and the label of their markers.
 
 **Unknowns per chunk.** For each chunk, what the solve may change:
