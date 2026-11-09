@@ -176,7 +176,9 @@ def _heights_at(path, pts: np.ndarray) -> np.ndarray:
     on the cell edges). In the outer half of the border cells the height is the border cell's (the position clipped
     to the centres of the grid before the cells are chosen). NaN where a cell around has no value and outside the grid
     (a DEM written without nodata would give 0 there). One window of the file is read, the one around all the points
-    (a long outline is not one reading per point)."""
+    (a long outline is not one reading per point), as float32: the box of all the points, so an outline running across
+    a large DEM reads most of it - fine for trenches and wrecks, a band at a time would be needed for a pond across a
+    survey of hundreds of millions of cells."""
     import rasterio
     from rasterio.windows import Window
 
@@ -200,11 +202,11 @@ def _heights_at(path, pts: np.ndarray) -> np.ndarray:
         tc, tr_ = fc - c0, fr - r0  # weights (0 or 1 at the border)
         col0, row0 = int(c0.min()), int(r0.min())
         win = Window(col0, row0, int(c1.max()) - col0 + 1, int(r1.max()) - row0 + 1)
-        band = src.read(1, window=win, masked=True)
-    grid = np.ma.filled(band.astype(np.float64), np.nan)
+        band = src.read(1, window=win, masked=True, out_dtype="float32")
+    grid = np.ma.filled(band, np.nan)
     grid[~np.isfinite(grid)] = np.nan
     r0, r1, c0, c1 = r0 - row0, r1 - row0, c0 - col0, c1 - col0
-    z00, z01, z10, z11 = grid[r0, c0], grid[r0, c1], grid[r1, c0], grid[r1, c1]
+    z00, z01, z10, z11 = (grid[r, c].astype(np.float64) for r, c in ((r0, c0), (r0, c1), (r1, c0), (r1, c1)))
     z[inside] = (z00 * (1 - tc) + z01 * tc) * (1 - tr_) + (z10 * (1 - tc) + z11 * tc) * tr_
     return z
 

@@ -4448,6 +4448,7 @@
   "Livello dell'acqua: il chunk attivo è cambiato durante la misura. Rendi attivo {0} e misura di nuovo.": "Water level: the active chunk changed during the measurement. Make {0} active and measure again.",
   "Correzione della rifrazione: {0}": "Refraction correction: {0}",
   "Nuvola corretta per la rifrazione: {0} punti su {1} sotto il livello {2} m, n {3}. Correzione parassiale: vale per foto quasi nadirali.": "Cloud corrected for the refraction: {0} points of {1} below the level {2} m, n {3}. Paraxial correction: it holds for photos close to the vertical.",
-  "Salita della riva tolta: {0} m.": "Rise of the bank removed: {0} m."
+  "Salita della riva tolta: {0} m.": "Rise of the bank removed: {0} m.",
+  "Livello dell'acqua di {0}: indice di rifrazione {1}": "Water level of {0}: refractive index {1}"
  }
 }

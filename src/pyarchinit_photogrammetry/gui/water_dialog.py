@@ -67,6 +67,8 @@ class WaterDialog(QDialog):
         self.setWindowTitle(tr("Livello dell'acqua e rifrazione"))
         self.working = False
         self.measured: dict | None = None  # the last level measured from the edge
+        self._seen = None  # the stored level the widgets were last set from: a refresh keeps what is typed otherwise
+        self._edge_key = None  # the stored level whose bank heights are drawn (EDGE_LAYER)
 
         lay = QVBoxLayout(self)
         intro = QLabel(tr("Visto dall'alto attraverso l'acqua, il fondo sembra meno profondo di quanto è. Con il "
@@ -192,6 +194,8 @@ class WaterDialog(QDialog):
         self.r_layer.toggled.connect(self._update_buttons)
         self.r_colour.toggled.connect(self._update_buttons)
         self.c_n.currentIndexChanged.connect(self._n_changed)
+        self.s_n.editingFinished.connect(self._n_changed)
+        window.runner.busy_changed.connect(self._busy_changed)
         self.b_sample.clicked.connect(self.start_sample)
         self.b_mask.clicked.connect(self._open_mask)
         self.b_measure.clicked.connect(self.measure)
@@ -214,19 +218,52 @@ class WaterDialog(QDialog):
         return dict((k, v) for k, v in N_CHOICES if v is not None).get(kind) or float(self.s_n.value())
 
     def set_n(self, n: float) -> None:
+        """The combo (and the spinbox) on ``n``, without storing it."""
+        index = len(N_CHOICES) - 1
         for i, (_k, v) in enumerate(N_CHOICES):
             if v is not None and abs(v - n) < 1e-9:
-                self.c_n.setCurrentIndex(i)
-                return
-        self.c_n.setCurrentIndex(len(N_CHOICES) - 1)
+                index = i
+                break
+        for w in (self.c_n, self.s_n):
+            w.blockSignals(True)
+        self.c_n.setCurrentIndex(index)
         self.s_n.setValue(float(n))
+        for w in (self.c_n, self.s_n):
+            w.blockSignals(False)
+        self._update_buttons()
 
     def _n_changed(self, *_a) -> None:
+        """Another refractive index chosen: with a level stored, stored with it (one step of Annulla), so the
+        correction always uses the n shown and stored."""
+        if self._gone():
+            return
         kind = self.c_n.currentData()
         v = dict(N_CHOICES).get(kind)
         if v is not None:
+            self.s_n.blockSignals(True)
             self.s_n.setValue(v)
+            self.s_n.blockSignals(False)
         self._update_buttons()
+        rec = self.chunk.meta.get("water")
+        if not isinstance(rec, dict) or rec.get("level") is None:
+            return
+        n = self.n()
+        if abs(float(rec.get("n") or water.N_SEA) - n) < 1e-9:
+            return
+        if self.working or not self._active():
+            self.set_n(float(rec.get("n") or water.N_SEA))  # back to the n stored
+            return
+        self.chunk.meta["water"] = {**rec, "n": n}  # the level as it was set: only its index changes
+        self._recorded(tr("Indice di rifrazione"))
+        self.window.log_pane.info(tr("Livello dell'acqua di {0}: indice di rifrazione {1}", self.chunk.label,
+                                     number(n, 3)))
+
+    def _busy_changed(self, busy: bool) -> None:
+        """The worker free again (done, failed or cancelled): the buttons back."""
+        if not busy and self.working:
+            with contextlib.suppress(RuntimeError):
+                self.working = False
+                self._update_buttons()
 
     def refresh(self) -> None:
         """Layers, level and correction as the chunk has them now (also after Annulla and after a build)."""
@@ -244,11 +281,18 @@ class WaterDialog(QDialog):
             (self.r_layer if names else self.r_colour).setChecked(True)
         lv = water.level_of(self.chunk)
         rec = self.chunk.meta.get("water") if isinstance(self.chunk.meta.get("water"), dict) else {}
+        key = None if lv is None else (lv["level"], lv["n"], lv["source"], rec.get("when"))
+        if key != self._seen:  # another level stored (set, undone, redone): the widgets from it; else what is typed stays
+            self._seen = key
+            if lv is not None:
+                self.set_n(lv["n"])
+                self.s_level.setValue(lv["level"])
+        if self._edge_key is not None and (key is None or key[0] != self._edge_key[0]
+                                           or key[2:] != self._edge_key[2:]):
+            self.clear_edge()  # the bank heights of a level that is no longer the one stored
         if lv is None:
             self.l_level.setText(tr("Nessun livello dell'acqua per il chunk {0}.", self.chunk.label))
         else:
-            self.set_n(lv["n"])
-            self.s_level.setValue(lv["level"])
             if lv["source"] == "edge":
                 text = tr("Livello {0} m (dal bordo dell'acqua: {1} quote, dispersione {2} m, dal 10 al 90 %: da {3} "
                           "a {4} m), n {5}.", number(lv["level"], 3), number(rec.get("edge_cells") or 0),
@@ -278,7 +322,8 @@ class WaterDialog(QDialog):
             self.c_layer.setEnabled(self.r_layer.isChecked())
             self.b_measure.setEnabled(self.r_colour.isChecked() or (self.r_layer.isChecked() and
                                                                      self.c_layer.count() > 0))
-            self.s_n.setEnabled(self.c_n.currentData() == "other")
+            self.c_n.setEnabled(not self.working)
+            self.s_n.setEnabled(self.c_n.currentData() == "other" and not self.working)
             cloud = self.chunk.product_path("point_cloud")
             corrected = bool((self.chunk.meta.get("dense") or {}).get("refraction"))
             self.b_correct.setEnabled(not self.working and water.level_of(self.chunk) is not None
@@ -379,6 +424,7 @@ class WaterDialog(QDialog):
         self.measured = dict(result)
         self._store(level, "edge", n, **info)
         self.draw_edge(points)
+        self._edge_key = self._seen
         self.window.log_pane.info(tr("Livello dell'acqua di {0}: {1} m dal bordo dell'acqua ({2} quote, dispersione "
                                      "{3} m)", self.chunk.label, number(level, 3), number(info["edge_cells"]),
                                      number(info["spread"], 3)))
@@ -400,9 +446,14 @@ class WaterDialog(QDialog):
         except ValueError as exc:
             w._warn(tr("Livello dell'acqua: {0}", error_text(exc)))
             return
+        self._recorded(tr("Livello dell'acqua"))
+
+    def _recorded(self, text: str) -> None:
+        """A change of the level stored: one step of Annulla, the tree and the window shown again."""
+        w = self.window
         w.setWindowModified(True)
         if w.history is not None and not w.history.applying:
-            w.history.record(tr("Livello dell'acqua"))
+            w.history.record(text)
         w.workspace.populate(self.doc)
         self.refresh()
 
@@ -417,6 +468,7 @@ class WaterDialog(QDialog):
         view.add_dots(np.asarray(points, float), color=EDGE_COLOUR, layer=EDGE_LAYER)
 
     def clear_edge(self) -> None:
+        self._edge_key = None
         with contextlib.suppress(RuntimeError, AttributeError):
             view = self.window.ortho_view
             if EDGE_LAYER in view.layers:
@@ -428,17 +480,25 @@ class WaterDialog(QDialog):
         it started."""
         if self._gone() or self.working or not self._active():
             return False
-        chunk, n, dem = self.chunk, self.n(), self.c_dem.isChecked()
+        chunk, dem = self.chunk, self.c_dem.isChecked()
 
         def work(p):
-            try:
-                return water.correct_cloud(chunk, n=n, rebuild_dem=dem, progress=p)
+            try:  # the n stored with the level: the one the combo shows (a change of it is stored at once)
+                return water.correct_cloud(chunk, rebuild_dem=dem, progress=p)
             except ValueError as exc:
                 return {"error": exc}
 
-        return self.window.run_task("Correzione della rifrazione", work, self._corrected)
+        self.working = True  # no new level while the correction reads this one
+        self._update_buttons()
+        started = self.window.run_task("Correzione della rifrazione", work, self._corrected)
+        if not started:
+            self.working = False
+            self._update_buttons()
+        return started
 
     def _corrected(self, result: dict) -> None:
+        with contextlib.suppress(RuntimeError):
+            self.working = False
         if self._gone():
             return
         if "error" in result:

@@ -148,6 +148,12 @@ def test_level_from_a_layer_is_shown_and_saved(qapp, tmp_path, monkeypatch):
         _wait(w, qapp)
         assert w.said and w.said[-1][0] == "warn" and "Livello dell'acqua" in w.said[-1][1]
         assert w.chunk.meta["water"] == before and len(w.history.entries) == n_steps + 2
+        # Annulla of the measure from the colours: the level from the layer back, its bank heights no longer drawn
+        assert EDGE_LAYER in w.ortho_view.layers
+        w.undo()
+        qapp.processEvents()
+        assert w.chunk.meta["water"]["level"] == pytest.approx(rec["level"])
+        assert EDGE_LAYER not in w.ortho_view.layers
         dlg.close()
         qapp.processEvents()
         assert EDGE_LAYER not in w.ortho_view.layers
@@ -213,8 +219,10 @@ def test_correct_runs_and_adds_a_version(qapp, tmp_path, monkeypatch):
         dlg.c_dem.setChecked(True)
         n_steps = len(w.history.entries)
         assert dlg.correct()
+        assert not dlg.hand_box.isEnabled() and not dlg.c_n.isEnabled()  # no new level while it runs
         _wait(w, qapp)
         assert not w.said, w.said
+        assert dlg.hand_box.isEnabled() and dlg.c_n.isEnabled()
         ch = w.chunk
         refr = ch.meta["dense"]["refraction"]
         assert refr["n"] == pytest.approx(water.N_SEA) and refr["below"] > 0
@@ -239,5 +247,51 @@ def test_correct_runs_and_adds_a_version(qapp, tmp_path, monkeypatch):
         _wait(w, qapp)
         assert w.said and w.said[-1][0] == "warn" and "niente da correggere" in w.said[-1][1]
         assert len(versions.versions(ch, "point_cloud")) == 1
+    finally:
+        _close(w)
+
+
+def test_n_chosen_is_stored_kept_by_a_refresh_and_used(qapp, tmp_path, monkeypatch):
+    doc, a = project(tmp_path)
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _open(w, qapp)
+        dlg.r_hand.setChecked(True)
+        dlg.s_level.setValue(LEVEL)
+        assert dlg.set_by_hand()
+        assert w.chunk.meta["water"]["n"] == pytest.approx(water.N_SEA)
+        n_steps = len(w.history.entries)
+        dlg.c_n.setCurrentIndex(dlg.c_n.findData("fresh"))  # stored with the level: one step of Annulla
+        assert w.chunk.meta["water"]["n"] == pytest.approx(water.N_FRESH)
+        assert w.chunk.meta["water"]["level"] == pytest.approx(LEVEL)
+        assert len(w.history.entries) == n_steps + 1
+        assert _water_items(w) == ["Acqua: livello 0,800 m, n 1,33"]
+        w.undo()
+        qapp.processEvents()
+        assert w.chunk.meta["water"]["n"] == pytest.approx(water.N_SEA) and dlg.c_n.currentData() == "sea"
+        w.redo()
+        qapp.processEvents()
+        assert dlg.c_n.currentData() == "fresh"
+        # another value: stored when its editing ends
+        dlg.c_n.setCurrentIndex(dlg.c_n.findData("other"))
+        assert len(w.history.entries) == n_steps + 1  # same n (1,33): nothing stored
+        dlg.s_n.setValue(1.36)
+        dlg.s_n.editingFinished.emit()
+        assert w.chunk.meta["water"]["n"] == pytest.approx(1.36) and len(w.history.entries) == n_steps + 2
+        # a refresh (a build, a version) keeps what is chosen and what is typed
+        dlg.s_level.setValue(0.7)  # typed, not set
+        w.refresh_all()
+        qapp.processEvents()
+        assert dlg.c_n.currentData() == "other" and dlg.s_n.value() == pytest.approx(1.36)
+        assert dlg.s_level.value() == pytest.approx(0.7)
+        assert w.chunk.meta["water"]["level"] == pytest.approx(LEVEL)
+        # Correggi uses the n shown and stored
+        assert dlg.correct()
+        _wait(w, qapp)
+        assert not w.said, w.said
+        refr = w.chunk.meta["dense"]["refraction"]
+        assert refr["n"] == pytest.approx(1.36) == w.chunk.meta["water"]["n"]
+        assert refr["level"] == pytest.approx(LEVEL)
+        assert dlg.c_n.currentData() == "other" and dlg.s_n.value() == pytest.approx(1.36)
     finally:
         _close(w)
