@@ -1617,8 +1617,12 @@ def append(project: Path,
             products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or "-"
             typer.echo(f"{r.path.name}: [{ch.key}] {ch.label}: {len(ch.cameras)} photos, CRS {ch.crs}, "
                        f"products: {products}")
+        if r.ties:
+            typer.echo(f"{r.path.name}: {r.ties} ties between the chunks appended, copied with them")
         for w in r.warnings:
             typer.echo(f"  warning: {w}")
+        for name in r.ties_dropped:
+            typer.echo(f"  warning: tie «{name}» not copied: it goes to a chunk not appended")
     typer.echo("Nothing was aligned: use align-chunks or merge-chunks to bring the chunks together.")
     if any(r.error for r in results):
         raise typer.Exit(1)

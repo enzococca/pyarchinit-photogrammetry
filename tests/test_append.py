@@ -472,3 +472,87 @@ def test_link_targets_of_windows_are_read_as_plain_paths():
     assert _plain_link("\\\\?\\UNC\\server\\share\\b.tif") == "\\\\server\\share\\b.tif"
     assert _plain_link("/Users/a/b.tif") == "/Users/a/b.tif"
     assert _plain_link("../dem.tif") == "../dem.tif"
+
+
+def make_tied_source(root: Path) -> Path:
+    """Three chunks with ties: A-B (two), B-C (one) and a known point in A."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine import ties
+
+    doc = ppg.Document()
+    a, b, c = doc.add_chunk("A"), doc.add_chunk("B"), doc.add_chunk("C")
+    a.meta["alignment_id"] = "allineamento A"
+    ties.add_tie(doc, a, [1, 2, 3], b, [4, 5, 6])
+    ties.add_tie(doc, a, [0, 0, 0], b, [1, 1, 1], name="picchetto")
+    ties.add_tie(doc, b, [2, 2, 2], c, [3, 3, 3])
+    ties.add_known(doc, a, [5, 5, 5], [100.0, 200.0, 10.0], "GNSS 1", 0.02)
+    doc.save(root / "legami.ppg")
+    return root / "legami.ppg"
+
+
+def test_ties_between_chunks_appended_come_with_them(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.append import append_projects
+    from pyarchinit_photogrammetry.engine import ties
+
+    src = make_tied_source(tmp_path / "src")
+    source = (tmp_path / "src" / "legami.ppg").read_bytes()
+    doc = _target(tmp_path, "X")
+    mine = ties.add_tie(doc, doc.chunks[0], [0, 0, 0], doc.add_chunk("Y"), [1, 1, 1], name="picchetto")
+    (res,) = append_projects(doc, [src], chunks=["A", "B"])
+    a, b = res.chunks
+    assert res.ties == 3 and res.ties_dropped == ["legame 2"]  # B-C: C was not appended
+    got = {t.name: t for t in ties.ties_of(doc)}
+    assert set(got) == {"picchetto", "legame 1", "picchetto (legami)", "GNSS 1"}
+    assert got["picchetto"].id == mine.id  # the tie already there is untouched
+    for t in (got["legame 1"], got["picchetto (legami)"], got["GNSS 1"]):
+        assert not t.broken and not t.stale and t.active and t.chunk_keys() <= {a.key, b.key}
+    known = got["GNSS 1"]
+    assert known.b is None and known.known == [100.0, 200.0, 10.0] and known.precision == pytest.approx(0.02)
+    np.testing.assert_allclose(ties.end_world(doc, *got["legame 1"].b, uid=got["legame 1"].b_uid),
+                               b.to_world(np.array([[4.0, 5, 6]]))[0])
+    assert (tmp_path / "src" / "legami.ppg").read_bytes() == source  # the source is only read
+    # the same project appended again: other identities, every tie resolved to its own chunk
+    (res2,) = append_projects(doc, [src], chunks=["A", "B"])
+    assert res2.ties == 3
+    uids = [m.uid for ch in doc.chunks for m in ch.markers if m.uid]
+    assert len(uids) == len(set(uids))
+    every = ties.ties_of(doc)
+    assert len(every) == 7 and len({t.id for t in every}) == 7 and not any(t.broken for t in every)
+    assert len({t.name for t in every}) == 7  # "picchetto (legami 2)"
+    doc.save()
+    assert len(ties.ties_of(ppg.Document.open(doc.path))) == 7
+
+
+def test_a_cancelled_append_takes_its_ties_away_too(tmp_path):
+    from pyarchinit_photogrammetry.core.append import append_projects
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    src = make_tied_source(tmp_path / "src")
+    other = make_source(tmp_path / "src2")
+    doc = _target(tmp_path, "X")
+
+    seen = []
+
+    def cb(fraction, message):
+        seen.append("ties" in doc.meta)
+        if fraction > 0.6:
+            p.cancel()
+
+    p = Progress(cb)
+    with pytest.raises(Cancelled):
+        append_projects(doc, [src, other], progress=p)
+    assert any(seen)  # the ties of the first source were there when the second was cancelled
+    assert [c.label for c in doc.chunks] == ["X"] and "ties" not in doc.meta
+
+
+def test_cli_append_says_the_ties(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    src = make_tied_source(tmp_path / "src")
+    _target(tmp_path, "X")
+    r = CliRunner().invoke(app, ["append", str(tmp_path / "dst" / "mio.ppg"), str(src), "--chunks", "A,B"])
+    assert r.exit_code == 0, r.output
+    assert "3 ties between the chunks appended" in r.output and "tie «legame 2» not copied" in r.output

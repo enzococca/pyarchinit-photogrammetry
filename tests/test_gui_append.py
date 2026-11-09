@@ -204,3 +204,26 @@ def test_no_chunk_becomes_active_while_an_append_runs_whatever_asks(window, qapp
     w._appending = False
     w._workspace_menu("chunk", other, None, QPoint(0, 0))
     assert w.chunk is other
+
+
+def test_ties_appended_come_and_go_with_the_undo(window, qapp, tmp_path, monkeypatch):
+    from test_append import make_tied_source
+
+    from pyarchinit_photogrammetry.engine import ties
+
+    w, mw = window
+    src = make_tied_source(tmp_path / "src")
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, p, t, fields, intro="": {
+        f.name: [0, 1] for f in fields}))  # A and B: the tie B-C stays behind
+    w.append_projects(sources=[src])
+    _wait(w, qapp)
+    assert len(ties.ties_of(w.doc)) == 3
+    text = w.shown[-1][1]
+    assert "3 legami fra i chunk aggiunti" in text and "legame «legame 2» non copiato" in text
+    w.undo()  # one step: the chunks and their ties
+    _settle(qapp)
+    assert "ties" not in w.doc.meta and [c.label for c in w.doc.chunks] == ["Chunk 1"]
+    w.redo()
+    _settle(qapp)
+    got = ties.ties_of(w.doc)
+    assert len(got) == 3 and not any(t.broken for t in got)

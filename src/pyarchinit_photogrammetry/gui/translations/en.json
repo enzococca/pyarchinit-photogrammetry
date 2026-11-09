@@ -52,6 +52,7 @@
   "%s: annullato": "%s: cancelled",
   "%s: avvio": "%s: start",
   "%s: completato in %s": "%s: done in %s",
+  "Legame «%s» di %s non copiato: va verso un chunk non aggiunto": "Tie «%s» of %s not copied: it goes to a chunk not appended",
   "%s: errore dopo %s\n%s": "%s: error after %s\n%s",
   "&Aiuto": "&Help",
   "&Modifica": "&Edit",
@@ -4258,6 +4259,8 @@
   "Escluso «{0}»: il marker {1} del chunk {2} è da rimisurare dopo il riallineamento (rimettilo in Punti in comune, misuralo sulle foto o conferma che è giusto)": "Left out «{0}»: marker {1} of chunk {2} to be measured again after the new alignment (place it again in Common points, measure it on photos or confirm it is right)",
   "da rimisurare dopo il riallineamento: {0}": "to be measured again after the new alignment: {0}",
   "Estremi confermati nel nuovo allineamento: {0}": "Ends confirmed in the new alignment: {0}",
-  "Legame «{0}» tolto: gli altri mettono i suoi estremi a {1:.3f} m l'uno dall'altro (precisione {2:.3f} m, della stima senza di lui {3:.3f} m)": "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m, of the solve without it {3:.3f} m)"
+  "Legame «{0}» tolto: gli altri mettono i suoi estremi a {1:.3f} m l'uno dall'altro (precisione {2:.3f} m, della stima senza di lui {3:.3f} m)": "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m, of the solve without it {3:.3f} m)",
+  "{0} legami fra i chunk aggiunti, copiati con loro": "{0} ties between the chunks appended, copied with them",
+  "{0}: legame «{1}» non copiato: va verso un chunk non aggiunto": "{0}: tie «{1}» not copied: it goes to a chunk not appended"
  }
 }

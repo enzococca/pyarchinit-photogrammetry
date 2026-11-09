@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -453,20 +454,28 @@ class _Appended:
     folders unless the project as last saved lists them. ``before``: the active chunk before, active again when
     the undo takes away the active one."""
 
-    def __init__(self, window, removal, before=None, sections=()):
+    def __init__(self, window, removal, before=None, sections=(), ties=(None, None)):
         self.window = window
         self.inner = _Removed(window, [removal])
         self.inner.after = before
         self.sections = list(sections)  # the sections of the projects appended, merged into the window's
+        self.ties = ties  # doc.meta["ties"] before and after: the ties copied with the chunks come and go with them
+
+    def _ties(self, which: int) -> None:
+        from ..core.append import _restore_ties
+
+        _restore_ties(self.window.doc, self.ties[which])
 
     def undo(self) -> None:
         current = self.window.chunk
         self.inner.active = current if any(current is c for c in self.inner.removals[0].chunks) else None
+        self._ties(0)
         self.window._redo_removed(self.inner)
         if self.sections:
             self.window._set_sections([s for s in self.window.sections if not any(s is x for x in self.sections)])
 
     def redo(self) -> None:
+        self._ties(1)
         self.window._undo_removed(self.inner)
         if self.sections:
             self.window._set_sections(self.window.sections + [s for s in self.sections
@@ -4062,6 +4071,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         doc = self.doc
         before = self.chunk
         self._store_drawings()
+        ties_before = copy.deepcopy(doc.meta.get("ties"))
 
         def job(p):
             return append_projects(doc, sources, chunks=chunks, webodm=webodm, progress=p)
@@ -4081,7 +4091,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 if added:
                     self._set_sections(self.sections + added)
                     self.log_pane.info(tr("{0} sezioni aggiunte dai progetti", len(added)))
-                step = _Appended(self, results.journal, before, added)
+                step = _Appended(self, results.journal, before, added,
+                                 ties=(ties_before, copy.deepcopy(doc.meta.get("ties"))))
                 if before is None or (self._empty_chunk(before) and any(before is c for c in doc.chunks)):
                     active = new[0]
                     self._activate_chunk(active)
@@ -4112,7 +4123,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or tr("nessuno")
                 lines.append("  " + tr("«{0}»: {1} foto, prodotti: {2}, CRS {3}", ch.label, len(ch.cameras),
                                        products, ch.crs))
+            if getattr(r, "ties", 0):
+                lines.append("  " + tr("{0} legami fra i chunk aggiunti, copiati con loro", r.ties))
             warnings += [f"{r.path.name}: {w}" for w in r.warnings]
+            warnings += [tr("{0}: legame «{1}» non copiato: va verso un chunk non aggiunto", r.path.name, name)
+                         for name in getattr(r, "ties_dropped", [])]
         added = sum(len(r.chunks) for r in results)
         text = "\n".join(lines)
         if added:
