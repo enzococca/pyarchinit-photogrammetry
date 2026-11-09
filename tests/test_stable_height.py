@@ -3,6 +3,8 @@ the same rough ground, the second higher by a bias (and tilted, or with a pit du
 placed and kept as a height tie with its anchors in the internal frames of the chunks."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -232,3 +234,83 @@ def _world_delta_systems(doc, tie, system):
     wa = a.to_world(np.array([tie.anchors[0]["a"]]))[0]
     wb = crs_mod.transform_points(b.to_world(np.array([tie.anchors[0]["b"]])), b.crs, system)[0]
     return wb - wa
+
+
+def test_layer_drawn_before_a_change_of_the_transform_follows_the_chunk(tmp_path):
+    # the polygon is drawn over the stable strip; then both chunks are moved 2 m west by a solve (their DEMs stale,
+    # moved with them): the polygon must follow A, else it would lie over the changed part
+    split = X0 + 0.4 * SIZE
+    doc, a, b = project(tmp_path, extra=lambda x, y: np.where(x > split, 0.10, 0.0))
+    for ch in (a, b):
+        ch.meta.setdefault("built_in", {})["dem"] = np.eye(4).tolist()
+    ring = [[X0 + 0.1, Y1 - 0.1, 100.0], [split - 0.1, Y1 - 0.1, 100.0], [split - 0.1, Y1 - SIZE + 0.1, 100.0],
+            [X0 + 0.1, Y1 - SIZE + 0.1, 100.0]]
+    free_drawings.add(a, "polygon", ring, layer="Stabile")
+    before = json.dumps(a.meta["drawings"], sort_keys=True)
+    move = np.eye(4)
+    move[0, 3] = -2.0
+    for ch in (a, b):
+        ch.transform = move @ np.asarray(ch.transform, float)
+    tie = stable_height.measure(doc, "B", "A", area="Stabile")
+    assert abs(tie.dz - BIAS) < 0.002
+    assert json.dumps(a.meta["drawings"], sort_keys=True) == before  # followed on a copy: nothing written
+
+
+def test_anchors_with_both_transforms_not_identity(tmp_path):
+    doc, a, b = project(tmp_path, extra=lambda x, y: -pit(x, y))
+    ta, tb = np.eye(4), np.eye(4)
+    ta[:3, 3] = (10.0, -5.0, 2.0)
+    c, s = np.cos(np.radians(20.0)), np.sin(np.radians(20.0))
+    tb[:3, :3] = 1.5 * np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    tb[:3, 3] = (-3.0, 4.0, -1.0)
+    for ch, t in ((a, ta), (b, tb)):
+        ch.transform = t
+        ch.meta.setdefault("built_in", {})["dem"] = t.tolist()  # built in these transforms: current
+    tie = stable_height.measure(doc, "B", "A")
+    assert np.allclose(_world_delta(doc, tie), (0.0, 0.0, BIAS), atol=0.002)
+    ib = np.array(tie.anchors[0]["b"])
+    wa = a.to_world(np.array([tie.anchors[0]["a"]]))[0]
+    assert not np.allclose(ib, wa) and np.allclose(geometry_apply(tb, ib), wa + (0, 0, BIAS), atol=0.002)
+
+
+def geometry_apply(m, p):
+    return (np.asarray(m, float) @ np.append(p, 1.0))[:3]
+
+
+def test_only_the_part_over_the_reference_is_read(tmp_path):
+    # B's DEM extends far beyond A (a large survey): read and warped over A's extent only, stale or not
+    doc, a, b = project(tmp_path)
+    n = int(round(SIZE / RES))
+    big = 4 * n
+    x, y = cells(origin=(X0 - 1.5 * SIZE, Y1 + 1.5 * SIZE), size=4 * SIZE)
+    zb = (ground(x, y) + BIAS).astype(np.float32)
+    b._set_product("dem", write_geotiff(b.data_dir / "dem.tif", zb, (X0 - 1.5 * SIZE, Y1 + 1.5 * SIZE), RES, CRS,
+                                        nodata=NODATA))
+    assert zb.shape == (big, big)
+    bounds = (X0, Y1 - SIZE, X0 + SIZE, Y1)
+    z, tr = stable_height.dem_in_world(b, a, bounds=bounds)
+    assert z.shape[0] <= n + 4 and z.shape[1] <= n + 4
+    rot = np.eye(4)
+    c, s = np.cos(np.radians(0.01)), np.sin(np.radians(0.01))
+    rot[:2, :2] = [[c, -s], [s, c]]
+    rot[:2, 3] = np.array([XC, YC]) - rot[:2, :2] @ np.array([XC, YC])  # about the middle of the trench
+    b.meta.setdefault("built_in", {})["dem"] = rot.tolist()  # stale by a tiny rotation: warped, still clipped
+    z, tr = stable_height.dem_in_world(b, a, bounds=bounds)
+    assert tr.b == 0 and z.shape[0] <= n + 2 and z.shape[1] <= n + 2
+    assert tr.c >= X0 - 1e-6 and tr.f <= Y1 + 1e-6
+    b.meta["built_in"].pop("dem")
+    assert abs(stable_height.measure(doc, "B", "A").dz - BIAS) < 0.002
+    empty, _ = stable_height.dem_in_world(b, a, bounds=(X0 + 500, Y1 + 500, X0 + 510, Y1 + 510))
+    assert empty.size == 0
+
+
+def test_a_local_area_file_with_projected_chunks_is_refused(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.io import free_drawings as io_free
+
+    doc, a, b = project(tmp_path)
+    path = tmp_path / "area.geojson"
+    path.write_text("{}")
+    ring = [[X0 + 1, Y1 - 1, None], [X0 + 3, Y1 - 1, None], [X0 + 3, Y1 - 3, None]]
+    monkeypatch.setattr(io_free, "read", lambda p: [{"kind": "polygon", "xyz": ring, "crs": "LOCAL"}])
+    with pytest.raises(ValueError, match="is in a local frame and the chunks are in EPSG:3004"):
+        stable_height.measure(doc, "B", "A", area=path)

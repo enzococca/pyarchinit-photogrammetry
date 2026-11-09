@@ -1037,16 +1037,20 @@ def height_offset(zr, tr_r, zd, tr_d, stable=None, exclude=None, plane: bool = F
                          "almost all of them")
     p = np.zeros(3)
     inl, _, _ = _inliers(raw, ok, k)
+    settled = False
     for _ in range(IRLS_ROUNDS):
         if int(inl.sum()) < MIN_CELLS:
             raise ValueError(FEW)
         _, _, p, _ = _fit(raw[inl], None, None, m.u[inl], m.v[inl], plane, shift=False)
         new, _, _ = _inliers(raw - m.plane(p), ok, k)
         if np.array_equal(new, inl):
+            settled = True
             break
         inl = new
     if int(inl.sum()) < MIN_CELLS:
         raise ValueError(FEW)
+    if not settled:  # the rounds ran out: the correction fitted on the cells it is reported on
+        _, _, p, _ = _fit(raw[inl], None, None, m.u[inl], m.v[inl], plane, shift=False)
     after = raw - m.plane(p)
     return HeightOffset(dz=float(p[0]), tilt_x=float(p[1]), tilt_y=float(p[2]),
                         centre=(float(centre[0]), float(centre[1])), nmad_before=_nmad(raw[inl]),

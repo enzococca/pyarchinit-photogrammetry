@@ -49,6 +49,7 @@ LABEL = "quota stabile"  # the name of a height tie: data of the project (as the
 MIN_PRECISION = 0.005  # metres: the least precision of a height tie
 INDEPENDENT_CELLS = 100  # at most this many cells taken as independent samples (neighbouring cells are correlated)
 NORTH_UP = 1e-9  # a moved grid whose rotation terms are below this share of its cell is still north up
+BOUNDS_MARGIN = 4  # cells of the reference: the DEM of B read this far beyond the reference
 HULL_VERTICES = 60  # at most this many vertices of the stable hull tried for the largest triangle
 
 
@@ -106,9 +107,10 @@ def _system_of(system) -> tuple[str | None, str]:
     return system, str(system or crs_mod.LOCAL)
 
 
-def _north_up(z: np.ndarray, tr, src_crs: str | None, dst_crs: str | None):
+def _north_up(z: np.ndarray, tr, src_crs: str | None, dst_crs: str | None, bounds=None):
     """``z`` on the affine ``tr`` (rotated, or in the system ``src_crs``) resampled bilinearly onto a north-up grid of
-    the same cell size in ``dst_crs``; two local frames (or two equal systems) by the rotation only."""
+    the same cell size in ``dst_crs``; two local frames (or two equal systems) by the rotation only. ``bounds``
+    ``(left, bottom, right, top)`` in ``dst_crs``: the grid clipped to them (None when nothing is left)."""
     import rasterio.crs
     from affine import Affine
     from rasterio.enums import Resampling
@@ -126,9 +128,14 @@ def _north_up(z: np.ndarray, tr, src_crs: str | None, dst_crs: str | None):
         pts = np.column_stack([corners, np.zeros(len(corners))])
         corners = crs_mod.transform_points(pts, crs_mod.horizontal(src_crs), crs_mod.horizontal(dst_crs))[:, :2]
     cell = math.sqrt(abs(tr.a * tr.e - tr.b * tr.d))
-    x0, y1 = corners[:, 0].min(), corners[:, 1].max()
-    nw = max(1, int(math.ceil((corners[:, 0].max() - x0) / cell)))
-    nh = max(1, int(math.ceil((y1 - corners[:, 1].min()) / cell)))
+    x0, x1 = corners[:, 0].min(), corners[:, 0].max()
+    y0, y1 = corners[:, 1].min(), corners[:, 1].max()
+    if bounds is not None:
+        x0, y0, x1, y1 = max(x0, bounds[0]), max(y0, bounds[1]), min(x1, bounds[2]), min(y1, bounds[3])
+        if x1 <= x0 or y1 <= y0:
+            return None
+    nw = max(1, int(math.ceil((x1 - x0) / cell)))
+    nh = max(1, int(math.ceil((y1 - y0) / cell)))
     dst_tr = Affine(cell, 0.0, x0, 0.0, -cell, y1)
     out = np.full((nh, nw), np.nan, np.float32)
     reproject(np.ascontiguousarray(z, np.float32), out, src_transform=tr, src_crs=s_crs, src_nodata=np.nan,
@@ -136,13 +143,51 @@ def _north_up(z: np.ndarray, tr, src_crs: str | None, dst_crs: str | None):
     return out, dst_tr
 
 
-def dem_in_world(chunk: "Chunk", system) -> tuple[np.ndarray, object]:
+def _read_window(path, bounds=None):
+    """``(heights float32 with NaN, transform)`` of the DEM ``path``, only the cells within ``bounds`` (left, bottom,
+    right, top in the coordinates of the file) when given (an empty array when they miss it), as :func:`coreg._read`."""
+    import rasterio
+    from rasterio.enums import MaskFlags
+    from rasterio.windows import Window, from_bounds
+
+    with rasterio.open(path) as src:
+        window = None
+        if bounds is not None:
+            win = from_bounds(*bounds, transform=src.transform)
+            c0, r0 = max(0, int(math.floor(win.col_off))), max(0, int(math.floor(win.row_off)))
+            c1 = min(src.width, int(math.ceil(win.col_off + win.width)))
+            r1 = min(src.height, int(math.ceil(win.row_off + win.height)))
+            if c1 <= c0 or r1 <= r0:
+                return np.zeros((0, 0), np.float32), src.transform
+            window = Window(c0, r0, c1 - c0, r1 - r0)
+        z = src.read(1, window=window, out_dtype="float32")
+        tr = src.window_transform(window) if window is not None else src.transform
+        nodata = src.nodata
+        if nodata is not None and not math.isnan(nodata):
+            z[z == np.float32(nodata)] = np.nan
+        if MaskFlags.per_dataset in src.mask_flag_enums[0] and MaskFlags.nodata not in src.mask_flag_enums[0]:
+            z[src.read_masks(1, window=window) == 0] = np.nan
+        return z, tr
+
+
+def _box_through(bounds, fn) -> tuple[float, float, float, float]:
+    """The box ``(left, bottom, right, top)`` around the corners and edge middles of ``bounds`` carried by ``fn``
+    (``(n, 2) -> (n, 2)``)."""
+    l, b, r, t = bounds
+    mx, my = (l + r) / 2, (b + t) / 2
+    pts = fn(np.array([[l, b], [r, b], [l, t], [r, t], [mx, b], [mx, t], [l, my], [r, my]], float))
+    return float(pts[:, 0].min()), float(pts[:, 1].min()), float(pts[:, 0].max()), float(pts[:, 1].max())
+
+
+def dem_in_world(chunk: "Chunk", system, bounds=None) -> tuple[np.ndarray, object]:
     """The DEM of ``chunk`` in its current world, in ``system`` (a system, or a chunk: its system): ``(heights float32
     with NaN, north-up affine)``. A DEM built in another transform of the chunk (its stamp) is moved with the chunk -
     the cells in plan by ``T_now inv(T_built)``, the heights ``z' = m20 x + m21 y + m22 z + m23`` - as the 2D view
     places it (``gui.chunk_views.overlay_image``); a rotation in plan resamples it north up. Between two projected
     systems it is reprojected (heights as they are); a local frame and a projected system: :class:`.ties.TieError`.
-    ``ValueError`` when the chunk has no DEM."""
+    ``bounds`` ``(left, bottom, right, top)`` in ``system``: only the part of the DEM there is read and warped (memory
+    bounded by the extent asked, not by the DEM); an empty array when the DEM misses them. ``ValueError`` when the
+    chunk has no DEM."""
     from affine import Affine
 
     dst_crs, dst_label = _system_of(system)
@@ -151,10 +196,25 @@ def dem_in_world(chunk: "Chunk", system) -> tuple[np.ndarray, object]:
     path = chunk.dem_path
     if path is None or not Path(path).exists():
         raise ValueError(f"the chunk {chunk.label} has no DEM")
-    z, tr, _crs = coreg._read(path)
+    same = chunk.crs == dst_crs or (crs_mod.is_local(chunk.crs) and crs_mod.is_local(dst_crs))
     built = stamps.stamp_of(chunk, "dem")
+    move = None
     if built is not None and not stamps.same_transform(built, chunk.transform):
         move = np.asarray(chunk.transform, float) @ np.linalg.inv(np.asarray(built, float))
+    file_bounds = None
+    if bounds is not None:  # the bounds asked, carried back to the coordinates of the file
+        file_bounds = tuple(float(v) for v in bounds)
+        if not same:
+            file_bounds = _box_through(file_bounds, lambda p: crs_mod.transform_points(
+                np.column_stack([p, np.zeros(len(p))]), crs_mod.horizontal(dst_crs),
+                crs_mod.horizontal(chunk.crs))[:, :2])
+        if move is not None:
+            back = np.linalg.inv(move)
+            file_bounds = _box_through(file_bounds, lambda p: p @ back[:2, :2].T + back[:2, 3])
+    z, tr = _read_window(path, file_bounds)
+    if not z.size:
+        return z, tr
+    if move is not None:
         h, w = z.shape
         cols = np.arange(w) + 0.5
         for r0 in range(0, h, coreg.BLOCK_ROWS):  # the heights move with the chunk, a block of rows at a time
@@ -165,9 +225,11 @@ def dem_in_world(chunk: "Chunk", system) -> tuple[np.ndarray, object]:
             z[r0:r1] = (move[2, 0] * x + move[2, 1] * y + move[2, 2] * z[r0:r1] + move[2, 3]).astype(np.float32)
         tr = Affine(move[0, 0], move[0, 1], move[0, 3], move[1, 0], move[1, 1], move[1, 3]) @ tr
     rotated = abs(tr.b) > NORTH_UP * abs(tr.a) or abs(tr.d) > NORTH_UP * abs(tr.e)
-    same = chunk.crs == dst_crs or (crs_mod.is_local(chunk.crs) and crs_mod.is_local(dst_crs))
     if rotated or not same:
-        z, tr = _north_up(z, tr, chunk.crs, dst_crs)
+        found = _north_up(z, tr, chunk.crs, dst_crs, bounds)
+        if found is None:
+            return np.zeros((0, 0), np.float32), tr
+        z, tr = found
     elif tr.b or tr.d:
         tr = Affine(tr.a, 0.0, tr.c, 0.0, tr.e, tr.f)
     return z, tr
@@ -175,8 +237,9 @@ def dem_in_world(chunk: "Chunk", system) -> tuple[np.ndarray, object]:
 
 # --------------------------------------------------------------------------- areas
 def _area_spec(area) -> dict | None:
-    """``area`` as stored: None, ``{"layer": name}`` or ``{"file": path}`` (a text naming an existing file is a file,
-    else a layer)."""
+    """``area`` as stored: None, ``{"layer": name}`` or ``{"file": path}``. A ``Path``, or a text ending in .gpkg,
+    .geojson, .json or .dxf, is a file (checked when read: a misspelt path is an error, never a layer); any other text
+    is the name of a layer."""
     if area is None or area == "" or area == {}:
         return None
     if isinstance(area, dict):
@@ -205,7 +268,9 @@ def _polygons_of_layer(chunk: "Chunk", layer: str) -> list:
 
 
 def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | None, what: str):
-    """The shapely geometry (in ``system``) of an area ``spec``; None for None."""
+    """The shapely geometry (in ``system``) of an area ``spec``; None for None. A file that says no system (a DXF, a
+    GeoJSON without one) is taken in the system of the chunks; one in a local frame with projected chunks, or the
+    reverse, is refused."""
     import shapely
     from shapely.geometry import Polygon
 
@@ -232,7 +297,11 @@ def _geometry(doc: "Document", spec: dict | None, chunks: list, system: str | No
             if rec["kind"] != "polygon":
                 continue
             xy = np.array([[p[0], p[1], 0.0] for p in rec["xyz"]], float)
-            src = rec.get("crs")
+            src = rec.get("crs") or rec.get("crs_unreadable")
+            if rec.get("crs_unreadable"):
+                raise ValueError(f"the file {path.name} names a system PROJ cannot read: {rec['crs_unreadable']}")
+            if src and crs_mod.is_local(src) and not crs_mod.is_local(system):
+                raise ValueError(f"the file {path.name} is in a local frame and the chunks are in {system}")
             if src and not crs_mod.is_local(system) and src != system:
                 xy = crs_mod.transform_points(xy, crs_mod.horizontal(src), crs_mod.horizontal(system))
             elif src and crs_mod.is_local(system):
@@ -291,12 +360,13 @@ def measure(doc: "Document", chunk, reference, area=None, exclude=None, plane: b
     system = ca.crs
     progress(0.0, f"Stable height of {cb.label} on {ca.label}: reading the DEMs")
     zr, tr_r = dem_in_world(ca, ca)
-    zd, tr_d = dem_in_world(cb, ca)
     hr, wr = zr.shape
-    hd, wd = zd.shape
+    margin = BOUNDS_MARGIN * abs(tr_r.a)
     ra = (tr_r.c, tr_r.c + wr * tr_r.a, tr_r.f + hr * tr_r.e, tr_r.f)
+    zd, tr_d = dem_in_world(cb, ca, bounds=(ra[0] - margin, ra[2] - margin, ra[1] + margin, ra[3] + margin))
+    hd, wd = zd.shape
     rb = (tr_d.c, tr_d.c + wd * tr_d.a, tr_d.f + hd * tr_d.e, tr_d.f)
-    if ra[1] <= rb[0] or rb[1] <= ra[0] or ra[3] <= rb[2] or rb[3] <= ra[2]:
+    if not zd.size or ra[1] <= rb[0] or rb[1] <= ra[0] or ra[3] <= rb[2] or rb[3] <= ra[2]:
         raise ValueError(f"the DEMs of {cb.label} and {ca.label} do not overlap where they are placed now")
     area_spec, exclude_spec = _area_spec(area), _area_spec(exclude)
     stable_geom = _geometry(doc, area_spec, [ca, cb], system, "stable")
