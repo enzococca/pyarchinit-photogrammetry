@@ -205,6 +205,13 @@ messo sulla superficie (nuvola o punti di legame).
 collegare: le viste sono sovrapposte (centro su centro), e una nota arancione lo dice. I legami si possono fare lo
 stesso.
 
+**Sistemi che si muovono nel tempo.** Due chunk in sistemi che PROJ unisce solo in modo approssimato (ITRF2020 con un
+altro sistema, ETRF2014/2020 con ETRF2000) si possono legare, e fra loro si può misurare una quota stabile: i pochi punti
+in gioco sono convertiti per la strada del programma (fra sistemi europei all'epoca del rilievo; con ITRF2020 dalla
+trasformazione di PROJ quando non è approssimata, altrimenti come posizioni su WGS 84), e il log lo dice una volta per
+chunk. L'ortofoto e il DEM uniti rifiutano una coppia così: lì ogni pixel sarebbe spostato dall'approssimazione di PROJ
+(vedi [Ortofoto e DEM uniti](multi-survey.md#ortofoto-e-dem-uniti)).
+
 ## Quota da una superficie stabile
 
 Due rilievi dello stesso sito spesso coincidono in pianta - il GPS di un drone li mette a pochi centimetri l'uno

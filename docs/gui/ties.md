@@ -196,6 +196,13 @@ triangulated; on one photo it is placed on the surface (cloud or tie points).
 **Two different systems.** A chunk in a local frame next to a chunk in a system of the world cannot be linked: the
 views are superimposed (middle on middle), and an orange note says so. Ties can still be made.
 
+**Frames that move with time.** Two chunks in systems that PROJ joins only approximately (ITRF2020 with another system,
+ETRF2014/2020 with ETRF2000) can be tied, and a stable height can be measured between them: the few points involved
+are converted by the program's own route (between European frames at the epoch of the survey; with ITRF2020 by
+PROJ's transformation where it is no ballpark, else as positions on WGS 84), and the log says so once per chunk. The
+merged orthophoto and DEM refuse such a pair: there every pixel would be warped by PROJ's approximation (see
+[Merged orthophoto and DEM](multi-survey.md#merged-orthophoto-and-dem)).
+
 ## Stable height
 
 Two surveys of the same site often agree in plan - the GPS of a drone puts them within a few centimetres - and not in

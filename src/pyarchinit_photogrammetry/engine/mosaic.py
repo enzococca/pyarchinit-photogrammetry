@@ -144,11 +144,14 @@ def frame_problem(src: str | None, dst: str | None) -> bool:
 def _frame_error(what_en: str, what_it: str, src: str | None, dst: str | None) -> MosaicError:
     return MosaicError(f"{what_en} is in {src} and the merged product in {dst}: between these two frames the pixels "
                        "would be placed by PROJ's approximate transformation (centimetres to a metre off), not by "
-                       "the epoch of the survey. Put the chunk in the system of the first (or make that chunk first), "
-                       "then build again",
+                       "the epoch of the survey. The ties and the stable heights accept this pair, because they move a "
+                       "few points by the program's own route; a merged raster cannot. Put the chunk in the system of "
+                       "the first (or make that chunk first), then build again",
                        f"{what_it} è in {src} e il prodotto unito in {dst}: fra questi due sistemi i pixel sarebbero "
                        "collocati dalla trasformazione approssimata di PROJ (da centimetri a un metro di errore), non "
-                       "all'epoca del rilievo. Porta il chunk nel sistema del primo (o mettilo primo), poi ricostruisci")
+                       "all'epoca del rilievo. I legami e le quote stabili accettano questa coppia, perché spostano "
+                       "pochi punti per la strada del programma; un raster unito no. Porta il chunk nel sistema del "
+                       "primo (o mettilo primo), poi ricostruisci")
 
 
 def _product_path(chunk, product: str) -> Path | None:

@@ -70,6 +70,10 @@ above it stay as they were, bit for bit); the cloud of before stays among the ve
 undoes the correction. *Rebuild the DEM from the corrected cloud* also builds a new version of the DEM, at the cell of
 the existing one. A cloud already corrected is not corrected twice.
 
+The [Shipwreck plugin](../plugins/shipwreck.md#water) can correct the heights of its sections under a level as well.
+With a model built from the corrected cloud leave that correction off, or the bottom is corrected twice and ends below
+its true depth (from version 0.5.0 the plugin asks when the active cloud of the chunk is a corrected version).
+
 !!! warning "Limits"
     * The correction is **paraxial**: it holds for photos close to the vertical. Oblique photos through the water need
       a correction per ray, which this is not.
@@ -89,8 +93,11 @@ once tied in one system can give one orthophoto or one DEM. *Tools > Merged orth
 * the **list** of the chunks: tick those to merge (only the chunks with the product can be ticked). The order is the
   **priority** (*Up*, *Down*): where two chunks have data, the first one wins. The **system** of the merged product is
   that of the first chunk; a chunk in a local frame with one in a system of the world is refused, as for the ties, and
-  so is a pair of systems that only an approximate transformation of PROJ would join (move the chunk into the system
-  of the first, or make it first);
+  so is a pair of systems that only an approximate transformation of PROJ would join (ITRF2020 with another system,
+  ETRF2014/2020 with ETRF2000): move the chunk into the system of the first, or make it first. The ties and the stable
+  heights accept such a pair, with a note in the log, because they move a few points by the program's own route
+  ([Ties](ties.md)); here every pixel would be warped by PROJ's approximation, centimetres to a metre
+  off, with nothing to show it;
 * an **area** for a chunk (optional): select its row, then *Draw the area* (a polygon on the 2D view) or *Area from a
   layer...* (the polygons of one of its layers of free drawings: a colour mask, a drawing). Inside its area the chunk
   wins over the list; where areas overlap, the first area in the order of the list wins. *Remove the area* takes it

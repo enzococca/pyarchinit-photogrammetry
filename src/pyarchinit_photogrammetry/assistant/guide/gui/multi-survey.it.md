@@ -71,6 +71,11 @@ sopra restano com'erano, bit per bit); la nuvola di prima resta fra le versioni,
 correzione. *Ricostruisci il DEM dalla nuvola corretta* costruisce anche una nuova versione del DEM, con la cella di
 quello esistente. Una nuvola già corretta non si corregge due volte.
 
+Anche il [plugin Relitto](../plugins/shipwreck.md#lacqua) può correggere le quote delle sue sezioni sotto un livello. Con un
+modello costruito dalla nuvola corretta lascia spenta quella correzione, altrimenti il fondo viene corretto due volte e
+finisce sotto la sua profondità vera (dalla versione 0.5.0 il plugin chiede prima, quando la nuvola attiva del chunk è
+una versione corretta).
+
 !!! warning "Limiti"
     * La correzione è **parassiale**: vale per foto quasi verticali. Le foto oblique attraverso l'acqua richiedono una
       correzione raggio per raggio, che questa non è.
@@ -90,8 +95,11 @@ volta agganciati in un sistema solo possono dare un'ortofoto o un DEM unico. *St
 * l'**elenco** dei chunk: spunta quelli da unire (si possono spuntare solo i chunk che hanno il prodotto). L'ordine è la
   **priorità** (*Su*, *Giù*): dove due chunk hanno dati vince il primo. Il **sistema** del prodotto unito è quello del
   primo chunk; un chunk in un sistema locale con uno in un sistema del mondo viene rifiutato, come per i legami, e così
-  una coppia di sistemi che solo una trasformazione approssimata di PROJ unirebbe (porta il chunk nel sistema del primo,
-  o mettilo primo);
+  una coppia di sistemi che solo una trasformazione approssimata di PROJ unirebbe (ITRF2020 con un altro sistema,
+  ETRF2014/2020 con ETRF2000): porta il chunk nel sistema del primo, o mettilo primo. I legami e le quote stabili
+  accettano una coppia così, con una nota nel log, perché spostano pochi punti per la strada del programma
+  ([Legami](ties.md)); qui ogni pixel sarebbe spostato dall'approssimazione di PROJ, da centimetri a un metro, senza
+  che niente lo mostri;
 * un'**area** per un chunk (facoltativa): seleziona la sua riga, poi *Disegna l'area* (un poligono sulla vista 2D) o
   *Area da un layer...* (i poligoni di uno dei suoi layer di disegni liberi: una maschera dal colore, un disegno).
   Dentro la sua area il chunk vince sull'elenco; dove le aree si sovrappongono vince la prima nell'ordine dell'elenco.
