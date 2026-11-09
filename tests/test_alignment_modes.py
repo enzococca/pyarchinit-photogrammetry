@@ -223,6 +223,8 @@ def test_photos_added_to_an_alignment(scene_dir, tmp_path):
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     ch.update_transform()
     before = {c.label: ch.to_world(c.center) for c in ch.aligned_cameras}
+    first_id = ch.meta["alignment_id"]
+    inside = {c.label: np.array(c.center) for c in ch.aligned_cameras}
     rest = len(photos) - 14
     ch.add_photos(photos[14:])
     ch.detect_markers("aruco_4x4_50")
@@ -231,6 +233,10 @@ def test_photos_added_to_an_alignment(scene_dir, tmp_path):
     assert info["continued"] and len(info["added"]) == rest
     assert info["pairs"] == rest * 14 + rest * (rest - 1) // 2  # the pairs with a new photo
     assert ch.align_cameras(reset=False, use_gps=False) == len(photos) and info["mapper"] == "incremental"
+    # the block continued is scaled and moved again by COLMAP: another internal frame, a new alignment for what was
+    # placed in the old one without photos (the ends of ties, engine/ties.py)
+    moved = max(np.linalg.norm(np.array(c.center) - inside[c.label]) for c in ch.aligned_cameras if c.label in inside)
+    assert ch.meta["alignment_id"] != first_id and moved > 0.05
     report = ch.update_transform()
     after = {c.label: ch.to_world(c.center) for c in ch.aligned_cameras}
     assert len(after) == len(photos) and report["control_rmse"] < 0.002  # as accurate as a fresh alignment
