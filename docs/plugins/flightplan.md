@@ -74,7 +74,7 @@ spec sheets. A camera that is not in the list is never invented; take it:
 - **By hand...**: sensor width and height in mm, focal length in mm, pixels on the long side. The fields start from
   the camera chosen in the list.
 
-**High resolution** uses the high-resolution mode of the cameras that have one (48 or 50 MP); **Battery** is the
+**High resolution** uses the high-resolution mode of the cameras that have one (48, 50 or 100 MP, as the camera list says); **Battery** is the
 minutes of flight you count on for one battery: a plan longer than that is split into legs.
 
 ### 3. Parameters
@@ -117,7 +117,7 @@ takeoff), kept between 10 m and 500 m above the takeoff.
   difference measured where both exist; if the two never overlap under the flight the project DEM is left out (heights
   of different references are not mixed) and a warning says so.
 - **Public tiles (network)**: the free terrain tiles of AWS (Terrain Tiles, Mapzen terrarium), with a detail of
-  *normale*, *fine* or *finissimo*. They need the network; they are kept in a cache.
+  *Normal detail*, *Fine detail* or *Finest detail*. They need the network; they are kept in a cache.
 - **Remove** goes back to one height per block.
 
 The takeoff is measured with the same source as the waypoints; a takeoff farther than 2000 m from the flight is
@@ -137,7 +137,7 @@ percentile, the share of the area under the **Threshold** (5 photos by default),
 - The coverage is the truth to look at before flying: where the terrain rises or the strips are short it shows the
   overlap the plan really gives.
 - **Limits**: there is **no occlusion** - walls and trees do not hide the ground behind them. Cells outside the DEM are
-  taken **flat at the takeoff**. A plan changed after the computation makes the coverage *Da rifare* (to do again).
+  taken **flat at the takeoff**. A plan changed after the computation makes the coverage *To do again*.
 
 ### 7. Targets
 
@@ -155,7 +155,8 @@ down.
 ### 8. Export
 
 Choose the format and press **Export...**; **Excel sheet** and **HTML sheet** write the flight sheet; **Open in QGIS**
-opens the plan in QGIS. The same formats are in *File > Export* of the program. Formats that hold one leg write **one
+opens the plan in QGIS. *File > Export* of the program has five of them - the DJI KMZ, the QGroundControl plan, the
+Litchi CSV, the GeoPackage and the Excel sheet; the other formats are here and on the command line. Formats that hold one leg write **one
 file per leg** next to the name you chose (or a zip). See [Exports per drone family](#exports).
 
 **Copy into DJI Fly...** puts the legs into the missions of DJI Fly on the remote controller (see [DJI Fly](#djifly)).
@@ -171,18 +172,18 @@ Add the photos of the flight to the chunk (*File > Add photos*), then **Compare*
   offset in plan and, for DJI drones, the median height difference (from the `RelativeAltitude` of DJI's XMP; other
   drones give no height difference).
 - The red layer *Piano di volo: scatti mancanti* shows the missing shots; in the workspace tree the plan gets a child
-  *Confronto con il volo* (double click: the plan active, the obtained coverage shown, the pane opened).
+  *Comparison with the flight* (double click: the plan active, the obtained coverage shown, the pane opened).
 - The positions are the program's camera references: EXIF GPS, a positions file, PPK. With RTK/PPK the offsets are
   real; with a plain GPS (± 5 m) the median offset is mostly the GPS error.
 - **Coverage obtained**: with the photos **aligned** and a projected system, the plugin counts how many aligned photos
-  see each cell, on the grid of the predicted coverage; **Show the coverage obtained** shows it. *Celle peggio del
-  previsto* (cells worse than predicted) = predicted at or above the threshold and obtained under it. Cells outside the
+  see each cell, on the grid of the predicted coverage; **Show the coverage obtained** shows it. *Cells worse than
+  predicted* = predicted at or above the threshold and obtained under it. Cells outside the
   reconstruction are **not measured**: their number is given, and they are left without a value on the map.
 - **Limits**: the obtained coverage has no occlusion either, and it has been tested only on synthetic data, never on a
-  real aligned flight yet. The comparison becomes *Da rifare* when the plan or the photos change (added, moved, aligned
+  real aligned flight yet. The comparison becomes *To do again* when the plan or the photos change (added, moved, aligned
   again, switched off), after a new alignment, a new DEM or new positions.
 
-The flight sheet (Excel/HTML) gets a *Confronto* page while the comparison is current.
+The flight sheet (Excel/HTML) gets a *Comparison* page while the comparison is current.
 
 ## Exports per drone family { #exports }
 
@@ -196,7 +197,7 @@ plan that follows the terrain keeps **one height per point** in every drone form
 | QGroundControl `.plan` | ArduPilot and PX4 drones, QGroundControl | items frame 3 (`MAV_FRAME_GLOBAL_RELATIVE_ALT`), `AltitudeMode` 1, `globalPlanAltitudeMode` 1 |
 | Mission Planner `.waypoints` | ArduPilot, Mission Planner | the `.plan` commands, frame 3; home row at the takeoff with altitude 0 |
 | Parrot `.mavlink` | Anafi, Anafi USA, Anafi Ai (FreeFlight 7, GroundSDK) | frame 3 |
-| Litchi CSV | DJI drones without waypoints in DJI Fly (Mini 2, Air 2, Mavic 2, Phantom 4) | `altitudemode` 0 (above the takeoff) |
+| Litchi CSV | DJI drones without waypoints in DJI Fly (Mini 2, Air 2S, Mavic 2, Phantom 4...) | `altitudemode` 0 (above the takeoff) |
 | KML of the plan | Google Earth, QGIS | `altitudeMode` `absolute` = ground of the takeoff + height above the takeoff; the takeoff height and its source written in the file (0, with a note, when unknown) |
 | GeoJSON of the plan | GIS | z = height above the takeoff, `riferimento_quote` = `decollo` |
 | GeoPackage of the plan | GIS, in the chunk's system | `quota_decollo_m` = height above the takeoff; Z = ground of the takeoff + it in the height system of the DEM used; a `riferimento_quote` column says which |
@@ -222,7 +223,7 @@ How to load them (the steps of the apps may change with their versions):
 - **Litchi** (iOS, Android): import the CSV in the Litchi Mission Hub (on the web), save the mission, open it in the
   app.
 - **QGroundControl**: in the *Plan* view, *File > Open*, choose the `.plan`, then upload it to the vehicle.
-- **Mission Planner**: *Flight Plan > Load WP File*, choose the `.waypoints`, then *Write WPs*.
+- **Mission Planner**: *Plan > Load WP File*, choose the `.waypoints`, then *Write WPs*.
 - **Parrot**: FreeFlight 7 imports the `.mavlink` from the share sheet of the phone or tablet; GroundSDK loads it
   directly.
 
@@ -269,7 +270,9 @@ ppg plugin flightplan design --coords "lat,lon;lat,lon;lat,lon" --plan piano.jso
 `--exif PHOTO`, or `--manual NAME,WIDTH_MM,HEIGHT_MM,FOCAL_MM,PIXELS`; `--mode per_punto|intervallo`; `--obliques` /
 `--no-obliques`. `--format` is one of `kmz`, `kmz-zip`, `djifly-zip`, `plan`, `waypoints`, `mavlink`, `litchi`, `kml`,
 `geojson`, `gpkg`, `area-kml`, `sheet-xlsx`, `sheet-html`, `maps-zip`. `--id` chooses a plan of the project (default
-the active one); `--plan FILE` works on a plan JSON file instead (a plan JSON of the Photo3D planner loads as it is).
+the active one); `--plan FILE` works on a plan JSON file instead, for `design`, `show`, `terrain`, `targets`, `export`, `djifly` (and
+`add` puts that file into the project); a plan JSON of the Photo3D planner loads as it is. `coverage` refuses `--plan`
+(the coverage is kept in the project), and `compare`, `list`, `use` and `remove` work on the project only.
 
 ## Files
 

@@ -74,7 +74,7 @@ tecniche. Una camera che non è nell'elenco non si inventa mai; prendila:
 - **A mano...**: larghezza e altezza del sensore in mm, focale in mm, pixel sul lato lungo. I campi partono dalla camera
   scelta nell'elenco.
 
-**Alta risoluzione** usa la modalità ad alta risoluzione delle camere che l'hanno (48 o 50 MP); **Batteria** sono i
+**Alta risoluzione** usa la modalità ad alta risoluzione delle camere che l'hanno (48, 50 o 100 MP, come dice l'elenco delle camere); **Batteria** sono i
 minuti di volo su cui conti per una batteria: un piano più lungo si divide in tratte.
 
 ### 3. Parametri
@@ -118,7 +118,7 @@ stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - su
   mediano misurato dove ci sono entrambi; se i due non si sovrappongono mai sotto il volo il DEM del progetto resta fuori
   (quote di riferimenti diversi non si mescolano) e un avviso lo dice.
 - **Tegole pubbliche (rete)**: le tegole libere del terreno di AWS (Terrain Tiles, terrarium di Mapzen), con dettaglio
-  *normale*, *fine* o *finissimo*. Serve la rete; restano in una cache.
+  *Dettaglio normale*, *Dettaglio fine* o *Dettaglio finissimo*. Serve la rete; restano in una cache.
 - **Togli** torna a una quota per blocco.
 
 Il decollo si misura con la stessa sorgente dei waypoint; un decollo a più di 2000 m dal volo si ignora. Quando
@@ -155,7 +155,8 @@ base: da lì un target A4 si legge) e fa una scala di foto con la camera dritta 
 ### 8. Esporta
 
 Scegli il formato e premi **Esporta...**; **Scheda Excel** e **Scheda HTML** scrivono la scheda del volo; **Apri in
-QGIS** apre il piano in QGIS. Gli stessi formati sono in *File > Esporta* del programma. I formati che contengono una
+QGIS** apre il piano in QGIS. *File > Esporta* del programma ne ha cinque - il KMZ DJI, il piano QGroundControl, il CSV
+di Litchi, il GeoPackage e la scheda Excel; gli altri formati sono qui e sulla riga di comando. I formati che contengono una
 tratta scrivono **un file per tratta** accanto al nome scelto (o uno zip). Vedi [Esportazioni per famiglia di
 droni](#exports).
 
@@ -198,7 +199,7 @@ piano che segue il terreno tiene **una quota per punto** in tutti i formati per 
 | QGroundControl `.plan` | droni ArduPilot e PX4, QGroundControl | item frame 3 (`MAV_FRAME_GLOBAL_RELATIVE_ALT`), `AltitudeMode` 1, `globalPlanAltitudeMode` 1 |
 | Mission Planner `.waypoints` | ArduPilot, Mission Planner | i comandi del `.plan`, frame 3; riga home al decollo con quota 0 |
 | Parrot `.mavlink` | Anafi, Anafi USA, Anafi Ai (FreeFlight 7, GroundSDK) | frame 3 |
-| Litchi CSV | droni DJI senza waypoint in DJI Fly (Mini 2, Air 2, Mavic 2, Phantom 4) | `altitudemode` 0 (sul decollo) |
+| Litchi CSV | droni DJI senza waypoint in DJI Fly (Mini 2, Air 2S, Mavic 2, Phantom 4...) | `altitudemode` 0 (sul decollo) |
 | KML del piano | Google Earth, QGIS | `altitudeMode` `absolute` = suolo al decollo + quota sul decollo; la quota del decollo e la sua sorgente scritte nel file (0, con una nota, se non si conosce) |
 | GeoJSON del piano | GIS | z = quota sul decollo, `riferimento_quote` = `decollo` |
 | GeoPackage del piano | GIS, nel sistema del chunk | `quota_decollo_m` = quota sul decollo; Z = suolo al decollo + quella, nel sistema di quote del DEM usato; una colonna `riferimento_quote` dice quale |
@@ -222,7 +223,7 @@ Come caricarli (i passi delle app possono cambiare con le loro versioni):
 - **DJI Fly** (Mini 4 Pro e i droni con waypoint in DJI Fly): DJI Fly non importa file - vedi [DJI Fly](#djifly).
 - **Litchi** (iOS, Android): importa il CSV nel Mission Hub di Litchi (sul web), salva la missione, aprila nell'app.
 - **QGroundControl**: nella vista *Plan*, *File > Open*, scegli il `.plan`, poi caricalo sul drone.
-- **Mission Planner**: *Flight Plan > Load WP File*, scegli il `.waypoints`, poi *Write WPs*.
+- **Mission Planner**: *Plan > Load WP File*, scegli il `.waypoints`, poi *Write WPs*.
 - **Parrot**: FreeFlight 7 importa il `.mavlink` dal menu Condividi del telefono o del tablet; GroundSDK lo carica
   direttamente.
 
@@ -269,8 +270,10 @@ ppg plugin flightplan design --coords "lat,lon;lat,lon;lat,lon" --plan piano.jso
 oppure `--exif FOTO`, oppure `--manual NOME,LARGHEZZA_MM,ALTEZZA_MM,FOCALE_MM,PIXEL`; `--mode per_punto|intervallo`;
 `--obliques` / `--no-obliques`. `--format` è uno fra `kmz`, `kmz-zip`, `djifly-zip`, `plan`, `waypoints`, `mavlink`,
 `litchi`, `kml`, `geojson`, `gpkg`, `area-kml`, `sheet-xlsx`, `sheet-html`, `maps-zip`. `--id` sceglie un piano del
-progetto (di base quello attivo); `--plan FILE` lavora invece su un file JSON del piano (un piano JSON del pianificatore
-di Photo3D si carica così com'è).
+progetto (di base quello attivo); `--plan FILE` lavora invece su un file JSON del piano, per `design`, `show`, `terrain`,
+`targets`, `export`, `djifly` (e `add` mette quel file nel progetto); un piano JSON del pianificatore di Photo3D si
+carica così com'è. `coverage` rifiuta `--plan` (la copertura resta nel progetto), e `compare`, `list`, `use` e `remove`
+lavorano solo sul progetto.
 
 ## File
 
