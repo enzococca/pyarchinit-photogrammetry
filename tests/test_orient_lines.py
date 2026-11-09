@@ -405,3 +405,20 @@ def test_a_file_in_another_system_is_put_in_the_chunks(tmp_path):
     with pytest.raises(OrientLinesError) as exc:
         orient_lines.lines_from_file(bare, chunk=a)
     assert "sistema" in exc.value.italian
+
+
+@pytest.mark.parametrize("iso", [1.0, 1.5])
+def test_seams_between_traced_frames_are_never_paired_with_their_ends(iso):
+    """Frame polygons with loose seam lines across them: the ends of the frames belong to the frames, a seam never pairs
+    with one of them (with ``pair_isolation`` 1 a seam 0.1 m from the frames' ends made a false strake)."""
+    polys = [np.array([(0.4 * k, 0.1), (0.4 * k + 0.12, 0.1), (0.4 * k + 0.12, 1.0), (0.4 * k, 1.0), (0.4 * k, 0.1)])
+             for k in range(10)]
+    seams = [np.array([(0.0, t), (3.9, t)]) for t in (0.2, 0.8)]  # 0.1 and 0.2 m from the frames' ends
+    r = orient_lines.classify(polys + seams, axis=((0, 0), (1, 0)), params={"pair_isolation": iso})
+    assert r.counts() == {"along": 2, "across": 0, "pair_along": 0, "pair_across": 10, "other": 0}, r.counts()
+    assert sorted(round(e.offset, 3) for e in r.elements if e.group == "along") == [0.2, 0.8]
+    # a seam lying on the frames' ends (drawn on their edge) is still a seam, the frames still four edges each
+    r = orient_lines.classify(polys + [np.array([(0.0, 1.0), (3.9, 1.0)])], axis=((0, 0), (1, 0)),
+                              params={"pair_isolation": iso})
+    assert r.counts()["pair_across"] == 10 and r.counts()["along"] == 1, r.counts()
+    assert all(len(e.segments) == 4 for e in r.elements if e.group == "pair_across")

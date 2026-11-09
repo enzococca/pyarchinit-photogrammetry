@@ -761,7 +761,7 @@ coppia), `angle`, `offset` (di traverso), `length`.
 
 I pezzi di una linea disegnata restano una linea. Pezzi separati si uniscono quando angolo, scarto laterale e
 distanza stanno entro `join_deg`, `join_offset` e `join_gap`; una linea disegnata andata e ritorno su se stessa sono
-due. Coppie: prima i due lati di un poligono chiuso (gli altri lati dentro la coppia ne fanno parte); poi una linea più vicina di `pair_min` e di `join_offset` a
+due. Coppie: prima i due lati di un poligono chiuso (gli altri lati dentro la coppia ne fanno parte, mai in coppia con una linea sciolta); poi una linea più vicina di `pair_min` e di `join_offset` a
 un'altra (disegnata due volte, un lato in comune) conta una volta con quella; poi le linee sciolte, le più vicine per
 prime, se ognuna è la più vicina dell'altra e la successiva linea dello stesso gruppo accanto a ognuna è almeno
 `pair_isolation` (1,5) volte più lontana, così le linee a passo regolare non diventano coppie. Le linee di traverso

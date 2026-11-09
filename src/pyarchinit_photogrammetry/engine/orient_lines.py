@@ -600,6 +600,9 @@ def _pairs(units: list[_Unit], frame: _Frame, p: dict, closed: set) -> tuple[lis
     # 1. the two sides of one closed polygon
     take([(d, i, j, c) for (i, j), (d, c) in info.items()
           if d <= p["pair_max"] and src_of[i] is not None and src_of[i] == src_of[j] and src_of[i] in closed])
+    # the other edges of a polygon whose element is formed (its ends): part of it, never paired with a loose line
+    formed = {src_of[i] for i, _j, _d, _c in out}
+    part = {k for k in range(n) if k not in used and all(sg.source in formed for sg in units[k].segs)}
     # 2. a line closer than pair_min to another counts once: with the line of a pair, or with the longer one
     host: dict = {}
 
@@ -609,13 +612,15 @@ def _pairs(units: list[_Unit], frame: _Frame, p: dict, closed: set) -> tuple[lis
         return k
 
     for _d, i, j in sorted(coincident):
+        if i in part or j in part:
+            continue
         a, b = root(i), root(j)
         if a == b or (a in used and b in used):
             continue
         if b in used or (a not in used and units[b].length > units[a].length):
             a, b = b, a
         host[b] = a
-    gone = set(host)
+    gone = set(host) | part
     # 3. the loose lines, nearest first
     cands = []
     for (i, j), (dist, corners) in info.items():
