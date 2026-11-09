@@ -273,7 +273,7 @@ su un telecomando vero**.
 
 ```bash
 ppg plugin flightplan cameras                                   # le camere dell'elenco
-ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain
+ppg plugin flightplan design scavo.ppg --area area.kml --goal orto --value 2 --terrain   # --battery 18 (minuti), --low-res, --name
 ppg plugin flightplan design scavo.ppg --xy "x,y;x,y;x,y" --camera mini4pro --margin 10 --double
 ppg plugin flightplan design scavo.ppg --bbox O,S,E,N --exif foto.jpg --takeoff LAT,LON
 ppg plugin flightplan show scavo.ppg                            # i numeri del piano (JSON)
@@ -282,9 +282,9 @@ ppg plugin flightplan targets scavo.ppg --csv target.csv --epsg 3003 --metres 10
 ppg plugin flightplan targets scavo.ppg --markers               # --estimated, --remove, --tiles (suolo sulle tegole)
 ppg plugin flightplan coverage scavo.ppg --cell 0.5 --low 5
 ppg plugin flightplan export scavo.ppg --format kmz-zip --out volo.zip
-ppg plugin flightplan djifly scavo.ppg --zip pronte.zip --missions UUID,UUID
+ppg plugin flightplan djifly scavo.ppg --zip pronte.zip --missions UUID,UUID   # --folder: la cartella dei waypoint; --overwrite: anche le tue missioni (copia tenuta)
 ppg plugin flightplan compare scavo.ppg --max-distance 3
-ppg plugin flightplan list scavo.ppg                            # use ID, remove ID, add --plan piano.json
+ppg plugin flightplan list scavo.ppg                            # use ID, remove ID, add --plan piano.json; show, export, djifly: --plan-id ID sceglie un piano
 ppg plugin flightplan design --coords "lat,lon;lat,lon;lat,lon" --plan piano.json   # senza progetto
 ```
 
