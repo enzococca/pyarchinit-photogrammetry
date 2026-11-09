@@ -568,6 +568,33 @@ def test_a_plugin_change_of_chunk_meta_is_undone(window):
     assert ch.meta["fake_plugin"] == {"n": 2, "names": ["a"]}
 
 
+def test_a_plugin_change_marked_while_a_processing_step_ends_is_no_entry(window):
+    """What ``MainWindow.mark_modified`` says: marked while a processing step ends (its save and refresh, here a plugin
+    refreshing a cache of its own on ``refreshed``) the change is a part of the processing, not an edit - no entry of
+    Modifica > Annulla; marked by itself in a later turn it is one, "Dati dei plugin"."""
+    w, app = window
+    ch = w.chunk
+
+    def on_refresh():
+        ch.meta["fake_cache"] = {"runs": ch.meta.get("fake_cache", {}).get("runs", 0) + 1}
+        w.mark_modified()
+
+    w.refreshed.connect(on_refresh)
+    try:
+        app.processEvents()
+        entries = len(w.history.entries)
+        w.run_task("Prova di elaborazione", lambda progress: None)
+        w.runner.wait()
+        app.processEvents()
+        assert ch.meta["fake_cache"]["runs"] >= 1
+        assert len(w.history.entries) == entries and w.history.unchanged()  # the history starts from it
+    finally:
+        w.refreshed.disconnect(on_refresh)
+    ch.meta["fake_cache"] = {"runs": 0}
+    w.mark_modified()
+    assert len(w.history.entries) == entries + 1 and w.a_undo.text() == "Annulla: Dati dei plugin"
+
+
 def test_a_window_without_a_document_closes(window):
     """A script or a plugin's test took the document away (``application.document = None``): the window still closes,
     the copies of the steps of the history it can reach are let go."""
