@@ -8,9 +8,12 @@ from the RTCM 10403 layout - under a ``.DAT`` name. They show that a file made o
 that is not is refused; they say nothing of a real D-RTK file."""
 from __future__ import annotations
 
+import binascii
 import gzip
 import os
 import random
+import struct
+import zlib
 import threading
 import time
 from datetime import datetime
@@ -18,8 +21,9 @@ from pathlib import Path
 
 import pytest
 
+import convbin_helpers as ubx
 from pyarchinit_photogrammetry import _native
-from pyarchinit_photogrammetry.gnss import convert
+from pyarchinit_photogrammetry.gnss import convert, events, rinex
 
 DATA = Path(__file__).parent / "data" / "gnss" / "phase4"
 CRINEX = Path(__file__).parent / "data" / "crinex" / "kraw_rinex402.crx"
@@ -325,3 +329,139 @@ def test_rinex_given_as_it_is(tmp_path, cache):
     assert done.epochs is None and done.events is None
     assert done.span[0] < done.span[1]
     assert not cache.exists() or not any(cache.iterdir())
+
+
+# --- RTCM 3 MSM written by receivers of before the standard, events counted, logs named (real-data trials) --------
+
+
+def _msm(message: int, epoch_ms: int, multiple: int = 1) -> bytes:
+    """An MSM frame without satellites: DF002 type, DF003 station, the epoch time (30 bits), the multiple message bit,
+    IODS, reserved, clock steering, external clock, smoothing and its interval, then the satellite and signal masks
+    (64 and 32 bits, all zero: no cells)."""
+    return _frame(_bits([(message, 12), (611, 12), (epoch_ms, 30), (multiple, 1), (0, 3), (0, 7), (0, 2), (0, 2),
+                         (0, 1), (0, 3), (0, 64), (0, 32)]))
+
+
+def _msm_epoch(frame: bytes) -> int:
+    return (int.from_bytes(frame[3:11], "big") >> 10) & ((1 << 30) - 1)
+
+
+def test_beidou_msm_in_gps_time_found_and_moved(tmp_path):
+    """Three epochs whose BeiDou MSM carry the GPS time of the epoch (a receiver of 2012): told, and a copy with the
+    BeiDou epochs 14 s back and their CRC right, every other byte the same. The standard (14 s behind) is not touched."""
+    tows = (86_398_000, 86_399_000, 86_400_000)
+    pre = b"".join(_msm(1077, t) + _msm(1087, 5_000) + _msm(1127, t, 0) for t in tows)
+    survey = convert.rtcm3_survey(_write_bytes(tmp_path / "pre.rtcm3", pre))
+    assert survey["bds_gps_time"] == 3 and survey["bds_standard"] == 0 and survey["types"][1127] == 3
+    moved = tmp_path / "moved.rtcm3"
+    assert convert._bds_moved_copy(tmp_path / "pre.rtcm3", moved) == 3
+    frames = list(convert.rtcm3_frames(moved.read_bytes()))
+    assert [m for m, _o, _s in frames] == [1077, 1087, 1127] * 3  # every CRC right
+    data = moved.read_bytes()
+    bds = [_msm_epoch(data[o:o + n]) for m, o, n in frames if m == 1127]
+    assert bds == [t - 14_000 for t in tows]
+    assert data != pre and len(data) == len(pre)
+    standard = b"".join(_msm(1077, t) + _msm(1127, t - 14_000, 0) for t in tows)
+    survey = convert.rtcm3_survey(_write_bytes(tmp_path / "std.rtcm3", standard))
+    assert survey["bds_gps_time"] == 0 and survey["bds_standard"] == 3 and survey["repeated"] == 0
+    # every MSM saying it ends its epoch: RTKLIB writes an epoch for each, the same time repeated
+    repeated = b"".join(_msm(1077, t, 0) + _msm(1127, t - 14_000, 0) for t in tows)
+    assert convert.rtcm3_survey(_write_bytes(tmp_path / "rep.rtcm3", repeated))["repeated"] == 3
+    assert convert._msm_low_only({1071: 3, 1121: 3, 1019: 2}) == [1071, 1121]
+    assert convert._msm_low_only({1071: 3, 1074: 1}) is None and convert._msm_low_only({1004: 3, 1071: 1}) is None
+
+
+def _write_bytes(path: Path, data: bytes) -> Path:
+    path.write_bytes(data)
+    return path
+
+
+@pytest.mark.skipif(not CORE, reason="native core 0.8 needed")
+def test_gmsd7_beidou_moved_keeps_every_system(tmp_path, cache):
+    """The RTKLIB sample GMSD7 (Trimble NetR9, 2012) writes its BeiDou MSM in GPS time: converted as it is RTKLIB
+    keeps BeiDou alone, 14 s late; from the moved copy every system, from 23:59:44."""
+    done = convert.to_rinex(DATA / "GMSD7_20121014_64k.rtcm3", cache, approx_time=DAY_GMSD7)
+    info = rinex.header(done.obs)
+    assert set(rinex._obs_types(rinex._header_lines(done.obs), info.version)) >= {"G", "R", "C"}
+    assert info.first == datetime(2012, 10, 13, 23, 59, 44)
+    assert any("BeiDou MSM of the log carry their epoch in GPS time" in w for w in done.warnings)
+    logs = [line for line in rinex._header_lines(done.obs) if line[:60].strip().startswith("log:")]
+    assert logs and all(line[:60].split("log:")[1].strip() == "GMSD7_20121014_64k.rtcm3" for line in logs)
+
+
+@pytest.mark.skipif(not CORE, reason="native core 0.8 needed")
+def test_msm1_to_3_refused_by_name(tmp_path, cache):
+    path = _write_bytes(tmp_path / "low.rtcm3", b"".join(_msm(1071, t) + _msm(1121, t - 14_000, 0)
+                                                         for t in range(86_390_000, 86_400_000, 1000)))
+    with pytest.raises(ValueError, match="MSM1-3 only.*1071, 1121.*MSM4 or MSM7"):
+        convert.to_rinex(path, cache, approx_time=DAY_GMSD7)
+
+
+@pytest.mark.skipif(not CORE, reason="native core 0.8 needed")
+def test_events_counted_in_the_rinex_and_log_named_without_folder(tmp_path, cache):
+    """A time mark between two raw epochs and none after: one event (convrnx counts one more when a time mark ends its
+    scan); the header names the log, not its folder."""
+    data = (DATA / "ubx_20080526_64k.ubx").read_bytes()
+    epochs = ubx.raw_epochs(data)
+    week, tow = epochs[len(epochs) // 2][1:]
+    log = tmp_path / "deep" / "folder" / "rover.ubx"
+    log.parent.mkdir(parents=True)
+    log.write_bytes(ubx.insert_time_marks(data, [ubx.tim_tm2(week, tow + 0.25, count=1)],
+                                          [week * ubx.WEEK + tow + 0.25]))
+    done = convert.to_rinex(log, cache)
+    assert done.events == 1 == len(events.rinex_events(done.obs).shots)
+    logs = [line[:60] for line in rinex._header_lines(done.obs) if "log:" in line[:60]]
+    assert logs and all(line.split("log:")[1].strip() == "rover.ubx" for line in logs)
+    # a log ending with a time mark (TIM-TM2 after the last epoch): still the events written
+    last = tmp_path / "last.ubx"
+    week, tow = epochs[-1][1:]
+    last.write_bytes(data + ubx.tim_tm2(week, tow + 0.1, count=1))
+    assert convert.to_rinex(last, cache).events == len(events.rinex_events(convert.to_rinex(last, cache).obs).shots)
+
+
+def _sbf(block_id: int, body: bytes) -> bytes:
+    """A Septentrio SBF block: "$@", CRC-16-CCITT of the rest, the ID, the length (a multiple of 4), the body."""
+    length = 8 + len(body) + (-(8 + len(body)) % 4)
+    rest = struct.pack("<HH", block_id, length) + body + bytes(length - 8 - len(body))
+    return b"$@" + struct.pack("<H", binascii.crc_hqx(rest, 0)) + rest
+
+
+def _unicore(message: int, body: bytes) -> bytes:
+    """A Unicore binary message: 0xAA 0x44 0xB5, a 24-byte header (bytes 4-5 the message ID, 6-7 the length of the
+    body), the body and the CRC-32 (NovAtel's: reflected 0xEDB88320, from 0) of header and body."""
+    header = b"\xaa\x44\xb5\x00" + struct.pack("<HH", message, len(body)) + bytes(16)
+    crc = zlib.crc32(header + body, 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return header + body + struct.pack("<I", crc)
+
+
+def _rt17(kind: int, data: bytes) -> bytes:
+    """A Trimble RT-17 packet: STX, status, type, length, data, checksum (sum of status to data), ETX."""
+    body = bytes([0, kind, len(data)]) + data
+    return b"\x02" + body + bytes([sum(body) & 0xFF]) + b"\x03"
+
+
+def test_other_receivers_told_by_content(tmp_path):
+    rng = random.Random(7)
+    sbf = _write_bytes(tmp_path / "a.bin", b"\x01\x02" + b"".join(_sbf(4027, rng.randbytes(40)) for _ in range(4)))
+    uni = _write_bytes(tmp_path / "b.bin", b"".join(_unicore(12, rng.randbytes(60)) for _ in range(4)))
+    rt17 = _write_bytes(tmp_path / "c.bin", b"".join(_rt17(0x57, rng.randbytes(30)) for _ in range(4)))
+    assert convert.raw_kind(sbf) == "sbf" and convert.raw_kind(uni) == "unicore" and convert.raw_kind(rt17) == "rt17"
+    broken = bytearray(sbf.read_bytes())
+    for k in (4, 52, 100, 148):  # a byte of every block changed: no CRC holds
+        broken[k + 10] ^= 0xFF
+    assert convert.raw_kind(_write_bytes(tmp_path / "d.bin", bytes(broken))) is None
+    # NovAtel (0xAA 0x44 0x12) is not told: its kind is given
+    assert convert.raw_kind(_write_bytes(tmp_path / "e.bin", b"\xaa\x44\x12" + rng.randbytes(500))) is None
+
+
+@pytest.mark.skipif(not CORE, reason="native core 0.8 needed")
+@pytest.mark.parametrize("kind", ["sbf", "unicore", "rt17"])
+def test_other_receivers_reach_their_decoders(tmp_path, cache, kind):
+    """Frames without observations: the decoder of the core is reached and finds nothing - a clear refusal."""
+    rng = random.Random(9)
+    frames = {"sbf": lambda: _sbf(4027, rng.randbytes(40)), "unicore": lambda: _unicore(12, rng.randbytes(60)),
+              "rt17": lambda: _rt17(0x57, rng.randbytes(30))}[kind]
+    path = _write_bytes(tmp_path / f"{kind}.bin", b"".join(frames() for _ in range(20)))
+    with pytest.raises(ValueError):
+        convert.to_rinex(path, cache, approx_time=DAY_GMSD7)
+    assert not [p for p in cache.rglob("*") if p.is_file()]

@@ -494,7 +494,8 @@ def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress)
         survey = rtcm3_survey(path) if kind == "rtcm3" else None
         source = path
         if survey and survey["bds_gps_time"] >= FRAMES_NEEDED and survey["bds_gps_time"] > survey["bds_standard"]:
-            source = part / f"{path.stem}.bds{path.suffix}"
+            (part / "moved").mkdir()
+            source = part / "moved" / path.name  # the name of the log, which RTKLIB writes in the RINEX header
             _bds_moved_copy(path, source)
             notes.append(BDS_GPS_TIME.format(name=path.name))
         if survey and survey["repeated"]:
@@ -533,7 +534,7 @@ def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress)
         meta.update(kind=kind, obs=obs.name, nav=nav.name if nav.exists() else None, message=result["message"],
                     notes=notes)
         if source != path:
-            source.unlink(missing_ok=True)
+            shutil.rmtree(source.parent, ignore_errors=True)
         (part / "convert.json").write_text(json.dumps(meta))
         progress.check()  # cancelled while it ran (a convbin program is not stopped): nothing kept
         try:
