@@ -404,8 +404,8 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
     lines an event announces are its, not records, and RTKLIB writes there the comment "Time mark is not valid" for a
     mark the receiver took without a valid GNSS fix (u-blox TIM-TM2 without its bit "time valid") -, and the number
     of the observation epoch RTKLIB gives it (from 0): the epoch whose record follows it, or the one before when the
-    event is earlier than that epoch (RTKLIB keeps one event per epoch). A file packed in layers is read through :func:`plain`; a navigation file is a
-    ``ValueError`` naming it."""
+    event is earlier than that epoch (RTKLIB keeps one event per epoch). A file packed in layers is read through
+    :func:`plain`; a navigation file is a ``ValueError`` naming it."""
     path = Path(path)
     info, _, leap, source = _read_header(path)
     if info.kind != "obs":
