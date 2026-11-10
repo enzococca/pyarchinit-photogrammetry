@@ -818,15 +818,67 @@ def test_persistent_step_still_splits_the_clock(tmp_path):
 @pytest.mark.parametrize("every, bad, off_ms", [(48, 3, 50), (48, 5, 150), (150, 1, 50)])
 def test_bad_fixes_of_sparse_logs(tmp_path, every, bad, off_ms):
     """Fixes logged once every 9.6 s (3 of them 50 ms early, or 5 of them 150 ms) or once every 30 s (1 of them):
-    the envelope leaves them out, the shots within 3 ms (a deterministic sawtooth, 200 ppm)."""
+    the envelope leaves them out, the shots within 3.5 ms (a deterministic sawtooth, 200 ppm)."""
     log, expected = flight(225, gps_hz=5, interval_ms=1777, sms="tick", drift_ppm=200.0, log_every=every, seed=2)
     rows = _gps_records(log)
     for j in range(bad):
         _shift_gms(log, rows[len(rows) // 2 + j], off_ms)
     shotset = autopilot.ardupilot(_write(tmp_path, log))
     errors = _errors(shotset, expected)
-    assert -0.003 <= errors.min() and errors.max() <= 0.002, errors
+    assert -0.0035 <= errors.min() and errors.max() <= 0.002, errors
     assert all(s.valid for s in shotset.shots)
+
+
+@pytest.mark.parametrize("bad", [3, 4])
+def test_bad_fixes_of_sparse_logs_within_the_spread(tmp_path, bad):
+    """Fixes logged once every 9.6 s, some 30 ms early (under ENVELOPE_SPREAD_S): the level lies under at least 3
+    fixes, so 3 of them move the shots by less than 4 ms; 4 of them make the level, the shots late by some 12 ms -
+    the limit of a sparse log - and the share of fixes above the clock says so."""
+    log, expected = flight(225, gps_hz=5, interval_ms=1777, sms="tick", drift_ppm=200.0, log_every=48, seed=2)
+    rows = _gps_records(log)
+    for j in range(bad):
+        _shift_gms(log, rows[len(rows) // 2 + j], 30)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert -0.003 <= errors.min() and errors.max() <= (0.004 if bad == 3 else 0.013), errors
+    assert any("above the clock" in w for w in shotset.warnings)
+
+
+@pytest.mark.parametrize("hz, ppm, bad, off_ms, spacing", [
+    (5, 300, 3, 12, 1), (5, 300, 3, 24, 1), (5, 300, 3, 36, 1), (1, 300, 3, 30, 1), (5, 50, 3, 30, 1),
+    (5, 300, 3, 30, 200), (1, 300, 3, 30, 40), (1, 300, 6, 30, 40)])
+def test_bad_fixes_within_the_spread_are_not_a_branch(tmp_path, hz, ppm, bad, off_ms, spacing):
+    """A few fixes 12-36 ms above the others (under ENVELOPE_SPREAD_S, so not left out as bad fixes) in a dense log,
+    together or 40 s apart: not a branch of the sawtooth one loop period above (too few, not spread, and the delays
+    under the level fill the loop period) - the shots as in a clean log (the rule of 3 fixes put 20 of these 60 shots
+    10-22 ms late)."""
+    log, expected = flight(60, gps_hz=hz, interval_ms=30_000, sms="tick", drift_ppm=float(ppm), seed=3)
+    rows = _gps_records(log)
+    for j in range(bad):
+        _shift_gms(log, rows[len(rows) // 2 + j * spacing], off_ms)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert np.abs(errors).max() <= TIME_TOL_S, errors
+    assert all(s.valid for s in shotset.shots)
+
+
+def test_envelope_takes_a_real_branch():
+    """Delays in clusters one loop period apart (as on a real 4.0.9 log, processing times of a CAN receiver): 2 % of
+    the fixes, spread over the window, caught the tick 20 ms above the main cluster, with an empty band between - the
+    level is that branch, not the 2 % quantile of the lower one; the same fixes bunched in 20 s are bad fixes."""
+    rng = np.random.default_rng(4)
+    t = np.sort(rng.uniform(0.0, 600.0, 600))
+    r = np.where(rng.uniform(size=600) < 0.45, -0.040, -0.020) + rng.uniform(-0.004, 0.004, 600)
+    top = rng.choice(600, 12, replace=False)
+    r[top] = rng.uniform(-0.001, 0.003, 12)
+    assert abs(autopilot._envelope_level(r, t)) <= 0.003
+    bunched = t.copy()
+    bunched[top] = np.linspace(300.0, 320.0, 12)
+    assert autopilot._envelope_level(r, bunched) <= -0.015
+    # the same branch above a sawtooth that fills the loop period: bad fixes, not a branch
+    r2 = rng.uniform(-0.040, -0.020, 600)
+    r2[top] = r[top]
+    assert autopilot._envelope_level(r2, t) <= -0.019
 
 
 @pytest.mark.parametrize("ppm", [5, 20, 50, 100, 150])

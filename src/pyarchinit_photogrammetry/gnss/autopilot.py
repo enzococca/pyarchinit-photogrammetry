@@ -35,7 +35,12 @@ one-sided - a fix is never processed before it arrives - and a sawtooth: the fix
 loop, a wait that drifts with the rate of the clock, so the offsets lie in branches 20 ms (:data:`LOOP_S`) apart, the
 highest being the fixes that caught the tick (no delay). The envelope (:func:`_envelope_level`) leaves out the fixes
 more than :data:`ENVELOPE_SPREAD_S` above the others (bad fixes), takes the level under all but 2 % of the rest (at
-least 3 fixes above it) and rises to the branch one loop period above when 3 fixes or more are there.
+least 3 fixes above it) and rises to the branch one loop period above only on the evidence a few bad fixes cannot
+give: at least :data:`BRANCH_SHARE` of the fixes (and 3), spread over :data:`BRANCH_SPREAD` of the window, above
+delays that leave a band of the loop period empty (:data:`BRANCH_GAP_S`; delays that fill it already hold the
+fixes that caught the tick). Bad fixes 10-40 ms high are so not taken for a branch in dense logs (synthetic, 1 and
+5 Hz, 3 or 6 of them, together or 40 s apart: the shots as without them); in a sparse log (a fix every 10 s) 4 of
+them in a window make the level, the shots late by some 10 ms, and the share of fixes above the clock says so.
 
 What it cannot see: when the clock of the autopilot runs within some 100 ppm of GPS time the wait for the loop
 changes so slowly that a window may hold no fix that caught the tick: the clock then sits on a lower branch and the
@@ -46,8 +51,8 @@ GPS time: 67 s at 300 ppm) gives it a little off, the times by some ms (80 s at 
 ``source["fixes_above"]`` is the share of the fixes within :data:`ABOVE_WINDOW_S` of a shot more than
 :data:`ABOVE_S` above its clock (fixes processed earlier than the clock says possible: a branch the envelope missed,
 or bad fixes), warned of over :data:`ABOVE_WARNING`. With too few fixes in a stretch the offsets of up to
-:data:`NEIGHBOURS` fixes each side are interpolated (their medians). Fixes before the receiver had a 3D fix (``Status`` < 3; < 2 when that leaves too few)
-are not used.
+:data:`NEIGHBOURS` fixes each side are interpolated (their medians). Fixes before the receiver had a 3D fix
+(``Status`` < 3; < 2 when that leaves too few) are not used.
 
 Which receiver: the clock of each physical receiver (``I`` 0, 1) is fitted from ALL its fixes, whether in use or not;
 a shot takes the receiver that was in use most (``U``), or another one when that one has no fixes around the shot;
@@ -66,8 +71,8 @@ What is not removed: the latency of the receiver from the epoch of a fix to its 
 the middle of the exposure likewise. On synthetic logs (see the tests): corrected SMS within 1.5 ms of the true time
 at 1-10 Hz, 50 and 3000 ppm clocks and outages; processing times at a 50 Hz loop within 3 ms when the clock is 50 ppm
 or more from GPS time, early by up to 20 ms, varying, nearer to it; a glitch of one fix (0.25-1 s) or a few bad fixes
-in sparse logs move no shot by more than 3 ms; 3.x logs that plus the 0-20 ms of the CAM writing. A real log with CAM
-and corrected SMS was not available."""
+in sparse logs move no shot by more than 3.5 ms (3 fixes 30 ms high: 4 ms); 3.x logs that plus the 0-20 ms of the
+CAM writing. A real log with CAM and corrected SMS was not available."""
 from __future__ import annotations
 
 import math
@@ -99,6 +104,10 @@ ENVELOPE_WINDOWS_S = (300.0, 600.0)  # processing times: the envelope of the fix
 MIN_ENVELOPE = 5  # the envelope from this many fixes (sparse logs: one fix a minute)
 ENVELOPE_TOP = 0.02  # ... the level under all but this share of them (at least ENVELOPE_LEAST) ...
 ENVELOPE_LEAST = 3
+BRANCH_SHARE = 0.01  # a branch one loop period above the level: at least this share of the fixes (and
+# ENVELOPE_LEAST) ...
+BRANCH_SPREAD = 0.25  # ... spread over this share of the window (a few bad fixes are not a branch) ...
+BRANCH_GAP_S = 0.005  # ... and the offsets in the loop period under the level leave a band this wide empty
 ENVELOPE_SPREAD_S = 0.040  # ... after those more than this above their median are left out (bad fixes: legitimate
 # delays of the processing span 20 ms at 50 Hz, up to some 40 ms with CAN receivers)
 LOOP_S = 0.020  # the period of the 50 Hz loop that processes the fixes: the branches of the sawtooth of delays
@@ -323,19 +332,27 @@ def _window(a: np.ndarray, knot: float, half: float) -> slice:
     return slice(int(np.searchsorted(a, center - half)), int(np.searchsorted(a, center + half, side="right")))
 
 
-def _envelope_level(r: np.ndarray) -> float:
-    """The level of the least delayed of the offsets ``r``: those more than :data:`ENVELOPE_SPREAD_S` above their
-    median left out (bad fixes), the level under all but :data:`ENVELOPE_TOP` of the others (at least
-    :data:`ENVELOPE_LEAST`), raised to the branch one loop period above it (:data:`LOOP_S`) when at least
-    :data:`ENVELOPE_LEAST` fixes are there: the fixes that caught the tick of the loop, the least delayed."""
-    r = r[r <= np.median(r) + ENVELOPE_SPREAD_S]
+def _envelope_level(r: np.ndarray, t: np.ndarray) -> float:
+    """The level of the least delayed of the offsets ``r`` of the fixes at the boot times ``t``: those more than
+    :data:`ENVELOPE_SPREAD_S` above their median left out (bad fixes), the level under all but :data:`ENVELOPE_TOP`
+    of the others (at least :data:`ENVELOPE_LEAST`), raised to the branch one loop period above it (:data:`LOOP_S`)
+    when that branch is a branch of the sawtooth, not a few bad fixes: at least :data:`ENVELOPE_LEAST` fixes and
+    :data:`BRANCH_SHARE` of them, spread over :data:`BRANCH_SPREAD` of the window - the fixes that caught the tick
+    of the loop, the least delayed."""
+    keep = r <= np.median(r) + ENVELOPE_SPREAD_S
+    r, t = r[keep], t[keep]
     above = max(ENVELOPE_LEAST, int(math.ceil(ENVELOPE_TOP * len(r))))
-    level = float(np.sort(r)[-above]) if len(r) > above else float(np.max(r))
+    level = float(np.sort(r)[-above - 1]) if len(r) > above else float(np.min(r))
+    least = max(ENVELOPE_LEAST, int(math.ceil(BRANCH_SHARE * len(r))))
+    span = float(np.ptp(t)) if len(t) else 0.0
     for _ in range(2):
-        branch = r[(r > level + LOOP_S / 2.0) & (r <= level + 1.5 * LOOP_S)]
-        if len(branch) < ENVELOPE_LEAST:
+        on = (r > level + LOOP_S / 2.0) & (r <= level + 1.5 * LOOP_S)
+        if np.count_nonzero(on) < least or float(np.ptp(t[on])) < BRANCH_SPREAD * span:
             break
-        level = float(np.median(branch))
+        below = np.sort(r[(r >= level - LOOP_S) & (r <= level)])
+        if float(np.max(np.diff(np.concatenate([[level - LOOP_S], below, [level]])))) < BRANCH_GAP_S:
+            break  # the delays under the level fill the loop period: the least delayed are already there
+        level = float(np.median(r[on]))
     return level
 
 
@@ -358,7 +375,7 @@ def _segment_model(a: np.ndarray, o: np.ndarray, envelope: bool) -> dict:
             sel = _window(a, knot, half)
             if sel.stop - sel.start >= least:
                 r = o[sel] - slope * (a[sel] - knot)
-                levels.append(_envelope_level(r) if envelope else float(np.median(r)))
+                levels.append(_envelope_level(r, a[sel]) if envelope else float(np.median(r)))
                 kept_k.append(knot)
                 break
     model.update(slope=slope, K=np.array(kept_k), L=np.array(levels))
