@@ -21,7 +21,8 @@ and a sequence of messages, each a header of 3 bytes (``msg_size`` uint16, ``msg
   ``P``/``Q`` parameters (and their defaults), ``L``/``C`` logged strings, ``S`` sync (8 magic bytes), ``O`` a
   dropout (``duration`` ms: data lost while the log could not write).
 - ``A`` a subscription: ``multi_id`` (the instance of the topic), ``msg_id`` and the topic name; ``R`` its end.
-- ``D`` data: ``msg_id`` and the fields of its topic, ``timestamp`` (uint64, us since boot) first.
+- ``D`` data: ``msg_id`` and the fields of its topic, ``timestamp`` (uint64, us since boot) first; one shorter than
+  its format by more than the trailing padding is damaged (left out, counted).
 
 Damaged data (a message of an unknown type or id, a size past the end) is skipped by looking for the next sync message,
 counted in the warnings."""
@@ -53,7 +54,8 @@ class ULog:
     array, of the topics read), ``counts`` (data messages of every subscription, read or not), ``dropouts`` and
     ``dropout_ms``, ``logged`` (``(level, timestamp, text)`` of the ``L`` and ``C`` messages), ``appended`` (whether
     data was appended), ``offsets_ignored`` (offsets of appended data not taken), ``bad_formats`` (a format, or a
-    topic depending on one, that cannot be read -> why: skipped and counted), ``damaged`` (bytes skipped to find the next sync)."""
+    topic depending on one, that cannot be read -> why: skipped and counted), ``short`` (data messages of the topics
+    read shorter than their format less its trailing padding: damaged, left out; still in ``counts``), ``damaged`` (bytes skipped to find the next sync)."""
     path: str
     version: int = 1
     start_us: int = 0
@@ -70,6 +72,7 @@ class ULog:
     appended: bool = False
     offsets_ignored: int = 0
     bad_formats: dict = field(default_factory=dict)
+    short: int = 0
     damaged: int = 0
 
     def topics(self) -> list[str]:
@@ -101,6 +104,9 @@ class ULog:
             n = len(self.bad_formats)
             out.append(f"{Path(self.path).name}: {n} format{'s' if n > 1 else ''} that cannot be read "
                        f"({', '.join(sorted(self.bad_formats)[:5])}{', ...' if n > 5 else ''}): their topics not read")
+        if self.short:
+            out.append(f"{Path(self.path).name}: {self.short} data message{'s' if self.short > 1 else ''} shorter than "
+                       "their format (more than its trailing padding missing): damaged, left out")
         if self.dropouts:
             out.append(f"{Path(self.path).name}: {self.dropouts} dropout{'s' if self.dropouts > 1 else ''} of the log "
                        f"({self.dropout_ms} ms in all): data lost while the log could not write")
@@ -226,7 +232,10 @@ def read_ulog(path: str | Path, topics=None) -> ULog:
             pos = stop
     for key, dt, parts in state.done + list(state.reading.values()):
         n = dt.itemsize
-        buf = b"".join(p[:n] if len(p) >= n else p + b"\0" * (n - len(p)) for p in parts)
+        least = n - _trailing_padding(state.formats[key[0]])
+        whole = [p for p in parts if len(p) >= least]
+        log.short += len(parts) - len(whole)
+        buf = b"".join(p[:n] if len(p) >= n else p + b"\0" * (n - len(p)) for p in whole)
         arr = np.frombuffer(buf, dtype=dt).copy() if buf else np.zeros(0, dtype=dt)
         old = log.data.get(key)
         log.data[key] = arr if old is None else np.concatenate([old, arr])
@@ -341,6 +350,16 @@ def _message(state: _State, kind: int, body: bytes) -> None:
         if size >= 11:
             level, _tag, t = struct.unpack_from("<BHQ", body)
             log.logged.append((level, t, body[11:].decode("utf-8", "replace").strip("\0")))
+
+
+def _trailing_padding(fields: list[tuple[str, int, str]]) -> int:
+    """The bytes of the padding fields (``_padding...``) at the end of a format: what a data message may leave out."""
+    size = 0
+    for type_, n, fname in reversed(fields):
+        if not fname.startswith("_padding") or type_ not in _TYPES:
+            break
+        size += np.dtype(_TYPES[type_]).itemsize * (n or 1)
+    return size
 
 
 def _dtype(state: _State, name: str) -> np.dtype:

@@ -317,3 +317,18 @@ def test_bad_format_fails_only_its_topic(tmp_path, bad):
         _read(tmp_path, raw, topics=["t", "u"])
     log = _read(tmp_path, raw)
     assert log.get("u")["w"].tolist() == [2.5] and log.get("t") is None and "t" in log.bad_formats
+
+
+def test_short_data_message_damaged(tmp_path):
+    """A data message may leave out the trailing padding of its format, all or part of it; one shorter than that is
+    damaged: left out and counted (it was filled with zeros, its missing fields read as 0)."""
+    fmt = gnss_ulog.message("F", b"t:uint64_t timestamp;float v;uint8_t[4] _padding0;")
+    full = struct.pack("<HQf", 0, 1, 1.5) + bytes(4)
+    messages = [full, full[:-4], full[:-2], full[:-6], struct.pack("<HQ", 0, 5)]
+    raw = (gnss_ulog.header() + fmt + _T_SUBSCRIBE
+           + b"".join(gnss_ulog.message("D", m[:2] + struct.pack("<Q", k + 1) + m[10:]) for k, m in enumerate(messages)))
+    log = _read(tmp_path, raw)
+    t = log.get("t")
+    assert t["timestamp"].tolist() == [1, 2, 3] and t["v"].tolist() == [1.5] * 3
+    assert log.short == 2 and log.counts[("t", 0)] == 5
+    assert any("2 data messages shorter than their format" in w for w in log.warnings), log.warnings
