@@ -25,7 +25,32 @@ def source_names() -> dict[str, str]:
     """Where a position can come from (``meta["gnss"]["source"]``), as the pane says it."""
     return {"exif": tr("EXIF"), dji.SOURCE_XMP: tr("XMP di DJI"), dji.SOURCE_MRK: tr("MRK di DJI"), "ppk": tr("PPK"),
             "positions_file": tr("file di posizioni"), "video": tr("video"), "panorama": tr("foto a 360°"),
-            "unknown": tr("sconosciuta")}
+            "unknown": tr("sconosciuta"), **shot_names()}
+
+
+def shot_names() -> dict[str, str]:
+    """The sources of the shots of receivers and autopilots (:data:`.shots.KINDS`, but the MRK), as the pane says
+    them: the source of a position taken from the shots themselves, and of the shots of a PPK position."""
+    return {"rinex_events": tr("eventi del ricevitore"), "ubx_tim_tm2": tr("eventi di un log u-blox"),
+            "ardupilot_cam": tr("log ArduPilot (CAM)"), "ardupilot_trig": tr("log ArduPilot (TRIG)"),
+            "px4_capture": tr("log PX4 (catture)"), "px4_trigger": tr("log PX4 (comandi di scatto)"),
+            "events_pos": tr("file di eventi")}
+
+
+def shots_text(chunk) -> str:
+    """The files the shots of the photos of ``chunk`` were read from (``meta["gnss"]["shots"]``: receivers and
+    autopilots, also behind a PPK position), each with its kind and how many photos took their shot from it; nothing
+    without any."""
+    counts: Counter = Counter()
+    for cam in (chunk.cameras if chunk is not None else []):
+        shot = (cam.meta.get("gnss") or {}).get("shots")
+        if isinstance(shot, dict) and shot.get("kind") and shot.get("kind") != "mrk":
+            counts[(str(shot.get("file") or "?"), str(shot["kind"]))] += 1
+    if not counts:
+        return ""
+    names = shot_names()
+    return tr("Scatti: {0}.", "; ".join(tr("{0} ({1}, {2} foto)", name, names.get(kind, kind), n)
+                                        for (name, kind), n in counts.items()))
 
 
 def status_names() -> dict[str, str]:
@@ -36,7 +61,8 @@ def status_names() -> dict[str, str]:
 
 def height_names() -> dict[str, str]:
     """The kinds of height of a position (``meta["gnss"]["height"]``) as the pane says them."""
-    return {"ellipsoidal": tr("ellissoidica"), "exif": tr("EXIF"), "unknown": tr("sconosciuta")}
+    return {"ellipsoidal": tr("ellissoidica"), "exif": tr("EXIF"), "msl": tr("sul livello del mare"),
+            "unknown": tr("sconosciuta")}
 
 
 def lengths(values) -> str:
@@ -91,9 +117,10 @@ def base_source_text(base: dict) -> str:
 
 def ppk_tip() -> str:
     """What *Calcola PPK* (and *Strumenti > GNSS > Correzioni PPK*) does, as its tooltip says it."""
-    return tr("Il RINEX del drone e il Timestamp.MRK del volo, il RINEX di una base che registrava durante il volo (la "
-              "tua o una stazione permanente) e i file di navigazione: RTKLIB calcola la traiettoria dell'antenna e "
-              "ogni foto prende la posizione della camera al suo scatto")
+    return tr("Le osservazioni del drone e gli scatti del volo (Timestamp.MRK, eventi del ricevitore, log "
+              "dell'autopilota), quelle di una base che registrava durante il volo (la tua o una stazione permanente) "
+              "e i file di navigazione: RTKLIB calcola la traiettoria dell'antenna e ogni foto prende la posizione "
+              "della camera al suo scatto")
 
 
 def ppk_state(chunk) -> str:
@@ -106,8 +133,9 @@ def ppk_state(chunk) -> str:
     cameras = list(chunk.cameras) if chunk is not None else []
     records = [c.meta["gnss"] for c in cameras if (c.meta.get("gnss") or {}).get("source") == "ppk"]
     if not records:
-        text = tr("Nessuna posizione PPK. Servono il RINEX del drone e il Timestamp.MRK del volo, il RINEX di una base "
-                  "che registrava durante il volo e i file di navigazione.")
+        text = tr("Nessuna posizione PPK. Servono le osservazioni del drone e gli scatti del volo (Timestamp.MRK, "
+                  "eventi del ricevitore, log dell'autopilota), quelle di una base che registrava durante il volo e i "
+                  "file di navigazione.")
         if not _native.ppk_available():
             text += " " + tr("Per calcolarle serve il nucleo nativo 0.5 o più recente, che contiene RTKLIB.")
         return text
@@ -245,6 +273,7 @@ class GnssPane(QWidget):
 
     mrk_requested = Signal()
     positions_requested = Signal()
+    autopilot_requested = Signal()
     ppk_requested = Signal()
     survey_crs_requested = Signal()
     geoid_requested = Signal()
@@ -297,7 +326,12 @@ class GnssPane(QWidget):
         self.b_positions.setToolTip(tr("Un file di testo con una riga per foto: nome, x, y, quota e, se ci sono, le "
                                        "deviazioni standard o l'accuratezza e lo stato (drone costruito in casa, "
                                        "soluzione PPK di un altro programma)"))
-        step(0, "positions", tr("Posizioni delle foto"), [self.b_mrk, self.b_positions])
+        self.b_autopilot = QPushButton(icon("load"), tr("Log dell'autopilota..."))
+        self.b_autopilot.setToolTip(tr("Il log di un autopilota ArduPilot (DataFlash .bin) o PX4 (ULog .ulg): la "
+                                       "posizione che l'autopilota registra a ogni scatto della camera, con il suo "
+                                       "stato e la sua accuratezza; le foto sono abbinate agli scatti per numero, per "
+                                       "tempo o per ordine"))
+        step(0, "positions", tr("Posizioni delle foto"), [self.b_mrk, self.b_positions, self.b_autopilot])
 
         self.b_ppk = QPushButton(icon("run"), tr("Calcola PPK..."))
         self.b_ppk.setToolTip(ppk_tip())
@@ -345,6 +379,7 @@ class GnssPane(QWidget):
         lay.addStretch(1)
         self.b_mrk.clicked.connect(self.mrk_requested)
         self.b_positions.clicked.connect(self.positions_requested)
+        self.b_autopilot.clicked.connect(self.autopilot_requested)
         self.b_ppk.clicked.connect(self.ppk_requested)
         self.b_survey_crs.clicked.connect(self.survey_crs_requested)
         self.b_geoid.clicked.connect(self.geoid_requested)
@@ -364,6 +399,7 @@ class GnssPane(QWidget):
         positioned = photos - sum(r["no_position"] for r in rows)
         self.b_mrk.setEnabled(photos > 0)
         self.b_positions.setEnabled(photos > 0)
+        self.b_autopilot.setEnabled(photos > 0)
         self._photos = photos
         self._chunk = chunk
         self.b_ppk.setEnabled(photos > 0 and not self._busy)
@@ -380,6 +416,9 @@ class GnssPane(QWidget):
             if sources:
                 text += ": " + ", ".join(f"{names.get(s, s)} {n}" for s, n in sorted(sources.items(), key=lambda p: -p[1]))
             text += "."
+            shots = shots_text(chunk)
+            if shots:
+                text += " " + shots
             mixed = mixed_heights(chunk)
             if mixed:
                 heights = height_names()

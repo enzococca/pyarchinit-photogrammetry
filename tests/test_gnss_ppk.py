@@ -3321,8 +3321,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     # in the menu Strumenti > GNSS
     menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
-    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Correzioni PPK...",
-                                                 "Pannello GNSS"]
+    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...",
+                                                 "Log dell'autopilota...", "Correzioni PPK...", "Pannello GNSS"]
 
 
 def test_ppk_step_asks_for_rtklib_and_for_the_photos(ppk_window, fake_rtklib, monkeypatch, tmp_path):
