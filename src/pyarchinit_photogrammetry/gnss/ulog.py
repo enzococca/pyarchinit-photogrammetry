@@ -15,7 +15,8 @@ and a sequence of messages, each a header of 3 bytes (``msg_size`` uint16, ``msg
 - ``F`` the format of a topic: ``name:type field;type field;...``, types ``int8_t`` to ``uint64_t``, ``float``,
   ``double``, ``bool``, ``char`` or the name of another format (nested), each with an optional ``[n]`` array; the
   fields are packed with no padding of their own (padding is fields named ``_padding...``, the last of which a data
-  message may leave out).
+  message may leave out). A format is spelled out only for the topics read, and refused when it is larger than a data
+  message can be (65533 bytes) or nested more than 8 deep.
 - ``I`` information (``type name`` key, value), ``M`` information over several messages (``is_continued``),
   ``P``/``Q`` parameters (and their defaults), ``L``/``C`` logged strings, ``S`` sync (8 magic bytes), ``O`` a
   dropout (``duration`` ms: data lost while the log could not write).
@@ -40,12 +41,14 @@ _TYPES = {"int8_t": "i1", "uint8_t": "u1", "int16_t": "<i2", "uint16_t": "<u2", 
           "int64_t": "<i8", "uint64_t": "<u8", "float": "<f4", "double": "<f8", "bool": "?", "char": "S1"}
 _FIELD = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 _KNOWN = set(b"BFIMPQALCDSOR")
+MAX_DATA = 65535 - 2  # the fields of a data message: its size is a uint16, the msg_id comes first
+MAX_DEPTH = 8  # formats nested deeper than this are refused
 
 
 @dataclass
 class ULog:
-    """What a ULog file holds: ``version``, ``start_us`` (the boot time the log started), ``formats`` (each topic: its
-    flat fields ``(name, numpy type)``), ``info`` and ``multi_info`` (the ``I`` and ``M`` messages, values decoded),
+    """What a ULog file holds: ``version``, ``start_us`` (the boot time the log started), ``formats`` (each format as
+    defined: ``(type, array length or 0, name)`` of its fields; :meth:`fields` spells one out), ``info`` and ``multi_info`` (the ``I`` and ``M`` messages, values decoded),
     ``params``, ``subscriptions`` (``msg_id`` -> ``(topic, multi_id)``), ``data`` ((topic, multi_id) -> structured
     array, of the topics read), ``counts`` (data messages of every subscription, read or not), ``dropouts`` and
     ``dropout_ms``, ``logged`` (``(level, timestamp, text)`` of the ``L`` and ``C`` messages), ``appended`` (whether
@@ -74,6 +77,11 @@ class ULog:
     def instances(self, topic: str) -> list[int]:
         """The ``multi_id`` of the instances of ``topic`` with data, in order."""
         return sorted(m for (name, m), n in self.counts.items() if name == topic and n)
+
+    def fields(self, topic: str) -> list[tuple[str, object]]:
+        """The flat fields ``(name, numpy type)`` of the format of ``topic``, spelled out when asked (a
+        ``ValueError`` for a format that is unknown or cannot be read)."""
+        return _flatten(topic, self.formats)
 
     def get(self, topic: str, multi_id: int = 0) -> np.ndarray | None:
         """The data of one instance of ``topic`` read (None when it has none or was not asked for)."""
@@ -111,11 +119,33 @@ def _value(type_: str, raw: bytes, formats: dict):
     return values.tolist() if n else values[0].item()
 
 
+def _layout(name: str, formats: dict, memo: dict, depth: int = 0) -> int:
+    """The size in bytes of the format ``name`` (nested formats and arrays spelled out), checked before anything is
+    built: a ``ValueError`` when it is unknown, empty, nested deeper than :data:`MAX_DEPTH` or larger than a data
+    message can be (:data:`MAX_DATA`). Every field is at least a byte, so a format that passes has at most
+    :data:`MAX_DATA` fields to spell out."""
+    if name in memo:
+        return memo[name]
+    if depth > MAX_DEPTH or name not in formats:
+        raise ValueError(f"format {name!r} unknown or nested too deep")
+    if not formats[name]:
+        raise ValueError(f"format {name!r} has no fields")
+    size = 0
+    for type_, n, _fname in formats[name]:
+        one = np.dtype(_TYPES[type_]).itemsize if type_ in _TYPES else _layout(type_, formats, memo, depth + 1)
+        size += one * (n or 1)
+        if size > MAX_DATA:
+            raise ValueError(f"format {name!r} larger than a data message ({MAX_DATA} bytes)")
+    memo[name] = size
+    return size
+
+
 def _flatten(name: str, formats: dict, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]:
     """The fields of the format ``name`` as ``(name, numpy type)``: nested formats spelled out (``a.b``,
-    ``a[0].b``), arrays of numbers as sub-arrays, ``char[n]`` as bytes."""
-    if depth > 8 or name not in formats:
-        raise ValueError(f"format {name!r} unknown or nested too deep")
+    ``a[0].b``), arrays of numbers as sub-arrays, ``char[n]`` as bytes. The size is checked first
+    (:func:`_layout`)."""
+    if depth == 0:
+        _layout(name, formats, {})
     out = []
     for type_, n, fname in formats[name]:
         full = prefix + fname
@@ -188,8 +218,7 @@ def read_ulog(path: str | Path, topics=None) -> ULog:
         arr = np.frombuffer(buf, dtype=dt).copy() if buf else np.zeros(0, dtype=dt)
         old = log.data.get(key)
         log.data[key] = arr if old is None else np.concatenate([old, arr])
-    formats = state.formats
-    log.formats = {name: _flatten(name, formats) for name in formats if _flattens(name, formats)}
+    log.formats = state.formats
     return log
 
 
@@ -229,6 +258,7 @@ class _State:
     formats: dict = field(default_factory=dict)
     reading: dict = field(default_factory=dict)  # msg_id -> [(topic, multi_id), dtype, payloads] of a subscription read
     done: list = field(default_factory=list)  # those whose msg_id was given to another subscription
+    dtypes: dict = field(default_factory=dict)  # topic -> numpy type of its data
 
 
 def _message(state: _State, kind: int, body: bytes) -> None:
@@ -256,7 +286,7 @@ def _message(state: _State, kind: int, body: bytes) -> None:
         if msg_id in reading:
             state.done.append(reading.pop(msg_id))
         if (state.wanted is None or name in state.wanted) and name in formats:
-            reading[msg_id] = [(name, multi_id), np.dtype(_flatten(name, formats)), []]
+            reading[msg_id] = [(name, multi_id), _dtype(state, name), []]
     elif kind == ord("F"):
         name, fields = _parse_format(body.decode("ascii", "replace").strip("\0"))
         formats[name] = fields
@@ -288,9 +318,12 @@ def _message(state: _State, kind: int, body: bytes) -> None:
             log.logged.append((level, t, body[11:].decode("utf-8", "replace").strip("\0")))
 
 
-def _flattens(name: str, formats: dict) -> bool:
-    try:
-        _flatten(name, formats)
-        return True
-    except ValueError:
-        return False
+def _dtype(state: _State, name: str) -> np.dtype:
+    """The numpy type of the data of topic ``name`` (once per topic); a format that cannot be read is a
+    ``ValueError`` naming the topic."""
+    if name not in state.dtypes:
+        try:
+            state.dtypes[name] = np.dtype(_flatten(name, state.formats))
+        except ValueError as exc:
+            raise ValueError(f"{Path(state.log.path).name}: the data of topic {name!r} cannot be read: {exc}") from None
+    return state.dtypes[name]

@@ -276,3 +276,22 @@ def test_appended_blocks_each_cut(tmp_path, blocks):
     assert log.get("t")["timestamp"].tolist() == expected
     assert log.get("t")["v"].tolist() == [t * 0.5 for t in expected]
     assert log.appended and log.damaged == 0 and not log.warnings
+
+
+@pytest.mark.parametrize("case", ["huge_array", "nested_arrays"])
+def test_format_larger_than_a_message_refused(tmp_path, case):
+    """A format no data message can hold (more than 65535 bytes: an array of 2e9 bytes, or arrays nested 7 deep of
+    200 each) is refused when its topic is read, at once and in little memory; reading other topics does not spell
+    it out (it took gigabytes or ran for ever)."""
+    if case == "huge_array":
+        formats = gnss_ulog.message("F", b"t:uint64_t timestamp;uint8_t[2000000000] x;")
+    else:
+        formats = b"".join(gnss_ulog.message("F", f"n{i}:n{i + 1}[200] x;".encode()) for i in range(7))
+        formats += gnss_ulog.message("F", b"n7:uint8_t y;") + gnss_ulog.message("F", b"t:uint64_t timestamp;n0 z;")
+    raw = gnss_ulog.header() + formats + _T_SUBSCRIBE + gnss_ulog.message("D", struct.pack("<HQ", 0, 5))
+    with pytest.raises(ValueError, match=r"topic 't'.*larger than a data message"):
+        _read(tmp_path, raw, topics=["t"])
+    log = _read(tmp_path, raw, topics=["other"])
+    assert log.counts[("t", 0)] == 1 and log.get("t") is None
+    with _within(10.0), pytest.raises(ValueError, match="larger than a data message"):
+        log.fields("t")
