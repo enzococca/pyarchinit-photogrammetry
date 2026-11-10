@@ -47,7 +47,7 @@ def _attempt(call, tmp: Path):
     try:
         return {"result": _plain(call(), tmp)}
     except ValueError as exc:
-        return {"error": str(exc).replace(str(tmp), "<tmp>")}
+        return {"error": str(exc).replace(str(tmp), "<tmp>").replace("\\", "/")}  # one spelling of the paths on Windows too
 
 
 def build(tmp: Path) -> dict:
