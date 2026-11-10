@@ -305,8 +305,8 @@ int ppg_ppk(const char *conf, const char **infiles, int n, const char *outfile,
 * convrnx() of convrnx.c, for the formats whose decoders this package builds
 *-----------------------------------------------------------------------------------------------------------------*/
 
-/* the formats ppg_convbin() knows by name: those with a decoder built here, and those whose decoder is not (their
-   entry points are the stubs of rcv_stubs.c: see native/vendor/rtklib/VERSION) */
+/* the formats ppg_convbin() knows by name, with whether their decoder is built here (all are, from 0.8: a format
+   whose decoder were left out would be refused with code -6; see native/vendor/rtklib/VERSION) */
 typedef struct {
     const char *name; /* the name raw_to_rinex() takes */
     int format;       /* STRFMT_ of RTKLIB */
@@ -317,9 +317,9 @@ static const ppg_format_t ppg_formats[] = {
     {"ubx", STRFMT_UBX, 1},         /* u-blox UBX: rcv/ublox.c */
     {"rtcm3", STRFMT_RTCM3, 1},     /* RTCM 3: rtcm.c, rtcm3.c */
     {"novatel", STRFMT_OEM4, 1},    /* NovAtel OEM4/V/6/7, OEMStar: rcv/novatel.c */
-    {"sbf", STRFMT_SEPT, 0},        /* Septentrio SBF: rcv/septentrio.c, not built */
-    {"rt17", STRFMT_RT17, 0},       /* Trimble RT-17: rcv/rt17.c, not built */
-    {"unicore", STRFMT_UNICORE, 0}, /* Unicore: rcv/unicore.c, not built */
+    {"sbf", STRFMT_SEPT, 1},        /* Septentrio SBF: rcv/septentrio.c */
+    {"rt17", STRFMT_RT17, 1},       /* Trimble RT-17: rcv/rt17.c */
+    {"unicore", STRFMT_UNICORE, 1}, /* Unicore: rcv/unicore.c */
 };
 #define PPG_NFORMATS ((int)(sizeof(ppg_formats) / sizeof(*ppg_formats)))
 
@@ -408,10 +408,11 @@ static int ppg_run_convbin(int format, const char *infile, double approx_gps_sec
 
 /* a raw receiver log converted into RINEX observations and navigation, as convbin -r <format> -v <version>
 *  [-tr <approximate time>] -o obs_out -n nav_out infile
-* args   : int    format             I   STRFMT_UBX, STRFMT_RTCM3 or STRFMT_OEM4 (ppg_convbin_format())
+* args   : int    format             I   STRFMT_UBX, STRFMT_RTCM3, STRFMT_OEM4, STRFMT_SEPT, STRFMT_RT17 or
+*                                        STRFMT_UNICORE (ppg_convbin_format())
 *          char  *infile             I   the log
 *          double approx_gps_seconds I   an approximate time of the log, seconds since 1980-01-06 GPS time (needed
-*                                        by RTCM 3, which carries the time of the week only); 0 = none
+*                                        by RTCM 3 and RT-17, which carry the time of the week only); 0 = none
 *          int    rinex_version      I   RINEX version x100, 300 to 305 (one navigation file for all the systems)
 *          int    navsys             I   the systems converted, SYS_ mask
 *          char  *obs_out, *nav_out  I   the RINEX observation and navigation files written
@@ -476,8 +477,11 @@ int ppg_convbin(int format, const char *infile, double approx_gps_seconds, int r
         return -6;
     }
     if ((format == STRFMT_RTCM3 || format == STRFMT_RT17) && !(approx_gps_seconds > 0.0)) {
-        ppg_message(msg, msglen, "error : RTCM 3 carries the time of the week only: an approximate time of the log "
-                    "(its day) is needed");
+        ppg_message(msg, msglen, format == STRFMT_RT17 ?
+                    "error : RT-17 carries the time of the week only: an approximate time of the log (its day) is "
+                    "needed" :
+                    "error : RTCM 3 carries the time of the week only: an approximate time of the log (its day) is "
+                    "needed");
         return -3;
     }
     if (!(fp = fopen(infile, "rb"))) {

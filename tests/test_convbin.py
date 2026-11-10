@@ -173,8 +173,8 @@ def test_missing_file_leaves_nothing(tmp_path):
 @needs_the_core
 @pytest.mark.parametrize("fmt", _native.RAW_FORMATS)
 def test_every_format_is_dispatched(tmp_path, fmt):
-    """Every accepted format reaches its decoder: noise gives a clean error, no crash and no file. The decoders that
-    are not built (no licence checked for them, see native/vendor/rtklib/VERSION) say so."""
+    """Every accepted format reaches its decoder (all are built: native/vendor/rtklib/VERSION): noise gives a clean
+    error, no crash and no file."""
     import ppg_core
 
     src = tmp_path / "noise.bin"
@@ -428,5 +428,5 @@ def test_without_anything_says_what_to_install(tmp_path, monkeypatch):
 
 def test_formats_known_to_python():
     assert _native.RAW_FORMATS == ("ubx", "rtcm3", "novatel", "sbf", "rt17", "unicore")
-    assert set(_native.RAW_FORMATS_BUILT) == {"ubx", "rtcm3", "novatel"}
+    assert set(_native.RAW_FORMATS_BUILT) == set(_native.RAW_FORMATS)
     assert _native.FEATURES["convbin"] == "raw_to_rinex" and _native.CONVBIN_API == 11

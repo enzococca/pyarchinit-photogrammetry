@@ -357,9 +357,9 @@ CONVBIN_MISSING = ("Raw receiver logs (u-blox, RTCM 3, NovAtel, ...) are convert
                    "the PATH or named by PPG_CONVBIN")
 
 # the formats raw_to_rinex() takes, with the name of convbin's -r for each; RAW_FORMATS_BUILT: those the core decodes
-# (the decoders of the others are not part of it: native/vendor/rtklib/VERSION; an external convbin may decode them)
+# (all of them from 0.8: native/vendor/rtklib/VERSION)
 RAW_FORMATS = ("ubx", "rtcm3", "novatel", "sbf", "rt17", "unicore")
-RAW_FORMATS_BUILT = ("ubx", "rtcm3", "novatel")
+RAW_FORMATS_BUILT = ("ubx", "rtcm3", "novatel", "sbf", "rt17", "unicore")
 _CONVBIN_NAMES = {"ubx": "ubx", "rtcm3": "rtcm3", "novatel": "nov", "sbf": "sbf", "rt17": "rt17", "unicore": "unicore"}
 # formats that carry the time of the week only: an approximate time of the log is needed
 RAW_NEED_TIME = ("rtcm3", "rt17")

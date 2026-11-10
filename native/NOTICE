@@ -7,20 +7,25 @@ observations (ppk_solve) and, from 0.8, for the conversion of raw receiver logs 
 
   RTKLIB-EX v2.5.1 (https://github.com/rtklibexplorer/RTKLIB, tag v2.5.1,
   commit 62d4677ed8425a4e2748c6d390b500d1afb493fc), sources in vendor/rtklib/src, unchanged
-  but for one line of src/rtkpos.c (the time mark of an epoch; see vendor/rtklib/VERSION).
+  but for one line of src/rtkpos.c (the time mark of an epoch) and three of src/convrnx.c (the
+  name, not the path, of a log in the headers of the RINEX files): see vendor/rtklib/VERSION.
 
   Of its receiver decoders (vendor/rtklib/src/rcv):
-    ublox.c    u-blox,  Copyright (C) 2007-2020 by T. Takasu; Copyright (C) 2014 by T. Suzuki
-    novatel.c  NovAtel, Copyright (C) 2007-2020 by T. Takasu
-  Their headers carry these copyright lines ("All rights reserved") and name no licence: that they
-  are under RTKLIB's BSD 2-clause licence below is inferred from the distribution (T. Takasu is the
-  copyright holder of its license.txt), not stated in the files.
+    ublox.c       u-blox,     Copyright (C) 2007-2020 by T. Takasu; Copyright (C) 2014 by T. Suzuki
+    novatel.c     NovAtel,    Copyright (C) 2007-2020 by T. Takasu
+    septentrio.c  Septentrio, Copyright (C) 2013 by Fabrizio Tappero; Copyright (C) 2015 by Jens Reimann
+    rt17.c        Trimble RT-17, Copyright (C) 2014, 2016 Daniel A. Cook; Copyright (C) 2020 T. Takasu
+    unicore.c     Unicore,    Copyright (C) 2024 Avinab Malla
+  Their headers carry these copyright lines (most "All rights reserved") and name no licence of
+  their own. ublox.c and novatel.c are T. Takasu's, the copyright holder of RTKLIB's license.txt:
+  that they are under its BSD 2-clause licence below is inferred, not stated in the files.
+  septentrio.c, rt17.c and unicore.c name other authors and carry no licence header of their own;
+  they are distributed with RTKLIB-EX, which is licensed as a whole under the BSD 2-clause licence
+  below, and are included here on that basis.
 
-Not part of this package: RTKLIB's other receiver decoders (among them Septentrio, septentrio.c by
-F. Tappero and J. Reimann; Trimble RT-17, rt17.c by D. A. Cook; Unicore, unicore.c by A. Malla: their
-files name no licence of their own), streams and applications, and the routines of the IAU SOFA
-library that RTKLIB bundles in sofa.c for the positions of the Sun and the Moon (an option that is
-not built; SOFA has a licence of its own). See vendor/rtklib/VERSION.
+Not part of this package: RTKLIB's other receiver decoders, streams and applications, and the
+routines of the IAU SOFA library that RTKLIB bundles in sofa.c for the positions of the Sun and the
+Moon (an option that is not built; SOFA has a licence of its own). See vendor/rtklib/VERSION.
 
 The Rust crates compiled into the extension (PyO3, numpy, rayon, wgpu, spade for the constrained
 Delaunay triangulation of the TIN, and their dependencies) are distributed under the MIT or the

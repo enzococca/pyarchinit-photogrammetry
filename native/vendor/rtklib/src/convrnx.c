@@ -360,7 +360,10 @@ static void setopt_file(int format, char **paths, int n, const int *mask,
         rnxcomment(opt, "options: %s", opt->rcvopt);
     for (int j=0; j<n; j++) {
         if (!mask[j]) continue;
-        rnxcomment(opt,"log: %s",paths[j]);
+        /* ppg_core: the name of the log, not its folder (local change, see VERSION) */
+        const char *name=paths[j], *p;
+        for (p=paths[j];*p;p++) if (*p=='/'||*p=='\\') name=p+1;
+        rnxcomment(opt,"log: %s",name);
     }
 }
 /* unset RINEX options comments ----------------------------------------------*/
