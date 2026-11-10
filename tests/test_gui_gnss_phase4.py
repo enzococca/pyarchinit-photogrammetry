@@ -361,6 +361,39 @@ def test_ppk_dialog_folder_as_shots_and_another_mrk(qt_app, tmp_path):
     _close(qt_app, d)
 
 
+def test_summaries_start_their_sentences_with_a_capital(qt_app, tmp_path):
+    """What the engine notes is written in the summaries of the dialogs as a sentence, its first letter a capital;
+    a note that starts with the name of a file, a number or a word of the log is left as it is. The buttons of the
+    PPK dialog are in Italian as those of the others."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from pyarchinit_photogrammetry.gui import shots_widgets as sw
+
+    assert sw.said("pairing by number not confirmed by the times: the photos have no date; a shift by whole shots "
+                   "cannot be excluded, check the positions on a control point").startswith(
+        "Abbinamento per numero non confermato dai tempi: le foto non hanno una data; ")
+    assert sw.said("the log has a gimbal: the attitude of a capture is the gimbal's when it reported one, not the "
+                   "vehicle's - a lever arm in the body of the drone turned with it is wrong").startswith("Il log ha ")
+    assert sw.said("the last message of the log is cut (the logger stopped while writing it): left out").startswith(
+        "L'ultimo messaggio del log")
+    for kept in ("2 photos without a date left without a shot: the times cannot check them",
+                 "flight.ulg: the log is closed", "volo: these shots carry no numbers: they cannot be paired by number",
+                 "camera_trigger 12", "TRIG 12", ""):
+        assert sw.said(kept) == i18n.engine(kept), kept
+    doc, _folder, _project = _events_chunk(tmp_path)
+    d = _dialog(qt_app, events_test.TM2_OBS, chunk=doc.chunk)
+    d.by.setCurrentIndex(d.by.findData("order"))
+    d.refresh()
+    assert _wait_until(lambda: "non confermato dai tempi" in d.shots_info.text()), d.shots_info.text()
+    lines = d.shots_info.text().split("\n")
+    assert any(line.startswith("Abbinamento per ordine non confermato dai tempi") for line in lines), lines
+    assert not [line for line in lines if line[:1].islower()], lines
+    box = d.findChild(QDialogButtonBox)
+    assert box.button(QDialogButtonBox.StandardButton.Ok).text() == "Avvia"
+    assert box.button(QDialogButtonBox.StandardButton.Cancel).text() == "Annulla"
+    _close(qt_app, d)
+
+
 def _readers() -> list:
     import threading
 

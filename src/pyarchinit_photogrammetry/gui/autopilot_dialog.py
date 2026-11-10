@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 from ..gnss import autopilot, sources
 from ..gnss import shots as gshots
 from . import shots_widgets as sw
-from .i18n import engine, tr
+from .i18n import tr
 
 TYPING_PAUSE_MS = 300  # the photos are paired again this long after the last change of the latency or of the folder
 
@@ -173,7 +173,7 @@ class AutopilotDialog(QDialog):
         if placed:
             lines.append(tr("Posizioni dell'autopilota con quote sul livello del mare (AMSL).")
                          if placed[0].height == "msl" else tr("Posizioni dell'autopilota con quote ellissoidiche."))
-        return lines + [engine(w) for w in shotset.warnings]
+        return lines + [sw.said(w) for w in shotset.warnings]
 
     def _update(self) -> None:
         """What the dialog says (:meth:`_say`), the dialog grown to hold it: never smaller, never beyond the screen."""
@@ -227,7 +227,7 @@ class AutopilotDialog(QDialog):
             self.pairing.setText(tr("Abbinamento delle foto in corso..."))
             return
         if isinstance(pairing, Exception):
-            self.error.setText(engine(str(pairing)))
+            self.error.setText(sw.said(str(pairing)))
             return
         self.pairing.setText(sw.pairing_text(pairing))
         if not pairing.kept:

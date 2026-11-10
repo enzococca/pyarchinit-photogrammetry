@@ -418,6 +418,8 @@ class PpkDialog(QDialog):
         self.error.setStyleSheet("color: #b91c1c; font-weight: bold")
         lay.addWidget(self.error)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Avvia"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Annulla"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
@@ -927,7 +929,7 @@ class PpkDialog(QDialog):
             if done.station_position is not None:
                 text += tr(", posizione della stazione dall'RTCM")
             lines.append((text if len(paths) == 1 else tr("{0}: {1}", path.name, text)) + ".")
-            lines += [engine(w) for w in done.warnings]
+            lines += [sw.said(w) for w in done.warnings]
         return lines
 
     def _observations(self, path: Path | None):
@@ -1042,7 +1044,7 @@ class PpkDialog(QDialog):
             if 0 < outside < len(times):
                 text += " " + tr("Scatti fuori dalle osservazioni del drone: {0}; le loro foto terranno la posizione "
                                  "che hanno.", outside)
-        lines = [text] + [engine(w) for w in shotset.warnings]
+        lines = [text] + [sw.said(w) for w in shotset.warnings]
         lever = sw.lever_words(self._lever(), self._latency_ms())
         if lever is not None:
             lines.append(lever + ".")
@@ -1053,7 +1055,7 @@ class PpkDialog(QDialog):
             elif pairing is sw.RUNNING:
                 lines.append(tr("Abbinamento delle foto in corso..."))
             elif isinstance(pairing, Exception):
-                lines.append(engine(str(pairing)))
+                lines.append(sw.said(str(pairing)))
             else:
                 lines.append(sw.pairing_text(pairing))
         return "\n".join(lines)

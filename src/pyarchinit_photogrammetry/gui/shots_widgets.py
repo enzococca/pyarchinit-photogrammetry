@@ -100,7 +100,7 @@ def pairing_text(pairing) -> str:
         text += " " + tr("Scatti doppi lasciati fuori: {0}.", pairing.doubles)
     if pairing.confirmed is False:
         text += " " + tr("I tempi non confermano l'abbinamento: controlla le posizioni.")
-    return "\n".join([text] + [engine(w) for w in pairing.warnings])
+    return "\n".join([text] + [said(w) for w in pairing.warnings])
 
 
 def pairing_words(result: dict) -> list[str]:
@@ -275,6 +275,15 @@ class Aside(QObject):
     def stop(self) -> None:
         self._stopped = True
         self._poll.stop()
+
+
+def said(message: str) -> str:
+    """A message of the engine for a summary: in the language of the interface, written as a sentence - its first
+    letter a capital when it starts with a plain word (a name of a file, a number, a word of the log stay as they
+    are)."""
+    text = engine(message)
+    first = text.split(" ", 1)[0].replace("'", "").replace("\u2019", "")
+    return text[0].upper() + text[1:] if first.isalpha() and first.islower() else text
 
 
 def unread(exc: Exception) -> str:
