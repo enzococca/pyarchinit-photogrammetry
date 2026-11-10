@@ -24,7 +24,7 @@ import numpy as np
 
 from .. import _native
 from . import atx as antex
-from . import frames, rinex
+from . import frames, rinex, rinex_files
 from .dji import GPS_EPOCH, wrap_longitude
 
 QUALITY = {1: "fix", 2: "float", 3: "sbas", 4: "dgps", 5: "single", 6: "ppp"}  # the Q of a row of RTKLIB's solution
@@ -693,7 +693,7 @@ def _navigation(navs, rovers: Sequence[Path], bases: Sequence[Path],
 def base_name(path: str | Path, info: rinex.RinexInfo) -> str:
     """The name of a base: the marker of the header of its RINEX file ``path``, else the name of the file without its
     extension (and without .gz, .Z or .zip)."""
-    return info.marker or Path(rinex._without_packing(Path(path).name)).stem
+    return info.marker or Path(rinex_files.without_packing(Path(path).name)).stem
 
 
 def horizontal_m(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
