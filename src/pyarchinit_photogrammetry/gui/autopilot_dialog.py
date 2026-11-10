@@ -216,7 +216,7 @@ class AutopilotDialog(QDialog):
             return
         if isinstance(shotset, Exception):
             self.summary.setText(kind)
-            self.error.setText(tr("Il log non si legge: {0}", engine(str(shotset))))
+            self.error.setText(tr("Il log non si legge: {0}", sw.unread(shotset)))
             return
         self.summary.setText("\n".join([kind] + self._shots_text(shotset)))
         chunk, folder, by = self.chunk, self.photos_path(), self.by.currentData()

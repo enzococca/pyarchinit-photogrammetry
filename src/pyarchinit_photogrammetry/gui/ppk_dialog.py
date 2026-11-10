@@ -12,6 +12,7 @@ here: the files, their times, the work folder of the PPK; files packed in gzip, 
 read in a thread of their own, never in the thread of the interface."""
 from __future__ import annotations
 
+import errno
 import math
 import os
 import re
@@ -356,8 +357,9 @@ class PpkDialog(QDialog):
         observations = tr("Osservazioni RINEX o log del ricevitore ({0});;Tutti i file (*)",
                           _OBSERVATION_PATTERNS + " " + _RAW_PATTERNS)
         rover = self.mrk if opened == "events" else rover_beside(self.mrk) if opened == "mrk" else None
-        self.rover = _FileField(str(rover) if rover else "", tr("Osservazioni del drone"), observations,
-                                self.mrk.parent)
+        self._rover_beside = str(rover) if rover and opened == "mrk" else ""  # found beside the MRK, not named
+        self.rover = _FileField(self._rover_beside or (str(rover) if rover else ""), tr("Osservazioni del drone"),
+                                observations, self.mrk.parent)
         self.rover_info = _label()
         form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.rover_info))
         form.addRow(tr("Posizione della base"), self._position_section())
@@ -840,6 +842,8 @@ class PpkDialog(QDialog):
         stamp = _stamp(path)
         if stamp is None:
             return FileNotFoundError(tr("Il file non esiste."))
+        if path.is_dir():  # said by its name: the readers would give the error of the system, or their own
+            return IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(path))
         edge, message, camera = self.edge.currentData(), self.message.currentData(), self._camera()
         if kind != "log":
             message, camera = "auto", None
@@ -942,7 +946,7 @@ class PpkDialog(QDialog):
         except FileNotFoundError:
             return tr("Il file non esiste.")
         except (OSError, ValueError) as exc:
-            return tr("Il file non si legge: {0}", exc)
+            return tr("Il file non si legge: {0}", sw.unread(exc))
         if info.kind != "obs":
             return tr("Questo file ha messaggi di navigazione, non osservazioni.")
         return info
@@ -972,7 +976,7 @@ class PpkDialog(QDialog):
                 shots = dji.read_mrk(path)
                 problem = None if shots else tr("Il file non ha scatti.")
             except (OSError, ValueError) as exc:
-                shots, problem = [], tr("Il file non si legge: {0}", exc)
+                shots, problem = [], tr("Il file non si legge: {0}", sw.unread(exc))
             self._mrk_read = (key, shots, problem)
         self.shots, self._mrk_problem = self._mrk_read[1], self._mrk_read[2]
 
@@ -1025,7 +1029,7 @@ class PpkDialog(QDialog):
         if shotset is sw.RUNNING:
             return tr("Lettura di {0} in corso...", source.name)
         if isinstance(shotset, Exception):
-            return tr("Il file non si legge: {0}", engine(str(shotset)))
+            return tr("Il file non si legge: {0}", sw.unread(shotset))
         times = [s.gps_time for s in shotset.shots if s.valid]
         text = (tr("{0} scatti ({1} con un tempo valido)", len(shotset.shots), len(times)) if kind == "log" else
                 tr("{0} eventi ({1} con un tempo valido)", len(shotset.shots), len(times)))
@@ -1165,7 +1169,20 @@ class PpkDialog(QDialog):
         self._timer.stop()
         self._update()
 
+    def _follow_mrk(self) -> None:
+        """The observations of the drone beside the MRK named now (:func:`rover_beside`), while the field holds the
+        ones found beside another MRK, or nothing: what the user named stays."""
+        path = self.shots_file.path() if self.kind() == "mrk" else None
+        text = self.rover.edit.text().strip()
+        if path is None or not path.is_file() or text not in ("", self._rover_beside):
+            return
+        found = rover_beside(path)
+        self._rover_beside = str(found) if found else ""
+        if self._rover_beside != text:
+            self.rover.edit.setText(self._rover_beside)
+
     def _update(self) -> None:
+        self._follow_mrk()
         self._read_mrk()
         self._fill_cameras()
         self._show_kind(self.kind())
@@ -1509,7 +1526,7 @@ class PpkDialog(QDialog):
             if shotset is sw.RUNNING or shotset is None:
                 return tr("Il programma sta ancora leggendo {0}: attendi un momento.", source.name)
             if isinstance(shotset, Exception):
-                return tr("Gli scatti non si possono usare: {0}", engine(str(shotset)))
+                return tr("Gli scatti non si possono usare: {0}", sw.unread(shotset))
             times = [s.gps_time for s in shotset.shots if s.valid]
             if not times:
                 return tr("Nessuno scatto con un tempo valido in {0}.", source.name)

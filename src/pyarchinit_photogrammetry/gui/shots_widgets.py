@@ -277,6 +277,21 @@ class Aside(QObject):
         self._poll.stop()
 
 
+def unread(exc: Exception) -> str:
+    """Why a file could not be read, for a dialog: an error of the system in Italian with the short name of the file
+    (never its whole path), a message of the engine in the language of the interface."""
+    if isinstance(exc, OSError) and exc.filename:
+        name = Path(str(exc.filename)).name
+        if isinstance(exc, IsADirectoryError):
+            return tr("{0} è una cartella, non un file", name)
+        if isinstance(exc, FileNotFoundError):
+            return tr("{0} non esiste", name)
+        if isinstance(exc, PermissionError):
+            return tr("{0} non si può aprire: manca il permesso di leggerlo", name)
+        return f"{name}: {exc.strerror}" if exc.strerror else name
+    return engine(str(exc))
+
+
 def plain_label(style: str = "color: #6c7a89") -> QLabel:
     """A label for what a dialog says of a file: plain text (file names and messages, never markup), wrapped."""
     label = QLabel("")

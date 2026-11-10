@@ -4673,7 +4673,10 @@
   "Scatti senza un tempo valido, mai abbinati: {0}": "Shots without a valid time, never paired: {0}",
   "{0} mm · {1} ms": "{0} mm · {1} ms",
   "Braccio di leva dall'antenna alla camera (avanti, destra, giù): {0} mm; latenza della camera: {1} ms": "Lever arm from the antenna to the camera (forward, right, down): {0} mm; latency of the camera: {1} ms",
-  "Braccio di leva e latenza: {0}": "Lever arm and latency: {0}"
+  "Braccio di leva e latenza: {0}": "Lever arm and latency: {0}",
+  "{0} è una cartella, non un file": "{0} is a folder, not a file",
+  "{0} non esiste": "{0} does not exist",
+  "{0} non si può aprire: manca il permesso di leggerlo": "{0} cannot be opened: no permission to read it"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

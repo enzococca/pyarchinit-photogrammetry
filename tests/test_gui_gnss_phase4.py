@@ -17,6 +17,7 @@ import pyarchinit_photogrammetry as ppg  # noqa: E402
 from pyarchinit_photogrammetry.gnss import sources  # noqa: E402
 from pyarchinit_photogrammetry.gui import i18n  # noqa: E402
 import gnss_dataflash  # noqa: E402
+import gnss_helpers  # noqa: E402
 import gnss_ulog  # noqa: E402
 import test_gnss_cli_phase4 as cli_test  # noqa: E402
 import test_gnss_convert as convert_test  # noqa: E402
@@ -321,6 +322,42 @@ def test_ppk_dialog_shots_modes(qt_app, tmp_path):
     d.shots_file.edit.setText("")
     d.refresh()
     assert d.problem() == "Scegli il file degli scatti."
+    _close(qt_app, d)
+
+
+def test_ppk_dialog_folder_as_shots_and_another_mrk(qt_app, tmp_path):
+    """A folder named where the file of the shots goes is said in Italian with its short name, whatever the source
+    (never the error of the system with the whole path); and another MRK typed brings the observations of the drone
+    beside it, unless the user named some."""
+    first, second = tmp_path / "card one" / "flight1", tmp_path / "card two" / "flight2"
+    for folder, flight in ((first, "DJI_0001"), (second, "DJI_0002")):
+        folder.mkdir(parents=True)
+        (folder / f"{flight}_Timestamp.MRK").write_text(gnss_helpers.mrk_line(1, 1_300_000_000.0, (0, 0, 190)))
+        (folder / f"{flight}_Rinex.obs").write_text("")
+    d = _dialog(qt_app, first / "DJI_0001_Timestamp.MRK")
+    assert d.rover.path() == first / "DJI_0001_Rinex.obs"
+    for kind in sources.KINDS:
+        if kind == "events":
+            continue
+        d.set_kind(kind)
+        d.shots_file.edit.setText(str(second))
+        d.refresh()
+        said = lambda: d.shots_info.text()  # noqa: E731
+        assert _wait_until(lambda: "flight2 è una cartella, non un file" in said()), (kind, said())
+        assert said().startswith("Il file non si legge: ") and str(tmp_path) not in said() and "Errno" not in said()
+    d.set_kind("mrk")
+    d.shots_file.edit.setText(str(second / "DJI_0002_Timestamp.MRK"))
+    d.refresh()
+    assert d.rover.path() == second / "DJI_0002_Rinex.obs"  # the drone of the MRK typed
+    mine = tmp_path / "mine.obs"
+    mine.write_text("")
+    d.rover.edit.setText(str(mine))
+    d.shots_file.edit.setText(str(first / "DJI_0001_Timestamp.MRK"))
+    d.refresh()
+    assert d.rover.path() == mine  # the one the user named stays
+    d.rover.edit.setText("")
+    d.refresh()
+    assert d.rover.path() == first / "DJI_0001_Rinex.obs"  # an empty field is filled again
     _close(qt_app, d)
 
 
