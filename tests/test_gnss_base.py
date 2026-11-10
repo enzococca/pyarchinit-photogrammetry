@@ -818,3 +818,14 @@ def test_prepare_base_by_a_baseline_or_a_static_ppp(tmp_path, monkeypatch):
     asked.clear()
     prepared = base.prepare_base("baseline", rover, pieces, folder=folder, station=station)
     assert navigation == [] and prepared.navs == [] and asked[0][-1] == "auto"
+
+
+def test_parked_273_the_refusal_of_a_ppp_without_calibrations_is_a_public_name_of_ppp(tmp_path):
+    """``base.py`` says what the PPP says, by a name the PPP publishes (it was the private ``ppp._NO_ANTEX``); the
+    refusal comes before anything is downloaded or run."""
+    from pyarchinit_photogrammetry.gnss import ppp
+
+    assert "_NO_ANTEX" not in Path(base.__file__).read_text() and "igs20.atx" in ppp.NO_ANTEX
+    with pytest.raises(ValueError) as error:
+        base.prepare_base("ppp", OWN, STATION_OBS, folder=tmp_path / "gnss", atx="off")
+    assert str(error.value) == ppp.NO_ANTEX and not (tmp_path / "gnss").exists()
