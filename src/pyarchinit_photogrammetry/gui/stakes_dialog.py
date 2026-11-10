@@ -53,6 +53,15 @@ def _referenced(ch) -> bool:
     return any(m.reference.location is not None and m.reference.enabled for m in ch.markers)
 
 
+def find_data(combo, value) -> int:
+    """The row of ``combo`` whose data equals ``value``, -1 when none: ``QComboBox.findData`` compares Python objects
+    such as tuples by identity, so a tuple made again is never found."""
+    for i in range(combo.count()):
+        if combo.itemData(i) == value:
+            return i
+    return -1
+
+
 class _PreviewRelay(QObject):
     """Brings the picture of a proposal, made in a thread of its own, to the window (a queued signal)."""
 
@@ -242,11 +251,11 @@ class StakesDialog(QDialog):
         for ch in self.doc.chunks:
             if _referenced(ch):
                 self.c_source.addItem(tr("Marker con coordinate di {0}", ch.label), ("chunk", ch.key))
-        i = self.c_source.findData(current) if current is not None else -1
+        i = find_data(self.c_source, current) if current is not None else -1
         if i < 0:  # the markers of the chunk searched when it has some, else the known ties, else a file
             key = self.c_chunk.currentData()
             for want in (("chunk", key), ("ties", None)):
-                i = self.c_source.findData(want)
+                i = find_data(self.c_source, want)
                 if i >= 0:
                     break
         self.c_source.setCurrentIndex(max(i, 0))
@@ -269,12 +278,12 @@ class StakesDialog(QDialog):
 
     def set_csv(self, path) -> None:
         """The known points from the CSV file ``path`` (as *File CSV* and the file chosen)."""
-        self.c_source.setCurrentIndex(self.c_source.findData(("csv", None)))
+        self.c_source.setCurrentIndex(find_data(self.c_source, ("csv", None)))
         self.e_file.setText(str(path))
 
     def set_source(self, kind: str, key: int | None = None) -> None:
         """The known points from ``kind`` "ties" or "chunk" (with the ``key`` of the chunk)."""
-        i = self.c_source.findData((kind, key))
+        i = find_data(self.c_source, (kind, key))
         if i < 0:
             raise KeyError(f"no source {kind} {key}")
         self.c_source.setCurrentIndex(i)
@@ -284,7 +293,10 @@ class StakesDialog(QDialog):
         if kind == "ties":
             return stakes.known_points("ties", doc=self.doc)
         if kind == "chunk":
-            return stakes.known_points(next(c for c in self.doc.chunks if c.key == key))
+            ch = next((c for c in self.doc.chunks if c.key == key), None)
+            if ch is None:
+                raise KeyError(tr("il chunk dei marker scelti non c'è più"))
+            return stakes.known_points(ch)
         text = self.e_file.text().strip()
         if not text:
             raise ValueError(tr("Scegli il file CSV dei punti noti."))
@@ -300,9 +312,8 @@ class StakesDialog(QDialog):
             return False
         try:
             points = self._points()
-        except (ValueError, KeyError, StopIteration, OSError) as exc:
-            self.window._warn(tr("Cerca picchetti: {0}", error_text(exc) if not isinstance(exc, StopIteration)
-                                 else tr("chunk non trovato")))
+        except (ValueError, KeyError, OSError) as exc:
+            self.window._warn(tr("Cerca picchetti: {0}", error_text(exc)))
             return False
         if not points:
             self.window._warn(tr("Cerca picchetti: nessun punto noto nella sorgente scelta."))
@@ -396,7 +407,15 @@ class StakesDialog(QDialog):
             self._fill_chunks()
             i = self.c_chunk.findData(key)
             if i >= 0:
+                self.c_chunk.blockSignals(True)
                 self.c_chunk.setCurrentIndex(i)
+                self.c_chunk.blockSignals(False)
+        self._fill_sources()  # the markers of a chunk removed (or newly referenced) as a source
+        if self.chunk_key is not None and self.chunk() is None:  # the picture of a chunk gone
+            self._preview_wanted = None
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText(tr("Scegli una proposta nella tabella"))
+            self.preview_text.setText("")
         self._refill()
 
     # ------------------------------------------------------------------ table
