@@ -36,18 +36,27 @@ Local changes (the only three; every other file is as upstream):
   in for the epoch: of two events between two epochs the first was written, of three none, of four
   the last with the epoch after them lost. On the 30 s samples of tests/data/rtklib (3040 against
   0759), the 00:05:00 epoch left out: an event at 00:05:10 lost the 00:05:30 epoch, and with a second
-  one at 00:05:40 both marks were lost. Now the events one after the other are read through (the
-  first kept) and the epoch after them is discarded only when it is off the grid of the epochs before
-  it: not a whole number of the shortest interval read so far (tint0) after the last, within DTTOL.
+  one at 00:05:40 both marks were lost. Now the events one after the other, and the records of
+  header lines (flags 3 and 4) after them, are read through (the first event kept; upstream such a
+  record stood in for the discarded epoch and the event went to the epoch after it, which is where it
+  goes now too) and the epoch after them is discarded only when it is off the grid of the epochs
+  before it: not a whole number of the shortest interval read so far (tint0) after the last, within
+  DTTOL.
       do {
           n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
-      } while (n == 0 && flag == 5);
+      } while (n == 0 && (flag == 5 || flag == 3 || flag == 4));
       if (n > 0 && tint0 > 0.0 && fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL) {
           double k = timediff(data[0].time,time1)/tint0;
           if (k < 0.5 || fabs(k-floor(k+0.5))*tint0 >= DTTOL)
               n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
       }
-  with tint0 (0 at first) set after each epoch kept to its interval from the one before when shorter.
+  with tint0 (0 at first) set after each epoch kept but the first - which has no epoch before it -
+  to its interval from the one before when shorter:
+      n1=n;dtime1=timediff(data[0].time,time1);
+      if (n>0&&time1.time!=0&&dtime1>=DTTOL&&(tint0<=0.0||dtime1<tint0)) tint0=dtime1;
+      time1=data[0].time;
+  (upstream: "n1=n;dtime1=timediff(data[0].time,time1);time1=data[0].time;" and no tint0), so an
+  event between the first two epochs keeps the second.
   An observation epoch at the time of an event is still discarded (tests/test_gnss_ppk_events.py);
   a change of rate to a rate not dividing the old one still loses one epoch, as upstream.
   rinex.external_events emulates this reading. To be reported upstream, with the change of rtkpos.c.

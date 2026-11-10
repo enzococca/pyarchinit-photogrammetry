@@ -517,20 +517,26 @@ def test_two_events_in_one_epoch_said_as_such(tmp_path, monkeypatch):
 
 
 @needs_rtklib
-@pytest.mark.parametrize("case", ["three", "gap", "observed"])
+@pytest.mark.parametrize("case", ["three", "gap", "observed", "after_first", "header_record"])
 def test_events_rtklib_reads_with_the_local_change(tmp_path, monkeypatch, case):
     """rinex.c changed (native/vendor/rtklib/VERSION): of three events between two epochs the first is written
     (upstream: none); two events around a gap (00:05:00 missing) are both written and the epoch after the gap is
     solved (upstream: both marks and that epoch lost); an epoch off the grid right after an event, the observations
-    of the event, is still discarded. The check finds nothing to say but the events that share an epoch."""
+    of the event, is still discarded; an event between the first two epochs keeps the second (the first change lost
+    it); an event followed by a record of header lines (flag 4) goes to the next epoch (the first change lost it).
+    rinex.external_events gives each event the epoch RTKLIB gives it. The check finds nothing to say but the events
+    that share an epoch."""
     monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
     header, records = rinex_records(PPK_ROVER)
     observed = list(records[9])
     observed[0] = observed[0][:13] + f"{4:2d}{40.0:11.7f}" + observed[0][26:]
-    after, skip, written = {
-        "three": ({1: [_event_2005(0, 40.0), _event_2005(0, 45.0), _event_2005(0, 50.0)]}, None, [40.0]),
-        "gap": ({9: [_event_2005(5, 10.0)], 11: [_event_2005(5, 40.0)]}, 10, [310.0, 340.0]),
-        "observed": ({9: [_event_2005(4, 40.0)] + observed}, None, [280.0]),
+    header_record = [" 05  4  2  0  2 40.0000000  4  1", "a comment of the receiver".ljust(60) + "COMMENT"]
+    after, skip, written, epochs = {
+        "three": ({1: [_event_2005(0, 40.0), _event_2005(0, 45.0), _event_2005(0, 50.0)]}, None, [40.0], [2, 2, 2]),
+        "gap": ({9: [_event_2005(5, 10.0)], 11: [_event_2005(5, 40.0)]}, 10, [310.0, 340.0], [10, 11]),
+        "observed": ({9: [_event_2005(4, 40.0)] + observed}, None, [280.0], [10]),
+        "after_first": ({0: [_event_2005(0, 15.0)]}, None, [15.0], [1]),
+        "header_record": ({5: [_event_2005(2, 40.0)] + header_record}, None, [160.0], [6]),
     }[case]
     lines = list(header)
     for i, record in enumerate(records):
@@ -538,6 +544,7 @@ def test_events_rtklib_reads_with_the_local_change(tmp_path, monkeypatch, case):
             lines += record + after.get(i, [])
     rover = tmp_path / "3040evts.05o"
     rover.write_text("\n".join(lines) + "\n", newline="\n")
+    assert [e for _t, e in events.rinex_event_epochs(rover)] == epochs
     solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
     marks = events.events_pos(solution.path.with_name(solution.path.stem + ppk.EVENTS_SUFFIX))
     assert [round(m.gps_time % 86400, 3) for m in marks.shots] == written

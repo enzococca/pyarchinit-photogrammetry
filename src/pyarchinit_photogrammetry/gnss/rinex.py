@@ -407,7 +407,7 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
     (``rinex.c``, ``readrnxobs``, with the local change of ``native/vendor/rtklib/VERSION``): the events between two
     epochs go to the epoch whose record follows them, or to the one before when the first of them is earlier than
     that epoch (a receiver that writes an event after the epoch that follows it), and the first of them is the one
-    kept; an epoch that follows events off the grid of the epochs before it (not a whole number of their shortest
+    kept (records of header lines, flags 3 and 4, among or after them are read through); an epoch that follows events off the grid of the epochs before it (not a whole number of their shortest
     interval after the last, within :data:`EPOCH_TOLERANCE_S`) is the observations of the event, discarded - the
     events go to the epoch after it. A file packed in layers is read through :func:`plain`; a navigation file is a
     ``ValueError`` naming it."""

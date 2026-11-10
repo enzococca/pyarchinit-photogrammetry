@@ -1152,10 +1152,10 @@ static int readrnxobs(FILE *fp, gtime_t ts, gtime_t te, double tint,
                read in place of the epoch, a third lost them all); the epoch that follows is discarded as
                the observations of the event only when it is off the grid of the epochs before it (the
                shortest interval between them) - not after a gap, nor as the first epoch, which upstream
-               were lost with the event */
+               were lost with the event; records of header lines (flags 3, 4) after it are read through */
             do {
                 n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
-            } while (n == 0 && flag == 5);
+            } while (n == 0 && (flag == 5 || flag == 3 || flag == 4));
             if (n > 0 && tint0 > 0.0 && fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL) {
                 double k = timediff(data[0].time,time1)/tint0;
                 if (k < 0.5 || fabs(k-floor(k+0.5))*tint0 >= DTTOL)
@@ -1195,8 +1195,9 @@ static int readrnxobs(FILE *fp, gtime_t ts, gtime_t te, double tint,
             /* save obs data */
             if ((stat=addobsdata(obs,data+i))<0) break;
         }
-        n1=n;dtime1=timediff(data[0].time,time1);time1=data[0].time;
-        if (n>0&&dtime1>=DTTOL&&(tint0<=0.0||dtime1<tint0)) tint0=dtime1; /* local change */
+        n1=n;dtime1=timediff(data[0].time,time1);
+        if (n>0&&time1.time!=0&&dtime1>=DTTOL&&(tint0<=0.0||dtime1<tint0)) tint0=dtime1; /* local change */
+        time1=data[0].time;
     }
     trace(4,"readrnxobs: nobs=%d stat=%d\n",obs->n,stat);
 
