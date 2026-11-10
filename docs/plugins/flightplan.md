@@ -13,7 +13,7 @@ the coverage obtained.
     buildings, cranes), the weather or the rules of your country. Checking that the flight is allowed and safe, and
     asking for the permits, is the pilot's job. Look at the route on the map and in the flight app before taking off.
 
-This page describes version 0.1.1 of the plugin, which **requires pyarchinit-photogrammetry 1.7.4**. The planner -
+This page describes version 0.1.2 of the plugin, which **requires pyarchinit-photogrammetry 1.7.4**. The planner -
 serpentine grids, rings, routes given point by point, legs that fit a battery, the camera profiles - is ported from the
 author's Photo3D planner. The README and the code are in the [plugin
 repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/flightplan).
@@ -95,6 +95,10 @@ minutes of flight you count on for one battery: a plan longer than that is split
 - **A shot per point** (a waypoint for each photo) or **Shots by interval** (the camera shoots every few seconds).
 - **Design** makes the plan.
 
+Under the parameters a few lines say why the plan is made that way: the height chosen (from the goal, or typed by
+hand) with the real GSD, then **one sentence** with the direction, the forward and side overlap and the speed that the
+nadir grids really fly - the values of the pane, not those of the goal.
+
 The overlaps are those of the strips over flat ground at the takeoff. What the plan really gives on the ground - where
 the terrain rises, at the edges, on short strips - is in the [Coverage](#coverage) step: look at it there.
 
@@ -109,7 +113,16 @@ terrain falls below the takeoff.
 
 - **Takeoff on the view**: click where the drone takes off. Heights in every file are **above the takeoff point**.
 - **Takeoff of this leg**: a takeoff of its own for the leg chosen in the table (each leg of a long flight may start
-  from another place); its heights are corrected by the difference of the ground.
+  from another place); its heights are corrected by the difference of the ground. Where a leg takes off **lower**
+  than the plan, the points that the plan held at the floor (10 m above the plan's takeoff, where the ground falls
+  more than the height above it) are computed again from the ground under them, so they fly the planned height above
+  the ground and not the drop higher; where that ground is unknown the export of the leg is refused. A takeoff of a
+  leg more than **2 km** from every point of its leg is not taken as its takeoff: the pane says so and the export is
+  refused until it is moved next to the leg or removed.
+
+After *Design* again on the same area the takeoffs of the legs are kept by leg number: when the legs changed, a line
+of the reasons names the legs whose kept takeoff may now be next to another part of the flight - check them, or place
+them again.
 
 On the 2D view the layers *Piano di volo: area*, *strisciate*, *scatti*, *decollo*, *target* show the plan.
 
@@ -122,7 +135,17 @@ On the 2D view the layers *Piano di volo: area*, *strisciate*, *scatti*, *decoll
 
 **Follow the terrain** gives every point its own height above the takeoff, so that the height above the ground - and
 the GSD - stays the same uphill and downhill: height = height above the ground + (ground at the point - ground at the
-takeoff), kept between 10 m and 500 m above the takeoff.
+takeoff), never under 10 m above the takeoff.
+
+The drones stop at a technical ceiling of **500 m above the takeoff**. A point that would need 500 m or more (the
+ground rises that much from where the drone takes off) is **not cut there**: cut, the drone would fly closer to the
+ground than planned, on a steep slope into it. *Follow the terrain* refuses the block before touching any block, and
+the export refuses a plan whose heights reach the ceiling - a block that follows the terrain (a plan computed by 0.1.1,
+which cut and only warned) or any leg, its special points and legs with a takeoff of their own included. The message
+names the blocks and legs, how many points, how high, and the ways out: move the takeoff of the plan (or of that leg)
+higher, lower the height above the ground, or split the area. When *Design* cannot compute the terrain the blocks stay
+"follows the terrain" without heights and the export is refused until the terrain is computed again or the terrain
+following is removed: a plan never falls back to a constant height without saying so.
 
 <figure markdown="span">
   ![Heights along a strip that crosses the hill](../img/plugins/flightplan/terrain-profile.jpg)
@@ -284,9 +307,11 @@ from the computer). The plugin replaces those files with the legs:
 2. Connect the remote controller to the computer. **Copy into DJI Fly...** finds the waypoint folder by itself when the
    device is visible as a path (Linux, an SD card, a path you paste); on Windows it reaches the MTP device through the
    system shell (PowerShell).
-3. The plugin fills the safe slots first (placeholder missions, the earlier legs of this plan), says what each slot
-   holds, asks before overwriting a mission of yours or a leg of another plan, and keeps a copy of every file it replaces in
-   `<chunk data>/flightplan/djifly_backup/`.
+3. The plugin fills the safe slots first (placeholder missions, the earlier legs of this plan), lists what each slot
+   holds and asks before overwriting a mission of yours or a leg of another plan (*Overwrite (a copy is kept)*). The
+   yes covers **only the missions that were listed**: a slot that became a mission of yours after the question (a
+   mission saved in DJI Fly meanwhile) stops the copy, nothing is written and the plugin asks again naming it. A copy
+   of every file it replaces is kept in `<chunk data>/flightplan/djifly_backup/`.
 4. Where there is no path (a Mac with the RC 2), export **DJI Fly: ready folders to drag (zip)** and drag the folders
    into the waypoint folder with a file manager for Android devices.
 
@@ -337,5 +362,7 @@ are made again when the plan changes. The exports go where you choose; the copie
   them before flying.
 - The obtained coverage has not yet been tried on a real aligned flight.
 - Without an orthophoto in the project the maps of the legs have a **grey background** (no third-party map tiles).
+- Heights at the **500 m ceiling** above the takeoff and takeoffs of a leg more than 2 km from it are refused, not
+  cut or ignored: move the takeoff, lower the height or split the area.
 - **Close-up shooting** (a trench, a wall face) is not in 0.1.
 - Airspace, permits, obstacles and weather are the pilot's.
