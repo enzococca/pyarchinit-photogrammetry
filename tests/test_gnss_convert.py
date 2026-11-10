@@ -11,6 +11,8 @@ from __future__ import annotations
 import gzip
 import os
 import random
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +60,13 @@ def _message_1005(station_id: int, xyz: tuple[float, float, float]) -> bytes:
                          (0, 1), (y, 38), (0, 2), (z, 38)]))
 
 
+def _message_1006(station_id: int, xyz: tuple[float, float, float], height: float) -> bytes:
+    """RTCM 3 message 1006: 1005 followed by DF028, the antenna height above the mark (16 bits, 0.1 mm)."""
+    x, y, z = (round(v * 1e4) for v in xyz)
+    return _frame(_bits([(1006, 12), (station_id, 12), (0, 6), (1, 1), (1, 1), (0, 1), (0, 1), (x, 38), (0, 1),
+                         (0, 1), (y, 38), (0, 2), (z, 38), (round(height * 1e4), 16)]))
+
+
 def _gps_seconds(when: datetime) -> float:
     return (when - GPS_EPOCH).total_seconds()
 
@@ -67,11 +76,12 @@ def cache(tmp_path):
     return tmp_path / "converted"
 
 
-def _dji_dat(folder: Path, with_station: bool = True) -> Path:
+def _dji_dat(folder: Path, with_station: bool = True, station: bytes | None = None) -> Path:
     """The RTCM 3 sample under the name a D-RTK gives its logs, after a few bytes that are not a frame (a log may
     start in the middle of a message) and, first, a station message (the sample's station id, 611)."""
     path = folder / "DJI_202210140000_001.DAT"
-    station = _message_1005(611, STATION) if with_station else b""
+    if station is None:
+        station = _message_1005(611, STATION) if with_station else b""
     path.write_bytes(b"\x00\x17\x42" + station + (DATA / "GMSD7_20121014_64k.rtcm3").read_bytes())
     return path
 
@@ -223,10 +233,81 @@ def test_dat_that_is_not_rtcm_refused(tmp_path, cache):
 @needs_a_converter
 def test_rtcm_wrong_week_refused(tmp_path, cache):
     dat = _dji_dat(tmp_path)
-    for weeks in (2, -2, -1):
+    # whole weeks off, and days off that RTKLIB rounds to the week before or after (the sample starts 2 s before the
+    # end of a GPS week: 4 days late puts it a week late)
+    for days in (14, -14, -7, 7, 10, 4):
         with pytest.raises(ValueError, match="week"):
-            convert.to_rinex(dat, cache, approx_time=_gps_seconds(DAY_GMSD7) + weeks * 7 * 86400.0)
+            convert.to_rinex(dat, cache, approx_time=_gps_seconds(DAY_GMSD7) + days * 86400.0)
     assert not [p for p in cache.rglob("*") if p.is_file()]  # nothing kept of a refused conversion
+    for hours in (-30, 30):  # within the half week: the right week
+        assert convert.to_rinex(dat, cache, approx_time=_gps_seconds(DAY_GMSD7) + hours * 3600.0).epochs == 64
+
+
+@needs_a_converter
+def test_refused_conversion_keeps_the_good_one(tmp_path, cache):
+    """A conversion of the same file for another day that is refused leaves the good one in the cache."""
+    dat = _dji_dat(tmp_path)
+    good = convert.to_rinex(dat, cache, approx_time=DAY_GMSD7)
+    with pytest.raises(ValueError, match="week"):
+        convert.to_rinex(dat, cache, approx_time=_gps_seconds(DAY_GMSD7) + 14 * 86400.0)
+    assert good.obs.is_file()
+
+
+@needs_a_converter
+def test_failed_or_cancelled_conversion_leaves_nothing(tmp_path, cache, monkeypatch):
+    rtcm = tmp_path / "base.rtcm3"
+    rtcm.write_bytes((DATA / "GMSD7_20121014_64k.rtcm3").read_bytes())
+    with pytest.raises(ValueError, match="base.rtcm3"):
+        convert.to_rinex(rtcm, cache, kind="ubx")  # the converter finds no u-blox observations
+    assert not any(cache.iterdir())
+
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    progress = Progress(lambda fraction, message: progress.cancel())  # cancelled at its first message
+    stopped = []
+    monkeypatch.setattr(_native, "convert_cancel", lambda: stopped.append(True))
+    real = _native.raw_to_rinex
+
+    def slow(*args, **kwargs):  # long enough for the watcher to see the cancel
+        time.sleep(0.4)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_native, "raw_to_rinex", slow)
+    with pytest.raises(Cancelled):
+        convert.to_rinex(rtcm, cache, approx_time=DAY_GMSD7, progress=progress)
+    assert stopped and not any(cache.iterdir())
+
+
+@needs_a_converter
+def test_concurrent_conversions_of_one_file(tmp_path, cache):
+    log = DATA / "ubx_20080526_64k.ubx"
+    results, errors = [], []
+
+    def run():
+        try:
+            results.append(convert.to_rinex(log, cache))
+        except Exception as error:  # noqa: BLE001 - reported below
+            errors.append(error)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len({r.obs for r in results}) == 1 and results[0].obs.is_file()
+    assert [p.name for p in cache.iterdir()] == [results[0].obs.parent.name]
+
+
+@needs_a_converter
+def test_rtcm_1006_antenna_height_in_delta_h(tmp_path, cache):
+    """The antenna height of message 1006 goes to ANTENNA: DELTA H/E/N, as RINEX keeps it: the position of the
+    station stays that of the antenna reference point of the message, the height not added to it."""
+    from pyarchinit_photogrammetry.gnss import rinex
+
+    dat = _dji_dat(tmp_path, station=_message_1006(611, STATION, 1.8034))
+    done = convert.to_rinex(dat, cache, approx_time=DAY_GMSD7)
+    assert done.station_position == pytest.approx(STATION, abs=1e-4)
+    assert rinex.header(done.obs).antenna_delta_hen == pytest.approx((1.8034, 0.0, 0.0), abs=1e-4)
 
 
 def test_not_a_raw_log_refused(tmp_path, cache):

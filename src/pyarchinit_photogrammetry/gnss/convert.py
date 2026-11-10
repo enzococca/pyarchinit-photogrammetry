@@ -19,6 +19,7 @@ import mmap
 import os
 import re
 import shutil
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ LONGEST_FRAME = 3 + 1023 + 3  # an RTCM 3 frame: header, the longest message, CR
 DAT_COVERAGE = 0.5  # the share of the bytes, from the first frame on, that RTCM 3 frames must hold in a D-RTK .DAT
 WEEK = 604800.0
 DAY = 86400.0
+ROLLOVER_TOE = 4 * 3600.0  # an ephemeris with a toe this early in a week may name the week before (see _week_warning)
 WRONG_WEEK_DAYS = 3.0  # a conversion this far from where it should be is in another week
 DJI_DAT_REFUSED = "not an RTCM 3 log: export RINEX from DJI Terra (4.4 or later) or DJI Assistant 2"
 CORE_SIGNALS = 6  # signals of a satellite the core keeps in an epoch (NFREQ=3 + NEXOBS=3)
@@ -194,25 +196,37 @@ def _gps_ephemerides(path: Path) -> list[tuple[int, float]]:
 
 def _week_warning(path: Path, span: tuple[float, float]) -> str | None:
     """None when the GPS ephemerides of the RTCM 3 log agree with the week its observations were put in, a warning
-    when it has none (the week is not checked), a ValueError when they do not agree (the approximate time was in
-    another week). An ephemeris is in its week ``WN`` or, near the end of a week, in the next one (a receiver gives
-    the week it received it): its time is taken as the nearer of the two to the observations; the observations put a
-    week before their time are told, a week after are not (an ephemeris received the week before)."""
+    when the week cannot be checked, a ValueError when they do not agree (the approximate time was in another week).
+
+    The week of an ephemeris (RTCM DF076) is read as the week of its toe; near the turn of a week a receiver may give
+    instead the week it received it, with a toe in the next week: an ephemeris whose toe is in the first
+    :data:`ROLLOVER_TOE` seconds of a week may be in the week after the one it names. An ephemeris agrees when its
+    time, read the first way, is within 3 days of the observations; it disagrees when neither reading is. More
+    disagreeing than agreeing is the wrong week. Not caught: a log whose ephemerides all have a toe in the first hours
+    of a week (a log of the first hours of a week), put one week late - both readings are possible."""
     ephemerides = _gps_ephemerides(path)
     if not ephemerides:
         return (f"{path.name}: no GPS ephemerides (RTCM 1019) in the log: the week of its observations comes from the "
                 "approximate time alone and is not checked")
     start, end = span
     week = int(start // WEEK)
-    distances = []
+
+    def apart(t: float) -> float:
+        return 0.0 if start <= t <= end else min(abs(t - start), abs(t - end))
+
+    agree = disagree = 0
     for week_mod, toe in ephemerides:
         full = week + ((week_mod - week) % 1024 + 512) % 1024 - 512  # the week nearest to the observations
-        times = ((full + k) * WEEK + toe for k in (0, 1))
-        distances.append(min(0.0 if start <= t <= end else min(abs(t - start), abs(t - end)) for t in times))
-    distances.sort()
-    if distances[len(distances) // 2] > WRONG_WEEK_DAYS * DAY:
+        if apart(full * WEEK + toe) <= WRONG_WEEK_DAYS * DAY:
+            agree += 1
+        elif not (toe < ROLLOVER_TOE and apart((full + 1) * WEEK + toe) <= WRONG_WEEK_DAYS * DAY):
+            disagree += 1
+    if disagree > agree:
         raise ValueError(f"{path.name}: the observations and the GPS ephemerides of the log are in different weeks: "
                          "the approximate time of the log is in the wrong week - give the day of the flight")
+    if not agree:
+        return (f"{path.name}: the GPS ephemerides of the log are all at the turn of a week: the week of its "
+                "observations comes from the approximate time alone and is not checked")
     return None
 
 
@@ -285,10 +299,9 @@ def _cached(entry: Path) -> dict | None:
 
 
 def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress) -> dict:
-    """The conversion written into the folder ``entry`` (made through ``entry`` + ".part"), its counts returned."""
-    part = entry.with_name(entry.name + ".part")
-    shutil.rmtree(part, ignore_errors=True)
-    part.mkdir(parents=True)
+    """The conversion written into the folder ``entry`` - made in a folder of its own beside it, renamed when whole -,
+    its counts returned. When another run of the same conversion finished it first, that one is used."""
+    part = Path(tempfile.mkdtemp(prefix=f".{entry.name}-", suffix=".part", dir=entry.parent))
     try:
         obs, nav = part / f"{path.stem}.obs", part / f"{path.stem}.nav"
         stop = threading.Event()
@@ -316,7 +329,14 @@ def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress)
         meta = {k: result.get(k, 0) for k in ("epochs", "events", "navigation", "errors")}
         meta.update(kind=kind, obs=obs.name, nav=nav.name if nav.exists() else None, message=result["message"])
         (part / "convert.json").write_text(json.dumps(meta))
-        os.replace(part, entry)
+        progress.check()  # cancelled while it ran (a convbin program is not stopped): nothing kept
+        try:
+            os.replace(part, entry)
+        except OSError:
+            done = _cached(entry)  # another run of the same conversion was renamed first
+            if done is None:
+                raise
+            return done
         return meta
     finally:
         shutil.rmtree(part, ignore_errors=True)
@@ -355,7 +375,7 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
     if found == "rinex":
         return _from_rinex(path)
     approx = _gps_seconds(approx_time) if approx_time is not None else None
-    if found in _native.RAW_NEED_TIME and not approx:
+    if found in _native.RAW_NEED_TIME and approx is None:
         raise ValueError(f"{path.name}: an {found} log carries the time of the week only: an approximate time of the "
                          "log (the day of the flight) is needed")
 
@@ -364,16 +384,13 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
     cache.mkdir(parents=True, exist_ok=True)
     whose = _hash(str(path.resolve()))
     timed = found in _native.RAW_NEED_TIME  # the approximate time changes the conversion of these only
-    day = int(approx // DAY) if timed else ""
+    day = int(approx // DAY) if timed and approx is not None else ""
     key = _hash(f"{stat.st_size}|{stat.st_mtime_ns}|{found}|{day}|{_native.convbin_identity()}")
     entry = cache / f"{whose}-{key}"
     progress(0.0, f"Converting {path.name} ({found}) to RINEX")
     meta = _cached(entry)
     if meta is None:
         meta = _convert(path, found, entry, approx if timed else None, progress)
-        for old in cache.glob(f"{whose}-*"):
-            if old != entry and not old.name.endswith(".part"):
-                shutil.rmtree(old, ignore_errors=True)
     try:
         obs = entry / meta["obs"]
         nav = entry / meta["nav"] if meta.get("nav") else None
@@ -381,10 +398,10 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
         span = rinex.time_span(obs)
         if span is None:
             raise ValueError(f"{path.name}: the conversion has no epochs"
-                             + (": is the approximate time of the log in the right week?" if approx else ""))
+                             + (": is the approximate time of the log in the right week?" if approx is not None else ""))
         span = (_seconds(span[0]), _seconds(span[1]))
         warnings = []
-        if approx:
+        if approx is not None:
             if min(abs(span[0] - approx), abs(span[1] - approx)) > WRONG_WEEK_DAYS * DAY and not (
                     span[0] <= approx <= span[1]):
                 raise ValueError(f"{path.name}: the epochs are more than {WRONG_WEEK_DAYS:g} days from the "
@@ -397,6 +414,9 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
     except ValueError:
         shutil.rmtree(entry, ignore_errors=True)  # a conversion refused is not kept
         raise
+    for earlier in cache.glob(f"{whose}-*"):  # the conversions of earlier states of the file, once this one is good
+        if earlier != entry and not earlier.name.endswith(".part"):
+            shutil.rmtree(earlier, ignore_errors=True)
     progress(1.0, f"{path.name}: {meta['epochs']} epochs, {meta['events']} events")
     return Converted(path, found, obs, nav, int(meta["epochs"]), int(meta["events"]), span, info.approx_xyz,
                      info.antenna, warnings)
