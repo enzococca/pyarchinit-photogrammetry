@@ -392,7 +392,12 @@ def features_unit(payload: dict, mapping, out_dir: Path | None) -> dict:
         finally:
             d.close()
     out = (out_dir or Path(tempfile.gettempdir())) / f"{payload['name']}.npz"
-    np.savez(out, **arrays)
+    # written beside and renamed: a unit done twice (requeued after a missed heartbeat) never
+    # changes the file under the main program while it reads it
+    part = out.with_name(f"{out.name}.{os.getpid()}.{threading.get_ident()}.part")
+    with open(part, "wb") as fh:
+        np.savez(fh, **arrays)
+    os.replace(part, out)
     return {"file": out.name, "names": [n for n in names if f"kp:{n}" in arrays]}
 
 
@@ -421,10 +426,10 @@ def import_features(db_path: Path, done_dir: Path, results: list[dict], camera_i
     db = pycolmap.Database.open(str(db_path))
     try:
         for res in results:
-            data = np.load(done_dir / res["file"])
-            for name in res["names"]:
-                kp = np.ascontiguousarray(data[f"kp:{name}"], np.float32)
-                desc = np.ascontiguousarray(data[f"desc:{name}"], np.uint8)
+            with np.load(done_dir / res["file"]) as data:
+                arrays = {name: (np.ascontiguousarray(data[f"kp:{name}"], np.float32),
+                                 np.ascontiguousarray(data[f"desc:{name}"], np.uint8)) for name in res["names"]}
+            for name, (kp, desc) in arrays.items():
                 image = pycolmap.Image(name=name, camera_id=int(camera_ids[name]))
                 iid = db.write_image(image)
                 db.write_keypoints(iid, kp)
