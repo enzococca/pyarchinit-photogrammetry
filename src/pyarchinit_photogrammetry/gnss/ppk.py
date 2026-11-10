@@ -612,8 +612,10 @@ def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, m
     """Why the events of the rover ``given`` (sorted) are not all among the marks RTKLIB ``written``: RTKLIB keeps one
     time mark per observation epoch - an event goes to the observation record that follows it in the file
     (``epochs``, of each event, :func:`.rinex.external_events`; without them the solved epoch at or after it) -, so
-    of events that go to the same epoch only the first is written; and it writes none outside the epochs it
-    solved."""
+    of events that go to the same epoch only the first is written; it writes none outside the epochs it solved; and
+    none on the first epoch of the rover in a forward or combined solution: it places a mark between the epoch it
+    goes to and the solved epoch before (postpos.c, ``fillsoltm``), and with none before the mark has no status and
+    is not written (a backward solution writes it)."""
     dropped = _apart_s(written, given) > MARK_TIME_S
     if not dropped.any():
         return []
@@ -624,6 +626,7 @@ def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, m
     for e in epochs:
         counts[e] = counts.get(e, 0) + 1
     shared = np.array([counts[e] > 1 for e in epochs], dtype=bool)  # another event goes to the same epoch
+    first = np.array([e in (0, (0, 0)) for e in epochs], dtype=bool) & ~shared  # to the first epoch of the rover
     _llh, _q, _sd, ok = at(solution, given)
     out = []
     n = int((dropped & shared).sum())
@@ -631,6 +634,13 @@ def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, m
         out.append(f"{n} of the {len(given)} events of the rover fall in the same observation epoch as another event: "
                    f"RTKLIB keeps one time mark per epoch, the first, so its {marks_name} has only that one. Every "
                    "shot takes its position from the solution at its own time, so none is lost")
+    n = int((dropped & first).sum())
+    if n:
+        out.append(f"{n} of the {len(given)} time marks of the rover go to the first observation epoch of the rover: "
+                   "RTKLIB places a mark from the solved epoch before the one it goes to, and with none before the "
+                   f"first it writes none in {marks_name} (a backward solution would). The shot takes the solution "
+                   "at its own time")
+    dropped = dropped & ~first
     n = int((dropped & ~shared & ~ok).sum())
     if n:
         out.append(f"{n} of the {len(given)} time marks of the rover are not in {marks_name}: RTKLIB writes none "
@@ -667,8 +677,9 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
       known, or whose rover is no longer there (moved, or its conversion gone from the cache: said so), the shots are
       compared with the marks written in the file, which RTKLIB may simply not have written.
     - Marks of the rover RTKLIB did not write (:func:`_dropped_marks`): of events in the same observation epoch it
-      keeps the first only - said as that, no shot is lost -, and it writes none outside the epochs it solved (before
-      the first, after the last, in a gap). (Upstream RTKLIB-EX also lost every event of three or more between two
+      keeps the first only - said as that, no shot is lost -, it writes none outside the epochs it solved (before
+      the first, after the last, in a gap), nor on the first epoch of the rover in a forward or combined solution
+      (nothing before it to place the mark from). (Upstream RTKLIB-EX also lost every event of three or more between two
       epochs, and the epoch after an event that follows a gap or begins the file, with the event; the vendored
       rinex.c is changed for both - native/vendor/rtklib/VERSION.) The rover's events are read whole for this,
       doubles and marks without a valid time too.

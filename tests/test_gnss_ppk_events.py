@@ -550,6 +550,25 @@ def test_events_rtklib_reads_with_the_local_change(tmp_path, monkeypatch, case):
         assert warnings == []
 
 
+@needs_rtklib
+@pytest.mark.parametrize("solution_type", ["combined", "backward"])
+def test_mark_on_the_first_epoch_of_the_rover(tmp_path, monkeypatch, solution_type):
+    """An event at 00:00:00 before the first record: RTKLIB places a mark from the solved epoch before the one it goes
+    to, so on the first epoch a forward or combined solution writes none - said as that; a backward one writes it."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    header, records = rinex_records(PPK_ROVER)
+    rover = tmp_path / "3040evts.05o"
+    lines = list(header) + [_event_2005(0, 0.0)] + [line for record in records for line in record]
+    rover.write_text("\n".join(lines) + "\n", newline="\n")
+    solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work", solution=solution_type)
+    warnings = ppk.events_check(solution, events.rinex_events(rover))
+    if solution_type == "backward":
+        assert warnings == []
+    else:
+        assert len(warnings) == 1 and "1 of the 1 time marks of the rover go to the first observation epoch" in \
+            warnings[0], warnings
+
+
 def test_solution_times_to_the_microsecond(tmp_path):
     """The options of a run write the times of the solution to the microsecond: a shot between two epochs of a .pos
     written so is placed on the line between them to 1e-5 m, where the millisecond would put it up to 0.5 ms x the
