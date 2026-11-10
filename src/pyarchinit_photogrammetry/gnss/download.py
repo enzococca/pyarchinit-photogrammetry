@@ -18,12 +18,10 @@ import uuid
 from html.parser import HTMLParser
 from pathlib import Path
 
-from .. import __version__
 from ..core.progress import as_progress
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = f"pyarchinit-photogrammetry/{__version__}"
 ATTEMPTS = 3  # a download is tried this many times ...
 FIRST_WAIT = 2.0  # ... waiting 2 s after the first failure, 4 s after the second
 BLOCK = 1 << 20
@@ -100,6 +98,26 @@ class _LocalFile:
         self._file.close()
 
 
+_user_agent: str | None = None
+
+
+def user_agent() -> str:
+    """The name the program introduces itself with, built at the first request: this module may be loaded while the
+    package is still being imported, before its version is there."""
+    global _user_agent
+    if _user_agent is None:
+        from .. import __version__
+
+        _user_agent = f"pyarchinit-photogrammetry/{__version__}"
+    return _user_agent
+
+
+def __getattr__(name: str):
+    if name == "USER_AGENT":  # the constant it was
+        return user_agent()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def _local_path(url: str) -> Path:
     return Path(urllib.request.url2pathname(urllib.parse.urlsplit(url).path))
 
@@ -120,7 +138,7 @@ def _opened(url: str, timeout: float):
                                 "plain http can be changed on the way", url)
         from ..updates import _ssl_context
 
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        request = urllib.request.Request(url, headers={"User-Agent": user_agent()})
         response = urllib.request.urlopen(request, timeout=timeout, context=_ssl_context())
         final = response.geturl() if hasattr(response, "geturl") else None
         if final and urllib.parse.urlsplit(final).scheme.lower() != "https":

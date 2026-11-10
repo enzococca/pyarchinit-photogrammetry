@@ -2325,3 +2325,28 @@ def test_navigation_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch
     web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 6
     with pytest.raises(ValueError, match="BKG could not be reached.*igs.bkg.bund.de"):
         stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+
+
+# --- the parked items of phase 3 (design/gnss-phase3-reviews/parked-items.md) --------------------------------------
+
+
+def test_parked_92_user_agent_built_at_the_first_request():
+    """``gnss.download`` loads while the package is still being imported (before ``__version__`` is there): the name
+    the program introduces itself with is built when the first request needs it."""
+    import subprocess
+
+    code = ("import importlib, sys\n"
+            "import pyarchinit_photogrammetry as ppg\n"
+            "version = ppg.__version__\n"
+            "del ppg.__version__\n"
+            "for name in [n for n in sys.modules if n.startswith('pyarchinit_photogrammetry.gnss')]:\n"
+            "    del sys.modules[name]\n"
+            "download = importlib.import_module('pyarchinit_photogrammetry.gnss.download')\n"
+            "ppg.__version__ = version\n"
+            "print(download.user_agent(), download.USER_AGENT)\n")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    agent = f"pyarchinit-photogrammetry/{__version__}"
+    assert done.stdout.split()[-2:] == [agent, agent]
+    assert download.user_agent() == download.USER_AGENT == agent
+
