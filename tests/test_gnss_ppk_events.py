@@ -23,7 +23,7 @@ import test_gnss_shots as shots_test
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import convert, events, ppk, rinex
+from pyarchinit_photogrammetry.gnss import convert, events, ppk, rinex, sources
 from pyarchinit_photogrammetry.gnss.shots import Shot, ShotSet
 from gnss_helpers import LEAP_2005, PPK_BASE, PPK_NAV, PPK_ROVER, START_2005, enu, jpeg, needs_rtklib, pos_text
 from gnss_helpers import rinex_records
@@ -618,3 +618,53 @@ def test_mrk_shots_between_epochs_take_the_interpolation_too(tmp_path):
     worst = max(cam.meta["gnss"].get("interpolation_m", 0.0) for cam in ch.cameras)
     assert worst > 0.3
     assert any("turns" in w for w in result["warnings"])
+
+
+# ------------------------------------------------------------------ the approximate time of a raw base
+def _rover_2012(folder: Path, seconds=(10.5, 20.25, 30.0)) -> Path:
+    """The RINEX of the RTCM 3 sample (from 2012-10-13 23:59:58 GPS time) as a rover with an event of its receiver at
+    each of ``seconds`` after the midnight of 14 October: its first epoch and its events on two GPS days."""
+    header, records = rinex_records(RTCM_OBS)
+    lines = list(header)
+    for record in records:
+        lines += record
+        stamp = record[0].split()
+        if stamp[3] == "14":
+            lines += [f"> 2012 10 14 00 00 {s:10.7f}  5  0" for s in seconds if int(s) == int(float(stamp[6]))]
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "rover_2012.obs"
+    path.write_text("\n".join(lines) + "\n", newline="\n")
+    return path
+
+
+@needs_a_converter
+def test_raw_base_takes_the_first_epoch_of_a_rinex_rover(tmp_path):
+    """A base that carries the time of the week only, a rover in RINEX with the events of its receiver: no shot is
+    read before the conversion, the first epoch of the rover places the log."""
+    rover = _rover_2012(tmp_path / "rover")
+    first = (rinex.time_span(rover)[0] - GPS_EPOCH).total_seconds()
+    inputs = sources.ppk_inputs("events", None, rover, [RTCM_LOG])
+    assert len(inputs.shotset.shots) == 3 and inputs.rover == rover
+    (done,) = inputs.converted
+    assert done.kind == "rtcm3" and inputs.bases == [done.obs] and inputs.approx_time == pytest.approx(first)
+    # the navigation of the run: that of its conversion, not one an earlier conversion left in the cache
+    stale, own = Path(done.obs).parent.parent / "gone" / "base.nav", tmp_path / "brdc.nav"
+    assert inputs.navs([stale, own, done.nav]) == [Path(done.nav), own]
+
+
+@needs_a_converter
+def test_raw_base_placed_by_the_rover_before_the_shots(tmp_path, monkeypatch):
+    """A flight across the GPS midnight, the shots after it: the base is converted with the first epoch of the rover,
+    as the window does while its dialog is open - one conversion for both, not one for each day."""
+    rover = _rover_2012(tmp_path / "rover")
+    first = (rinex.time_span(rover)[0] - GPS_EPOCH).total_seconds()
+    shotset = _shifted(events.rinex_events(rover), 0.0)
+    seen = []
+    to_rinex = convert.to_rinex
+    monkeypatch.setattr(convert, "to_rinex", lambda path, *a, **k: seen.append(k.get("approx_time")) or to_rinex(
+        path, *a, **k))
+    inputs = sources.ppk_inputs("events-pos", tmp_path / "flight_events.pos", rover, [RTCM_LOG],
+                                reader=lambda *_a: shotset)
+    assert shotset.shots[0].gps_time // 86400 == first // 86400 + 1
+    assert seen == [pytest.approx(first)] and inputs.approx_time == pytest.approx(first)
+    assert sources.base_time(rover) == pytest.approx(first)

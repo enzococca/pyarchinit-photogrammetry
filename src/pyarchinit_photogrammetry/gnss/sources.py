@@ -6,6 +6,7 @@ read from its conversion."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .shots import ShotSet
@@ -77,11 +78,53 @@ def read(kind: str, path: str | Path, edge: str = "falling", message: str = "aut
     raise OptionError(f"one of {', '.join(KINDS)}", "--shots")
 
 
+_GPS_EPOCH = datetime(1980, 1, 6)
+
+
+def is_raw(path: str | Path) -> bool:
+    """Whether ``path`` is the raw log of a receiver, to convert to RINEX before a PPK: what
+    :func:`.convert.raw_kind` knows, and every D-RTK ``.DAT`` - for a rover as for a base."""
+    from . import convert
+
+    path = Path(path)
+    return path.suffix.lower() == ".dat" or convert.raw_kind(path) not in (None, "rinex")
+
+
+def first_epoch(observations) -> float | None:
+    """The first epoch of RINEX observations in GPS seconds: ``observations`` is their file or its header
+    (:class:`.rinex.RinexInfo`); None when it is not known - a file that is not RINEX, one without epochs."""
+    from . import rinex
+
+    info = observations
+    if not isinstance(info, rinex.RinexInfo):
+        try:
+            info = rinex.header(Path(observations))
+        except (OSError, ValueError):
+            return None
+    return None if info.first is None else (info.first - _GPS_EPOCH).total_seconds()
+
+
+def first_shot(shotset) -> float | None:
+    """The time (GPS seconds) of the first shot of ``shotset`` with a valid time, None when there is none."""
+    for shot in getattr(shotset, "shots", None) or ():
+        if getattr(shot, "valid", True):
+            return shot.gps_time
+    return None
+
+
+def base_time(rover, shotset=None) -> float | None:
+    """The approximate time (GPS seconds) for the conversion of a raw base log, the same for a run and for the
+    dialog that prepares it: the first epoch of the rover in RINEX (its file, its header, those of its conversion),
+    else the first shot of ``shotset`` with a valid time; None when nothing tells."""
+    when = first_epoch(rover)
+    return when if when is not None else first_shot(shotset)
+
+
 @dataclass
 class PpkInputs:
     """The files of a PPK run as RINEX: the ``shotset``, the ``rover`` and ``bases`` observations (the conversions of
     raw logs in their place), the ``converted`` logs (:class:`.convert.Converted`, the rover's first) and the
-    approximate time used for them (GPS seconds, None when none was needed)."""
+    approximate time used for the bases (GPS seconds, None when none was needed or known)."""
 
     shotset: ShotSet
     rover: Path
@@ -89,16 +132,32 @@ class PpkInputs:
     converted: list = field(default_factory=list)
     approx_time: float | None = None
 
+    def navs(self, given=()) -> list[Path]:
+        """The navigation files of the run: those of these conversions first, then the ``given`` ones that are not
+        the navigation of a conversion (a file in the cache of the conversions belongs to the conversion that made
+        it, which may be gone: the run takes those of its own)."""
+        from . import download
+
+        cache = download.cache_dir("converted").resolve()
+        found = [Path(done.nav) for done in self.converted if done.nav]
+        for path in given or ():
+            path = Path(path)
+            if path not in found and cache not in path.resolve().parents:
+                found.append(path)
+        return found
+
 
 def ppk_inputs(kind: str, shots_file: str | Path | None, rover: str | Path, bases=(), *, approx_time=None,
                edge: str = "falling", message: str = "auto", camera: int | None = None, progress=None,
                reader=None) -> PpkInputs:
     """The shots and the observations of a PPK run: the shots of ``shots_file`` read as ``kind`` (for ``"events"`` and
     ``"ubx"`` the rover itself when no file is given; the events of a raw rover are those of its conversion), a raw
-    rover or base log converted to RINEX (:func:`.convert.to_rinex`, with ``approx_time``: given, else the first shot
-    with a valid time, else the first epoch of the rover). ``reader(kind, path, edge, message, camera)`` reads the
-    shots (default :func:`read`). The errors of the readers and of the conversions as they are; a cancelled
-    ``progress`` stops a conversion."""
+    rover or base log (:func:`is_raw`) converted to RINEX (:func:`.convert.to_rinex`). The approximate time of a
+    conversion is ``approx_time`` when given; else, for the rover, the first shot with a valid time of a file of
+    shots that is not the rover, and for a base :func:`base_time`: the first epoch of the rover (in RINEX, or
+    converted), else that shot. ``reader(kind, path, edge, message, camera)`` reads the shots (default
+    :func:`read`). The errors of the readers and of the conversions as they are; a cancelled ``progress`` stops a
+    conversion."""
     from . import convert
 
     read_shots = reader or read
@@ -108,23 +167,21 @@ def ppk_inputs(kind: str, shots_file: str | Path | None, rover: str | Path, base
         raise ValueError(f"the shots of kind {kind} need their file")
     from_rover = kind == "events" and source.resolve() == rover.resolve()
     shotset = None if from_rover else read_shots(kind, source, edge, message, camera)
-    when = approx_time
-    if when is None and shotset is not None:
-        timed = [s.gps_time for s in shotset.shots if s.valid]
-        when = timed[0] if timed else None
     converted = []
-    if convert.raw_kind(rover) not in (None, "rinex"):
-        done = convert.to_rinex(rover, approx_time=when, progress=progress)
+    if is_raw(rover):
+        done = convert.to_rinex(rover, approx_time=approx_time if approx_time is not None else first_shot(shotset),
+                                progress=progress)
         converted.append(done)
         rover = done.obs
-        if when is None:
-            when = done.span[0]
     if from_rover:
         shotset = read_shots(kind, rover, edge, message, camera)
+    when = approx_time
     observed = []
     for path in bases or ():
         path = Path(path)
-        if convert.raw_kind(path) not in (None, "rinex") or path.suffix.lower() == ".dat":
+        if is_raw(path):
+            if when is None:
+                when = base_time(rover, None if from_rover else shotset)
             done = convert.to_rinex(path, approx_time=when, progress=progress)
             converted.append(done)
             observed.append(done.obs)

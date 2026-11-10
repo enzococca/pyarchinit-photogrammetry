@@ -421,6 +421,76 @@ def test_window_ppk_with_rover_events(tmp_path, qt_app, monkeypatch):
         qt_app.processEvents()
 
 
+@needs_a_converter
+def test_window_ppk_from_the_dialog_with_a_raw_base(tmp_path, qt_app, monkeypatch):
+    """Calcola PPK... through the dialog itself: the events of a rover in RINEX and a D-RTK .DAT as the base, which
+    carries the time of the week only. What the dialog accepts the run takes: the base converted once, with the same
+    approximate time (the first epoch of the rover), and the navigation files of that conversion given to RTKLIB
+    (stood in for: the sample has too few ephemerides for a solution)."""
+    from pyarchinit_photogrammetry import _native
+    from pyarchinit_photogrammetry.gnss import convert, rinex
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from gnss_helpers import pos_text
+
+    rover = events_test._rover_2012(tmp_path / "rover")
+    first = (rinex.time_span(rover)[0] - events_test.GPS_EPOCH).total_seconds()
+    midnight = (first // 86400 + 1) * 86400
+    project, folder = cli_test._project(tmp_path, {i: midnight + t for i, t in enumerate((10.5, 20.25, 30.0), 1)}, 16)
+    doc = ppg.Document.open(project)
+    dat = convert_test._dji_dat(tmp_path)
+    seen, given = [], []
+    to_rinex = convert.to_rinex
+
+    def spy(path, *args, **kwargs):
+        seen.append((Path(path).name, kwargs.get("approx_time")))
+        return to_rinex(path, *args, **kwargs)
+
+    def rtklib(conf, inputs, out):
+        given.append([Path(path) for path in inputs if Path(path).is_file()])
+        rows = [(first + t, 35.7, 139.5, 80.0, 1, 8, 0.01, 0.01, 0.02) for t in range(0, 64)]
+        Path(out).write_text(pos_text(rows), newline="")
+        return 0, ""
+
+    def drive(dialog):  # the user: names the base, waits for what the dialog says of it, confirms
+        dialog.show()
+        dialog.base.set_paths([dat])
+        dialog.by.setCurrentIndex(dialog.by.findData("order"))  # three photos: too few for their times to pair them
+        dialog.refresh()
+        assert _wait_until(lambda: "convertito" in dialog.base_info.text(), 60), dialog.base_info.text()
+        assert _wait_until(lambda: dialog.problem() is None, 30), dialog.problem()
+        dialog.accept()
+        return dialog.result()
+
+    monkeypatch.setattr(convert, "to_rinex", spy)
+    monkeypatch.setattr(_native, "ppk_solve", rtklib)
+    monkeypatch.setattr(_native, "ppk_available", lambda: True)
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.show()
+    qt_app.processEvents()
+    try:
+        monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(rover), ""))
+        monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+        monkeypatch.setattr(mw.PpkDialog, "exec", drive)
+        monkeypatch.setattr(mw, "message", lambda *a, **k: None)
+        failed = []
+        monkeypatch.setattr(w, "_error", lambda *a, **k: failed.append(a))
+        w.gnss_ppk()
+        assert _wait_until(lambda: not w.runner.busy, 120)
+        w.runner.wait()
+        qt_app.processEvents()
+        assert not failed, failed
+        times = [when for name, when in seen if name == dat.name]
+        assert times and all(when == pytest.approx(first) for when in times), seen
+        (inputs,) = given
+        assert len(inputs) >= 3, inputs  # the rover, the base and the navigation of the conversion, all there
+        assert "PPK: 3 foto su 3" in w.log_pane.text(), w.log_pane.text()
+    finally:
+        w.setWindowModified(False)
+        w.close()
+        qt_app.processEvents()
+
+
 def test_window_ppk_refuses_what_the_source_does_not_take(tmp_path, qt_app, monkeypatch):
     """An answer with a lever arm for an MRK (an older caller, a script) is refused before anything runs."""
     from pyarchinit_photogrammetry.gui import main_window as mw

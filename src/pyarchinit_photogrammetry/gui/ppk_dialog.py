@@ -801,15 +801,15 @@ class PpkDialog(QDialog):
         self._update()
 
     def _is_raw(self, path: Path) -> tuple | None:
-        """The time and size of ``path`` when it is the raw log of a receiver, to convert (:func:`.convert.raw_kind`,
-        and every D-RTK ``.DAT``); None for anything else."""
+        """The time and size of ``path`` when it is the raw log of a receiver, to convert (:func:`.sources.is_raw`,
+        as the run takes it); None for anything else."""
         stamp = _stamp(path)
         if stamp is None:
             return None
         known = self._raw.get(str(path))
         if known is None or known[0] != stamp:
             try:
-                raw = convert.raw_kind(path) not in (None, "rinex") or path.suffix.lower() == ".dat"
+                raw = sources.is_raw(path)
             except OSError:
                 raw = False
             known = self._raw[str(path)] = (stamp, raw)
@@ -849,25 +849,25 @@ class PpkDialog(QDialog):
         return self._file_shots()
 
     def _approx_time(self, path: Path):
-        """The approximate time (GPS seconds) for the conversion of the raw log ``path``, as
-        :func:`.sources.ppk_inputs` takes it: for the rover the first shot of a file of shots; for a base the first
-        epoch of the rover, else that shot. None when nothing tells, :data:`_WAIT` while what tells is being read."""
+        """The approximate time (GPS seconds) for the conversion of the raw log ``path``, the one
+        :func:`.sources.ppk_inputs` takes (so that the run finds the conversion of the dialog): for the rover the
+        first shot of a file of shots; for a base :func:`.sources.base_time`, the first epoch of the rover, else that
+        shot. None when nothing tells, :data:`_WAIT` while what tells is being read."""
         rover = self.rover.path()
         if rover is not None and path != rover:
             info = self._observations(rover)
             if isinstance(info, _Pending):
                 return _WAIT
-            span = _span(info)
-            if span is not None:
-                return span[0]
+            if isinstance(info, rinex.RinexInfo):
+                when = sources.first_epoch(info)
+                if when is not None:
+                    return when
         if self.kind() == "mrk":
-            times = [shot.gps_time for shot in self.shots]
-        else:
-            shotset = self._file_shots()
-            if shotset is sw.RUNNING:
-                return _WAIT
-            times = [s.gps_time for s in shotset.shots if s.valid] if isinstance(shotset, gshots.ShotSet) else []
-        return times[0] if times else None
+            return self.shots[0].gps_time if self.shots else None
+        shotset = self._file_shots()
+        if shotset is sw.RUNNING:
+            return _WAIT
+        return sources.first_shot(shotset) if isinstance(shotset, gshots.ShotSet) else None
 
     def _convert(self, path: Path, stamp: tuple):
         """The header of the conversion to RINEX of the raw log ``path`` (done once, in a thread), the text that says
