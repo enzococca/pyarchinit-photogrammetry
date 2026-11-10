@@ -156,7 +156,8 @@ def flight(shots: int = 50, *, message: str = "CAM", instances=(0,), no_fix: int
     after its epoch. With ``sms="corrected"`` (the default of ``firmware="4.x"``) GPA ``SMS`` is that arrival (ms,
     off by up to ``sms_jitter_ms`` either way) and the GPS and GPA messages are written 12-16 ms later; with
     ``"loop"`` (the default of ``firmware="3.x"``) the fix is processed at the next tick of a 50 Hz loop - delays that
-    drift slowly as a sawtooth with the clock, as in real logs; with ``"processing"`` it is processed 0-
+    drift slowly as a sawtooth with the clock, as in real logs (``"tick"``: exactly at the tick, 0.3 ms after it, the
+    sawtooth without jitter); with ``"processing"`` it is processed 0-
     ``processing_ms`` after its arrival (uniform). In both SMS is the processing time (ms, truncated) and the messages
     are written within the next 0.8 ms. The boot clock runs
     ``drift_ppm`` fast. Only every ``log_every``-th fix is logged (sparse GPS rows); every ``duplicate_every``-th
@@ -227,6 +228,10 @@ def flight(shots: int = 50, *, message: str = "CAM", instances=(0,), no_fix: int
             if sms == "corrected":
                 sms_ms = int(round(arrival / 1000.0 + rng.uniform(-sms_jitter_ms, sms_jitter_ms)))
                 written = int(round(arrival)) + PROCESS_US + int(rng.integers(0, 4000))
+            elif sms == "tick":  # processed exactly at the next tick of a 50 Hz loop: a deterministic sawtooth
+                processed = math.ceil(arrival / 20_000) * 20_000 + 300
+                sms_ms = int(processed // 1000)
+                written = int(processed + 400)
             elif sms == "loop":  # processed at the next tick of a 50 Hz loop (and up to 1.5 ms of reading)
                 processed = math.ceil((arrival + rng.uniform(0, 1500)) / 20_000) * 20_000 + rng.uniform(0, 500)
                 sms_ms = int(processed // 1000)

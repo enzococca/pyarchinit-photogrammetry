@@ -606,14 +606,13 @@ def _errors(shotset, expected) -> np.ndarray:
 
 @pytest.mark.parametrize("hz", [1, 5, 10])
 def test_one_sided_processing_delays(tmp_path, hz):
-    """SMS the time the fix was processed, 0-20 ms after its arrival (uniform), the boot clock 50 ppm fast: the clock
-    is fitted to the least delayed fixes, the times within -2.5..+1 ms of the truth (-3 ms at 1 Hz, where 60 fixes a
-    minute give the slope less well), early by the 5 % quantile of the delays and the truncation of SMS to the ms - the
-    mean of the fixes would put them 10 ms early."""
+    """SMS the time the fix was processed, 0-20 ms after its arrival (uniform, as with a CAN receiver), the boot clock
+    50 ppm fast: the clock is fitted to the least delayed fixes, the times within -3..+1.5 ms of the truth (the slope
+    of two minutes of fixes, the truncation of SMS to the ms) - the mean of the fixes would put them 10 ms early."""
     log, expected = flight(60, gps_hz=hz, drift_ppm=50.0, sms="processing", processing_ms=20.0, seed=hz)
     shotset = autopilot.ardupilot(_write(tmp_path, log))
     errors = _errors(shotset, expected)
-    assert (-0.003 if hz == 1 else -0.0025) <= errors.min() and errors.max() <= 0.001, errors
+    assert -0.003 <= errors.min() and errors.max() <= 0.0015, errors
     assert {s.source["time_base"] for s in shotset.shots} == {"gpa_sms_uncorrected"}
     assert any("processed them" in w for w in shotset.warnings)
     assert all(s.valid for s in shotset.shots)
@@ -631,12 +630,15 @@ def test_clock_thousands_of_ppm_off(tmp_path, sms):
 
 
 def test_firmware_3x_semantics(tmp_path):
-    """ArduPlane 3.6: CAM written at the next 50 Hz loop (0-20 ms late), fixes processed at a loop tick: with a clock
-    near GPS time the wait for the loop cannot be seen. The times are within 22 ms of the truth either way, said."""
-    log, expected = flight(40, firmware="3.x", drift_ppm=20.0, seed=4)
+    """ArduPlane 3.6: CAM written at the next 50 Hz loop, 0-20 ms after the flash, fixes processed at a loop tick.
+    With a clock 300 ppm off GPS time (a sawtooth of 67 s, five of them in the flight) the clock is right, and every
+    time is late by exactly the writing of its CAM."""
+    log, expected = flight(40, interval_ms=8000, firmware="3.x", sms="tick", drift_ppm=300.0, seed=4)
     shotset = autopilot.ardupilot(_write(tmp_path, log))
     errors = _errors(shotset, expected)
-    assert np.abs(errors).max() <= 0.022, errors
+    late = np.array([e["late"] for e in expected])
+    assert errors - late == pytest.approx(np.zeros(len(late)), abs=TIME_TOL_S), errors - late
+    assert late.max() > 0.015 and late.min() < 0.005
     assert all(e["late"] > 0 for e in expected) and shotset.shots[0].source["firmware"] == "ArduPlane V3.6.0"
     assert any("V3.6.0 writes the camera messages" in w and "20 ms" in w for w in shotset.warnings)
     assert {s.source["time_base"] for s in shotset.shots} == {"gpa_sms_uncorrected"}
@@ -766,3 +768,106 @@ def test_failing_units_close_the_log(tmp_path, monkeypatch):
     with pytest.raises(ZeroDivisionError):
         autopilot.read_dataflash(path)
     assert closed == [True]
+
+
+# --- the clock: glitches, bad fixes of sparse logs, the sawtooth of the processing delays ---------------------------
+
+
+def _gps_records(log: LogWriter) -> list[int]:
+    return [i for i, r in enumerate(log.records) if r[0] == "GPS"]
+
+
+def _shift_gms(log: LogWriter, k: int, ms: int) -> None:
+    """The GPS time of the k-th record of ``log`` (a GPS message of the 4.x layout) moved by ``ms``."""
+    name, (type_id, fmt, values) = log.records[k]
+    values = list(values)
+    values[3] += ms
+    log.records[k] = (name, (type_id, fmt, tuple(values)))
+
+
+@pytest.mark.parametrize("hz", [1, 5])
+@pytest.mark.parametrize("glitch_ms", [250, 1000])
+@pytest.mark.parametrize("sms", ["corrected", "tick"])
+def test_glitch_of_one_fix_left_out(tmp_path, hz, glitch_ms, sms):
+    """One fix whose GPS time is off by 0.25 s or 1 s (more than a step, but for one fix only) is left out, said:
+    every shot valid and on time (the same tolerances as without the glitch)."""
+    log, expected = flight(80, gps_hz=hz, interval_ms=1777, sms=sms, drift_ppm=200.0, seed=1)
+    rows = _gps_records(log)
+    _shift_gms(log, rows[len(rows) // 2], glitch_ms)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert all(s.valid for s in shotset.shots)
+    errors = _errors(shotset, expected)
+    low = -TIME_TOL_S if sms == "corrected" else -0.003
+    assert low <= errors.min() and errors.max() <= TIME_TOL_S, errors
+    assert any("1 GPS fix with a time off" in w and "left out of the clock" in w for w in shotset.warnings)
+
+
+def test_persistent_step_still_splits_the_clock(tmp_path):
+    """A step of the receiver's time that holds (every fix after it 0.5 s later) is a new stretch of the clock, not a
+    glitch: nothing left out."""
+    log, _ = flight(40, gps_hz=5, seed=2)
+    rows = _gps_records(log)
+    for k in rows[len(rows) // 2:]:
+        _shift_gms(log, k, 500)
+    with autopilot.read_dataflash(_write(tmp_path, log)) as df:
+        gps = autopilot._gps(df)
+        clock = autopilot._clocks(gps, autopilot._sms(df, gps))[0]
+    assert clock["glitches"] == 0 and int(clock["seg"][-1]) == 1 and len(clock["models"]) == 2
+
+
+@pytest.mark.parametrize("every, bad, off_ms", [(48, 3, 50), (48, 5, 150), (150, 1, 50)])
+def test_bad_fixes_of_sparse_logs(tmp_path, every, bad, off_ms):
+    """Fixes logged once every 9.6 s (3 of them 50 ms early, or 5 of them 150 ms) or once every 30 s (1 of them):
+    the envelope leaves them out, the shots within 3 ms (a deterministic sawtooth, 200 ppm)."""
+    log, expected = flight(225, gps_hz=5, interval_ms=1777, sms="tick", drift_ppm=200.0, log_every=every, seed=2)
+    rows = _gps_records(log)
+    for j in range(bad):
+        _shift_gms(log, rows[len(rows) // 2 + j], off_ms)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert -0.003 <= errors.min() and errors.max() <= 0.002, errors
+    assert all(s.valid for s in shotset.shots)
+
+
+@pytest.mark.parametrize("ppm", [5, 20, 50, 100, 150])
+def test_deterministic_sawtooth(tmp_path, ppm):
+    """Fixes processed exactly at the ticks of a 50 Hz loop, 30 minutes at 5 Hz: 50 ppm or more from GPS time every
+    window holds fixes that caught the tick and the times are within 1.5 ms; nearer to it the clock may sit on a
+    lower branch, the times early by up to 20 ms (never late), and the warning says so."""
+    log, expected = flight(60, gps_hz=5, interval_ms=30_000, sms="tick", drift_ppm=float(ppm), seed=3)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    if ppm >= 50:
+        assert np.abs(errors).max() <= TIME_TOL_S, errors
+    else:
+        assert -0.0205 <= errors.min() and errors.max() <= TIME_TOL_S, errors
+    assert any("early by up to 20 ms" in w and "varies along the flight" in w for w in shotset.warnings)
+    assert all(s.source["sms_lag_ms"] < 2 for s in shotset.shots)
+
+
+@pytest.mark.parametrize("sms", ["corrected", "tick"])
+def test_shots_at_the_ends_of_the_log(tmp_path, sms):
+    """Shots 50 ms after the first fix and at the last one: the window of the clock is shifted, not cut."""
+    log, expected = flight(shot_offsets_s=[0.05, 0.4, 50.0, 100.0, 149.9, 150.5], sms=sms, drift_ppm=200.0, seed=5)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    low = -TIME_TOL_S if sms == "corrected" else -0.003
+    assert low <= errors.min() and errors.max() <= TIME_TOL_S, errors
+    assert all(s.valid for s in shotset.shots)
+
+
+def test_corrected_times_lag_kept(tmp_path):
+    log, _ = flight(5)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert all(s.source["sms_lag_ms"] >= 12 and s.source["time_base"] == "gpa_sms" for s in shotset.shots)
+    assert all(s.source["fixes_above"] == 0.0 for s in shotset.shots)
+
+
+def test_too_old_without_camera_messages(tmp_path):
+    lines = ["FMT, 128, 89, FMT, BBnNZ, Type,Length,Name,Format,Columns",
+             "FMT, 130, 33, GPS, BIHBcLLeeEefI, Status,TimeMS,Week,NSats,HDop,Lat,Lng,RelAlt,Alt,Spd,GCrs,VZ,T",
+             "FMT, 135, 29, CAM, IHLLeccC, GPSTime,GPSWeek,Lat,Lng,Alt,Roll,Pitch,Yaw"]
+    path = tmp_path / "old.log"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match="no camera messages.*too old.*CAM, GPS"):
+        autopilot.ardupilot(path)

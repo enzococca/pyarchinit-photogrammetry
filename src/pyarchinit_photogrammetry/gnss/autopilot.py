@@ -15,24 +15,39 @@ whose ``SMS`` is the boot time (ms) the autopilot gives the fix. What that time 
 driver: in 4.5 and master the arrival of the fix on the serial port corrected for its jitter
 (``last_corrected_gps_time_us``, in master the PPS edge when there is one) - time base ``"gpa_sms"``; before 4.0, and
 from 4.0 for drivers without corrected timestamps (CAN/DroneCAN/UAVCAN, MAVLink receivers), the time the fix was
-processed, 0 to tens of ms after its arrival and within a couple of ms of the writing of the message - time base
-``"gpa_sms_uncorrected"`` (found from the data: ``TimeUS`` - ``SMS`` under :data:`UNCORRECTED_US` on most fixes).
-Without GPA (or SMS) the ``TimeUS`` of the GPS messages stands for it (``"gps_timeus"``), later still.
+processed, 0 to tens of ms after its arrival - time base ``"gpa_sms_uncorrected"``. The two are told apart by what
+the data shows, not by the firmware: ``TimeUS`` - ``SMS`` under :data:`UNCORRECTED_US` on 90 % of the fixes means SMS
+was taken within 2 ms of writing the message (a processing time); a corrected arrival is tens of ms earlier than the
+writing (real logs: 0.1-1.0 ms against 94-97 ms; the median is kept in ``source["sms_lag_ms"]``). A driver that
+corrected its times and wrote them at once would be taken for processing times: its shot times would be late by
+about 1.6 times the noise of SMS. Without GPA (or SMS) the ``TimeUS`` of the GPS messages stands for it
+(``"gps_timeus"``), later still, fitted as processing times.
 
-The clock: GPS time = boot time + offset, the offset a straight line in boot time (its slope is the rate of the
-autopilot's clock, which can be thousands of ppm off), never fitted across a step of the receiver's time. With
-corrected arrival times the line is fitted by least squares, the fixes more than 3 MAD from it left out (a bad fix),
-to the fixes of the receiver within :data:`FIT_WINDOWS_S` of the shot (the smallest window holding :data:`MIN_FIT` of
-them: sparse logs widen it). With processing times the delays are one-sided - a fix is never processed before it
-arrives - and in real logs they are a sawtooth (the fix waits for the next tick of a 50 Hz loop, a wait that drifts
-with the clock) with branches 20 ms apart: the mean of the fixes is not the clock, the least delayed of them is. So
-the line is the :data:`ENVELOPE_QUANTILE` quantile of the offsets (quantile regression) within
-:data:`ENVELOPE_WINDOW_S` of the shot: it follows the least delayed branch and a few bad fixes do not lift it. What
-it cannot see is the delay of the least delayed fixes themselves: when the clock of the autopilot keeps pace with GPS
-time (tens of ppm) the wait for the loop changes so slowly that it can stay near one value, up to 20 ms, for the
-whole flight - the shot times are then early by it. With too few fixes the offsets of up to :data:`NEIGHBOURS` fixes
-each side are interpolated (their medians). Fixes before the receiver had a 3D fix (``Status`` < 3; < 2 when that
-leaves too few) are not used.
+The clock: GPS time = boot time + offset. A stretch of the fixes of a receiver at one level of time ends at a step
+(the offset jumps by more than :data:`STEP_S`, beyond the rate of the clock); a stretch that does not hold for
+:data:`STEP_MIN_FIXES` fixes and :data:`STEP_MIN_S` is a glitch of the receiver's time (bad fixes), left out and said.
+A step during an outage smaller than :data:`STEP_S` plus 1 % of the outage is not seen: the clock is assumed to run
+on across it. In each stretch the rate of the clock (thousands of ppm off on some boards) is the slope of a robust
+line through all its fixes, and the offset is found at knots every :data:`KNOT_S` and interpolated between them:
+with corrected times the median of the offsets around each knot (:data:`FIT_WINDOWS_S`); with processing times their
+envelope over :data:`ENVELOPE_WINDOWS_S` (a full window, shifted at the ends of a stretch). Processing delays are
+one-sided - a fix is never processed before it arrives - and a sawtooth: the fix waits for the next tick of a 50 Hz
+loop, a wait that drifts with the rate of the clock, so the offsets lie in branches 20 ms (:data:`LOOP_S`) apart, the
+highest being the fixes that caught the tick (no delay). The envelope (:func:`_envelope_level`) leaves out the fixes
+more than :data:`ENVELOPE_SPREAD_S` above the others (bad fixes), takes the level under all but 2 % of the rest (at
+least 3 fixes above it) and rises to the branch one loop period above when 3 fixes or more are there.
+
+What it cannot see: when the clock of the autopilot runs within some 100 ppm of GPS time the wait for the loop
+changes so slowly that a window may hold no fix that caught the tick: the clock then sits on a lower branch and the
+shot times are early by up to 20 ms, by an amount that VARIES along the flight (synthetic, deterministic sawtooth at
+5/10 Hz over 30 min: 5 ppm -20 to -11 ms, 20 ppm -10 to +1 ms, 50 ppm and more within 1 ms). The rate is the slope
+through all the fixes of a stretch: a stretch holding few periods of the sawtooth (20 ms over the rate's offset from
+GPS time: 67 s at 300 ppm) gives it a little off, the times by some ms (80 s at 300 ppm: -5 to +0.6 ms).
+``source["fixes_above"]`` is the share of the fixes within :data:`ABOVE_WINDOW_S` of a shot more than
+:data:`ABOVE_S` above its clock (fixes processed earlier than the clock says possible: a branch the envelope missed,
+or bad fixes), warned of over :data:`ABOVE_WARNING`. With too few fixes in a stretch the offsets of up to
+:data:`NEIGHBOURS` fixes each side are interpolated (their medians). Fixes before the receiver had a 3D fix (``Status`` < 3; < 2 when that leaves too few)
+are not used.
 
 Which receiver: the clock of each physical receiver (``I`` 0, 1) is fitted from ALL its fixes, whether in use or not;
 a shot takes the receiver that was in use most (``U``), or another one when that one has no fixes around the shot;
@@ -48,12 +63,11 @@ not valid, with a warning.
 What is not removed: the latency of the receiver from the epoch of a fix to its arrival (tens of ms on a u-blox;
 ``GPS_DELAY_MS`` is ArduPilot's own estimate of it, not logged with the fixes) makes every time early by that constant
 - :func:`.shots.pair` and ``apply_shots`` take it as ``latency_s`` - and the delay of the camera from the flash shoe to
-the middle of the exposure likewise. On synthetic logs with these semantics (see the tests): corrected SMS within
-1.5 ms of the true time at 1-10 Hz, 50 and 3000 ppm clocks and outages; processing times with random delays of
-0-20 ms within about 1 ms (early by the 5 % quantile of the delays), with a 50 Hz loop and a 3000 ppm clock early by
-about 2 ms, and with a clock near GPS time early by the unseen wait for the loop (up to 20 ms); 3.x logs that plus the
-0-20 ms of the CAM writing. On real logs the clock of processing times sits on the least delayed fixes around each
-shot; a real log with CAM and corrected SMS was not available."""
+the middle of the exposure likewise. On synthetic logs (see the tests): corrected SMS within 1.5 ms of the true time
+at 1-10 Hz, 50 and 3000 ppm clocks and outages; processing times at a 50 Hz loop within 3 ms when the clock is 50 ppm
+or more from GPS time, early by up to 20 ms, varying, nearer to it; a glitch of one fix (0.25-1 s) or a few bad fixes
+in sparse logs move no shot by more than 3 ms; 3.x logs that plus the 0-20 ms of the CAM writing. A real log with CAM
+and corrected SMS was not available."""
 from __future__ import annotations
 
 import math
@@ -76,14 +90,27 @@ MESSAGES = {"cam": "CAM", "trig": "TRIG"}
 SHOT_MESSAGES = ("CAM", "TRIG", "GPS", "GPA", "PARM", "MSG")  # what the shots need of a log
 TIME_BASES = ("gpa_sms", "gpa_sms_uncorrected", "gps_timeus", "cam_gpstime")  # how the shot times were found
 NEAREST_GPS_S = 1.0  # status and accuracy of a shot from the GPS and GPA messages this close to it
-FIT_WINDOWS_S = (20.0, 60.0, 180.0)  # the clock fitted to the fixes this close to a shot, the first that holds ...
+KNOT_S = 15.0  # the offset of a clock is found at knots this far apart and interpolated between them
+FIT_WINDOWS_S = (20.0, 60.0, 180.0)  # corrected times: the fixes this close to a knot, the first window that holds ...
 MIN_FIT = 10  # ... this many fixes; with fewer, the medians of the NEIGHBOURS fixes on each side are interpolated
 NEIGHBOURS = 5
-ENVELOPE_WINDOW_S = 300.0  # processing times: the envelope of the fixes this close to a shot ...
-ENVELOPE_QUANTILE = 0.95  # ... the line under this share of them
-UNCORRECTED_US = 2000  # TimeUS - SMS under this on most fixes: SMS is the time the fix was processed
-STEP_S = 0.2  # a jump of the offset (beyond the rate of the clock) this big between two fixes: a step of time
-STEP_RATE = 0.01  # the rate of the clock may differ from GPS time by up to 1 % between fixes
+ENVELOPE_WINDOWS_S = (300.0, 600.0)  # processing times: the envelope of the fixes this close to a knot (a window of
+# twice this, shifted, not cut, at the ends of a stretch), the first that holds MIN_FIT fixes ...
+MIN_ENVELOPE = 5  # the envelope from this many fixes (sparse logs: one fix a minute)
+ENVELOPE_TOP = 0.02  # ... the level under all but this share of them (at least ENVELOPE_LEAST) ...
+ENVELOPE_LEAST = 3
+ENVELOPE_SPREAD_S = 0.040  # ... after those more than this above their median are left out (bad fixes: legitimate
+# delays of the processing span 20 ms at 50 Hz, up to some 40 ms with CAN receivers)
+LOOP_S = 0.020  # the period of the 50 Hz loop that processes the fixes: the branches of the sawtooth of delays
+ABOVE_S = 0.005  # a fix this far above the clock was processed earlier than the clock says possible ...
+ABOVE_WINDOW_S = 30.0  # ... counted among the fixes this close to a shot (source["fixes_above"]; not those beyond
+# ENVELOPE_SPREAD_S, bad fixes) ...
+ABOVE_WARNING = 0.05  # ... and more than this share of them is a warning
+UNCORRECTED_US = 2000  # TimeUS - SMS under this on most fixes: SMS was taken within 2 ms of writing the message
+STEP_S = 0.2  # a jump of the offset (beyond the rate of the clock) this big between two fixes: a step of time ...
+STEP_RATE = 0.01  # ... (the rate of the clock may differ from GPS time by up to 1 % between fixes) ...
+STEP_MIN_FIXES = 3  # ... that holds for at least this many fixes and ...
+STEP_MIN_S = 2.0  # ... this long; a shorter stretch at another level is bad fixes (a glitch), left out
 MAX_GAP_S = 120.0  # a shot between two fixes further apart than this (an outage) has no GPS time
 MAX_EXTRAPOLATION_S = 10.0  # nor one further than this before the first fix or after the last
 CHECK_MARGIN_S = 0.1  # the GPSTime of a shot and its time disagree by more than this: not valid
@@ -213,9 +240,11 @@ def _clocks(gps: dict, sms: np.ndarray) -> list[dict]:
         if np.count_nonzero(sel) < 2:
             continue
         g = gps["week"] * float(_WEEK) + gps["ms"] / 1000.0
+        lag_ms = None
         if np.count_nonzero(sel & np.isfinite(sms)) >= 2:
             sel &= np.isfinite(sms)
             lag = gps["boot_us"][sel] - np.round(sms[sel] * 1000.0) * 1000.0
+            lag_ms = round(float(np.median(lag)) / 1000.0, 2)
             base = "gpa_sms_uncorrected" if np.mean(lag < UNCORRECTED_US) >= 0.9 else "gpa_sms"
             a = sms[sel]
         else:
@@ -228,19 +257,48 @@ def _clocks(gps: dict, sms: np.ndarray) -> list[dict]:
         a, g = a[first], g[first]
         order = np.argsort(a, kind="stable")
         a, o = a[order], g[order] - a[order]
-        jump = np.abs(np.diff(o)) > STEP_S + STEP_RATE * np.diff(a)
-        clocks.append({"instance": inst, "A": a, "O": o, "seg": np.concatenate([[0], np.cumsum(jump)]),
-                       "base": base, "envelope": base != "gpa_sms",
-                       "used": int(np.count_nonzero(mine & gps["used"])), "fixes": len(a)})
+        a, o, glitches = _without_glitches(a, o)
+        seg = _segment_ids(a, o)
+        envelope = base != "gpa_sms"
+        clock = {"instance": inst, "A": a, "O": o, "seg": seg, "base": base, "envelope": envelope,
+                 "used": int(np.count_nonzero(mine & gps["used"])), "fixes": len(a), "glitches": glitches,
+                 "lag_ms": lag_ms, "models": [_segment_model(a[seg == k], o[seg == k], envelope)
+                                              for k in range(int(seg[-1]) + 1)]}
+        clocks.append(clock)
     physical = [c for c in clocks if c["instance"] != BLENDED] or clocks
     rest = [c for c in clocks if c not in physical]
     return (sorted(physical, key=lambda c: (-c["used"], -c["fixes"], c["instance"]))
             + sorted(rest, key=lambda c: (-c["used"], -c["fixes"])))
 
 
-def _line(x: np.ndarray, y: np.ndarray) -> tuple[float, float, np.ndarray] | None:
+def _segment_ids(a: np.ndarray, o: np.ndarray) -> np.ndarray:
+    """The stretch of each fix: a new one where the offset jumps by more than :data:`STEP_S` (beyond the rate of the
+    clock) from the fix before."""
+    if len(a) < 2:
+        return np.zeros(len(a), dtype=np.int64)
+    jump = np.abs(np.diff(o)) > STEP_S + STEP_RATE * np.diff(a)
+    return np.concatenate([[0], np.cumsum(jump)])
+
+
+def _without_glitches(a: np.ndarray, o: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """The fixes without the bad ones: a stretch at another level (a step of time) that does not hold for
+    :data:`STEP_MIN_FIXES` fixes and :data:`STEP_MIN_S` is a glitch of the receiver's time (or of SMS), not a step,
+    when a stretch that holds exists; and how many were left out."""
+    seg = _segment_ids(a, o)
+    if not len(seg) or seg[-1] == 0:
+        return a, o, 0
+    starts = np.flatnonzero(np.diff(np.concatenate([[-1], seg])))
+    ends = np.concatenate([starts[1:], [len(seg)]]) - 1
+    persistent = ((ends - starts + 1) >= STEP_MIN_FIXES) & ((a[ends] - a[starts]) >= STEP_MIN_S)
+    if not persistent.any() or persistent.all():
+        return a, o, 0
+    keep = persistent[seg]
+    return a[keep], o[keep], int(np.count_nonzero(~keep))
+
+
+def _line(x: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
     """A straight line fitted to ``(x, y)`` by least squares, points beyond 3 MAD of it left out: ``(value at 0,
-    slope, kept)``; None when ``x`` gives no line."""
+    slope)``; None when ``x`` gives no line."""
     if len(x) < 3 or np.ptp(x) <= 0:
         return None
     keep = np.ones(len(x), bool)
@@ -254,35 +312,73 @@ def _line(x: np.ndarray, y: np.ndarray) -> tuple[float, float, np.ndarray] | Non
         if np.count_nonzero(new) < 3 or np.array_equal(new, keep):
             break
         keep = new
-    return float(coef[1]), float(coef[0]), keep
+    return float(coef[1]), float(coef[0])
 
 
-def _envelope(x: np.ndarray, y: np.ndarray) -> float | None:
-    """The value at 0 of the upper envelope of ``(x, y)`` - the offsets of the least delayed fixes: the line of the
-    :data:`ENVELOPE_QUANTILE` quantile (quantile regression by iteratively reweighted least squares, from the robust
-    line), which a few bad fixes above the others do not lift and which follows the least delayed branch of a sawtooth
-    of delays, not the mean of its branches."""
-    fit = _line(x, y)
-    if fit is None:
-        return None
-    c, m, _keep = fit
-    design = np.column_stack([x, np.ones(len(x))])
-    tau = ENVELOPE_QUANTILE
-    for _ in range(50):
-        r = y - (m * x + c)
-        w = np.where(r > 0, tau, 1.0 - tau) / np.maximum(np.abs(r), 1e-4)
-        sw = np.sqrt(w)
-        m_new, c_new = np.linalg.lstsq(design * sw[:, None], y * sw, rcond=None)[0]
-        done = abs(c_new - c) < 1e-6 and abs(m_new - m) * max(np.ptp(x), 1.0) < 1e-6
-        m, c = float(m_new), float(c_new)
-        if done:
+def _window(a: np.ndarray, knot: float, half: float) -> slice:
+    """The fixes (``a`` sorted) within a window of ``2 * half`` around ``knot``, the window shifted - not cut - where
+    the stretch ends nearer than ``half``."""
+    first, last = float(a[0]), float(a[-1])
+    center = (first + last) / 2.0 if last - first <= 2.0 * half else min(max(knot, first + half), last - half)
+    return slice(int(np.searchsorted(a, center - half)), int(np.searchsorted(a, center + half, side="right")))
+
+
+def _envelope_level(r: np.ndarray) -> float:
+    """The level of the least delayed of the offsets ``r``: those more than :data:`ENVELOPE_SPREAD_S` above their
+    median left out (bad fixes), the level under all but :data:`ENVELOPE_TOP` of the others (at least
+    :data:`ENVELOPE_LEAST`), raised to the branch one loop period above it (:data:`LOOP_S`) when at least
+    :data:`ENVELOPE_LEAST` fixes are there: the fixes that caught the tick of the loop, the least delayed."""
+    r = r[r <= np.median(r) + ENVELOPE_SPREAD_S]
+    above = max(ENVELOPE_LEAST, int(math.ceil(ENVELOPE_TOP * len(r))))
+    level = float(np.sort(r)[-above]) if len(r) > above else float(np.max(r))
+    for _ in range(2):
+        branch = r[(r > level + LOOP_S / 2.0) & (r <= level + 1.5 * LOOP_S)]
+        if len(branch) < ENVELOPE_LEAST:
             break
-    return c
+        level = float(np.median(branch))
+    return level
 
 
-def _to_gps(clock: dict, b: float) -> tuple[float | None, str, float | None, float]:
-    """The GPS time of the boot time ``b`` (s) on ``clock``: ``(time, why not, age, period)`` - age the time since the
-    last fix before ``b`` (None before the first), period the time between that fix and the next."""
+def _segment_model(a: np.ndarray, o: np.ndarray, envelope: bool) -> dict:
+    """The offset of a stretch of a clock: its slope (the rate of the clock: a robust line through all its fixes) and
+    the offset at knots every :data:`KNOT_S` (``K``, ``L``): with corrected times the median of the offsets around
+    each knot, with processing times their envelope (:func:`_envelope_level`), both with the slope removed. No knots
+    (``K`` empty) when the stretch has too few fixes."""
+    model = {"start": float(a[0]), "end": float(a[-1]), "slope": 0.0, "K": np.zeros(0), "L": np.zeros(0)}
+    least = MIN_ENVELOPE if envelope else MIN_FIT
+    fit = _line(a - a.mean(), o) if len(a) >= least else None
+    if fit is None:
+        return model
+    slope = fit[1]
+    knots = np.arange(model["start"], model["end"] + KNOT_S, KNOT_S)
+    knots[-1] = min(knots[-1], model["end"])
+    kept_k, levels = [], []
+    for knot in knots:
+        for half in (ENVELOPE_WINDOWS_S if envelope else FIT_WINDOWS_S):
+            sel = _window(a, knot, half)
+            if sel.stop - sel.start >= least:
+                r = o[sel] - slope * (a[sel] - knot)
+                levels.append(_envelope_level(r) if envelope else float(np.median(r)))
+                kept_k.append(knot)
+                break
+    model.update(slope=slope, K=np.array(kept_k), L=np.array(levels))
+    return model
+
+
+def _offset(model: dict, b: np.ndarray | float):
+    """The offset of the stretch ``model`` at the boot times ``b``: interpolated between its knots, extended with
+    its slope beyond them."""
+    k, lv = model["K"], model["L"]
+    b = np.asarray(b, dtype=np.float64)
+    inside = np.interp(b, k, lv)
+    return np.where(b < k[0], lv[0] + model["slope"] * (b - k[0]),
+                    np.where(b > k[-1], lv[-1] + model["slope"] * (b - k[-1]), inside))
+
+
+def _to_gps(clock: dict, b: float) -> tuple[float | None, str, float | None, float, float | None]:
+    """The GPS time of the boot time ``b`` (s) on ``clock``: ``(time, why not, age, period, fixes above)`` - age the
+    time since the last fix before ``b`` (None before the first), period the time between that fix and the next,
+    fixes above the share of the fixes within :data:`ABOVE_WINDOW_S` more than :data:`ABOVE_S` above the clock."""
     a, o, seg = clock["A"], clock["O"], clock["seg"]
     k = int(np.searchsorted(a, b, side="right"))
     spacing = float(np.median(np.diff(a))) if len(a) > 1 else 0.0
@@ -290,25 +386,27 @@ def _to_gps(clock: dict, b: float) -> tuple[float | None, str, float | None, flo
     if 0 < k < len(a):
         period = float(a[k] - a[k - 1])
         if period > MAX_GAP_S:
-            return None, f"in a gap of {period:.0f} s between GPS fixes", None, period
+            return None, f"in a gap of {period:.0f} s between GPS fixes", None, period, None
         near = k - 1 if seg[k - 1] == seg[k] or b - a[k - 1] <= a[k] - b else k
     else:
         period = spacing
         far = b - float(a[-1]) if k else float(a[0]) - b
         if far > MAX_EXTRAPOLATION_S:
-            return None, f"{far:.0f} s {'after the last' if k else 'before the first'} GPS fix", None, period
+            return None, f"{far:.0f} s {'after the last' if k else 'before the first'} GPS fix", None, period, None
         near = k - 1 if k else 0
-    idx = np.flatnonzero(seg == seg[near])
-    windows = (ENVELOPE_WINDOW_S,) if clock["envelope"] else FIT_WINDOWS_S
-    for window in windows:
-        sel = idx[np.abs(a[idx] - b) <= window]
-        if len(sel) >= MIN_FIT:
-            x = a[sel] - b
-            offset = _envelope(x, o[sel]) if clock["envelope"] else (_line(x, o[sel]) or (None,))[0]
-            if offset is not None:
-                return b + offset, "", age, period
-            break
-    j = int(np.searchsorted(a[idx], b, side="right"))  # few fixes: the medians of the neighbours each side
+    model = clock["models"][int(seg[near])]
+    if len(model["K"]):
+        offset = float(_offset(model, b))
+        lo, hi = np.searchsorted(a, b - ABOVE_WINDOW_S), np.searchsorted(a, b + ABOVE_WINDOW_S, side="right")
+        mine = slice(lo, hi)
+        same = seg[mine] == seg[near]
+        r = o[mine][same] - _offset(model, a[mine][same])
+        # bad fixes far above (ENVELOPE_SPREAD_S) are left out of the clock and of this count
+        r = r[r <= ENVELOPE_SPREAD_S]
+        above = round(float(np.mean(r > ABOVE_S)), 3) if len(r) else None
+        return b + offset, "", age, period, above
+    idx = np.flatnonzero(seg == seg[near])  # few fixes: the medians of the neighbours each side
+    j = int(np.searchsorted(a[idx], b, side="right"))
     before, after = idx[max(0, j - NEIGHBOURS):j], idx[j:j + NEIGHBOURS]
     if len(before) and len(after):
         bb, ob = float(np.median(a[before])), float(np.median(o[before]))
@@ -316,7 +414,7 @@ def _to_gps(clock: dict, b: float) -> tuple[float | None, str, float | None, flo
         offset = ob + (oa - ob) * (b - bb) / (ba - bb) if ba > bb else ob
     else:
         offset = float(np.median(o[before if len(before) else after]))
-    return b + offset, "", age, period
+    return b + offset, "", age, period, None
 
 
 def _status_at(gps: dict | None, at: float, source: dict) -> tuple[str | None, int | None, bool]:
@@ -369,10 +467,15 @@ def _antenna_offset(params: np.ndarray | None) -> list[str]:
 def _choose(df: DataFlash, message: str) -> str:
     if message not in ("auto", *MESSAGES):
         raise ValueError(f"message must be one of auto, {', '.join(MESSAGES)}, not {message!r}")
-    for name in ("CAM", "TRIG", "GPS"):
-        if name in df.formats and "TimeUS" not in df.formats[name]["columns"]:
-            raise ValueError(f"{df.path.name}: a log too old for the times of its shots - its {name} messages have "
-                             "no TimeUS (an ArduPilot of about 2015 or older)")
+    old = [name for name in ("CAM", "TRIG", "GPS")
+           if name in df.formats and "TimeUS" not in df.formats[name]["columns"]]
+    if old and not (df.count("CAM") or df.count("TRIG")):
+        raise ValueError(f"{df.path.name}: the log has no camera messages (CAM or TRIG), and is too old for the times "
+                         f"of shots anyway: its formats of {', '.join(old)} have no TimeUS (an ArduPilot of about 2015 "
+                         "or older)")
+    if old:
+        raise ValueError(f"{df.path.name}: a log too old for the times of its shots - its {' and '.join(old)} "
+                         "messages have no TimeUS (an ArduPilot of about 2015 or older)")
     if message != "auto":
         name = MESSAGES[message]
         if not df.count(name):
@@ -475,7 +578,7 @@ def ardupilot(path: str | Path, message: str = "auto", camera: int | None = None
             std = _std_at(acc, at, gps_instance)
             why = ""
             for clock in clocks:
-                mapped, reason, age, period = _to_gps(clock, at)
+                mapped, reason, age, period, above = _to_gps(clock, at)
                 if mapped is not None:
                     break
                 why = why or reason
@@ -486,6 +589,9 @@ def ardupilot(path: str | Path, message: str = "auto", camera: int | None = None
             elif clocks:
                 t, base = mapped, clock["base"]
                 source["clock_instance"] = clock["instance"]
+                source["sms_lag_ms"] = clock["lag_ms"]
+                if above is not None:
+                    source["fixes_above"] = above
                 apart = t - cam_t
                 low = (age - period if age is not None else -MAX_EXTRAPOLATION_S) - CHECK_MARGIN_S
                 high = (age + period if age is not None else MAX_EXTRAPOLATION_S) + CHECK_MARGIN_S
@@ -500,7 +606,7 @@ def ardupilot(path: str | Path, message: str = "auto", camera: int | None = None
                           antenna=(la, lo, h), height="msl", std=std, status=status, attitude=attitude,
                           valid=valid, source=source))
     shots.sort(key=lambda s: s.gps_time)
-    warnings += _time_warnings(name, shots, firmware, version)
+    warnings += _time_warnings(name, shots, firmware, version, clocks)
     if no_fix:
         warnings.append(f"{no_fix} {name} message{_plural(no_fix)} without a GPS time (GPSWeek 0: no GPS fix yet) "
                         "left out")
@@ -523,7 +629,7 @@ def ardupilot(path: str | Path, message: str = "auto", camera: int | None = None
     return ShotSet(shots=shots, kind=kind, name=path.name, warnings=warnings, path=str(path))
 
 
-def _time_warnings(name: str, shots: list[Shot], firmware: str | None, version) -> list[str]:
+def _time_warnings(name: str, shots: list[Shot], firmware: str | None, version, clocks: list[dict]) -> list[str]:
     """What the times of the shots owe to the firmware and to the receivers."""
     out = []
     if name == "TRIG":
@@ -533,16 +639,30 @@ def _time_warnings(name: str, shots: list[Shot], firmware: str | None, version) 
         out.append(f"{firmware} writes the camera messages at its next 50 Hz loop, 0-20 ms after the shot (the "
                    "feedback pin is timed from ArduPilot 4.0): every shot time can be late by up to 20 ms")
     bases = {s.source["time_base"] for s in shots}
-    if "cam_gpstime" in bases:
+    if any(s.valid and s.source["time_base"] == "cam_gpstime" for s in shots):
         out.append("the log has no GPS fixes to put the boot times of the shots in GPS time: the times are those of "
                    "the last fix before each shot (GPSTime), early by up to a GPS period")
+    above = [s.source["fixes_above"] for s in shots if s.source.get("fixes_above") is not None]
+    many = sum(a > ABOVE_WARNING for a in above)
+    if many:
+        out.append(f"{many} shot{_plural(many)} with more than {ABOVE_WARNING:.0%} of the GPS fixes around "
+                   f"{'them' if many > 1 else 'it'} above the clock (up to {max(above):.0%}): a branch of the delays "
+                   "of the fixes the clock does not follow, or bad fixes - those shot times can be early by up to "
+                   "20 ms (source['fixes_above'])")
     if "gpa_sms_uncorrected" in bases:
         out.append("the GPS fixes carry the time the autopilot processed them, not their arrival (firmware before 4.0, "
-                   "or a CAN or MAVLink receiver): the clock is fitted to the least delayed of them, the shot times "
-                   "to a few ms")
+                   "or a CAN or MAVLink receiver): the clock is fitted to the least delayed of them; when the clock "
+                   "of the autopilot runs within some 100 ppm of GPS time the shot times can be early by up to 20 ms, "
+                   "by an amount that varies along the flight")
     if "gps_timeus" in bases:
         out.append("the GPS fixes have no arrival time (no GPA with SMS): their times of writing stand for it, fitted "
-                   "to the least delayed of them, the shot times to some ms")
+                   "to the least delayed of them; the shot times can be early by up to 20 ms or more, varying along "
+                   "the flight")
+    glitches = sum(c["glitches"] for c in clocks)
+    if glitches:
+        out.append(f"{glitches} GPS fix{'es' if glitches > 1 else ''} with a time off by more than {STEP_S:g} s from "
+                   "the fixes around (a glitch of the receiver's time, for less than "
+                   f"{STEP_MIN_FIXES} fixes and {STEP_MIN_S:g} s) left out of the clock")
     receivers = sorted({s.source["clock_instance"] for s in shots if "clock_instance" in s.source})
     if len(receivers) > 1:
         out.append(f"the shot times come from the clocks of receivers {', '.join(map(str, receivers))} (one had no "
