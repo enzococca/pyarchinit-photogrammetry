@@ -582,6 +582,10 @@ sotto).
 | `ppg ties list project.ppg [--json]` / `ppg ties remove project.ppg ID [--keep-markers]` | riga di comando: i legami (id, estremi, precisione, attivo o perché no); un legame tolto per id o nome, con i marker che aveva creato salvo `--keep-markers` |
 | `ppg ties check project.ppg --unknowns A=fixed,B=plan,C=similarity [--robust] [--no-references] [--json]` | riga di comando: la stima unica e i suoi controlli (residui, gradi di libertà in avanzo, distanze fra legami, leave-one-out, plausibilità), senza cambiare nulla; incognite `similarity`, `rigid`, `plan`, `shift`, `height`, `fixed` |
 | `ppg ties solve project.ppg --unknowns ... [--robust] [--no-references] [--yes [--accept-no-check]]` | riga di comando: lo stesso rapporto, poi le trasformazioni nuove applicate e il progetto salvato, con `--yes` o dopo la conferma; senza gradi di libertà in avanzo (nessun controllo) una conferma a parte, e con `--yes` serve anche `--accept-no-check` |
+| `engine.stable_height.measure(doc, chunk, reference, area=None, exclude=None, plane=False, name=None, progress=None)` | di quanto `chunk` (B) sta più in alto di `reference` (A) sul terreno stabile, con i DEM come sono messi adesso: un `HeightTie` (`dz`, `nmad`, `cells`, un'ancora o tre con `plane`), non salvato; `area`/`exclude` il nome di un layer dei disegni liberi, un file o `{"layer"}`/`{"file"}`, None = trovato da solo; `stable_height.add(doc, tie)` lo tiene (solo z nella stima), `heights_of`, `remove`, `remeasure` |
+| `ppg ties height project.ppg CHUNK REFERENCE [--layer L \| --area FILE] [--exclude L] [--plane] [--name N]` / `ppg ties heights project.ppg [--json]` / `ppg ties remeasure project.ppg ID` | riga di comando: una quota stabile misurata e tenuta; l'elenco delle quote stabili; una rimisurata dove i chunk sono adesso |
+| `engine.stakes.known_points(source, crs=None, doc=None)` / `engine.stakes.find(doc, chunk, points, radius=3, head=(0.03, 0.12), min_contrast=25, min_photos=3, max_candidates=5, progress=None)` | picchetti e capisaldi: punti noti da un CSV (`nome,x,y[,z][,precisione]`), da un chunk (i suoi marker con coordinate) o `"ties"`; una `Proposal` per punto (`best`, `others`, `displacement`, `flags`), niente salvato; `stakes.check(proposals)` (distanze, sospetti, spostamento mediano, punti fuori), `stakes.preview(chunk, proposal)` (ortofoto e foto, RGB), `stakes.next_candidate(proposal)`, `stakes.accept(doc, chunk, proposals, names=None)` (legami a coordinate note con le misure delle foto concordi) |
+| `ppg stakes find project.ppg CHUNK PUNTI [--crs C] [--radius R] [--head MIN,MAX] [--min-contrast N] [--min-photos N] [--out FILE.json]` / `ppg stakes accept project.ppg CHUNK FILE.json (--ids N1,N2 \| --agreeing) [--yes]` | riga di comando: le proposte scritte in un file JSON con un'immagine ognuna, il progetto invariato; poi quelle accettate come legami a coordinate note (senza `--yes` solo cosa farebbe) |
 | `doc.duplicate_chunk(chunk, cameras=None, label=None, keep_products=False)` | nuovo chunk (etichetta predefinita `<etichetta> (copia)`, poi `(copia 2)`... se già usata: `engine.chunks.duplicate_label`) con le foto `cameras` di `chunk` (tutte con None) e le loro pose e il loro stato attivo, i marker con le proiezioni su quelle foto, le barre di scala, trasformazione, CRS e impostazioni; un modello COLMAP scritto dalle pose, così le mappe di profondità girano senza allineare; le maschere delle foto tenute e le foto che stanno nella cartella del chunk (copie di riferimento delle riprese multispettrali e termiche) copiate, le camere puntate sulle copie; le impostazioni delle riprese restano, i loro prodotti no; i punti di legame copiati quando si tengono tutte le foto (una parte delle foto ne ha bisogno: ValueError senza); i prodotti mai copiati (`keep_products` è riservato); `chunk` non cambia; CLI `ppg duplicate-chunk` |
 | `chunk.set_cameras_enabled(cameras, enabled)` | attiva o disattiva foto (oggetti del chunk, chiavi o etichette; KeyError per un nome che non c'è, ValueError per una Camera di un altro chunk, per esempio di un duplicato, che ne condivide le chiavi): una foto disattivata tiene la sua posa, allineamento, mappe di profondità, ortofoto e texture la lasciano fuori; restituisce quante sono cambiate; CLI `ppg photos enable\|disable` |
 | `engine.chunks.cameras_in_area(chunk, polygon)` | le foto la cui immagine inquadra la superficie dentro `polygon` (coordinate del chunk) |
@@ -646,6 +650,30 @@ ha CRS, trasformazione e sistema interno del primo chunk, e contiene:
 DEM, ortofoto e texture non vengono uniti. `merged.meta["merge"]` elenca i chunk di origine, le
 foto trovate in più di un chunk e gli avvisi.
 
+## Più rilievi: maschere, acqua, prodotti uniti
+
+Il motore di [più rilievi](gui/multi-survey.md) (applicazione 1.7.7): maschere da un colore dell'ortofoto, livello
+dell'acqua con la correzione della rifrazione, ortofoto e DEM uniti di più chunk. Gli errori sono `ValueError` con il
+messaggio in inglese (`str()`) e in italiano (`.italian`): `MaskError`, `WaterError`, `MosaicError`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.colour_mask.HsvRange(hue=(lo, hi), sat=(lo, hi), val=(lo, hi))` | un intervallo di colori: tinta in gradi 0-360 (minimo sopra il massimo passa per lo 0, i rossi), saturazione e valore in % |
+| `engine.colour_mask.sample(chunk, x, y, radius=0.1, tolerance=(15, 20, 20))` | l'intervallo attorno al colore dell'ortofoto in un cerchio in `(x, y)` (mondo) |
+| `engine.colour_mask.mask(chunk, rng, opening=0.05, fill_holes=True, keep="largest", min_area=0.05, margin=0.0, bounds=None, progress=None)` | le celle dell'ortofoto dentro `rng` (letta al massimo a `MASK_SIDE` = 4000 pixel di lato), pulite: un `MaskResult` (`polygons`, `area`, `share`, `cell`, `holes`), niente scritto |
+| `engine.colour_mask.to_layer(chunk, result, layer=None, replace=True)` | la maschera come poligoni di un layer di disegni liberi (di solito `Maschera colore N`), quote dal DEM; una maschera precedente del layer sostituita, i disegni a mano tenuti; gli id |
+| `engine.colour_mask.union(chunk, layer)` | l'unione dei poligoni di un layer nel mondo attuale del chunk (shapely) |
+| `engine.water.level_from_edge(chunk, water, progress=None)` | il livello dell'acqua dal suo bordo: `water` un poligono, una lista, un `HsvRange` o il nome di un layer; il DEM letto dal lato della terra a 2 e 4 celle dal contorno, la mediana di `2 z2 - z4`: `level`, `spread` (NMAD), `p10`, `p90`, `edge_cells`, `slope_bias`; niente scritto |
+| `engine.water.set_level(chunk, level, source="hand", n=1.34, **info)` / `water.level_of(chunk)` | il livello conservato in `chunk.meta["water"]` (con il timbro della trasformazione); il livello nel mondo attuale del chunk (`level`, `n`, `source`, `spread`) o None |
+| `engine.water.correct_cloud(chunk, n=None, rebuild_dem=False, progress=None)` | la nuvola densa sotto il livello corretta (`z' = L - n (L - z)`, parassiale) come nuova versione, la nuvola di prima tenuta; `rebuild_dem` anche una nuova versione del DEM |
+| `engine.mosaic.build(doc, chunks, product="orthomosaic", areas=None, resolution=None, background="faded", name=None, progress=None)` | le ortofoto (o `product="dem"`) di `chunks` (in ordine di priorità) unite nel sistema del primo: le `areas` `[(chunk, poligono)]` vincono sull'elenco al loro interno, `background` `"faded"` o `"none"` fuori; ogni sorgente collocata dalla trasformazione in cui è stata costruita; file in `<progetto>.ppg.files/mosaics/<id>/` (`mosaic.tif`, `sources.tif`, `areas.gpkg`, `mosaic.json`), il record aggiunto a `doc.meta["mosaics"]` e restituito (il documento non salvato) |
+| `engine.mosaic.mosaics_of(doc)` / `record_of(doc, id)` / `remove(doc, id, delete_files=True)` | i prodotti uniti; uno; uno tolto (la cartella cancellata, o tenuta con `delete_files=False`) |
+| `engine.mosaic.is_stale(doc, record)` / `source_at(doc, id, x, y)` / `read_areas(doc, path, system)` | i chunk da unire di nuovo (spostati, sorgente ricostruita, tolti); il chunk da cui viene una cella; le aree di un GeoPackage (attributo `chunk`, `priority` facoltativo) |
+| `core.removal.MosaicRemoval(doc, ids)` | prodotti uniti tolti con le loro cartelle messe da parte, come fa la finestra (`apply`, `undo`, `redo`; `MosaicRemoval.added(doc, ids)` annulla una costruzione) |
+| `ppg mask colour progetto.ppg CHUNK (--hue A,B [--sat A,B] [--val A,B] \| --sample X,Y [--radius R]) [--opening M] [--holes] [--all] [--min-area A] [--margin M] [--layer NOME]` | riga di comando: la maschera come layer di disegni liberi |
+| `ppg water level progetto.ppg CHUNK (--set Z \| --layer NOME \| --hue A,B [--sat A,B] [--val A,B] \| --sample X,Y) [--n N \| --sea \| --fresh]` / `ppg water correct progetto.ppg CHUNK [--n N] [--dem]` / `ppg water show progetto.ppg CHUNK` | riga di comando: il livello a mano o dal bordo dell'acqua; la nuvola densa corretta (una nuova versione); il livello adesso |
+| `ppg mosaic build progetto.ppg --chunks A,B[,C] [--dem] [--areas FILE.gpkg] [--resolution R] [--background faded\|none] [--name N]` / `ppg mosaic list progetto.ppg [--json]` / `ppg mosaic remove progetto.ppg ID` | riga di comando: un prodotto unito costruito (i chunk collocati dal loro timbro e quelli inclinati segnalati); l'elenco con i chunk da unire di nuovo; uno tolto con i suoi file |
+
 ## Orientare un chunk locale
 
 Un chunk in un sistema locale (senza coordinate del mondo: un oggetto, un rilievo senza GNSS né
@@ -705,6 +733,40 @@ Un file senza quote le prende dal DEM (un vertice fuori dal DEM ha la quota inte
 disegno; un disegno senza nessun vertice sul DEM resta fuori); il layer viene da `--layer`,
 altrimenti dalla colonna `layer` del file, altrimenti dal nome del file; un'identità che il chunk
 ha già ne riceve una nuova. Un poligono tiene solo il contorno: i suoi buchi vengono contati.
+
+## Un disegno classificato per orientamento
+
+Il motore di [*Classifica un disegno*](gui/drawing.md#un-disegno-classificato-per-orientamento) (applicazione 1.7.7,
+`engine/orient_lines.py`): polilinee 2D su un piano divise secondo la loro direzione rispetto a un asse. Il programma
+non dà nomi agli elementi; i plugin Relitti e Murature danno loro un significato. Gli errori sono `OrientLinesError`
+(un `ValueError`) con il messaggio in inglese (`str()`) e in italiano (`.italian`).
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.orient_lines.DEFAULTS` | i parametri: `simplify` 0,01 m, `min_length` 0,05 m, `along_deg` 15, `across_deg` 15, `join_deg` 5, `join_offset` 0,02 m, `join_gap` 0,10 m, `across_bin` 0,10 m, `pair_deg` 5, `pair_min` 0,02 m, `pair_max` 0,50 m, `pair_overlap` 0,5 (i dodici del piano); `EXTRA_DEFAULTS`: `pair_isolation` 1,5 (1: basta la linea più vicina, 0: le più vicine per prime) |
+| `engine.orient_lines.lines_from_layer(chunk, layer)` | le linee e i poligoni di un layer di disegni liberi, array `(n, 2)` di x, y del mondo attuale del chunk; un poligono come anello chiuso |
+| `engine.orient_lines.lines_from_elevation(chunk, eid, units=True)` | i disegni di un prospetto nel suo `(u, v)`: le sue linee e, con `units`, gli anelli delle sue unità (senza le pietre) |
+| `engine.orient_lines.lines_from_file(path, chunk=None)` | le linee e i poligoni di un GeoPackage, GeoJSON o DXF; con `chunk` messi nel suo sistema come fa l'importazione dei disegni liberi (rifiutati quando non si può), senza così come li ha il file (l'`(u, v)` di un prospetto) |
+| `engine.orient_lines.elevation_axis(chunk, eid)` | l'orizzontale di un prospetto piano sulla pianta, `((x1, y1), (x2, y2))` a un metro di distanza |
+| `engine.orient_lines.classify(lines, axis, params=None, frame=None)` | una `Classification`: `axis`, `params`, `segments`, `elements`, `frame` (None per la pianta, l'id del prospetto); rifiutata per un asse più corto di 1e-6, nessuna linea, un parametro fuori intervallo |
+| `Classification.counts()` / `.to_dict()` / `.plate(path, size=(2000, 1400), language="it", names=None)` | gli elementi per gruppo (`along`, `across`, `pair_along`, `pair_across`, `other`); pronta per il JSON; la tavola di controllo in PNG o SVG (`names`: testo scritto al posto del numero di un elemento) |
+| `engine.orient_lines.to_layers(chunk, result, prefix="Classificato")` | gli elementi di un disegno della pianta come disegni liberi, un layer per gruppo, con le quote del DEM e gli attributi `gruppo`, `elemento`, `angolo`, `larghezza`; `{layer: numero}` |
+| `ppg classify-lines progetto.ppg CHUNK (--layer NOME \| --file F \| --elevation ID) (--axis X1,Y1,X2,Y2 \| --axis-from ID) [--param nome=valore ...] [--plate out.png] [--json out.json] [--layers]` | riga di comando: i conteggi per gruppo; la tavola, il JSON, i layer (il progetto viene salvato solo con `--layers`) |
+
+Un `Segment` è un tratto dritto: `id`, `source` (l'indice della sua linea), `p0`, `p1`, `length`, `angle` (gradi
+dall'asse, da -90 a 90), `s0`, `s1` (posizioni lungo l'asse), `t` (scarto con segno di traverso, positivo a sinistra),
+`group`. Un `Element` è quello che legge un plugin: `id`, `group`, `segments`, `geometry` (una LineString di shapely,
+o un Polygon per una coppia, nel piano dei dati), `position` (lungo l'asse), `side` (-1, 0, 1), `width` (di una
+coppia), `angle`, `offset` (di traverso), `length`.
+
+I pezzi di una linea disegnata restano una linea. Pezzi separati si uniscono quando angolo, scarto laterale e
+distanza stanno entro `join_deg`, `join_offset` e `join_gap`; una linea disegnata andata e ritorno su se stessa sono
+due. Coppie: prima i due lati di un poligono chiuso (gli altri lati dentro la coppia ne fanno parte, mai in coppia con una linea sciolta); poi una linea più vicina di `pair_min` e di `join_offset` a
+un'altra (disegnata due volte, un lato in comune) conta una volta con quella; poi le linee sciolte, le più vicine per
+prime, se ognuna è la più vicina dell'altra e la successiva linea dello stesso gruppo accanto a ognuna è almeno
+`pair_isolation` (1,5) volte più lontana, così le linee a passo regolare non diventano coppie. Le linee di traverso
+rimaste si uniscono quando stanno dalla stessa parte, entro `across_bin` l'una dall'altra lungo l'asse e una dopo
+l'altra.
 
 ## Prodotti da classi di punti scelte
 

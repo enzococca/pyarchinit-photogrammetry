@@ -3,8 +3,11 @@ two ends (or the known coordinates), precision, active, the residual of the last
 unknowns of each chunk (the six kinds, or out of the solve; the active chunk fixed), *Robusto*, an optional straight
 axis per chunk (two of its markers), *Controlla* (the solve and its checks in the worker; the report with the suspect
 ties in red) and *Applica* (after a check; without redundancy only after its own question, default No), *Rimuovi*,
-*Da marker omonimi*, *Importa...*. Not modal: the views stay usable while it is open. Applying is one step of
-*Modifica > Annulla* (:class:`TiesStep`)."""
+*Da marker omonimi*, *Importa...*; the stable heights (:mod:`..engine.stable_height`) in a second table - measured
+in the worker (*Misura quota stabile...*), measured again (*Rimisura*, in amber when the chunks moved apart in plan
+since), removed, switched on and off. Not modal: the views stay usable while it is open. Applying is one step of
+*Modifica > Annulla* (:class:`TiesStep`), and so is every edit of the ties and of the stable heights
+(:class:`TiesEditStep`)."""
 from __future__ import annotations
 
 import contextlib
@@ -21,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import crs as crs_mod
+from ..engine import stable_height
 from ..engine import ties as ties_mod
 from . import i18n
 from .dialogs import Field, ParamDialog, choice
@@ -35,10 +39,11 @@ RED = "#c0392b"
 ORANGE = "#b9770e"
 GREY = "#7f8c8d"
 # messages of the report that point at a wrong tie or a wrong result (red); the precision warnings are advice
-ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "loo_large_solved", "residual_large", "implausible_rotation",
-          "implausible_scale", "axis_bent", "distance_scale", "distance_scale_known"}
+ALARMS = {"no_check", "distance_suspect", "distance_failed", "loo_large", "loo_large_solved", "residual_large",
+          "height_residual_large", "implausible_rotation", "implausible_scale", "axis_bent", "distance_scale",
+          "distance_scale_known"}
 ADVICE = {"precision_spread", "precision_residuals", "precision_inherited", "not_levelled", "tilt_scale_kept",
-          "local_references", "approximated", "robust_unsettled"}
+          "local_references", "approximated", "robust_unsettled", "remeasure_height"}
 
 
 def alive(obj) -> bool:
@@ -80,23 +85,27 @@ def _held(chunk) -> bool:
 
 
 def default_kinds(doc, active=None) -> dict[int, str]:
-    """The unknowns proposed for each chunk: the active one fixed (else the first chunk with ties), a chunk without
-    usable ties out of the solve, *in pianta* for a chunk georeferenced by its own references or with 2-3 ties, else
-    *similitudine*."""
+    """The unknowns proposed for each chunk: the active one fixed (else the first chunk with ties), a chunk with a
+    stable height and no usable tie *quota*, a chunk without usable ties out of the solve, *in pianta* for a chunk
+    georeferenced by its own references or with 2-3 ties, else *similitudine*."""
     counts: dict[int, int] = {}
     for t in ties_mod.ties_of(doc):
         if t.active and not t.broken and not t.stale:
             for k in t.chunk_keys():
                 counts[k] = counts.get(k, 0) + 1
+    heights: set[int] = set()  # chunks with an active stable height: in the solve for their height at least
+    for h in stable_height.heights_of(doc):
+        if h.active:
+            heights.update((int(h.a), int(h.b)))
     fixed = active.key if active is not None and active in doc.chunks else \
-        next((c.key for c in doc.chunks if counts.get(c.key)), None)
+        next((c.key for c in doc.chunks if counts.get(c.key) or c.key in heights), None)
     out = {}
     for ch in doc.chunks:
         n = counts.get(ch.key, 0)
         if ch.key == fixed:
             out[ch.key] = "fixed"
         elif not n:
-            out[ch.key] = OUT
+            out[ch.key] = "height" if ch.key in heights else OUT
         elif _held(ch) or n <= 3:
             out[ch.key] = "plan"
         else:
@@ -171,12 +180,20 @@ def report_html(result: dict) -> str:
     suspect = set(rep["suspects"])
     loo = rep["loo"]
     for r in rep["residuals"]:
+        if r["kind"] == "height":  # in their own section below
+            continue
         kind = tr(ties_mod.MESSAGES["kind_check" if r["check"] else "kind_" + r["kind"]][0])
         value = loo.get(r["id"]) if r["id"] is not None else None
         gone = tr("-") if value is None else i18n.number(value, 3) + " m"
         bad = r["id"] in suspect or (r.get("fitted") and r["normalised"] > ties_mod.CHECK_FACTOR)
         out.append(line(m("line_residual", r["name"], kind, float(np.hypot(r["dx"], r["dy"])), float(r["dz"]),
                           float(r["precision"]), gone), RED if bad else None, bold=r["id"] in suspect))
+    if rep.get("heights"):
+        out.append("<br>" + line(tr("Quote stabili"), bold=True))
+        for h in rep["heights"]:
+            out.append(line(m("line_height", h["name"], h["labels"][1], h["labels"][0], float(h["dz"]),
+                              float(h["precision"]), float(h["horizontal"])),
+                            RED if h["fitted"] and h["normalised"] > ties_mod.CHECK_FACTOR else None))
     comparable = [c for c in result["checks"] if c.get("ok") is not None]
     if comparable:
         out.append("<br>" + line(m("line_distances", sum(1 for c in comparable if c["ok"]), len(comparable)),
@@ -200,16 +217,19 @@ class TiesChanged(ScriptChanged):
 
 
 def edit_state(doc, keys=None) -> dict:
-    """What an edit of the ties may change: the ties (``doc.meta["ties"]``) and the markers of the chunks ``keys``
-    (default every chunk; the ends of the ties are markers, a known tie keeps its coordinates in its marker's
-    reference). Deep copies: nothing is shared with the live markers."""
+    """What an edit of the ties may change: the ties (``doc.meta["ties"]``), the stable heights
+    (``doc.meta["height_ties"]``) and the markers of the chunks ``keys`` (default every chunk; the ends of the ties are
+    markers, a known tie keeps its coordinates in its marker's reference). Deep copies: nothing is shared with the
+    live markers."""
     return {"ties": copy.deepcopy(doc.meta.get(ties_mod.META_KEY)),
+            "heights": copy.deepcopy(doc.meta.get(stable_height.META_KEY)),
             "markers": {ch.key: copy.deepcopy([m.to_dict() for m in ch.markers]) for ch in doc.chunks
                         if keys is None or ch.key in keys}}
 
 
 def _restrict(state: dict, keys) -> dict:
-    return {"ties": state["ties"], "markers": {k: v for k, v in state["markers"].items() if k in keys}}
+    return {"ties": state["ties"], "heights": state.get("heights"),
+            "markers": {k: v for k, v in state["markers"].items() if k in keys}}
 
 
 def fingerprint(doc) -> str:
@@ -220,8 +240,9 @@ def fingerprint(doc) -> str:
 
 
 class TiesEditStep:
-    """An edit of the ties (import, from markers, remove, active, precision) as one step of *Modifica > Annulla*: the
-    ties and the markers of the chunks the edit changed, before and after it (:func:`edit_state`). Undo and redo first
+    """An edit of the ties (import, from markers, remove, active, precision; a stable height measured, measured again,
+    removed, switched on or off) as one step of *Modifica > Annulla*: the ties, the stable heights and the markers of
+    the chunks the edit changed, before and after it (:func:`edit_state`). Undo and redo first
     check that the ties and those chunks are as the step left them (else :class:`TiesChanged`: the history drops the
     step; a change in another chunk does not count), then write the other side back - the ties and their markers
     together."""
@@ -235,10 +256,11 @@ class TiesEditStep:
         doc = self.window.doc
         if edit_state(doc, set(expected["markers"])) != expected:
             raise TiesChanged("the ties or the markers changed after the edit of the ties")
-        if state["ties"]:
-            doc.meta[ties_mod.META_KEY] = copy.deepcopy(state["ties"])
-        else:
-            doc.meta.pop(ties_mod.META_KEY, None)
+        for key, value in ((ties_mod.META_KEY, state["ties"]), (stable_height.META_KEY, state.get("heights"))):
+            if value:
+                doc.meta[key] = copy.deepcopy(value)
+            else:
+                doc.meta.pop(key, None)
         for ch in doc.chunks:
             if ch.key in state["markers"]:
                 ch.markers = [Marker.from_dict(d) for d in copy.deepcopy(state["markers"][ch.key])]
@@ -327,6 +349,8 @@ class TiesDialog(QDialog):
     """The ties of the project, the unknowns per chunk, the check and the apply (see the module)."""
 
     COLS = ("active", "name", "a", "b", "precision", "residual", "state")
+    HCOLS = ("name", "chunk", "reference", "dz", "nmad", "cells", "plane", "active", "residual", "state")
+    AUTOMATIC = ""  # the area of a stable height: the stable-ground rules over the whole overlap
 
     @classmethod
     def ask(cls, window) -> "TiesDialog":
@@ -382,8 +406,42 @@ class TiesDialog(QDialog):
             row.addWidget(b)
         row.addStretch(1)
         tl.addLayout(row)
+        split.addWidget(top)
 
-        tl.addWidget(QLabel("<b>" + html.escape(tr("Incognite per chunk")) + "</b>"))
+        # the stable heights and the unknowns in panes of their own: the splitter lets the user give the room
+        mid = QWidget()
+        ml = QVBoxLayout(mid)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(QLabel("<b>" + html.escape(tr("Quote stabili")) + "</b>"))
+        self.heights = QTableWidget(0, len(self.HCOLS))
+        self.heights.setHorizontalHeaderLabels([tr("Nome"), tr("Chunk"), tr("Rispetto a"), tr("dz (m)"),
+                                                tr("NMAD (m)"), tr("Celle"), tr("Piano"), tr("Attivo"),
+                                                tr("Residuo (m)"), tr("Stato")])
+        self.heights.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.heights.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.heights.verticalHeader().setVisible(False)
+        self.heights.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.heights.horizontalHeader().setStretchLastSection(True)
+        ml.addWidget(self.heights, 1)
+        hrow = QHBoxLayout()
+        self.b_measure_height = QPushButton(tr("Misura quota stabile..."))
+        self.b_measure_height.setToolTip(tr("La quota di un chunk rispetto a un altro sul terreno che non è cambiato "
+                                            "(confronto dei DEM): fissa solo la quota, nella stima con i legami"))
+        self.b_remeasure_height = QPushButton(tr("Rimisura"))
+        self.b_remeasure_height.setToolTip(tr("Le quote stabili scelte (nessuna scelta: quelle da rimisurare) misurate "
+                                              "di nuovo dove i chunk sono adesso"))
+        self.b_remove_height = QPushButton(tr("Rimuovi"))
+        self.b_remove_height.setToolTip(tr("Rimuovi le quote stabili scelte nella tabella"))
+        for b in (self.b_measure_height, self.b_remeasure_height, self.b_remove_height):
+            hrow.addWidget(b)
+        hrow.addStretch(1)
+        ml.addLayout(hrow)
+        split.addWidget(mid)
+
+        low = QWidget()
+        ll = QVBoxLayout(low)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(QLabel("<b>" + html.escape(tr("Incognite per chunk")) + "</b>"))
         self.chunks = QTableWidget(0, 4)
         self.chunks.setHorizontalHeaderLabels([tr("Chunk"), tr("Incognite"), tr("Asse: da marker"),
                                                tr("Asse: a marker")])
@@ -391,7 +449,7 @@ class TiesDialog(QDialog):
         self.chunks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.chunks.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.chunks.horizontalHeader().setStretchLastSection(True)
-        tl.addWidget(self.chunks)
+        ll.addWidget(self.chunks, 1)
         opts = QHBoxLayout()
         self.c_robust = QCheckBox(tr("Robusto"))
         self.c_robust.setToolTip(tr("Pesi di Huber: un legame sbagliato pesa meno (la stima si ripete finché i pesi "
@@ -402,8 +460,8 @@ class TiesDialog(QDialog):
         opts.addWidget(self.c_robust)
         opts.addWidget(self.c_references)
         opts.addStretch(1)
-        tl.addLayout(opts)
-        split.addWidget(top)
+        ll.addLayout(opts)
+        split.addWidget(low)
 
         bottom = QWidget()
         bl = QVBoxLayout(bottom)
@@ -413,6 +471,10 @@ class TiesDialog(QDialog):
         self.report.setPlaceholderText(tr("Premi Controlla: la stima e i controlli, niente viene applicato"))
         bl.addWidget(self.report, 1)
         split.addWidget(bottom)
+        split.setChildrenCollapsible(False)
+        for i, stretch in enumerate((3, 1, 1, 2)):  # the ties first, the report next
+            split.setStretchFactor(i, stretch)
+        split.setSizes([260, 130, 130, 220])
 
         buttons = QHBoxLayout()
         self.b_check = QPushButton(tr("Controlla"))
@@ -433,6 +495,10 @@ class TiesDialog(QDialog):
         self.b_points.clicked.connect(lambda: self.window.common_points())
         self.b_confirm.clicked.connect(self.confirm_selected)
         self.table.itemChanged.connect(self._item_changed)
+        self.heights.itemChanged.connect(self._height_item_changed)
+        self.b_measure_height.clicked.connect(self.ask_measure)
+        self.b_remeasure_height.clicked.connect(self.remeasure_selected)
+        self.b_remove_height.clicked.connect(self.remove_selected_heights)
         self.c_robust.toggled.connect(lambda _on: self.invalidate())
         self.c_references.toggled.connect(lambda _on: self.invalidate())
         self.finished.connect(self._forget)  # Esc / reject: Qt closes the dialog without a closeEvent
@@ -511,11 +577,76 @@ class TiesDialog(QDialog):
                     mc.setCurrentIndex(max(0, mc.findData(chosen)))
                     mc.currentIndexChanged.connect(lambda _i: self.invalidate())
                     self.chunks.setCellWidget(i, col, mc)
+            self._fill_heights()
         finally:
             self._filling = False
         self._chunks_seen = self._chunk_names()
         self._update_buttons(busy=self.checking)
         self.invalidate()
+
+    def _fill_heights(self) -> None:
+        """The table of the stable heights from the project (called with ``_filling`` on); a height whose chunks moved
+        apart in plan since it was measured in amber, said in its state."""
+        labels = {c.key: c.label for c in self.doc.chunks}
+        rows = stable_height.heights_of(self.doc)
+        self.heights.setRowCount(len(rows))
+        for i, h in enumerate(rows):
+            moved = stable_height.horizontal_move(self.doc, h)
+            name = QTableWidgetItem(h.name)
+            name.setData(Qt.ItemDataRole.UserRole, h.id)
+            self.heights.setItem(i, 0, name)
+            self.heights.setItem(i, 1, QTableWidgetItem(labels.get(h.b, tr("chunk {0} (non c'è più)", h.b))))
+            self.heights.setItem(i, 2, QTableWidgetItem(labels.get(h.a, tr("chunk {0} (non c'è più)", h.a))))
+            self.heights.setItem(i, 3, QTableWidgetItem(i18n.number(h.dz, 3)))
+            self.heights.setItem(i, 4, QTableWidgetItem(i18n.number(h.nmad, 3)))
+            self.heights.setItem(i, 5, QTableWidgetItem(i18n.number(h.cells, 0)))
+            self.heights.setItem(i, 6, QTableWidgetItem(tr("sì") if h.plane else tr("no")))
+            active = QTableWidgetItem()
+            active.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
+            active.setCheckState(Qt.CheckState.Checked if h.active else Qt.CheckState.Unchecked)
+            self.heights.setItem(i, 7, active)
+            self.heights.setItem(i, 8, QTableWidgetItem(""))
+            stale = moved is not None and moved[0] > moved[1]
+            self.heights.setItem(i, 9, QTableWidgetItem(self._height_state(h, moved)))
+            name.setData(self.STALE, stale)
+            if stale:
+                self._height_colours(i, ORANGE)
+
+    @staticmethod
+    def _height_state(h, moved) -> str:
+        state = tr("attivo") if h.active else tr("non attivo")
+        if moved is not None and moved[0] > moved[1]:
+            state += " - " + tr("da rimisurare: spostati di {0} m in pianta", i18n.number(moved[0], 3))
+        return state
+
+    def height_row_of(self, tie_id: str) -> int:
+        for i in range(self.heights.rowCount()):
+            if self.heights.item(i, 0).data(Qt.ItemDataRole.UserRole) == tie_id:
+                return i
+        return -1
+
+    STALE = Qt.ItemDataRole.UserRole + 1  # the chunks moved apart in plan since the height was measured
+    PREDICTED = Qt.ItemDataRole.UserRole + 2  # the solve of the last check would move them apart
+
+    def height_stale(self, tie_id: str) -> bool:
+        """The chunks of the stable height ``tie_id`` moved apart in plan since it was measured: to be measured again
+        (amber). What a check would move is :meth:`height_predicted`, not this."""
+        row = self.height_row_of(tie_id)
+        return row >= 0 and bool(self.heights.item(row, 0).data(self.STALE))
+
+    def height_predicted(self, tie_id: str) -> bool:
+        """The solve of the last check (still valid) would move the chunks of ``tie_id`` apart in plan beyond the
+        limit: to be measured again after *Applica* (amber, said in its state)."""
+        row = self.height_row_of(tie_id)
+        return row >= 0 and bool(self.heights.item(row, 0).data(self.PREDICTED))
+
+    def _height_colours(self, row: int, colour: str | None) -> None:
+        for c in range(len(self.HCOLS)):
+            item = self.heights.item(row, c)
+            if colour is not None:
+                item.setForeground(QColor(colour))
+            else:
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
 
     def _state_text(self, t) -> str:
         if t.broken:
@@ -532,9 +663,10 @@ class TiesDialog(QDialog):
         change under the tables."""
         doc = self.doc
         if doc is None:
-            return (), ()
+            return (), (), ()
         return (tuple((ch.key, ch.label) for ch in doc.chunks),
-                tuple((t.id, t.broken, tuple(t.stale or ())) for t in ties_mod.ties_of(doc)))
+                tuple((t.id, t.broken, tuple(t.stale or ())) for t in ties_mod.ties_of(doc)),
+                tuple(h.id for h in stable_height.heights_of(doc)))
 
     def follow_chunks(self) -> None:
         """The window refreshed: the tables reloaded when chunks were added, removed or renamed or a tie changed state
@@ -731,6 +863,187 @@ class TiesDialog(QDialog):
             self.window.refresh_all()
             self.reload(kinds=self._kinds_with_new())
 
+    # ------------------------------------------------------------------ stable heights
+    def selected_height_ids(self) -> list[str]:
+        rows = sorted({i.row() for i in self.heights.selectedIndexes()})
+        return [self.heights.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in rows]
+
+    def _polygon_layers(self) -> list[str]:
+        """The free-drawing layers with polygons in any chunk: the areas a stable height may be measured in."""
+        from ..core import free_drawings
+
+        names: list[str] = []
+        for ch in self.doc.chunks:
+            for f in free_drawings.features(ch):
+                if f.get("kind") == "polygon" and f.get("layer") and f["layer"] not in names:
+                    names.append(f["layer"])
+        return names
+
+    def ask_measure(self) -> bool:
+        """*Misura quota stabile...*: the chunk, the reference, the area (a polygon layer or automatic), what to leave
+        out and offset or plane asked, then :meth:`measure_height`."""
+        if len(self.doc.chunks) < 2:
+            self.window._warn(tr("Servono almeno due chunk."))
+            return False
+        with_dem = [ch for ch in self.doc.chunks if ch.dem_path is not None]
+        if len(with_dem) < 2:
+            self.window._warn(tr("Una quota stabile confronta i DEM di due chunk: servono almeno due chunk con il "
+                                 "DEM."))
+            return False
+        choices = [(ch.key, ch.label) for ch in with_dem]
+        current = self.window.chunk if self.window.chunk in with_dem else with_dem[0]
+        reference = next(ch for ch in with_dem if ch is not current)
+        layers = self._polygon_layers()
+        v = ParamDialog.ask(self, tr("Misura quota stabile"), [
+            Field("chunk", tr("Chunk da agganciare in quota"), current.key, choices=choices),
+            Field("reference", tr("Rispetto a"), reference.key, choices=choices),
+            Field("area", tr("Terreno stabile"), self.AUTOMATIC,
+                  choices=[(self.AUTOMATIC, tr("Automatica (pendenze basse, celle concordi)"))]
+                  + [(n, n) for n in layers]),
+            Field("exclude", tr("Escludi"), self.AUTOMATIC,
+                  choices=[(self.AUTOMATIC, tr("niente"))] + [(n, n) for n in layers]),
+            Field("plane", tr("Piano (anche l'inclinazione) invece di uno scostamento"), False)],
+            intro=tr("Il DEM del chunk confrontato con quello del riferimento dove il terreno non è cambiato: la "
+                     "differenza di quota diventa una quota stabile, usata dalla stima con i legami. Nulla viene "
+                     "applicato finché non premi Applica."))
+        if not v:
+            return False
+        if v["chunk"] == v["reference"]:
+            self.window._warn(tr("Scegli due chunk diversi."))
+            return False
+        return self.measure_height(v["chunk"], v["reference"], layer=v["area"] or None, plane=bool(v["plane"]),
+                                   exclude=v["exclude"] or None)
+
+    def measure_height(self, chunk_key: int, reference_key: int, layer: str | None = None, plane: bool = False,
+                       exclude: str | None = None) -> bool:
+        """The height of chunk ``chunk_key`` over ``reference_key`` on stable ground (in the polygons of the layer
+        ``layer``, else automatic; without those of ``exclude``) measured in the worker
+        (:func:`..engine.stable_height.measure`); the result added in the window as one step of Modifica > Annulla.
+        Returns whether the measure started."""
+        doc = self.doc
+        area = None if layer is None else {"layer": layer}
+        out = None if exclude is None else {"layer": exclude}
+
+        def work(p):
+            try:
+                return stable_height.measure(doc, chunk_key, reference_key, area=area, exclude=out, plane=plane,
+                                             progress=p)
+            except (ties_mod.TieError, ValueError, KeyError) as exc:
+                return {"error": exc}
+
+        return self._run_heights(tr("Misura quota stabile"), work, self._measured)
+
+    def _run_heights(self, label: str, work, done) -> bool:
+        was = self.checking  # a check of this dialog may be running: refused, the buttons stay as they were
+        self._update_buttons(busy=True)
+        doc = self.doc
+        started = self.window.runner.run(label, work, lambda result: done(result, doc), self._failed)
+        if not started:
+            self._update_buttons(busy=was)
+        return started
+
+    def _gone(self, doc) -> bool:
+        """The dialog closed, or another project opened, while the worker measured."""
+        try:
+            self.isVisible()
+        except RuntimeError:
+            return True
+        return doc is not self.doc
+
+    def _measured(self, result, doc) -> None:
+        if self._gone(doc):
+            return
+        self._update_buttons()
+        if isinstance(result, dict):
+            self.window._warn(tr("Quota stabile: {0}", error_text(result["error"])))
+            return
+        before = edit_state(self.doc)
+        try:
+            tie = stable_height.add(self.doc, result)
+        except KeyError as exc:  # a chunk removed while it was measured
+            self.window._warn(tr("Quota stabile: {0}", error_text(exc)))
+            return
+        self.window.log_pane.info(tr("Quota stabile «{0}»: dz {1} m, NMAD {2} m su {3} celle stabili", tie.name,
+                                     i18n.number(tie.dz, 3), i18n.number(tie.nmad, 3), i18n.number(tie.cells, 0)))
+        self._edited(tr("Misura quota stabile"), before)
+        self.reload(kinds=self._kinds_with_new())
+
+    def remeasure_selected(self) -> bool:
+        """*Rimisura*: the selected stable heights (none selected: those shown as to be measured again) measured
+        again where the chunks are now, in the worker; the new measures written in the window as one step of
+        Modifica > Annulla (id, name and state kept). Returns whether the measure started."""
+        ids = self.selected_height_ids()
+        if not ids:
+            ids = [h.id for h in stable_height.heights_of(self.doc) if self.height_stale(h.id)]
+        if not ids:
+            self.window._info(tr("Rimisura"), tr("Scegli nella tabella le quote stabili da rimisurare."))
+            return False
+        olds = [h for h in stable_height.heights_of(self.doc) if h.id in ids]
+        doc = self.doc
+
+        def work(p):
+            out = []
+            for i, old in enumerate(olds):
+                sub = p.sub(i / len(olds), 1.0 / len(olds))
+                try:
+                    out.append(stable_height.measure(doc, old.b, old.a, area=old.area, exclude=old.exclude,
+                                                     plane=old.plane, name=old.name, progress=sub))
+                except (ties_mod.TieError, ValueError, KeyError) as exc:
+                    return {"error": exc, "name": old.name}
+            return [(old.id, new) for old, new in zip(olds, out)]
+
+        return self._run_heights(tr("Rimisura quota stabile"), work, self._remeasured)
+
+    def _remeasured(self, result, doc) -> None:
+        if self._gone(doc):
+            return
+        self._update_buttons()
+        if isinstance(result, dict):
+            self.window._warn(tr("Quota stabile «{0}»: {1}", result["name"], error_text(result["error"])))
+            return
+        before = edit_state(self.doc)
+        done = []
+        for tid, new in result:
+            with contextlib.suppress(KeyError):  # removed while it was measured
+                done.append(stable_height.replace(self.doc, tid, new))
+        if not done:
+            return
+        for h in done:
+            self.window.log_pane.info(tr("Quota stabile «{0}» rimisurata: dz {1} m, NMAD {2} m", h.name,
+                                         i18n.number(h.dz, 3), i18n.number(h.nmad, 3)))
+        self._edited(tr("Rimisura quota stabile"), before)
+        self.reload()
+
+    def remove_selected_heights(self) -> None:
+        ids = self.selected_height_ids()
+        if not ids:
+            self.window._warn(tr("Scegli nella tabella le quote stabili da rimuovere."))
+            return
+        before = edit_state(self.doc)
+        for tid in ids:
+            with contextlib.suppress(KeyError):
+                stable_height.remove(self.doc, tid)
+        self._edited(tr("Rimuovi quote stabili"), before)
+        self.reload()
+
+    def _height_item_changed(self, item) -> None:
+        if self._filling or item.column() != 7:
+            return
+        tid = self.heights.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
+        before = edit_state(self.doc)
+        existing = stable_height.heights_of(self.doc)
+        h = next((x for x in existing if x.id == tid), None)
+        if h is None:
+            return
+        h.active = item.checkState() == Qt.CheckState.Checked
+        stable_height.save_heights(self.doc, existing)
+        self._filling = True
+        try:
+            self.heights.item(item.row(), 9).setText(self._height_state(h, stable_height.horizontal_move(self.doc, h)))
+        finally:
+            self._filling = False
+        self._edited(tr("Quota stabile attiva o no"), before)
+
     def _kinds_with_new(self) -> dict:
         """The unknowns chosen, with the proposal for the chunks that were out of the solve and now have ties."""
         kinds = self.kinds(include_out=True)
@@ -756,6 +1069,7 @@ class TiesDialog(QDialog):
                 item = self.table.item(i, 5)
                 if item is not None:
                     item.setText("")
+            self._clear_height_check()
         finally:
             self._filling = False
         if self.report.toPlainText():
@@ -771,7 +1085,8 @@ class TiesDialog(QDialog):
 
     def _update_buttons(self, busy: bool = False) -> None:
         self.checking = busy
-        for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import, self.b_confirm):
+        for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import, self.b_confirm,
+                  self.b_measure_height, self.b_remeasure_height, self.b_remove_height):
             b.setEnabled(not busy)
         self.b_apply.setEnabled(not busy and self.result is not None)
 
@@ -833,11 +1148,57 @@ class TiesDialog(QDialog):
                         item.setForeground(colour)
                     elif item is not None:
                         item.setData(Qt.ItemDataRole.ForegroundRole, None)
+            self._checked_heights(rep, left)
         finally:
             self._filling = False
         self.report.setHtml(report_html(result))
         self._update_buttons()
         self._points_redraw()
+
+    def _clear_height_check(self) -> None:
+        """What a check wrote in the table of the heights taken away (residual, prediction, colours, state): each
+        row back to its own state (called with ``_filling`` on)."""
+        heights = {h.id: h for h in stable_height.heights_of(self.doc)}
+        for i in range(self.heights.rowCount()):
+            name = self.heights.item(i, 0)
+            if name is None:
+                continue
+            self.heights.item(i, 8).setText("")
+            name.setData(self.PREDICTED, False)
+            h = heights.get(name.data(Qt.ItemDataRole.UserRole))
+            if h is not None:
+                self.heights.item(i, 9).setText(self._height_state(h, stable_height.horizontal_move(self.doc, h)))
+            self._height_colours(i, ORANGE if name.data(self.STALE) else None)
+
+    def _checked_heights(self, rep: dict, left: dict) -> None:
+        """The residuals of the stable heights (the largest of a plane's anchors) from the report of a check: red
+        when it does not agree with the solve, grey when left out, amber when the solve would move its chunks apart
+        in plan beyond the limit (by id: ``horizontal`` of the report against :func:`..engine.stable_height.
+        horizontal_move`'s limit; said in the state, gone with the check)."""
+        residual: dict[str, dict] = {}
+        for h in rep.get("heights") or []:
+            if h["id"] not in residual or abs(h["dz"]) > abs(residual[h["id"]]["dz"]):
+                residual[h["id"]] = h
+        apart: dict[str, float] = {}
+        for h in rep.get("heights") or []:
+            apart[h["id"]] = max(apart.get(h["id"], 0.0), float(h.get("horizontal") or 0.0))
+        heights = {h.id: h for h in stable_height.heights_of(self.doc)}
+        for i in range(self.heights.rowCount()):
+            name = self.heights.item(i, 0)
+            tid = name.data(Qt.ItemDataRole.UserRole)
+            h, r = heights.get(tid), residual.get(tid)
+            self.heights.item(i, 8).setText("" if r is None else i18n.number(abs(r["dz"]), 3))
+            moved = None if h is None else stable_height.horizontal_move(self.doc, h)
+            predicted = moved is not None and tid in apart and apart[tid] > moved[1]
+            name.setData(self.PREDICTED, predicted)
+            if tid in left:
+                self.heights.item(i, 9).setText("; ".join(say(x) for x in left[tid].get("messages") or []))
+            elif predicted:
+                self.heights.item(i, 9).setText(self._height_state(h, moved) + " - " + tr(
+                    "da rimisurare dopo Applica: la stima li sposta di {0} m in pianta", i18n.number(apart[tid], 3)))
+            bad = r is not None and r["fitted"] and r["normalised"] > ties_mod.CHECK_FACTOR
+            self._height_colours(i, RED if bad else GREY if tid in left else ORANGE if (
+                predicted or name.data(self.STALE)) else None)
 
     def apply(self) -> bool:
         """The last check applied (one step of Modifica > Annulla). Without redundancy only after its own question
@@ -877,4 +1238,5 @@ class TiesDialog(QDialog):
         super().closeEvent(ev)
 
 
-__all__ = ["alive", "undo_shortcuts", "TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state", "record_edit", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]
+__all__ = ["alive", "undo_shortcuts", "TiesDialog", "TiesStep", "TiesEditStep", "TiesChanged", "edit_state",
+           "record_edit", "fingerprint", "keep_report", "check", "report_html", "default_kinds", "say", "error_text"]

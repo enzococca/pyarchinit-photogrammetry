@@ -13,6 +13,7 @@ part.
 - :material-camera-marker: **[Photos and markers](photos-markers.md)** - photos, masks, markers, scale bars
 - :material-cog-play: **[Processing](processing.md)** - from the alignment to the orthophoto, versions, cleaning
 - :material-link-variant: **[Ties between chunks](ties.md)** - several surveys put together with points in common, checked before applying
+- :material-vector-union: **[Several surveys](multi-survey.md)** - masks from a colour, the water level and refraction, the merged orthophoto and DEM of several chunks
 - :material-draw: **[Drawing and measures](drawing.md)** - units, sections, spot heights, measures, SAM
 - :material-shovel: **[Tools for archaeology](archaeology.md)** - PyArchInit, QGIS, proxies, matrix, phases, pottery
 - :material-leaf: **[Multispectral and thermal](multispectral.md)** - reflectance, indices, temperatures

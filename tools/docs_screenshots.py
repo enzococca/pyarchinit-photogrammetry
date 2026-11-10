@@ -471,6 +471,12 @@ def _worker(args) -> int:
     # ---- ties between chunks: a clone of the demo with a second campaign moved by a known error, deleted after
     if wanted("ties-dialog") or wanted("ties-common-points"):
         _ties_shots(w, args.demo, pump, save, wanted)
+    # ---- stakes near known points: a clone of the demo with stake heads painted on its orthophoto and photos
+    if wanted("stakes-dialog"):
+        _stakes_shots(w, args.demo, pump, save)
+    # ---- colour mask, water level, merged products: a clone of the demo with a pond and a second campaign
+    if any(wanted(n) for n in ("colour-mask-dialog", "water-dialog", "mosaic-dialog", "mosaic-view")):
+        _multi_survey_shots(w, args.demo, pump, save, wanted)
 
     guard.stop()
     w.setWindowModified(False)
@@ -589,7 +595,8 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
     """*Aggancia chunk con legami* and *Punti in comune* on a clone of the demo: the chunk duplicated as a second
     campaign "2025" (its DEM and orthophoto copied, built where it was), then moved as a drone GPS would put it (1.5
     degrees, some decimetres); five ties on the trench, one of them 30 cm off. The dialog after *Controlla* (the wrong
-    tie in red, robust weights) and the two linked views with the residuals. The clone is deleted after; nothing is saved."""
+    tie in red, robust weights; a stable height of 2025 on 2024 in its own table) and the two linked views with the
+    residuals. The clone is deleted after; nothing is saved."""
     import shutil
 
     import numpy as np
@@ -598,7 +605,7 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
     from pyarchinit_photogrammetry.core import stamps
     from pyarchinit_photogrammetry.core.camera import Reference
     from pyarchinit_photogrammetry.core.document import Document
-    from pyarchinit_photogrammetry.engine import ties
+    from pyarchinit_photogrammetry.engine import stable_height, ties
 
     folder = _clone(demo, "ties_clone")
     try:
@@ -630,13 +637,15 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
         moved[:2, :2] = [[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]
         moved[:3, 3] = centre - moved[:3, :3] @ centre + np.array([0.35, -0.2, 0.12])
         b.transform = moved @ np.asarray(b.transform, float)
+        # a stable height of 2025 on 2024 (their DEMs on the ground that did not change): a row of *Quote stabili*
+        stable_height.add(doc, stable_height.measure(doc, b, a))
         doc.chunk = a
         w.set_document(doc)
         pump(1500)
         w.tie_chunks()
         pump(600)
         dlg = w._live_ties_dialog()
-        dlg.resize(1100, 820)
+        dlg.resize(1100, 900)
         dlg.c_robust.setChecked(True)  # Huber weights: the wrong tie alone stands out
         dlg.run_check()
         for _ in range(200):  # the check runs in the worker
@@ -664,6 +673,227 @@ def _ties_shots(w, demo: Path, pump, save, wanted) -> None:
         pump(800)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def _stakes_shots(w, demo: Path, pump, save) -> None:
+    """*Cerca picchetti* on a clone of the demo: four stake heads (5 cm, dark) painted on its orthophoto and on every
+    aligned photo that sees them (projected through the cameras), a table of known points a few centimetres off as a
+    GNSS survey gives them, one of them 0.4 m off (in red after the search); the window after *Cerca* with a head
+    confirmed by the photos selected. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import cv2
+    import numpy as np
+    import rasterio
+    from rasterio.windows import Window
+
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.engine import stakes
+    from pyarchinit_photogrammetry.markers.refine import _pixels_per_metre
+
+    folder = _clone(demo, "stakes_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        ch = doc.chunk
+        diameter = 0.05
+        with rasterio.open(ch.dem_path) as src:
+            left, bottom, right, top = src.bounds
+            spots = [(0.15, 0.15), (0.88, 0.2), (0.8, 0.78), (0.18, 0.8)]  # the ground around the trench
+            heads = []
+            for fx, fy in spots:
+                x, y = left + fx * (right - left), bottom + fy * (top - bottom)
+                heads.append((x, y, float(next(src.sample([(x, y)]))[0])))
+        with rasterio.open(ch.product_path("orthomosaic"), "r+") as src:
+            cell = abs(src.res[0])
+            r = int(np.ceil(diameter / cell)) + 2
+            for x, y, _z in heads:
+                col, row = ~src.transform * (x, y)
+                win = Window(int(col) - r, int(row) - r, 2 * r + 1, 2 * r + 1)
+                data = np.ascontiguousarray(np.moveaxis(src.read([1, 2, 3], window=win), 0, -1))
+                centre = (int(round((col - 0.5 - win.col_off) * 16)), int(round((row - 0.5 - win.row_off) * 16)))
+                cv2.circle(data, centre, int(round(diameter / 2 / cell * 16)), (38, 34, 30), -1, cv2.LINE_AA, 4)
+                src.write(np.moveaxis(data, -1, 0), [1, 2, 3], window=win)
+        axes = stakes._plane_axes(ch)
+        internals = ch.to_internal(np.array(heads, float))
+        for cam in ch.aligned_cameras:
+            img = cv2.imread(str(cam.path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            if img is None:
+                continue
+            px, depth = cam.project(ch.sensor(cam), internals)
+            drawn = False
+            for X, (u, v), d in zip(internals, px, depth):
+                if d <= 0 or not (0 <= u < img.shape[1] and 0 <= v < img.shape[0]):
+                    continue
+                ppm = _pixels_per_metre(ch, cam, X, *axes) / max(float(ch.scale), 1e-12)
+                centre = (int(round((u - 0.5) * 16)), int(round((v - 0.5) * 16)))
+                cv2.circle(img, centre, max(16, int(round(diameter / 2 * ppm * 16))), (30, 34, 38), -1, cv2.LINE_AA, 4)
+                drawn = True
+            if drawn:
+                cv2.imwrite(str(cam.path), img, [cv2.IMWRITE_JPEG_QUALITY, 97])
+        offsets = [(0.03, -0.02), (-0.02, 0.04), (-0.4, 0.05), (0.01, 0.03)]  # the third point given 40 cm off
+        table = folder / "punti_noti.csv"
+        lines = ["nome,x,y,z,precisione"]
+        for i, ((x, y, z), (dx, dy)) in enumerate(zip(heads, offsets), start=1):
+            lines.append(f"CS{i},{x + dx:.3f},{y + dy:.3f},{z:.3f},0.03")
+        table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        w.set_document(doc)
+        pump(1500)
+        dlg = w.find_stakes()
+        dlg.resize(1400, 720)
+        dlg.set_csv(table)
+        dlg.s_radius.setValue(1.0)
+        dlg.search()
+        for _ in range(300):  # the search runs in the worker
+            pump(100)
+            if dlg.proposals:
+                break
+        dlg.e_file.setText("~/ppg_demo/punti_noti.csv")
+        confirmed = [p.point.name for p in dlg.proposals if p.best is not None and not p.best.ortho_only]
+        dlg.select(confirmed[:1] or [dlg.proposals[0].point.name])
+        dlg.wait_preview()
+        pump(600)
+        save(dlg.grab(), "stakes-dialog")
+        w._close_stakes_dialog()
+        pump(300)
+        w.setWindowModified(False)
+        w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after
+        pump(800)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _multi_survey_shots(w, demo: Path, pump, save, wanted) -> None:
+    """*Maschera dal colore*, *Livello dell'acqua e rifrazione* and *Ortofoto e DEM uniti* on a clone of the demo: a
+    blue pond painted on the ground of its orthophoto, the mask of its colour, the level measured from its edge; the
+    chunk duplicated as a second campaign "2025" (its orthophoto copied and warmed, so the merge shows which cells come
+    from it) and the two merged with an area each. The clone is deleted after; nothing is saved."""
+    import shutil
+
+    import cv2
+    import numpy as np
+    import rasterio
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.engine import mosaic
+
+    def wait() -> None:
+        for _ in range(600):
+            pump(100)
+            if not w.runner.busy:
+                break
+        pump(400)
+
+    folder = _clone(demo, "multi_clone")
+    try:
+        doc = Document.open(folder / "scavo.ppg")
+        a = doc.chunk
+        a.label = "2024"
+        with rasterio.open(a.dem_path) as src:
+            left, bottom, right, top = src.bounds
+        pond = (left + 0.84 * (right - left), bottom + 0.22 * (top - bottom))  # on the ground beside the trench
+        with rasterio.open(a.product_path("orthomosaic"), "r+") as src:
+            cell = abs(src.res[0])
+            data = np.ascontiguousarray(np.moveaxis(src.read([1, 2, 3]), 0, -1))
+            col, row = ~src.transform * pond
+            axes = (int(round(0.22 / cell * 16)), int(round(0.14 / cell * 16)))
+            cv2.ellipse(data, (int(round(col * 16)), int(round(row * 16))), axes, 20, 0, 360, (40, 110, 160), -1,
+                        cv2.LINE_AA, 4)
+            src.write(np.moveaxis(data, -1, 0), [1, 2, 3])
+            factors = src.overviews(1)
+            if factors:  # the reduced copies (the preview of the mask, the 2D view) see the pond too
+                from rasterio.enums import Resampling
+
+                src.build_overviews(factors, Resampling.average)
+        b = doc.duplicate_chunk(a, label="2025")
+        for name in ("dem", "orthomosaic"):
+            target = b.data_dir / Path(a.product_path(name)).name
+            b.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(a.product_path(name), target)
+            b._set_product(name, target)
+            stamps.stamp(b, name)
+        with rasterio.open(b.product_path("orthomosaic"), "r+") as src:  # the other campaign: warmer light
+            rgb = src.read([1, 2, 3]).astype(np.float32)
+            rgb[0] *= 1.12
+            rgb[2] *= 0.82
+            src.write(np.clip(rgb, 0, 255).astype(np.uint8), [1, 2, 3])
+            factors = src.overviews(1)
+            if factors:
+                from rasterio.enums import Resampling
+
+                src.build_overviews(factors, Resampling.average)
+        doc.chunk = a
+        w.set_document(doc)
+        pump(1500)
+        w._show_raster("ortho")
+        pump(800)
+        mask = w.open_colour_mask()
+        mask.resize(760, mask.height())  # the buttons with their whole text
+        mask.sampled(np.array([pond]))
+        mask.s_opening.setValue(0.02)
+        pump(800)
+        mask.update_preview()
+        if wanted("colour-mask-dialog"):
+            save(mask.grab(), "colour-mask-dialog")
+        mask.create()
+        wait()
+        layer = next(iter(fd_layers(a)), None)
+        w._close_colour_mask_dialog()
+        water = w.open_water()
+        water.resize(780, water.height())
+        if layer is not None:
+            water.r_layer.setChecked(True)
+            water.c_layer.setCurrentText(layer)
+        water.measure()
+        wait()
+        if wanted("water-dialog"):
+            save(water.grab(), "water-dialog")
+        w._close_water_dialog()
+        dlg = w.open_mosaic()
+        dlg.resize(760, 640)
+        dlg.set_order(["2024", "2025"])
+        mid_x = (left + right) / 2
+        dlg.set_area(a.key, box(left + 0.12 * (right - left), bottom + 0.15 * (top - bottom), mid_x,
+                                bottom + 0.85 * (top - bottom)), _drawn())
+        dlg.set_area(b.key, box(mid_x, bottom + 0.15 * (top - bottom), left + 0.88 * (right - left),
+                                bottom + 0.85 * (top - bottom)), _drawn())
+        dlg.table.selectRow(1)
+        pump(600)
+        if wanted("mosaic-dialog"):
+            save(dlg.grab(), "mosaic-dialog")
+        dlg.build()
+        wait()
+        w._close_mosaic_dialog()
+        pump(600)
+        assert mosaic.mosaics_of(doc), "the merged product was not built"
+        w._show_coords(left + 0.7 * (right - left), bottom + 0.5 * (top - bottom), None)
+        from PySide6.QtCore import Qt
+
+        for item in w.workspace._walk():  # the chunks closed: the node of the merged products in sight
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[0] == "chunk":
+                item.setExpanded(False)
+        pump(400)
+        if wanted("mosaic-view"):
+            save(w.grab(), "mosaic-view")
+        w.setWindowModified(False)
+        w.set_document(Document.open(demo / "scavo.ppg"))  # the clone left: nothing writes into it after
+        pump(800)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _drawn() -> str:
+    from pyarchinit_photogrammetry.gui.i18n import tr
+
+    return tr("disegnata")
+
+
+def fd_layers(chunk) -> list[str]:
+    from pyarchinit_photogrammetry.gui.water_dialog import polygon_layers
+
+    return polygon_layers(chunk)
 
 
 def _orient_clone(demo: Path) -> Path:

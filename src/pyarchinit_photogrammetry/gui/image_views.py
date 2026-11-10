@@ -1017,6 +1017,11 @@ class RasterView(_ZoomView):
             self._dem_lookup = (z.filled(np.nan).astype(float), src.transform @ src.transform.scale(
                 src.width / max(1, w // 4), src.height / max(1, h // 4)))
 
+    def clear_dem(self) -> None:
+        """No elevations for the cursor readout from :meth:`set_dem` (a raster whose heights are not those of that DEM:
+        a merged orthophoto)."""
+        self._dem_lookup = None
+
     def world(self, p: QPointF) -> tuple[float, float]:
         x, y = _apply(self.tr, p.x(), p.y())
         return float(x), float(y)
@@ -1138,6 +1143,24 @@ class RasterView(_ZoomView):
         item.setZValue(-0.5)  # the raster is at -2 and -1, the drawings at 0: the units stay on top
         item.setData(NOT_PICKED, True)
         self._register(layer, "line", item, None, {"etichetta": "", **(attrs or {})})
+        return item
+
+    def add_dots(self, xy, color: str = "#00a5e0", layer: str = "Punti", attrs: dict | None = None,
+                 size: float = 5.0):
+        """Many points ((n, 2) world XY: the cells of the edge of the water read for its level) as one feature of
+        ``layer``, painted with one call (:class:`SegmentsItem` without segments): drawn and hidden at once, over the
+        raster, never picked (:data:`NOT_PICKED`), no geometry of their own for QGIS."""
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        inv = self._inverse()
+        cols = inv.a * xy[:, 0] + inv.b * xy[:, 1] + inv.c
+        rows = inv.d * xy[:, 0] + inv.e * xy[:, 1] + inv.f
+        dot = QPen(QColor(color), size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        dot.setCosmetic(True)
+        item = SegmentsItem(np.zeros((0, 2, 2)), dot, dots=np.column_stack([cols, rows]), dot_pen=dot)
+        self.scene().addItem(item)
+        item.setZValue(-0.5)
+        item.setData(NOT_PICKED, True)
+        self._register(layer, "point", item, None, {"etichetta": "", **(attrs or {})})
         return item
 
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",

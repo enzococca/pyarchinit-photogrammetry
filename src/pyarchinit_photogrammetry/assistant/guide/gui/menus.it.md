@@ -117,6 +117,8 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte; il riepilogo dà, per ogni chunk, la quota dei suoi punti sul riferimento e la loro distanza mediana ([più chunk insieme](view3d.md#piu-chunk-insieme)) |
 | **Aggancia chunk con legami...** | più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare ([legami fra chunk](ties.md)) |
+| **Misura quota stabile...** | la quota di un chunk rispetto a un altro dove il terreno non è cambiato (confronto dei DEM): una quota stabile nella finestra dei legami, solo in z ([quota da una superficie stabile](ties.md#quota-da-una-superficie-stabile)) |
+| **Cerca picchetti...** | picchetti e capisaldi cercati sull'ortofoto e sulle foto vicino a punti di coordinate note, proposti da accettare come legami a coordinate note ([capisaldi e picchetti](ties.md#capisaldi-e-picchetti)) |
 | **Punti in comune...** | due chunk affiancati con le viste collegate: un legame con un clic sullo stesso punto in ognuna, un estremo anche su una foto ([punti in comune](ties.md#punti-in-comune)) |
 | **Orienta il sistema locale...** | origine, asse x e piano orizzontale di un chunk senza coordinate, da tre punti o da un piano adattato ([orientare](processing.md#orientare-un-sistema-locale)) |
 | **Ricostruisci i prodotti da rifare** | DEM, ortofoto, prospetti e i raster fatti in un sistema precedente del chunk, rifatti in ordine; un passo di *Modifica > Annulla* |
@@ -214,6 +216,10 @@ multispettrali, termiche e satellitari, i plugin.
 | **Calibra il colore con la tabella colori...** | una ColorChecker fotografata nello scavo rende confrontabili i colori Munsell |
 | **Visualizzazioni del rilievo...** | sky-view factor, openness, rilievo locale e multiscala, ombreggiature ([rilievo](archaeology.md#visualizzazioni-del-rilievo)) |
 | **Calcolatore raster...** | formule sui raster del progetto, anche quelli dei plugin, come in QGIS ([calcolatore](archaeology.md#calcolatore-raster)) |
+| **Maschera dal colore...** | le celle dell'ortofoto in un intervallo di colori (l'acqua, un telo, la sabbia) come poligoni di un layer di disegni liberi, per il ritaglio, la quota stabile e il livello dell'acqua ([maschera dal colore](multi-survey.md#maschera-dal-colore)) |
+| **Livello dell'acqua e rifrazione...** | il livello dell'acqua dal suo bordo o a mano, e la nuvola densa sotto di esso corretta per la rifrazione come nuova versione ([livello dell'acqua](multi-survey.md#livello-dellacqua-e-rifrazione)) |
+| **Ortofoto e DEM uniti...** | le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, per priorità o per aree, con il chunk da cui viene ogni cella ([prodotti uniti](multi-survey.md#ortofoto-e-dem-uniti)) |
+| **Classifica un disegno...** | le linee di un disegno della pianta o di un prospetto divise per direzione rispetto a un asse (lungo, di traverso, coppie di linee parallele, altre), con la tavola di controllo e i layer per gruppo, per i plugin Relitti e Murature ([disegno classificato](drawing.md#un-disegno-classificato-per-orientamento)) |
 | **Regione sui marker...** | una regione di ricostruzione sottile sul piano di tre marker (un muro, un oggetto), con il suo spessore lungo la normale: mappe di profondità, nuvola densa e modello ne restano dentro |
 | **Mappa delle normali...** | le normali della superficie (modello o DEM) sulla griglia dell'ortofoto, rosso est, verde nord, blu alto; mostrata nella vista 2D ed elencata nell'Area di lavoro |
 | **Opzioni delle sezioni...** · **Pianta a quota (slice orizzontale)...** | da cosa tagliare le sezioni (modello o nuvola, classi); una pianta a una quota |

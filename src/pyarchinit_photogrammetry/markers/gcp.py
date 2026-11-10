@@ -17,14 +17,18 @@ CAMERA_REFERENCES = "the positions of the photos"
 MARKERS_READ = "the coordinates of the markers"
 
 
-def triangulate_markers(chunk, min_views: int = 2) -> None:
+def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
     """Triangulate every marker seen in at least ``min_views`` aligned photos. A marker measured
     in fewer photos is placed where the ray of its measurement meets the surface
     (:func:`surface_point`), as Metashape does on its model: it gets coordinates, shows on the
     model and on the orthophoto and can end a scale bar; measured in a second photo it becomes a
-    triangulated point."""
+    triangulated point. ``only``: these markers alone (the others keep their positions: tie ends,
+    ground control points, positions adjusted with the block)."""
     points = _SurfacePoints(chunk)
+    wanted = None if only is None else {id(m) for m in only}
     for m in chunk.markers:
+        if wanted is not None and id(m) not in wanted:
+            continue
         if not m.projections:  # placed in 3D where no photo sees it (or given a position): kept
             continue
         measured = {k: p for k, p in m.projections.items() if p.measured}

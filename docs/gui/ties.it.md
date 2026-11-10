@@ -57,12 +57,16 @@ Ci sono quattro modi:
   `chunk_b` vuoto vuol dire che il secondo punto sono coordinate note; una z vuota si legge dal DEM del chunk;
 * la **riga di comando**: `ppg ties add`, `ppg ties known` (vedi [la riga di comando](#riga-di-comando)).
 
+Due altri tipi di registrazione legano i chunk senza scegliere i punti a mano: una **quota stabile** (la quota di un
+chunk rispetto a un altro dove il terreno non è cambiato, [più sotto](#quota-da-una-superficie-stabile)) e i
+**picchetti e capisaldi** trovati da soli vicino a punti di coordinate note ([più sotto](#capisaldi-e-picchetti)).
+
 ## La finestra dei legami
 
 *Flusso di lavoro > Aggancia chunk con legami...* apre la finestra dei legami. Non è modale: può restare aperta mentre
 lavori nella finestra principale e in *Punti in comune*.
 
-![La finestra dei legami dopo Controlla: il legame sbagliato in rosso](../img/gui/ties-dialog.png)
+![La finestra dei legami dopo Controlla: il legame sbagliato in rosso, una quota stabile (arancione: da rimisurare dopo Applica)](../img/gui/ties-dialog.png)
 
 **Legami.** Una riga per legame: *Attivo*, nome, i due estremi (`chunk / marker`, o le coordinate note),
 *Precisione (m)* (modificabile), *Residuo (m)* dell'ultimo controllo e *Stato*. Un legame con un estremo che non c'è
@@ -79,6 +83,9 @@ questi vengono tolti - rifalli sul chunk unito. *Aggiungi progetti* copia i chun
 marker e i legami fra i chunk che prendi; un legame verso un chunk che lasci fuori non viene copiato (il riepilogo lo
 nomina). Un progetto con legami salvato da una versione precedente (1.7.5 o prima) tiene i suoi
 legami: vengono riconosciuti di nuovo dalla chiave e dal nome dei loro marker.
+
+**Quote stabili.** Sotto i legami, la tabella delle quote stabili con *Misura quota stabile...*, *Rimisura* e
+*Rimuovi* (vedi [quota da una superficie stabile](#quota-da-una-superficie-stabile)).
 
 **Incognite per chunk.** Per ogni chunk, che cosa la stima può cambiare:
 
@@ -198,6 +205,121 @@ messo sulla superficie (nuvola o punti di legame).
 collegare: le viste sono sovrapposte (centro su centro), e una nota arancione lo dice. I legami si possono fare lo
 stesso.
 
+**Sistemi che si muovono nel tempo.** Due chunk in sistemi che PROJ unisce solo in modo approssimato (ITRF2020 con un
+altro sistema, ETRF2014/2020 con ETRF2000) si possono legare, e fra loro si può misurare una quota stabile: i pochi punti
+in gioco sono convertiti per la strada del programma (fra sistemi europei all'epoca del rilievo; con ITRF2020 dalla
+trasformazione di PROJ quando non è approssimata, altrimenti come posizioni su WGS 84), e il log lo dice una volta per
+chunk. L'ortofoto e il DEM uniti rifiutano una coppia così: lì ogni pixel sarebbe spostato dall'approssimazione di PROJ
+(vedi [Ortofoto e DEM uniti](multi-survey.md#ortofoto-e-dem-uniti)).
+
+## Quota da una superficie stabile
+
+Due rilievi dello stesso sito spesso coincidono in pianta - il GPS di un drone li mette a pochi centimetri l'uno
+dall'altro - e non in quota: decine di centimetri, a volte metri. Dove il terreno non è cambiato fra i due (la sabbia o
+il campo intorno a uno scavo, una strada, un pavimento) i loro DEM devono stare alla stessa quota. Una **quota
+stabile** misura lì di quanto un chunk sta più in alto di un altro, e dà alla stima solo quella quota.
+
+*Flusso di lavoro > Misura quota stabile...* (o *Misura quota stabile...* sotto la tabella *Quote stabili* della
+finestra dei legami) chiede:
+
+* il **chunk** (B) e il chunk **rispetto a** cui misurarlo (A): tutti e due con un DEM;
+* l'**area**: *Automatica* (pendenze basse e celle concordi, su tutta la sovrapposizione) o un layer di poligoni dei
+  disegni liberi - disegna il terreno che sai non essere cambiato, o usa una sua maschera di colore;
+* cosa **escludere** (facoltativo): un layer di poligoni sulle buche, i cumuli di terra, la vegetazione;
+* **piano**: un piano (quota e inclinazione, tre ancore) invece di uno spostamento unico. Usalo quando i due rilievi
+  possono essere inclinati l'uno rispetto all'altro (un drone con il solo GPS) e il terreno stabile si estende sul sito.
+
+I due DEM sono letti come sono messi adesso: nessuno spostamento in pianta viene misurato o fatto. Un DEM costruito
+prima che una stima spostasse il suo chunk viene spostato con il chunk, come lo mostra la vista 2D. Un chunk in un
+sistema locale e uno in un sistema del mondo sono rifiutati, come per i legami.
+
+La misura gira in sottofondo e aggiunge una riga alla tabella **Quote stabili**: nome ("quota stabile N"), i due chunk,
+*dz* (di quanto B sta più in alto di A), l'NMAD delle differenze sul terreno stabile, le celle stabili, *Piano*,
+*Attivo*, il *Residuo* dell'ultimo controllo e *Stato*. La sua **precisione** è l'NMAD diviso la radice delle celle,
+contando al massimo 100 celle (celle vicine non sono indipendenti: una grande superficie di sabbia non deve pesare più
+di tutti i legami), e almeno 5 mm; ogni ancora di un piano conta √3 volte tanto. Misurare, rimisurare, togliere e
+attivare o disattivare una quota stabile sono ognuno un passo di *Modifica > Annulla*.
+
+**Nella stima.** Una quota stabile lega i chunk solo in z: il controllo e la stima usano quelle attive fra chunk della
+stima, e i loro residui sono nel rapporto (sezione *Quote stabili*). Un chunk tenuto solo da quote stabili viene
+proposto con **solo quota**. Non entrano mai nelle distanze fra legami né nel *leave one out*: non hanno punti
+corrispondenti.
+
+**Rimisurare.** Una quota stabile è stata misurata dove i chunk stavano in pianta in quel momento. Quando una stima li
+sposta l'uno rispetto all'altro in pianta di più di 2 celle del DEM di A (e almeno 10 cm), la riga diventa arancione e
+*Stato* dice di quanto: dopo un controllo "da rimisurare dopo Applica"; dopo *Applica* "da rimisurare". Quindi
+l'ordine solito è: prima legare i chunk in pianta (legami, *Applica*), poi premere **Rimisura**: le quote scelte
+(nessuna scelta: quelle in arancione) sono misurate di nuovo dove i chunk sono adesso, con gli stessi chunk, aree e
+tipo, e tengono nome e stato.
+
+## Capisaldi e picchetti
+
+Capisaldi, punti GNSS e i picchetti della quadrettatura dello scavo sono spesso nelle foto: una testa scura e rotonda
+a terra, con le coordinate note nella tabella del topografo. *Cerca picchetti...* li cerca vicino a quelle coordinate e
+propone ognuno come **legame a coordinate note** - un punto del chunk con coordinate note. Niente viene aggiunto finché
+non lo accetti.
+
+![Cerca picchetti: le proposte, una spostata di 40 cm in rosso, e la testa sull'ortofoto e su una foto](../img/gui/stakes-dialog.png)
+
+Si apre con **Cerca picchetti...** nel pannello [*Riferimenti*](panes.md#riferimenti) o da *Flusso di lavoro > Cerca
+picchetti...*. Non è modale.
+
+**Prima rileva i target codificati** (*Flusso di lavoro > Rileva marker codificati...*). La loro impronta resta fuori
+dalla ricerca, ma su un'ortofoto grossolana (circa 1 cm per pixel o più) le celle nere di un target non rilevato sono
+piccole come una testa e possono essere proposte.
+
+**Punti noti**, da una di queste fonti:
+
+* un **file CSV**: `nome,x,y[,z][,precisione]`, separati da virgole, punti e virgola, tabulazioni o spazi, con una riga
+  d'intestazione ammessa (la virgola decimale va bene quando il separatore non è la virgola). Le coordinate sono nel
+  sistema del chunk, o in quello scritto in *Sistema del CSV* (un codice EPSG). Senza z la quota viene dal DEM; senza
+  precisione 5 cm;
+* i **legami a coordinate note del progetto**;
+* i **marker con coordinate** di un chunk (i suoi punti di controllo, per esempio di un altro rilievo).
+
+Poi scegli il **chunk** (serve un'ortofoto), il **raggio** intorno a ogni punto (predefinito 3 m) e il **diametro
+della testa** (predefinito da 3 a 12 cm), e premi **Cerca**. In sottofondo, vicino a ogni punto:
+
+1. sull'ortofoto: macchie scure almeno 25 livelli di grigio più scure di quello che hanno intorno, rotonde (circolarità
+   almeno 0,6), piene e della misura di una testa; radici lunghe, grandi chiazze e le celle dei target codificati
+   restano fuori;
+2. sulle foto: ogni candidato viene cercato nelle foto che lo vedono (al massimo 12). Quando almeno **3 foto
+   concordano** (entro 2 pixel, o un quarto della testa) il punto viene triangolato da quelle, con la precisione delle
+   foto; altrimenti viene proposto come **solo ortofoto**, con la precisione di 2 pixel dell'ortofoto. Foto mancanti o
+   illeggibili (segnaposto da 0 byte di una cartella "solo online") lasciano una proposta solo ortofoto, mai un errore;
+3. al massimo 5 candidati per punto, prima quelli confermati dalle foto, poi per scurezza, rotondità e distanza.
+
+**La tabella.** Una riga per punto noto: la proposta (x, y, z), le *Foto concordi* (o *solo ortofoto*), il
+*Contrasto*, lo *Spostamento* dal punto noto e un *Avviso*: *nessuna testa trovata*, *fuori dall'ortofoto*, *nessuna
+foto allineata*, *foto illeggibili*, gli altri candidati. Le proposte vengono controllate fra loro prima di
+accettarne una, come i legami: le **distanze** fra ogni coppia di teste trovate devono tornare con quelle fra i loro
+punti noti (un punto che non torna con la maggior parte degli altri è **sospetto**), e lo **spostamento** di ognuna
+deve tornare con la mediana di tutti (un rilievo spostato in blocco si vede nella mediana, scritta sotto la tabella;
+un punto sbagliato - un errore di battitura, un altro picchetto - come un punto **spostato diversamente dagli altri**).
+Queste righe sono in rosso: controllale prima di accettarle.
+
+A destra, l'**immagine** della proposta scelta: l'ortofoto intorno e la foto che la vede meglio, con una croce rossa
+sulla testa proposta. Guardala prima di accettare.
+
+| Pulsante | Cosa fa |
+| --- | --- |
+| *Accetta selezionati* | le proposte scelte diventano legami a coordinate note |
+| *Accetta i concordi* | le proposte confermate dalle foto e non in rosso |
+| *Scarta* | toglie le proposte scelte dall'elenco; il progetto non cambia |
+| *Scegli un altro candidato* | la proposta scelta passa alla testa successiva trovata vicino al suo punto (quando c'è) |
+
+**Accettare** crea, per ogni proposta, un legame a coordinate note con il nome del punto: un marker del chunk sulla
+testa, con le coordinate note come riferimento (un punto senza z prende la quota della testa) e la precisione della
+testa e del punto combinate. Le foto che concordavano diventano misure del marker (bandierine fissate), e solo i nuovi
+marker vengono triangolati: gli altri marker del chunk restano dove sono. Tutta l'accettazione è **un passo** di
+*Modifica > Annulla*. Le proposte accettate escono dall'elenco; i legami compaiono nella finestra dei legami, da
+controllare e applicare come tutti gli altri.
+
+Una proposta appartiene all'allineamento in cui è stata trovata: dopo un nuovo allineamento delle foto del chunk,
+accettarla viene rifiutato - cerca di nuovo. La finestra lo dice sotto la tabella, e anche quando il chunk è stato
+spostato da una stima dopo la ricerca (accettare resta giusto, ma coordinate, spostamenti e righe rosse sono di prima)
+o rimosso.
+
 ## Riga di comando
 
 ```bash
@@ -207,9 +329,22 @@ ppg ties from-markers scavo.ppg 2024 2025                   # marker con lo stes
 ppg ties import scavo.ppg legami.csv
 ppg ties list scavo.ppg [--json]
 ppg ties confirm scavo.ppg [LEGAME ...]                     # estremi ancora giusti dopo un nuovo allineamento
+ppg ties height scavo.ppg 2025 2024 [--layer Sabbia | --area stabile.gpkg] [--exclude Scavo] [--plane]
+ppg ties heights scavo.ppg [--json]                         # le quote stabili
+ppg ties remeasure scavo.ppg "quota stabile 1"              # rimisurata dove i chunk sono adesso
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
+ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
+ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # o --agreeing: quelle confermate dalle foto
 ```
+
+`ppg ties height` misura di quanto CHUNK sta più in alto di REFERENCE sul terreno stabile (un layer di poligoni dei
+disegni liberi con `--layer`, un file GeoPackage, GeoJSON o DXF con `--area`; nessuno dei due: trovato da solo) e lo
+tiene come quota stabile; `check` e `solve` usano quelle attive. `ppg stakes find` prende come punti noti un file CSV,
+`ties` (i legami a coordinate note del progetto) o il nome di un chunk (i suoi marker con coordinate); stampa una riga
+per punto e il controllo (spostamento mediano, sospetti, punti spostati diversamente dagli altri), e scrive le
+proposte in un file JSON con accanto un'immagine `<punto>.png` per ognuna. Il progetto non cambia. `ppg stakes accept`
+stampa cosa farebbe e senza `--yes` non cambia niente.
 
 `check` stampa lo stesso rapporto della finestra, senza l'asse dritto (in inglese), e non cambia niente. `solve` chiede prima di applicare (o `--yes`);
 con avanzo 0 fa una domanda a parte, e `--yes` richiede anche `--accept-no-check`. Le coordinate negative si scrivono

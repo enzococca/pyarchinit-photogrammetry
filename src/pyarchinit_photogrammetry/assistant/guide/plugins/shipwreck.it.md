@@ -4,7 +4,7 @@ Il plugin *Relitto* fa il disegno tecnico di uno scafo scavato dal suo modello 3
 scafo a ogni stazione, i piani, e un elenco numerato dei legni con le loro misure. Oggi tutto questo si disegna a mano su un'ortofoto.
 Il plugin misura quello che c'è. Non ricostruisce quello che manca e non sposta una linea dal modello per carenarla.
 
-Questa pagina descrive la versione 0.3.0 del plugin, che richiede pyarchinit-photogrammetry 1.7.1 o successiva. Il README e il codice
+Questa pagina descrive la versione 0.5.0 del plugin, che richiede pyarchinit-photogrammetry 1.7.1 o successiva (1.7.7 per i disegni classificati e il livello dell'acqua del chunk). Il README e il codice
 sono nel [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/shipwreck).
 
 <figure markdown="span">
@@ -85,6 +85,18 @@ come da rifare nel pannello e nell'albero.
 Il fondo visto attraverso l'acqua è **apparente**: in vista nadirale la profondità vera è circa quella apparente per l'indice di
 rifrazione, 1,34 per l'acqua. Dai il livello, con un numero in z della nave o cliccando sul raster il pelo dell'acqua, e accendi la
 correzione: un punto sotto il livello si disegna a `livello - (livello - z) * n`.
+
+Dalla versione 0.5.0, con pyarchinit-photogrammetry 1.7.7 o successivo, un livello dell'acqua dato al chunk nel programma
+(*Acqua*: a mano, dal bordo dell'acqua o con un clic) è il valore proposto da *Livello e rifrazione...* finché il plugin non ha un
+livello suo: lo stato del passo lo dice ("livello dell'acqua del chunk"), la correzione resta spenta e il livello diventa quello del
+plugin quando confermi la finestra. Un livello del plugin vince sempre.
+
+!!! warning "Non correggere la rifrazione due volte"
+    Il programma può correggere da sé la nuvola densa (*Strumenti > Livello dell'acqua e rifrazione*, *Correggi la
+    nuvola*). Un modello costruito da quella nuvola corretta ha già il fondo alla sua profondità vera: lascia **spenta**
+    la correzione del plugin. Accendila solo per un modello costruito da una nuvola non corretta. Quando la nuvola attiva
+    del chunk è una versione corretta, la finestra chiede prima di accendere la correzione, e `water --on` dalla riga di
+    comando stampa un avviso.
 
 <figure markdown="span">
   ![Una sezione come misurata e corretta](../img/plugins/shipwreck/water.it.png)
@@ -347,6 +359,53 @@ ripropone ciò che è stato accettato o scartato. I limiti, detti chiaramente:
 - le fasce sono bande fra i comenti letti, non i contorni delle tavole: dove mancano comenti sono rettangoli sopra
   qualsiasi cosa ci sia (sedimento, legni longitudinali); correggile o ricalcale a mano.
 
+### Un disegno classificato per orientamento
+
+Dalla versione 0.5.0, con pyarchinit-photogrammetry 1.7.7 o successivo (con un programma più vecchio il pulsante è nascosto),
+un tuo ricalco può riempire il catalogo: *Importa un disegno classificato...* al passo 8 legge un layer di disegni liberi del chunk, oppure
+un file GeoPackage, GeoJSON o DXF (portato nel sistema del chunk come fa l'importazione dei disegni liberi), lo porta nella
+pianta della nave e lo fa classificare dal programma lungo la chiglia ([Un disegno classificato per orientamento](../gui/drawing.md#un-disegno-classificato-per-orientamento)). Il significato dei gruppi lo dà il plugin:
+
+| Gruppo del programma | Legno | Geometria |
+|---|---|---|
+| coppie di traverso | ordinata | poligono |
+| linee lungo l'asse | comento | linea |
+| coppie lungo l'asse | fascia (corso di fasciame) | poligono |
+
+Le linee di traverso singole e quelle in altre direzioni non sono legni e restano fuori (la tavola le mostra con il loro
+numero). Il lato viene dalla y media, come per un legno ricalcato a mano; i nomi sono quelli del plugin: `ordinata N` dalla prua
+(i due lati di una stessa ordinata hanno lo stesso N), `comento B1`, `B2`, ... e `fascia T1`, ... numerati dalla chiglia su
+ogni lato.
+
+Niente entra nel catalogo prima della **tavola di controllo**: mostra ogni elemento colorato per gruppo con i nomi del plugin,
+e una casella per tipo con il suo numero. *Nel catalogo* aggiunge i tipi spuntati come legni misurati (sorgente `orient:<disegno>:<id>`),
+un passo di *Modifica > Annulla*; *Annulla* lascia il catalogo com'era. Importando di nuovo lo stesso disegno, o un disegno
+cresciuto, entra solo il nuovo: un legno già nel catalogo da un disegno classificato (stesso tipo, stessi vertici) viene
+saltato, e la finestra e la riga di comando dicono quanti. Un elemento modificato dopo l'importazione (un vertice
+spostato, una linea allungata, un poligono ridisegnato) ha vertici nuovi, quindi entra di nuovo come legno nuovo accanto
+al vecchio: togli prima il vecchio legno dal catalogo. La tavola resta in `shipwreck/classified/plate.png`.
+
+!!! tip "Ordinate disegnate come linee sciolte"
+    Un poligono ricalcato è sempre un elemento solo: quando puoi, disegna ordinate e fasce come poligoni. Ordinate disegnate
+    con **due linee sciolte ciascuna, vicine fra loro** (per esempio larghe 12 cm con 13 cm fra l'una e l'altra) sembrano linee
+    a passo regolare ed escono come linee di traverso singole, non come ordinate: porta **Isolamento delle coppie** a 1
+    (`--pair-isolation 1`), oppure disegnale come poligoni. Abbassalo solo per disegni così e guarda la tavola: con 1 anche
+    due comenti sciolti vicini fra loro possono essere letti come una fascia.
+
+La finestra chiede anche la distanza delle coppie (da 2 a 50 cm di partenza) e il tratto più corto letto (5 cm). Dalla riga di
+comando:
+
+```bash
+ppg plugin shipwreck classified PROGETTO.ppg --layer "Rilievo" --plate tavola.png        # i conteggi e l'elenco; niente salvato
+ppg plugin shipwreck classified PROGETTO.ppg --layer "Rilievo" --accept                  # tutto nel catalogo
+ppg plugin shipwreck classified PROGETTO.ppg --file disegno.dxf --pair-isolation 1 --accept --kinds frame,plank
+ppg plugin shipwreck classified PROGETTO.ppg --layer "Rilievo" --param pair_max=0.4 --accept 7 8 9
+```
+
+Senza `--accept` non si scrive niente; `--accept` con degli id prende quegli elementi, senza tutti (dei tipi di `--kinds`). Gli
+id sono quelli elencati da un'esecuzione senza `--accept` con lo stesso disegno e gli stessi parametri: se cambia l'uno o
+l'altro cambiano.
+
 ### I legni 3D
 
 ![I legni dello scafo sintetico in 3D](../img/plugins/shipwreck/shipwreck-timbers-3d.png)
@@ -568,6 +627,7 @@ ppg plugin shipwreck frame-of PROGETTO.ppg CHUNK [--chunk QUESTO]      # il sist
 ppg plugin shipwreck chunks PROGETTO.ppg                               # i chunk della ricostruzione, e perché no gli altri
 ppg plugin shipwreck reconstruct PROGETTO.ppg [--no-mirror] [--no-extension] [--no-frames] [--no-loft]
 ppg plugin shipwreck reconstruct table PROGETTO.ppg [--out CARTELLA]   # tabella.csv e .xlsx
+ppg plugin shipwreck classified PROGETTO.ppg --layer NOME | --file FILE [--pair-isolation 1] [--plate FILE] [--accept [ID ...]] [--kinds frame,seam,plank]
 ppg plugin shipwreck export3d PROGETTO.ppg --out FILE.obj|.glb|.ifc --reconstruction
 ppg plugin shipwreck plan PROGETTO.ppg --reconstruction [--out CARTELLA]
 ppg plugin shipwreck drawings PROGETTO.ppg --reconstruction [--out CARTELLA]   # piano e profilo con la carenatura

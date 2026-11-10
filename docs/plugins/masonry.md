@@ -12,8 +12,8 @@ It makes the plate at scale, the DXF, the tables and the wall's IFC.
 The measures say how a wall stands. They never judge it: a lean is a number with its direction, and a type is what the
 measures *suggest*, with the rules that suggest it.
 
-This page describes version 0.1.0 of the plugin, which **requires pyarchinit-photogrammetry 1.7.0** (the drawings kept
-with the elevations). The README and the code are in the [plugin
+This page describes version 0.1.3 of the plugin, which **requires pyarchinit-photogrammetry 1.7.0** (the drawings kept
+with the elevations); courses and joints from a classified drawing need 1.7.7. The README and the code are in the [plugin
 repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/masonry).
 
 <figure markdown="span">
@@ -39,7 +39,8 @@ repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/
    apse, use **Face on a cylinder...**; for a polygonal tower, use **Polygonal tower...**.
 3. **Shape**: lean and bulge, with the bulge shown over the elevation. Then **Sections...** and **Axis of the
    tower...**; **Compare surveys...** when another chunk holds a second survey of the same wall.
-4. **Find the stones...** (the program's stone tool on the face), then **Measure the stones**.
+4. **Find the stones...** (the program's stone tool on the face), or draw the beds and joints and use **Courses and
+   joints from a classified drawing...**; then **Measure the stones**.
 5. Draw the USM on the face with the program's *Disegna US*, then **Propose relationships...** and tick those you
    checked. **Save in PyArchInit** writes them.
 6. Export the face with **Plate...** or **Export all...**, the wall with **Wall IFC...**, or open the face with
@@ -216,6 +217,44 @@ stones, it is within 3 %.
   (yellow).</figcaption>
 </figure>
 
+### Courses and joints from a classified drawing
+
+With the program **1.7.7 or later** (on an older program the button is hidden), **Courses and joints from a classified
+drawing...** turns the lines you drew on the face into courses and stones. Draw the bed joints and the head joints
+on the face's elevation with the program's line tools, or give a GeoPackage, GeoJSON or DXF already in the face's
+`(u, v)`. The program classifies the lines along the face's horizontal ([A drawing classified by
+orientation](../gui/drawing.md#a-drawing-classified-by-orientation)); the plugin gives the groups their meaning:
+
+| Group of the classification | In the wall |
+|---|---|
+| lines along the axis | **beds**: the bed joints between two courses |
+| pairs along the axis (two lines close together, also a band traced as a polygon) | a **course** of known thickness: its two lines are the beds below and above it |
+| lines across the axis | **joints**: the head joints between two stones of a course |
+| pairs across the axis | two joints (a wide joint drawn on both sides leaves between them a cell too narrow to be a stone) |
+| other directions | left out, and counted |
+
+A course lies between a bed and the bed directly above it, over the stretch both cover. Its stones are the cells of
+the course split by the joints that cover **at least half of its height**; each such joint is taken across the whole
+course. A joint at the end of a course closes it. Cells narrower or lower than the **smallest stone** (5 cm) are not
+stones. The outlines of the USM drawn on the face are left out unless you tick them. A straight joint drawn as one
+line through several courses splits each of them.
+
+Nothing is written before the **check plate**. It shows the stones proposed, numbered, the beds in blue, the joints
+that split a course in orange and those that split none dashed grey, each course named on its left, with the summary:
+courses, their mean height, thickness and stones. **Add the stones** appends them to the stones of the face, the same
+the program's stone tool keeps, so *Measure the stones* reads them and you can correct them by hand. A proposed stone
+that overlaps a stone already on the face by more than half is skipped, and the plate and the status bar say how many:
+taking the same drawing again, or a redrawing a few millimetres off, adds nothing. The box **Replace the stones of the
+face** puts the proposal in their place. The addition is one step of *Edit > Undo*, which puts back the whole list of
+stones of the face as it was: stones you corrected by hand after the import go back too. Run from a script of the
+console, the import makes no step of its own.
+
+The plate is written in `<chunk data>/masonry/<wall>/<face>/classificato/tavola_controllo.png`. On the command line
+`ppg plugin masonry classified` prints the courses and stones (and writes the plate with `--plate`); without
+`--accept` nothing is saved, and with `--accept` the duplicates are skipped the same way. Here `--accept` takes no
+value; for `usm` it needs one (`all` or the numbers of the proposals): a bare `--accept` there is an error, so that
+no relationship is accepted by mistake.
+
 ## USM and their relationships
 
 Draw the units on the face with the program's *Disegna US* (`unita_tipo` USM) and fill their fields. **Propose
@@ -295,6 +334,8 @@ ppg plugin masonry face PROJECT Tower --kind tower --polygon 314.0 [--min-side 0
 ppg plugin masonry shape PROJECT "North wall" [FACE] [--sections Z1,Z2 --stations U1,U2] [--compare CHUNK]
 ppg plugin masonry shape PROJECT Tower --axis [--heights Z1,Z2,Z3]
 ppg plugin masonry stones PROJECT "North wall" [FACE] [--region "POLYGON((u v, ...))"] [--export FOLDER]
+ppg plugin masonry classified PROJECT "North wall" [FACE] [--file DRAWING] [--plate plate.png] [--accept [--replace]]
+    [--joint-cover 0.5] [--min-stone 0.05] [--pair-isolation 1.5] [--with-units] [--param KEY=VALUE ...]
 ppg plugin masonry usm PROJECT "North wall" [FACE] [--accept all|1,3] [--write --config config.cfg]
 ppg plugin masonry plate|export PROJECT "North wall" [FACE] --out FOLDER [--scale 20]
 ppg plugin masonry ifc PROJECT "North wall" --out wall.ifc [--thickness 0.6]

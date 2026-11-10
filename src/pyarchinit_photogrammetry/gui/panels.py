@@ -125,7 +125,7 @@ def _tool(name: str, text: str, tip: str = "") -> QToolButton:
 
 # the kinds of the items of the workspace that can be removed (Rimuovi, the Delete key)
 REMOVABLE = {"chunk", "product", "version", "elevation", "camera", "cameras", "marker", "markers", "scalebar",
-             "scalebars"}
+             "scalebars", "mosaic"}
 
 
 COMPASS = {"it": ["N", "NE", "E", "SE", "S", "SO", "O", "NO"], "en": ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]}
@@ -388,6 +388,9 @@ class WorkspaceTree(QTreeWidget):
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "dem_precision"))
                 it.setToolTip(0, tr("Doppio clic per vederla: deviazione standard delle quote, dai punti di legame"))
                 ci.addChild(it)
+            wnode = self._water_item(ch)
+            if wnode is not None:
+                ci.addChild(wnode)
             elevations = (ch.meta or {}).get("elevations") or []
             if elevations:
                 el = QTreeWidgetItem([tr("Prospetti  ({0})", len(elevations))])
@@ -478,6 +481,10 @@ class WorkspaceTree(QTreeWidget):
                 cnode.setExpanded(True)
             self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
+        merged = self._mosaics_item(document)
+        if merged is not None:
+            root.addChild(merged)
+            merged.setExpanded(True)
         root.setExpanded(True)
         if opened:  # filled again (something removed, a product built): the nodes as the user left them,
             for item in self._walk():  # the active chunk open
@@ -610,6 +617,67 @@ class WorkspaceTree(QTreeWidget):
         if data and data[0] == "plugin":
             return ("plugin", data[1], self._plugin_items[data[2]])
         return data
+
+    @staticmethod
+    def _mosaics_item(document):
+        """"Prodotti uniti (n)" at the level of the document (:mod:`..engine.mosaic`), a child for each merged
+        orthophoto or DEM with its chunks; one to merge again (a chunk moved, rebuilt or gone) marked "da rifare".
+        Double click: shown in the 2D view (a merged product) or the window *Ortofoto e DEM uniti* (the node)."""
+        from ..engine import mosaic
+
+        records = mosaic.mosaics_of(document)
+        if not records:
+            return None
+        node = QTreeWidgetItem([tr("Prodotti uniti  ({0})", len(records))])
+        node.setIcon(0, icon("merge"))
+        node.setData(0, Qt.ItemDataRole.UserRole, ("mosaics", None, None))
+        node.setToolTip(0, tr("Ortofoto e DEM di più chunk uniti in uno. Doppio clic: Ortofoto e DEM uniti"))
+        for rec in records:
+            mid = str(rec.get("id"))
+            labels = rec.get("labels") or {}
+            names = ", ".join(str(labels.get(str(k), k)) for k in rec.get("chunks") or [])
+            try:
+                stale = mosaic.is_stale(document, rec)
+            except Exception:  # a broken record: said as one to make again
+                stale = ["?"]
+            res = rec.get("resolution")
+            text = tr("{0}  ({1}; {2} cm)", rec.get("name", mid), names, number(float(res) * 100, 1)) if res else \
+                tr("{0}  ({1})", rec.get("name", mid), names)
+            if stale:
+                text += tr("  -  da rifare")
+            it = QTreeWidgetItem([text])
+            it.setIcon(0, icon("warning") if stale else icon("dem" if rec.get("product") == "dem" else "orthomosaic"))
+            it.setData(0, Qt.ItemDataRole.UserRole, ("mosaic", None, mid))
+            tip = tr("Doppio clic per vederlo nella vista 2D; tasto destro: mostra, apri la cartella, rimuovi")
+            if stale:
+                it.setForeground(0, QColor(PALETTE["red"]))
+                tip = tr("Da rifare: {0} spostati, ricostruiti o tolti dopo l'unione", ", ".join(stale)) + "\n" + tip
+            it.setToolTip(0, tip)
+            node.addChild(it)
+        return node
+
+    @staticmethod
+    def _water_item(ch):
+        """"Acqua: livello z, n" when the chunk has a water level (:func:`..engine.water.level_of`: in the world of the
+        chunk now); double click: the window of the water."""
+        if not isinstance((ch.meta or {}).get("water"), dict):
+            return None
+        from ..engine import water
+
+        try:
+            lv = water.level_of(ch)
+        except Exception:  # a broken record: not in the tree
+            return None
+        if lv is None:
+            return None
+        it = QTreeWidgetItem([tr("Acqua: livello {0} m, n {1}", number(lv["level"], 3), number(lv["n"], 2))])
+        it.setIcon(0, icon("water"))
+        it.setData(0, Qt.ItemDataRole.UserRole, ("water", ch, None))
+        tip = tr("Dal bordo dell'acqua") if lv["source"] == "edge" else tr("A mano")
+        if (ch.meta.get("dense") or {}).get("refraction"):
+            tip += "\n" + tr("Nuvola densa corretta per la rifrazione")
+        it.setToolTip(0, tip + "\n" + tr("Doppio clic: Livello dell'acqua e rifrazione"))
+        return it
 
     def _double(self, item, _col) -> None:
         data = self._data(item)
@@ -927,6 +995,7 @@ class ReferencePane(QWidget):
     move3d_requested = Signal(int)  # key of the marker to place again in the 3D view
     remove_requested = Signal(object)  # keys of the markers to delete
     scalebar_import_requested = Signal()
+    stakes_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
                 "Errore (m)"]
@@ -964,7 +1033,13 @@ class ReferencePane(QWidget):
         bar.addWidget(self.b_bar)
         bar.addWidget(self.b_bar_import)
         bar.addWidget(self.b_est)
+        self.b_stakes = _tool("markers", tr("Cerca picchetti..."), tr("Picchetti e capisaldi cercati sull'ortofoto e "
+                                                                      "sulle foto vicino a punti di coordinate note: "
+                                                                      "proposte da accettare come legami a "
+                                                                      "coordinate note"))
+        bar.addWidget(self.b_stakes)
         lay.addLayout(bar)
+        self.b_stakes.clicked.connect(self.stakes_requested)
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
         self.b_opt.clicked.connect(self.optimize_requested)
@@ -2130,6 +2205,7 @@ class LayersPane(QWidget):
     chunk_overlay_changed = Signal(int, bool, float)  # another chunk's raster: key, shown, opacity (0-1)
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
     MAX_LISTED = 500  # features listed under a layer
+    layer_actions = None  # callable(layer name) -> [(text, icon name, slot)]: the window's commands in the layer menu
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2435,6 +2511,8 @@ class LayersPane(QWidget):
         menu = QMenu(self)
         self._add_label_actions(menu, name, index)
         menu.addSeparator()
+        for text, icon_name, slot in (self.layer_actions(name) if self.layer_actions is not None else []):
+            menu.addAction(icon(icon_name), text).triggered.connect(lambda _=False, f=slot: f())
         a = menu.addAction(icon("excel"), tr("Esporta gli attributi di {0} in Excel...", translate(name)))
         a.triggered.connect(lambda _=False: self.export_layer(name))
         a.setEnabled(self.view is not None and bool(self.view.features(name)))

@@ -201,6 +201,64 @@ come tre layer *Disegni 3D - linee / poligoni / punti (ppg)*, in un solo verso (
 i disegni fatti dopo aver creato il progetto QGIS chiedono di crearlo di nuovo (*QGIS > Apri in QGIS*), come per i
 prospetti. Dalla riga di comando: `ppg drawings3d progetto.ppg list | export --out FILE | import FILE`.
 
+## Un disegno classificato per orientamento
+
+*Strumenti > Classifica un disegno...* divide le linee di un disegno secondo la loro direzione rispetto a un asse. È il
+primo passo per i plugin che leggono un disegno fatto a mano: le ordinate e i comenti di uno scafo
+([Relitti](../plugins/shipwreck.md)), i corsi e i giunti di un muro ([Murature](../plugins/masonry.md)). Il programma
+non dà nomi a quello che trova: dice solo quali linee vanno in quale direzione. Il significato lo danno i plugin, dopo
+il controllo sulla tavola.
+
+**Il disegno.** Un layer di [disegni liberi](#disegni-liberi-2d-e-3d) sulla pianta, i disegni di un
+[prospetto](processing.md#disegni-sui-prospetti-e-sulle-sezioni) (le sue linee e i contorni delle sue unità, nel suo `(u, v)`) o un file: GeoPackage,
+GeoJSON o DXF; un file viene messo nel sistema del chunk come fa *File > Importa > Disegni 3D...* (riproiettato dal
+sistema che dichiara, un GeoJSON in longitudine e latitudine letto come WGS 84, rifiutato quando non si può: nessun
+sistema con un chunk in uno reale, un sistema reale con un chunk locale). Ogni linea viene semplificata (1 cm in modo predefinito) e divisa nei suoi tratti dritti: un poligono
+chiuso conta per i suoi lati, anche quello che lo chiude, una curva per i suoi tratti dritti.
+
+**L'asse.** Due punti, scritti (X1, Y1, X2, Y2) o con *Asse con due clic* sulla vista (la pianta per un disegno della
+pianta, il prospetto mostrato per quello di un prospetto), oppure *Dall'orizzontale di un prospetto...*: l'orizzontale
+di un prospetto piano riportata sulla pianta. Il disegno di un prospetto si classifica lungo il suo asse u. I due punti
+devono essere distinti: un asse senza lunghezza viene rifiutato.
+
+**I gruppi.**
+
+| Gruppo | Che cosa è |
+| --- | --- |
+| lungo l'asse | linee entro 15 gradi dall'asse; i pezzi di una linea (spezzata, o con una piega lasciata dalla semplificazione) uniti in una |
+| di traverso | linee entro 15 gradi dalla perpendicolare; i pezzi di una linea, uno dopo l'altro, entro 10 cm lungo l'asse e dalla stessa parte, uniti - anche i giunti che proseguono uno nell'altro per più corsi (un giunto passante) |
+| coppie lungo l'asse / di traverso | due linee parallele a 2-50 cm che si sovrappongono almeno per metà della più corta: prima i due lati di un poligono chiuso (un fasciame o un'ordinata tracciati come poligono, anche a contatto con il successivo; gli altri lati, le teste, ne fanno parte); poi le linee sciolte, ognuna la più vicina all'altra e senza un'altra linea dello stesso gruppo vicina accanto (la successiva almeno 1,5 volte più lontana). I due lati di un elemento: un poligono con la sua **larghezza** |
+| altre direzioni | ogni altro tratto dritto |
+
+Le linee a passo regolare (i letti di un muro, ogni 25 cm) non sono coppie: ognuna ha due vicine alla stessa distanza.
+Una linea disegnata due volte, o il lato che due poligoni tracciati hanno in comune, conta una volta (più vicine di
+2 cm). Le ordinate disegnate come linee sciolte con intervalli larghi quanto le ordinate (12 cm ogni 25 cm) sembrano
+linee a passo regolare: tracciale come poligoni, oppure abbassa *Coppie di linee sciolte* a 1 (basta la linea più
+vicina) o a 0 (le più vicine per prime).
+
+**Parametri** (*Avanzate*, con *Valori predefiniti*): semplificazione 0,01 m, tratto più corto 0,05 m, lungo l'asse
+entro 15 gradi, di traverso entro 15 gradi, unione dei pezzi con al massimo 5 gradi di differenza, 0,02 m di scarto
+laterale e 0,10 m di distanza, linee di traverso raggruppate entro 0,10 m lungo l'asse, coppie parallele entro 5 gradi,
+distanti da 0,02 a 0,50 m, sovrapposte per 0,5 della più corta; per le linee sciolte, la vicina successiva almeno 1,5
+volte più lontana.
+
+**La tavola.** *Classifica* lavora in sottofondo e mostra la tavola nella finestra: ogni elemento nel colore del suo
+gruppo con il suo numero, l'asse tratteggiato con una freccia, i conteggi nella legenda. *Salva la tavola...* la
+scrive in PNG o SVG.
+
+![La tavola del disegno di uno scafo: le ordinate come coppie di traverso, i comenti lungo l'asse](../img/gui/orient-lines-plate.it.png)
+
+**I layer.** *Scrivi i layer* scrive gli elementi di un disegno della pianta come disegni liberi, un layer per gruppo
+(*Classificato - lungo l'asse*, *Classificato - coppie di traverso*, ...; il prefisso si può cambiare), con le quote
+del DEM e gli attributi `gruppo`, `elemento`, `angolo` e, per una coppia, `larghezza`. È un passo di *Modifica >
+Annulla*. Scrivere di nuovo sostituisce la classificazione precedente in quei layer; i disegni fatti a mano lì restano.
+Un elemento tutto fuori dal DEM prende la quota mediana degli altri. Il disegno di un prospetto non si scrive sulla
+pianta: i plugin leggono direttamente la sua classificazione.
+
+Dalla riga di comando: `ppg classify-lines progetto.ppg CHUNK (--layer NOME | --file F | --elevation ID) --axis
+X1,Y1,X2,Y2 [--param nome=valore ...] [--plate tavola.png] [--json out.json] [--layers]`
+([API Python](../api.md#un-disegno-classificato-per-orientamento)).
+
 ## Sezioni
 
 1. **Sezione**, poi due clic sull'ortofoto: il modello viene tagliato lungo la traccia.

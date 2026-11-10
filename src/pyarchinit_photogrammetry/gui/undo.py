@@ -51,6 +51,7 @@ PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sect
               "markers": "Marker", "excluded": "Marker", "scalebars": "Barre di scala",
               "patches": "Patch dell'ortofoto", "frame_patches": "Patch dei prospetti",
               "region": "Regione di ricostruzione", "lines": "Linee di rottura", "free": "Disegni 3D",
+              "water": "Livello dell'acqua",
               "plugins": "Dati dei plugin"}
 ABSORBED_PARTS = ("plugins",)  # a change of these made in the turn of the last entry: a part of that entry
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",

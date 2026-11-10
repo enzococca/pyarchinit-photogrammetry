@@ -22,6 +22,7 @@ without that (a crash) is settled when the project is opened again (:func:`recov
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -777,6 +778,82 @@ class ItemsRemoval(Removal):
         return False
 
 
+class MosaicRemoval(Removal):
+    """Merged products of the document (:mod:`..engine.mosaic`: ``doc.meta["mosaics"]``, folders
+    ``mosaics/<id>``) taken out and put back: their records and their folders together. :meth:`added` is the
+    removal that undoes a build (*Ortofoto e DEM uniti*), not applied."""
+
+    kind = "mosaics"
+    adds = False
+
+    def __init__(self, document, ids):
+        super().__init__(document)
+        self.ids = [str(i) for i in ids]
+        self.records: dict[str, dict] = {}
+        self.places: dict[str, int] = {}
+
+    @classmethod
+    def added(cls, document, ids) -> "MosaicRemoval":
+        """The removal that undoes the build of the merged products ``ids``, not applied: they stay. Until the project
+        is saved the file on disk does not list them, so the end of the session deletes their folders unless a save
+        comes first (call :meth:`mark_saved` when the build was saved at once)."""
+        r = cls(document, ids)
+        r.adds = True
+        r.state = RESTORED
+        r.saved = REMOVED
+        root = document.files_dir
+        r.files[PRESENT] = [f"mosaics/{i}" for i in r.ids if (root / "mosaics" / i).exists()]
+        r._write_manifest()
+        return r
+
+    def _manifest(self) -> dict:
+        kind = "mosaics_added" if self.adds and self.state == RESTORED else self.kind
+        return {**super()._manifest(), "kind": kind, "mosaics": list(self.ids)}
+
+    def apply(self) -> None:
+        self.redo()
+
+    def redo(self) -> None:
+        from ..engine import mosaic
+
+        doc = self.document
+        present = mosaic.mosaics_of(doc)
+        order = [r.get("id") for r in present]
+        mids = [i for i in self.ids if i in order]
+        if not mids:
+            raise ValueError("nothing to remove")
+        self.records = {i: copy.deepcopy(next(r for r in present if r.get("id") == i)) for i in mids}
+        self.places = {i: order.index(i) for i in mids}
+        root = doc.files_dir
+        before, self.state = self.state, REMOVED
+        try:
+            self._stash_files(PRESENT, [f"mosaics/{i}" for i in mids if (root / "mosaics" / i).exists()])
+        except Exception:
+            self.state = before
+            raise
+        for i in mids:
+            mosaic.remove(doc, i, delete_files=False)
+
+    def undo(self) -> None:
+        from ..engine import mosaic
+
+        doc = self.document
+        root = doc.files_dir
+        for rel in self.files[PRESENT]:
+            if not _free(root / rel) and (self.folder / PRESENT / rel).exists():
+                raise RemovalConflict(f"{root / rel} is in the way of the merged product that comes back")
+        self._unstash_files(PRESENT, ABSENT)
+        self.state = RESTORED
+        self._write_manifest()
+        records = mosaic.mosaics_of(doc)
+        here = {r.get("id") for r in records}
+        for i in sorted(self.records, key=lambda i: self.places.get(i, len(records))):
+            if i not in here:
+                records.insert(min(self.places.get(i, len(records)), len(records)), copy.deepcopy(self.records[i]))
+        if records:
+            doc.meta[mosaic.META_KEY] = records
+
+
 def holding_coordinates(document, chunk) -> list[ItemsRemoval]:
     """The removals of ``chunk`` in force - taken away, not undone - whose items carry coordinates in its system
     (:meth:`ItemsRemoval.holds_coordinates`): those an undo must not put back after a change of the chunk's system."""
@@ -813,6 +890,15 @@ def recover(document) -> dict:
             continue
         entries.append((0 if manifest.get("kind") in ("chunks", "added") else 1, entry, manifest))
     for _order, entry, manifest in sorted(entries, key=lambda t: t[0]):  # the chunks first, then what goes in them
+        if manifest.get("kind") == "mosaics_added":  # merged products built, in place: those the project as saved
+            listed = {str(r.get("id")) for r in (document.meta.get("mosaics") or []) if isinstance(r, dict)}
+            for rel in manifest.get("files", {}).get(PRESENT, []):  # does not list go
+                place = root / rel
+                if rel.startswith("mosaics/") and rel.split("/", 1)[1] not in listed and place.exists():
+                    _delete(place)
+                    out["deleted"] += 1
+            _delete(entry)
+            continue
         if manifest.get("kind") == "added":  # chunks added (Aggiungi progetti), their folders in place: those the
             for rel in manifest.get("files", {}).get(PRESENT, []):  # project as saved does not list go
                 m = _CHUNK_DIR.match(rel)
@@ -828,7 +914,10 @@ def recover(document) -> dict:
                 continue
             top = rel.split("/")[0]
             m = _CHUNK_DIR.match(top)
-            if manifest.get("kind") == "chunks":
+            if manifest.get("kind") == "mosaics":  # a merged product the project as saved still lists
+                listed = {str(r.get("id")) for r in (document.meta.get("mosaics") or []) if isinstance(r, dict)}
+                wanted = top == "mosaics" and rel.count("/") == 1 and rel.split("/", 1)[1] in listed
+            elif manifest.get("kind") == "chunks":
                 wanted = m is not None and int(m.group(1)) in keys and rel == top
             else:  # inside a chunk the project still has, where nothing took its place
                 wanted = m is not None and int(m.group(1)) in keys and (root / top).is_dir()
@@ -843,5 +932,5 @@ def recover(document) -> dict:
     return out
 
 
-__all__ = ["TRASH", "RemovalConflict", "Removal", "ChunkRemoval", "ItemsRemoval", "make_part", "holding_coordinates",
-           "recover"]
+__all__ = ["TRASH", "RemovalConflict", "Removal", "ChunkRemoval", "ItemsRemoval", "MosaicRemoval", "make_part",
+           "holding_coordinates", "recover"]

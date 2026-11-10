@@ -84,6 +84,8 @@ buttons that do not fit):
 | *Cameras*, *Markers*, *Scale bars* | the removal of all they hold |
 | several items | *Enable*, *Disable*, *Remove N items* |
 | the project | *Add chunk*, *Append projects...* |
+| *Merged products* | *Merged orthophoto and DEM...* |
+| a merged product | *Show*, *Open the folder*, *Remove* ([merged products](multi-survey.md#merged-orthophoto-and-dem)) |
 
 The commands work on chunks that are not the active one too: removing, renaming, enabling and disabling act
 on the chunk of the item and leave the active chunk as it is, while showing an item and the commands of its
@@ -137,6 +139,7 @@ or added on the model or the orthophoto.
 | *Precision* | the precision of cameras, markers and tie points ([precision](processing.md#precision)) |
 | *Scale bar...*, *Import bars...* | a known distance between two markers, or a list of them from a CSV |
 | *Estimated coordinates* | as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates instead of the reference ones (on by itself when no marker has reference coordinates) |
+| *Find stakes...* | stakes and benchmarks near points of known coordinates, proposed as known ties ([benchmarks and stakes](ties.md#benchmarks-and-stakes)) |
 
 The right click on the markers filters the photos on them, refines their blue flags, merges them (a coded
 target and the GCP placed by hand on it), moves one again in the 3D view, creates a scale bar between two of
@@ -170,6 +173,7 @@ stones, patches.
 
 * Tick to show or hide a layer, double click to zoom (a layer or a single feature), *Remove* takes it away;
   *All* and *None* tick every drawn layer (one step of *Edit > Undo*) and leave the background as it is.
+* The right click on a layer of free drawings with polygons has *Crop with this mask...* (a [colour mask](multi-survey.md#mask-from-a-colour)) or *Crop with the polygons of this layer...*: the crop of the products with their union.
 * In *Pan / query* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...)
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,

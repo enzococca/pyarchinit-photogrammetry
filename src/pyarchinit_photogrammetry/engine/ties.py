@@ -754,6 +754,8 @@ def import_ties(doc: "Document", path) -> list[Tie]:
 
 # --------------------------------------------------------------------------- the joint solve
 KINDS = {"similarity": 7, "rigid": 6, "plan": 4, "shift": 3, "height": 1, "fixed": 0}
+REMEASURE_CELLS = 2.0  # R3: a height tie whose anchors moved apart in plan by more than this many DEM cells
+REMEASURE_MIN = 0.10  # ... and more than this (metres) is to be measured again
 HUBER = 2.0  # robust solve: an observation whose residual is above HUBER x its precision weighs HUBER / that ratio
 RANK_RATIO = 1e-6  # an unknown the ties do not determine: a singular value of the Jacobian (columns scaled to one)
 # below this x the largest
@@ -805,6 +807,11 @@ MESSAGES: dict[str, tuple[str, str]] = {
                             "ties ({3:.3f} m): its own ties are well spread ({4:.3f} m by themselves), the error "
                             "comes through {5}, which it hangs on - tie {0} or {5} to a fixed chunk or to known "
                             "points"),
+    "remeasure_height": ("Quota stabile «{0}» da rimisurare: {1} e {2} si sono spostati di {3:.3f} m in pianta l'uno "
+                         "rispetto all'altro da quando è stata misurata (oltre {4:.3f} m) - misurala di nuovo dove "
+                         "sono ora",
+                         "Stable height «{0}» to be measured again: {1} and {2} moved {3:.3f} m in plan against each "
+                         "other since it was measured (over {4:.3f} m) - measure it again where they are now"),
     # plausibility (a chunk georeferenced before the solve)
     "implausible_rotation": ("{0}: ruotato di {1:.1f}° rispetto a prima, oltre {2:g}° per un chunk georeferenziato "
                              "({3}): controlla i legami prima di applicare",
@@ -825,6 +832,8 @@ MESSAGES: dict[str, tuple[str, str]] = {
                          "Tie «{0}» probably wrong: {1} of its {2} pairs of distances do not agree"),
     "distance_failed": ("Distanze fra legami: {0} coppie su {1} non tornano entro la tolleranza",
                         "Distances between ties: {0} of {1} pairs do not agree within the tolerance"),
+    "height_residual_large": ("Quota stabile «{0}»: residuo in quota {1:+.3f} m, {2:.1f} volte la sua precisione",
+                              "Stable height «{0}»: height residual {1:+.3f} m, {2:.1f} x its precision"),
     "loo_large": ("Legame «{0}» tolto: gli altri mettono i suoi estremi a {1:.3f} m l'uno dall'altro (precisione "
                   "{2:.3f} m)",
                   "Tie «{0}» left out: the others put its ends {1:.3f} m apart (precision {2:.3f} m)"),
@@ -842,6 +851,8 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "out_reference_cleared": ("Escluso «{0}»: il marker {1} del chunk {2} non ha più un riferimento",
                               "Left out «{0}»: marker {1} of chunk {2} has no reference any more"),
     "out_inactive": ("Escluso «{0}»: non attivo", "Left out «{0}»: inactive"),
+    "out_no_anchor": ("Escluso «{0}»: quota stabile senza punti di ancoraggio",
+                      "Left out «{0}»: stable height without anchors"),
     "out_stale": ("Escluso «{0}»: il marker {1} del chunk {2} è da rimisurare dopo il riallineamento (rimettilo in "
                   "Punti in comune, misuralo sulle foto o conferma che è giusto)",
                   "Left out «{0}»: marker {1} of chunk {2} to be measured again after the new alignment (place it "
@@ -888,12 +899,16 @@ MESSAGES: dict[str, tuple[str, str]] = {
                   "Straight axis: largest angle {0:.2f}° (before {1:.2f}°)"),
     "line_axis_no_before": ("Asse dritto: angolo massimo {0:.2f}°", "Straight axis: largest angle {0:.2f}°"),
     "heading_residuals": ("Residui", "Residuals"),
+    "heading_heights": ("Quote stabili", "Stable heights"),
+    "line_height": ("{0} ({1} su {2}): in quota {3:+.3f} m, precisione {4:.3f} m, spostamento in pianta {5:.3f} m",
+                    "{0} ({1} on {2}): height {3:+.3f} m, precision {4:.3f} m, moved in plan {5:.3f} m"),
     "heading_chunks": ("Chunk della stima", "Chunks of the solve"),
     "heading_warnings": ("Avvisi", "Warnings"),
     "kind_tie": ("legame", "tie"),
     "kind_known": ("punto noto", "known point"),
     "kind_reference": ("riferimento", "reference"),
     "kind_check": ("verifica", "check"),
+    "kind_height": ("quota stabile", "stable height"),
     "no_value": ("-", "-"),
     "unknowns_similarity": ("similitudine", "similarity"),
     "unknowns_rigid": ("rigido", "rigid"),
@@ -967,7 +982,7 @@ class _Obs:
     """One observation of the solve: the end ``(chunk key, internal xyz)`` against the other end or against known
     world coordinates (``target``, in the system of the solve), with a precision per axis."""
 
-    kind: str  # "tie" | "known" | "reference"
+    kind: str  # "tie" | "known" | "reference" | "height" (a stable height: z only, sigma (inf, inf, s))
     name: str
     tie_id: str | None
     a: tuple[int, np.ndarray]
@@ -983,12 +998,15 @@ class Solution:
 
     ``transforms``: the new ``chunk.transform`` of every chunk of the solve (the fixed ones as they are);
     ``residuals``: one entry per observation - ``id`` (tie id, None for a reference), ``name``, ``kind`` ("tie",
-    "known", "reference"), ``chunks``, ``dx``/``dy``/``dz``/``d`` (world units of the solve; tie = end A - end B, known
-    point = computed - known), ``precision``, ``normalised`` (the residual over its precision), ``weight`` (< 1 when
-    the robust solve weighs it down), ``fitted`` (False: reported only - observations between fixed chunks, check
+    "known", "reference", "height": a stable height, ``dz`` only and ``horizontal``), ``chunks``,
+    ``dx``/``dy``/``dz``/``d`` (world units of the solve; tie = end A - end B, known point = computed - known),
+    ``precision``, ``normalised`` (the residual over its precision), ``weight`` (< 1 when the robust solve weighs it
+    down), ``fitted`` (False: reported only - observations between fixed chunks, check
     points); ``redundancy``: equations - unknowns of the fitted observations (0: no check at all); ``rms`` of the fitted
     residuals; ``per_chunk``: ``kind``, ``label``, ``rotation_deg``, ``shift`` (how far its centre moves), ``scale``,
-    ``crs_before``, ``observations``; ``crs``: the system of the solve (the fixed chunks', else the known points');
+    ``crs_before``, ``observations`` (the observations with an end on the chunk: a point tie, a known point, a
+    reference or one anchor of a stable height each count one); ``crs``: the system of the solve (the fixed
+    chunks', else the known points');
     ``left_out``: ``[{"id", "name", "reason", "messages"}]`` the ties not used (``reason`` in English,
     ``messages`` the same as :func:`message`, one per reason); ``messages``: the warnings as structured
     messages (:func:`message`, Italian and English), ``warnings`` the same in English; ``previous``: the transform and CRS of
@@ -1119,8 +1137,77 @@ def _sigma3(values, fallback: float) -> np.ndarray:
     return v
 
 
+def _height_observations(doc: "Document", heights, chunks: dict) -> tuple[list[dict], list[tuple]]:
+    """The height ties of a solve (``heights``: objects or ids, None = all) as observations of :func:`solve` (one per
+    anchor) and the entries of ``left_out`` of those not used."""
+    from . import stable_height
+
+    every = stable_height.heights_of(doc)
+    wanted = None if heights is None else {h if isinstance(h, str) else h.id for h in heights}
+    left_out, obs = [], []
+    if wanted is not None:
+        ids = {h.id for h in every}
+        left_out += [_out(i, "", ("out_no_such_tie",), reason="no such tie") for i in sorted(wanted - ids)]
+    labels = {c.key: c.label for c in doc.chunks}
+    for h in every:
+        if wanted is not None and h.id not in wanted:
+            continue
+        gone = [k for k in (h.a, h.b) if k not in labels]
+        if gone:
+            left_out.append(_out(h.id, h.name, *[("out_chunk_removed", k) for k in gone],
+                                 reason="; ".join(f"chunk {k} removed" for k in gone)))
+            continue
+        if not h.active:
+            left_out.append(_out(h.id, h.name, ("out_inactive",), reason="inactive"))
+            continue
+        outside = [labels[k] for k in (h.a, h.b) if k not in chunks]
+        if outside:
+            left_out.append(_out(h.id, h.name, ("out_outside", ", ".join(outside)),
+                                 reason=f"chunk {', '.join(outside)} not in the solve"))
+            continue
+        if not h.anchors:
+            left_out.append(_out(h.id, h.name, ("out_no_anchor",), reason="no anchors"))
+            continue
+        for x in h.anchors:
+            sigma = np.array([np.inf, np.inf, max(float(x.get("precision") or 0.0), 1e-6)])
+            obs.append(("height", h, (h.a, np.asarray(x["a"], float)), (h.b, np.asarray(x["b"], float)), None, None,
+                        sigma, False, None))
+    return left_out, obs
+
+
+def _finite(sigma) -> np.ndarray:
+    return np.isfinite(np.asarray(sigma, float))
+
+
+def _over(values, sigma) -> np.ndarray:
+    """``values / sigma``, 0 where the precision is infinite (an axis a height tie does not observe)."""
+    values, sigma = np.asarray(values, float), np.broadcast_to(np.asarray(sigma, float), np.shape(values))
+    return np.divide(values, sigma, out=np.zeros_like(values), where=np.isfinite(sigma))
+
+
+def _equations(o) -> int:
+    """The equations of an observation: its axes with a finite precision (3, or 1 for a height)."""
+    return int(_finite(o.sigma).sum())
+
+
+def _largest_sigma(sigma) -> float:
+    sigma = np.asarray(sigma, float)
+    return float(np.max(sigma[np.isfinite(sigma)]))
+
+
+def _dem_cell(chunk: "Chunk") -> float | None:
+    """The cell of the chunk's DEM (its units), None without one."""
+    path = chunk.product_path("dem")
+    if path is None or not Path(path).exists():
+        return None
+    import rasterio
+
+    with rasterio.open(path) as src:
+        return float(max(abs(src.res[0]), abs(src.res[1])))
+
+
 def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, robust: bool = False,
-          check_ties=()) -> Solution:
+          check_ties=(), heights=None) -> Solution:
     """Several chunks placed together from their ties, one least squares; nothing is changed (:func:`apply`).
 
     ``unknowns``: chunk (object, key or label) -> ``"similarity"`` (rotation, shift, scale: 7), ``"rigid"`` (6),
@@ -1156,7 +1243,15 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
     tied only among themselves); a solve that does not converge; chunks in systems that cannot be mixed; a geographic
     system.
 
-    ``check_ties``: ids of ties reported as check points only, never fitted (:func:`leave_one_out`)."""
+    ``check_ties``: ids of ties reported as check points only, never fitted (:func:`leave_one_out`).
+
+    ``heights``: height ties (:mod:`.stable_height`, objects or ids; default every height tie of the document): each
+    anchor one observation of z only (precision ``(inf, inf, s)``) between its two chunks, left out as the ties are
+    (inactive, a chunk removed or outside the solve). Equations are counted per axis with a finite precision (a height
+    is one equation); the first position of a "plan", "shift" or "height" chunk takes its z from them too. Their
+    residuals have ``kind`` "height", ``dz`` only (``dx``/``dy`` 0, ``d`` = ``|dz|``) and ``horizontal``: how far
+    apart in plan the solve puts the two points of the anchor, which were at the same x, y when measured; over
+    ``max(2 DEM cells of A, 0.10 m)`` the message ``remeasure_height`` (R3: a warning, the tie is still used)."""
     from scipy.optimize import least_squares
 
     from ..core import crs as crs_mod
@@ -1242,10 +1337,13 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                     continue
                 observations.append(("reference", m, (key, p), None, np.asarray(m.reference.location, float), ch.crs,
                                      _sigma3(m.reference.accuracy, TABLE_PRECISION), bool(m.checkpoint), ch))
+    left, height_obs = _height_observations(doc, heights, chunks)
+    left_out += left
+    observations += height_obs
 
     # the system of the solve
     fixed = [k for k in order if kinds[k] == "fixed"]
-    known_obs = [o for o in observations if o[0] != "tie" and not o[7]]
+    known_obs = [o for o in observations if o[0] not in ("tie", "height") and not o[7]]
     if not fixed and not any(kinds[o[2][0]] != "fixed" for o in known_obs):
         raise TieError("nothing fixes the system of the solve: mark a chunk as fixed, or give known points "
                        "(GNSS points, benchmarks, references)",
@@ -1264,7 +1362,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         raise TieError(f"the system {system} is geographic; use a projected system (e.g. the UTM zone)",
                        f"il sistema {system} è geografico; usa un sistema proiettato (es. il fuso UTM)")
     for o in list(observations):
-        if o[0] != "tie" and not _compatible(o[5], system):
+        if o[0] not in ("tie", "height") and not _compatible(o[5], system):
             if o[0] == "known" and not o[7]:  # a known point the user tied explicitly: never dropped silently
                 raise _not_same_frame(o[8].label, o[5], system_chunk.label, system)
             # a check point, or a reference of a chunk that leaves its own frame: it cannot be measured here
@@ -1331,7 +1429,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         need = KINDS[kinds[key]]
         if not need:
             continue
-        n = 3 * sum(1 for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key)
+        n = sum(_equations(o) for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key)
         if n < need:
             raise TieError(f"chunk {chunks[key].label}: {n} equations for {need} unknowns ({kinds[key]}): not enough "
                            "ties - add ties or known points, or choose fewer unknowns (plan, shift, height)",
@@ -1340,9 +1438,10 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                            "spostamento, solo quota)")
 
     # first positions, from the fixed chunks outwards: each time the chunk with the most observations of placed points
-    # (enough for a closed form of its unknowns first), then every chunk again from all its observations
+    # (enough for a closed form of its unknowns first), then every chunk again from all its observations; the heights
+    # (z only) apart: they give the z of "plan", "shift" and "height" chunks only
     def pairs(key, placed):
-        src, dst, w = [], [], []
+        src, dst, w, heights_ = [], [], [], ([], [], [])
         for o in fitted:
             ends = [e for e in (o.a, o.b) if e is not None]
             mine = [e for e in ends if e[0] == key]
@@ -1355,10 +1454,32 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                 if other is None or other[0] not in placed:
                     continue
                 there = geometry.apply(base[other[0]], other[1])
-            src.append(geometry.apply(base[key], mine[0][1]))
+            here = geometry.apply(base[key], mine[0][1])
+            if o.kind == "height":
+                heights_[0].append(here)
+                heights_[1].append(there)
+                heights_[2].append(1.0 / float(o.sigma[2]) ** 2)
+                continue
+            src.append(here)
             dst.append(there)
             w.append(1.0 / float(np.mean(o.sigma ** 2)))
-        return np.array(src).reshape(-1, 3), np.array(dst).reshape(-1, 3), np.array(w)
+        return (np.array(src).reshape(-1, 3), np.array(dst).reshape(-1, 3), np.array(w),
+                tuple(np.array(v, float) for v in heights_))
+
+    def first(key, src, dst, w, hz) -> np.ndarray:
+        """:func:`_initial`, its z taken from the points and the heights together (weighted mean) for the kinds
+        that move in z without a tilt; the other kinds from the points only."""
+        hs, hd, hw = hz
+        if not len(hs) or kinds[key] not in ("plan", "shift", "height"):
+            return _initial(kinds[key], src, dst, w)
+        m = _initial(kinds[key], src, dst, w) if len(src) else np.eye(4)
+        dz = np.concatenate([dst[:, 2] - geometry.apply(m, src)[:, 2] if len(src) else np.zeros(0),
+                             hd[:, 2] - geometry.apply(m, hs)[:, 2]])
+        ww = np.concatenate([w if len(src) else np.zeros(0), hw])
+        return _translate([0.0, 0.0, float(ww @ dz / ww.sum())]) @ m
+
+    def usable(key, src, hz) -> bool:
+        return bool(len(src)) or (bool(len(hz[0])) and kinds[key] in ("plan", "shift", "height"))
 
     def enough(kind, src) -> bool:
         from .chunks import _spread
@@ -1373,22 +1494,22 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         for key in order:
             if key in placed:
                 continue
-            src, dst, w = pairs(key, placed)
-            if len(src):
-                score = (enough(kinds[key], src), len(src))
+            src, dst, w, hz = pairs(key, placed)
+            if usable(key, src, hz):
+                score = (enough(kinds[key], src), len(src) + len(hz[0]))
                 if best is None or score > best[0]:
-                    best = (score, key, src, dst, w)
+                    best = (score, key, src, dst, w, hz)
         if best is None:
             break
-        _score, key, src, dst, w = best
-        base[key] = _initial(kinds[key], src, dst, w) @ base[key]
+        _score, key, src, dst, w, hz = best
+        base[key] = first(key, src, dst, w, hz) @ base[key]
         placed.add(key)
         sequence.append(key)
     for _again in range(2):
         for key in sequence:
-            src, dst, w = pairs(key, placed - {key})
-            if len(src):
-                base[key] = _initial(kinds[key], src, dst, w) @ base[key]
+            src, dst, w, hz = pairs(key, placed - {key})
+            if usable(key, src, hz):
+                base[key] = first(key, src, dst, w, hz) @ base[key]
 
     # the unknowns
     slices, centre, start = {}, {}, 0
@@ -1417,7 +1538,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
     weights = np.ones(len(fitted))
 
     def residuals(x):
-        return ((positions(x) / sig) * np.sqrt(weights)[:, None]).ravel()
+        return (_over(positions(x), sig) * np.sqrt(weights)[:, None]).ravel()
 
     x = np.zeros(n_par)
     lower, upper = np.full(n_par, -np.inf), np.full(n_par, np.inf)
@@ -1434,7 +1555,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
             x = result.x
             if not robust:
                 break
-            norm = np.linalg.norm(positions(x) / sig, axis=1)
+            norm = np.linalg.norm(_over(positions(x), sig), axis=1)
             new = np.where(norm > HUBER, HUBER / np.maximum(norm, 1e-300), 1.0)
             if np.allclose(new, weights, atol=1e-6):
                 settled = True
@@ -1466,16 +1587,24 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         if len(null) or dead.any():
             loose = [chunks[k].label for k in order if KINDS[kinds[k]] and
                      ((len(null) and np.abs(null[:, slices[k]]).max() > 1e-3) or dead[slices[k]].any())]
+            heights_only = [chunks[k].label for k in order if chunks[k].label in loose and any(
+                o.kind == "height" for o in fitted for e in (o.a, o.b) if e is not None and e[0] == k)]
+            hint_en = hint_it = ""
+            if heights_only:  # its stable heights fix its height only: say so
+                hint_en = (f"; a stable height fixes the height only ({', '.join(heights_only)}): add point ties "
+                           "or known points, or choose fewer unknowns (shift, height)")
+                hint_it = (f"; una quota stabile fissa solo la quota ({', '.join(heights_only)}): aggiungi legami fra "
+                           "punti o punti noti, o scegli meno incognite (solo spostamento, solo quota)")
             raise TieError(f"the ties do not determine chunk {', '.join(loose)}: points on a line, or chunks tied only "
-                           "among themselves and not to a fixed chunk or known points",
+                           f"among themselves and not to a fixed chunk or known points{hint_en}",
                            f"i legami non determinano il chunk {', '.join(loose)}: punti su una linea, o chunk legati "
-                           "solo fra loro e non a un chunk fisso o a punti noti")
+                           f"solo fra loro e non a un chunk fisso o a punti noti{hint_it}")
         # covariance of the unknowns: (J^T J)^-1 with the a-priori precisions, scaled by sigma0^2 when the residuals
         # say the ties are worse than their precision (never made smaller by residuals better than it)
         vs = vt[:len(sv)]
         covariance = (vs.T / sv ** 2) @ vs / np.outer(norms, norms)
         normal = J.T @ J
-        dof = 3 * len(fitted) - n_par
+        dof = sum(_equations(o) for o in fitted) - n_par
         if dof > 0:
             variance_factor = max(1.0, float(np.sum(result.fun ** 2) / dof))
             covariance *= variance_factor
@@ -1512,19 +1641,34 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         cov = G @ covariance @ G.T
         return float(np.sqrt(max(0.0, float(np.linalg.eigvalsh((cov + cov.T) / 2).max()))))
 
-    entries = []
+    entries, equations, remeasure, cells = [], 0, {}, {}
     for o in obs:
         pa = geometry.apply(final[o.a[0]], o.a[1])
         pb = (geometry.apply(final[o.b[0]], o.b[1]) if o.b is not None else o.target)
         r = pa - pb
-        entries.append({"id": o.tie_id, "name": o.name, "kind": o.kind,
-                        "chunks": [o.a[0]] + ([o.b[0]] if o.b is not None else []),
-                        "dx": float(r[0]), "dy": float(r[1]), "dz": float(r[2]), "d": float(np.linalg.norm(r)),
-                        "precision": float(np.max(o.sigma)), "normalised": float(np.linalg.norm(r / o.sigma)),
-                        "weight": weight_of.get(id(o), 1.0), "fitted": id(o) in weight_of,
-                        "check": bool(o.check), "predicted": predicted(o) if o.check else None})
+        entry = {"id": o.tie_id, "name": o.name, "kind": o.kind,
+                 "chunks": [o.a[0]] + ([o.b[0]] if o.b is not None else []),
+                 "dx": float(r[0]), "dy": float(r[1]), "dz": float(r[2]), "d": float(np.linalg.norm(r)),
+                 "precision": _largest_sigma(o.sigma), "normalised": float(np.linalg.norm(_over(r, o.sigma))),
+                 "weight": weight_of.get(id(o), 1.0), "fitted": id(o) in weight_of,
+                 "check": bool(o.check), "predicted": predicted(o) if o.check else None}
+        if o.kind == "height":  # z only: the move in plan since it was measured is said apart (R3)
+            horizontal = float(np.hypot(r[0], r[1]))
+            entry.update({"dx": 0.0, "dy": 0.0, "d": abs(float(r[2])), "horizontal": horizontal})
+            if o.a[0] not in cells:  # the DEM of A read once per solve
+                cells[o.a[0]] = _dem_cell(chunks[o.a[0]])
+            cell = cells[o.a[0]]
+            limit = max(REMEASURE_CELLS * cell if cell else 0.0, REMEASURE_MIN)
+            if horizontal > limit and horizontal > remeasure.get(o.tie_id, (0.0,))[0]:
+                remeasure[o.tie_id] = (horizontal, limit, o)
+        if entry["fitted"]:
+            equations += _equations(o)
+        entries.append(entry)
+    for horizontal, limit, o in remeasure.values():
+        messages.append(message("remeasure_height", o.name, chunks[o.b[0]].label, chunks[o.a[0]].label, horizontal,
+                                limit, chunk=o.b[0]))
     used = [e for e in entries if e["fitted"]]
-    redundancy = 3 * len(used) - n_par
+    redundancy = equations - n_par
     rms = float(np.sqrt(np.mean([e["d"] ** 2 for e in used]))) if used else 0.0
     sigma0 = (float(np.sqrt(sum(e["weight"] * e["normalised"] ** 2 for e in used) / redundancy))
               if redundancy > 0 else None)
@@ -1576,7 +1720,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                           "crs": ch.crs if kinds[key] == "fixed" else system, "observations": n}
         if kinds[key] == "fixed":
             per_chunk[key]["rotation_deg"] = 0.0
-        sigmas = [float(np.max(o.sigma)) for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key]
+        sigmas = [_largest_sigma(o.sigma) for o in fitted for e in (o.a, o.b) if e is not None and e[0] == key]
         precision = chunk_precision(key)
         own = chunk_precision(key, own=True)
         limit = PRECISION_FACTOR * float(np.median(sigmas)) if sigmas else 0.0
@@ -1831,7 +1975,7 @@ class LeaveOneOut(dict):
 
 
 def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool = True,
-                  robust: bool = False, solution: Solution | None = None) -> LeaveOneOut:
+                  robust: bool = False, solution: Solution | None = None, heights=None) -> LeaveOneOut:
     """For each tie of the solve (two-chunk ties and known points), the solve made again without it: how far apart
     the others put its ends (for a known point: from its coordinates). A wrong tie is far from where the others put
     it. Only ties after whose removal some redundancy is left (>= 1); the others are not in the result. Nothing is
@@ -1842,16 +1986,20 @@ def leave_one_out(doc: "Document", unknowns: dict, ties=None, references: bool =
     a distance; ``LeaveOneOut.precision`` has how precisely the reduced solve puts the ends together (a chunk held by
     few ties is placed loosely without one of them): :func:`report` compares the distance with 3 x the two precisions
     combined (``hypot``), so a right tie is not named under weak geometry, and names only the ties near the worst
-    (a wrong tie drags the others: fix the worst one, solve again)."""
+    (a wrong tie drags the others: fix the worst one, solve again).
+
+    The height ties (``heights``, as :func:`solve`) stay in every solve and are never left out themselves: they have
+    no partner points to compare (R3)."""
     full = solution if solution is not None else solve(doc, unknowns, ties=ties, references=references,
-                                                       robust=robust)
-    ids = [r["id"] for r in full.residuals if r["id"] is not None and r["fitted"]]
+                                                       robust=robust, heights=heights)
+    ids = [r["id"] for r in full.residuals if r["id"] is not None and r["fitted"] and r["kind"] != "height"]
     out = LeaveOneOut()
     if full.redundancy < 4:  # a tie takes 3 equations away: nothing would be left to check it
         return out
     for tid in ids:
         try:
-            sol = solve(doc, unknowns, ties=ties, references=references, robust=robust, check_ties={tid})
+            sol = solve(doc, unknowns, ties=ties, references=references, robust=robust, check_ties={tid},
+                        heights=heights)
         except TieError:
             continue
         if sol.redundancy < 1:
@@ -1963,9 +2111,10 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
            axis: dict | None = None) -> dict:
     """Everything the checks say about a solve, as data (JSON) for the window and the command line: the solve
     (``crs``, ``redundancy``, ``rms``, ``sigma0``, ``robust``), ``chunks`` (moves and precision), ``residuals``,
-    ``ties`` (one row per tie: residual, ``loo``, ``distance_pairs``/``distance_failed``, ``suspect``), ``checks``,
-    ``suspects``, ``loo``, ``left_out``, ``axis`` and ``messages`` (:func:`message`, the most important first:
-    no check at all, suspect ties, large leave-one-out moves, large residuals, implausible moves, a bent axis, the
+    ``ties`` (one row per tie: residual, ``loo``, ``distance_pairs``/``distance_failed``, ``suspect``), ``heights``
+    (one row per anchor of a height tie: ``chunks``/``labels`` [A, B], ``dz``, ``precision``, ``horizontal``),
+    ``checks``, ``suspects``, ``loo``, ``left_out``, ``axis`` and ``messages`` (:func:`message`, the most important
+    first: no check at all, suspect ties, large leave-one-out moves, large residuals, implausible moves, a bent axis, the
     warnings of the solve, what was left out). ``warnings``: :func:`plausibility`."""
     from ..core import crs as crs_mod
 
@@ -1973,8 +2122,14 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
     counts = _distance_counts(checks)
     loo_precision = dict(getattr(loo, "precision", None) or {})
     labels = {k: v["label"] for k, v in solution.per_chunk.items()}
-    rows = []
+    rows, heights = [], []
     for r in solution.residuals:
+        if r["kind"] == "height":
+            heights.append({"id": r["id"], "name": r["name"], "chunks": r["chunks"],
+                            "labels": [labels.get(k, k) for k in r["chunks"]], "dz": r["dz"],
+                            "precision": r["precision"], "normalised": r["normalised"], "fitted": r["fitted"],
+                            "horizontal": r.get("horizontal", 0.0)})
+            continue
         if r["id"] is None:
             continue
         f, n = counts.get(r["id"], [0, 0])
@@ -2030,6 +2185,9 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
     for r in large:  # as above: those near the worst one
         if r["normalised"] >= 0.5 * large[0]["normalised"]:
             msgs.append(message("residual_large", r["name"], r["d"], r["normalised"]))
+    for r in sorted((r for r in heights if r["fitted"] and r["normalised"] > CHECK_FACTOR),
+                    key=lambda r: -r["normalised"]):
+        msgs.append(message("height_residual_large", r["name"], r["dz"], r["normalised"]))
     msgs.extend(warnings)
     if axis is not None:
         for p in axis["pairs"]:
@@ -2046,7 +2204,7 @@ def report(solution: Solution, checks: list[dict], loo: dict[str, float], warnin
               for k, v in solution.per_chunk.items()]
     return {"crs": solution.crs, "redundancy": int(solution.redundancy), "rms": float(solution.rms),
             "sigma0": solution.sigma0, "robust": bool(solution.robust), "chunks": chunks,
-            "residuals": solution.residuals, "ties": rows, "checks": checks, "suspects": suspect,
+            "residuals": solution.residuals, "ties": rows, "heights": heights, "checks": checks, "suspects": suspect,
             "loo": dict(loo), "left_out": list(solution.left_out), "axis": axis, "messages": msgs}
 
 
@@ -2072,11 +2230,18 @@ def report_text(solution: Solution, checks: list[dict], loo: dict[str, float], w
                                   float(c["precision_m"])))
     lines += ["", _text("heading_residuals", language)]
     for r in rep["residuals"]:
+        if r["kind"] == "height":
+            continue
         kind = _text("kind_check" if r["check"] else "kind_" + r["kind"], language)
         value = loo.get(r["id"]) if r["id"] is not None else None
         left = _text("no_value", language) if value is None else _metres(value, language) + " m"
         lines.append("  " + _text("line_residual", language, r["name"], kind, float(np.hypot(r["dx"], r["dy"])),
                                   float(r["dz"]), float(r["precision"]), left))
+    if rep["heights"]:
+        lines += ["", _text("heading_heights", language)]
+        for h in rep["heights"]:
+            lines.append("  " + _text("line_height", language, h["name"], h["labels"][1], h["labels"][0],
+                                      float(h["dz"]), float(h["precision"]), float(h["horizontal"])))
     comparable = [c for c in checks if c.get("ok") is not None]
     if comparable:
         lines += ["", _text("line_distances", language, sum(1 for c in comparable if c["ok"]), len(comparable))]

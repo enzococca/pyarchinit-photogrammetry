@@ -93,6 +93,10 @@ Large DEMs are measured on a regular sample of at most :data:`MAX_SAMPLES` cells
 version, or a file) and keeps the result as the active version of its DEM, the DEM as it was among
 the versions; :mod:`.timeline` coregisters the phases of an excavation before measuring volumes.
 
+:func:`height_offset` measures the height of a DEM over the reference only, as the two are placed (no horizontal
+shift): the median of the differences on the stable ground, or a plane; :mod:`..engine.stable_height` keeps it as a
+height tie between two chunks.
+
 ``method="xdem"`` uses the library xdem (``pip install pyarchinit-photogrammetry[coreg]``:
 ``NuthKaab`` and, with ``tilt``, ``Deramp``, without the initial search) if it can be imported;
 ``"auto"`` and ``"nuth_kaab"`` are the implementation of this module.
@@ -975,6 +979,83 @@ def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, 
                           search_cell=found.cell if found is not None else 0.0,
                           method_used="search+nuth_kaab" if used else "nuth_kaab",
                           stable_index=(m.rr[inl], m.cc[inl]))
+
+
+# ---------------------------------------------------------------- a height offset only
+@dataclass
+class HeightOffset:
+    """What :func:`height_offset` found: how much higher the DEM is than the reference on the stable ground (metres),
+    ``dz`` at ``centre`` (the middle of the reference grid) plus, with ``plane``, ``tilt_x``/``tilt_y`` metres per
+    metre; ``nmad_before``/``nmad_after``: the agreement on the stable cells before and after the correction;
+    ``median``: the median difference (DEM - reference) on the stable cells before it; ``cells``: stable cells (of the
+    sample), ``compared``: cells in both DEMs, not too steep, inside the areas given; ``stable_index``: rows and
+    columns of the stable cells on the reference grid."""
+
+    dz: float = 0.0
+    tilt_x: float = 0.0
+    tilt_y: float = 0.0
+    centre: tuple[float, float] = (0.0, 0.0)
+    nmad_before: float = float("nan")
+    nmad_after: float = float("nan")
+    median: float = float("nan")
+    cells: int = 0
+    compared: int = 0
+    plane: bool = False
+    stable_index: tuple | None = field(default=None, repr=False)
+
+    def correction(self, x, y):
+        """The height of the DEM above the reference at ``(x, y)``: ``dz`` plus the tilt."""
+        return self.dz + self.tilt_x * (np.asarray(x, float) - self.centre[0]) + self.tilt_y * (
+            np.asarray(y, float) - self.centre[1])
+
+    def to_dict(self) -> dict:
+        """JSON values (the stable cells left out)."""
+        out = {}
+        for k in ("dz", "tilt_x", "tilt_y", "nmad_before", "nmad_after", "median"):
+            v = float(getattr(self, k))
+            out[k] = v if math.isfinite(v) else None
+        out.update(centre=[float(self.centre[0]), float(self.centre[1])], cells=int(self.cells),
+                   compared=int(self.compared), plane=bool(self.plane))
+        return out
+
+
+def height_offset(zr, tr_r, zd, tr_d, stable=None, exclude=None, plane: bool = False, max_slope: float = MAX_SLOPE,
+                  k: float = OUTLIER_K, max_samples: int = MAX_SAMPLES) -> HeightOffset:
+    """How much higher the DEM ``zd`` (grid ``tr_d``) is than ``zr`` (grid ``tr_r``) on the stable ground, with no
+    horizontal shift: the two DEMs are taken as placed. The stable ground is that of :func:`coregister` (slope below
+    ``max_slope``, inside ``stable``, outside ``exclude``, within ``k`` NMAD of the median difference, looked for again
+    on the differences left after each fit); the offset is the median of the stable differences, or with ``plane``
+    a plane fitted with Huber weights (:func:`_fit` without the shift). ``ValueError`` when the DEMs do not overlap
+    (or the areas leave out almost every cell) or the ground differs almost everywhere (:data:`FEW`)."""
+    _check(tr_r, tr_d, None, None)
+    centre = _centre(tr_r, zr.shape)
+    m = _Measure(zr, tr_r, stable, exclude, max_slope, max_samples, centre)
+    raw = bilinear(zd, tr_d, m.x, m.y) - m.z
+    ok = m.base & np.isfinite(raw)
+    if int(ok.sum()) < MIN_CELLS:
+        raise ValueError("too few cells to compare: the DEMs do not overlap, or the areas given leave out "
+                         "almost all of them")
+    p = np.zeros(3)
+    inl, _, _ = _inliers(raw, ok, k)
+    settled = False
+    for _ in range(IRLS_ROUNDS):
+        if int(inl.sum()) < MIN_CELLS:
+            raise ValueError(FEW)
+        _, _, p, _ = _fit(raw[inl], None, None, m.u[inl], m.v[inl], plane, shift=False)
+        new, _, _ = _inliers(raw - m.plane(p), ok, k)
+        if np.array_equal(new, inl):
+            settled = True
+            break
+        inl = new
+    if int(inl.sum()) < MIN_CELLS:
+        raise ValueError(FEW)
+    if not settled:  # the rounds ran out: the correction fitted on the cells it is reported on
+        _, _, p, _ = _fit(raw[inl], None, None, m.u[inl], m.v[inl], plane, shift=False)
+    after = raw - m.plane(p)
+    return HeightOffset(dz=float(p[0]), tilt_x=float(p[1]), tilt_y=float(p[2]),
+                        centre=(float(centre[0]), float(centre[1])), nmad_before=_nmad(raw[inl]),
+                        nmad_after=_nmad(after[inl]), median=float(np.median(raw[inl])), cells=int(inl.sum()),
+                        compared=int(ok.sum()), plane=bool(plane), stable_index=(m.rr[inl], m.cc[inl]))
 
 
 def _method(method: str) -> str:

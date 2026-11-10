@@ -198,6 +198,10 @@ What else comes with the chunks of a `.ppg`:
 * the site of this project (*PyArchInit*) does not change: the summary says when the source belongs to another site;
 * drawings already published to PyArchInit keep their link to the records they wrote.
 
+The **merged orthophotos and DEMs** of the source ([*Tools > Merged orthophoto and DEM...*](gui/multi-survey.md#merged-orthophoto-and-dem))
+are not copied: they are files of the source project, made from its chunks where they were then. The summary names
+those built from a chunk you append; build them again here once the chunks are tied.
+
 **Nothing is aligned**: each chunk keeps its own frame and coordinate system. To bring them together use *Workflow >
 Align chunks* (markers, photos in common or points) or *Merge chunks*.
 

@@ -559,3 +559,28 @@ def test_cli_append_says_the_ties(tmp_path):
     r = CliRunner().invoke(app, ["append", str(tmp_path / "dst" / "mio.ppg"), str(src), "--chunks", "A,B"])
     assert r.exit_code == 0, r.output
     assert "3 ties between the chunks appended" in r.output and "tie «legame 2» not copied" in r.output
+
+
+def test_merged_products_of_the_source_are_said_not_copied(tmp_path):
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.append import append_projects
+
+    src = make_source(tmp_path / "src")
+    sd = ppg.Document.open(src)
+    k1, kb = (c.key for c in sd.chunks)
+    sd.meta["mosaics"] = [{"id": "m1", "name": "Ortofoto unita 1", "chunks": [k1, kb]},
+                          {"id": "m2", "name": "DEM unito 1", "chunks": [k1]}]
+    sd.save()
+    doc = _target(tmp_path)
+    (res,) = append_projects(doc, [src], chunks=["Saggio B"])
+    said = [w for w in res.warnings if "prodotti uniti" in w]
+    assert len(said) == 1 and "«Ortofoto unita 1»" in said[0] and "DEM unito 1" not in said[0]
+    assert "mosaics" not in doc.meta
+    (res2,) = append_projects(doc, [make_source(tmp_path / "src2")])  # a source without merged products
+    assert not [w for w in res2.warnings if "prodotti uniti" in w]
+    r = CliRunner().invoke(app, ["append", str(doc.path), str(src)])
+    assert r.exit_code == 0, r.output
+    assert "2 prodotti uniti" in r.output and "«DEM unito 1»" in r.output

@@ -1674,6 +1674,10 @@ def append(project: Path,
             typer.echo(f"  warning: {w}")
         for name in r.ties_dropped:
             typer.echo(f"  warning: tie «{name}» not copied: it goes to a chunk not appended")
+        if r.heights:
+            typer.echo(f"{r.path.name}: {r.heights} stable heights between the chunks appended, copied with them")
+        for name in r.heights_dropped:
+            typer.echo(f"  warning: stable height «{name}» not copied: it goes to a chunk not appended")
     typer.echo("Nothing was aligned: use align-chunks or merge-chunks to bring the chunks together.")
     if any(r.error for r in results):
         raise typer.Exit(1)
@@ -4085,17 +4089,48 @@ def _tie_line(doc, t) -> str:
     return f"{t.id}  {t.name!r}: {a} <-> {b}, precision {t.precision:.3f} m, {state}"
 
 
-def _find_tie(doc, ref: str):
-    """A tie by id, else by its name when only one tie has it."""
+def _find_tie(doc, ref: str, heights: bool = False):
+    """A tie by id, else by its name when only one tie has it; ``heights``: the height ties count too (a tie or a
+    :class:`engine.stable_height.HeightTie`)."""
+    from .engine import stable_height
     from .engine import ties as ties_mod
 
-    all_ties = ties_mod.ties_of(doc)
+    all_ties = ties_mod.ties_of(doc) + (stable_height.heights_of(doc) if heights else [])
     found = [t for t in all_ties if t.id == ref] or [t for t in all_ties if t.name == ref]
     if not found:
-        raise typer.BadParameter(f"no tie {ref!r} (ids and names: ppg ties list)")
+        where = "ppg ties list, ppg ties heights" if heights else "ppg ties list"
+        raise typer.BadParameter(f"no tie {ref!r} (ids and names: {where})")
     if len(found) > 1:
         raise typer.BadParameter(f"{len(found)} ties are named {ref!r}: give the id ({', '.join(t.id for t in found)})")
     return found[0]
+
+
+def _find_height(doc, ref: str):
+    """A height tie by id, else by its name when only one has it."""
+    from .engine import stable_height
+
+    every = stable_height.heights_of(doc)
+    found = [t for t in every if t.id == ref] or [t for t in every if t.name == ref]
+    if not found:
+        raise typer.BadParameter(f"no stable height {ref!r} (ids and names: ppg ties heights)")
+    if len(found) > 1:
+        raise typer.BadParameter(f"{len(found)} stable heights are named {ref!r}: give the id "
+                                 f"({', '.join(t.id for t in found)})")
+    return found[0]
+
+
+def _height_labels(doc, h) -> tuple[str, str]:
+    labels = {c.key: c.label for c in doc.chunks}
+    return labels.get(h.b, f"chunk {h.b} (gone)"), labels.get(h.a, f"chunk {h.a} (gone)")
+
+
+def _height_line(doc, h) -> str:
+    """One line of a height tie: id, name, B on A, dz, NMAD, cells, precision, state."""
+    b, a = _height_labels(doc, h)
+    precision = min((x["precision"] for x in h.anchors), default=0.0)
+    kind = "plane, 3 anchors" if h.plane else "offset"
+    return (f"{h.id}  {h.name!r}: {b} on {a}, dz {h.dz:+.4f} m, NMAD {h.nmad:.4f} m, {h.cells} stable cells, "
+            f"precision {precision:.4f} m ({kind}), {'active' if h.active else 'inactive'}")
 
 
 def _parse_unknowns(doc, text: str) -> dict[int, str]:
@@ -4258,15 +4293,22 @@ def ties_list(project: Path,
 
 @ties_app.command("remove")
 def ties_remove(project: Path,
-                tie: str = typer.Argument(..., help="id of the tie (or its name when only one tie has it)"),
+                tie: str = typer.Argument(..., help="id of the tie or of the stable height (or its name when only "
+                                                    "one has it)"),
                 markers: bool = typer.Option(True, "--markers/--keep-markers",
                                              help="remove also the markers the tie made (never the markers that "
                                                   "were already there, nor those another tie still uses)")):
-    """Remove a tie."""
+    """Remove a tie, or a stable height (ppg ties heights)."""
+    from .engine import stable_height
     from .engine import ties as ties_mod
 
     doc = Document.open(project)
-    t = _find_tie(doc, tie)
+    t = _find_tie(doc, tie, heights=True)
+    if isinstance(t, stable_height.HeightTie):
+        stable_height.remove(doc, t.id)
+        doc.save()
+        typer.echo(f"removed stable height {t.id} {t.name!r}")
+        return
     try:
         ties_mod.remove_tie(doc, t.id, keep_markers=not markers)
     except (ValueError, KeyError) as exc:
@@ -4296,6 +4338,82 @@ def ties_confirm(project: Path,
     typer.echo(f"confirmed {len(done)} ties: {', '.join(done)}")
 
 
+@ties_app.command("height")
+def ties_height(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk whose height is measured (B: label or key)"),
+                reference: str = typer.Argument(..., help="the reference chunk (A): B is measured against it"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the stable ground: a polygon layer of the "
+                                                    "free drawings (of A, else of B)"),
+                area: Optional[Path] = typer.Option(None, "--area", help="the stable ground: polygons of a GeoPackage, "
+                                                    "GeoJSON or DXF file"),
+                exclude: Optional[str] = typer.Option(None, "--exclude", help="ground left out: a polygon layer, or "
+                                                      "a file (.gpkg, .geojson, .json, .dxf)"),
+                plane: bool = typer.Option(False, "--plane", help="a plane (offset and tilt, three anchors) instead "
+                                           "of an offset"),
+                name: Optional[str] = typer.Option(None, help="name of the stable height (default: quota stabile N)")):
+    """Measure how much higher CHUNK is than REFERENCE on stable ground (their DEMs as they are placed now: no
+    horizontal shift) and keep it as a stable height, a z-only tie used by ppg ties check/solve. Without --layer or
+    --area the stable ground is found by itself (gentle slopes, cells that agree)."""
+    from .engine import stable_height
+    from .engine import ties as ties_mod
+
+    if layer is not None and area is not None:
+        raise typer.BadParameter("give --layer or --area, not both")
+    doc = Document.open(project)
+    cb, ca = _tie_chunk(doc, chunk), _tie_chunk(doc, reference)
+    where = {"layer": layer} if layer is not None else {"file": str(area)} if area is not None else None
+    try:
+        h = stable_height.measure(doc, cb, ca, area=where, exclude=exclude, plane=plane, name=name)
+        h = stable_height.add(doc, h)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"{cb.label} on {ca.label}: dz {h.dz:+.4f} m, NMAD {h.nmad:.4f} m, {h.cells} stable cells")
+    typer.echo(f"added {_height_line(doc, h)}")
+
+
+@ties_app.command("heights")
+def ties_heights(project: Path,
+                 as_json: bool = typer.Option(False, "--json", help="print the stable heights as JSON")):
+    """The stable heights of the project: chunks, dz, NMAD, cells, precision, active or not."""
+    from .engine import stable_height
+
+    doc = Document.open(project)
+    every = stable_height.heights_of(doc)
+    if as_json:
+        rows = []
+        for h in every:
+            d = h.to_dict()
+            d["chunks"] = list(_height_labels(doc, h))
+            rows.append(d)
+        typer.echo(json.dumps(rows, indent=1))
+        return
+    if not every:
+        typer.echo("no stable heights")
+        return
+    for h in every:
+        typer.echo(_height_line(doc, h))
+
+
+@ties_app.command("remeasure")
+def ties_remeasure(project: Path,
+                   height: str = typer.Argument(..., help="id of the stable height (or its name when only one has "
+                                                          "it)")):
+    """Measure a stable height again where its chunks are now (same chunks, areas and kind): needed when a solve
+    moved them in plan against each other since it was measured."""
+    from .engine import stable_height
+    from .engine import ties as ties_mod
+
+    doc = Document.open(project)
+    h = _find_height(doc, height)
+    try:
+        new = stable_height.remeasure(doc, h.id)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"measured again {_height_line(doc, new)} (before: dz {h.dz:+.4f} m)")
+
+
 @ties_app.command("check")
 def ties_check(project: Path,
                unknowns: str = typer.Option(..., "--unknowns", "-u", help=UNKNOWNS_HELP),
@@ -4303,7 +4421,8 @@ def ties_check(project: Path,
                references: bool = typer.Option(True, help="the control markers of the chunks count as known points"),
                as_json: bool = typer.Option(False, "--json", help="print the report as JSON")):
     """The solve and its checks (residuals, redundancy, distances between ties, leave one out, plausibility):
-    a report only, nothing is changed."""
+    a report only, nothing is changed. The active stable heights (ppg ties heights) between chunks of the solve take
+    part as z-only ties."""
     from .engine import ties as ties_mod
 
     doc = Document.open(project)
@@ -4367,6 +4486,507 @@ def ties_solve(project: Path,
     typer.echo(f"applied to {', '.join(moving)} (system {solution.crs or 'LOCAL'}); project saved")
     for key, stale in changed["stale_products"].items():
         typer.echo(f"  {labels.get(int(key), key)}: build again {', '.join(stale)}")
+
+
+stakes_app = typer.Typer(help="Stakes and benchmarks: dark round heads looked for on the orthophoto (and the photos) near "
+                              "points of known coordinates, proposed as known ties; nothing is stored until accepted")
+app.add_typer(stakes_app, name="stakes")
+
+
+def _stake_line(p) -> str:
+    """One line for a proposal of engine.stakes."""
+    import numpy as np
+
+    if p.best is None:
+        why = ("no height for the point (no z and no DEM there)" if "no_height" in p.flags else
+               "outside the orthophoto" if "outside_orthophoto" in p.flags else "no head found")
+        return f"{p.point.name}: {why}"
+    b = p.best
+    where = (f"{b.agreeing} photos agree" if not b.ortho_only else
+             "ortho only" + (" (photos unreadable)" if "photos_unreadable" in p.flags else
+                             " (no aligned photos)" if "no_aligned_photos" in p.flags else ""))
+    d = p.displacement
+    shift = f"{float(np.hypot(d[0], d[1])):.3f} m from the known point" if d is not None else ""
+    return (f"{p.point.name}: head at {b.world[0]:.3f}, {b.world[1]:.3f}, {b.world[2]:.3f}, {shift}, {where}, "
+            f"precision {b.precision:.3f} m, diameter {b.diameter:.3f} m"
+            + (f", {len(p.others)} other candidates" if p.others else ""))
+
+
+@stakes_app.command("find")
+def stakes_find(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                points: str = typer.Argument(..., help="the known points: a CSV file (name,x,y[,z][,precision]), "
+                                                       "'ties' (the known ties of the project) or a chunk (its markers "
+                                                       "with coordinates)"),
+                crs: Optional[str] = typer.Option(None, "--crs", help="system of the CSV coordinates (default: the "
+                                                  "chunk's)"),
+                radius: float = typer.Option(3.0, "--radius", help="metres around each point"),
+                head: str = typer.Option("0.03,0.12", "--head", help="smallest,largest head diameter in metres"),
+                min_contrast: float = typer.Option(25, "--min-contrast", help="grey levels darker than the "
+                                                   "background"),
+                min_photos: int = typer.Option(3, "--min-photos", help="photos that must agree, else ortho only"),
+                out: Optional[Path] = typer.Option(None, "--out", help="the proposals (JSON; default proposals.json "
+                                                   "next to the project); a picture <name>.png beside it for each "
+                                                   "point")):
+    """Look for stakes and benchmarks near known points: proposals written to a JSON file with a picture each
+    (orthophoto and photo side by side); the project does not change. Accept them with ppg stakes accept."""
+    import cv2
+
+    from .engine import stakes
+    from .engine import ties as ties_mod
+
+    try:
+        lo, hi = (float(v) for v in head.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"--head is smallest,largest in metres (got {head!r})") from None
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if points == "ties":
+            known = stakes.known_points("ties", doc=doc)
+        elif Path(points).exists():
+            known = stakes.known_points(Path(points), crs=crs)
+        else:
+            known = stakes.known_points(_tie_chunk(doc, points))
+        if not known:
+            raise ValueError(f"no known points in {points}")
+        props = stakes.find(doc, ch, known, radius=radius, head=(lo, hi), min_contrast=min_contrast,
+                            min_photos=min_photos)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    for p in props:
+        typer.echo(_stake_line(p))
+    result = stakes.check(props)
+    med = result["displacement_median"]
+    if med is not None:
+        typer.echo(f"median displacement: {med[0]:+.3f}, {med[1]:+.3f}"
+                   + (f", {med[2]:+.3f}" if med[2] is not None else "") + " m")
+    if result["suspects"]:
+        typer.echo(f"suspect (distances do not agree): {', '.join(result['suspects'])}")
+    if result["outliers"]:
+        typer.echo(f"displaced unlike the others: {', '.join(result['outliers'])}")
+    out = out if out is not None else Path(project).parent / "proposals.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"project": str(Path(project).resolve()), "chunk": ch.key,
+                               "proposals": [p.to_dict() for p in props], "check": result}, indent=1),
+                   encoding="utf-8")
+    for p in props:
+        cv2.imwrite(str(out.parent / f"{stakes.file_name(p.point.name)}.png"),
+                    stakes.preview(ch, p)[..., ::-1])
+    typer.echo(f"proposals written to {out}; nothing changed in the project (ppg stakes accept)")
+
+
+@stakes_app.command("accept")
+def stakes_accept(project: Path,
+                  chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                  proposals: Path = typer.Argument(..., help="the JSON written by ppg stakes find"),
+                  ids: Optional[str] = typer.Option(None, "--ids", help="the points accepted, by name: N1,N2"),
+                  agreeing: bool = typer.Option(False, "--agreeing", help="every point confirmed by the photos "
+                                                "(not ortho only)"),
+                  yes: bool = typer.Option(False, "--yes", help="accept them (without it: only what would be done)")):
+    """Accept proposals of ppg stakes find as known ties (markers with the agreeing photo measurements)."""
+    from .engine import stakes
+    from .engine import ties as ties_mod
+
+    if (ids is None) == (not agreeing):
+        raise typer.BadParameter("give --ids N1,N2 or --agreeing")
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        data = json.loads(Path(proposals).read_text(encoding="utf-8"))
+        props = [stakes.Proposal.from_dict(d) for d in data["proposals"]]
+    except (OSError, ValueError, KeyError) as exc:
+        _ties_error(ValueError(f"cannot read the proposals {proposals}: {exc}"))
+    if ids is not None:
+        names = [n.strip() for n in ids.split(",") if n.strip()]
+    else:
+        names = [p.point.name for p in props if p.best is not None and not p.best.ortho_only]
+        if not names:
+            _ties_error(ValueError("no proposal is confirmed by the photos"))
+    chosen = [p for p in props if p.point.name in names]
+    for p in chosen:
+        typer.echo(("accept " if yes else "would accept ") + _stake_line(p))
+    if not yes:
+        typer.echo("Nothing changed: add --yes to accept them.")
+        return
+    try:
+        made = stakes.accept(doc, ch, props, names=names)
+    except (ties_mod.TieError, ValueError, KeyError) as exc:
+        _ties_error(exc)
+    doc.save()
+    for t in made:
+        typer.echo(f"added {_tie_line(doc, t)}")
+
+
+mask_app = typer.Typer(help="Masks of the orthophoto written as layers of free drawings")
+app.add_typer(mask_app, name="mask")
+
+
+def _range_of(text: Optional[str], what: str, top: float) -> Optional[tuple[float, float]]:
+    """``"A,B"`` -> ``(a, b)`` (None for None)."""
+    if text is None:
+        return None
+    try:
+        lo, hi = (float(v) for v in text.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"{what} is low,high (got {text!r})") from None
+    if not (0 <= lo <= top and 0 <= hi <= top):
+        raise typer.BadParameter(f"{what}: from 0 to {top:g} (got {text!r})")
+    return lo, hi
+
+
+@mask_app.command("colour")
+def mask_colour(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                hue: Optional[str] = typer.Option(None, "--hue", help="hue low,high in degrees 0-360 (low above high "
+                                                  "goes through 0: the reds, e.g. 350,10)"),
+                sat: Optional[str] = typer.Option(None, "--sat", help="saturation low,high in % (default 0,100)"),
+                val: Optional[str] = typer.Option(None, "--val", help="value (brightness) low,high in % (default "
+                                                  "0,100)"),
+                sample: Optional[str] = typer.Option(None, "--sample", help="X,Y: the range around the colour of the "
+                                                     "orthophoto there (instead of --hue/--sat/--val)"),
+                radius: float = typer.Option(0.1, "--radius", help="metres of the disc sampled"),
+                opening: float = typer.Option(0.05, "--opening", help="specks smaller than this (metres) dropped"),
+                margin: float = typer.Option(0.0, "--margin", help="metres added around the polygons (negative: "
+                                             "taken away)"),
+                keep_all: bool = typer.Option(False, "--all", help="every region of --min-area or more (default: the "
+                                              "largest only)"),
+                min_area: float = typer.Option(0.05, "--min-area", help="smallest region kept, m2"),
+                holes: bool = typer.Option(False, "--holes", help="keep the holes of the mask (default: filled)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the layer of free drawings (default "
+                                                    "'Maschera colore N'; an earlier mask in it is replaced)")):
+    """The cells of the orthophoto within a colour range as polygons of a layer of free drawings (heights from the
+    DEM): for the crop of the products, the stable height of ppg ties, every export of the free drawings."""
+    from .engine import colour_mask
+    from .engine import ties as ties_mod
+
+    if sample is not None and (hue or sat or val):
+        raise typer.BadParameter("give --sample or --hue/--sat/--val, not both")
+    if sample is None and hue is None:
+        raise typer.BadParameter("give --hue (with --sat, --val) or --sample X,Y")
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if sample is not None:
+            x, y, _z = _coordinates(sample, "--sample")
+            rng = colour_mask.sample(ch, x, y, radius=radius)
+            typer.echo(f"sampled: {rng.text()}")
+        else:
+            rng = colour_mask.HsvRange(_range_of(hue, "--hue", 360), _range_of(sat, "--sat", 100) or (0.0, 100.0),
+                                       _range_of(val, "--val", 100) or (0.0, 100.0))
+        result = colour_mask.mask(ch, rng, opening=opening, fill_holes=not holes,
+                                  keep="all" if keep_all else "largest", min_area=min_area, margin=margin,
+                                  progress=print_progress)
+        name = (layer or "").strip() or colour_mask.next_layer_name(ch)
+        ids = colour_mask.to_layer(ch, result, layer=name)
+    except (ties_mod.TieError, ValueError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"layer {name!r}: {len(ids)} polygon(s), {result.area:.3f} m2 ({100 * result.share:.1f} % of the "
+               f"orthophoto read), cells of {result.cell:.4f} m"
+               + (f", {result.holes} hole(s) left out" if result.holes else ""))
+
+
+water_app = typer.Typer(help="The water level of a chunk and the refraction correction of its dense cloud")
+app.add_typer(water_app, name="water")
+
+
+def _water_n(n: Optional[float], sea: bool, fresh: bool, default: Optional[float]) -> Optional[float]:
+    from .engine import water
+
+    if (n is not None) + bool(sea) + bool(fresh) > 1:
+        raise typer.BadParameter("give one of --n, --sea, --fresh")
+    if sea:
+        return water.N_SEA
+    if fresh:
+        return water.N_FRESH
+    return default if n is None else n
+
+
+def _water_line(lv: dict) -> str:
+    spread = lv.get("spread")
+    return (f"water level {lv['level']:.3f} m ({lv.get('source')}), n {lv['n']:.2f}"
+            + (f", spread (NMAD) {spread:.3f} m" if spread is not None else ""))
+
+
+@water_app.command("level")
+def water_level(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                set_z: Optional[float] = typer.Option(None, "--set", help="the level by hand: a world height (m)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="the water as the polygons of a layer of "
+                                                    "free drawings (a colour mask, for instance)"),
+                hue: Optional[str] = typer.Option(None, "--hue", help="the water as a colour range of the "
+                                                  "orthophoto: hue low,high in degrees 0-360"),
+                sat: Optional[str] = typer.Option(None, "--sat", help="saturation low,high in % (default 0,100)"),
+                val: Optional[str] = typer.Option(None, "--val", help="value low,high in % (default 0,100)"),
+                sample: Optional[str] = typer.Option(None, "--sample", help="X,Y: the water is the colour of the "
+                                                     "orthophoto there"),
+                n: Optional[float] = typer.Option(None, "--n", help="refractive index of the water (1.0-2.0)"),
+                sea: bool = typer.Option(False, "--sea", help="sea water: n 1.34 (the default)"),
+                fresh: bool = typer.Option(False, "--fresh", help="fresh water: n 1.33")):
+    """The level of the water of a chunk, by hand (--set) or from the edge of the water (--layer, --hue/--sat/--val,
+    --sample): the DEM read two cells on the land side of the outline, the median the level. Stored in the project."""
+    from .engine import colour_mask, water
+
+    if (sat or val) and hue is None:
+        raise typer.BadParameter("--sat/--val need --hue")
+    if [set_z, layer, hue, sample].count(None) != 3:
+        raise typer.BadParameter("give one of --set Z, --layer NAME, --hue/--sat/--val, --sample X,Y")
+    idx = _water_n(n, sea, fresh, water.N_SEA)
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if set_z is not None:
+            rec = water.set_level(ch, set_z, source="hand", n=idx)
+        else:
+            if layer is not None:
+                what = layer
+            elif sample is not None:
+                x, y, _z = _coordinates(sample, "--sample")
+                what = colour_mask.sample(ch, x, y)
+                typer.echo(f"sampled: {what.text()}")
+            else:
+                what = colour_mask.HsvRange(_range_of(hue, "--hue", 360), _range_of(sat, "--sat", 100) or (0.0, 100.0),
+                                            _range_of(val, "--val", 100) or (0.0, 100.0))
+            info = water.level_from_edge(ch, what, progress=print_progress)
+            rec = water.set_level(ch, info.pop("level"), source="edge", n=idx, **info)
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(_water_line(rec))
+    if rec.get("edge_cells"):
+        typer.echo(f"edge: {rec['edge_cells']} DEM cells on the land side, 10-90 % {rec['p10']:.3f} - "
+                   f"{rec['p90']:.3f} m; rise of the bank removed {rec.get('slope_bias') or 0.0:.3f} m")
+
+
+@water_app.command("correct")
+def water_correct(project: Path,
+                  chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                  n: Optional[float] = typer.Option(None, "--n", help="refractive index (default: the one stored "
+                                                    "with the level)"),
+                  dem: bool = typer.Option(False, "--dem", help="build the DEM again from the corrected cloud (a new "
+                                           "version of the DEM)")):
+    """The dense cloud corrected for the refraction under the water level (z' = L - n (L - z) below it): a new
+    version of the dense cloud, the one before kept among the versions."""
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        r = water.correct_cloud(ch, n=n, rebuild_dem=dem, progress=print_progress)
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"{r['below']} of {r['points']} points below the level {r['level']:.3f} m corrected with n "
+               f"{r['n']:.2f}; the cloud before kept as version {r['version']}")
+    typer.echo(f"note: {water.NOTE_EN} ({water.NOTE})")
+    if r.get("dem"):
+        typer.echo(f"DEM built again from the corrected cloud; the DEM before kept as version {r['dem_version']}")
+
+
+@water_app.command("show")
+def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (label or key)")):
+    """The water level of a chunk in its current system, and the correction of its cloud if any."""
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    lv = water.level_of(ch)
+    if lv is None:
+        typer.echo(f"{ch.label}: no water level")
+        return
+    typer.echo(f"{ch.label}: {_water_line(lv)}")
+    corr = (ch.meta.get("dense") or {}).get("refraction")
+    if corr:
+        typer.echo(f"active dense cloud corrected for the refraction (n {corr['n']:.2f}, level {corr['level']:.3f} m, "
+                   f"{corr['below']} points below); note: {water.NOTE_EN}")
+
+
+def _axis_of(text: str) -> tuple:
+    try:
+        x1, y1, x2, y2 = (float(v) for v in text.replace(";", ",").split(","))
+    except ValueError:
+        raise typer.BadParameter(f"--axis is X1,Y1,X2,Y2 (got {text!r})") from None
+    return (x1, y1), (x2, y2)
+
+
+@app.command("classify-lines")
+def classify_lines(project: Path,
+                   chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                   layer: Optional[str] = typer.Option(None, "--layer", help="the lines and polygons of a layer of "
+                                                       "free drawings (plan x, y)"),
+                   file: Optional[Path] = typer.Option(None, "--file", help="the lines and polygons of a GeoPackage, "
+                                                       "GeoJSON or DXF"),
+                   elevation: Optional[str] = typer.Option(None, "--elevation", help="the drawings of an elevation "
+                                                           "(its id) in its (u, v)"),
+                   axis: Optional[str] = typer.Option(None, "--axis", help="X1,Y1,X2,Y2: the axis the lines are "
+                                                      "sorted by (default with --elevation: its u axis, 0,0,1,0)"),
+                   axis_from: Optional[str] = typer.Option(None, "--axis-from", help="the axis of a plan drawing "
+                                                           "along the horizontal of a flat elevation (its id)"),
+                   param: Optional[list[str]] = typer.Option(None, "--param", help="NAME=VALUE over the defaults "
+                                                             "(repeatable): simplify, min_length, along_deg, "
+                                                             "across_deg, join_deg, join_offset, join_gap, "
+                                                             "across_bin, pair_deg, pair_min, pair_max, "
+                                                             "pair_overlap; pair_isolation (1.5; 1: the nearest "
+                                                             "line only, 0: off)"),
+                   plate: Optional[Path] = typer.Option(None, "--plate", help="the check plate (.png or .svg)"),
+                   json_out: Optional[Path] = typer.Option(None, "--json", help="the classification as JSON"),
+                   layers: bool = typer.Option(False, "--layers", help="write the elements as layers of free "
+                                               "drawings, one per group (plan drawings only; heights from the DEM)")):
+    """A drawing classified by its orientation along an axis: lines along it, across it, pairs of parallel lines
+    (the two sides of one element) and the rest. The program does not name the elements: the plugins do."""
+    import json as _json
+
+    import numpy as np
+
+    from .engine import orient_lines
+
+    if [layer, file, elevation].count(None) != 2:
+        raise typer.BadParameter("give one of --layer NAME, --file F, --elevation EID")
+    if axis is not None and axis_from is not None:
+        raise typer.BadParameter("give --axis or --axis-from, not both")
+    if axis is None and axis_from is None and elevation is None:
+        raise typer.BadParameter("give --axis X1,Y1,X2,Y2 (or --axis-from EID)")
+    params = {}
+    for item in param or []:
+        if "=" not in item:
+            raise typer.BadParameter(f"--param is NAME=VALUE (got {item!r})")
+        k, v = item.split("=", 1)
+        params[k.strip()] = v.strip()
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if layer is not None:
+            lines = orient_lines.lines_from_layer(ch, layer)
+        elif file is not None:
+            lines = orient_lines.lines_from_file(file, chunk=ch)  # put in the chunk's system
+        else:
+            lines = orient_lines.lines_from_elevation(ch, elevation)
+        if axis is not None:
+            ax = _axis_of(axis)
+        elif axis_from is not None:
+            if elevation is not None:
+                raise typer.BadParameter("--axis-from is for a plan drawing: an elevation's drawing is sorted along "
+                                         "its own u axis")
+            ax = orient_lines.elevation_axis(ch, axis_from)
+        else:
+            ax = ((0.0, 0.0), (1.0, 0.0))
+        result = orient_lines.classify(lines, ax, params, frame=elevation)
+        if plate is not None:
+            result.plate(plate, language="en")
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(_json.dumps(result.to_dict(), indent=1), encoding="utf-8")
+        written = orient_lines.to_layers(ch, result) if layers else {}
+    except ValueError as exc:
+        _ties_error(exc)
+    if written:
+        doc.save()
+    counts = result.counts()
+    typer.echo(f"{len(lines)} line(s), {len(result.segments)} straight piece(s), {len(result.elements)} element(s)")
+    for g in orient_lines.GROUPS:
+        typer.echo(f"  {orient_lines.GROUP_LABELS[g][1]}: {counts[g]}")
+    widths = [e.width for e in result.elements if e.width is not None]
+    if widths:
+        typer.echo(f"pairs: width {min(widths):.3f} - {max(widths):.3f} m (median {float(np.median(widths)):.3f})")
+    if plate is not None:
+        typer.echo(f"plate: {plate}")
+    if json_out is not None:
+        typer.echo(f"json: {json_out}")
+    for name, n in written.items():
+        typer.echo(f"layer {name!r}: {n} drawing(s)")
+
+
+mosaic_app = typer.Typer(help="The orthophoto or the DEM of several tied chunks merged into one raster")
+app.add_typer(mosaic_app, name="mosaic")
+
+
+def _mosaic_line(rec: dict, stale: list) -> str:
+    what = "DEM" if rec.get("product") == "dem" else "orthophoto"
+    w, h = rec.get("size") or (0, 0)
+    labels = rec.get("labels") or {}
+    names = ", ".join(str(labels.get(str(k), k)) for k in rec.get("chunks") or [])
+    line = (f"{rec['id']}  {rec.get('name')}: {what} of {names}, {w} x {h} cells of {rec['resolution']:.4f} m "
+            f"({rec.get('crs') or 'LOCAL'})")
+    if rec.get("areas"):
+        line += f", {len(rec['areas'])} area(s), background {rec.get('background')}"
+    if stale:
+        line += f"; to build again: {', '.join(stale)} moved since"
+    return line
+
+
+@mosaic_app.command("build")
+def mosaic_build(project: Path,
+                 chunks: str = typer.Option(..., "--chunks", help="the chunks in their order of priority (labels or "
+                                            "keys, separated by commas): the first decides the system"),
+                 dem: bool = typer.Option(False, "--dem", help="merge the DEMs (default: the orthophotos)"),
+                 areas: Optional[Path] = typer.Option(None, "--areas", help="a GeoPackage of polygons with the "
+                                                      "attribute 'chunk' (and 'priority'): inside an area its chunk "
+                                                      "comes first"),
+                 resolution: Optional[float] = typer.Option(None, "--resolution", help="the cell (m; default the "
+                                                            "finest of the sources)"),
+                 background: str = typer.Option("faded", "--background", help="outside the areas: faded (the list, "
+                                                "the orthophoto blended toward white) or none (empty)"),
+                 name: Optional[str] = typer.Option(None, "--name", help="the name of the merged product")):
+    """The orthophotos (or DEMs) of several tied chunks merged into one raster, each placed where its chunk is now,
+    with the source of every cell (sources.tif). Stored in the project."""
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    items = [c.strip() for c in chunks.split(",") if c.strip()]
+    chs = [_tie_chunk(doc, c) for c in items]
+    try:
+        area_list = mosaic.read_areas(doc, areas, chs[0].crs if chs else None) if areas is not None else None
+        rec = mosaic.build(doc, chs, product="dem" if dem else "orthomosaic", areas=area_list, resolution=resolution,
+                           background=background, name=name, progress=print_progress)
+    except (ValueError, OSError) as exc:  # OSError: a missing or unreadable file (RasterioIOError among them)
+        _ties_error(exc)
+    doc.save()
+    typer.echo(_mosaic_line(rec, []))
+    labels = rec.get("labels") or {}
+    for key, n in (rec.get("counts") or {}).items():
+        typer.echo(f"  {labels.get(key, key)}: {n} cells")
+    if rec.get("moved"):
+        typer.echo("placed with their chunk (built before the last change of its transform): "
+                   + ", ".join(str(labels.get(str(k), k)) for k in rec["moved"]))
+        for key, deg in (rec.get("moved_tilt_deg") or {}).items():
+            if deg >= mosaic.TILT_NOTE_DEG:
+                typer.echo(f"note: {labels.get(key, key)} is tilted {deg:.1f} degrees since its raster was built: "
+                           "placed in plan only, the plan is approximate - build it again")
+    typer.echo(f"files: {mosaic.folder(doc, rec['id'])}")
+
+
+@mosaic_app.command("list")
+def mosaic_list(project: Path, as_json: bool = typer.Option(False, "--json", help="the records as JSON")):
+    """The merged products of the project."""
+    import json as _json
+
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    recs = mosaic.mosaics_of(doc)
+    if as_json:
+        typer.echo(_json.dumps([dict(r, stale=mosaic.is_stale(doc, r)) for r in recs], indent=1))
+        return
+    if not recs:
+        typer.echo("no merged products")
+        return
+    for r in recs:
+        typer.echo(_mosaic_line(r, mosaic.is_stale(doc, r)))
+
+
+@mosaic_app.command("remove")
+def mosaic_remove(project: Path, mid: str = typer.Argument(..., help="the id of the merged product")):
+    """A merged product taken out of the project, its files deleted."""
+    from .engine import mosaic
+
+    doc = Document.open(project)
+    try:
+        rec = mosaic.remove(doc, mid)
+    except (ValueError, OSError) as exc:
+        _ties_error(exc)
+    doc.save()
+    typer.echo(f"removed {rec['id']} ({rec.get('name')})")
 
 
 def main():  # pragma: no cover - console entry point

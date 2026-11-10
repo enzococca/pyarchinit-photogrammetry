@@ -5,7 +5,7 @@ shape of the hull at each station, the plans, and a numbered list of the timbers
 drawn by hand on an orthophoto. The plugin measures what is there. It does not reconstruct what is missing, and it does not
 fair a line away from the model.
 
-This page describes version 0.3.0 of the plugin, which needs pyarchinit-photogrammetry 1.7.1 or later. The README and the
+This page describes version 0.5.0 of the plugin, which needs pyarchinit-photogrammetry 1.7.1 or later (1.7.7 for the classified drawings and the water level of the chunk). The README and the
 code are in the [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/shipwreck).
 
 <figure markdown="span">
@@ -85,6 +85,17 @@ coordinates: the plugin refuses until the keel is traced again. Drawings already
 The bottom seen through water is **apparent**: for a nadir view the true depth is about the apparent depth times the
 refractive index, 1.34 for water. Give the level, as a number in ship z or by clicking the waterline on the raster, and switch the
 correction on: a point under the level is drawn at `level - (level - z) * n`.
+
+From version 0.5.0, with pyarchinit-photogrammetry 1.7.7 or later, a water level set for the chunk in the program
+(*Water*: by hand, from the edge of the water or a click) is taken as the default of *Level and refraction...* while the plugin
+has no level of its own: the state of the step says so ("the water level of the chunk"), the correction stays off, and the
+level becomes the plugin's own when you confirm the form. A level of the plugin always wins.
+
+!!! warning "Do not correct the refraction twice"
+    The program can correct the dense cloud itself (*Tools > Water level and refraction*, *Correct the cloud*). A model
+    built from that corrected cloud already has the bottom at its true depth: leave the correction of the plugin **off**.
+    Switch it on only for a model built from an uncorrected cloud. When the active cloud of the chunk is a corrected
+    version, the window asks before switching the correction on, and `water --on` on the command line prints a warning.
 
 <figure markdown="span">
   ![A section as measured and corrected](../img/plugins/shipwreck/water.png)
@@ -344,6 +355,50 @@ proposes again what was accepted or rejected. The limits, plainly:
 - the strakes are bands between the seams read, not the outlines of the planks: where seams are missing they are boxes
   over whatever lies there (sediment, longitudinal timbers); correct or trace them by hand.
 
+### A drawing classified by orientation
+
+From version 0.5.0, with pyarchinit-photogrammetry 1.7.7 or later (the button is hidden with an older program), a tracing
+of your own can fill the catalogue: *Import a classified drawing...* in step 8 reads a layer of free drawings of the chunk, or a
+GeoPackage, GeoJSON or DXF file (put in the chunk's system as the import of free drawings does), turns it into the ship
+plan and has the program classify it along the keel line ([A drawing classified by orientation](../gui/drawing.md#a-drawing-classified-by-orientation)). The plugin gives the groups their meaning:
+
+| Group of the program | Timber | Geometry |
+|---|---|---|
+| pairs across the axis | frame | polygon |
+| lines along the axis | seam | line |
+| pairs along the axis | strake (plank) | polygon |
+
+Single lines across the keel and lines in other directions are not timbers and stay out (the plate shows them with their
+numbers). The side comes from the mean y, as for a timber traced by hand; the names are the plugin's: `ordinata N` from the
+bow (both sides of one frame share N), `comento B1`, `B2`, ... and `fascia T1`, ... numbered from the keel on each side.
+
+Nothing enters the catalogue before the **check plate**: it shows every element coloured by group with the plugin's names,
+and a box per kind with its count. *Into the catalogue* adds the kinds ticked as measured timbers (source `orient:<drawing>:<id>`),
+one step of *Edit > Undo*; *Cancel* leaves the catalogue as it was. Importing the same drawing again, or a drawing
+that grew, adds only what is new: a timber already in the catalogue from a classified drawing (same kind, same vertices) is
+skipped, and the window and the command line say how many. An element edited after its import (a vertex moved, a
+line extended, a polygon reshaped) has new vertices, so it comes in again as a new timber beside the old one: remove
+the old timber from the catalogue first. The plate is kept in `shipwreck/classified/plate.png`.
+
+!!! tip "Frames drawn as loose lines"
+    A traced polygon is always one element: draw frames and strakes as polygons when you can. Frames drawn as **two loose
+    lines each, close together** (for instance 12 cm sided with 13 cm between them) look like evenly spaced lines and come out
+    as single lines across, not frames: set **Pair isolation** to 1 (`--pair-isolation 1`), or draw them as polygons. Lower
+    it only for such drawings and check the plate: with 1 two loose seams close together may also be read as a strake.
+
+The form also takes the pairs' distance (from 2 cm to 50 cm by default) and the shortest piece read (5 cm). From the
+command line:
+
+```bash
+ppg plugin shipwreck classified PROJECT.ppg --layer "Rilievo" --plate plate.png          # the counts and the list; nothing saved
+ppg plugin shipwreck classified PROJECT.ppg --layer "Rilievo" --accept                   # all into the catalogue
+ppg plugin shipwreck classified PROJECT.ppg --file drawing.dxf --pair-isolation 1 --accept --kinds frame,plank
+ppg plugin shipwreck classified PROJECT.ppg --layer "Rilievo" --param pair_max=0.4 --accept 7 8 9
+```
+
+Without `--accept` nothing is written; `--accept` with ids takes those elements, with none all of them (of `--kinds`). The ids are
+those listed by a run without `--accept` with the same drawing and the same parameters: change either and they change.
+
 ### The 3D timbers
 
 ![The timbers of the synthetic hull in 3D](../img/plugins/shipwreck/shipwreck-timbers-3d.png)
@@ -561,6 +616,7 @@ ppg plugin shipwreck frame-of PROJECT.ppg CHUNK [--chunk THIS]         # the shi
 ppg plugin shipwreck chunks PROJECT.ppg                                # the chunks feeding the reconstruction, and why not
 ppg plugin shipwreck reconstruct PROJECT.ppg [--no-mirror] [--no-extension] [--no-frames] [--no-loft]
 ppg plugin shipwreck reconstruct table PROJECT.ppg [--out FOLDER]      # tabella.csv and .xlsx
+ppg plugin shipwreck classified PROJECT.ppg --layer NAME | --file FILE [--pair-isolation 1] [--plate FILE] [--accept [ID ...]] [--kinds frame,seam,plank]
 ppg plugin shipwreck export3d PROJECT.ppg --out FILE.obj|.glb|.ifc --reconstruction
 ppg plugin shipwreck plan PROJECT.ppg --reconstruction [--out FOLDER]
 ppg plugin shipwreck drawings PROJECT.ppg --reconstruction [--out FOLDER]   # body plan and profile with the faired hull

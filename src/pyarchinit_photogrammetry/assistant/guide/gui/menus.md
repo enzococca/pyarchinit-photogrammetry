@@ -117,6 +117,8 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds; the summary gives, for each chunk, the share of its points on the reference and their median distance ([several chunks together](view3d.md#several-chunks-together)) |
 | **Tie chunks together...** | several chunks solved together from points in common (ties) and known points, with the unknowns chosen for each chunk and a report that shows the wrong ties before applying ([ties between chunks](ties.md)) |
+| **Measure stable height...** | the height of a chunk on another where the ground did not change (their DEMs compared): a stable height in the ties window, z only ([stable height](ties.md#stable-height)) |
+| **Find stakes...** | stakes and benchmarks looked for on the orthophoto and the photos near points of known coordinates, proposed to accept as known ties ([benchmarks and stakes](ties.md#benchmarks-and-stakes)) |
 | **Common points...** | two chunks side by side with linked views: a tie with a click on the same point in each, an end on a photo too ([common points](ties.md#common-points)) |
 | **Orient the local system...** | origin, x axis and horizontal plane of a chunk without coordinates, from three points or a fitted plane ([orienting](processing.md#orienting-a-local-system)) |
 | **Rebuild the stale products** | DEM, orthophoto, elevations and the rasters made in an earlier frame of the chunk, made again in order; one step of *Edit > Undo* |
@@ -214,6 +216,10 @@ thermal and satellite captures, plugins.
 | **Calibrate the colour with the colour chart...** | a ColorChecker photographed in the trench makes the Munsell colours comparable |
 | **Relief visualisations...** | sky-view factor, openness, local and multi-scale relief, hillshades ([relief](archaeology.md#relief-visualisations)) |
 | **Raster calculator...** | formulas on the rasters of the project, those of the plugins too, as in QGIS ([calculator](archaeology.md#raster-calculator)) |
+| **Mask from colour...** | the cells of the orthophoto within a range of colours (water, a tarpaulin, the sand) as the polygons of a layer of free drawings, for the crop, the stable height and the water level ([mask from a colour](multi-survey.md#mask-from-a-colour)) |
+| **Water level and refraction...** | the level of the water from its edge or by hand, and the dense cloud below it corrected for the refraction as a new version ([water level](multi-survey.md#water-level-and-refraction)) |
+| **Merged orthophoto and DEM...** | the orthophotos or DEMs of several tied chunks merged into one raster, by priority or by areas, with the chunk each cell comes from ([merged products](multi-survey.md#merged-orthophoto-and-dem)) |
+| **Classify a drawing...** | the lines of a plan or elevation drawing sorted by their direction to an axis (along, across, pairs of parallel lines, other), with a check plate and the layers per group, for the Shipwreck and Masonry plugins ([classified drawing](drawing.md#a-drawing-classified-by-orientation)) |
 | **Region on markers...** | a thin reconstruction region on the plane of three markers (a wall, an object), its thickness along the normal: depth maps, dense cloud and model stay inside it |
 | **Normal map...** | the normals of the surface (model or DEM) on the grid of the orthophoto, red east, green north, blue up; shown in the 2D view and listed in the Workspace |
 | **Section options...** · **Plan slice (horizontal slice)...** | what the sections cut (model or cloud, classes); a plan at a height |

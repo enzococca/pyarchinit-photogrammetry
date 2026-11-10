@@ -91,6 +91,7 @@ plugins:
             Photos and markers: Foto e marker
             Processing: Elaborazione
             Ties between chunks: Legami fra chunk
+            Several surveys - masks, water, merged products: Più rilievi - maschere, acqua, prodotti uniti
             Drawing and measures: Disegno e misure
             Tools for archaeology: Strumenti per l'archeologia
             Multispectral and thermal: Multispettrale e termico
@@ -179,6 +180,7 @@ nav:
           - Photos and markers: gui/photos-markers.md
           - Processing: gui/processing.md
           - Ties between chunks: gui/ties.md
+          - Several surveys - masks, water, merged products: gui/multi-survey.md
           - Drawing and measures: gui/drawing.md
           - Tools for archaeology: gui/archaeology.md
           - Multispectral and thermal: gui/multispectral.md

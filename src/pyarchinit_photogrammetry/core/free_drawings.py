@@ -401,6 +401,25 @@ def follow(chunk, adopt: bool = True) -> np.ndarray | None:
     return kept
 
 
+def features_in_world(chunk, layer: str | None = None) -> list[dict]:
+    """The free drawings of ``chunk`` (of ``layer`` only when given) in its current world: the drawings carried by a
+    change of the transform no hook saw yet (:func:`follow`), on a copy - nothing written. Copies of the records."""
+    from types import SimpleNamespace
+
+    view = SimpleNamespace(meta={"drawings": copy.deepcopy(chunk.meta.get("drawings") or {}),
+                                 "alignment_id": chunk.meta.get("alignment_id")},
+                           transform=chunk.transform, label=getattr(chunk, "label", ""))
+    follow(view, adopt=False)
+    return features(view, layer)
+
+
+def polygons_in_world(chunk, layer: str) -> list[np.ndarray]:
+    """The polygons of the layer ``layer`` of ``chunk`` as ``(n, 3)`` arrays in its current world
+    (:func:`features_in_world`). The areas of the stable height (:mod:`..engine.stable_height`) and of the crop by a
+    mask (:mod:`..engine.colour_mask`)."""
+    return [np.asarray(f["xyz"], float) for f in features_in_world(chunk, layer) if f["kind"] == "polygon"]
+
+
 def fill_missing(values: list, xy) -> list | None:
     """``values`` (None where a vertex has none) with the missing ones interpolated along the polyline ``xy`` (by its
     length in plan; the nearest known value beyond the ends); None when no vertex has a value. Shared by the 2D drawing
