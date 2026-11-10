@@ -4,8 +4,21 @@ tag:        v2.5.1
 commit:     62d4677ed8425a4e2748c6d390b500d1afb493fc
 license:    BSD 2-clause (license.txt beside this file)
 
-Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged,
-in src/: rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
+Local changes (the only ones; every other file is as upstream):
+
+  src/rtkpos.c, rtkpos() (line 2381 upstream, "} else rtk->sol.time=obs[0].time;"): the branch that
+  skips the single point positioning of an epoch (when the variance of the position is below
+  STD_PREC_VAR_THRESH) now also copies the time mark of the epoch,
+      } else { rtk->sol.time=obs[0].time; rtk->sol.eventime=obs[0].eventime; }
+  pntpos() (pntpos.c, sol->eventime = obs[0].eventime) is the only place that sets it, so upstream an
+  event (RINEX epoch flag 5, u-blox TIM-TM2) on such an epoch was lost and the mark of an earlier epoch
+  was written again on later ones: on the 30 s samples of tests/data/rtklib (3040 against 0759) two
+  of four marks were missing from <solution>_events.pos in forward, backward and combined mode. With
+  the change all four are written, and the .pos files are byte for byte the same. To be reported upstream.
+
+Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged
+(but for the change above), in src/:
+rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
 ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c), and, from 0.8 of the core,
 those of convbin's conversion of raw receiver logs (app/consapp/convbin/gcc/makefile) with two of its
 receiver decoders, unchanged too: src/convrnx.c, src/rcvraw.c, src/rcv/ublox.c and src/rcv/novatel.c.

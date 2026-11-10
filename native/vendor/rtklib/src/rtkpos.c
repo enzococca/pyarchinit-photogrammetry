@@ -2379,7 +2379,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
                 return 0;
             }
         }
-    } else rtk->sol.time=obs[0].time;
+    } else { rtk->sol.time=obs[0].time; rtk->sol.eventime=obs[0].eventime; }
     if (time.time!=0) rtk->tt=timediff(rtk->sol.time,time);
 
     /* return to static start if long delay without rover data */

@@ -466,12 +466,11 @@ def test_events_pos_read(tmp_path, monkeypatch):
     shotset = events.events_pos(pos)
     expected = [_gps(*_week_tow(2005, 4, 2, *t)) for t in ((0, 0, 45.125), (0, 24, 31.5), (0, 39, 50.25),
                                                           (0, 49, 50.25))]
-    # RTKLIB-EX 2.5.1 in combined mode (postpos.c, combres) writes a mark only where the combined row comes from the
-    # forward pass or both: the backward pass reads the events onto other epochs, and where its row alone is taken (a
-    # better quality, a fix against a float) the mark is lost - two of these four with this build (pinned: a change
-    # of RTKLIB or of the options shows here); the check against rinex_events of the rover comes with the PPK of shots
+    # every mark is written: RTKLIB-EX 2.5.1 as released lost the marks of the epochs whose single point positioning
+    # it skips (rtkpos.c: the time mark of the epoch was not taken there; the local fix is in
+    # native/vendor/rtklib/VERSION) - two of these four with this pair
     assert shotset.kind == "events_pos" and [s.index for s in shotset.shots] == list(range(1, len(shotset.shots) + 1))
-    assert len(shotset.shots) == 2
+    assert len(shotset.shots) == 4
     for shot in shotset.shots:
         assert min(abs(shot.gps_time - t) for t in expected) < 1e-3  # RTKLIB writes the times to the millisecond
     placed = [s for s in shotset.shots if s.valid]
