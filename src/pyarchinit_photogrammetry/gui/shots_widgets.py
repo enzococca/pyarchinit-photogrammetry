@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QW
 
 from ..gnss import shots as gshots
 from ..gnss import sources
-from .i18n import decimal_comma, engine, tr
+from .i18n import decimal_comma, engine, number, tr
 
 _GPS_EPOCH = datetime(1980, 1, 6)
 RUNNING = object()  # what a reading still in its thread gives (:meth:`Aside.get`)
@@ -120,6 +120,29 @@ def pairing_words(result: dict) -> list[str]:
     if result.get("invalid"):
         lines.append(tr("Scatti senza un tempo valido, mai abbinati: {0}", result["invalid"]))
     return lines
+
+
+def _amount(value: float) -> str:
+    return number(value, 0 if float(value) == round(float(value)) else 1)
+
+
+def lever_short(lever, latency_ms: float) -> str | None:
+    """The lever arm (mm forward, right, down) and the latency of the camera in a few words - "0, 0, 250 mm · 40
+    ms" - for where there is little room; None when the arm is all zeros (or None) and there is no latency."""
+    arm = tuple(float(v) for v in lever) if lever is not None else (0.0, 0.0, 0.0)
+    if not any(arm) and not latency_ms:
+        return None
+    return tr("{0} mm · {1} ms", ", ".join(_amount(v) for v in arm), _amount(latency_ms))
+
+
+def lever_words(lever, latency_ms: float) -> str | None:
+    """The lever arm and the latency a run counts with, as a sentence for a summary or the log; None when both are
+    zero."""
+    arm = tuple(float(v) for v in lever) if lever is not None else (0.0, 0.0, 0.0)
+    if not any(arm) and not latency_ms:
+        return None
+    return tr("Braccio di leva dall'antenna alla camera (avanti, destra, giù): {0} mm; latenza della camera: {1} ms",
+              ", ".join(_amount(v) for v in arm), _amount(latency_ms))
 
 
 def log_key(path, message: str, camera) -> tuple | None:

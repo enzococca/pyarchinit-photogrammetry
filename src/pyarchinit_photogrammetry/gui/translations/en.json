@@ -3448,7 +3448,6 @@
   "Tutti i file (*)": "All files (*)",
   "Il fronte del segnale dello scatto che il ricevitore ha marcato.": "The edge of the shot signal the receiver marked.",
   "Braccio di leva e latenza...": "Lever arm and latency...",
-  "Per un drone autocostruito: dove è la camera rispetto all'antenna e quanto dopo il segnale dello scatto espone. Contano solo mentre il pannello è aperto.": "For a self-built drone: where the camera is from the antenna and how long after the shot signal it exposes. They count only while the panel is open.",
   "Scegli il file degli scatti.": "Choose the file of the shots.",
   "discesa": "falling",
   "salita": "rising",
@@ -3489,7 +3488,8 @@
   "Camera in avanti dall'antenna": "Camera forward of the antenna",
   "Camera a destra dell'antenna": "Camera to the right of the antenna",
   "Camera sotto l'antenna": "Camera below the antenna",
-  "Latenza della camera": "Latency of the camera"
+  "Latenza della camera": "Latency of the camera",
+  "Per un drone autocostruito: dove è la camera rispetto all'antenna e quanto dopo il segnale dello scatto espone. I valori diversi da zero contano anche a pannello chiuso: restano scritti sul pulsante.": "For a self-built drone: where the camera is from the antenna and how long after the shot signal it exposes. Values other than zero count with the panel closed too: they stay written on the button."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4670,7 +4670,10 @@
   "Scatti doppi lasciati fuori: {0}.": "Double shots left out: {0}.",
   ", l'orologio della camera a {0} s dall'UTC": ", the clock of the camera {0} s from UTC",
   "Scatti doppi lasciati fuori: {0}": "Double shots left out: {0}",
-  "Scatti senza un tempo valido, mai abbinati: {0}": "Shots without a valid time, never paired: {0}"
+  "Scatti senza un tempo valido, mai abbinati: {0}": "Shots without a valid time, never paired: {0}",
+  "{0} mm · {1} ms": "{0} mm · {1} ms",
+  "Braccio di leva dall'antenna alla camera (avanti, destra, giù): {0} mm; latenza della camera: {1} ms": "Lever arm from the antenna to the camera (forward, right, down): {0} mm; latency of the camera: {1} ms",
+  "Braccio di leva e latenza: {0}": "Lever arm and latency: {0}"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

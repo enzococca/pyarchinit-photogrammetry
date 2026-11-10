@@ -304,7 +304,8 @@ class PpkDialog(QDialog):
     :attr:`shots_info` what it holds and the photos of ``chunk`` its shots pair with (:func:`.shots.pair`),
     :attr:`edge`, :attr:`message`, :attr:`camera` and :attr:`by` the options of the source; the lever arm from the
     antenna to the camera and the latency of the camera (:attr:`lever_panel`) are behind :attr:`b_lever`, and count
-    only while it is open; a DJI MRK takes none of them. A raw log named as the rover or the base (u-blox, RTCM 3,
+    whenever they are not zero, the panel open or closed (closed, the button and the summary of the shots say
+    them); a DJI MRK takes none of them. A raw log named as the rover or the base (u-blox, RTCM 3,
     Septentrio SBF, Unicore, Trimble RT-17, a D-RTK ``.DAT``) is converted to RINEX in a thread
     (:func:`.convert.to_rinex`, kept in the cache of the program) while the dialog says so; closing the dialog
     cancels the conversion and waits for nothing."""
@@ -482,7 +483,8 @@ class PpkDialog(QDialog):
         self.b_lever = QPushButton(tr("Braccio di leva e latenza..."))
         self.b_lever.setCheckable(True)
         self.b_lever.setToolTip(tr("Per un drone autocostruito: dove è la camera rispetto all'antenna e quanto dopo "
-                                   "il segnale dello scatto espone. Contano solo mentre il pannello è aperto."))
+                                   "il segnale dello scatto espone. I valori diversi da zero contano anche a "
+                                   "pannello chiuso: restano scritti sul pulsante."))
         lever_row = QWidget()
         lever_lay = QHBoxLayout(lever_row)
         lever_lay.setContentsMargins(0, 0, 0, 0)
@@ -523,17 +525,30 @@ class PpkDialog(QDialog):
         self.options_row.setVisible(kind != "mrk")
         self.lever_row.setVisible(kind != "mrk")
         self.lever_panel.setVisible(kind != "mrk" and self.b_lever.isChecked())
+        self._show_lever()
 
     def _camera(self) -> int | None:
         """The camera of an autopilot log the shots are read of: None while the log has one."""
         return self.camera.currentData() if self.kind() == "log" and self.camera.count() > 1 else None
 
-    def _lever_open(self) -> bool:
-        """The lever arm and the latency count: their panel is open, for a source that takes them."""
-        return self.kind() != "mrk" and self.b_lever.isChecked()
+    def _lever(self) -> tuple[float, float, float] | None:
+        """The lever arm that counts: the one typed, whatever the state of its panel, for a source that takes it;
+        None when it is all zeros."""
+        return self.lever_panel.lever() if self.kind() != "mrk" else None
+
+    def _latency_ms(self) -> float:
+        """The latency that counts, as :meth:`_lever`."""
+        return self.lever_panel.latency_ms() if self.kind() != "mrk" else 0.0
 
     def _latency_s(self) -> float:
-        return self.lever_panel.latency_ms() / 1000.0 if self._lever_open() else 0.0
+        return self._latency_ms() / 1000.0
+
+    def _show_lever(self) -> None:
+        """The button of the lever arm: with its panel closed it says the values that count."""
+        short = None if self.b_lever.isChecked() else sw.lever_short(self._lever(), self._latency_ms())
+        text = tr("Braccio di leva e latenza...") if short is None else tr("Braccio di leva e latenza: {0}", short)
+        if self.b_lever.text() != text:
+            self.b_lever.setText(text)
 
     def _photos(self) -> Path | None:
         """The folder of the photos of the shots (:func:`.shots_widgets.photos_folder`): None for an MRK (its own
@@ -1024,6 +1039,9 @@ class PpkDialog(QDialog):
                 text += " " + tr("Scatti fuori dalle osservazioni del drone: {0}; le loro foto terranno la posizione "
                                  "che hanno.", outside)
         lines = [text] + [engine(w) for w in shotset.warnings]
+        lever = sw.lever_words(self._lever(), self._latency_ms())
+        if lever is not None:
+            lines.append(lever + ".")
         if times and self.chunk is not None:
             pairing = self._pairing(shotset)
             if pairing is None:
@@ -1574,15 +1592,14 @@ class PpkDialog(QDialog):
         :data:`.sources.KINDS`), ``"file"`` (None for the events of the rover, and for a u-blox rover with its own time
         marks), ``"edge"``, ``"message"``, ``"camera"``, ``"photos"}`` (the folder of the photos, None for an MRK and
         when the window is to ask) -, the lever arm from the antenna to the camera in the body of the drone (mm
-        forward, right, down; None when all zero or with its panel closed), the latency of the camera in
-        milliseconds (0 with the panel closed), how the photos are paired (:data:`.shots.BY`)."""
-        kind, is_open = self.kind(), self._lever_open()
+        forward, right, down; None when all zero), the latency of the camera in milliseconds - both as typed, with
+        their panel open or closed -, how the photos are paired (:data:`.shots.BY`)."""
+        kind = self.kind()
         return {"shots": {"kind": kind, "file": None if kind == "events" else self.shots_file.path(),
                           "edge": self.edge.currentData() if kind == "ubx" else events.EDGES[0],
                           "message": self.message.currentData() if kind == "log" else "auto",
                           "camera": self._camera(), "photos": self._photos()},
-                "lever_body_mm": self.lever_panel.lever() if is_open else None,
-                "latency_ms": self.lever_panel.latency_ms() if is_open else 0.0,
+                "lever_body_mm": self._lever(), "latency_ms": self._latency_ms(),
                 "by": self.by.currentData() if kind != "mrk" else "auto"}
 
     def accept(self) -> None:

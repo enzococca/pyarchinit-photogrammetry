@@ -5849,7 +5849,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
         self._gnss_done(tr("Log dell'autopilota: {0} foto su {1} hanno la posizione del loro scatto ({2})",
                            result["matched"], result["photos"], detail), result["unmatched"])
-        for line in sw.pairing_words(result):
+        lever = sw.lever_words(v.get("lever_body_mm"), float(v.get("latency_ms") or 0.0))
+        for line in sw.pairing_words(result) + ([lever] if lever is not None else []):
             self.log_pane.info(line)
         for warning in list(shotset.warnings) + list(result["warnings"]):
             self.log_pane.warning(warning)
@@ -5950,6 +5951,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 notes += list(inputs.shotset.warnings)
             return solution, result, notes
 
+        lever = None if kind == "mrk" else sw.lever_words(v.get("lever_body_mm"), float(v.get("latency_ms") or 0.0))
+        if lever is not None:  # what the run counts with, in its log
+            self.log_pane.info(lever)
         # like an MRK or a positions file: the positions change and the project is to be saved, not saved at once
         self.run_task("Calcolo PPK", job, self._ppk_done, refresh=False, save=False)
 

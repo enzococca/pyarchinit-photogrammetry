@@ -199,6 +199,40 @@ def test_ppk_dialog_shots_modes(qt_app, tmp_path):
     _close(qt_app, d)
 
 
+def test_ppk_dialog_lever_counts_with_its_panel_closed(qt_app, tmp_path):
+    """A lever arm and a latency typed and their panel closed again: they count as they are, and the dialog says so
+    on the button and in the summary of the shots - never silently dropped."""
+    doc, folder, _project = _events_chunk(tmp_path)
+    d = _dialog(qt_app, events_test.TM2_OBS, chunk=doc.chunk)
+    assert d.b_lever.text() == "Braccio di leva e latenza..."
+    d.b_lever.click()
+    d.lever_down.setValue(250)
+    d.latency.setValue(40)
+    d.b_lever.click()
+    qt_app.processEvents()
+    assert not d.lever_panel.isVisible() and not d.b_lever.isChecked()
+    v = d.values()
+    assert v["lever_body_mm"] == (0.0, 0.0, 250.0) and v["latency_ms"] == 40.0
+    assert d._latency_s() == pytest.approx(0.040)
+    assert d.b_lever.text() == "Braccio di leva e latenza: 0, 0, 250 mm · 40 ms"
+    assert _wait_until(lambda: "3 eventi" in d.shots_info.text()), d.shots_info.text()
+    assert ("Braccio di leva dall'antenna alla camera (avanti, destra, giù): 0, 0, 250 mm; latenza della camera: "
+            "40 ms.") in d.shots_info.text()
+    d.b_lever.click()  # open: the values are in sight, the button as it was
+    assert d.b_lever.text() == "Braccio di leva e latenza..."
+    d.lever_down.setValue(0)
+    d.latency.setValue(0)
+    d.b_lever.click()
+    qt_app.processEvents()
+    assert d.b_lever.text() == "Braccio di leva e latenza..." and "Braccio di leva" not in d.shots_info.text()
+    assert d.values()["lever_body_mm"] is None and d.values()["latency_ms"] == 0.0
+    d.latency.setValue(12.5)
+    assert _wait_until(lambda: d.b_lever.text() == "Braccio di leva e latenza: 0, 0, 0 mm · 12,5 ms"), d.b_lever.text()
+    d.set_kind("mrk")  # a DJI MRK takes none of them
+    assert d.shots_values()["lever_body_mm"] is None and d.shots_values()["latency_ms"] == 0.0
+    _close(qt_app, d)
+
+
 @needs_a_converter
 def test_ppk_dialog_converts_a_ubx_rover_in_background(qt_app, tmp_path):
     """A raw u-blox log as the rover: converted in a thread while the dialog says so, then its epochs and events, the
@@ -414,6 +448,7 @@ def test_window_ppk_with_rover_events(tmp_path, qt_app, monkeypatch):
         text = w.log_pane.text()
         assert "PPK: 3 foto su 3 hanno la posizione corretta del loro scatto" in text
         assert "abbinate per ordine" in text and "parte verticale" in text
+        assert "Braccio di leva dall'antenna alla camera (avanti, destra, giù): 0, 0, 250 mm" in text
         assert "eventi del ricevitore" in w.gnss_pane.states["positions"].text()
     finally:
         w.setWindowModified(False)
