@@ -26,18 +26,27 @@ def _write(tmp_path: Path, log: LogWriter, name: str = "flight.bin", text: bool 
     return path
 
 
-def _check_shots(shotset, expected) -> None:
-    assert [s.index for s in shotset.shots] == [e[1] for e in expected]
-    for shot, (_inst, _img, week, tow_ms, time_us, lat, lng, alt, roll, pitch, yaw, status, hacc, vacc) in zip(
-            shotset.shots, expected):
-        assert shot.gps_time == week * 604800 + tow_ms / 1000.0
-        assert shot.source["gps_week"] == week and shot.source["tow"] == tow_ms / 1000.0
-        assert shot.source["time_us"] == time_us
-        assert shot.antenna == pytest.approx((lat * 1e-7, lng * 1e-7, alt * 0.01), abs=1e-9)
+# the shot times from TimeUS and the fixes: the SMS of GPA is to the millisecond, so a time is within this of the
+# truth (half a millisecond of rounding at each end of the interpolation, and the microseconds of TimeUS)
+TIME_TOL_S = 0.0015
+
+
+def _check_shots(shotset, expected, base: str = "gpa_sms", tol: float = TIME_TOL_S) -> None:
+    assert [s.index for s in shotset.shots] == [e["img"] for e in expected]
+    for shot, e in zip(shotset.shots, expected):
+        assert abs(shot.gps_time - e["true"]) <= tol, (shot.source, e["true"])
+        week, tow = shot.source["gps_week"], shot.source["tow"]
+        assert week * 604800 + tow == pytest.approx(shot.gps_time, abs=1e-6) and 0 <= tow < 604800
+        assert (shot.source["cam_gps_week"], shot.source["cam_tow_ms"]) == (e["cam_week"], e["cam_tow_ms"])
+        assert shot.source["time_us"] == e["time_us"] and shot.source["time_base"] == base
+        assert shot.antenna == pytest.approx((e["lat"] * 1e-7, e["lng"] * 1e-7, e["alt"] * 0.01), abs=1e-9)
         assert shot.height == "msl"
-        assert shot.attitude == pytest.approx((roll * 0.01, pitch * 0.01, yaw * 0.01), abs=1e-9)
-        assert shot.status == {6: "fix", 5: "float"}[status]
-        assert shot.std == pytest.approx((hacc * 0.01, hacc * 0.01, vacc * 0.01))
+        assert shot.attitude == pytest.approx(e["attitude"], abs=1e-4)  # float32 degrees of master
+        assert shot.status == {6: "fix", 5: "float", None: None}[e["status"]]
+        if e["hacc"] is None:
+            assert shot.std is None
+        else:
+            assert shot.std == pytest.approx((e["hacc"] * 0.01, e["hacc"] * 0.01, e["vacc"] * 0.01))
         assert shot.valid
 
 
@@ -108,9 +117,10 @@ def test_no_fix_rows_left_out(tmp_path):
     _check_shots(shotset, expected[3:])
     assert any("3 CAM" in w and "GPS" in w for w in shotset.warnings)
     info = autopilot.cameras(tmp_path / "flight.bin")
-    assert info == [{"instance": 0, "cam": 20, "trig": 0, "no_fix": 3, "first": expected[3][2] * 604800 +
-                     expected[3][3] / 1000.0, "last": expected[-1][2] * 604800 + expected[-1][3] / 1000.0,
-                     "first_img": 1, "last_img": 20}]
+    first, last = expected[3], expected[-1]
+    assert info == [{"instance": 0, "cam": 20, "trig": 0, "no_fix": 3,
+                     "first": first["cam_week"] * 604800 + first["cam_tow_ms"] / 1000.0,
+                     "last": last["cam_week"] * 604800 + last["cam_tow_ms"] / 1000.0, "first_img": 1, "last_img": 20}]
 
 
 def test_two_cameras_need_a_choice(tmp_path):
@@ -119,7 +129,7 @@ def test_two_cameras_need_a_choice(tmp_path):
     with pytest.raises(ValueError, match=r"2 cameras.*0, 1"):
         autopilot.ardupilot(path)
     second = autopilot.ardupilot(path, camera=1)
-    _check_shots(second, [e for e in expected if e[0] == 1])
+    _check_shots(second, [e for e in expected if e["inst"] == 1])
     assert all(s.source["instance"] == 1 for s in second.shots)
     with pytest.raises(ValueError, match="camera 3"):
         autopilot.ardupilot(path, camera=3)
@@ -295,9 +305,8 @@ def test_mutated_logs_give_shots_or_a_clear_error(tmp_path):
         assert all(math.isfinite(s.gps_time) and s.height == "msl" for s in shotset.shots)
 
 
-def test_gps_time_against_boot_clock(tmp_path):
-    """A CAM whose GPS time disagrees with the boot clock (a stale or wrong week) is said; status from the GPS in
-    use only."""
+def test_wrong_week_in_gpstime_is_not_valid(tmp_path):
+    """A CAM whose GPSTime names a fix a week away from its time (a wrong week, a bad fix) is not valid, said."""
     log, expected = flight(10)
     rows = [r for r in log.records if r[0] == "CAM"]
     name, (type_id, fmt, values) = rows[4]
@@ -305,9 +314,201 @@ def test_gps_time_against_boot_clock(tmp_path):
     values[4] = values[4] - 1  # one week early
     log.records[log.records.index(rows[4])] = (name, (type_id, fmt, tuple(values)))
     shotset = autopilot.ardupilot(_write(tmp_path, log))
-    assert any("boot clock" in w and "1 " in w for w in shotset.warnings)
+    assert any("1 CAM shot whose GPSTime disagrees" in w for w in shotset.warnings)
     bad = [s for s in shotset.shots if s.source["img"] == 5][0]
-    assert bad.source["clock_disagrees_s"] == pytest.approx(-604800.0, abs=1.0)
+    assert not bad.valid and bad.source["gps_time_disagrees_s"] == pytest.approx(604800.0, abs=1.0)
+    assert abs(bad.gps_time - expected[4]["true"]) <= TIME_TOL_S  # its time is still that of TimeUS
+    assert sum(s.valid for s in shotset.shots) == 9
+
+
+@pytest.mark.parametrize("hz", [1, 2, 5, 10])
+def test_shot_time_from_timeus_not_from_the_last_fix(tmp_path, hz):
+    """GPSTime is the time of the last fix (as the firmware writes it): the shot time is TimeUS put in GPS time,
+    within TIME_TOL_S of the truth at any rate of the receiver, with a clock 30 ppm fast."""
+    log, expected = flight(40, gps_hz=hz, drift_ppm=30.0, interval_ms=1777)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+    errors = [s.gps_time - e["true"] for s, e in zip(shotset.shots, expected)]
+    stale = [e["cam_week"] * 604800 + e["cam_tow_ms"] / 1000.0 - e["true"] for e in expected]
+    assert max(map(abs, errors)) <= TIME_TOL_S
+    assert min(stale) < -0.4 / hz  # what GPSTime alone would have given: up to a period early
+    assert not any("disagrees" in w for w in shotset.warnings)
+
+
+def test_two_shots_within_one_gps_period(tmp_path):
+    offsets = [1.31, 1.35, 3.0, 3.05, 5.1, 7.3, 7.33]
+    log, expected = flight(shot_offsets_s=offsets, gps_hz=5)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+    times = [s.gps_time for s in shotset.shots]
+    assert np.diff(times) == pytest.approx(np.diff(offsets), abs=2 * TIME_TOL_S)
+    assert expected[0]["cam_tow_ms"] == expected[1]["cam_tow_ms"]  # the same last fix for both
+    # neither is taken for a double: the old GPSTime gave both the same time
+    assert all(s.valid for s in shotset.shots) and shotset.duplicates == 0
+    assert min(np.diff(times)) > shots.DOUBLE_SHOT_S
+
+
+def test_one_bad_fix_and_jitter_are_outvoted(tmp_path):
+    """Arrival times off by up to 2 ms, and one off by 80 ms: the medians of the neighbouring fixes keep every shot
+    within 2.5 ms."""
+    log, expected = flight(30, sms_jitter_ms=2.0, seed=5)
+    gpa = [i for i, r in enumerate(log.records) if r[0] == "GPA"]
+    k = gpa[len(gpa) // 2]
+    name, (type_id, fmt, values) = log.records[k]
+    values = list(values)
+    values[8] += 80  # SMS of the GPA layout of 4.x
+    log.records[k] = (name, (type_id, fmt, tuple(values)))
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected, tol=0.0025)
+
+
+def test_clock_drift_over_a_long_flight(tmp_path):
+    """Two hours at 50 ppm (0.36 s of drift in all): the local mapping follows it."""
+    log, expected = flight(120, interval_ms=60_000, gps_hz=5, drift_ppm=50.0)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+
+
+def test_gps_outage(tmp_path):
+    """No fixes for 30 s: the shots in it keep a time interpolated across the gap (valid, no status); a gap longer
+    than MAX_GAP_S leaves its shots without a time (not valid)."""
+    log, expected = flight(40, interval_ms=2000, outage=(20.0, 50.0), drift_ppm=50.0)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+    inside = [s for s, e in zip(shotset.shots, expected) if e["status"] is None]
+    assert len(inside) >= 10 and all(s.valid and s.status is None for s in inside)
+    assert any("no status" in w for w in shotset.warnings)
+    long = autopilot.MAX_GAP_S + 30.0
+    log, expected = flight(30, interval_ms=10_000, outage=(20.0, 20.0 + long), gps_hz=1)
+    shotset = autopilot.ardupilot(_write(tmp_path, log, "long.bin"))
+    lost = [s for s in shotset.shots if not s.valid]
+    assert lost and all("gap" in s.source["no_gps_time"] for s in lost)
+    assert any("without a GPS time (in a gap" in w for w in shotset.warnings)
+    for s, e in zip(shotset.shots, expected):
+        if s.valid:
+            assert abs(s.gps_time - e["true"]) <= TIME_TOL_S
+
+
+def test_without_gpa_the_times_of_writing_stand_for_the_arrivals(tmp_path):
+    log, expected = flight(20, gpa=False)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert all(s.source["time_base"] == "gps_timeus" and s.std is None for s in shotset.shots)
+    errors = [s.gps_time - e["true"] for s, e in zip(shotset.shots, expected)]
+    # early by the processing of the fixes (12-16 ms here), never late
+    assert all(-(dfw.PROCESS_US + 4000) * 1e-6 - TIME_TOL_S <= x <= -dfw.PROCESS_US * 1e-6 + TIME_TOL_S
+               for x in errors)
+    assert any("no GPA with SMS" in w for w in shotset.warnings)
+    # no fixes at all: the GPSTime of the messages, said
+    log = LogWriter()
+    log.fmt("CAM", *dfw.CAM_FORMAT)
+    log.add("CAM", 5_000_000, 0, 1, dfw.TOW0_MS, dfw.WEEK, 437712345, 112543210, 15000, 0, 0, 0, 0, 0)
+    shotset = autopilot.ardupilot(_write(tmp_path, log, "bare.bin"))
+    assert shotset.shots[0].source["time_base"] == "cam_gpstime"
+    assert shotset.shots[0].gps_time == dfw.WEEK * 604800 + dfw.TOW0_MS / 1000.0
+    assert any("early by up to a GPS period" in w for w in shotset.warnings)
+
+
+def test_receiver_latency_stays_a_constant(tmp_path):
+    """The latency of the receiver is not in the log: every time is early by it (what latency_s is for)."""
+    log, expected = flight(20, latency_ms=40.0)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = [s.gps_time - e["true"] for s, e in zip(shotset.shots, expected)]
+    assert errors == pytest.approx([-0.040] * len(errors), abs=TIME_TOL_S)
+    assert all(s.valid for s in shotset.shots)
+
+
+@pytest.mark.parametrize("cam_layout, gps_layout, gpa_layout", [
+    ("master", "4.x", "4.x"), ("3.x", "3.x", "3.x"), ("4.x", "no_u", "3.x")])
+def test_layouts_of_other_versions(tmp_path, cam_layout, gps_layout, gpa_layout):
+    """master's CAM (attitude in float degrees), the CAM before 4.4 (no I or Img, Roll/Pitch/Yaw), GPS without U and
+    the GPA without I."""
+    log, expected = flight(12, cam_layout=cam_layout, gps_layout=gps_layout, gpa_layout=gpa_layout)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+    text = autopilot.ardupilot(_write(tmp_path, log, "f.log", text=True))
+    _check_shots(text, expected)
+
+
+def test_gps_week_rolls_over_during_the_flight(tmp_path):
+    log, expected = flight(30, tow0_ms=604_800_000 - 30_000)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+    weeks = {s.source["gps_week"] for s in shotset.shots}
+    assert weeks == {dfw.WEEK, dfw.WEEK + 1}
+
+
+def test_gps_status_static_and_ppp():
+    assert autopilot.GPS_STATUS[7] == "single" and autopilot.GPS_STATUS[8] == "float"
+    assert [autopilot.GPS_STATUS[k] for k in range(7)] == ["none", "none", "single", "single", "single", "float",
+                                                           "fix"]
+
+
+def test_ppp_status_from_the_log(tmp_path):
+    log, _ = flight(6)
+    for i, (name, record) in enumerate(log.records):
+        if name == "GPS":
+            type_id, fmt, values = record
+            values = list(values)
+            values[2] = 8
+            log.records[i] = (name, (type_id, fmt, tuple(values)))
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert {s.status for s in shotset.shots} == {"float"} and {s.source["gps_status"] for s in shotset.shots} == {8}
+
+
+def test_cam_defined_with_and_without_instance(tmp_path):
+    """CAM defined again without I and Img (one log, two firmware layouts): one camera, no warning of numpy."""
+    import warnings
+    log, expected = flight(6)
+    old = dfw.CAM_LAYOUTS["3.x"]
+    type_id = log.formats["CAM"][0]
+    log.fmt("CAM", *old, type_id=type_id)
+    g = expected[-1]
+    log.add("CAM", g["time_us"] + 500_000, g["cam_tow_ms"] + 400, g["cam_week"], g["lat"], g["lng"], g["alt"], 0, 0,
+            0, 0, 0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert len(shotset.shots) == 7 and shotset.shots[-1].index is None
+    assert {s.source["instance"] for s in shotset.shots} == {0}
+    assert [c["instance"] for c in autopilot.cameras(tmp_path / "flight.bin")] == [0]
+
+
+def test_mission_planner_text_log(tmp_path):
+    """A text log as Mission Planner writes it: CRLF line ends, the ids of UNIT and MULT as characters, a MSG with
+    commas and characters that are line breaks to Python but not to the log."""
+    log, expected = flight(10)
+    log.fmt("MSG", "QZ", "TimeUS,Message")
+    log.add("MSG", 1, "ArduCopter V4.5.7 (abc), frame QUAD\x0b\u2028\x1c end")
+    lines = []
+    for line in log.text().rstrip("\n").split("\n"):
+        if line.startswith(("UNIT,", "MULT,")):
+            parts = line.split(", ")
+            parts[2] = chr(int(parts[2]))
+            line = ", ".join(parts)
+        lines.append(line)
+    path = tmp_path / "mp.log"
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode())
+    with autopilot.read_dataflash(path) as df:
+        assert df.bad_lines == 0 and df.truncated == 0
+        assert list(df.messages("MSG")["Message"]) == ["ArduCopter V4.5.7 (abc), frame QUAD\x0b\u2028\x1c end"]
+        assert df.units["CAM"]["GPSTime"] == {"unit": "s", "mult": 1e-3}
+    _check_shots(autopilot.ardupilot(path), expected)
+
+
+def test_time_pairing_round_trip(tmp_path):
+    """Photos whose numbers are not the image numbers of the log: paired by their times, each with its own shot."""
+    from test_gnss_shots import _photos
+    rng = np.random.default_rng(3)
+    steps = rng.uniform(1.7, 2.3, 120) + np.where(np.arange(120) % 40 == 39, 9.0, 0.0)  # a turn every 40
+    offsets = list(1.0 + np.cumsum(steps))
+    log, expected = flight(shot_offsets_s=offsets)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    names = [f"DSC{7000 + i}.JPG" for i in range(120)]
+    utcs = [shots.utc(s).replace(tzinfo=None) for s in shotset.shots]
+    ch = _photos(tmp_path / "p", names, utcs)
+    pairing = shots.pair(ch, shotset, tmp_path / "p")
+    assert pairing.by == "time" and len(pairing.kept) == 120
+    assert [(f.name, s.index) for f, s, _c in pairing.kept] == [(n, i) for i, n in enumerate(names, 1)]
 
 
 def test_gps_not_in_use_and_far_gps_ignored(tmp_path):
@@ -341,11 +542,10 @@ def test_gps_antenna_offset_said(tmp_path):
 
 def test_apply_shots_pairs_by_number(tmp_path):
     from test_gnss_shots import _photos
-    from datetime import timedelta
     log, expected = flight(6, fix_until=6)
     path = _write(tmp_path, log)
     shotset = autopilot.ardupilot(path)
-    utcs = [shots.utc(s).replace(tzinfo=None) - timedelta(seconds=0) for s in shotset.shots]
+    utcs = [shots.utc(s).replace(tzinfo=None) for s in shotset.shots]
     ch = _photos(tmp_path / "photos", [f"IMG_{i:04d}.JPG" for i in range(1, 6)], utcs[:5])
     result = gnss_apply.apply_shots(ch, shotset, tmp_path / "photos")
     assert result["matched"] == 5
@@ -353,7 +553,7 @@ def test_apply_shots_pairs_by_number(tmp_path):
     for cam, e in zip(cams, expected):
         gnss = cam.meta["gnss"]
         assert gnss["height"] == "msl" and gnss["status"] == "fix"
-        assert cam.reference.location[2] == pytest.approx(e[7] * 0.01, abs=1e-6)
+        assert cam.reference.location[2] == pytest.approx(e["alt"] * 0.01, abs=1e-6)
 
 
 def test_big_log_is_read_fast(tmp_path):
@@ -383,9 +583,9 @@ def test_big_log_is_read_fast(tmp_path):
     path.unlink()
 
 
-@pytest.mark.skipif(not os.environ.get("PPG_DATAFLASH_SAMPLE"), reason="a real DataFlash log only in the workflow")
+@pytest.mark.skipif(not os.environ.get("PPG_DATAFLASH_SAMPLE"), reason="no real DataFlash log given (PPG_DATAFLASH_SAMPLE): none is in the repository")
 def test_real_log_if_given():
-    """A real log (the workflow downloads one; never in the repository): read whole, every message decoded."""
+    """A real log named by PPG_DATAFLASH_SAMPLE (never in the repository): read whole, every message decoded."""
     path = Path(os.environ["PPG_DATAFLASH_SAMPLE"])
     with autopilot.read_dataflash(path) as df:
         assert "FMT" in df.formats and len(df.formats) > 10
