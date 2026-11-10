@@ -325,8 +325,9 @@ def test_tim_tm2_falling_and_rising(tmp_path):
 
 
 def test_tim_tm2_gnss_time_base_from_the_time_pulse_settings(tmp_path):
-    """A CFG-TP5 of the time pulse 0 (version 1) in the log says which GNSS the time grid is: GPS, no warning;
-    another, a warning that the times may be off."""
+    """A CFG-TP5 of the time pulse 0 (version 1) in the log says which GNSS the time grid is: GPS, no warning; BeiDou,
+    Galileo or GLONASS, whose week and seconds the Interface Description does not define for TIM-TM2, marks not valid
+    and a warning naming the system; none, read as GPS time with a warning."""
     def tp5(grid: int) -> bytes:
         flags = (1 << 0) | (grid << 7)  # active, gridUtcGnss in bits 7-10
         return ubx.ubx_frame(0x06, 0x31, struct.pack("<BBHhhIIIIiI", 0, 1, 0, 50, 0, 1, 1, 0, 0, 0, flags))
@@ -334,8 +335,13 @@ def test_tim_tm2_gnss_time_base_from_the_time_pulse_settings(tmp_path):
     mark = _tm2(1, ubx.FALLING | ubx.BASE_GNSS | ubx.TIME_VALID, (2300, 0, 0), (2300, 5000, 0))
     gps = events.ubx_time_marks(_write(tmp_path / "gps.ubx", tp5(1), mark))
     assert gps.warnings == [] and gps.shots[0].source["time_base"] == "GPS"
-    galileo = events.ubx_time_marks(_write(tmp_path / "gal.ubx", tp5(4), mark))
-    assert len(galileo.shots) == 1 and any("Galileo" in w for w in galileo.warnings)
+    for grid, name in ((2, "GLONASS"), (3, "BeiDou"), (4, "Galileo")):
+        other = events.ubx_time_marks(_write(tmp_path / f"{name}.ubx", tp5(grid), mark))
+        assert len(other.shots) == 1 and not other.shots[0].valid, name
+        assert other.shots[0].source["time_base"] == name
+        assert any(name in w and "not valid" in w for w in other.warnings), other.warnings
+    unknown = events.ubx_time_marks(_write(tmp_path / "unknown.ubx", mark))
+    assert unknown.shots[0].valid and any("GPS time" in w for w in unknown.warnings)
 
 
 def test_tim_tm2_utc_base_to_gps(tmp_path):
@@ -366,6 +372,23 @@ def test_bad_checksum_skipped_and_counted(tmp_path):
     marks = events.ubx_time_marks(path)
     assert [s.index for s in marks.shots] == [1, 3]
     assert any("1 damaged UBX frame" in w for w in marks.warnings)
+    # sync bytes by chance inside other data (RTCM 3 in the same log): no known class or a length no UBX message has,
+    # not counted
+    chance = b"\xd3\x00\x13" + b"\xb5\x62\x77\x01\x10\x00" + bytes(30) + b"\xb5\x62\x02\x15\xff\xff" + bytes(10)
+    mixed = _write(tmp_path / "mixed.ubx", good1, chance, good3)
+    skipped = []
+    assert len(list(events.ubx_frames(mixed, skipped=skipped))) == 2 and skipped == []
+    assert not any("damaged" in w for w in events.ubx_time_marks(mixed).warnings)
+
+
+def test_tim_tm2_count_unwrapped(tmp_path):
+    """The counter of TIM-TM2 has 16 bits: after 65535 it starts again from 0, the shots go on counting."""
+    flags = ubx.FALLING | ubx.BASE_GNSS | ubx.TIME_VALID
+    frames = [_tm2(count, flags, (2300, 0, 0), (2300, 1000 * (i + 1), 0))
+              for i, count in enumerate((65534, 65535, 0, 1))]
+    marks = events.ubx_time_marks(_write(tmp_path / "wrap.ubx", *frames))
+    assert [s.index for s in marks.shots] == [65534, 65535, 65536, 65537]
+    assert [s.source["count"] for s in marks.shots] == [65534, 65535, 0, 1]
 
 
 def test_invalid_time_mark(tmp_path):
@@ -444,10 +467,11 @@ def test_events_pos_read(tmp_path, monkeypatch):
     expected = [_gps(*_week_tow(2005, 4, 2, *t)) for t in ((0, 0, 45.125), (0, 24, 31.5), (0, 39, 50.25),
                                                           (0, 49, 50.25))]
     # RTKLIB-EX 2.5.1 in combined mode (postpos.c, combres) writes a mark only where the combined row comes from the
-    # forward pass or both: where the backward row alone is taken (a better quality) the mark is lost - two of these
-    # four with this build; how many varies with the fixes
+    # forward pass or both: the backward pass reads the events onto other epochs, and where its row alone is taken (a
+    # better quality, a fix against a float) the mark is lost - two of these four with this build (pinned: a change
+    # of RTKLIB or of the options shows here); the check against rinex_events of the rover comes with the PPK of shots
     assert shotset.kind == "events_pos" and [s.index for s in shotset.shots] == list(range(1, len(shotset.shots) + 1))
-    assert len(shotset.shots) >= 1
+    assert len(shotset.shots) == 2
     for shot in shotset.shots:
         assert min(abs(shot.gps_time - t) for t in expected) < 1e-3  # RTKLIB writes the times to the millisecond
     placed = [s for s in shotset.shots if s.valid]

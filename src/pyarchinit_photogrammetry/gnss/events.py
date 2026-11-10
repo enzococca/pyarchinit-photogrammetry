@@ -117,16 +117,27 @@ _NEW_EDGE = {"falling": 1 << 2, "rising": 1 << 7}
 _TIME_VALID = 1 << 6
 _BASES = {0: "receiver", 1: "GNSS", 2: "UTC"}
 # CFG-TP5 version 1, flags bits 7-10 (gridUtcGnss): the time grid of the time pulse - and of the time marks in "GNSS"
-# time base - 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
+# time base - 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo. The Interface Description does not say how TIM-TM2 writes
+# the week and the time of week on a BeiDou, Galileo or GLONASS grid (whose week numbering, seconds of the week or
+# offset from GPS time?): marks on those grids are not converted, only marked as not valid. A CFG-TP5 of version 0
+# (no grid field) and the time grid set by CFG-VALSET (CFG-TP-TIMEGRID_TP1, F9 receivers) are not read: their marks in
+# "GNSS" time are read as GPS time with a warning.
 _GRIDS = {0: "UTC", 1: "GPS", 2: "GLONASS", 3: "BeiDou", 4: "Galileo"}
+_OTHER_GRIDS = ("GLONASS", "BeiDou", "Galileo")
+# the UBX classes of the Interface Description (NAV, RXM, INF, ACK, CFG, UPD, MON, AID, TIM, ESF, MGA, LOG, SEC, NAV2):
+# a frame of another class with a wrong checksum is sync bytes by chance in other data (RTCM 3, a binary of another
+# receiver), not a damaged frame; nor is one longer than any UBX message
+_CLASSES = frozenset((0x01, 0x02, 0x04, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0D, 0x10, 0x13, 0x21, 0x27, 0x29))
+_LONGEST = 8192
 
 
 def ubx_frames(path: str | Path, skipped: list[int] | None = None) -> Iterator[tuple[int, int, bytes, int]]:
     """The UBX frames of a u-blox log as ``(class, id, payload, offset)``, in order. A frame is 0xB5 0x62, class, id,
     the little-endian length of the payload, the payload and the two bytes of the 8-bit Fletcher checksum over class,
     id, length and payload (u-blox Interface Description); the bytes between frames (NMEA, RTCM) are passed over. A
-    whole frame whose checksum is wrong is skipped - its offset appended to ``skipped`` when a list is given - and the
-    next sync bytes after its start are looked for, as are those after a frame cut by the end of the file."""
+    whole frame whose checksum is wrong is skipped - its offset appended to ``skipped`` when a list is given and it
+    has a UBX class and a length a UBX message can have (not sync bytes by chance in other data) - and the next sync
+    bytes after its start are looked for, as are those after a frame cut by the end of the file."""
     path = Path(path)
     with open(path, "rb") as f:
         if path.stat().st_size == 0:
@@ -146,7 +157,7 @@ def ubx_frames(path: str | Path, skipped: list[int] | None = None) -> Iterator[t
                         yield data[i + 2], data[i + 3], bytes(data[i + 6:end - 2]), i
                         i = data.find(_SYNC, end)
                         continue
-                    if skipped is not None:
+                    if skipped is not None and data[i + 2] in _CLASSES and length <= _LONGEST:
                         skipped.append(i)
                 i = data.find(_SYNC, i + 1)
 
@@ -167,9 +178,10 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     message that announces a new ``edge`` ("falling", the default, or "rising") of the signal at the event input,
     ``index`` the counter of the message (``count``), the time of that edge (``wn``, ``towMs``, ``towSubMs``: to the
     nanosecond) in GPS time - ``gps_time`` and, exact, ``source["gps_week"]``, ``source["tow"]``, ``source["tow_ms"]``,
-    ``source["tow_sub_ns"]``. A mark in UTC is put in GPS time with the leap seconds of its day
-    (``source["leap_seconds"]``); one in GNSS time is GPS time when a CFG-TP5 in the log sets the time grid to GPS,
-    else read as GPS time with a warning (another GNSS named, or none); one in receiver time likewise.
+    ``source["tow_sub_ns"]``; the 16-bit counter wraps after 65535 and is unwrapped (``source["count"]`` as sent). A
+    mark in UTC is put in GPS time with the leap seconds of its day (``source["leap_seconds"]``); one in GNSS time is
+    GPS time when the last CFG-TP5 before it sets the time grid to GPS, not valid when it sets BeiDou, Galileo or
+    GLONASS (not converted: see :data:`_GRIDS`), else read as GPS time with a warning; one in receiver time likewise.
     ``valid`` is False for a mark without a valid time (bit 6), with a warning; ``source["acc_ns"]`` the accuracy the
     receiver gives the time. A mark within :data:`DOUBLE_EVENT_S` of the one kept before it (a message repeated, a
     bouncing contact) is left out and counted; damaged frames are skipped and counted in a warning. A log without
@@ -181,18 +193,23 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     path = Path(path)
     skipped: list[int] = []
     marks: list[tuple[int, tuple]] = []
-    grids: set[str] = set()
+    grid = None  # the time grid of the last CFG-TP5 of the time pulse 0, version 1
     for cls, msg_id, payload, offset in ubx_frames(path, skipped):
         if (cls, msg_id) == _TIM_TM2 and len(payload) == _TM2.size:
-            marks.append((offset, _TM2.unpack(payload)))
+            marks.append((offset, grid, _TM2.unpack(payload)))
         elif (cls, msg_id) == _CFG_TP5 and len(payload) == _TP5.size:
             tp_index, version, *_, flags = _TP5.unpack(payload)
             if tp_index == 0 and version >= 1:
-                grids.add(_GRIDS.get((flags >> 7) & 0xF, "unknown"))
+                grid = _GRIDS.get((flags >> 7) & 0xF, "unknown")
     timed = []
     others = 0
     channels = set()
-    for offset, (channel, flags, count, wn_r, wn_f, ms_r, ns_r, ms_f, ns_f, acc) in marks:
+    wraps, last = 0, None
+    for offset, grid, (channel, flags, count, wn_r, wn_f, ms_r, ns_r, ms_f, ns_f, acc) in marks:
+        if last is not None and count < last - 32768:  # 65535 -> 0: the counter of 16 bits started again
+            wraps += 1
+        last = count
+        index = count + wraps * 65536
         if not flags & _NEW_EDGE[edge]:
             others += bool(flags & _NEW_EDGE[other])
             continue
@@ -200,31 +217,36 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
         week, ms, ns = (wn_f, ms_f, ns_f) if edge == "falling" else (wn_r, ms_r, ns_r)
         base = _BASES.get((flags >> 3) & 0x3, "unknown")
         gps_week, tow, leap = _tm2_time(week, ms, ns, base == "UTC")
-        if base == "GNSS" and grids == {"GPS"}:
-            base = "GPS"
+        valid = bool(flags & _TIME_VALID)
+        if base == "GNSS" and (grid == "GPS" or grid in _OTHER_GRIDS):
+            base = grid
         source = {"file": str(path), "kind": "ubx_tim_tm2", "offset": offset, "edge": edge, "gps_week": gps_week,
-                  "tow": tow, "tow_ms": ms, "tow_sub_ns": ns, "time_base": base, "acc_ns": acc, "channel": channel}
+                  "tow": tow, "tow_ms": ms, "tow_sub_ns": ns, "time_base": base, "acc_ns": acc, "channel": channel,
+                  "count": count, "time_valid": valid}
         if base == "UTC":
             source["leap_seconds"] = leap
-        timed.append(((gps_week, tow), count, bool(flags & _TIME_VALID), source))
+        timed.append(((gps_week, tow), index, valid and base not in _OTHER_GRIDS, source))
     kept, doubles = _without_doubles(timed)
-    shots = [Shot(index=count, gps_time=week * float(_WEEK) + tow, valid=valid, source=source)
-             for (week, tow), count, valid, source in kept]
+    shots = [Shot(index=index, gps_time=week * float(_WEEK) + tow, valid=valid, source=source)
+             for (week, tow), index, valid, source in kept]
     warnings = []
     if skipped:
-        warnings.append(f"{len(skipped)} damaged UBX frame{'s' if len(skipped) > 1 else ''} (wrong checksum) "
-                        "skipped")
+        warnings.append(f"{len(skipped)} damaged UBX frame{'s' if len(skipped) > 1 else ''} (wrong checksum) skipped"
+                        " - in a log mixed with other data (RTCM 3) some can be bytes that look like a frame by chance")
     if not timed:
         warnings.append(f"the log has no time marks of the {edge} edge, but {others} of the {other} edge: read them "
                         f"with edge=\"{other}\"" if others else NO_TIME_MARKS)
     bases = {s.source["time_base"] for s in shots}
-    if bases - {"GPS", "UTC"}:
-        named = sorted(grids - {"GPS"})
-        why = (f"the log sets the time grid to {' and '.join(named)} time" if named
-               else "the log does not say of which system")
-        warnings.append(f"the time marks are in {' and '.join(sorted(bases - {'GPS', 'UTC'}))} time and {why}: read as "
-                        "GPS time, they can be off by seconds if that is not GPS time")
-    invalid = sum(not s.valid for s in shots)
+    unknown = sorted(bases - {"GPS", "UTC", *_OTHER_GRIDS})
+    if unknown:
+        warnings.append(f"the time marks are in {' and '.join(unknown)} time and the log does not say of which system: "
+                        "read as GPS time, they can be off by seconds if that is not GPS time")
+    for system in _OTHER_GRIDS:
+        n = sum(s.source["time_base"] == system for s in shots)
+        if n:
+            warnings.append(f"{n} time mark{'s' if n > 1 else ''} in {system} time (the time grid the log sets): not "
+                            "converted to GPS time, marked as not valid - set the time grid of the receiver to GPS")
+    invalid = sum(not s.source["time_valid"] for s in shots)
     if invalid:
         warnings.append(f"{invalid} time mark{'s' if invalid > 1 else ''} without a valid time (no time fix of the "
                         "receiver yet): kept, marked as not valid")
