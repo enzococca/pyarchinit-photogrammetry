@@ -3282,7 +3282,7 @@ def gnss_mrk(project: Path, file: Path,
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a photo")
 
 
-SHOT_SOURCES = ("mrk", "events", "ubx", "log", "events-pos")
+SHOT_SOURCES = ("mrk", "events", "ubx", "log", "events-pos")  # as gnss.sources.KINDS
 LOG_MESSAGES = ("auto", "cam", "trig", "capture", "trigger")
 
 
@@ -3326,47 +3326,26 @@ def _approx_time(text: str | None, like: Path | None):
     return None
 
 
-def _is_ulog(path: Path) -> bool:
-    try:
-        with open(path, "rb") as f:
-            return f.read(7) == b"ULog\x01\x12\x35"
-    except OSError:
-        return False
-
-
 def _log_shots(path: Path, message: str = "auto", camera: Optional[int] = None):
-    """The shots of an autopilot log: PX4 (ULog) or ArduPilot (DataFlash)."""
-    from .gnss import autopilot, px4
+    """The shots of an autopilot log: PX4 (ULog) or ArduPilot (DataFlash) (:func:`.gnss.sources.log_shots`), an
+    option that does not fit the log a usage error."""
+    from .gnss import sources
 
-    if message not in LOG_MESSAGES:
-        raise typer.BadParameter(f"one of {', '.join(LOG_MESSAGES)}", param_hint="--message")
-    if _is_ulog(path):
-        if message in ("cam", "trig"):
-            raise typer.BadParameter("a PX4 log has capture and trigger messages, not cam and trig",
-                                     param_hint="--message")
-        if camera is not None:
-            raise typer.BadParameter("a PX4 log has one camera", param_hint="--camera")
-        return px4.px4(path, message)
-    if message in ("capture", "trigger"):
-        raise typer.BadParameter("an ArduPilot log has cam and trig messages, not capture and trigger",
-                                 param_hint="--message")
-    return autopilot.ardupilot(path, message, camera)
+    try:
+        sources.check_log_options(path, message, camera)
+    except sources.OptionError as exc:
+        raise typer.BadParameter(str(exc), param_hint=exc.option) from None
+    return sources.log_shots(path, message, camera)
 
 
 def _shot_source(kind: str, path: Path, edge: str = "falling", message: str = "auto",
                  camera: Optional[int] = None):
-    """The shots of ``path`` read as ``kind`` (:data:`SHOT_SOURCES`)."""
-    from .gnss import events, shots
+    """The shots of ``path`` read as ``kind`` (:data:`SHOT_SOURCES`, :func:`.gnss.sources.read`)."""
+    from .gnss import sources
 
-    if kind == "mrk":
-        return shots.from_mrk(path)
-    if kind == "events":
-        return events.rinex_events(path)
-    if kind == "ubx":
-        return events.ubx_time_marks(path, edge)
     if kind == "log":
         return _log_shots(path, message, camera)
-    return events.events_pos(path)
+    return sources.read(kind, path, edge)
 
 
 def _pairing_words(result: dict) -> list[str]:
@@ -3688,7 +3667,7 @@ def gnss_ppk(project: Path,
     RTCM 3, ...) is converted to RINEX first, as ``ppg gnss convert`` does."""
     from .gnss import apply as gnss
     from .gnss import base as gbase
-    from .gnss import convert, download, frames, ppk
+    from .gnss import download, frames, ppk, sources
     from .gnss import shots as gshots
 
     if atx not in gbase.ATX_CHOICES:
@@ -3751,29 +3730,9 @@ def gnss_ppk(project: Path,
     frame = base_frame or frames.UNKNOWN
     doc, ch = _open(project, chunk)
     try:
-        from_rover = kind == "events" and source_file.resolve() == rover.resolve()
-        shotset = None if from_rover else _shot_source(kind, source_file, edge, message, camera)
-        if when is None and shotset is not None:
-            timed = [s.gps_time for s in shotset.shots if s.valid]
-            when = timed[0] if timed else None
-        converted = []
-        if convert.raw_kind(rover) not in (None, "rinex"):
-            done = convert.to_rinex(rover, approx_time=when, progress=print_progress)
-            converted.append(done)
-            rover = done.obs
-            if when is None:
-                when = done.span[0]
-        if from_rover:
-            shotset = _shot_source(kind, rover, edge)
-        raw_bases = []
-        for path in bases:
-            if convert.raw_kind(path) not in (None, "rinex"):
-                done = convert.to_rinex(path, approx_time=when, progress=print_progress)
-                converted.append(done)
-                raw_bases.append(done.obs)
-            else:
-                raw_bases.append(path)
-        bases = raw_bases
+        inputs = sources.ppk_inputs(kind, source_file, rover, bases, approx_time=when, edge=edge, message=message,
+                                    camera=camera, progress=print_progress, reader=_shot_source)
+        shotset, rover, bases, converted = inputs.shotset, inputs.rover, inputs.bases, inputs.converted
         for done in converted:
             typer.echo(f"{done.source.name} ({done.kind}) converted: {done.epochs} epochs, {done.events} events")
         station = _station_by_id(base_station or base_baseline) if mode in ("station", "baseline") else None
