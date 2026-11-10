@@ -3401,7 +3401,7 @@ def gnss_convert(files: list[Path] = typer.Argument(..., exists=True, dir_okay=F
     """Convert raw receiver logs into RINEX 3.04 observations and navigation, as the PPK does.
 
     The conversion is kept in the cache of the program and used again while the log is the same; --out copies the
-    RINEX into a folder, named after each log. Prints the RINEX written, the epochs and the events (the shots on the
+    RINEX into a folder, named after each log (two logs of the same name are refused: the first is kept). Prints the RINEX written, the epochs and the events (the shots on the
     event pin), and what the conversion has to say."""
     import shutil
 
@@ -3411,6 +3411,7 @@ def gnss_convert(files: list[Path] = typer.Argument(..., exists=True, dir_okay=F
     if out is not None:
         out.mkdir(parents=True, exist_ok=True)
     failed = False
+    written: dict[str, Path] = {}  # the names written into --out in this run (case apart) and the log of each
     for path in files:
         try:
             done = convert.to_rinex(path, kind=kind, approx_time=when, progress=print_progress)
@@ -3420,6 +3421,13 @@ def gnss_convert(files: list[Path] = typer.Argument(..., exists=True, dir_okay=F
             continue
         obs, nav = done.obs, done.nav
         if out is not None and done.kind != "rinex":
+            first = written.get(path.stem.lower())
+            if first is not None:
+                typer.echo(f"error: {path}: --out: {path.stem}.obs is written from {first} in this run, not written "
+                           "over: give the logs different names or convert them apart", err=True)
+                failed = True
+                continue
+            written[path.stem.lower()] = path
             obs = Path(shutil.copyfile(done.obs, out / f"{path.stem}.obs"))
             if done.nav is not None:
                 nav = Path(shutil.copyfile(done.nav, out / f"{path.stem}.nav"))
@@ -3437,13 +3445,18 @@ def gnss_convert(files: list[Path] = typer.Argument(..., exists=True, dir_okay=F
 @gnss_app.command("events")
 def gnss_events(file: Path = typer.Argument(..., exists=True, dir_okay=False, help="RINEX observations with events "
                                             "(epoch flag 5), a u-blox log with TIM-TM2, or RTKLIB's _events.pos"),
-                edge: str = typer.Option("falling", "--edge", help="u-blox: the edge of the signal at the event input "
-                                         "(falling, the default, or rising)")):
+                edge: Optional[str] = typer.Option(None, "--edge", help="u-blox: the edge of the signal at the event "
+                                                   "input (falling, the default, or rising)")):
     """List the shots on the event pin of a receiver: their number, GPS time, UTC and whether their time is valid."""
     from .gnss import convert, events, shots
 
-    if edge not in events.EDGES:
+    if edge is not None and edge not in events.EDGES:
         raise typer.BadParameter(f"one of {', '.join(events.EDGES)}", param_hint="--edge")
+    ubx = not file.name.endswith(".pos") and convert.raw_kind(file) == "ubx"
+    if edge is not None and not ubx:
+        raise typer.BadParameter("the edge is that of the time marks of a u-blox log: RINEX and RTKLIB's events "
+                                 "carry no edge to choose", param_hint="--edge")
+    edge = edge or "falling"
     try:
         if file.name.endswith(".pos"):
             shotset = events.events_pos(file)
@@ -3607,7 +3620,13 @@ def gnss_ppk(project: Path,
                                                  "attitude of each shot when the source gives it"),
              latency: float = typer.Option(0.0, "--latency", help="ms the camera exposes after the time of the "
                                            "shot"),
-             edge: str = typer.Option("falling", "--edge", help="ubx: the edge of the signal at the event input"),
+             edge: Optional[str] = typer.Option(None, "--edge", help="--shots ubx: the edge of the signal at the "
+                                                "event input (falling, the default, or rising)"),
+             message: str = typer.Option("auto", "--message", help="--shots log: as for ppg gnss log - ArduPilot: "
+                                         "cam or trig; PX4: capture or trigger; auto: the confirmed shots when the "
+                                         "log has them"),
+             camera: Optional[int] = typer.Option(None, "--camera", help="--shots log: the camera (I) of an "
+                                                  "ArduPilot log with several"),
              by: str = typer.Option("auto", "--by", help="how the photos are paired with the shots: auto, number, "
                                     "time or order"),
              approx_time: Optional[str] = typer.Option(None, "--approx-time", help="the day of the flight (GPS time), "
@@ -3663,10 +3682,10 @@ def gnss_ppk(project: Path,
     later, or PPG_RNX2RTKP.
 
     The shots can come from elsewhere than a DJI MRK (--shots, --shots-file): the events of the rover's receiver (its
-    RINEX, or a u-blox log: --edge), an ArduPilot or PX4 log, an _events.pos; then --lever places the camera from the
-    antenna in the body of the drone, --latency adds the delay of the camera to the times of the shots, and --by says
-    how the photos pair with them. A raw rover or base (u-blox, RTCM 3, ...) is converted to RINEX first, as ``ppg gnss
-    convert`` does."""
+    RINEX, or a u-blox log: --edge), an ArduPilot or PX4 log (--message, --camera, as for ``ppg gnss log``), an
+    _events.pos; then --lever places the camera from the antenna in the body of the drone, --latency adds the delay of
+    the camera to the times of the shots, and --by says how the photos pair with them. A raw rover or base (u-blox,
+    RTCM 3, ...) is converted to RINEX first, as ``ppg gnss convert`` does."""
     from .gnss import apply as gnss
     from .gnss import base as gbase
     from .gnss import convert, download, frames, ppk
@@ -3697,8 +3716,14 @@ def gnss_ppk(project: Path,
     if by not in gshots.BY:
         raise typer.BadParameter(f"one of {', '.join(gshots.BY)}", param_hint="--by")
     arm = _lever(lever)
-    if edge not in ("falling", "rising"):
+    if edge is not None and edge not in ("falling", "rising"):
         raise typer.BadParameter("falling or rising", param_hint="--edge")
+    if edge is not None and kind != "ubx":
+        raise typer.BadParameter("the edge of the time marks of a u-blox log, for --shots ubx only", param_hint="--edge")
+    edge = edge or "falling"
+    if kind != "log" and (message != "auto" or camera is not None):
+        raise typer.BadParameter("the messages and the camera of an autopilot log, for --shots log only",
+                                 param_hint="--message/--camera")
     if kind == "mrk" and (arm is not None or latency or by != "auto"):
         _gnss_failed(ValueError("a DJI MRK carries the lever arm of each shot and is paired as it always was: "
                                 "--lever, --latency and --by are for the other sources of shots"))
@@ -3726,8 +3751,8 @@ def gnss_ppk(project: Path,
     frame = base_frame or frames.UNKNOWN
     doc, ch = _open(project, chunk)
     try:
-        from_rover = kind == "events" and source_file == rover
-        shotset = None if from_rover else _shot_source(kind, source_file, edge)
+        from_rover = kind == "events" and source_file.resolve() == rover.resolve()
+        shotset = None if from_rover else _shot_source(kind, source_file, edge, message, camera)
         if when is None and shotset is not None:
             timed = [s.gps_time for s in shotset.shots if s.valid]
             when = timed[0] if timed else None

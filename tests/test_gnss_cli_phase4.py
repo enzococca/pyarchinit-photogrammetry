@@ -2,6 +2,7 @@
 source."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -116,12 +117,78 @@ def test_cli_log_applies_positions(tmp_path):
     assert status.exit_code == 0 and "msl:12" in status.output, status.output
 
 
+def _refused(result, *words: str) -> None:
+    """A usage error (exit 2) whose message holds ``words``."""
+    assert result.exit_code == 2, result.output
+    text = " ".join(re.sub("[\u2500-\u257f]", " ", result.output).split())  # the box of the error wraps it
+    for word in words:
+        assert word in text, result.output
+
+
 def test_cli_log_options_checked(tmp_path):
     log, expected = _px4_log(tmp_path)
     project, _folder = _project(tmp_path, {e["seq"]: e["true"] for e in expected}, gnss_ulog.LEAP_2025)
-    assert _run("gnss", "log", project, log, "--message", "cam").exit_code == 2
-    assert _run("gnss", "log", project, log, "--lever", "1,2").exit_code == 2
-    assert _run("gnss", "log", project, log, "--by", "colour").exit_code == 2
+    _refused(_run("gnss", "log", project, log, "--message", "cam"), "capture and trigger messages, not cam and trig")
+    _refused(_run("gnss", "log", project, log, "--lever", "1,2"), "--lever takes F,R,D")
+    _refused(_run("gnss", "log", project, log, "--by", "colour"), "one of auto")
+
+
+@needs_a_converter
+def test_cli_convert_out_same_name(tmp_path):
+    """Two logs of the same name in different folders, --out: the second is not written over the first (it was,
+    silently); said, exit 1."""
+    first, second = tmp_path / "a" / "rover.ubx", tmp_path / "b" / "rover.ubx"
+    for path in (first, second):
+        path.parent.mkdir()
+        path.write_bytes((PHASE4 / "ubx_20080526_64k.ubx").read_bytes())
+    out = tmp_path / "rinex"
+    result = _run("gnss", "convert", first, second, "--out", out)
+    assert result.exit_code == 1, result.output
+    assert "rover.obs is written from" in " ".join(result.output.split()), result.output
+    assert sorted(p.name for p in out.iterdir()) == ["rover.nav", "rover.obs"]
+
+
+def test_cli_ppk_options_of_the_sources(tmp_path, monkeypatch):
+    """--message and --camera of ppg gnss log reach the log's reader with --shots log and are refused with the other
+    sources; --edge is refused but for u-blox time marks (it was ignored)."""
+    log, expected = _px4_log(tmp_path)
+    project, folder = _project(tmp_path, {e["seq"]: e["true"] for e in expected}, gnss_ulog.LEAP_2025)
+    rover = PHASE4 / "ubx_20080526_64k.obs"
+    ppk = ("gnss", "ppk", project, "--rover", rover, "--base", rover, "--photos", folder)
+    _refused(_run(*ppk, "--shots", "log", "--shots-file", log, "--message", "cam"), "not cam and trig")
+    _refused(_run(*ppk, "--shots", "events", "--message", "capture"), "--message", "--shots log")
+    _refused(_run(*ppk, "--shots", "events", "--camera", "1"), "--camera", "--shots log")
+    _refused(_run(*ppk, "--shots", "events", "--edge", "rising"), "--edge", "--shots ubx")
+    _refused(_run(*ppk, "--shots", "log", "--shots-file", log, "--edge", "falling"), "--edge", "--shots ubx")
+    _refused(_run("gnss", "events", PHASE4 / "ubx_20080526_64k_tm2.obs", "--edge", "rising"), "--edge", "u-blox")
+    asked = {}
+
+    def reader(path, message="auto", camera=None):
+        asked.update(path=path, message=message, camera=camera)
+        raise ValueError("read no further")
+
+    monkeypatch.setattr("pyarchinit_photogrammetry.cli._log_shots", reader)
+    result = _run(*ppk, "--shots", "log", "--shots-file", log, "--message", "trigger")
+    assert result.exit_code == 1 and "read no further" in result.output, result.output
+    assert asked == {"path": log, "message": "trigger", "camera": None}
+
+
+@needs_rtklib
+@needs_a_converter
+def test_cli_ppk_events_of_a_raw_rover_named_twice(tmp_path, monkeypatch):
+    """--shots events of a raw u-blox rover named by --shots-file another way than by --rover (an absolute path, a
+    relative one): the same file, its events read from its conversion (it was read as RINEX and refused)."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    rover = events_test._ubx_rover(tmp_path / "rover")
+    times = [t for _m, t in events_test.MARKS[:3]]
+    project, folder = _project(tmp_path, {i: t for i, t in enumerate(times, 1)}, events_test.LEAP_2008,
+                               zone=events_test.ZONE)
+    base = events_test._alone(events_test.UBX_OBS, tmp_path / "base")
+    monkeypatch.chdir(rover.parent)
+    result = _run("gnss", "ppk", project, "--rover", rover.name, "--shots-file", rover, "--base", base, "--nav",
+                  events_test.UBX_NAV, "--shots", "events", "--photos", folder, "--by", "order")
+    assert result.exit_code == 0, result.output
+    assert "3 of 3 photos took the PPK position of their shot" in result.output
 
 
 @needs_rtklib
