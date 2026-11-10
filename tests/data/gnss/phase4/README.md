@@ -25,7 +25,12 @@ convbin -r nov   -v 3.04 -y S -y I -o oemv_200911218_64k.obs   -n oemv_200911218
 ```
 
 They are equal to what the native core writes except the line `PGM / RUN BY / DATE` (program and date of the run)
-and the `COMMENT` line `log: <input file>` (its path). The navigation file of `ubx_20080526_64k_tm2.ubx` is the
+and the `COMMENT` line `log: <input file>` (its path). Equal on these samples, not in general: the core builds RTKLIB
+with `NFREQ=3` (as its post-processing needs) where this convbin has `NFREQ=4`, so it keeps at most 6 signals of a
+satellite in an epoch instead of 7, and on logs of many signals (Galileo E6, BeiDou B3I, B1C, B2a beside the others)
+it may write fewer observation types. These samples have 3 signals at most. RTKLIB-EX's `test/data/rcvraw` at this
+commit holds no log of more signals (no u-blox RXM-RAWX, no RTCM 3 MSM7 of four frequencies): the difference is not
+pinned by a test. The navigation file of `ubx_20080526_64k_tm2.ubx` is the
 same as that of `ubx_20080526_64k.ubx` and is not kept.
 
 `ubx_20080526_64k_tm2.ubx` is not kept either: the tests make it again from `ubx_20080526_64k.ubx` with

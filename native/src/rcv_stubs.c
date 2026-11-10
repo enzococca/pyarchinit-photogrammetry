@@ -3,7 +3,8 @@
 *
 * rcvraw.c (RTKLIB-EX, unchanged) calls the decoder of every receiver format
 * RTKLIB knows. ppg_core builds two of them from RTKLIB's src/rcv: ublox.c and
-* novatel.c (T. Takasu, under RTKLIB's BSD 2-clause licence); RTCM 3 is decoded
+* novatel.c (T. Takasu; BSD 2-clause inferred from RTKLIB's license.txt, the
+* files name no licence); RTCM 3 is decoded
 * by rtcm*.c, which the post-processing already builds. The other decoders of
 * src/rcv are files of other authors whose headers carry no licence of their
 * own (see native/vendor/rtklib/VERSION) and are not part of this package.

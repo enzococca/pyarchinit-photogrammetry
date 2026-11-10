@@ -12,14 +12,18 @@ receiver decoders, unchanged too: src/convrnx.c, src/rcvraw.c, src/rcv/ublox.c a
 Streams, servers, downloads and the applications are left out. Compile-time settings come from
 native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
 
-The receiver decoders (src/rcv) were vendored one by one after reading the licence header of each:
-only those whose licence is clearly RTKLIB's BSD 2-clause, compatible with the GPL-2.0-or-later of
-the core, are here.
+The receiver decoders (src/rcv) were vendored one by one after reading the header of each. No file
+of src/rcv names a licence: each has a copyright line, most with "All rights reserved". BSD 2-clause
+for ublox.c and novatel.c is an inference, not a statement in the files: their copyright holder,
+T. Takasu, is the one of license.txt, the BSD 2-clause licence (compatible with the GPL-2.0-or-later
+of the core) under which RTKLIB distributes its sources. Only those two are here.
 
   ublox.c     "Copyright (C) 2007-2020 by T.TAKASU" and "Copyright (C) 2014 by T.SUZUKI": RTKLIB's
               author, the copyright holder of license.txt (T. Suzuki's changes are part of RTKLIB's
-              own releases). Vendored: u-blox UBX (RXM-RAWX, RXM-SFRBX, TIM-TM2, ...).
-  novatel.c   "Copyright (C) 2007-2020 by T.TAKASU": vendored: NovAtel OEM4/OEMV/OEM6/OEM7, OEMStar.
+              own releases), "All rights reserved", no licence named. Vendored: u-blox UBX (RXM-RAWX,
+              RXM-SFRBX, TIM-TM2, ...).
+  novatel.c   "Copyright (C) 2007-2020 by T.TAKASU, All rights reserved", no licence named. Vendored:
+              NovAtel OEM4/OEMV/OEM6/OEM7, OEMStar.
   septentrio.c "Copyright (C) 2013 by Fabrizio Tappero. Copyright (C) 2015 by Jens Reimann": other
               authors, no licence in the file. Not vendored.
   rt17.c      "Copyright (C) 2016 Daniel A. Cook, All rights reserved. Copyright (C) 2020 T.TAKASU",
