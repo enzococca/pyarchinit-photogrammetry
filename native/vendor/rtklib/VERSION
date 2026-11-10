@@ -6,9 +6,40 @@ license:    BSD 2-clause (license.txt beside this file)
 
 Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged,
 in src/: rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
-ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c). The receiver decoders
-(src/rcv), streams, servers, downloads and the applications are left out. Compile-time settings
-come from native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
+ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c), and, from 0.8 of the core,
+those of convbin's conversion of raw receiver logs (app/consapp/convbin/gcc/makefile) with two of its
+receiver decoders, unchanged too: src/convrnx.c, src/rcvraw.c, src/rcv/ublox.c and src/rcv/novatel.c.
+Streams, servers, downloads and the applications are left out. Compile-time settings come from
+native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
+
+The receiver decoders (src/rcv) were vendored one by one after reading the licence header of each:
+only those whose licence is clearly RTKLIB's BSD 2-clause, compatible with the GPL-2.0-or-later of
+the core, are here.
+
+  ublox.c     "Copyright (C) 2007-2020 by T.TAKASU" and "Copyright (C) 2014 by T.SUZUKI": RTKLIB's
+              author, the copyright holder of license.txt (T. Suzuki's changes are part of RTKLIB's
+              own releases). Vendored: u-blox UBX (RXM-RAWX, RXM-SFRBX, TIM-TM2, ...).
+  novatel.c   "Copyright (C) 2007-2020 by T.TAKASU": vendored: NovAtel OEM4/OEMV/OEM6/OEM7, OEMStar.
+  septentrio.c "Copyright (C) 2013 by Fabrizio Tappero. Copyright (C) 2015 by Jens Reimann": other
+              authors, no licence in the file. Not vendored.
+  rt17.c      "Copyright (C) 2016 Daniel A. Cook, All rights reserved. Copyright (C) 2020 T.TAKASU",
+              and "Copyright (C) 2014, 2016 by Daniel A. Cook. All Rights Reserved." in its text, "written
+              ... for inclusion into the RTKLIB library", with no licence named. Not vendored.
+  unicore.c   "Copyright (C) 2024 Avinab Malla, All rights reserved.", no licence in the file. Not
+              vendored.
+  crescent.c, skytraq.c, javad.c, nvs.c, binex.c, swiftnav.c, tersus.c, comnav.c: formats the
+              program does not take; not looked at, not vendored.
+
+These files are distributed inside RTKLIB under its BSD 2-clause licence, and they may well be
+covered by it; but the headers of septentrio.c, rt17.c and unicore.c name authors other than the
+holder of license.txt and reserve their rights without naming a licence, so they stay out until
+their authors (or RTKLIB's maintainers) state it. The entry points that rcvraw.c calls for them, and
+for the other receivers, are stubs of ours in native/src/rcv_stubs.c, which decode nothing;
+ppg_convbin() refuses those formats by name (code -6). RTCM 3 needs no file of src/rcv: rtcm.c and
+rtcm3.c decode it.
+
+RINEX is never an input of convrnx() here (ppg_convbin() takes u-blox, RTCM 3 and NovAtel only):
+convrnx() would decompress a compressed RINEX file through a shell command (rtk_uncompress).
 
 Also left out: src/sofa.c, which the makefile of rnx2rtkp lists. It is a bundle of routines of the
 IAU SOFA library (epv00 and moon98 with the functions they need), and SOFA has a licence of its

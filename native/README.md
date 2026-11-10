@@ -21,6 +21,10 @@ the vertices with the break lines as constraints (`tin_triangulate`, with the cr
 [spade](https://github.com/Stoeoef/spade), robust predicates in double precision; constraints that
 cross are split at a new vertex), the TIN rasterised on a grid (`tin_rasterize`), its contour
 segments (`tin_contours`) and its exact cut and fill against a plane (`tin_volume`).
+From 0.8 (API 11) RTKLIB's conversion of raw receiver logs into RINEX 3 (`raw_to_rinex`, what
+RTKLIB's `convbin` does, with `convert_cancel` to stop it): u-blox UBX (time marks TIM-TM2 as event
+records), RTCM 3 and NovAtel; Septentrio SBF, Trimble RT-17 and Unicore are known by name but their
+decoders are not built (`vendor/rtklib/VERSION` says why).
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 
@@ -38,7 +42,8 @@ same project (on RTKLIB's test data 115 of 120 instead of about 40).
 License: GPL-2.0-or-later. The extension includes RTKLIB-EX v2.5.1
 (https://github.com/rtklibexplorer/RTKLIB, commit 62d4677ed8425a4e2748c6d390b500d1afb493fc),
 Copyright (c) 2007-2020, T. Takasu, distributed under the BSD 2-clause license: its text is in
-`vendor/rtklib/license.txt` and in `NOTICE`, which come with the package. RTKLIB's optional routines
+`vendor/rtklib/license.txt` and in `NOTICE`, which come with the package. Of RTKLIB's receiver
+decoders only `ublox.c` (T. Takasu, T. Suzuki) and `novatel.c` (T. Takasu) are included. RTKLIB's optional routines
 of the IAU SOFA library (`sofa.c`, a licence of their own) are not included.
 
 The Rust crates built into the extension are under licences compatible with the GPL (MIT or
