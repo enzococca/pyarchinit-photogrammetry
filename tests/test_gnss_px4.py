@@ -295,3 +295,25 @@ def test_format_larger_than_a_message_refused(tmp_path, case):
     assert log.counts[("t", 0)] == 1 and log.get("t") is None
     with _within(10.0), pytest.raises(ValueError, match="larger than a data message"):
         log.fields("t")
+
+
+@pytest.mark.parametrize("bad", [b"t:uint64_t timestamp;uint8_t[x] a;", b"t:uint64_t timestamp;uint8_t a;uint8_t a;",
+                                 b"t:uint64_t timestamp;broken z;"])
+def test_bad_format_fails_only_its_topic(tmp_path, bad):
+    """A format that cannot be read (a field of bad syntax, a field name twice, a nested format of bad syntax) is
+    skipped and counted: the other topics are read; asking for its topic is a ValueError naming it; with every topic
+    asked for, it is left out (it killed the whole log)."""
+    good = gnss_ulog.message("F", b"u:uint64_t timestamp;float w;")
+    nested = gnss_ulog.message("F", b"broken:uint8_t[ a;")
+    raw = (gnss_ulog.header() + nested + gnss_ulog.message("F", bad) + good + _T_SUBSCRIBE
+           + gnss_ulog.message("A", struct.pack("<BH", 0, 1) + b"u")
+           + gnss_ulog.message("D", struct.pack("<HQB", 0, 5, 1) + b"\0")
+           + gnss_ulog.message("D", struct.pack("<HQf", 1, 6, 2.5)))
+    log = _read(tmp_path, raw, topics=["u"])
+    assert log.get("u")["w"].tolist() == [2.5] and log.counts[("t", 0)] == 1
+    assert "broken" in log.bad_formats
+    assert any("cannot be read" in w for w in log.warnings), log.warnings
+    with pytest.raises(ValueError, match=r"topic 't'"):
+        _read(tmp_path, raw, topics=["t", "u"])
+    log = _read(tmp_path, raw)
+    assert log.get("u")["w"].tolist() == [2.5] and log.get("t") is None and "t" in log.bad_formats

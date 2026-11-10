@@ -52,7 +52,8 @@ class ULog:
     ``params``, ``subscriptions`` (``msg_id`` -> ``(topic, multi_id)``), ``data`` ((topic, multi_id) -> structured
     array, of the topics read), ``counts`` (data messages of every subscription, read or not), ``dropouts`` and
     ``dropout_ms``, ``logged`` (``(level, timestamp, text)`` of the ``L`` and ``C`` messages), ``appended`` (whether
-    data was appended), ``offsets_ignored`` (offsets of appended data not taken), ``damaged`` (bytes skipped to find the next sync)."""
+    data was appended), ``offsets_ignored`` (offsets of appended data not taken), ``bad_formats`` (a format, or a
+    topic depending on one, that cannot be read -> why: skipped and counted), ``damaged`` (bytes skipped to find the next sync)."""
     path: str
     version: int = 1
     start_us: int = 0
@@ -68,6 +69,7 @@ class ULog:
     logged: list = field(default_factory=list)
     appended: bool = False
     offsets_ignored: int = 0
+    bad_formats: dict = field(default_factory=dict)
     damaged: int = 0
 
     def topics(self) -> list[str]:
@@ -95,6 +97,10 @@ class ULog:
         if self.offsets_ignored:
             out.append(f"{Path(self.path).name}: an offset of appended data before the data it follows or past the end "
                        "of the file: no appended data read from it on")
+        if self.bad_formats:
+            n = len(self.bad_formats)
+            out.append(f"{Path(self.path).name}: {n} format{'s' if n > 1 else ''} that cannot be read "
+                       f"({', '.join(sorted(self.bad_formats)[:5])}{', ...' if n > 5 else ''}): their topics not read")
         if self.dropouts:
             out.append(f"{Path(self.path).name}: {self.dropouts} dropout{'s' if self.dropouts > 1 else ''} of the log "
                        f"({self.dropout_ms} ms in all): data lost while the log could not write")
@@ -164,6 +170,8 @@ def _flatten(name: str, formats: dict, prefix: str = "", depth: int = 0) -> list
 
 
 def _parse_format(text: str) -> tuple[str, list[tuple[str, int, str]]]:
+    """The name and fields of the text of an ``F`` message; a field of bad syntax or a field name given twice is a
+    ``ValueError``."""
     name, _, body = text.partition(":")
     fields = []
     for part in body.split(";"):
@@ -171,7 +179,9 @@ def _parse_format(text: str) -> tuple[str, list[tuple[str, int, str]]]:
             continue
         m = _FIELD.match(part)
         if not m:
-            raise ValueError(f"field {part!r} of format {name!r}")
+            raise ValueError(f"field {part!r} of format {name.strip()!r}")
+        if any(f[2] == m.group(3) for f in fields):
+            raise ValueError(f"field {m.group(3)!r} twice in format {name.strip()!r}")
         fields.append((m.group(1), int(m.group(2)) if m.group(2) else 0, m.group(3)))
     return name.strip(), fields
 
@@ -179,7 +189,9 @@ def _parse_format(text: str) -> tuple[str, list[tuple[str, int, str]]]:
 def read_ulog(path: str | Path, topics=None) -> ULog:
     """Read the ULog file ``path``: every definition, and the data of the ``topics`` (names; None: all) as structured
     arrays. A file that is not a ULog, of another version or with an incompatible flag this reader does not know, is a
-    ``ValueError``."""
+    ``ValueError``; so is a topic asked for by name whose format cannot be read (bad syntax, a field name twice, an
+    unknown or bad nested format, too large: the message names the topic). Such formats are otherwise skipped and
+    counted in ``bad_formats`` - with ``topics`` None, the topics that depend on them are left out."""
     path = Path(path)
     raw = path.read_bytes()
     if len(raw) < 16 or raw[:7] != MAGIC:
@@ -285,11 +297,24 @@ def _message(state: _State, kind: int, body: bytes) -> None:
         log.counts.setdefault((name, multi_id), 0)
         if msg_id in reading:
             state.done.append(reading.pop(msg_id))
-        if (state.wanted is None or name in state.wanted) and name in formats:
+        if state.wanted is not None and name in state.wanted:
             reading[msg_id] = [(name, multi_id), _dtype(state, name), []]
+        elif state.wanted is None and name not in log.bad_formats:
+            try:
+                reading[msg_id] = [(name, multi_id), _dtype(state, name), []]
+            except ValueError as exc:  # every topic asked for: the ones that cannot be read are left out
+                log.bad_formats[name] = str(exc).split(": ", 1)[-1]
     elif kind == ord("F"):
-        name, fields = _parse_format(body.decode("ascii", "replace").strip("\0"))
+        text = body.decode("ascii", "replace").strip("\0")
+        try:
+            name, fields = _parse_format(text)
+        except ValueError as exc:
+            name = text.partition(":")[0].strip()
+            log.bad_formats[name] = str(exc)
+            formats.pop(name, None)
+            return
         formats[name] = fields
+        log.bad_formats.pop(name, None)
     elif kind in (ord("I"), ord("P"), ord("Q"), ord("M")):
         skip = {ord("I"): 0, ord("P"): 0, ord("Q"): 1, ord("M"): 1}[kind]
         if size < skip + 1:
@@ -322,6 +347,9 @@ def _dtype(state: _State, name: str) -> np.dtype:
     """The numpy type of the data of topic ``name`` (once per topic); a format that cannot be read is a
     ``ValueError`` naming the topic."""
     if name not in state.dtypes:
+        if name in state.log.bad_formats:
+            raise ValueError(f"{Path(state.log.path).name}: the data of topic {name!r} cannot be read: "
+                             f"{state.log.bad_formats[name]}")
         try:
             state.dtypes[name] = np.dtype(_flatten(name, state.formats))
         except ValueError as exc:
