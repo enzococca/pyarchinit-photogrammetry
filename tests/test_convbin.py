@@ -1,5 +1,6 @@
 """Raw receiver logs converted to RINEX inside the native core (``raw_to_rinex``, API 11) as the official ``convbin``
-of RTKLIB-EX 2.5.1 converts them: tests/data/gnss/phase4 holds samples of RTKLIB's test data and what ``convbin`` made
+of RTKLIB-EX 2.5.1 converts them, on samples of at most 3 signals (the core keeps 6 signals of a satellite, convbin 7:
+README.md of the data): tests/data/gnss/phase4 holds samples of RTKLIB's test data and what ``convbin`` made
 of them, described in its README.md. Time marks of a u-blox log (TIM-TM2) become event records (flag 5); damaged
 files, cancelled runs and refused formats leave no file behind. Without the core the program runs a ``convbin`` it is
 given, and without either it says what to install."""
@@ -146,6 +147,23 @@ def test_damaged_file_leaves_nothing(tmp_path, data):
 
 
 @needs_the_core
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="a folder that cannot be written to: POSIX permissions, not root")
+def test_output_folder_not_writable(tmp_path):
+    """An output that cannot be opened is code -1, not -2 ("not a log of that format"). (A missing folder is made by
+    RTKLIB, as convbin makes it.)"""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        result, _obs, _nav = _convert("ubx", DATA / "ubx_20080526_64k.ubx", locked)
+        assert result["code"] == -1 and "cannot write" in result["message"] and "locked" in result["message"], result
+        assert list(locked.iterdir()) == []
+    finally:
+        locked.chmod(0o700)
+
+
+@needs_the_core
 def test_missing_file_leaves_nothing(tmp_path):
     result, _obs, _nav = _convert("ubx", tmp_path / "nowhere.ubx", tmp_path)
     assert result["code"] == -1 and "nowhere.ubx" in result["message"], result
@@ -250,6 +268,31 @@ def test_cancel_leaves_nothing(tmp_path):
     assert result["code"] == 0 and obs.exists()
 
 
+@needs_the_core
+def test_cancel_while_waiting_for_the_lock(tmp_path):
+    """A conversion that waits behind another run of RTKLIB is cancelled by a cancel pressed while it waits."""
+    import ppg_core
+
+    big = _big_ubx(tmp_path, copies=600)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    results = {}
+    holder = threading.Thread(target=lambda: results.setdefault("first", _convert("ubx", big, first)))
+    waiter = threading.Thread(target=lambda: results.setdefault(
+        "second", _convert("ubx", DATA / "ubx_20080526_64k.ubx", second)))
+    holder.start()
+    time.sleep(0.1)  # the first one holds the lock
+    waiter.start()
+    time.sleep(0.1)  # the second one waits for it
+    ppg_core.convert_cancel()
+    holder.join()
+    waiter.join()
+    assert results["second"][0]["code"] == 1, results["second"][0]
+    assert results["first"][0]["code"] == 1, results["first"][0]
+    assert list(first.iterdir()) == [] and list(second.iterdir()) == []
+
+
 PPK_STATIC = """\
 pos1-posmode       =static
 pos1-frequency     =l1+l2
@@ -273,13 +316,14 @@ def _solution_rows(path: Path) -> list[str]:
 @needs_the_core
 def test_convert_and_ppk_never_together(tmp_path):
     """The conversion and the post-processing share RTKLIB's globals: run from two threads at once, each gives what it
-    gives alone (they wait for each other on one lock)."""
+    gives alone, and the post-processing started while the conversion runs ends after it (they wait for each other on
+    one lock: alone it takes a tenth of the time of the conversion)."""
     conf = tmp_path / "static.conf"
     conf.write_text(PPK_STATIC)
     files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
     code, message = _native.ppk_solve(str(conf), files, str(tmp_path / "alone.pos"))
     assert code == 0, message
-    src = _big_ubx(tmp_path, copies=40)
+    src = _big_ubx(tmp_path, copies=300)
     alone = tmp_path / "alone"
     alone.mkdir()
     first, obs_alone, _ = _convert("ubx", src, alone)
@@ -291,15 +335,21 @@ def test_convert_and_ppk_never_together(tmp_path):
 
     def convert():
         results["convert"] = _convert("ubx", src, together)
+        results["convert_end"] = time.perf_counter()
 
     def solve():
         results["ppk"] = _native.ppk_solve(str(conf), files, str(tmp_path / "together.pos"))
+        results["ppk_end"] = time.perf_counter()
 
+    started = time.perf_counter()
     threads = [threading.Thread(target=convert), threading.Thread(target=solve)]
-    for t in threads:
-        t.start()
+    threads[0].start()
+    time.sleep(0.05)  # the conversion holds the lock
+    threads[1].start()
     for t in threads:
         t.join()
+    assert results["convert_end"] - started > 0.1, "the conversion was too short to hold the lock"
+    assert results["ppk_end"] >= results["convert_end"]
     assert results["ppk"][0] == 0, results["ppk"]
     assert _solution_rows(tmp_path / "together.pos") == _solution_rows(tmp_path / "alone.pos")
     result, obs, _ = results["convert"]
@@ -360,7 +410,9 @@ def test_without_the_core_a_failing_convbin_leaves_nothing(tmp_path, monkeypatch
     out = tmp_path / "out"
     out.mkdir()
     result = _native.raw_to_rinex("ubx", DATA / "ubx_20080526_64k.ubx", out / "a.obs", out / "a.nav")
-    assert result["code"] != 0
+    assert result["code"] == -2, result  # a failure, not a cancel (code 1)
+    if os.name != "nt":
+        assert "log open error" in result["message"]
     assert list(out.iterdir()) == []
 
 

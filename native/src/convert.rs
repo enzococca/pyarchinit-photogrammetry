@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_double, c_int};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use pyo3::prelude::*;
 
@@ -22,21 +22,25 @@ extern "C" {
                    msg: *mut c_char, msglen: c_int) -> c_int;
 }
 
-/// Raised by `convert_cancel`, read by the shim's `showmsg` while a conversion runs (RTKLIB stops on it), lowered
-/// when a conversion starts.
-static CANCEL: AtomicBool = AtomicBool::new(false);
+/// How many times `convert_cancel` was called. A conversion notes it when it is called, before it waits for the lock
+/// of RTKLIB, and stops when the count has moved: a cancel pressed while it waits behind another run is honoured, one
+/// pressed before it was called is not.
+static CANCELS: AtomicU64 = AtomicU64::new(0);
+/// The count noted by the conversion that holds the lock now.
+static RUNNING_SINCE: AtomicU64 = AtomicU64::new(0);
 
 /// For ppk_shim.c: the conversion running now is to stop.
 #[no_mangle]
 pub extern "C" fn ppg_convert_cancelled() -> c_int {
-    c_int::from(CANCEL.load(Ordering::SeqCst))
+    c_int::from(CANCELS.load(Ordering::SeqCst) != RUNNING_SINCE.load(Ordering::SeqCst))
 }
 
-/// The conversion running now (`raw_to_rinex`, any thread) stops at RTKLIB's next status message and leaves no file;
-/// nothing happens when none runs, and a later conversion is not affected.
+/// Every conversion of the core called before this (`raw_to_rinex`, any thread), running or waiting for the lock of
+/// RTKLIB, stops at RTKLIB's next status message and leaves no file; nothing happens when none is under way, and a
+/// later conversion is not affected. An external convbin (the fallback of the Python package) is not stopped.
 #[pyfunction]
 pub fn convert_cancel() {
-    CANCEL.store(true, Ordering::SeqCst);
+    CANCELS.fetch_add(1, Ordering::SeqCst);
 }
 
 /// The SYS_ mask of RTKLIB of a string of system letters (G R E J S C I), or the letter that is none of them.
@@ -87,8 +91,13 @@ fn counts_of(counts: [c_int; 4]) -> HashMap<String, i64> {
 /// "novatel" (OEM4/V/6/7, OEMStar), and "sbf", "rt17", "unicore", which are known and refused (code -6): their
 /// decoders are not part of this package. `rinex_version` "3.00" to "3.05" (one navigation file for every system).
 ///
+/// RTKLIB is built here with NFREQ=3 and NEXOBS=3, as the post-processing needs, where convbin's makefile has NFREQ=4:
+/// at most 6 signals of a satellite in an epoch are kept instead of 7, so on logs of many signals (Galileo E1, E5a,
+/// E5b, E5ab and E6, BeiDou B1I, B2I, B3I, B1C and B2a...) fewer observation types may be written than convbin
+/// writes; on RTKLIB's u-blox, RTCM 3 and NovAtel samples (3 signals at most) the output is the same.
+///
 /// Returns the shim's code (0 done; 1 cancelled by `convert_cancel`; -1 `src` could not be read or an output not
-/// written; -2 no observations decoded: not a log of that format, or damaged; -3 bad arguments: a format not known,
+/// opened or written (a folder missing or not writable); -2 no observations decoded: not a log of that format, or damaged; -3 bad arguments: a format not known,
 /// a path of 1000 bytes or more or with '*' or '%', which RTKLIB would replace, no approximate time for RTCM 3, a
 /// version or systems out of range; -5 the thread could not be put in the "C" locale for numbers; -6 a decoder not
 /// built), RTKLIB's last status line or the error, and the counts {"epochs", "events", "navigation", "errors"} of
@@ -122,13 +131,14 @@ pub fn raw_to_rinex(py: Python<'_>, format: &str, src: &str, obs: &str, nav: &st
     let nav_c = c_text(&nav_part.to_string_lossy(), "the navigation file")?;
     let (obs, nav) = (PathBuf::from(obs), PathBuf::from(nav));
 
+    let since = CANCELS.load(Ordering::SeqCst); // before waiting for the lock
     let (code, message, counts) = py.allow_threads(move || {
         let mut msg = vec![0u8; MSGLEN];
         let mut counts: [c_int; 4] = [0; 4];
         let _guard = rtklib::lock(); // shared with ppk_solve (ppk.rs)
         let _ = fs::remove_file(&obs_part); // a part left by a process that died
         let _ = fs::remove_file(&nav_part);
-        CANCEL.store(false, Ordering::SeqCst);
+        RUNNING_SINCE.store(since, Ordering::SeqCst);
         // SAFETY: every pointer is a NUL-terminated string alive until the call returns, counts holds the 4 ints the
         // shim writes, msg is MSGLEN bytes and the shim writes at most msglen bytes, NUL included; the lock keeps
         // RTKLIB's globals to one caller

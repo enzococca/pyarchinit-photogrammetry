@@ -400,7 +400,9 @@ def convbin_identity() -> str:
 
 
 def convert_cancel() -> None:
-    """Stops the conversion of the core running now (it leaves no file); nothing without the core or a conversion."""
+    """Stops the conversions of the core under way, running or waiting for the lock of RTKLIB (they leave no file);
+    nothing without the core or a conversion. An external convbin (the fallback of :func:`raw_to_rinex`) is not
+    stopped: it runs to its end."""
     fn = kernel("convert_cancel")
     if fn is not None:
         fn()
@@ -429,10 +431,16 @@ def raw_to_rinex(format: str, src, obs, nav, approx_gps_seconds: float | None = 
     1980-01-06), needed by RTCM 3 and RT-17 (time of the week only), convbin's ``-tr``; ``systems``: the letters of
     the satellite systems kept (G R E J S C I; convbin's ``-y`` leaves out the others).
 
+    The core is built with NFREQ=3 and NEXOBS=3, as the post-processing needs, where convbin's makefile has
+    NFREQ=4: it keeps at most 6 signals of a satellite in an epoch instead of 7, so on logs of many signals (Galileo
+    E1, E5a, E5b, E5ab and E6, BeiDou B1I, B2I, B3I, B1C and B2a...) it may write fewer observation types than
+    convbin; on RTKLIB's u-blox, RTCM 3 and NovAtel samples (3 signals at most) the output is the same.
+
     Returns ``{"code", "message", "epochs", "events", "navigation", "errors"}``: code 0 done, 1 cancelled
     (:func:`convert_cancel`), -1 the log unreadable or an output not written, -2 no observations decoded (not a log of
     that format, or damaged), -3 bad arguments, -5 the thread could not be put in the C locale, -6 a decoder the core
-    does not carry and no convbin program to run instead; with an external convbin, its exit status (0 or 1). The
+    does not carry and no convbin program to run instead; with an external convbin, 0 or -2 (it failed: the end of its
+    messages). :func:`convert_cancel` stops the core only. The
     outputs are written beside ``obs`` and ``nav`` with ".part" after their names and renamed when complete: on any
     code but 0 neither is there.
 
@@ -487,8 +495,10 @@ def _run_convbin(tool: str, format: str, src: Path, obs: Path, nav: Path, approx
         stats = [line for line in lines if _STAT.search(line)]
         line = stats[-1] if stats else _last_message(proc.stderr or "")
         counts = _counts(stats[-1]) if stats else _counts("")
-        if proc.returncode != 0:
-            return {"code": 1, "message": line or f"convbin: exit status {proc.returncode}", **counts}
+        if proc.returncode != 0:  # -2: a failure (1 would read as cancelled)
+            tail = " | ".join(lines[-3:]) if lines else ""
+            return {"code": -2, "message": f"convbin failed on {src.name} (exit status {proc.returncode})"
+                                           + (f": {tail}" if tail else ""), **counts}
         if not obs_part.exists() or (stats and counts["epochs"] <= 0):
             return {"code": -2, "message": f"no observations decoded from {src.name}: not a log of the {format} format, "
                                            f"or damaged (convbin: {line})", **counts}

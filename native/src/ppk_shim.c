@@ -418,7 +418,8 @@ static int ppg_run_convbin(int format, const char *infile, double approx_gps_sec
 *          int   *counts             O   counts[4]: epochs, events, navigation messages, errors (convrnx's n[])
 *          char  *msg                O   RTKLIB's last message, or the error
 *          int    msglen             I   size of msg
-* return : 0 done, 1 cancelled (convert_cancel), -1 the log could not be read, -2 nothing decoded (not a log of
+* return : 0 done, 1 cancelled (convert_cancel), -1 the log could not be read or an output could not be opened
+*          for writing, -2 nothing decoded (not a log of
 *          that format, or damaged; RTKLIB's message), -3 bad arguments (a path of 1000 bytes or more or with '*' or
 *          '%', a format not known, no approximate time for RTCM 3, a version or systems out of range), -5 the
 *          thread could not be put in the "C" locale for numbers, -6 the format is known but its decoder is not
@@ -507,6 +508,11 @@ int ppg_convbin(int format, const char *infile, double approx_gps_seconds, int r
     if (ppg_cancel_seen) {
         ppg_message(msg, msglen, "cancelled");
         return 1;
+    }
+    if (stat <= 0 && !strncmp(ppg_last, "file open error: ", 17)) { /* openfile() of convrnx.c */
+        snprintf(text, sizeof(text), "error : cannot write %s (a folder missing or not writable)", ppg_last + 17);
+        ppg_message(msg, msglen, text);
+        return -1;
     }
     if (stat <= 0 || counts[0] <= 0) {
         snprintf(text, sizeof(text), "error : no observations decoded from %s: not a log of the %s format, or damaged%s%s",
