@@ -1,4 +1,140 @@
 {
+ "empty_mrk": {
+  "result": {
+   "matched": 0,
+   "photos": 2,
+   "shots": 0,
+   "shots_unmatched": [],
+   "status": {},
+   "unmatched": [
+    "DJI_0001",
+    "DJI_0002"
+   ]
+  }
+ },
+ "empty_names_mrk": {
+  "error": "Timestamp.MRK has 0 shots and <tmp>/empty_names has 2 photos, and the photo names carry no shot number: they cannot be paired by order"
+ },
+ "empty_names_ppk": {
+  "error": "Timestamp.MRK has 0 shots and <tmp>/empty_names has 2 photos, and the photo names carry no shot number: they cannot be paired by order"
+ },
+ "empty_names_state": {
+  "cameras": {
+   "a": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ],
+   "b": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ]
+  },
+  "memory": null
+ },
+ "empty_ppk": {
+  "error": "Timestamp.MRK: it has no shots, and the solution drone.pos has positions from 2005-04-02 00:00:00 to 2005-04-02 00:59:30 GPS time: they are not of the same flight"
+ },
+ "empty_state": {
+  "cameras": {
+   "DJI_0001": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ],
+   "DJI_0002": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ]
+  },
+  "memory": null
+ },
  "numbered": {
   "result": {
    "matched": 3,

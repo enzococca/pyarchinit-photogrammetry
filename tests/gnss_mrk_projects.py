@@ -123,6 +123,18 @@ def build(tmp: Path) -> dict:
     ch = ppg.Document().add_chunk()
     ch.add_photos([folder])
     out["other_day"] = _attempt(lambda: gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution), tmp)
+    # an empty Timestamp.MRK beside DJI photos, and beside photos without a shot number
+    for name, photos in (("empty", ("DJI_0001.JPG", "DJI_0002.JPG")), ("empty_names", ("a.JPG", "b.JPG"))):
+        folder = tmp / name
+        folder.mkdir()
+        for photo in photos:
+            jpeg(folder / photo, None)
+        (folder / "Timestamp.MRK").write_text("")
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        out[f"{name}_mrk"] = _attempt(lambda: gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK"), tmp)
+        out[f"{name}_ppk"] = _attempt(lambda: gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution), tmp)
+        out[f"{name}_state"] = _state(ch, tmp)
     return out
 
 
