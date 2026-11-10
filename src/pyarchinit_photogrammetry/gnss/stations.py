@@ -905,10 +905,15 @@ MAX_HOLE = timedelta(seconds=30)
 _BKG_DAILY = "BKG daily files are online about 30 minutes after midnight UTC"
 
 # The names of the files of observations (RINEX 3, "long" names): station, source (R receiver, S stream, U unknown),
-# the start of the file, its length, the interval of its epochs, MO (observations), Hatanaka inside gzip. Only ASCII
-# letters and digits (\d takes other digits too), and a name is taken only whole (``fullmatch``).
+# the start of the file, its length, the interval of its epochs, MO (the observations of several constellations; GO,
+# RO, EO ... those of one alone, :data:`_SYSTEMS`), Hatanaka inside gzip. Only ASCII letters and digits (\d takes
+# other digits too), and a name is taken only whole (``fullmatch``).
 _OBS_NAME = re.compile(r"(?P<id>[A-Z0-9]{9})_(?P<source>[RSU])_(?P<year>[0-9]{4})(?P<day>[0-9]{3})(?P<hour>[0-9]{2})"
-                       r"(?P<minute>[0-9]{2})_(?P<period>[0-9]{2}[SMHD])_(?P<rate>[0-9]{2}[SMHD])_MO\.crx\.gz")
+                       r"(?P<minute>[0-9]{2})_(?P<period>[0-9]{2}[SMHD])_(?P<rate>[0-9]{2}[SMHD])_(?P<system>[MGRECJIS])O\.crx\.gz")
+# The constellations of a file of observations by the letter of its name, in the order they are preferred: the mixed
+# file, then GPS alone (which every rover has), then the others.
+_SYSTEMS = {"M": "mixed", "G": "GPS", "E": "Galileo", "R": "GLONASS", "C": "BeiDou", "J": "QZSS", "I": "NavIC",
+            "S": "SBAS"}
 _PIECE_LAYERS = (("gzip", "hatanaka"), ("gzip",))  # how the archives pack a file of observations
 _NAV_PRODUCT = "BRDC00WRD"  # the broadcast messages of all constellations, merged for the world
 _NAV_NAME = re.compile(rf"{_NAV_PRODUCT}_[RSU]_[0-9]{{11}}_01D_MN\.rnx(?:\.gz)?")
@@ -1084,8 +1089,9 @@ def _name_start(match: re.Match) -> datetime | None:
 
 def _find(station: Station, archive: _Archive, kind: _Kind, slot: datetime, progress=None) -> RemoteFile | None:
     """The file of ``station`` of this ``kind`` that begins at ``slot``, as the listing of the folder of the archive
-    has it, or None. Of the names that are the station's, for this time, length and interval, R is taken before S
-    before U. ``progress`` hears which site is contacted (:func:`download.listing`)."""
+    has it, or None. Of the names that are the station's, for this time, length and interval, the mixed file (``_MO``) is
+    taken before one of a single constellation (GPS first, :data:`_SYSTEMS` - used with a warning that says so), and R
+    before S before U. ``progress`` hears which site is contacted (:func:`download.listing`)."""
     folder = kind.folder(slot)
     try:
         names = download.listing(folder, progress)
@@ -1101,12 +1107,17 @@ def _find(station: Station, archive: _Archive, kind: _Kind, slot: datetime, prog
                 or _seconds(match["period"]) != _seconds(kind.period_code)
                 or _seconds(match["rate"]) != _seconds(kind.rate_code)):
             continue
-        key = ("RSU".index(match["source"]), name)
+        key = (list(_SYSTEMS).index(match["system"]), "RSU".index(match["source"]), name)
         if best is None or key < best:
             best = key
     if best is None:
         return None
-    return RemoteFile(folder + best[1], best[1], slot, slot + kind.period, kind.interval)
+    name = best[2]
+    if best[0]:
+        log.warning("%s: no mixed file (_MO) for %s in %s: %s is used, which holds the observations of %s alone - "
+                    "the satellites of the other constellations of the drone are left out of the solution",
+                    station.id, f"{slot:%Y-%m-%d %H:%M}", folder, name, list(_SYSTEMS.values())[best[0]])
+    return RemoteFile(folder + name, name, slot, slot + kind.period, kind.interval)
 
 
 def _missing(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -> str:

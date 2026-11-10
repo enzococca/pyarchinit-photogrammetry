@@ -2395,3 +2395,42 @@ def test_parked_93_a_redirection_from_https_to_plain_http_is_not_followed(tmp_pa
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_parked_120_a_single_system_file_is_taken_when_there_is_no_mixed_one(trees, caplog, tmp_path):
+    """A station that publishes the observations of one constellation (``_GO``, GPS alone) and no mixed file
+    (``_MO``): its file is found, with a note that says which constellation; the mixed file is preferred whatever its
+    source, GPS among several single ones."""
+    kraw = _made("KRAW00POL", "EPN")
+    folder = "EUREF/nrt/299/10/"
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+
+    def chosen() -> list[str]:
+        download._LISTINGS.clear()
+        caplog.clear()
+        return _names(stations.observation_files(kraw, *span, rate="30s"))
+
+    gps, glonass = KRAW_NAME.replace("_MO.", "_GO."), KRAW_NAME.replace("_MO.", "_RO.")
+    _put(trees.bkg, folder + glonass)
+    _put(trees.bkg, folder + "KRAW00POL_R_20262991000_01H_30S_GN.rnx.gz")  # navigation, not observations
+    assert chosen() == [glonass]
+    notes = [text for text in _warnings(caplog) if glonass in text]
+    assert len(notes) == 1 and "GLONASS alone" in notes[0] and "_MO" in notes[0], _warnings(caplog)
+    _put(trees.bkg, folder + gps)
+    _put(trees.bkg, folder + KRAW_NAME.replace("_MO.", "_EO."))
+    assert chosen() == [gps]
+    assert any("GPS alone" in text and gps in text for text in _warnings(caplog))
+    mixed = "KRAW00POL_S_20262991000_01H_30S_MO.crx.gz"  # from the stream, and still before the single ones
+    _put(trees.bkg, folder + mixed)
+    assert chosen() == [mixed] and _warnings(caplog) == []
+    assert not (download.gnss_dir() / "stations").exists()
+
+
+@needs_a_decoder
+def test_parked_120_a_single_system_file_is_downloaded_and_joined(trees, tmp_path, caplog):
+    kraw = _made("KRAW00POL", "EPN")
+    name = KRAW_NAME.replace("_MO.", "_GO.")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{name}", gzip.compress(KRAW_HOUR.read_bytes()))
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert _epochs(out) > 10 and (download.gnss_dir() / "stations" / "KRAW00POL" / name).is_file()
+    assert any("GPS alone" in text for text in _warnings(caplog))
