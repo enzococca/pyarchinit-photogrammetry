@@ -702,9 +702,10 @@ def join(paths: str | Path | Iterable[str | Path],
     file cut short or damaged (the base is never missing its end in silence) and an ``out`` that is one of the
     files. They are written in the order of their first epoch (the order given for those that begin together): the
     records of a file whose epoch is not later than the last one written are repeats and are left out, with the event
-    records that follow them - except an external event (flag 5, a shot) that was not written yet: it goes after the
-    last epoch written, or back among the epochs before it when its time is earlier, so that no shot is lost at a cut
-    and none is written twice; the other records, events included, are copied as they are. A header event inside a
+    records that follow them. An external event (flag 5, a shot) is written once: one that another piece wrote is left
+    out wherever it is, and one earlier than the last epoch an earlier piece wrote goes back among the epochs, so that
+    no shot is lost at a cut, none is written twice and they stay in time order; the other records, events included,
+    are copied as they are. A header event inside a
     piece that gives observation types other than its header's is refused when there are several pieces, the pieces
     after it would be read with them.
 
@@ -736,14 +737,15 @@ def join(paths: str | Path | Iterable[str | Path],
     last: datetime | None = None
     fields: tuple | None = None
     interval: float | None = None  # of the piece the last epoch written is in
-    external: set[tuple] = set()  # the external events written, by their time as the file writes it
+    external: dict[tuple, int] = {}  # the external events written, by their time as written: the piece of each
+    last_piece = -1  # the piece the last epoch written is in
     late: list[tuple[datetime, list[str]]] = []  # external events to put back among the epochs written before them
     with _writing(out) as f:
         def emit(lines: list[str]) -> None:
             f.write(("\n".join(lines) + "\n").encode("latin-1"))
 
         emit(top)
-        for piece in pieces:
+        for number, piece in enumerate(pieces):
             skipping = False  # after an epoch left out, until the next one written
             held: list[str] = []  # cycle slip records (flag 6), written before the epoch they come with
             for time, flag, lines, record_fields in _records(_piece_lines(piece), version):
@@ -757,7 +759,7 @@ def join(paths: str | Path | Iterable[str | Path],
                     if last is not None and steps and (time - last).total_seconds() > _GAP_INTERVALS * max(steps):
                         gaps.append((last, time))
                     skipping = False
-                    last, fields, interval = time, record_fields, piece.interval
+                    last, fields, interval, last_piece = time, record_fields, piece.interval, number
                     emit(held + lines)
                     held = []
                 else:  # an event, or lines before the first epoch
@@ -766,16 +768,19 @@ def join(paths: str | Path | Iterable[str | Path],
                         raise ValueError(f"{piece.path.name} gives other observation types than its header inside its "
                                          "observations: it cannot be joined with other files")
                     key = _event_key(record_fields) if flag == EXTERNAL_EVENT and time is not None else None
+                    if key is not None and external.get(key, number) != number:
+                        continue  # written from another piece; the cycle slips held stay with their epoch
+                    if key is not None and last is not None and time < last and last_piece != number:
+                        external[key] = number  # an earlier piece has the epochs around it, not the event
+                        late.append((time, lines))
+                        continue
                     if not skipping:
                         emit(held + lines)
                         if key is not None:
-                            external.add(key)
-                    elif key is not None and key not in external:  # among repeated epochs, and not written yet
-                        external.add(key)
-                        if time >= last:
-                            emit(lines)
-                        else:  # the piece written before has the epochs around it, not the event
-                            late.append((time, lines))
+                            external[key] = number
+                    elif key is not None:  # among repeated epochs, not written yet, not before the last epoch
+                        external[key] = number
+                        emit(lines)
                     held = []
             if held and not skipping:
                 emit(held)

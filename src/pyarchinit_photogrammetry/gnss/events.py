@@ -22,6 +22,8 @@ def _ahead(time_system: str, fields: tuple, leap: int | None) -> int:
     """The seconds GPS time is ahead of the time system of the file: GPS, Galileo, QZSS and NavIC time are GPS time;
     UTC - and GLONASS time, which RINEX writes as UTC - is behind by the leap seconds (those of the header when it
     gives them, else those of the day); BeiDou time by 14 s."""
+    # rinex._to_gps (header().first/last, time_span) reads a "UTC" file as GPS time - phase 3 behaviour, kept: for
+    # such a file those times are the leap seconds (18 s today) away from its events, which are converted here
     if time_system in ("GLO", "UTC"):
         return leap or rinex.gps_minus_utc(datetime(*fields[:5]))
     if time_system == "BDT":

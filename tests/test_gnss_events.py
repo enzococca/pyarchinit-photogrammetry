@@ -124,6 +124,19 @@ def test_events_in_utc_time_system(tmp_path):
     assert v3[0].source["tow"] == pytest.approx(107975.5 + 14, abs=1e-9)
 
 
+def test_events_across_midnight_and_the_week(tmp_path):
+    """An event of Saturday 2 April 2005 at 23:59:50.5 UTC is 13 leap seconds later in GPS time: Sunday 00:00:03.5,
+    second 3.5 of the next GPS week."""
+    v2 = _with_events(tmp_path / "late0920.05o", {119: [_event_v2(23, 59, 50.5)]})
+    gps = events.rinex_events(v2).shots[0]
+    assert (gps.source["gps_week"], gps.source["tow"]) == _week_tow(2005, 4, 2, 23, 59, 50.5)
+    utc = events.rinex_events(_with_time_system(v2, tmp_path / "utc.05o", "UTC")).shots[0]
+    week, _ = _week_tow(2005, 4, 3, 0, 0, 0.0)
+    assert date(2005, 4, 3).weekday() == 6 and utc.source["gps_week"] == week
+    assert utc.source["tow"] == pytest.approx(3.5, abs=1e-9)
+    assert utc.gps_time == pytest.approx(_gps(week, 3.5), abs=2.5e-7)
+
+
 def test_double_events_removed(tmp_path):
     """Two events within DOUBLE_EVENT_S (a bouncing contact) are one shot: the first is kept, the second counted."""
     assert events.DOUBLE_EVENT_S == 0.005
@@ -169,6 +182,13 @@ def test_join_keeps_external_events(tmp_path):
     assert body == expected_body
     assert [s.gps_time for s in events.rinex_events(tmp_path / "c.05o").shots] == [
         s.gps_time for s in events.rinex_events(whole).shots]
+    # the later piece starts with the event the earlier one ends with: written once, no false double
+    event_49 = [records[49][-1]]
+    body = joined("d", [records[:50], [event_49] + records[50:]])
+    assert body == expected_body and events.rinex_events(tmp_path / "d.05o").duplicates == 0
+    # the later piece starts with an event earlier than the last epoch written: put back in its place
+    body = joined("e", [records[:49] + [without_event(records[49])] + records[50:53], [event_49] + records[50:]])
+    assert body == expected_body
 
 
 def test_rinex_files_reexported():
