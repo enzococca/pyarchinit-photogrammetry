@@ -517,6 +517,26 @@ def test_tim_tm2_valid_lost_in_flight_and_counter_gaps(tmp_path):
     assert not any("never reported" in w for w in whole.warnings)
 
 
+def test_tim_tm2_counters_per_channel_wraps_and_resets(tmp_path):
+    """Two event inputs counted apart (EXTINT0 1, 2, 3; EXTINT1 7, 8): no gap. A wrap 65534, 65535, 0, 1: no gap,
+    indices going on. A drop not near the wrap (40, 41, 3, 4: the receiver restarted) is a reset, said, the gap across
+    it not counted, the indices going on after the last."""
+    def frames(counts, channels=None):
+        channels = channels or [0] * len(counts)
+        return [_tm2(c, 0xCD, (2300, 0, 0), (2300, 1000 * (i + 1), 0), channel=ch)
+                for i, (c, ch) in enumerate(zip(counts, channels))]
+    two = events.ubx_time_marks(_write(tmp_path / "two.ubx", *frames([1, 7, 2, 8, 3], [0, 1, 0, 1, 0])))
+    assert not any("never reported" in w or "started again" in w for w in two.warnings), two.warnings
+    assert any("2 event inputs" in w for w in two.warnings)
+    wrap = events.ubx_time_marks(_write(tmp_path / "wrap.ubx", *frames([65534, 65535, 0, 1])))
+    assert [s.index for s in wrap.shots] == [65534, 65535, 65536, 65537]
+    assert not any("never reported" in w or "started again" in w for w in wrap.warnings), wrap.warnings
+    reset = events.ubx_time_marks(_write(tmp_path / "reset.ubx", *frames([40, 41, 3, 4, 6])))
+    assert [s.index for s in reset.shots] == [40, 41, 42, 43, 45]
+    assert any("started again 1 time (41 to 3)" in w for w in reset.warnings), reset.warnings
+    assert any("1 pulse of the event input never reported" in w for w in reset.warnings), reset.warnings
+
+
 def test_event_epochs_as_rtklib_gives_them(tmp_path):
     """An event goes to the observation epoch after it, or to the one before when it is earlier than that epoch (a
     receiver that writes its events after the epoch that follows them): two events then share an epoch."""

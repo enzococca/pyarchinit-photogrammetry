@@ -208,10 +208,21 @@ def _tm2_time(week: int, ms: int, sub_ns: int, utc: bool) -> tuple[int, float, i
     return week, whole_ms / 1000.0 + sub_ns * 1e-9, leap
 
 
-def _count_gaps(counts: list[int]) -> int:
-    """How many values the counter of TIM-TM2 skipped (unwrapped counts, in the order of the log)."""
-    values = sorted(set(counts))
-    return sum(b - a - 1 for a, b in zip(values, values[1:]) if b - a > 1)
+WRAP_NEAR = 1024  # the 16-bit counter of TIM-TM2 going down: a wrap (65535 -> 0) when it lands within this many
+# counts of where it would after 65535, else the counter started again (a reset: the receiver restarted)
+
+
+def _count_gaps(counts: list[tuple[int, int, int]]) -> int:
+    """How many values the counter of TIM-TM2 skipped: ``counts`` (channel, run, unwrapped count) in the order of the
+    log; each channel and each run of its counter (between resets) apart."""
+    runs: dict[tuple[int, int], set[int]] = {}
+    for channel, run, count in counts:
+        runs.setdefault((channel, run), set()).add(count)
+    missing = 0
+    for values in runs.values():
+        values = sorted(values)
+        missing += sum(b - a - 1 for a, b in zip(values, values[1:]) if b - a > 1)
+    return missing
 
 
 def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
@@ -219,17 +230,18 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     message that announces a new ``edge`` ("falling", the default, or "rising") of the signal at the event input,
     ``index`` the counter of the message (``count``), the time of that edge (``wn``, ``towMs``, ``towSubMs``: to the
     nanosecond) in GPS time - ``gps_time`` and, exact, ``source["gps_week"]``, ``source["tow"]``, ``source["tow_ms"]``,
-    ``source["tow_sub_ns"]``; the 16-bit counter wraps after 65535 and is unwrapped (``source["count"]`` as sent). A
-    mark in UTC is put in GPS time with the leap seconds of its day (``source["leap_seconds"]``); one in GNSS time is
-    GPS time when the last CFG-TP5 before it sets the time grid to GPS, not valid when it sets BeiDou, Galileo or
-    GLONASS (not converted: see :data:`_GRIDS`), else read as GPS time with a warning; one in receiver time likewise.
-    ``valid`` is False for a mark without a valid time (bit 6: the receiver had no valid GNSS fix at the mark, before
-    its first fix or lost in flight), with a warning (:func:`invalid_warning`); a gap of the counter (pulses the
-    receiver never reported) is warned of too; ``source["acc_ns"]`` the accuracy the
-    receiver gives the time. A mark within :data:`DOUBLE_EVENT_S` of the one kept before it (a message repeated, a
-    bouncing contact) is left out and counted; damaged frames are skipped and counted in a warning. A log without
-    marks of ``edge`` gives no shots and a warning: :data:`NO_TIME_MARKS`, or one that names the other edge when the
-    log has those."""
+    ``source["tow_sub_ns"]``; the 16-bit counter wraps after 65535 and is unwrapped, each event input (``channel``)
+    apart, a drop of it that is not a wrap (:data:`WRAP_NEAR`) a reset, said, the indices going on (``source["count"]``
+    as sent). A mark in UTC is put in GPS time with the leap seconds of its day (``source["leap_seconds"]``); one in
+    GNSS time is GPS time when the last CFG-TP5 before it sets the time grid to GPS, not valid when it sets BeiDou,
+    Galileo or GLONASS (not converted: see :data:`_GRIDS`), else read as GPS time with a warning; one in receiver time
+    likewise. ``valid`` is False for a mark without a valid time (bit 6: the receiver had no valid GNSS fix at the mark,
+    before its first fix or lost in flight), with a warning (:func:`invalid_warning`); a gap of the counter (pulses the
+    receiver never reported, counted on each channel between resets) is warned of too; ``source["acc_ns"]`` the accuracy
+    the receiver gives the time. A mark within :data:`DOUBLE_EVENT_S` of the one kept before it (a message repeated, a
+    bouncing contact) is left out and counted; damaged frames are skipped and counted in a warning. A log without marks
+    of ``edge`` gives no shots and a warning: :data:`NO_TIME_MARKS`, or one that names the other edge when the log has
+    those."""
     if edge not in EDGES:
         raise ValueError(f"edge must be one of {', '.join(EDGES)}, not {edge!r}")
     other = EDGES[1 - EDGES.index(edge)]
@@ -248,13 +260,20 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     others = 0
     channels = set()
     counts = []
-    wraps, last = 0, None
+    state: dict[int, dict] = {}  # of each channel: its last count, what its counts are raised by, its run
+    resets: list[tuple[int, int, int]] = []  # (channel, count before, count after)
     for offset, grid, (channel, flags, count, wn_r, wn_f, ms_r, ns_r, ms_f, ns_f, acc) in marks:
-        if last is not None and count < last - 32768:  # 65535 -> 0: the counter of 16 bits started again
-            wraps += 1
-        last = count
-        index = count + wraps * 65536
-        counts.append(index)
+        st = state.setdefault(channel, {"last": None, "base": 0, "run": 0, "index": 0})
+        if st["last"] is not None and count < st["last"]:
+            if count + 65536 - st["last"] <= WRAP_NEAR:  # 65535 -> 0: the counter of 16 bits went round
+                st["base"] += 65536
+            else:  # the counter started again (the receiver restarted): the indices go on after the last
+                st["run"] += 1
+                st["base"] = st["index"] + 1 - count
+                resets.append((channel, st["last"], count))
+        st["last"] = count
+        index = st["index"] = st["base"] + count
+        counts.append((channel, st["run"], index))
         if not flags & _NEW_EDGE[edge]:
             others += bool(flags & _NEW_EDGE[other])
             continue
@@ -297,6 +316,11 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
         warnings.append(f"{missing} pulse{'s' if missing > 1 else ''} of the event input never reported (gaps in the "
                         "counter of TIM-TM2): the receiver counted them but sent no message for them - it sends at "
                         "most one time mark per navigation epoch - so their photos have no time mark")
+    if resets:
+        said = ", ".join(f"{a} to {b}" + (f" (channel {c})" if len(state) > 1 else "") for c, a, b in resets[:3])
+        warnings.append(f"the counter of TIM-TM2 started again {len(resets)} time{'s' if len(resets) > 1 else ''} "
+                        f"({said}{', ...' if len(resets) > 3 else ''}): the receiver restarted - the marks keep "
+                        "their order, and pulses lost while it restarted are not counted")
     if len(channels) > 1:
         warnings.append(f"time marks of {len(channels)} event inputs (channels {', '.join(map(str, sorted(channels)))})"
                         " mixed in one set")
