@@ -33,9 +33,8 @@ SCALES = {"c": 0.01, "C": 0.01, "e": 0.01, "E": 0.01, "L": 1e-7}  # centi-units,
 _STRINGS = "nNZ"
 _NAME = re.compile(r"^[A-Za-z0-9_]{1,4}$")
 _ALWAYS = ("FMT", "FMTU", "UNIT", "MULT")  # kept whatever the names asked: they describe the others
-_SNIFF = 1 << 16
-_TEXT_BLOCK = 50_000  # lines of a text log decoded at a time  # where the first message must be found for a binary log that does not start with one
-
+_SNIFF = 1 << 16  # where the first message must be found for a log that does not start with one
+_TEXT_BLOCK = 50_000  # lines of a text log decoded at a time
 
 
 class _Format:
@@ -47,10 +46,13 @@ class _Format:
         self.reason = _check(length, name, chars, columns)
         self.dtype = None
         if self.reason is None:
-            self.dtype = np.dtype({"names": ["_head"] + self.columns,
-                                   "formats": ["V3"] + [_CHARS[c] for c in chars]}, align=False)
-            if self.dtype.itemsize != length:
-                self.reason = f"its fields take {self.dtype.itemsize - 3} bytes, not {length - 3}"
+            names, formats = ["_head"] + self.columns, ["V3"] + [_CHARS[c] for c in chars]
+            size = np.dtype({"names": names, "formats": formats}).itemsize
+            if size < length:  # a length that counts more than the fields (BAR3 of Plane 3.6): padding at the end
+                names, formats = names + ["_pad"], formats + [f"V{length - size}"]
+            self.dtype = np.dtype({"names": names, "formats": formats}, align=False)
+            if size > length:
+                self.reason = f"its fields take {size - 3} bytes, not {length - 3}"
                 self.dtype = None
 
 
@@ -58,7 +60,7 @@ def _unique(columns: list[str]) -> list[str]:
     out = []
     for i, c in enumerate(columns):
         c = c.strip() or f"field{i}"
-        while c in out or c == "_head":
+        while c in out or c in ("_head", "_pad"):
             c += "_2"
         out.append(c)
     return out
@@ -68,8 +70,8 @@ def _check(length: int, name: str, chars: str, columns: list[str]) -> str | None
     if not _NAME.match(name):
         return "a name that is not one"
     bad = sorted(set(chars) - set(_CHARS))
-    if bad or not chars:
-        return f"unknown format characters {''.join(bad)!r}" if bad else "no fields"
+    if bad:
+        return f"unknown format characters {''.join(bad)!r}"
     if len(columns) != len(chars):
         return f"{len(chars)} format characters for {len(columns)} fields"
     if length < 3:
@@ -91,7 +93,9 @@ class DataFlash:
     logger stopped while writing it), ``skipped_bytes`` the bytes that were no message (damage, a type without a
     format) and ``damaged`` the places where they were; ``bad_formats`` the FMT messages that cannot be read, by name,
     with the reason, ``undecoded`` the messages of those types (skipped by their length), ``bad_lines`` the lines of a
-    text log that are no message of a known format. ``names`` are the messages kept (None: all): the others are only
+    text log that are no message of a known format, ``preamble`` the lines before its first FMT (the log number, the
+    firmware and the board a terminal download writes: not damage). A text log may write the flight mode (``M``) by
+    its name: read as -1. ``names`` are the messages kept (None: all): the others are only
     counted (in a text log without checking their values). Close it (or use it in a ``with``) to release the file."""
 
     def __init__(self, path: Path, kind: str, names=None):
@@ -99,7 +103,7 @@ class DataFlash:
         self.names = None if names is None else set(names) | set(_ALWAYS)
         self.formats: dict[str, dict] = {}
         self.units: dict[str, dict[str, dict]] = {}
-        self.truncated = self.skipped_bytes = self.damaged = self.undecoded = self.bad_lines = 0
+        self.truncated = self.skipped_bytes = self.damaged = self.undecoded = self.bad_lines = self.preamble = 0
         self.bad_formats: dict[str, str] = {}
         self._segments: dict[str, list[tuple[_Format, object]]] = {}  # by name: (format, offsets or rows)
         self._history: dict[int, list[tuple[int, str]]] = {}  # type -> (position, name) of each definition
@@ -193,13 +197,18 @@ class DataFlash:
         """The lines of a text log, read one at a time from the binary file ``f`` (split on newlines only: a string
         can hold any other character); only the messages of :attr:`names` are kept."""
         current: dict[str, tuple[_Format, object]] = {}
+        started = False  # lines before the first FMT: the preamble a terminal download writes (log number, board)
         for number, raw in enumerate(f):
             cut = not raw.endswith(b"\n")  # the last line, without its end: the logger stopped while writing it
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             name = line.split(",", 1)[0].strip()
             if not name:
                 continue
+            if name != "FMT" and not started:
+                self.preamble += 1
+                continue
             if name == "FMT":
+                started = True
                 parts = [p.strip() for p in line.split(",")]
                 try:
                     type_id, msg, chars = int(parts[1]), parts[3], parts[4]
@@ -210,7 +219,8 @@ class DataFlash:
                     continue
                 if type_id == FMT_TYPE:
                     continue
-                fmt = _Format(type_id, 3 + _size(chars), msg, chars, parts[5:])
+                columns = parts[5:] if chars else [c for c in parts[5:] if c]  # "FMT, 10, 3, STRT, , ": no fields
+                fmt = _Format(type_id, 3 + _size(chars), msg, chars, columns)
                 current[msg] = (fmt, self._define(fmt, number))
                 continue
             entry = current.get(name)
@@ -440,6 +450,8 @@ def _parses(chars: str, values: list[str]) -> bool:
         for c, v in zip(chars, values):
             if c == "a":
                 [int(x) for x in v.split()]
+            elif c == "M":  # the flight mode: Mission Planner writes its name (FBWA), read as -1
+                continue
             elif c not in _STRINGS and not (math.isfinite(float(v)) or c in "fd"):
                 return False
     except ValueError:
@@ -460,6 +472,8 @@ def _text_column(c: str, values: list[str]) -> np.ndarray:
                 continue
             out[i, :len(items)] = items
         return out
+    if c == "M":
+        return np.array([int(v) if v.lstrip("-").isdigit() else -1 for v in values], dtype=np.int64)
     floats = np.array([_number(v) for v in values], dtype=np.float64)
     if c in SCALES or c in "fd":
         return floats
@@ -491,7 +505,7 @@ def read_dataflash(path: str | Path, names=None) -> DataFlash:
     with path.open("rb") as f:
         head = f.read(_SNIFF)
     stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
-    if head[:2] != HEAD and stripped[:4] == b"FMT,":
+    if head[:2] != HEAD and (stripped[:4] == b"FMT," or b"\nFMT," in head):  # FMT lines, maybe after a preamble
         df = DataFlash(path, "text", names)
         with path.open("rb") as f:
             df._read_text(f)
@@ -507,8 +521,11 @@ def read_dataflash(path: str | Path, names=None) -> DataFlash:
             raise
     else:
         raise ValueError(f"{path.name}: not an ArduPilot DataFlash log (binary or text)")
-    if not any(name != "FMT" for name in df.formats):
+    try:
+        if not any(name != "FMT" for name in df.formats):
+            raise ValueError(f"{path.name}: not an ArduPilot DataFlash log - no message formats in it")
+        df._resolve_units()
+    except Exception:
         df.close()
-        raise ValueError(f"{path.name}: not an ArduPilot DataFlash log - no message formats in it")
-    df._resolve_units()
+        raise
     return df

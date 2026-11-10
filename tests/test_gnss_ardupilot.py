@@ -42,7 +42,7 @@ def _check_shots(shotset, expected, base: str = "gpa_sms", tol: float = TIME_TOL
         assert shot.antenna == pytest.approx((e["lat"] * 1e-7, e["lng"] * 1e-7, e["alt"] * 0.01), abs=1e-9)
         assert shot.height == "msl"
         assert shot.attitude == pytest.approx(e["attitude"], abs=1e-4)  # float32 degrees of master
-        assert shot.status == {6: "fix", 5: "float", None: None}[e["status"]]
+        assert shot.status == (None if e["status"] is None else autopilot.GPS_STATUS[e["status"]])
         if e["hacc"] is None:
             assert shot.std is None
         else:
@@ -490,7 +490,7 @@ def test_mission_planner_text_log(tmp_path):
     path.write_bytes(("\r\n".join(lines) + "\r\n").encode())
     with autopilot.read_dataflash(path) as df:
         assert df.bad_lines == 0 and df.truncated == 0
-        assert list(df.messages("MSG")["Message"]) == ["ArduCopter V4.5.7 (abc), frame QUAD\x0b\u2028\x1c end"]
+        assert df.messages("MSG")["Message"][-1] == "ArduCopter V4.5.7 (abc), frame QUAD\x0b\u2028\x1c end"
         assert df.units["CAM"]["GPSTime"] == {"unit": "s", "mult": 1e-3}
     _check_shots(autopilot.ardupilot(path), expected)
 
@@ -583,7 +583,8 @@ def test_big_log_is_read_fast(tmp_path):
     path.unlink()
 
 
-@pytest.mark.skipif(not os.environ.get("PPG_DATAFLASH_SAMPLE"), reason="no real DataFlash log given (PPG_DATAFLASH_SAMPLE): none is in the repository")
+@pytest.mark.skipif(not os.environ.get("PPG_DATAFLASH_SAMPLE"),
+                    reason="no real DataFlash log given (PPG_DATAFLASH_SAMPLE): none is in the repository")
 def test_real_log_if_given():
     """A real log named by PPG_DATAFLASH_SAMPLE (never in the repository): read whole, every message decoded."""
     path = Path(os.environ["PPG_DATAFLASH_SAMPLE"])
@@ -594,3 +595,174 @@ def test_real_log_if_given():
         assert df.undecoded == 0
     for cam in autopilot.cameras(path):
         assert cam["cam"] + cam["trig"] > 0
+
+
+# --- clocks of processing times, firmware generations, receivers --------------------------------------------------
+
+
+def _errors(shotset, expected) -> np.ndarray:
+    return np.array([s.gps_time - e["true"] for s, e in zip(shotset.shots, expected)])
+
+
+@pytest.mark.parametrize("hz", [1, 5, 10])
+def test_one_sided_processing_delays(tmp_path, hz):
+    """SMS the time the fix was processed, 0-20 ms after its arrival (uniform), the boot clock 50 ppm fast: the clock
+    is fitted to the least delayed fixes, the times within -2.5..+1 ms of the truth (-3 ms at 1 Hz, where 60 fixes a
+    minute give the slope less well), early by the 5 % quantile of the delays and the truncation of SMS to the ms - the
+    mean of the fixes would put them 10 ms early."""
+    log, expected = flight(60, gps_hz=hz, drift_ppm=50.0, sms="processing", processing_ms=20.0, seed=hz)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert (-0.003 if hz == 1 else -0.0025) <= errors.min() and errors.max() <= 0.001, errors
+    assert {s.source["time_base"] for s in shotset.shots} == {"gpa_sms_uncorrected"}
+    assert any("processed them" in w for w in shotset.warnings)
+    assert all(s.valid for s in shotset.shots)
+
+
+@pytest.mark.parametrize("sms", ["corrected", "processing", "loop"])
+def test_clock_thousands_of_ppm_off(tmp_path, sms):
+    """A board clock 3000 ppm off GPS time (real: 2778 ppm on a Plane 4.6 board): the slope comes from the data."""
+    log, expected = flight(80, drift_ppm=3000.0, sms=sms, seed=2)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    low = -TIME_TOL_S if sms == "corrected" else -0.0025
+    assert low <= errors.min() and errors.max() <= TIME_TOL_S, errors
+    assert all(s.valid for s in shotset.shots)
+
+
+def test_firmware_3x_semantics(tmp_path):
+    """ArduPlane 3.6: CAM written at the next 50 Hz loop (0-20 ms late), fixes processed at a loop tick: with a clock
+    near GPS time the wait for the loop cannot be seen. The times are within 22 ms of the truth either way, said."""
+    log, expected = flight(40, firmware="3.x", drift_ppm=20.0, seed=4)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert np.abs(errors).max() <= 0.022, errors
+    assert all(e["late"] > 0 for e in expected) and shotset.shots[0].source["firmware"] == "ArduPlane V3.6.0"
+    assert any("V3.6.0 writes the camera messages" in w and "20 ms" in w for w in shotset.warnings)
+    assert {s.source["time_base"] for s in shotset.shots} == {"gpa_sms_uncorrected"}
+    # 4.x says nothing of the sort
+    log, _ = flight(5)
+    shotset = autopilot.ardupilot(_write(tmp_path, log, "new.bin"))
+    assert shotset.shots[0].source["firmware"] == "ArduCopter V4.5.7"
+    assert not any("50 Hz loop" in w for w in shotset.warnings)
+
+
+def test_primary_switch_keeps_every_fix(tmp_path):
+    """Receiver 0 in use for 150 s, then receiver 1 (40 ms more latency): every shot keeps a time from ONE receiver's
+    clock fitted to all its fixes, not only those in use."""
+    log, expected = flight(150, interval_ms=2000, receivers=2, switch_s=150.0, seed=6)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert all(s.valid for s in shotset.shots) and len(shotset.shots) == 150
+    clocks = {s.source["clock_instance"] for s in shotset.shots}
+    assert len(clocks) == 1
+    latency = (0.0, 0.040)[clocks.pop()]
+    assert _errors(shotset, expected) == pytest.approx([-latency] * 150, abs=TIME_TOL_S)
+    # the status of the receiver in use at each shot
+    assert {s.source["gps_instance"] for s in shotset.shots[:70]} == {0}
+    assert {s.source["gps_instance"] for s in shotset.shots[80:]} == {1}
+
+
+def test_blended_instance_is_the_last_choice(tmp_path):
+    log, expected = flight(30, receivers=2, blended=True, seed=7)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert {s.source["clock_instance"] for s in shotset.shots} <= {0, 1}
+    assert {s.source["gps_instance"] for s in shotset.shots} == {2}  # the status of the solution in use
+    assert all(s.valid for s in shotset.shots)
+    latency = (0.0, 0.040)[shotset.shots[0].source["clock_instance"]]
+    assert _errors(shotset, expected) == pytest.approx([-latency] * 30, abs=TIME_TOL_S)
+
+
+def test_other_receiver_where_one_has_no_fixes(tmp_path):
+    """Receiver 0 has no fixes for 150 s (more than MAX_GAP_S): its shots take the clock of receiver 1, said."""
+    log, expected = flight(150, interval_ms=2000, receivers=2, latencies_ms=(0.0, 0.0), seed=8)
+    keep = []
+    for name, record in log.records:
+        if name in ("GPS", "GPA") and record[2][1] == 0 and 100e6 < record[2][0] - dfw.BOOT0_US < 250e6:
+            continue
+        keep.append((name, record))
+    log.records = keep
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    assert all(s.valid for s in shotset.shots)
+    assert {s.source["clock_instance"] for s in shotset.shots} == {0, 1}
+    assert any("clocks of receivers 0, 1" in w for w in shotset.warnings)
+    _check_shots(shotset, expected)
+
+
+def test_duplicate_fixes_and_fixes_before_lock(tmp_path):
+    """Fixes logged twice (same GMS) are kept once; fixes before the 3D fix carry a GPS time 1 s wrong and are not
+    used for the clock."""
+    log, expected = flight(30, duplicate_every=3, prelock=15, seed=9)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    _check_shots(shotset, expected)
+
+
+def test_names_with_a_type_given_to_other_messages(tmp_path):
+    """A type kept, given to a message not kept, then kept again: each read as its definition says."""
+    log = LogWriter()
+    log.fmt("AAA", "QH", "TimeUS,A", type_id=200)
+    log.add("AAA", 1, 10)
+    log.fmt("BBB", "Qi", "TimeUS,B", type_id=200)
+    log.add("BBB", 2, -5)
+    log.add("BBB", 3, -6)
+    log.fmt("AAA", "QH", "TimeUS,A", type_id=200)
+    log.add("AAA", 4, 11)
+    for name, text in (("n.bin", False), ("n.log", True)):
+        with autopilot.read_dataflash(_write(tmp_path, log, name, text=text), names=("AAA",)) as df:
+            assert list(df.messages("AAA", multipliers=False)["A"]) == [10, 11]
+            assert df.count("BBB") == 2
+            with pytest.raises(KeyError, match="not kept"):
+                df.messages("BBB")
+
+
+def test_format_longer_than_its_fields(tmp_path):
+    """BAR3 of Plane 3.6 declares 33 bytes for 26 of fields: read, the rest padding."""
+    import struct
+    log = LogWriter()
+    log.fmt("XYZ", "QH", "TimeUS,A", type_id=150)
+    data = bytearray(log.binary())
+    data += b"\xa3\x95\x80" + struct.pack("<BB4s16s64s", 151, 3 + 8 + 2 + 7, b"PAD", b"QH", b"TimeUS,A")
+    data += b"\xa3\x95\x97" + struct.pack("<QH", 5, 42) + b"\x00" * 7
+    data += b"\xa3\x95\x96" + struct.pack("<QH", 6, 43)
+    path = tmp_path / "pad.bin"
+    path.write_bytes(bytes(data))
+    with autopilot.read_dataflash(path) as df:
+        assert list(df.messages("PAD")["A"]) == [42] and list(df.messages("XYZ")["A"]) == [43]
+        assert df.messages("PAD").dtype.names == ("TimeUS", "A") and not df.bad_formats
+
+
+def test_old_mission_planner_text_logs(tmp_path):
+    """A terminal download of an APM2 log: a preamble before the first FMT, a format without fields, flight modes by
+    name, CAM and GPS without TimeUS. Read without damage; too old for shot times."""
+    lines = ["", "1", "ArduCopter V3.1 (1d1b3fb2)", "Free RAM: 1044", "APM 2",
+             "FMT, 128, 89, FMT, BBnNZ, Type,Length,Name,Format,Columns",
+             "FMT, 10, 3, STRT, , ",
+             "FMT, 130, 33, GPS, BIHBcLLeeEefI, Status,TimeMS,Week,NSats,HDop,Lat,Lng,RelAlt,Alt,Spd,GCrs,VZ,T",
+             "FMT, 135, 29, CAM, IHLLeccC, GPSTime,GPSWeek,Lat,Lng,Alt,Roll,Pitch,Yaw",
+             "FMT, 141, 7, MODE, Mh, Mode,ThrCrs",
+             "STRT", "MODE, STABILIZE, 0",
+             "GPS, 3, 645078570, 1752, 9, 1.61, 43.7712345, 11.2543210, 0.00, 150.00, 0.00, 0.00, 0.00, 10",
+             "MODE, LOITER, 400", "MODE, 5, 400",
+             "CAM, 645078570, 1752, 43.7712345, 11.2543210, 150.00, 1.00, 2.00, 359.00"]
+    path = tmp_path / "apm2.log"
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode())
+    with autopilot.read_dataflash(path) as df:
+        assert df.kind == "text" and df.preamble == 4 and df.bad_lines == 0 and not df.bad_formats
+        assert df.warnings == []
+        assert list(df.messages("MODE")["Mode"]) == [-1, -1, 5]
+        assert df.count("STRT") == 1 and df.count("CAM") == 1
+    with pytest.raises(ValueError, match="too old"):
+        autopilot.ardupilot(path)
+
+
+def test_failing_units_close_the_log(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gnss import dataflash
+    log, _ = flight(3)
+    path = _write(tmp_path, log)
+    closed = []
+    monkeypatch.setattr(dataflash.DataFlash, "_resolve_units", lambda self: 1 / 0)
+    original = dataflash.DataFlash.close
+    monkeypatch.setattr(dataflash.DataFlash, "close", lambda self: (closed.append(self._mmap is not None),
+                                                                   original(self)))
+    with pytest.raises(ZeroDivisionError):
+        autopilot.read_dataflash(path)
+    assert closed == [True]
