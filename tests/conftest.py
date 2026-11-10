@@ -165,6 +165,24 @@ def _no_modal_dialogs(monkeypatch):
         pytest.fail("modal dialog opened during the test: " + "\n".join(opened), pytrace=False)
 
 
+def _delete_main_windows() -> None:
+    """Hand the main windows a test has closed to Qt for deletion."""
+    import sys
+
+    module = sys.modules.get("pyarchinit_photogrammetry.gui.main_window")
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    if module is None or widgets is None:
+        return
+    app = widgets.QApplication.instance()
+    if not isinstance(app, widgets.QApplication):
+        return
+    for window in app.topLevelWidgets():
+        if not isinstance(window, module.MainWindow):
+            continue
+        if not window.isVisible():  # closed: a window still shown may belong to a fixture of the module
+            window.deleteLater()
+
+
 @pytest.fixture(autouse=True)
 def _qt_garbage_between_tests():
     """The windows and widgets a test leaves behind are destroyed here, between the tests, in the
@@ -179,7 +197,13 @@ def _qt_garbage_between_tests():
     timers ("QObject::~QObject: Timers cannot be stopped from another thread"), and the next
     processEvents handed a timer event to the deleted view
     (reproduced in tests/test_gc_guard.py; the application collects in the GUI thread only, see
-    gui/gc_guard.py). The objects waiting for deleteLater go too."""
+    gui/gc_guard.py). The objects waiting for deleteLater go too.
+
+    The main windows go as well. Closing a window hides it and nothing more: Qt keeps it, with its
+    thousand widgets, and the connections of its actions keep the Python object, so every test with
+    a window left one behind (some 1500 in a whole run). The process grew to 13 GB and the CI on
+    Linux, with 16 GB, ended in the swap and in the 20 minute timeout of one test (10 November 2026,
+    version 1.7.7). Only closed windows go: one still shown may be shared by the tests of a module."""
     yield
     import gc
     import sys
@@ -188,6 +212,7 @@ def _qt_garbage_between_tests():
         return
     from PySide6.QtCore import QCoreApplication, QEvent
 
+    _delete_main_windows()
     gc.collect()
     if QCoreApplication.instance() is not None:
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
