@@ -230,19 +230,37 @@ def _engine_it(text: str) -> str:
         if m:
             values = {}
             for n, v in zip(fields, m.groups()):
-                values.setdefault(n, fixed.get(v, v))
+                values.setdefault(n, _engine_value(v))
             return _FIELD.sub(lambda f: values.get(int(f.group(1)), f.group(0)), it).replace("{{", "{").replace(
                 "}}", "}")
     if "\n" in text:
         return "\n".join(_engine_it(line) for line in text.split("\n"))
+    head, colon, rest = text.partition(": ")  # "flight.MRK: <a message the section has without the name>"
+    if colon:
+        shown = _engine_it(rest)
+        if shown != rest:
+            return head + colon + shown
     return text
+
+
+def _engine_value(value: str) -> str:
+    """A value of a message of the engine in Italian: a text or a message of the section itself (the reason inside
+    another message), or a list of them between commas; else as it is. A list is tried first when every item is of
+    the section, last when only some are: a message has commas of its own."""
+    parts = value.split(", ")
+    listed = [_engine_it(part) for part in parts]
+    if len(parts) > 1 and all(a != b for a, b in zip(listed, parts)):
+        return ", ".join(listed)
+    shown = _engine_it(value)
+    return ", ".join(listed) if shown == value else shown
 
 
 def engine(text: str) -> str:
     """A message of the engine - written in English: warnings, errors, progress - in the language of the interface.
     In Italian the section ``engine`` of the catalog (Italian -> English, as the others) is read the other way: a
     fixed text, or a message with values recognised from its English and written with its Italian template (a value
-    that is itself a fixed text of the section in Italian too); line by line when it has several lines. A message the
+    that is itself a text or a message of the section, or a list of them, in Italian too), also after the name of its
+    file (``name: message``); line by line when it has several lines. A message the
     section does not know - every Italian one among them - stays as it is. In English the message as
     :func:`translate` gives it (the interface writes its own messages in Italian)."""
     if not text:

@@ -533,7 +533,7 @@ def test_tim_tm2_counters_per_channel_wraps_and_resets(tmp_path):
     assert not any("never reported" in w or "started again" in w for w in wrap.warnings), wrap.warnings
     reset = events.ubx_time_marks(_write(tmp_path / "reset.ubx", *frames([40, 41, 3, 4, 6])))
     assert [s.index for s in reset.shots] == [40, 41, 42, 43, 45]
-    assert any("started again 1 time (41 to 3)" in w for w in reset.warnings), reset.warnings
+    assert any("started again 1 time (41 -> 3)" in w for w in reset.warnings), reset.warnings
     assert any("1 pulse of the event input never reported" in w for w in reset.warnings), reset.warnings
 
 

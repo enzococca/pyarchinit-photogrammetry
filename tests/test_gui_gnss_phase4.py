@@ -130,6 +130,131 @@ def test_engine_messages_in_italian():
         i18n.set_current("it")
 
 
+REFUSALS = (  # as the engine writes them, with the values of a real case
+    "flight.MRK: the times of the photos and of the shots do not agree: by the clock of the camera the photos were "
+    "taken +0:17:42 from the UTC of their shots, which is no time zone. These are not the photos of this MRK, or the "
+    "clock of the camera was wrong",
+    "rover.ubx: the times of the photos and of the shots do not agree: by the clock of the camera the photos were "
+    "taken -3:12:05 from the UTC of their shots, which is no time zone. These are not the photos of this source, or "
+    "the clock of the camera was wrong",
+    "flight.MRK: the times of the photos fit the shots of more than one flight (at +2:00:00, +1:00:00 from UTC): keep "
+    "the photos of each flight in a folder of their own",
+    "flight.MRK: the times of the photos fit more than one way of pairing them with the shots, on the clocks of the "
+    "camera +2:00:00 (57 photos), +2:00:02 (56 photos) from UTC: the photos cannot be paired by time, and paired by "
+    "number or by order they are not checked by the times either",
+    "flight.MRK: the times of the photos fit the shots on more than one clock of the camera, +1:00:00, +2:00:00 from "
+    "UTC, as well as each other: the photos cannot be paired by time, and paired by number or by order they are not "
+    "checked by the times either",
+    "flight.MRK: paired by number, 3 photos disagree with the times, which pair them with other shots: the first, "
+    "DJI_0004.JPG, has shot 4 by number and shot 5 by time. Pair them by time",
+    "flight.MRK: paired by order, 1 photo disagree with the times, which pair it with other shots: the first, "
+    "DJI_0004.JPG, has shot 4 by order and shot 5 by time. Pair them by time",
+    "flight.MRK: paired by order, the photos were taken +0:17:42 (most of them) from the UTC of their shots, +0:17:42 "
+    "from the nearest time zone: the times disagree with this pairing",
+    "flight.MRK: paired by number, 12 of 40 photos disagree with the times of their shots by more than 2 s (the "
+    "first, DJI_0004.JPG, by +0:00:07): the number pairs photos with the shots of others. Pair them by time",
+    "flight.MRK: only 12 of 40 photos were taken at the time of their shot (clock of the camera +2:00:00 from UTC): "
+    "the MRK is of another flight, or the folder holds the photos of other flights too",
+    "pairing by order not confirmed by the times: the times alone cannot pair the photos (the times of the photos "
+    "fit more than one way of pairing them with the shots, on the clocks of the camera +2:00:00 (57 photos), "
+    "+2:00:02 (56 photos) from UTC: the photos cannot be paired by time, and paired by number or by order they are "
+    "not checked by the times either); a shift by whole shots cannot be excluded, check the positions on a control "
+    "point",
+    "the shots of kind mrk need their file",
+    "the counter of TIM-TM2 started again 1 time (41 -> 0): the receiver restarted - the marks keep their order, and "
+    "pulses lost while it restarted are not counted",
+    "the counter of TIM-TM2 started again 4 times (41 -> 0, 12 -> 0 (channel 1), 7 -> 1, ...): the receiver "
+    "restarted - the marks keep their order, and pulses lost while it restarted are not counted",
+    "events.pos: its times are in GLONASST, which is not GPS time (GPST), UTC or JST",
+    "3 time marks RTKLIB could not place (no solution at the epochs around it): not valid, without a position",
+    "1 time mark RTKLIB could not place (no solution at the epochs around it): not valid, without a position",
+    "5 time marks without a valid time: the receiver had no valid GNSS fix when they were taken (3 before its first "
+    "fix, 2 after losing it in flight, e.g. signals blocked). Kept, marked as not valid: check those photos",
+    "1 time mark without a valid time: the receiver had no valid GNSS fix when it was taken (1 before its first "
+    "fix). Kept, marked as not valid: check that photo",
+    "2 time marks without a valid time: the receiver had no valid GNSS fix when they were taken (2 after losing it "
+    "in flight, e.g. signals blocked). Kept, marked as not valid: check those photos",
+    "base.rtcm3: the observations and the GPS ephemerides of the log are in different weeks: the approximate time of "
+    "the log is in the wrong week - give the day of the flight",
+    "base.24o: a RINEX file with no observation epochs",
+    "notes.txt: not a raw receiver log (u-blox, RTCM 3, Septentrio SBF, Unicore, Trimble RT-17) nor a RINEX file - a "
+    'NovAtel log is converted with kind="novatel"',
+    "base.rtcm3: an rtcm3 log carries the time of the week only: an approximate time of the log (the day of the "
+    "flight) is needed",
+    "base.rtcm3: its MSM say they end their epoch (multiple message bit 0) before others of the same time: RTKLIB "
+    "writes one RINEX epoch for each, the same time repeated with some of the systems each (the PPK reads them as one "
+    "epoch)",
+    "base.rtcm3: the BeiDou MSM of the log carry their epoch in GPS time, not in BeiDou time as RTCM 3 says (a "
+    "receiver of before the standard): RTKLIB would put the BeiDou observations 14 s late and lose the others; "
+    "converted from a copy with the BeiDou epochs moved 14 s back",
+    "base.rtcm3: the observations of the log are MSM1-3 only (messages 1071, 1081), which RTKLIB does not decode "
+    "(they lack the full pseudoranges): set the receiver to send MSM4 or MSM7 (or 1004/1012)",
+    "base.ubx: not a ubx log, or damaged",
+    "base.ubx: conversion failed (-3): no memory",
+    "base.rtcm3: the conversion has no epochs",
+    "base.rtcm3: the conversion has no epochs: is the approximate time of the log in the right week?",
+    "base.rtcm3: the epochs are more than 3 days from the approximate time of the log: is it the log of that day, in "
+    "the right week?",
+    "old.bin: the log has no camera messages (CAM or TRIG), and is too old for the times of shots anyway: its formats "
+    "of CAM, GPS have no TimeUS (an ArduPilot of about 2015 or older)",
+    "flight.bin: the CAM messages have no GPSWeek, GPSTime: not a format this reader knows",
+    "flight.bin: the log has 2 cameras (CAM instances 0, 1): choose one",
+    "flight.bin: no camera 3 in the log (cameras 0, 1)",
+    "flight.ulg: the log has no camera_capture messages: no camera was set up to log its shots",
+    "flight.ulg: the log has no camera_trigger messages (the log's info lists them among the topics it left out): no "
+    "camera was set up to log its shots",
+    "/Users/Shared/flights/flight.bin: no such file",
+    "flight.bin: the file is empty",
+    "flight.bin: the log is closed",
+    "notes.txt: not an ArduPilot DataFlash log (binary or text)",
+    "flight.bin: not an ArduPilot DataFlash log - no message formats in it",
+    "notes.txt is not a ULog file (no ULog header)",
+    "flight.ulg: ULog version 2, this reader knows version 1",
+    "flight.ulg: incompatible ULog flags this reader does not know",
+    "flight.ulg: the data of topic 'camera_capture' cannot be read: format 'camera_capture' unknown or nested too "
+    "deep",
+    "flight.ulg: the data of topic 'camera_capture' cannot be read: format 'esc_report' has no fields",
+    "flight.ulg: the data of topic 'camera_capture' cannot be read: format 'camera_capture' larger than a data "
+    "message (65535 bytes)",
+    "flight.ulg: the data of topic 'camera_capture' cannot be read: field 'uint8_t[' of format 'camera_capture'",
+    "flight.ulg: the data of topic 'camera_capture' cannot be read: field 'seq' twice in format 'camera_capture'",
+    "flight.ulg: 120 damaged bytes skipped (to the next sync message)",
+    "flight.ulg: an offset of appended data before the data it follows or past the end of the file: no appended data "
+    "read from it on",
+    "flight.ulg: 2 formats that cannot be read (esc_report, mission): their topics not read",
+    "flight.ulg: 1 format that cannot be read (esc_report): their topics not read",
+    "flight.ulg: 3 data messages shorter than their format (more than its trailing padding missing): damaged, left "
+    "out",
+    "flight.ulg: 1 data message shorter than their format (more than its trailing padding missing): damaged, left out",
+    "flight.ulg: 4 dropouts of the log (310 ms in all): data lost while the log could not write",
+    "flight.ulg: 1 dropout of the log (25 ms in all): data lost while the log could not write",
+)
+ENGLISH = re.compile(r"\b(the|of|is|are|not|and|or|by|with|from|to|its|their|them|it|one|this|an|on|as|was|were|"
+                     r"photos?|shots?|times?)\b")
+
+
+def test_engine_refusals_in_italian():
+    """What the engine refuses, and what it warns of, reaches the dialogs in Italian whole: the name of the file and
+    the values kept, a reason inside another message and a list of values in Italian too; nothing of the English is
+    left."""
+    i18n.set_current("it")
+    left = {}
+    for message in REFUSALS:
+        shown = i18n.engine(message)
+        words = ENGLISH.findall(shown.replace("no memory", ""))  # what RTKLIB says stays as it says it
+        if shown == message or words:
+            left[message[:70]] = sorted(set(words))
+    assert not left, left
+    shown = i18n.engine(REFUSALS[0])
+    assert shown.startswith("flight.MRK: ") and "+0:17:42" in shown and "MRK" in shown[12:]
+    assert "DJI_0004.JPG" in i18n.engine(REFUSALS[5]) and "per numero" in i18n.engine(REFUSALS[5])
+    assert "57 foto" in i18n.engine(REFUSALS[3]) and "57 foto" in i18n.engine(REFUSALS[10])
+    assert i18n.engine(REFUSALS[10]).startswith("abbinamento per ordine non confermato dai tempi: ")
+    assert "12 -> 0 (canale 1), 7 -> 1, ...)" in i18n.engine(REFUSALS[13])
+    assert i18n.engine("flight.MRK: something the catalog does not know") == (
+        "flight.MRK: something the catalog does not know")
+
+
 def test_engine_messages_reach_the_log_and_the_messages(qt_app, monkeypatch):
     """The log pane and the message boxes show a message of the engine in Italian."""
     from pyarchinit_photogrammetry.gui import dialogs, panels

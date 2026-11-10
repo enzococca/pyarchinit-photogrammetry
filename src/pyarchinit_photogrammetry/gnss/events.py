@@ -317,7 +317,7 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
                         "counter of TIM-TM2): the receiver counted them but sent no message for them - it sends at "
                         "most one time mark per navigation epoch - so their photos have no time mark")
     if resets:
-        said = ", ".join(f"{a} to {b}" + (f" (channel {c})" if len(state) > 1 else "") for c, a, b in resets[:3])
+        said = ", ".join(f"{a} -> {b}" + (f" (channel {c})" if len(state) > 1 else "") for c, a, b in resets[:3])
         warnings.append(f"the counter of TIM-TM2 started again {len(resets)} time{'s' if len(resets) > 1 else ''} "
                         f"({said}{', ...' if len(resets) > 3 else ''}): the receiver restarted - the marks keep "
                         "their order, and pulses lost while it restarted are not counted")
