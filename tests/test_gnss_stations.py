@@ -1003,8 +1003,8 @@ def _http_error(url: str, code: int) -> urllib.error.HTTPError:
 
 @pytest.fixture
 def web(monkeypatch):
-    """``urlopen`` that answers from a plan (a reply, or an exception to raise, one after the other) and the waiting
-    of the retries recorded instead of done."""
+    """The ``urlopen`` of the downloads answering from a plan (a reply, or an exception to raise, one after the other)
+    and the waiting of the retries recorded instead of done."""
     class Web:
         def __init__(self):
             self.plan: list = []
@@ -1019,7 +1019,7 @@ def web(monkeypatch):
             return outcome
 
     fake = Web()
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(download, "_urlopen", fake)
     monkeypatch.setattr(download, "_sleep", fake.sleeps.append)
     return fake
 
@@ -1258,7 +1258,7 @@ def test_a_site_that_does_not_answer_is_given_up_within_half_a_minute(web, tmp_p
         progress.cancel()
         raise socket.timeout("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", first)
+    monkeypatch.setattr(download, "_urlopen", first)
     download._LISTINGS.clear()
     with pytest.raises(Cancelled):
         stations.download_observations(ring, _t(26, 10), _t(26, 10, 30), tmp_path / "out", progress=progress)
@@ -2350,3 +2350,48 @@ def test_parked_92_user_agent_built_at_the_first_request():
     assert done.stdout.split()[-2:] == [agent, agent]
     assert download.user_agent() == download.USER_AGENT == agent
 
+
+def test_parked_93_a_redirection_from_https_to_plain_http_is_not_followed(tmp_path):
+    """A server on this computer that sends its visitor on to a plain http address: the second address is never asked
+    (the refusal comes with the redirection, not after the answer), and a plain http address is not asked at all."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    asked: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            asked.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/target")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            self.wfile.write(b"data")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        here = f"http://127.0.0.1:{server.server_address[1]}"
+        # the opener of the downloads, asked directly (fetch itself refuses the http address of this server)
+        request = urllib.request.Request(f"{here}/start", headers={"User-Agent": download.user_agent()})
+        with pytest.raises(download.DownloadError, match="not HTTPS") as error:
+            download._urlopen(request, timeout=5.0, context=None)
+        assert "/target" in str(error.value) and asked == ["/start"]
+        with pytest.raises(download.DownloadError, match="not HTTPS"):
+            download.fetch(f"{here}/target", tmp_path / "a.bin", retries=1)
+        with pytest.raises(download.DownloadError, match="not HTTPS"):
+            download.listing(f"{here}/start")
+        assert asked == ["/start"] and list(tmp_path.iterdir()) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

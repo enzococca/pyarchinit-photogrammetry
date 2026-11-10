@@ -118,6 +118,28 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+_NOT_HTTPS = "what comes over plain http can be changed on the way"
+
+
+class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirection is followed only to another https address: one to plain http is refused where it is announced,
+    so the second address is never asked."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            url = req.full_url
+            raise DownloadError(f"{url}: the server sent the request on to {newurl}, which is not HTTPS: refused, "
+                                f"{_NOT_HTTPS}", url)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen(request, timeout: float, context=None):
+    """``urllib.request.urlopen`` with the certificates of ``context`` and the redirections of
+    :class:`_HttpsRedirects`."""
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _HttpsRedirects())
+    return opener.open(request, timeout=timeout)
+
+
 def _local_path(url: str) -> Path:
     return Path(urllib.request.url2pathname(urllib.parse.urlsplit(url).path))
 
@@ -127,24 +149,24 @@ def _opened(url: str, timeout: float):
     or the error that says why there is none: :class:`NotPublished` when the file is not there, a plain
     :class:`DownloadError` when asking again would not help, and the private ``_Transient`` when it might.
 
-    Only HTTPS reaches the network: a plain http address is refused before anything is asked, and an answer that a
-    redirection brought from one is refused before it is read - what comes over plain http can be changed on the way."""
+    Only HTTPS reaches the network: a plain http address is refused before anything is asked, and a redirection to
+    one is not followed (:class:`_HttpsRedirects`; an answer that says it came from one is refused all the same) -
+    what comes over plain http can be changed on the way."""
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     try:
         if scheme == "file":
             return _LocalFile(_local_path(url))
         if scheme != "https":
-            raise DownloadError(f"{url}: not HTTPS - only https and file addresses are downloaded, what comes over "
-                                "plain http can be changed on the way", url)
+            raise DownloadError(f"{url}: not HTTPS - only https and file addresses are downloaded, {_NOT_HTTPS}", url)
         from ..updates import _ssl_context
 
         request = urllib.request.Request(url, headers={"User-Agent": user_agent()})
-        response = urllib.request.urlopen(request, timeout=timeout, context=_ssl_context())
+        response = _urlopen(request, timeout=timeout, context=_ssl_context())
         final = response.geturl() if hasattr(response, "geturl") else None
         if final and urllib.parse.urlsplit(final).scheme.lower() != "https":
             response.close()
-            raise DownloadError(f"{url}: the server sent the request on to {final}, which is not HTTPS: refused, what "
-                                "comes over plain http can be changed on the way", url)
+            raise DownloadError(f"{url}: the server sent the request on to {final}, which is not HTTPS: refused, "
+                                f"{_NOT_HTTPS}", url)
         return response
     except DownloadError:
         raise
@@ -245,7 +267,7 @@ def _download_once(url: str, work: Path, timeout: float, progress) -> tuple[int,
 
 def fetch(url: str, target: Path, progress=None, *, sha256: str | None = None, timeout: float = 60.0,
           retries: int = 3) -> Path:
-    """The file at ``url`` (http, https or file) saved as ``target``, whose folder is made; returns ``target``.
+    """The file at ``url`` (https or file) saved as ``target``, whose folder is made; returns ``target``.
 
     It is written beside the target and moved into place when it is whole (and, with ``sha256``, when it is the file
     that was asked for), so a failure leaves nothing behind and a file that was there stays. ``retries`` is the number
