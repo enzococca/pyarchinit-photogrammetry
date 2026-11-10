@@ -295,9 +295,9 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
     than an MRK what :func:`apply_shots` keeps (the antenna being the one of the solution), and the run its ``shots``
     (``kind``, ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``) with ``mrk`` None. The events of
     the rover's receiver (:data:`.ppk.EVENT_KINDS`) are checked against the time marks RTKLIB wrote for the run
-    (:func:`.ppk.events_check`), its warnings among the others. For any source but a DJI MRK (whose results
-    stay as they were) a shot between two epochs adds in quadrature to the accuracy of its photo how far the straight
-    line between them may be from the path of the drone (:func:`.ppk.interpolation_error`, kept as
+    (:func:`.ppk.events_check`), its warnings among the others. For every source, a DJI MRK too, a shot between
+    two epochs adds in quadrature to the accuracy of its photo how far the straight line between them may be from
+    the path of the drone (:func:`.ppk.interpolation_error`, kept as
     ``meta["gnss"]["interpolation_m"]``), with a warning when that is more than
     :data:`.ppk.INTERPOLATION_WARNING_M` (a receiver logging at 1 Hz on a drone that turns).
 
@@ -322,9 +322,9 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
     held = frames.frame_and_epoch(frame, base.get("epoch"))[1] if frame in frames.DYNAMIC else None
     when = [shot.gps_time + late for _f, shot, _cam in pairing.kept]
     llh, q, sd, ok = ppk.at(solution, when)
-    # the straight line between two epochs off the path of a drone that turns: in the accuracy of the photos (not for
-    # a DJI MRK, whose results stay as they always were)
-    curve = np.zeros(len(when)) if pairing.kind == "mrk" else np.nan_to_num(ppk.interpolation_error(solution, when))
+    # the straight line between two epochs off the path of a drone that turns: in the accuracy of the photos (a DJI MRK
+    # too, from 1.7.8)
+    curve = np.nan_to_num(ppk.interpolation_error(solution, when))
     curved = []  # the photos whose line is more than INTERPOLATION_WARNING_M off
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse

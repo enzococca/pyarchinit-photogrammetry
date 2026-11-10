@@ -537,3 +537,24 @@ def test_solution_times_to_the_microsecond(tmp_path):
     lon = 139.0 + speed * 0.0437 / 111320.0 / math.cos(math.radians(35.0))
     assert ok[0] and ppk.horizontal_m(35.0, lon, llh[0][0], llh[0][1]) < 1e-5
 
+
+def test_mrk_shots_between_epochs_take_the_interpolation_too(tmp_path):
+    """A DJI MRK (from 1.7.8, as every other source): a shot between two epochs of a turning drone has the
+    interpolation in its accuracy."""
+    exposures = shots_test._exposures(30)
+    ch = shots_test._photos(tmp_path / "f", [f"IMG_{i:04d}.JPG" for i in range(1, 31)], exposures)
+    t0 = shots_test._gps(exposures[0]) - 5.0
+    times = t0 + np.arange(0.0, 90.0, 1.0)
+    metre = 1.0 / math.radians(1.0) / 6378137.0
+    angle = 0.5 * (times - t0)
+    llh = np.column_stack([41.134 + 20 * np.sin(angle) * metre,
+                           14.266 + 20 * np.cos(angle) * metre / math.cos(math.radians(41.134)),
+                           np.full(len(times), 94.35)])
+    solution = ppk.Solution(times=times, llh=llh, q=np.ones(len(times), dtype=int), ns=np.full(len(times), 8),
+                            sd=np.full((len(times), 3), 0.005), base={}, path=tmp_path / "rover.pos")
+    mrk = shots_test._events(exposures, kind="mrk", name="Timestamp.MRK", lever_ned_mm=(0.0, 0.0, 0.0))
+    result = gnss_apply.apply_ppk_shots(ch, mrk, solution, tmp_path / "f", by="order")
+    assert result["matched"] == 30
+    worst = max(cam.meta["gnss"].get("interpolation_m", 0.0) for cam in ch.cameras)
+    assert worst > 0.3
+    assert any("turns" in w for w in result["warnings"])
