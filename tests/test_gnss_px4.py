@@ -355,3 +355,39 @@ def test_slow_clock_said(tmp_path, drift_ppm, slow):
         assert "20 shots" in said[0] and "not measured on PX4" in said[0]
     stamped = px4.px4(_write(tmp_path, flight(20, gps="stamp", drift_ppm=drift_ppm)[0].binary(), "stamp.ulg"))
     assert not any("ppm from GPS time" in w for w in stamped.warnings)
+
+
+def _feedback_instance(w, expected, delay_s: float, captures: bool) -> None:
+    """A second instance of camera_trigger (multi_id 1) with the confirmed exposures, ``delay_s`` after the commands
+    of instance 0, and with ``captures`` a second instance of camera_capture copying them (as camera_feedback does
+    with CAM_CAP_FBACK)."""
+    g0 = gnss_ulog.gps_seconds(gnss_ulog.UTC0)
+    w.subscribe("camera_trigger", multi_id=1)
+    if captures:
+        w.subscribe("camera_capture", multi_id=1)
+    for e in expected:
+        g = e["true"] + delay_s
+        t = gnss_ulog.BOOT0_US + int(round((g - g0) * 1e6))
+        utc = int(round((g - gnss_ulog.LEAP_2025 + 315964800) * 1e6))
+        w.data("camera_trigger", dict(timestamp=t, timestamp_utc=utc, seq=e["seq"], feedback=True), multi_id=1)
+        if captures:
+            w.data("camera_capture", dict(timestamp=t, timestamp_utc=utc, lat=e["lat"], lon=e["lon"], seq=e["seq"],
+                                          alt=e["msl"], ground_distance=50.0, q=[1.0, 0, 0, 0], result=1), multi_id=1)
+
+
+@pytest.mark.parametrize("captures", [False, True])
+def test_feedback_instance_preferred(tmp_path, captures):
+    """Two instances of camera_trigger (the commands, and the feedback of the camera 30 ms later), and with
+    ``captures`` two of camera_capture copying each: the instance of the confirmed shots is used, each shot once,
+    said in the warnings and in source['instance'] (only instance 0 was read)."""
+    w, expected = flight(20, captures=captures, feedback=False)
+    _feedback_instance(w, expected, 0.030, captures)
+    shotset = px4.px4(_write(tmp_path, w.binary()))
+    assert [s.index for s in shotset.shots] == list(range(20))
+    assert np.abs(_errors(shotset, expected) - 0.030).max() <= FIX_TOL_S
+    assert {s.source["instance"] for s in shotset.shots} == {1}
+    assert all(s.source["feedback"] is True for s in shotset.shots)
+    name = "camera_capture" if captures else "camera_trigger"
+    said = [w for w in shotset.warnings if f"{name} has 2 instances" in w]
+    assert said and "instance 1 used" in said[0], shotset.warnings
+    assert not any("commands to shoot" in w for w in shotset.warnings)

@@ -171,6 +171,31 @@ def _grid_phase(g: np.ndarray, period: float) -> np.ndarray:
     return np.mod(g - g[0] - centre + period / 2.0, period) - period / 2.0
 
 
+def _instances(log, topic: str) -> list[tuple[int, np.ndarray]]:
+    """The instances of ``topic`` with data: ``(multi_id, rows)``."""
+    out = []
+    for multi in log.instances(topic):
+        arr = log.get(topic, multi)
+        if arr is not None and len(arr):
+            out.append((multi, arr))
+    return out
+
+
+def _pick(instances: list[tuple[int, np.ndarray]], name: str, confirmed) -> tuple[int, np.ndarray, str | None]:
+    """The instance of a camera topic the shots are taken from, and what to say when there were several: the one
+    with the most confirmed shots (``confirmed(rows)``: messages of the camera's feedback), then the most messages,
+    then the lowest ``multi_id``. Only one is used - several instances are copies of the same shots (commands and
+    their feedback), never added up, so no shot is counted twice."""
+    counts = [(multi, arr, confirmed(arr)) for multi, arr in instances]
+    multi, arr, n = max(counts, key=lambda c: (c[2], len(c[1]), -c[0]))
+    if len(counts) == 1:
+        return multi, arr, None
+    listed = ", ".join(f"{m}: {len(a)} message{_plural(len(a))}, {c} with feedback" for m, a, c in counts)
+    why = "the most with the camera's feedback" if n else "the most messages, none with feedback"
+    return multi, arr, (f"{name} has {len(counts)} instances ({listed}): instance {multi} used ({why}); the others "
+                        "left out, a shot is never taken twice (source['instance'])")
+
+
 def _nearest(times: np.ndarray, at: float, within: float) -> int | None:
     if not len(times):
         return None
@@ -194,14 +219,16 @@ def _interp_position(gpos: np.ndarray | None, at_us: float) -> tuple[float, floa
 def px4(path: str | Path, topic: str = "auto") -> ShotSet:
     """The camera shots of a PX4 log: with ``topic`` "auto" the ``camera_capture`` messages with ``result`` 1 (the
     others left out and counted), or the ``camera_trigger`` messages when there are no captures (the commands to
-    shoot unless ``feedback``: a warning); ``"capture"`` or ``"trigger"`` choose one. A log with neither is a
+    shoot unless ``feedback``: a warning); ``"capture"`` or ``"trigger"`` choose one. Of a topic with several instances (``multi_id``) one is used, the one
+    with the most messages of the camera's feedback (:func:`_pick`; said, ``source["instance"]``) - a capture's
+    feedback is that of the trigger at its time. A log with neither is a
     ``ValueError`` that says so (and names the topics the log's info says it left out).
 
     Each shot: ``index`` the ``seq`` of the message, ``gps_time`` (see the module; ``source["time_base"]`` one of
     ``"gps_fix"``, ``"gps_stamp"``, ``"timestamp_utc"``), ``antenna`` ``(lat, lon, h)`` with ``height``
     ``"ellipsoidal"`` or ``"msl"``, ``attitude`` from ``q``, ``status`` and ``std`` from the nearest GPS message.
     ``valid`` is False for a shot with no time (no GPS clock around it and no ``timestamp_utc``). ``source`` keeps
-    ``file``, ``kind``, ``topic``, ``row``, ``seq``, ``time_us``, ``timestamp_utc``, ``time_base``, ``clock_topic``,
+    ``file``, ``kind``, ``topic``, ``instance``, ``row``, ``seq``, ``time_us``, ``timestamp_utc``, ``time_base``, ``clock_topic``,
     ``fixes_above``, ``clock_ppm``, ``utc_minus_clock_ms``, ``feedback`` (None when unknown), ``firmware``,
     ``msl_alt``, ``geoid_sep`` (the separation used), ``ground_distance``, ``gps_status``, ``gps_alt``."""
     path = Path(path)
@@ -209,11 +236,29 @@ def px4(path: str | Path, topic: str = "auto") -> ShotSet:
         raise ValueError(f"topic must be auto, capture or trigger, not {topic!r}")
     log = read_ulog(path, topics=_READ)
     warnings = list(log.warnings)
-    captures = log.get("camera_capture")
-    triggers = log.get("camera_trigger")
+    all_captures = _instances(log, "camera_capture")
+    all_triggers = _instances(log, "camera_trigger")
+    feedback_at = {}  # boot time of a trigger -> feedback (camera_feedback gives a capture the time of its trigger)
+    for _multi, arr in all_triggers:
+        for stamp, fed in zip(arr["timestamp"].tolist(), arr["feedback"].tolist()):
+            feedback_at[int(stamp)] = feedback_at.get(int(stamp), False) or bool(fed)
+    seq_feedback = {}  # with one instance of triggers: seq -> feedback, for captures not at a trigger's time
+    if len(all_triggers) == 1:
+        for row in all_triggers[0][1]:
+            seq_feedback.setdefault(int(row["seq"]), bool(row["feedback"]))
+
+    def fed(row) -> bool | None:
+        stamp = int(row["timestamp"])
+        return feedback_at[stamp] if stamp in feedback_at else seq_feedback.get(int(row["seq"]))
+
     if topic == "auto":
-        topic = "capture" if captures is not None and len(captures) else "trigger"
-    rows = captures if topic == "capture" else triggers
+        topic = "capture" if all_captures else "trigger"
+    candidates = all_captures if topic == "capture" else all_triggers
+    rows = None
+    if candidates:
+        instance, rows, instance_note = _pick(candidates, TOPICS[topic],
+                                              (lambda arr: sum(fed(r) is True for r in arr)) if topic == "capture"
+                                              else (lambda arr: int(np.count_nonzero(arr["feedback"]))))
     if rows is None or not len(rows):
         left_out = str(log.info.get("excluded_optional_topics", "")) + "".join(
             map(str, log.multi_info.get("excluded_optional_topics", [])))
@@ -224,10 +269,6 @@ def px4(path: str | Path, topic: str = "auto") -> ShotSet:
     gps = _gps(log)
     clock = _clock(gps) if gps is not None else None
     gpos = log.get("vehicle_global_position")
-    feedback_of = {}
-    if triggers is not None and len(triggers):
-        for row in triggers:
-            feedback_of.setdefault(int(row["seq"]), bool(row["feedback"]))
     kind = "px4_capture" if topic == "capture" else "px4_trigger"
     separated = False  # the receiver gives a geoid: its ellipsoidal and AMSL heights differ
     if gps is not None:
@@ -244,8 +285,9 @@ def px4(path: str | Path, topic: str = "auto") -> ShotSet:
         seq = int(row["seq"])
         boot_us = int(row["timestamp"])
         utc_us = int(row["timestamp_utc"])
-        feedback = bool(row["feedback"]) if topic == "trigger" else feedback_of.get(seq)
-        source = {"file": str(path), "kind": kind, "topic": TOPICS[topic], "row": k, "seq": seq, "time_us": boot_us,
+        feedback = bool(row["feedback"]) if topic == "trigger" else fed(row)
+        source = {"file": str(path), "kind": kind, "topic": TOPICS[topic], "instance": instance, "row": k, "seq": seq,
+                  "time_us": boot_us,
                   "timestamp_utc": utc_us, "feedback": feedback, "firmware": firmware}
         utc_gps = utc_us / 1e6 - _UNIX_TO_GPS + _leap(utc_us) if utc_us > 0 else None
         t, base, valid = None, None, True
@@ -313,11 +355,13 @@ def px4(path: str | Path, topic: str = "auto") -> ShotSet:
                           attitude=attitude, valid=valid, source=source))
     shots.sort(key=lambda s: s.gps_time)
     name = TOPICS[topic]
+    if instance_note:
+        warnings.append(instance_note)
     if topic == "trigger":
         if not any(s.source["feedback"] for s in shots):
             warnings.append("camera_trigger messages without feedback are the commands to shoot, not the shots: the "
                             "camera may expose later or not at all (a feedback pin gives the confirmed shots)")
-        if captures is None or not len(captures):
+        if not all_captures:
             warnings.append("the shots have the position of the autopilot's estimate (vehicle_global_position) "
                             "interpolated at their times" if gpos is not None else "the log has no positions for the "
                             "triggers (no vehicle_global_position)")
