@@ -3,11 +3,12 @@ of the ways to pair them with the photos, the lever arm in the body of the drone
 folder of the photos, how a pairing is said, and the readings done in a thread of their own."""
 from __future__ import annotations
 
+import queue
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QWidget
 
 from ..gnss import shots as gshots
@@ -216,25 +217,32 @@ class LeverPanel(QWidget):
 
 class Aside(QObject):
     """Readings done in threads of their own, each once: :meth:`get` gives :data:`RUNNING` while a reading is in its
-    thread, then what it returned, or the exception that stopped it; ``done`` is emitted in the thread of the
-    interface (this object lives there) when a reading ends. :meth:`stop` forgets the readings still running: what
-    they give is dropped."""
+    thread, then what it returned, or the exception that stopped it; ``done`` is emitted when a reading ends.
+    :meth:`stop` forgets the readings still running - what they give is dropped - and nothing is started after it.
+    The threads leave what they read in a queue this object empties on a timer, in the thread of the interface: they
+    never touch an object of Qt, so one that ends after its dialog is deleted does no harm."""
 
     done = Signal()
-    _read = Signal(object, object, object)  # the key of a reading, what it returned, the exception that stopped it
+    POLL_MS = 25
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._known: dict = {}
         self._stopped = False
-        self._read.connect(self._keep)
+        self._results: queue.SimpleQueue = queue.SimpleQueue()
+        self._running = 0
+        self._poll = QTimer(self)
+        self._poll.setInterval(self.POLL_MS)
+        self._poll.timeout.connect(self._collect)
 
     def get(self, key, work):
         """What ``work()`` gives, run once for ``key`` in a thread of its own."""
         if key in self._known:
             return self._known[key]
+        if self._stopped:
+            return RUNNING
         self._known[key] = RUNNING
-        signal = self._read
+        results = self._results
 
         def body() -> None:
             result = error = None
@@ -242,22 +250,31 @@ class Aside(QObject):
                 result = work()
             except Exception as exc:  # noqa: BLE001 - whatever stops the reading, the dialog says it
                 error = exc
-            try:
-                signal.emit(key, result, error)
-            except RuntimeError:  # the dialog was closed meanwhile
-                pass
+            results.put((key, result, error))
 
+        self._running += 1
+        self._poll.start()
         threading.Thread(target=body, name="ppg-shots-reading", daemon=True).start()
         return RUNNING
 
-    def _keep(self, key, result, error) -> None:
-        if self._stopped:
-            return
-        self._known[key] = error if error is not None else result
-        self.done.emit()
+    def _collect(self) -> None:
+        read = False
+        while True:
+            try:
+                key, result, error = self._results.get_nowait()
+            except queue.Empty:
+                break
+            self._running -= 1
+            self._known[key] = error if error is not None else result
+            read = True
+        if not self._running:
+            self._poll.stop()
+        if read and not self._stopped:
+            self.done.emit()
 
     def stop(self) -> None:
         self._stopped = True
+        self._poll.stop()
 
 
 def plain_label(style: str = "color: #6c7a89") -> QLabel:

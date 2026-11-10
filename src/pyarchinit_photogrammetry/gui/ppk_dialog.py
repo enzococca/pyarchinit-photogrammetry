@@ -1616,4 +1616,7 @@ class PpkDialog(QDialog):
         :func:`opening_kind`), the work folder ``work`` and the chunk ``chunk`` (its last run, its photos:
         :class:`PpkDialog`) (:meth:`values`), None when it is cancelled."""
         dialog = cls(mrk, parent, work, chunk)
-        return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        try:
+            return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()

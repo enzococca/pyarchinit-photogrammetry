@@ -324,6 +324,75 @@ def test_ppk_dialog_shots_modes(qt_app, tmp_path):
     _close(qt_app, d)
 
 
+def _readers() -> list:
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "ppg-shots-reading"]
+
+
+def test_aside_reads_once_and_starts_nothing_once_stopped(qt_app):
+    """A reading runs once in its thread and tells the interface when it ends; once the dialog is closed nothing is
+    started, and what a reading still running gives then is dropped - also when its dialog is gone."""
+    import threading
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from pyarchinit_photogrammetry.gui import shots_widgets as sw
+
+    assert _wait_until(lambda: not _readers())
+    aside, told, calls = sw.Aside(), [], []
+    aside.done.connect(lambda: told.append(1))
+    assert aside.get("a", lambda: calls.append("a") or 7) is sw.RUNNING
+    assert _wait_until(lambda: aside.get("a", lambda: calls.append("again")) == 7)
+    assert calls == ["a"] and told == [1]
+    failed = aside.get("b", lambda: 1 / 0)
+    assert failed is sw.RUNNING and _wait_until(lambda: isinstance(aside.get("b", None), ZeroDivisionError))
+    gate, problems = threading.Event(), []
+    hook, threading.excepthook = threading.excepthook, lambda args: problems.append(args.exc_value)
+    try:
+        assert aside.get("slow", lambda: gate.wait(10) and calls.append("slow")) is sw.RUNNING
+        slow = _readers()
+        aside.stop()
+        assert aside.get("late", lambda: calls.append("late")) is sw.RUNNING  # asked after the end: never started
+        assert _readers() == slow and "late" not in calls
+        assert aside.get("a", None) == 7  # what was read stays
+        told.clear()
+        aside.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        gate.set()
+        assert _wait_until(lambda: not _readers())
+        qt_app.processEvents()
+    finally:
+        gate.set()
+        threading.excepthook = hook
+    assert not problems and not told and "late" not in calls
+
+
+def test_ppk_dialog_asked_is_deleted_when_done(qt_app, tmp_path, monkeypatch):
+    """The dialog asked for its answer is deleted when it is done, as the one of the autopilot log, with its readings
+    stopped."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QDialog
+
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    doc, _folder, _project = _events_chunk(tmp_path)
+    seen = []
+
+    def driver(dialog):
+        seen.append(dialog)
+        dialog.destroyed.connect(lambda: seen.append("deleted"))
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(PpkDialog, "exec", driver)
+    assert PpkDialog.ask(None, events_test.TM2_OBS, chunk=doc.chunk) is None
+    assert seen[0]._aside._stopped
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert seen[-1] == "deleted"
+    assert _wait_until(lambda: not _readers())
+
+
 def test_ppk_dialog_lever_counts_with_its_panel_closed(qt_app, tmp_path):
     """A lever arm and a latency typed and their panel closed again: they count as they are, and the dialog says so
     on the button and in the summary of the shots - never silently dropped."""
