@@ -135,7 +135,8 @@ def _gps(log) -> dict | None:
 
 def _clock(gps: dict) -> dict | None:
     """The clock fitted to the GPS messages with a time and a fix (2D or better; any with a time when fewer than 2):
-    envelope when their UTC times are the epochs of the fixes (on the grid of their period, :data:`GRID_S`), median
+    envelope when their UTC times are the epochs of the fixes (9 in 10 on the grid of their period within
+    :data:`GRID_S`, the grid placed by all of them: :func:`_grid_phase`), median
     when the receiver stamps its messages off any grid."""
     timed = np.isfinite(gps["gps"])
     sel = timed & (gps["fix"] >= 2)
@@ -147,11 +148,21 @@ def _clock(gps: dict) -> dict | None:
     period = float(np.median(np.diff(np.unique(np.round(g, 6))))) if len(np.unique(g)) > 1 else 0.0
     grid = False
     if period > 0:
-        phase = np.mod(g - g[0] + period / 2.0, period) - period / 2.0
-        grid = bool(np.mean(np.abs(phase) <= GRID_S) >= 0.9)
+        grid = bool(np.mean(np.abs(_grid_phase(g, period)) <= GRID_S) >= 0.9)
     clock = fit_clock(a, g, "gps_fix" if grid else "gps_stamp", grid)
     clock.update(instance=gps["instance"], topic=gps["topic"], period_ms=round(period * 1000.0, 1), bus=gps["bus"])
     return clock
+
+
+def _grid_phase(g: np.ndarray, period: float) -> np.ndarray:
+    """How far each time of ``g`` is from a grid of ``period`` (s, within half a period), the grid placed by all the
+    times - the direction of their mean on the circle of the period, then the median of the phases around it -, so
+    that a few times off it (the first among them) do not move it."""
+    angle = 2.0 * np.pi * np.mod(g - g[0], period) / period
+    centre = float(np.angle(np.mean(np.exp(1j * angle)))) * period / (2.0 * np.pi)
+    phase = np.mod(g - g[0] - centre + period / 2.0, period) - period / 2.0
+    centre += float(np.median(phase))
+    return np.mod(g - g[0] - centre + period / 2.0, period) - period / 2.0
 
 
 def _nearest(times: np.ndarray, at: float, within: float) -> int | None:

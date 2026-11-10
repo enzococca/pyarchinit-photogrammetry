@@ -155,7 +155,8 @@ def gps_seconds(utc: datetime) -> float:
 def flight(shots: int = 40, *, interval_s: float = 2.0, gps_hz: float = 5.0, gps: str = "fix", drift_ppm: float = 0.0,
            processing_ms: float = 30.0, utc_error_ms: float = 0.0, utc_is_gps: bool = False, failed=(),
            feedback: bool = True, captures: bool = True, separation: float | None = SEPARATION, layout: str = "1.15",
-           seed: int = 1, appended_from: int | None = None, gps_utc: bool = True) -> tuple[ULogWriter, list[dict]]:
+           seed: int = 1, appended_from: int | None = None, gps_utc: bool = True,
+           first_fix_off_ms: float = 0.0) -> tuple[ULogWriter, list[dict]]:
     """A PX4 survey flight: the GPS messages of one receiver every 1/``gps_hz`` s - with ``gps="fix"``
     ``time_utc_usec`` the epoch of the fix and ``timestamp`` its processing, 0-``processing_ms`` later (uniform); with
     ``"stamp"`` the receiver's UTC at the message and ``timestamp`` within 0.5 ms of it -, ``vehicle_global_position``
@@ -164,7 +165,8 @@ def flight(shots: int = 40, *, interval_s: float = 2.0, gps_hz: float = 5.0, gps
     fast; ``timestamp_utc`` of the triggers is off by ``utc_error_ms`` (and is GPS time with ``utc_is_gps``). The
     drone flies north at 8 m/s, AMSL ``MSL0`` + 0.5 m per shot. ``separation`` the geoid of the receiver (None: none
     given, ellipsoid = AMSL); ``layout`` "1.15" (``sensor_gps`` fields) or "1.7" (``lat``/``alt`` in 1e-7 deg and mm).
-    From the shot ``appended_from`` on the camera messages go to appended data. Returns the writer and per shot
+    From the shot ``appended_from`` on the camera messages go to appended data. ``first_fix_off_ms`` puts the UTC time
+    of the first GPS message that far off the grid of the fixes. Returns the writer and per shot
     ``seq``, ``true`` (GPS time), ``lat``, ``lon``, ``msl``."""
     rng = np.random.default_rng(seed)
     w = ULogWriter(start_us=BOOT0_US - 5_000_000)
@@ -197,7 +199,7 @@ def flight(shots: int = 40, *, interval_s: float = 2.0, gps_hz: float = 5.0, gps
         ell = msl + separation if separation is not None else msl
         if gps == "fix":
             t = boot_us(g) + int(rng.uniform(0, processing_ms * 1000.0))
-            utc_us = int(round((g - LEAP_2025 + 315964800) * 1e6))
+            utc_us = int(round((g - LEAP_2025 + 315964800 + (first_fix_off_ms / 1000.0 if k == 1 else 0.0)) * 1e6))
         else:
             stamp = g + rng.uniform(0.010, 0.150)  # a time of the message, off the grid
             t = boot_us(stamp) + int(rng.uniform(0, 500))

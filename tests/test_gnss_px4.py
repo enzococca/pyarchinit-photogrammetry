@@ -332,3 +332,12 @@ def test_short_data_message_damaged(tmp_path):
     assert t["timestamp"].tolist() == [1, 2, 3] and t["v"].tolist() == [1.5] * 3
     assert log.short == 2 and log.counts[("t", 0)] == 5
     assert any("2 data messages shorter than their format" in w for w in log.warnings), log.warnings
+
+
+def test_first_fix_off_the_grid(tmp_path):
+    """The first GPS message 37 ms off the grid of the fixes: the receiver still gives fix epochs (the phase of the
+    grid is the median of all, not that of the first message)."""
+    w, expected = flight(20, first_fix_off_ms=37.0)
+    shotset = px4.px4(_write(tmp_path, w.binary()))
+    assert {s.source["time_base"] for s in shotset.shots} == {"gps_fix"}
+    assert np.abs(_errors(shotset, expected)).max() <= FIX_TOL_S
