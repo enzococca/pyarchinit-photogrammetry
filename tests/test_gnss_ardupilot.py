@@ -815,6 +815,31 @@ def test_persistent_step_still_splits_the_clock(tmp_path):
     assert clock["glitches"] == 0 and int(clock["seg"][-1]) == 1 and len(clock["models"]) == 2
 
 
+@pytest.mark.parametrize("step_ms", [0, 500])
+def test_log_ending_in_a_jump_of_time(tmp_path, step_ms):
+    """The log ends 1 s after the GPS time of its fixes jumped by 0.5 s (6 fixes: too few to be a step that holds,
+    too late to be seen as a glitch among fixes that hold): a shot after the jump has no GPS time - a step would make
+    it 0.5 s wrong - and is not valid, said; the shots before are timed as ever."""
+    log, expected = flight(shot_offsets_s=[50.0, 99.0, 100.0], gps_hz=5, seed=5)
+    gps = {r[1][2][0]: i for i, r in enumerate(log.records) if r[0] == "GPS"}
+    rel = {t: (log.records[i][1][2][3] - dfw.TOW0_MS) / 1000.0 for t, i in gps.items()}
+    cut = {t for t, x in rel.items() if x > 100.65}
+    for t, i in gps.items():
+        if 99.55 < rel[t] <= 100.65 and step_ms:
+            _shift_gms(log, i, step_ms)
+    log.records = [r for r in log.records if not (r[0] in ("GPS", "GPA") and r[1][2][0] in cut)]
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert np.abs(errors[:2]).max() <= TIME_TOL_S, errors
+    if not step_ms:
+        assert all(s.valid for s in shotset.shots)
+        return
+    assert [s.valid for s in shotset.shots] == [True, True, False]
+    assert "jumps by +0.500 s in the last 6 fixes" in shotset.shots[2].source["no_gps_time"]
+    assert any("1 CAM shot without a GPS time (the GPS time jumps" in w for w in shotset.warnings), shotset.warnings
+    assert any("6 GPS fixes with a time off" in w for w in shotset.warnings)
+
+
 @pytest.mark.parametrize("every, bad, off_ms", [(48, 3, 50), (48, 5, 150), (150, 1, 50)])
 def test_bad_fixes_of_sparse_logs(tmp_path, every, bad, off_ms):
     """Fixes logged once every 9.6 s (3 of them 50 ms early, or 5 of them 150 ms) or once every 30 s (1 of them):

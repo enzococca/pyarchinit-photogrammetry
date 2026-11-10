@@ -25,7 +25,9 @@ about 1.6 times the noise of SMS. Without GPA (or SMS) the ``TimeUS`` of the GPS
 
 The clock: GPS time = boot time + offset. A stretch of the fixes of a receiver at one level of time ends at a step
 (the offset jumps by more than :data:`STEP_S`, beyond the rate of the clock); a stretch that does not hold for
-:data:`STEP_MIN_FIXES` fixes and :data:`STEP_MIN_S` is a glitch of the receiver's time (bad fixes), left out and said.
+:data:`STEP_MIN_FIXES` fixes and :data:`STEP_MIN_S` is a glitch of the receiver's time (bad fixes), left out and said;
+where the log ends (or starts) inside such a stretch a glitch cannot be told from a step, and the shots it would time
+(from halfway between it and the last fix that holds) have no GPS time on that receiver: not valid, said.
 A step during an outage smaller than :data:`STEP_S` plus 1 % of the outage is not seen: the clock is assumed to run
 on across it. In each stretch the rate of the clock (thousands of ppm off on some boards) is the slope of a robust
 line through all its fixes, and the offset is found at knots every :data:`KNOT_S` and interpolated between them:
@@ -272,12 +274,13 @@ def _clocks(gps: dict, sms: np.ndarray) -> list[dict]:
         a, g = a[first], g[first]
         order = np.argsort(a, kind="stable")
         a, o = a[order], g[order] - a[order]
-        a, o, glitches = _without_glitches(a, o)
+        a, o, glitches, unsure = _without_glitches(a, o)
         seg = _segment_ids(a, o)
         envelope = base != "gpa_sms"
         step_ms = int(round(float(np.median(np.diff(a + o))) * 1000.0)) if len(a) > 1 else 0
         clock = {"instance": inst, "A": a, "O": o, "seg": seg, "base": base, "envelope": envelope, "step_ms": step_ms,
                  "used": int(np.count_nonzero(mine & gps["used"])), "fixes": len(a), "glitches": glitches,
+                 "unsure": unsure,
                  "lag_ms": lag_ms, "models": [_segment_model(a[seg == k], o[seg == k], envelope)
                                               for k in range(int(seg[-1]) + 1)]}
         clocks.append(clock)
@@ -296,20 +299,31 @@ def _segment_ids(a: np.ndarray, o: np.ndarray) -> np.ndarray:
     return np.concatenate([[0], np.cumsum(jump)])
 
 
-def _without_glitches(a: np.ndarray, o: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+def _without_glitches(a: np.ndarray, o: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, list]:
     """The fixes without the bad ones: a stretch at another level (a step of time) that does not hold for
     :data:`STEP_MIN_FIXES` fixes and :data:`STEP_MIN_S` is a glitch of the receiver's time (or of SMS), not a step,
-    when a stretch that holds exists; and how many were left out."""
+    when a stretch that holds exists; how many were left out; and where the log ends inside such a stretch - after the
+    last stretch that holds, or before the first - the boot times (from, to, the jump in s, fixes) that cannot be told
+    from a step: from halfway between the last fix that holds and the first left out (to halfway between the last left
+    out and the first that holds)."""
     seg = _segment_ids(a, o)
     if not len(seg) or seg[-1] == 0:
-        return a, o, 0
+        return a, o, 0, []
     starts = np.flatnonzero(np.diff(np.concatenate([[-1], seg])))
     ends = np.concatenate([starts[1:], [len(seg)]]) - 1
     persistent = ((ends - starts + 1) >= STEP_MIN_FIXES) & ((a[ends] - a[starts]) >= STEP_MIN_S)
     if not persistent.any() or persistent.all():
-        return a, o, 0
+        return a, o, 0, []
+    held = np.flatnonzero(persistent)
+    unsure = []
+    if held[-1] < len(starts) - 1:  # the log ends in a short stretch
+        last, first = int(ends[held[-1]]), int(starts[held[-1] + 1])
+        unsure.append(((a[last] + a[first]) / 2.0, math.inf, float(o[first] - o[last]), len(a) - first))
+    if held[0] > 0:  # the log starts in one
+        last, first = int(ends[held[0] - 1]), int(starts[held[0]])
+        unsure.append((-math.inf, (a[last] + a[first]) / 2.0, float(o[last] - o[first]), first))
     keep = persistent[seg]
-    return a[keep], o[keep], int(np.count_nonzero(~keep))
+    return a[keep], o[keep], int(np.count_nonzero(~keep)), unsure
 
 
 def _line(x: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
@@ -405,6 +419,11 @@ def _to_gps(clock: dict, b: float) -> tuple[float | None, str, float | None, flo
     next, fixes above the share of the fixes within :data:`ABOVE_WINDOW_S` more than :data:`ABOVE_S` above the
     clock, rate the rate of the clock of that stretch against GPS time (ppm; None with too few fixes to fit one)."""
     a, o, seg = clock["A"], clock["O"], clock["seg"]
+    for lo, hi, jump, count in clock.get("unsure", ()):
+        if lo <= b <= hi:
+            where = "last" if math.isinf(hi) else "first"
+            return (None, f"the GPS time jumps by {jump:+.3f} s in the {where} {count} fix{'es' if count > 1 else ''} "
+                    "of the log: a glitch or a step of time, the log too short there to tell", None, 0.0, None, None)
     k = int(np.searchsorted(a, b, side="right"))
     spacing = float(np.median(np.diff(a))) if len(a) > 1 else 0.0
     age = b - float(a[k - 1]) if k else None
