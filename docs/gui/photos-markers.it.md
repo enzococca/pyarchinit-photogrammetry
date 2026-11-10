@@ -335,6 +335,164 @@ le cui foto hanno tenuto tutte il loro fix di bordo non cambia nulla e non è un
 `ppg gnss baseline` e `ppg gnss ppp` stampano il punto trovato con il suo sistema, la sua epoca e le sue deviazioni standard, gli avvisi, e le
 opzioni che lo danno a `ppg gnss ppk` (`--base-position ... --base-frame ITRF2020 --base-epoch ...`).
 
+### Droni costruiti da sé
+
+Un drone costruito da sé - un telaio con un autopilota ArduPilot o PX4, un ricevitore u-blox o Emlid, una camera
+comandata dall'autopilota - non scrive un `Timestamp.MRK`. Quello che scrive basta per lo stesso risultato: il log
+grezzo del ricevitore diventa le osservazioni del PPK, e l'istante di ogni scatto viene dalle marche di tempo del
+ricevitore o dal log dell'autopilota. Due finestre prendono questi file: *Strumenti > GNSS > Correzioni PPK...*
+(o *Calcola PPK...* nel pannello GNSS), che calcola la posizione dell'antenna a ogni scatto rispetto a una base, e
+*Strumenti > GNSS > Log dell'autopilota...*, che dà a ogni foto la posizione registrata dall'autopilota stesso,
+senza PPK. Un file di testo di posizioni fatto altrove si legge sempre con *File di posizioni...*, come sopra.
+
+#### Da dove vengono gli scatti
+
+Nella finestra del PPK la riga *Scatti* sceglie la sorgente, e sotto il file e le opzioni che le servono:
+
+| *Scatti* | Il file | Che cosa dice |
+|---|---|---|
+| *MRK di DJI* | il `Timestamp.MRK` di un drone DJI | il tempo di ogni scatto e il suo braccio di leva, come nelle sezioni sopra |
+| *Eventi del ricevitore (nel file del rover)* | nessuno: le osservazioni del drone | le marche di tempo che il ricevitore ha scritto tra le osservazioni: un file RINEX con record di evento (flag di epoca 5, come li scrive un Emlid Reach), o un log grezzo u-blox con messaggi `TIM-TM2` |
+| *Eventi di un log u-blox (.ubx)* | un log u-blox con messaggi `TIM-TM2` (vuoto: il log del rover) | le marche di tempo di quel log, quando non sono nel file delle osservazioni |
+| *Log dell'autopilota (ArduPilot, PX4)* | un log DataFlash (`.bin`, `.log`) o un ULog (`.ulg`) | il tempo dei messaggi della camera dell'autopilota, portato sul tempo GPS dai messaggi GPS dello stesso log |
+| *File di eventi (_events.pos)* | l'`_events.pos` che scrivono RTKLIB o Emlid Studio | i tempi degli eventi di quella soluzione: le posizioni le ricalcola questo PPK |
+
+Una marca di tempo è l'istante in cui il ricevitore ha visto il segnale della camera (la slitta del flash, o la
+linea di scatto) sul suo ingresso di evento, sull'orologio delle sue stesse osservazioni: è la sorgente più
+accurata. *Fronte* dice quale fronte del segnale ha marcato il ricevitore, *discesa* (il default) o *salita*:
+dipende dal cablaggio, e quello sbagliato sposta ogni scatto della durata dell'impulso. Due marche a meno di 5 ms
+sono uno scatto solo (un contatto che rimbalza): la seconda è lasciata fuori e contata. Una marca senza un tempo
+valido non viene mai abbinata a una foto.
+
+Gli eventi di un ricevitore non hanno una posizione propria: serve il PPK. Un log dell'autopilota ha entrambe le
+cose, quindi si usa in due modi: come sorgente degli scatti di un PPK (i suoi tempi, le posizioni dal PPK) o da
+solo, in *Log dell'autopilota...* (i suoi tempi e le sue posizioni).
+
+#### Log grezzi dei ricevitori
+
+*Osservazioni del drone* e i file della base prendono un file RINEX o il log grezzo del ricevitore, che il
+programma converte in RINEX 3.04 (osservazioni e navigazione) una volta sola e tiene nella sua cache: la finestra
+dice il formato riconosciuto, le epoche e gli eventi della conversione.
+
+| Log del ricevitore | Riconosciuto dal contenuto | Note |
+|---|---|---|
+| u-blox (`.ubx`: `RXM-RAWX`, `RXM-SFRBX`, `TIM-TM2`) | sì | i log in UBX di un Emlid Reach sono questi |
+| RTCM 3 (messaggi MSM, effemeridi) | sì | porta solo il tempo della settimana: serve il giorno del volo |
+| Septentrio SBF | sì | |
+| Unicore | sì | |
+| Trimble RT-17 | sì | porta solo il tempo della settimana: serve il giorno del volo |
+| NovAtel OEM | no: `--kind novatel` dalla riga di comando | |
+| Base DJI D-RTK (`.DAT`) | solo se i suoi byte sono RTCM 3 | altrimenti rifiutato: esporta il RINEX da DJI Terra (4.4 o successivo) o DJI Assistant 2 |
+
+Per i log che portano solo il tempo della settimana la finestra prende il giorno dal primo scatto o dalle
+osservazioni del drone; dalla riga di comando è `--approx-time` (o `--like` con un file RINEX dello stesso
+giorno). Il convertitore tiene tre frequenze e fino a 6 segnali per satellite a ogni epoca: un log che ne ha di
+più ha un avviso, e il PPK lavora su quelli tenuti.
+
+#### Log dell'autopilota
+
+*Strumenti > GNSS > Log dell'autopilota...* legge un log ArduPilot (DataFlash) o un log PX4 (ULog). *Messaggi
+degli scatti* sceglie tra gli scatti confermati dalla camera (`CAM` in ArduPilot, `camera_capture` in PX4) e i
+comandi di scatto (`TRIG`, `camera_trigger`): i confermati sono più precisi, e *automatico* li prende quando il
+log li ha. *Camera* sceglie tra le camere di un log ArduPilot (un log PX4 ne ha una). La finestra dice quanti
+scatti ha trovato, tra quali tempi, e il tipo delle loro quote.
+
+Ogni foto prende la posizione che l'autopilota ha registrato al suo scatto: la soluzione di navigazione del
+controllore di volo, buona quanto il suo ricevitore, non una posizione PPK. Le quote sono sul livello medio del
+mare, e restano tali, mai prese per ellissoidiche, a meno che il log dia anche la separazione del geoide (alcuni
+log PX4 la danno): vedi [Quote sul geoide e sistema del rilievo](#quote-sul-geoide-e-sistema-del-rilievo).
+Per i centimetri, usa lo stesso log come sorgente degli *Scatti* di un PPK con il log grezzo del ricevitore.
+
+#### Braccio di leva e latenza
+
+*Braccio di leva e latenza* (in entrambe le finestre) dice dove è la camera rispetto all'antenna nel corpo del
+drone, in millimetri: *Camera in avanti dall'antenna*, *Camera a destra dell'antenna*, *Camera sotto l'antenna*.
+Il braccio viene girato con l'assetto di ogni scatto (imbardata, beccheggio, rollio del log dell'autopilota) e
+sommato alla posizione dell'antenna, così la foto prende la posizione della camera. Senza assetto - gli eventi di
+un ricevitore non ne hanno - si applica solo la parte verticale, e il report lo dice: con l'antenna dritta sopra
+la camera non si perde nulla; con un braccio di qualche centimetro in avanti o di lato l'errore è al massimo quel
+braccio.
+
+*Latenza della camera* è quanto dopo il segnale la camera espone, in millisecondi: sposta i tempi degli scatti,
+non le posizioni. A 10 m/s, 10 ms sono 10 cm lungo la rotta: misurala per una camera comandata da un comando di
+scatto; un segnale preso dalla slitta del flash arriva con l'esposizione e vuole 0. Un `Timestamp.MRK` porta il
+suo braccio per ogni scatto: con esso un braccio nel corpo è rifiutato.
+
+#### Abbinare le foto agli scatti
+
+*Abbinamento* (*Abbinamento delle foto* nella finestra dell'autopilota) dice come ogni foto trova il suo scatto:
+
+* *per numero*: il numero dello scatto è nel nome della foto, come lo scrive un drone DJI;
+* *per tempo*: l'ora della foto (EXIF) contro il tempo dello scatto. L'orologio della camera non deve essere
+  sull'UTC: il programma trova il fuso su cui è regolato e di quanto sbaglia (fino a due minuti), lo dice, e dà a
+  ogni foto lo scatto più vicino su quell'orologio. Tempi che tornano in più di un modo - una serie breve di
+  scatti a intervalli uguali - sono rifiutati, non indovinati;
+* *per ordine*: tante foto quanti scatti, nell'ordine dei loro tempi. Uno scatto senza foto (una scheda che ne ha
+  persa una) lo rompe: la finestra dice quanti sono gli uni e le altre;
+* *automatico* sceglie dal tipo degli scatti e dalle foto.
+
+La finestra dice quante foto hanno trovato uno scatto, le foto senza scatto e gli scatti senza foto, lo scarto
+dell'orologio e, quando i tempi delle foto non confermano un abbinamento per ordine, che le posizioni vanno
+controllate. Il report tiene tutto: la sua parte GNSS ha, per ogni calcolo, la sorgente degli scatti e il suo
+file, il fronte, i log convertiti con le loro epoche e i loro eventi, il braccio e la latenza, l'abbinamento, e
+gli eventi doppi e non validi lasciati fuori.
+
+#### Che cosa aspettarsi, e i limiti
+
+* **Frequenza del ricevitore**: la posizione a uno scatto è interpolata tra due epoche. A 1 Hz un drone che vira
+  o accelera non è dove lo mette l'interpolazione: il programma stima di quanto, lo somma all'accuratezza della
+  foto e avvisa. Registra a 5 Hz o più.
+* **Prima e ultima epoca**: uno scatto esattamente sulla prima epoca delle osservazioni, o dopo l'ultima, non
+  prende una posizione; sono elencati tra gli scatti rimasti senza. Avvia il log prima della prima foto e fermalo
+  dopo l'ultima.
+* **Tempi di un log dell'autopilota**: i messaggi della camera hanno il tempo dell'orologio della scheda, portato
+  sul tempo GPS dai messaggi GPS del log. Con i log ArduPilot che non portano il tempo corretto dei messaggi GPS
+  e un orologio della scheda entro 35 ppm dal tempo GPS, i tempi degli scatti possono essere in anticipo fino a
+  20 ms (un avviso lo dice); i messaggi `CAM` di ArduPilot 3.x sono in ritardo di 0-20 ms; un log rado con fix
+  scadenti di 12-18 ms. A 10 m/s, 20 ms sono 20 cm lungo la rotta: per i centimetri, collega la slitta del flash
+  all'ingresso di evento del ricevitore. Un salto del tempo GPS dentro il log è lasciato fuori con un avviso; gli
+  scatti dopo un salto proprio alla fine del log non hanno tempo.
+* **Non verificato su file veri**: i decodificatori Septentrio, Trimble e Unicore (quelli di RTKLIB) sono provati
+  solo sui campioni di RTKLIB, e non si è trovato un `.DAT` di D-RTK in RTCM 3 da provare; il tempo GPS corretto
+  di ArduPilot 4.5 e successivi con i messaggi `CAM` viene letto ma non è stato verificato dal log alle
+  posizioni. Alcuni log PX4 sono rifiutati con un messaggio che dice che cosa manca. Facci sapere quando un tuo
+  log non viene letto.
+* **RTCM 3 e RT-17** vogliono il giorno del volo; un log RTCM 3 con effemeridi di un'altra settimana è rifiutato
+  con un messaggio che parla della settimana.
+
+#### I droni costruiti da sé dalla riga di comando
+
+```bash
+ppg gnss convert rover.ubx base.rtcm3 --approx-time 2026-05-18     # log grezzi in RINEX 3.04, tenuti nella cache
+#   --kind novatel (un formato che non si riconosce dal contenuto), --like FILE.obs (il giorno di un file RINEX),
+#   --out CARTELLA (una copia del RINEX lì); stampa il RINEX scritto, le epoche e gli eventi
+ppg gnss events rover.ubx --edge rising                            # le marche di tempo: numero, tempo GPS, UTC, validità
+#   un file RINEX con eventi, un log u-blox con TIM-TM2, o un _events.pos
+ppg gnss log rilievo.ppg volo.bin --lever 0,0,250 --latency 40     # le posizioni dell'autopilota, senza PPK
+#   --message auto|cam|trig|capture|trigger, --camera I (ArduPilot), --by auto|number|time|order,
+#   --photos CARTELLA, --dry-run (che cosa farebbe, senza salvare), --chunk NOME
+ppg gnss ppk rilievo.ppg --rover rover.ubx --base base.obs --shots events --lever 0,0,250
+#   --shots mrk|events|ubx|log|events-pos, --shots-file FILE (l'MRK, il log u-blox, il log dell'autopilota,
+#       l'_events.pos; --mrk FILE equivale a --shots mrk --shots-file FILE)
+#   --rover e --base prendono log grezzi: vengono convertiti prima (--approx-time per RTCM 3 e RT-17)
+#   --edge falling|rising, --message, --camera, --by, --lever A,D,G (mm), --latency MS
+```
+
+`--lever` è avanti, destra, giù in millimetri. `ppg gnss log` e `ppg gnss ppk` stampano l'abbinamento (come, lo
+scarto dell'orologio, le foto senza scatto e gli scatti senza foto), gli avvisi del log e della conversione, e
+salvano il progetto; si fermano con un errore, senza cambiare nulla, quando un file non si può usare o
+un'opzione non va con la sorgente (`--camera` con un log PX4, un braccio nel corpo con un MRK).
+
+#### Software e dati
+
+I log grezzi sono decodificati dai decodificatori dei ricevitori di RTKLIB (T. Takasu) nella versione di
+RTKLIB-EX (rtklibexplorer), BSD a 2 clausole, compilati nel nucleo nativo; il PPK è quello di RTKLIB. Il lettore
+dei log PX4 è verificato su un log di esempio di pyulog (PX4, BSD a 3 clausole), i convertitori sui log di
+esempio di RTKLIB-EX. La conversione e la soluzione statica di un vero log u-blox ZED-F9P si verificano a
+richiesta sul dataset di J. Tomaštík e T. Everett, "u-Blox F9P and Google Pixel 5 (repeated 20 minutes static
+measurements under variable conditions)", Mendeley Data, V2, 2023,
+[doi:10.17632/83bvxzx3bj.2](https://doi.org/10.17632/83bvxzx3bj.2) (CC BY 4.0).
+
 ### Sistemi di riferimento ed epoche
 
 Ogni posizione di una foto tiene il sistema di riferimento e l'epoca delle sue coordinate, e il programma la converte

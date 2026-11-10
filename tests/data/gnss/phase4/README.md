@@ -76,3 +76,11 @@ notice, conditions and disclaimer `pyulog_LICENSE.md` beside it reproduces (its 
 `test/sample_appended_multiple_info.txt` of the same commit: the counts of an independent reader, which
 `tests/test_gnss_px4.py` checks ours against. No code of pyulog is used. The log has no camera topics: the camera
 shots are tested on logs that `tests/gnss_ulog.py` writes.
+
+## A real receiver log, not kept here
+
+The check `.github/scripts/gnss_station_check.py --receiver-log` (the workflow `gnss-check`, on demand) downloads
+the raw log of a u-blox ZED-F9P, the RINEX file of its base and the surveyed points of J. Tomaštík and T. Everett,
+"u-Blox F9P and Google Pixel 5 (repeated 20 minutes static measurements under variable conditions)", Mendeley Data,
+V2, 2023, doi:10.17632/83bvxzx3bj.2 (CC BY 4.0; the paper: https://doi.org/10.3390/s23063136), by the addresses and
+the SHA-256 of version 2 written in the script. Nothing of the dataset is in this repository and no test uses it.
