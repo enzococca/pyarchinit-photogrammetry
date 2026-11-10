@@ -65,15 +65,17 @@ jobs:
           working-directory: native
           command: sdist
           args: --out dist
-      - name: The sdist holds no IAU SOFA code
+      - name: The sdist holds no IAU SOFA code and no receiver decoder but u-blox and NovAtel
         # RTKLIB's sofa.c (routines of the IAU SOFA library, whose licence this package does not carry) is
         # not vendored and not built: native/vendor/rtklib/VERSION says why. Looked for by name and by
-        # the copyright line of the SOFA routines in any C source.
+        # the copyright line of the SOFA routines in any C source. Of RTKLIB's receiver decoders (src/rcv)
+        # only ublox.c and novatel.c (T. Takasu, RTKLIB's BSD 2-clause licence) are vendored: the others
+        # name other authors and no licence of their own (VERSION), and must not come in unnoticed.
         run: |
           python3 - <<'EOF'
           import glob, re, sys, tarfile
           [path] = glob.glob("native/dist/*.tar.gz")
-          found = []
+          found, decoders = [], []
           with tarfile.open(path) as sdist:
               for member in sdist:
                   if re.search(r"(^|/)sofa[^/]*$", member.name, re.IGNORECASE):
@@ -81,9 +83,15 @@ jobs:
                   elif member.isfile() and member.name.endswith((".c", ".h")):
                       if b"IAU SOFA Board" in sdist.extractfile(member).read():
                           found.append(member.name)
+                  if re.search(r"/vendor/rtklib/src/rcv/[^/]+$", member.name):
+                      decoders.append(member.name.rsplit("/", 1)[1])
           print(path, "has IAU SOFA code: " + ", ".join(found) if found else "has no IAU SOFA code")
+          print(path, "has the receiver decoders:", ", ".join(sorted(decoders)))
           if found:
               print("::error::the sdist holds IAU SOFA code (" + ", ".join(found) + "): its licence is not carried by this package")
+              sys.exit(1)
+          if sorted(decoders) != ["novatel.c", "ublox.c"]:
+              print("::error::the sdist holds the receiver decoders " + ", ".join(sorted(decoders)) + ": only novatel.c and ublox.c are vendored (vendor/rtklib/VERSION)")
               sys.exit(1)
           EOF
       - uses: actions/upload-artifact@v4

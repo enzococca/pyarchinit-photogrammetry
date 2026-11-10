@@ -7,6 +7,10 @@ Standing still every epoch is fixed and the station is where its RINEX header pu
 the proof of accuracy. Moving, how many epochs reach a fix hangs on the last bit of the arithmetic
 and of each system's maths library (39-49 of 120, 37-115 at the extremes) and fix-and-hold keeps a
 wrong fix now and then: a tenth fixed at least, and the median of those on the static station.
+
+From the core 0.8 (API 11) also RTKLIB's conversion of raw logs (raw_to_rinex): RTKLIB's u-blox and RTCM 3 samples
+(tests/data/gnss/phase4) into the RINEX the official convbin wrote of them, but the lines of the program, the date and
+the input path (tests/test_convbin.py has the same runs).
 """
 import pathlib
 import tempfile
@@ -62,3 +66,29 @@ assert len(moving) >= 12, len(moving)
 median = np.median(np.abs(offsets(moving, station)), axis=1)
 print("kinematic, fixed epochs from the static station: median", np.round(100 * median, 2), "cm north, east, up")
 assert (median < [0.02, 0.02, 0.03]).all(), median
+
+
+# --- raw logs converted into RINEX (API 11)
+if getattr(ppg_core, "API", 0) >= 11:
+    raw = data.parent / "gnss" / "phase4"
+
+    def comparable(path):  # without PGM / RUN BY / DATE and the comment "log: <path>" (on more lines when long)
+        out, in_log = [], False
+        for line in pathlib.Path(path).read_text().splitlines():
+            in_log = line[60:].startswith("COMMENT") and (line.startswith("log: ") or (in_log and line.startswith("  ")))
+            if not in_log and not line[60:].startswith("PGM / RUN BY / DATE"):
+                out.append(line)
+        return out
+
+    approx = 1034208000.0  # 2012-10-14 00:00:00 GPS time, convbin's -tr of the RTCM 3 sample
+    for fmt, name, ext, when in (("ubx", "ubx_20080526_64k", ".ubx", None),
+                                 ("rtcm3", "GMSD7_20121014_64k", ".rtcm3", approx),
+                                 ("novatel", "oemv_200911218_64k", ".gps", None)):
+        obs, nav = tmp / f"{name}.obs", tmp / f"{name}.nav"
+        code, message, counts = ppg_core.raw_to_rinex(fmt, str(raw / (name + ext)), str(obs), str(nav), when)
+        print(fmt, "convbin code", code, "-", message, counts)
+        assert code == 0, (fmt, code, message)
+        assert comparable(obs) == comparable(raw / f"{name}.obs"), fmt
+        assert comparable(nav) == comparable(raw / f"{name}.nav"), fmt
+else:
+    print("core older than 0.8 (API 11): no conversion of raw logs to check")
