@@ -230,9 +230,8 @@ def read_ulog(path: str | Path, topics=None) -> ULog:
             if kind != ord("B"):  # flag bits anywhere but first: ignored
                 _message(state, kind, raw[pos + 3:stop])
             pos = stop
-    for key, dt, parts in state.done + list(state.reading.values()):
+    for key, dt, parts, least in state.done + list(state.reading.values()):
         n = dt.itemsize
-        least = n - _trailing_padding(state.formats[key[0]])
         whole = [p for p in parts if len(p) >= least]
         log.short += len(parts) - len(whole)
         buf = b"".join(p[:n] if len(p) >= n else p + b"\0" * (n - len(p)) for p in whole)
@@ -277,7 +276,8 @@ class _State:
     log: ULog
     wanted: set | None
     formats: dict = field(default_factory=dict)
-    reading: dict = field(default_factory=dict)  # msg_id -> [(topic, multi_id), dtype, payloads] of a subscription read
+    # msg_id -> [(topic, multi_id), dtype, payloads, least size of a payload] of a subscription read
+    reading: dict = field(default_factory=dict)
     done: list = field(default_factory=list)  # those whose msg_id was given to another subscription
     dtypes: dict = field(default_factory=dict)  # topic -> numpy type of its data
 
@@ -307,14 +307,15 @@ def _message(state: _State, kind: int, body: bytes) -> None:
         if msg_id in reading:
             state.done.append(reading.pop(msg_id))
         if state.wanted is not None and name in state.wanted:
-            reading[msg_id] = [(name, multi_id), _dtype(state, name), []]
+            reading[msg_id] = _subscription(state, name, multi_id)
         elif state.wanted is None and name not in log.bad_formats:
             try:
-                reading[msg_id] = [(name, multi_id), _dtype(state, name), []]
+                reading[msg_id] = _subscription(state, name, multi_id)
             except ValueError as exc:  # every topic asked for: the ones that cannot be read are left out
                 log.bad_formats[name] = str(exc).split(": ", 1)[-1]
     elif kind == ord("F"):
         text = body.decode("ascii", "replace").strip("\0")
+        state.dtypes.clear()  # a format given again: the types built from it are built again
         try:
             name, fields = _parse_format(text)
         except ValueError as exc:
@@ -350,6 +351,13 @@ def _message(state: _State, kind: int, body: bytes) -> None:
         if size >= 11:
             level, _tag, t = struct.unpack_from("<BHQ", body)
             log.logged.append((level, t, body[11:].decode("utf-8", "replace").strip("\0")))
+
+
+def _subscription(state: _State, name: str, multi_id: int) -> list:
+    """What is kept of a subscription read: its key, the numpy type of its data, the payloads to come and the least
+    size of one (the format less its trailing padding), as its format is now."""
+    dt = _dtype(state, name)
+    return [(name, multi_id), dt, [], dt.itemsize - _trailing_padding(state.formats[name])]
 
 
 def _trailing_padding(fields: list[tuple[str, int, str]]) -> int:

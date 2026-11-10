@@ -391,3 +391,12 @@ def test_feedback_instance_preferred(tmp_path, captures):
     said = [w for w in shotset.warnings if f"{name} has 2 instances" in w]
     assert said and "instance 1 used" in said[0], shotset.warnings
     assert not any("commands to shoot" in w for w in shotset.warnings)
+
+
+def test_format_redefined_badly_after_its_data(tmp_path):
+    """A topic read, then an F message of the same name that cannot be read: the data read stays, as its format was
+    when it was subscribed."""
+    raw = (gnss_ulog.header() + _T_FORMAT + _T_SUBSCRIBE + _t(1)
+           + gnss_ulog.message("F", b"t:uint64_t timestamp;uint8_t[x] a;") + _t(2))
+    log = _read(tmp_path, raw)
+    assert log.get("t")["timestamp"].tolist() == [1, 2] and "t" in log.bad_formats
