@@ -13,6 +13,7 @@ The native core is built with NFREQ=3 and keeps at most 6 signals of a satellite
 on logs of many signals a few observation types may be left out; :class:`Converted` warns when a system reaches 6."""
 from __future__ import annotations
 
+import binascii
 import hashlib
 import json
 import mmap
@@ -21,6 +22,7 @@ import re
 import shutil
 import tempfile
 import threading
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +31,7 @@ from .. import _native
 from ..core.progress import Cancelled, as_progress
 from . import download, rinex, rinex_files
 
-KINDS = ("rinex", "ubx", "rtcm3")  # what raw_kind tells
+KINDS = ("rinex", "ubx", "rtcm3", "sbf", "unicore", "rt17")  # what raw_kind tells
 HEAD_BYTES = 1 << 16  # the part of a file looked at to tell what it is
 FRAMES_NEEDED = 3  # valid frames that make a file a UBX or RTCM 3 log
 LONGEST_FRAME = 3 + 1023 + 3  # an RTCM 3 frame: header, the longest message, CRC
@@ -39,6 +41,7 @@ DAY = 86400.0
 ROLLOVER_TOE = 4 * 3600.0  # an ephemeris with a toe this early in a week may name the week before (see _week_warning)
 WRONG_WEEK_DAYS = 3.0  # a conversion this far from where it should be is in another week
 DJI_DAT_REFUSED = "not an RTCM 3 log: export RINEX from DJI Terra (4.4 or later) or DJI Assistant 2"
+CACHE_VERSION = 2  # of what a conversion keeps: a new one converts the logs again (2: events counted in the file)
 CORE_SIGNALS = 6  # signals of a satellite the core keeps in an epoch (NFREQ=3 + NEXOBS=3)
 _GPS_EPOCH = datetime(1980, 1, 6)
 
@@ -107,6 +110,59 @@ def _ubx_frames(data: bytes) -> list[tuple[int, int]]:
     return frames
 
 
+def _sbf_frames(data: bytes) -> list[tuple[int, int]]:
+    """The whole Septentrio SBF blocks of ``data`` as ``(offset, size)``: sync "$@", the CRC-16-CCITT (0x1021, from
+    0) of the block from its ID on, the ID and the length of the whole block (a multiple of 4, header included)."""
+    frames, i, size = [], data.find(b"$@"), len(data)
+    while 0 <= i and i + 8 <= size:
+        length = int.from_bytes(data[i + 6:i + 8], "little")
+        if length >= 8 and length % 4 == 0 and i + length <= size and binascii.crc_hqx(
+                data[i + 4:i + length], 0) == int.from_bytes(data[i + 2:i + 4], "little"):
+            frames.append((i, length))
+            i = data.find(b"$@", i + length)
+        else:
+            i = data.find(b"$@", i + 1)
+    return frames
+
+
+def _crc32_novatel(data: bytes) -> int:
+    """The CRC-32 of NovAtel and Unicore logs (reflected 0xEDB88320, from 0, no final xor)."""
+    return zlib.crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF
+
+
+def _unicore_frames(data: bytes) -> list[tuple[int, int]]:
+    """The whole Unicore binary messages of ``data`` as ``(offset, size)``: sync 0xAA 0x44 0xB5, a header of 24 bytes
+    whose bytes 6-7 are the length of the message after it, the message and the CRC-32 of header and message."""
+    frames, i, size = [], data.find(b"\xaa\x44\xb5"), len(data)
+    while 0 <= i and i + 24 <= size:
+        end = i + 24 + int.from_bytes(data[i + 6:i + 8], "little")
+        if end + 4 <= size and _crc32_novatel(data[i:end]) == int.from_bytes(data[end:end + 4], "little"):
+            frames.append((i, end + 4 - i))
+            i = data.find(b"\xaa\x44\xb5", end + 4)
+        else:
+            i = data.find(b"\xaa\x44\xb5", i + 1)
+    return frames
+
+
+_RT17_TYPES = (0x40, 0x55, 0x57)  # GENOUT (GSOF), RETSVDATA, RAWDATA: the packets of an RT-17 stream
+
+
+def _rt17_frames(data: bytes) -> list[tuple[int, int]]:
+    """The whole Trimble RT-17 packets of ``data`` as ``(offset, size)``: STX (0x02), status, type (GENOUT, RETSVDATA
+    or RAWDATA), the length of the data, the data, the checksum (the sum modulo 256 of status to data) and ETX."""
+    frames, i, size = [], data.find(b"\x02"), len(data)
+    while 0 <= i and i + 6 <= size:
+        length = data[i + 3]
+        end = i + 4 + length + 2
+        if (data[i + 2] in _RT17_TYPES and length and end <= size and data[end - 1] == 0x03
+                and sum(data[i + 1:i + 4 + length]) & 0xFF == data[end - 2]):
+            frames.append((i, end - i))
+            i = data.find(b"\x02", end)
+        else:
+            i = data.find(b"\x02", i + 1)
+    return frames
+
+
 def _inner_head(path: Path) -> tuple[tuple[str, ...], bytes]:
     """The layers ``path`` is packed in and the first bytes of what is inside them (of the file itself when none)."""
     layers = rinex_files.compression(path)
@@ -128,22 +184,24 @@ def raw_kind(path: str | Path) -> str | None:
     """What ``path`` is, told by its content, never by its name: ``"rinex"`` a RINEX file (also packed: gzip, the Unix
     compress, zip, Hatanaka), ``"ubx"`` a u-blox log (at least 3 whole UBX frames in its first 64 KiB), ``"rtcm3"`` an
     RTCM 3 log (at least 3 frames whose CRC-24Q is right in its first 64 KiB, also after bytes that are not a frame:
-    a log may start in the middle of a message), None for anything else. A file with both kinds of frames (a receiver
-    that writes RTCM 3 beside UBX) is the kind whose frames hold more of its first bytes. A raw log under gzip or zip
-    is not looked into."""
+    a log may start in the middle of a message), likewise ``"sbf"`` Septentrio SBF (CRC-16), ``"unicore"`` Unicore
+    binary (CRC-32) and ``"rt17"`` Trimble RT-17 (checksum and ETX), None for anything else. A file with several kinds
+    of frames (a receiver that writes RTCM 3 beside UBX) is the kind whose frames hold more of its first bytes.
+    NovAtel logs are not told (convert them with ``kind="novatel"``). A raw log under gzip or zip is not looked
+    into."""
     path = Path(path)
     layers, head = _inner_head(path)
     if "hatanaka" in layers or _is_rinex(head):
         return "rinex"
     if layers:
         return None
-    ubx = _ubx_frames(head)
-    rtcm = list(rtcm3_frames(head))
-    ubx_bytes = sum(size for _, size in ubx) if len(ubx) >= FRAMES_NEEDED else 0
-    rtcm_bytes = sum(size for _, _, size in rtcm) if len(rtcm) >= FRAMES_NEEDED else 0
-    if not ubx_bytes and not rtcm_bytes:
+    found = {"ubx": _ubx_frames(head), "rtcm3": [(i, size) for _, i, size in rtcm3_frames(head)],
+             "sbf": _sbf_frames(head), "unicore": _unicore_frames(head), "rt17": _rt17_frames(head)}
+    covered = {kind: sum(size for _, size in frames) for kind, frames in found.items()
+               if len(frames) >= FRAMES_NEEDED}
+    if not covered:
         return None
-    return "ubx" if ubx_bytes >= rtcm_bytes else "rtcm3"
+    return max(covered, key=lambda kind: (covered[kind], -KINDS.index(kind)))
 
 
 def _is_dat(path: Path) -> bool:
@@ -230,6 +288,128 @@ def _week_warning(path: Path, span: tuple[float, float]) -> str | None:
     return None
 
 
+# ------------------------------------------------------------------------------- RTCM 3 MSM: what RTKLIB cannot read
+
+# the MSM messages (RTCM 10403.3, DF002 1071-1127): GPS 107x, GLONASS 108x, Galileo 109x, SBAS 110x, QZSS 111x,
+# BeiDou 112x, x the MSM 1-7. After the 12-bit type: DF003 station (12 bits), the epoch time (30 bits: GPS, Galileo,
+# QZSS milliseconds of the GPS week; BeiDou milliseconds of the BeiDou week, which runs 14 s behind; GLONASS the day
+# and the milliseconds of the day) and the multiple message bit (1: more MSM of the same epoch follow).
+_MSM_SYSTEMS = {107: "GPS", 108: "GLONASS", 109: "Galileo", 110: "SBAS", 111: "QZSS", 112: "BeiDou"}
+_GPS_TIMED = ("GPS", "Galileo", "QZSS")  # epoch times in GPS time
+BDS_BEHIND_MS = 14_000  # BeiDou time is GPS time less 14 s (RTCM: the BeiDou epoch time is in BeiDou time)
+_WEEK_MS = 604_800_000
+SURVEY_BYTES = 2 << 20  # the part of an RTCM 3 log looked at to tell how it writes its MSM
+MSM_NEAR_FRAMES = 12  # a BeiDou MSM is compared with the GPS MSM at most this many frames before it
+BDS_GPS_TIME = ("{name}: the BeiDou MSM of the log carry their epoch in GPS time, not in BeiDou time as RTCM 3 says "
+                "(a receiver of before the standard): RTKLIB would put the BeiDou observations 14 s late and lose the "
+                "others; converted from a copy with the BeiDou epochs moved 14 s back")
+MSM_LOW_ONLY = ("{name}: the observations of the log are MSM1-3 only (messages {types}), which RTKLIB does not decode "
+                "(they lack the full pseudoranges): set the receiver to send MSM4 or MSM7 (or 1004/1012)")
+
+
+def _msm(message: int) -> tuple[str, int] | None:
+    """(system, MSM number) of an RTCM 3 message type, None for a message that is no MSM."""
+    system = _MSM_SYSTEMS.get(message // 10)
+    return (system, message % 10) if system and 1 <= message % 10 <= 7 else None
+
+
+def _msm_header(frame: bytes) -> tuple[int, int]:
+    """(epoch time field, multiple message bit) of the MSM ``frame`` (preamble, length, message, CRC)."""
+    bits = int.from_bytes(frame[3:11], "big")  # 64 bits: type 12, station 12, epoch 30, multiple 1, ...
+    return (bits >> 10) & ((1 << 30) - 1), (bits >> 9) & 1
+
+
+def rtcm3_survey(path: str | Path, limit: int = SURVEY_BYTES) -> dict:
+    """How the first ``limit`` bytes of an RTCM 3 log write their observations: ``types`` the message types and how
+    many of each, ``bds_gps_time`` the BeiDou MSM whose epoch is the epoch of a GPS MSM just before them (BeiDou time
+    written as GPS time) and ``bds_standard`` those 14 s behind it (as the standard says), ``repeated`` the MSM that
+    say they are the last of their epoch (multiple message bit 0) followed by another MSM of the same time: RTKLIB
+    writes an epoch for each, the same time repeated."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        data = f.read(limit)
+    types: dict[int, int] = {}
+    pre = std = repeated = 0
+    last_gps: tuple[int, int] | None = None  # (frame number, epoch) of the last GPS-timed MSM
+    previous = None  # (system, epoch, multiple bit) of the MSM before
+    for number, (message, offset, size) in enumerate(rtcm3_frames(data)):
+        types[message] = types.get(message, 0) + 1
+        kind = _msm(message)
+        if kind is None:
+            continue
+        system = kind[0]
+        epoch, multiple = _msm_header(data[offset:offset + size])
+        if system in _GPS_TIMED:
+            last_gps = (number, epoch)
+        elif system == "BeiDou" and last_gps is not None and number - last_gps[0] <= MSM_NEAR_FRAMES:
+            if epoch == last_gps[1]:
+                pre += 1
+            elif (last_gps[1] - epoch) % _WEEK_MS == BDS_BEHIND_MS:
+                std += 1
+        if previous is not None and previous[2] == 0 and _same_epoch(previous[:2], (system, epoch)):
+            repeated += 1
+        previous = (system, epoch, multiple)
+    return {"types": types, "bds_gps_time": pre, "bds_standard": std, "repeated": repeated}
+
+
+def _same_epoch(a: tuple[str, int], b: tuple[str, int]) -> bool:
+    """Whether two MSM (system, epoch time) are of the same epoch: the same time, or 14 s apart when one is BeiDou
+    (BeiDou time); GLONASS (the day and the time of the day in Moscow) is not compared."""
+    if "GLONASS" in (a[0], b[0]):
+        return False
+    if a[1] == b[1]:
+        return True
+    return (a[0] == "BeiDou") != (b[0] == "BeiDou") and abs(a[1] - b[1]) % _WEEK_MS in (BDS_BEHIND_MS,
+                                                                                      _WEEK_MS - BDS_BEHIND_MS)
+
+
+def _msm_low_only(types: dict[int, int]) -> list[int] | None:
+    """The MSM1-3 types of a log whose observations are all MSM1-3 (none of MSM4-7, nor of 1001-1004, 1009-1012)."""
+    legacy = any(1001 <= t <= 1004 or 1009 <= t <= 1012 for t in types)
+    msm = {t: _msm(t)[1] for t in types if _msm(t)}
+    if legacy or not msm or any(n >= 4 for n in msm.values()):
+        return None
+    return sorted(msm)
+
+
+def _bds_moved_copy(path: Path, dest: Path) -> int:
+    """``path`` copied into ``dest`` with the epoch time of every BeiDou MSM whose CRC-24Q is right moved 14 s back
+    (GPS time to BeiDou time) and its CRC written again; the other bytes as they are. How many were moved."""
+    moved = 0
+    with open(path, "rb") as f, open(dest, "wb") as out:
+        size = os.fstat(f.fileno()).st_size
+        if size == 0:
+            return 0
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            written = 0
+            i = data.find(b"\xd3")
+            while 0 <= i and i + 6 <= size:
+                length = ((data[i + 1] & 0x03) << 8) | data[i + 2]
+                end = i + 6 + length
+                message = (data[i + 3] << 4) | (data[i + 4] >> 4) if length >= 2 else 0
+                kind = _msm(message)
+                if end > size or length < 8 or kind is None or kind[0] != "BeiDou":
+                    i = data.find(b"\xd3", i + 1)
+                    continue
+                frame = bytearray(data[i:end])
+                if crc24q(bytes(frame[:-3])) != int.from_bytes(frame[-3:], "big"):
+                    i = data.find(b"\xd3", i + 1)
+                    continue
+                bits = int.from_bytes(frame[3:11], "big")
+                epoch = (bits >> 10) & ((1 << 30) - 1)
+                epoch = (epoch - BDS_BEHIND_MS) % _WEEK_MS
+                bits = (bits & ~(((1 << 30) - 1) << 10)) | (epoch << 10)
+                frame[3:11] = bits.to_bytes(8, "big")
+                frame[-3:] = crc24q(bytes(frame[:-3])).to_bytes(3, "big")
+                out.write(data[written:i])
+                out.write(frame)
+                written = end
+                moved += 1
+                i = data.find(b"\xd3", end)
+            out.write(data[written:size])
+    return moved
+
+
 # ------------------------------------------------------------------------------------------------------- conversion
 
 @dataclass
@@ -300,10 +480,27 @@ def _cached(entry: Path) -> dict | None:
 
 def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress) -> dict:
     """The conversion written into the folder ``entry`` - made in a folder of its own beside it, renamed when whole -,
-    its counts returned. When another run of the same conversion finished it first, that one is used."""
+    its counts returned (and ``notes``, the warnings of the conversion). When another run of the same conversion
+    finished it first, that one is used.
+
+    An RTCM 3 log is looked at first (:func:`rtcm3_survey`): BeiDou MSM in GPS time (receivers of before the
+    standard) are converted from a copy with their epochs moved 14 s back (:data:`BDS_GPS_TIME`); MSM that end an
+    epoch before others of the same time give RINEX epochs written twice (a warning); a log of MSM1-3 only is refused
+    by name (:data:`MSM_LOW_ONLY`)."""
     part = Path(tempfile.mkdtemp(prefix=f".{entry.name}-", suffix=".part", dir=entry.parent))
     try:
         obs, nav = part / f"{path.stem}.obs", part / f"{path.stem}.nav"
+        notes: list[str] = []
+        survey = rtcm3_survey(path) if kind == "rtcm3" else None
+        source = path
+        if survey and survey["bds_gps_time"] >= FRAMES_NEEDED and survey["bds_gps_time"] > survey["bds_standard"]:
+            source = part / f"{path.stem}.bds{path.suffix}"
+            _bds_moved_copy(path, source)
+            notes.append(BDS_GPS_TIME.format(name=path.name))
+        if survey and survey["repeated"]:
+            notes.append(f"{path.name}: its MSM say they end their epoch (multiple message bit 0) before others of the "
+                         "same time: RTKLIB writes one RINEX epoch for each, the same time repeated with some of the "
+                         "systems each (the PPK reads them as one epoch)")
         stop = threading.Event()
 
         def watch():  # the cancel button of a run stops the core's conversion
@@ -315,7 +512,7 @@ def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress)
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
         try:
-            result = _native.raw_to_rinex(kind, path, obs, nav, approx)
+            result = _native.raw_to_rinex(kind, source, obs, nav, approx)
         finally:
             stop.set()
             watcher.join()
@@ -323,11 +520,20 @@ def _convert(path: Path, kind: str, entry: Path, approx: float | None, progress)
         if code == 1:
             raise Cancelled(f"conversion of {path.name} cancelled")
         if code == -2:
+            low = _msm_low_only(survey["types"]) if survey else None
+            if low:
+                raise ValueError(MSM_LOW_ONLY.format(name=path.name, types=", ".join(map(str, low))))
             raise ValueError(f"{path.name}: {result['message'] or f'not a {kind} log, or damaged'}")
         if code != 0:
             raise RuntimeError(f"{path.name}: conversion failed ({code}): {result['message']}")
         meta = {k: result.get(k, 0) for k in ("epochs", "events", "navigation", "errors")}
-        meta.update(kind=kind, obs=obs.name, nav=nav.name if nav.exists() else None, message=result["message"])
+        # the events written, counted in the file: convrnx counts one more when the last message of the log is a
+        # time mark (its scan leaves the flag of the event on the last epoch)
+        meta["events"] = len(rinex.external_events(obs)[2]) if obs.is_file() else 0
+        meta.update(kind=kind, obs=obs.name, nav=nav.name if nav.exists() else None, message=result["message"],
+                    notes=notes)
+        if source != path:
+            source.unlink(missing_ok=True)
         (part / "convert.json").write_text(json.dumps(meta))
         progress.check()  # cancelled while it ran (a convbin program is not stopped): nothing kept
         try:
@@ -371,7 +577,8 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
         kind = "rtcm3"
     found = kind or raw_kind(path)
     if found is None:
-        raise ValueError(f"{path.name}: not a raw receiver log (u-blox, RTCM 3) nor a RINEX file")
+        raise ValueError(f"{path.name}: not a raw receiver log (u-blox, RTCM 3, Septentrio SBF, Unicore, "
+                         "Trimble RT-17) nor a RINEX file - a NovAtel log is converted with kind=\"novatel\"")
     if found == "rinex":
         return _from_rinex(path)
     approx = _gps_seconds(approx_time) if approx_time is not None else None
@@ -385,7 +592,7 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
     whose = _hash(str(path.resolve()))
     timed = found in _native.RAW_NEED_TIME  # the approximate time changes the conversion of these only
     day = int(approx // DAY) if timed and approx is not None else ""
-    key = _hash(f"{stat.st_size}|{stat.st_mtime_ns}|{found}|{day}|{_native.convbin_identity()}")
+    key = _hash(f"{stat.st_size}|{stat.st_mtime_ns}|{found}|{day}|{_native.convbin_identity()}|{CACHE_VERSION}")
     entry = cache / f"{whose}-{key}"
     progress(0.0, f"Converting {path.name} ({found}) to RINEX")
     meta = _cached(entry)
@@ -400,7 +607,7 @@ def to_rinex(path: str | Path, folder: str | Path | None = None, *, kind: str | 
             raise ValueError(f"{path.name}: the conversion has no epochs"
                              + (": is the approximate time of the log in the right week?" if approx is not None else ""))
         span = (_seconds(span[0]), _seconds(span[1]))
-        warnings = []
+        warnings = list(meta.get("notes", []))
         if approx is not None:
             if min(abs(span[0] - approx), abs(span[1] - approx)) > WRONG_WEEK_DAYS * DAY and not (
                     span[0] <= approx <= span[1]):
