@@ -1450,3 +1450,32 @@ def test_survey_crs_carries_them(tmp_path):
     '''))
     assert out["moved"] and out["free"] < 0.001 and out["basis"] and out["again"] and out["same"] == 0.0
     assert out["counted"] == 1  # said in the preview
+
+
+def test_parked_300_the_helper_reads_the_last_json_line_or_shows_the_end_of_the_output(tmp_path):
+    """The helper of these tests: what a library writes after the answer of the script (a warning at exit) does not
+    hide it, and a script that printed no JSON fails with the last lines of its output and of its errors."""
+    answer = _run(tmp_path, '''
+        import sys
+        print("a line of a library")
+        print(json.dumps({"first": 1}))
+        print(json.dumps({"answer": 42}))
+        print("Warning: something written at exit")
+        print("{not json")
+    ''')
+    assert answer == {"answer": 42}
+    with pytest.raises(pytest.fail.Exception) as failed:
+        _run(tmp_path, '''
+            import sys
+            print("nothing to read here")
+            print("what went wrong", file=sys.stderr)
+        ''')
+    said = str(failed.value)
+    assert "no line of JSON" in said and "nothing to read here" in said and "what went wrong" in said
+    with pytest.raises(AssertionError, match="exit status 3") as failed:
+        _run(tmp_path, '''
+            import sys
+            print("the last words", file=sys.stderr)
+            sys.exit(3)
+        ''')
+    assert "the last words" in str(failed.value)
