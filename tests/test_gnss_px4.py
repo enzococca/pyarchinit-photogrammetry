@@ -341,3 +341,17 @@ def test_first_fix_off_the_grid(tmp_path):
     shotset = px4.px4(_write(tmp_path, w.binary()))
     assert {s.source["time_base"] for s in shotset.shots} == {"gps_fix"}
     assert np.abs(_errors(shotset, expected)).max() <= FIX_TOL_S
+
+
+@pytest.mark.parametrize("drift_ppm, slow", [(10.0, True), (300.0, False)])
+def test_slow_clock_said(tmp_path, drift_ppm, slow):
+    """Fix epochs and processing times (the envelope): a boot clock within 35 ppm of GPS time is warned of, as for
+    ArduPilot, without a size of the error taken from ArduPilot's loop; a stamping receiver never."""
+    w, _expected = flight(20, drift_ppm=drift_ppm)
+    shotset = px4.px4(_write(tmp_path, w.binary()))
+    said = [w for w in shotset.warnings if "ppm from GPS time" in w]
+    assert bool(said) == slow, shotset.warnings
+    if slow:
+        assert "20 shots" in said[0] and "not measured on PX4" in said[0]
+    stamped = px4.px4(_write(tmp_path, flight(20, gps="stamp", drift_ppm=drift_ppm)[0].binary(), "stamp.ulg"))
+    assert not any("ppm from GPS time" in w for w in stamped.warnings)

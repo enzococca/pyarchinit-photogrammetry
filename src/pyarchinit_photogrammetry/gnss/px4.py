@@ -20,7 +20,9 @@ reader): each message of ``vehicle_gps_position`` (or, without it, ``sensor_gps`
 was published) and ``time_utc_usec`` (UTC, us), put in GPS time with the leap seconds of its day. Two kinds were found
 in real logs: receivers whose ``time_utc_usec`` is the epoch of the fix, on the grid of the fixes (u-blox: the boot
 times are processing times, 0 to tens of ms after the arrival, one-sided - the clock is their envelope, time base
-``"gps_fix"``), and receivers that stamp each message with its own UTC off any grid (a DroneCAN receiver: the clock is
+``"gps_fix"``; the envelope of the ArduPilot reader, whose rise to a branch one 20 ms loop above models ArduPilot's
+50 Hz loop: whether PX4's GPS driver delays its messages in such branches no PX4 log here shows, the model is applied
+as it is, not proven), and receivers that stamp each message with its own UTC off any grid (a DroneCAN receiver: the clock is
 the median, ``"gps_stamp"``); they are told by whether the UTC times fall on the grid of the fixes. ``timestamp_utc``
 is the check: its median difference from the fitted clock is kept per shot (``source["utc_minus_clock_ms"]``); over
 :data:`UTC_CHECK_S` a warning, and when the difference is the leap seconds ``timestamp_utc`` was GPS time already
@@ -28,6 +30,10 @@ is the check: its median difference from the fitted clock is kept per shot (``so
 Without GPS messages with a time the shot time is ``timestamp_utc`` plus the leap seconds (``"timestamp_utc"``, with a
 warning). ``timestamp_sample`` of the GPS messages is not used: on the real logs read (PX4 1.15, 1.16) it stays at
 one value for the whole log.
+
+As with ArduPilot, a boot clock within :data:`.autopilot.SLOW_PPM` of GPS time drifts too slowly through the
+processing delays for every window of the envelope to hold a message processed at once: with ``"gps_fix"`` such shots
+are warned of (``source["clock_ppm"]``); how early their times can be is measured on ArduPilot's loop only.
 
 What is not removed: the latency of the receiver from the epoch of a fix to its message (``"gps_fix"``: every time
 early by it, tens of ms on a u-blox; ``shots.pair`` and ``apply_shots`` take it as ``latency_s``) and, for the
@@ -55,7 +61,7 @@ from pathlib import Path
 import numpy as np
 
 from . import rinex
-from .autopilot import NEAREST_GPS_S, _plural, _to_gps, fit_clock
+from .autopilot import NEAREST_GPS_S, SLOW_PPM, _plural, _to_gps, fit_clock
 from .lever import quaternion_to_euler
 from .shots import Shot, ShotSet
 from .ulog import read_ulog
@@ -338,6 +344,16 @@ def px4(path: str | Path, topic: str = "auto") -> ShotSet:
         warnings.append(f"the GPS messages ({clock['topic']}) carry the time of their fix and the boot time they were "
                         "processed: the clock is fitted to the least delayed of them; every shot time is early by the "
                         "latency of the receiver (tens of ms on a u-blox), not removed")
+    if clock is not None and clock["envelope"]:
+        slow = [s.source["clock_ppm"] for s in shots if s.valid and s.source["time_base"] == clock["base"]
+                and s.source.get("clock_ppm") is not None and abs(s.source["clock_ppm"]) < SLOW_PPM]
+        if slow:
+            nearest = min(slow, key=abs)
+            warnings.append(f"{len(slow)} shot{_plural(len(slow))} timed on a clock that runs {abs(nearest):.1f} ppm "
+                            f"from GPS time (under {SLOW_PPM:g} ppm, GPS messages every {clock['step_ms']} ms): the "
+                            "delays of processing drift too slowly to be all sampled, the clock may not reach the "
+                            "least delayed messages and those shot times can be early - by up to 20 ms on "
+                            "ArduPilot's 50 Hz loop, not measured on PX4 (source['clock_ppm'])")
     if clock is not None and clock["base"] == "gps_stamp":
         bus = f", {clock['bus']}" if clock.get("bus") else ""
         warnings.append(f"the GPS messages ({clock['topic']}{bus}) carry a UTC time of the receiver's own, off the "

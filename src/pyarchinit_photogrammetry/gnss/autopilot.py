@@ -282,7 +282,9 @@ def fit_clock(a: np.ndarray, g: np.ndarray, base: str, envelope: bool) -> dict:
     ``envelope`` (the boot times are processing times: one-sided delays, the clock is their envelope; else the
     median), ``step_ms`` (the period of the fixes in GPS time), ``fixes``, ``glitches`` and ``unsure``
     (:func:`_without_glitches`). A fix logged twice is kept once, at its first boot time. Shared by the ArduPilot and
-    PX4 readers: the same problem of a boot clock against the GPS times of fixes (:func:`_to_gps` reads it)."""
+    PX4 readers: the same problem of a boot clock against the GPS times of fixes (:func:`_to_gps` reads it). The rise
+    of the envelope to a branch one :data:`LOOP_S` above is a model of ArduPilot's 50 Hz loop, measured on ArduPilot
+    logs only; on PX4 it is applied as it is, not proven."""
     order = np.lexsort((a, g))  # by GPS time, then arrival: a fix logged twice is kept once, at its first time
     a, g = a[order], g[order]
     first = np.ones(len(g), bool)
