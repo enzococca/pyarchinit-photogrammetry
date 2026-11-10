@@ -4563,6 +4563,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _mosaic_release(self, ids) -> None:
         """Before the folders of the merged products ``ids`` move: the 2D view no longer shows them (Windows does not
         move a file in use)."""
+        from ..engine import mosaic
+
+        for mid in ids:
+            mosaic.release_sources(mosaic.folder(self.doc, mid))
         shown = getattr(self, "_mosaic_view", None)
         if shown is not None and shown[0] in set(ids):
             self._load_raster()
