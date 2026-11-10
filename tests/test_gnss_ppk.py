@@ -763,6 +763,7 @@ def test_config_with_a_typed_base_position():
     assert options["out-height"] == "ellipsoidal"
     assert options["out-timesys"] == "gpst"
     assert options["out-timeform"] == "tow"
+    assert options["out-timendec"] == "6"  # the times of the solution to the microsecond
     assert options["out-outhead"] == "on"
     # only options RTKLIB knows, no file of any kind, values without a "#" (a comment for RTKLIB) or blanks
     assert set(options) <= _rtklib_option_names()

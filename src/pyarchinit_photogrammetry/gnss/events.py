@@ -65,7 +65,7 @@ def rinex_events(path: str | Path) -> ShotSet:
     info, leap, found = rinex.external_events(path)
     system = info.time_system
     timed = []
-    for fields, line, valid in found:
+    for fields, line, valid, _epoch in found:
         week, tow = _week_and_seconds(fields, _ahead(system, fields, leap))
         timed.append(((week, tow), line, valid))
     kept, doubles = _without_doubles(timed)
@@ -84,12 +84,18 @@ def rinex_events(path: str | Path) -> ShotSet:
 def rinex_event_times(path: str | Path) -> list[float]:
     """The GPS times of every external event of a RINEX observation file, in the order of their times: doubles and
     marks without a valid time too, as RTKLIB reads them (:func:`rinex_events` leaves doubles out)."""
+    return sorted(t for t, _epoch in rinex_event_epochs(path))
+
+
+def rinex_event_epochs(path: str | Path) -> list[tuple[float, int]]:
+    """``(GPS time, observation epoch)`` of every external event of a RINEX observation file, in the order of the
+    file: the number of the observation epoch RTKLIB gives it (:func:`.rinex.external_events`)."""
     info, leap, found = rinex.external_events(Path(path))
-    times = []
-    for fields, _line, _valid in found:
+    out = []
+    for fields, _line, _valid, epoch in found:
         week, tow = _week_and_seconds(fields, _ahead(info.time_system, fields, leap))
-        times.append(week * float(_WEEK) + tow)
-    return sorted(times)
+        out.append((week * float(_WEEK) + tow, epoch))
+    return out
 
 
 def invalid_warning(valid: list[bool]) -> list[str]:
@@ -289,8 +295,8 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     missing = _count_gaps(counts)
     if missing:
         warnings.append(f"{missing} pulse{'s' if missing > 1 else ''} of the event input never reported (gaps in the "
-                        "counter of TIM-TM2): the receiver saw them but sent no message, so their photos have no time "
-                        "mark")
+                        "counter of TIM-TM2): the receiver counted them but sent no message for them - it sends at "
+                        "most one time mark per navigation epoch - so their photos have no time mark")
     if len(channels) > 1:
         warnings.append(f"time marks of {len(channels)} event inputs (channels {', '.join(map(str, sorted(channels)))})"
                         " mixed in one set")

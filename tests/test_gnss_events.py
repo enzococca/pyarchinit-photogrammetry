@@ -480,3 +480,46 @@ def test_events_pos_read(tmp_path, monkeypatch):
         lat, lon, h = (np.interp(shot.gps_time, solution.times, solution.llh[:, i]) for i in range(3))
         assert shot.antenna[0] == pytest.approx(lat, abs=1e-8) and shot.antenna[1] == pytest.approx(lon, abs=1e-8)
         assert shot.antenna[2] == pytest.approx(h, abs=1e-3)
+
+
+# --- validity of the marks, gaps of the counter (real-data trials) -------------------------------------------------
+
+
+def _event_v2_not_valid(hour: int, minute: int, seconds: float) -> list[str]:
+    """An external event of RINEX 2 as RTKLIB writes a mark without a valid time: one special line, its comment."""
+    return [f" 05  4  2 {hour:2d} {minute:2d}{seconds:11.7f}  5  1", f"{' Time mark is not valid':<60}COMMENT"]
+
+
+def test_rinex_marks_without_valid_time(tmp_path):
+    """RTKLIB writes a TIM-TM2 mark without a valid time with the comment "Time mark is not valid": read back as not
+    valid, the warning telling marks before the first fix from those taken after losing it."""
+    after = {1: _event_v2_not_valid(0, 0, 45.0), 49: [_event_v2(0, 24, 31.0)], 99: _event_v2_not_valid(0, 49, 50.0)}
+    shotset = events.rinex_events(_with_events(tmp_path / "inv0920.05o", after))
+    assert [s.valid for s in shotset.shots] == [False, True, False]
+    assert [s.source["time_valid"] for s in shotset.shots] == [False, True, False]
+    warning = [w for w in shotset.warnings if "without a valid time" in w]
+    assert len(warning) == 1 and "1 before its first fix" in warning[0] and "1 after losing it in flight" in warning[0]
+    # every event read for the check of RTKLIB's marks: the invalid ones too
+    assert len(events.rinex_event_times(tmp_path / "inv0920.05o")) == 3
+
+
+def test_tim_tm2_valid_lost_in_flight_and_counter_gaps(tmp_path):
+    """Flags 0xcd, 0x8d, 0xcd: the middle mark without a valid time (the fix lost in flight); a counter that jumps from
+    3 to 6 says that two pulses were never reported."""
+    frames = [_tm2(count, flags, (2300, 0, 0), (2300, 1000 * (i + 1), 0))
+              for i, (count, flags) in enumerate(((1, 0xCD), (2, 0x8D), (3, 0xCD), (6, 0xCD)))]
+    marks = events.ubx_time_marks(_write(tmp_path / "lost.ubx", *frames))
+    assert [s.valid for s in marks.shots] == [True, False, True, True]
+    assert any("1 time mark without a valid time" in w and "1 after losing it in flight" in w
+               and "before its first fix" not in w for w in marks.warnings)
+    assert any("2 pulses of the event input never reported" in w for w in marks.warnings)
+    whole = events.ubx_time_marks(_write(tmp_path / "whole.ubx", *frames[:3]))
+    assert not any("never reported" in w for w in whole.warnings)
+
+
+def test_event_epochs_as_rtklib_gives_them(tmp_path):
+    """An event goes to the observation epoch after it, or to the one before when it is earlier than that epoch (a
+    receiver that writes its events after the epoch that follows them): two events then share an epoch."""
+    after = {1: [_event_v2(0, 0, 45.0)], 2: [_event_v2(0, 0, 50.0)], 49: [_event_v2(0, 24, 31.0)]}
+    path = _with_events(tmp_path / "late0920.05o", after)
+    assert [epoch for _t, epoch in events.rinex_event_epochs(path)] == [2, 2, 50]

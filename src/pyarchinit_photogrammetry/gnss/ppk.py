@@ -607,25 +607,29 @@ def _apart_s(times: np.ndarray, t: np.ndarray) -> np.ndarray:
     return np.minimum(np.abs(times[after] - t), np.abs(times[before] - t))
 
 
-def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, marks_name: str) -> list[str]:
+def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, marks_name: str,
+                   epochs: list | None = None) -> list[str]:
     """Why the events of the rover ``given`` (sorted) are not all among the marks RTKLIB ``written``: RTKLIB keeps one
-    time mark per observation epoch (the last event before it: an event between two epochs belongs to the later), so
-    of events closer than the interval of the observations only the last of each epoch is written; and it writes none
-    outside the epochs it solved."""
+    time mark per observation epoch - an event goes to the observation record that follows it in the file
+    (``epochs``, of each event; without them the solved epoch at or after it) -, so of events that go to the same
+    epoch only one is written; and it writes none outside the epochs it solved."""
     dropped = _apart_s(written, given) > MARK_TIME_S
     if not dropped.any():
         return []
-    times = np.asarray(solution.times, dtype=np.float64)
-    epoch = np.searchsorted(times, given - _SAME_EPOCH_S)  # the epoch at or after each event
-    shared = np.zeros(len(given), dtype=bool)
-    shared[:-1] = (epoch[:-1] == epoch[1:]) & (epoch[:-1] < len(times))  # a later event in the same epoch
+    if epochs is None:
+        times = np.asarray(solution.times, dtype=np.float64)
+        epochs = list(np.searchsorted(times, given - _SAME_EPOCH_S))  # the epoch at or after each event
+    counts: dict = {}
+    for e in epochs:
+        counts[e] = counts.get(e, 0) + 1
+    shared = np.array([counts[e] > 1 for e in epochs], dtype=bool)  # another event goes to the same epoch
     _llh, _q, _sd, ok = at(solution, given)
     out = []
     n = int((dropped & shared).sum())
     if n:
-        out.append(f"{n} of the {len(given)} events of the rover fall in the same observation epoch as a later event: "
-                   f"RTKLIB keeps one time mark per epoch, so its {marks_name} has only the last of each. Every shot "
-                   "takes its position from the solution at its own time, so none is lost")
+        out.append(f"{n} of the {len(given)} events of the rover fall in the same observation epoch as another event: "
+                   f"RTKLIB keeps one time mark per epoch, so its {marks_name} has only one of each. Every shot takes "
+                   "its position from the solution at its own time, so none is lost")
     n = int((dropped & ~shared & ~ok).sum())
     if n:
         out.append(f"{n} of the {len(given)} time marks of the rover are not in {marks_name}: RTKLIB writes none "
@@ -693,14 +697,19 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
         return [f"{marks_path.name} cannot be read ({exc}): the shots of {name} were not checked against it"]
     warnings = []
     given = None  # the time marks of the rover's observations: those RTKLIB was given
+    given_epochs = None
     rovers, notes = _rover_observations(solution)
     if notes:
         warnings.append(f"{'; '.join(notes)}: the shots of {name} are compared with the marks RTKLIB wrote in "
                         f"{marks_path.name} only")
     if rovers:
         try:
-            # every event, doubles and marks without a valid time too: RTKLIB is given them all
-            given = np.array(sorted(t for rover in rovers for t in events.rinex_event_times(rover)), dtype=np.float64)
+            # every event, doubles and marks without a valid time too: RTKLIB is given them all, each with the
+            # observation epoch it goes to (files apart)
+            pairs = sorted((t, (i, epoch)) for i, rover in enumerate(rovers)
+                           for t, epoch in events.rinex_event_epochs(rover))
+            given = np.array([t for t, _e in pairs], dtype=np.float64)
+            given_epochs = [e for _t, e in pairs]
         except (ValueError, OSError):
             given = None
     written = np.array(sorted(m.gps_time for m in marks), dtype=np.float64)
@@ -732,7 +741,7 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
                             "writes no mark outside the epochs it solved, or the events may be of another receiver "
                             "or flight: check the photos")
     if given is not None and len(given):
-        warnings += _dropped_marks(solution, given, written, marks_path.name)
+        warnings += _dropped_marks(solution, given, written, marks_path.name, given_epochs)
     placed = [m for m in marks if m.valid and m.antenna is not None]
     if placed:
         mark_times = np.array([m.gps_time for m in placed], dtype=np.float64)

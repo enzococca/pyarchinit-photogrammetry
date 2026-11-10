@@ -396,21 +396,25 @@ def time_span(path: str | Path) -> tuple[datetime, datetime] | None:
 _NOT_VALID = "time mark is not valid"  # RTKLIB's comment after an event whose time is not valid (rinex.c)
 
 
-def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple[tuple, int, bool]]]:
+def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple[tuple, int, bool, int]]]:
     """The external events (epoch flag 5: a shot on the event pin of the receiver) of an observation file, in the order
     of the file: the header of the file, the leap seconds its header gives (None when it gives none) and, for each
     event, its time as the file writes it - (year, month, day, hour, minute, seconds), in the time system of the file
     (``RinexInfo.time_system``) -, its line in the plain text of the file (from 1) and whether its time is valid: the
     lines an event announces are its, not records, and RTKLIB writes there the comment "Time mark is not valid" for a
-    mark the receiver took without a valid GNSS fix (u-blox TIM-TM2 without its bit "time valid"). A file packed in
-    layers is read through :func:`plain`; a navigation file is a ``ValueError`` naming it."""
+    mark the receiver took without a valid GNSS fix (u-blox TIM-TM2 without its bit "time valid") -, and the number
+    of the observation epoch RTKLIB gives it (from 0): the epoch whose record follows it, or the one before when the
+    event is earlier than that epoch (RTKLIB keeps one event per epoch). A file packed in layers is read through :func:`plain`; a navigation file is a
+    ``ValueError`` naming it."""
     path = Path(path)
     info, _, leap, source = _read_header(path)
     if info.kind != "obs":
         raise ValueError(f"{path.name}: a navigation file has no events")
-    found: list[tuple[tuple, int, bool]] = []
+    found: list[tuple[tuple, int, bool, int]] = []
     special = 0
     event = False
+    epochs = 0  # the observation epochs read so far
+    last = None  # the time of the last of them
     number = 0
     try:
         with _open(source) as f:
@@ -421,7 +425,7 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
                 if special:
                     special -= 1
                     if event and _NOT_VALID in line.lower():
-                        found[-1] = (found[-1][0], found[-1][1], False)
+                        found[-1] = (found[-1][0], found[-1][1], False, found[-1][3])
                     continue
                 event = False
                 start = _record_start(line.rstrip("\r\n"), info.version)
@@ -431,8 +435,14 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
                 if 2 <= flag <= 5:
                     special = count
                 if flag == EXTERNAL_EVENT and fields is not None:
-                    found.append((fields, number, True))
+                    # the epoch RTKLIB gives it (rinex.c, readrnxobs): the next one, or the one before when the
+                    # event is earlier than that (a receiver that writes an event after the epoch that follows it)
+                    before = last is not None and _time is not None and _time < last
+                    found.append((fields, number, True, epochs - 1 if before else epochs))
                     event = True
+                elif flag in (0, 1, 6):
+                    epochs += 1
+                    last = _time
     except (EOFError, gzip.BadGzipFile, zlib.error) as error:
         raise ValueError(f"{path.name} is cut short or damaged ({error})") from None
     return info, leap, found

@@ -497,3 +497,43 @@ def test_converted_rover_gone_from_the_cache(tmp_path, monkeypatch):
     shutil.rmtree(Path(raw.inputs["converted"][0]["obs"]).parent)
     (warning,) = ppk.events_check(raw, events.ubx_time_marks(log))
     assert "no longer in the cache" in warning and "marks RTKLIB wrote" in warning
+
+
+# --- the marks RTKLIB keeps: one per observation epoch (real-data trials) -----------------------------------------
+
+
+@needs_rtklib
+def test_two_events_in_one_epoch_said_as_such(tmp_path, monkeypatch):
+    """Two events between the same two epochs (00:00:30 and 00:01:00): RTKLIB writes one mark for that epoch; the
+    check says so, and that no shot is lost - not that the mark is outside the solution."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    after = {1: [_event_2005(0, 40.0), _event_2005(0, 50.0)], 49: [_event_2005(24, 31.5)]}
+    rover = _rover_2005(tmp_path / "3040evts.05o", after)
+    solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    warnings = ppk.events_check(solution, events.rinex_events(rover))
+    shared = [w for w in warnings if "same observation epoch" in w]
+    assert len(shared) == 1 and shared[0].startswith("1 of the 3 events"), warnings
+    assert not any("outside the epochs" in w or "although the solution has positions" in w for w in warnings)
+
+
+def test_solution_times_to_the_microsecond(tmp_path):
+    """The options of a run write the times of the solution to the microsecond: a shot between two epochs of a .pos
+    written so is placed on the line between them to 1e-5 m, where the millisecond would put it up to 0.5 ms x the
+    speed off."""
+    assert "out-timendec      =6" in ppk.config(None)
+    rows = []
+    t0, speed = 518400.100416, 8.0  # m/s eastwards
+    for k in range(10):
+        t = t0 + 0.1 * k
+        lon = 139.0 + speed * (t - t0) / 111320.0 / math.cos(math.radians(35.0))
+        rows.append(f"1316 {t:13.6f}   35.000000000  {lon:13.9f}    61.0000   1  10   0.0040   0.0030   0.0090"
+                    "  -0.0010   0.0010  -0.0020   0.00   12.3")
+    path = tmp_path / "micro.pos"
+    path.write_text("%  GPST          latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  "
+                    "sdne(m)  sdeu(m)  sdun(m) age(s)  ratio\n" + "\n".join(rows) + "\n")
+    solution = ppk.read_pos(path)
+    when = 1316 * 604800.0 + t0 + 0.0437
+    llh, _q, _sd, ok = ppk.at(solution, [when])
+    lon = 139.0 + speed * 0.0437 / 111320.0 / math.cos(math.radians(35.0))
+    assert ok[0] and ppk.horizontal_m(35.0, lon, llh[0][0], llh[0][1]) < 1e-5
+
