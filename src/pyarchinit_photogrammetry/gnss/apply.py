@@ -292,7 +292,9 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
     kept unless ``replace_fix``, the errors, the warnings, the run recorded - as :func:`apply_ppk`, whose contract this
     is; the photos paired by :func:`.shots.pair` (``by``, ``latency_s``). ``meta["gnss"]`` keeps for a source other
     than an MRK what :func:`apply_shots` keeps (the antenna being the one of the solution), and the run its ``shots``
-    (``kind``, ``file``, ``by``, ``latency_s``, ``body_lever_mm``) with ``mrk`` None.
+    (``kind``, ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``) with ``mrk`` None. The events of
+    the rover's receiver (:data:`.ppk.EVENT_KINDS`) are checked against the time marks RTKLIB wrote for the run
+    (:func:`.ppk.events_check`), its warnings among the others.
 
     Returns what :func:`apply_ppk` returns with what :func:`apply_shots` adds about the pairing."""
     _check_lever(shotset, body_lever_mm)
@@ -395,6 +397,8 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
                         "the same. The base may be too far from the flight or share too few satellites with the "
                         "drone: check its distance and its observations")
     warnings += _pairing_warnings(pairing, vertical_only)
+    if shotset.kind in ppk.EVENT_KINDS:  # the events of the rover: checked against RTKLIB's time marks
+        warnings += ppk.events_check(solution, shotset)
     if placed:
         _remember(chunk, pairing, photos_folder, solution, replace_fix, body_lever_mm)
     return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings,
@@ -428,7 +432,7 @@ def _remember(chunk: Chunk, pairing: Pairing, photos_folder: str | Path | None, 
     """Record the run in ``chunk.meta`` (:func:`.ppk.last_run`): its files, its base and how it was placed (the typed
     position ``[lon, lat, h]``, the frame and the epoch of its position, the permanent station it came from), whether
     it replaced the onboard fixes; for shots other than those of a DJI MRK, ``mrk`` None and ``shots`` (``kind``,
-    ``file``, ``by``, ``latency_s``, ``body_lever_mm``)."""
+    ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``)."""
     base, inputs = solution.base or {}, solution.inputs or {}
     typed = base.get("position_source") == "typed" and base.get("position")
     files = [s.source.get("file") for s in pairing.shots if s.source.get("file")]
@@ -443,7 +447,8 @@ def _remember(chunk: Chunk, pairing: Pairing, photos_folder: str | Path | None, 
         "solution": Path(solution.path).name}
     if pairing.kind != "mrk":
         last["shots"] = {"kind": pairing.kind, "file": source, "by": pairing.by, "latency_s": pairing.latency_s,
-                         "body_lever_mm": None if body_lever_mm is None else [float(v) for v in body_lever_mm]}
+                         "body_lever_mm": None if body_lever_mm is None else [float(v) for v in body_lever_mm],
+                         "confirmed": pairing.confirmed}
     chunk.meta[ppk.MEMORY] = {"last": last}
 
 
