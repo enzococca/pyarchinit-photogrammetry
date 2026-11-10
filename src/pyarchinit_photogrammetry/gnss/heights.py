@@ -370,11 +370,11 @@ def _grid_missing_at(camera, chunk) -> GridMissing | None:
 
 
 def exif_heights_in_ellipsoidal_systems(chunk) -> list:
-    """The photos of ``chunk`` whose positions, switched on, have heights marked as above the sea level (the EXIF,
-    ``meta["gnss"]["height"]``) in a system with heights above the ellipsoid (EPSG:4979): every conversion takes them
-    as heights above the ellipsoid."""
+    """The photos of ``chunk`` whose positions, switched on, have heights marked as above the sea level (the EXIF or an
+    autopilot log, ``meta["gnss"]["height"]`` ``"exif"`` or ``"msl"``) in a system with heights above the ellipsoid
+    (EPSG:4979): every conversion takes them as heights above the ellipsoid."""
     return [cam for cam in chunk.cameras if cam.reference.location and cam.reference.enabled
-            and (cam.meta.get("gnss") or {}).get("height") == "exif"
+            and (cam.meta.get("gnss") or {}).get("height") in ("exif", "msl")
             and height_kind(_reference_crs(chunk, cam)) == ELLIPSOIDAL]
 
 

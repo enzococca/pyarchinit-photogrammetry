@@ -11,7 +11,7 @@ from ..markers import gcp
 from . import frames, heights
 
 STATUSES = ("fix", "float", "single", "none")
-HEIGHTS = ("ellipsoidal", "exif")
+HEIGHTS = ("ellipsoidal", "exif", "msl")  # "msl": above the sea level as an autopilot log gives it, taken as "exif"
 
 
 def _status(camera) -> str:
@@ -56,7 +56,8 @@ def summary(chunk: Chunk) -> list[dict]:
       counts as ``"single"``. Photos with no position at all are in none of them but in ``no_position``;
     * ``sources``: ``{source: n}`` for the photos with a position (``"unknown"`` for one that records none);
     * ``heights``: ``{kind: n}`` for the photos with a position, the kind of their height: ``"ellipsoidal"`` (GNSS,
-      MRK), ``"exif"`` (the altitude of the EXIF) or ``"unknown"``;
+      MRK), ``"exif"`` (the altitude of the EXIF), ``"msl"`` (above the sea level, from an autopilot log) or
+      ``"unknown"``;
     * ``frames``: ``{frame: n}`` for the photos with a position, the reference frame of each (one of
       :data:`.frames.FRAMES`: ``"ITRF2020"`` for a PPK against a permanent station, ``"unknown"`` for the drone's own
       RTK, the GPS of a photo and the positions written before the frames);
@@ -102,13 +103,14 @@ def summary(chunk: Chunk) -> list[dict]:
 
 
 def mixed_heights(chunk: Chunk, vertical: float = 1.0) -> list[str]:
-    """The kinds of height (``"ellipsoidal"``, ``"exif"``, ``"unknown"``, sorted) of the photos of ``chunk`` whose
-    reference is switched on and accurate in height (under ``vertical`` metres), when they are more than one: an
-    ellipsoidal height and one of the EXIF of the same place can be tens of metres apart, and both would pull the
-    block. An empty list when the heights are of one kind."""
+    """The kinds of height (``"ellipsoidal"``, ``"exif"`` - ``"msl"`` counted with it -, ``"unknown"``, sorted) of the
+    photos of ``chunk`` whose reference is switched on and accurate in height (under ``vertical`` metres), when they are
+    more than one: an ellipsoidal height and one of the EXIF of the same place can be tens of metres apart, and both
+    would pull the block. An empty list when the heights are of one kind."""
     kinds = set()
     for cam in chunk.cameras:
         acc = _accuracy(cam)
         if cam.enabled and cam.reference.enabled and cam.reference.location and acc is not None and acc[2] < vertical:
-            kinds.add(_height(cam))
+            kind = _height(cam)
+            kinds.add("exif" if kind == "msl" else kind)  # both above the sea level
     return sorted(kinds) if len(kinds) > 1 else []

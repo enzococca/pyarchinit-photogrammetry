@@ -33,6 +33,7 @@ _EPOCH_V3 = re.compile(r"^> +(\d{4}) +(\d{1,2}) +(\d{1,2}) +(\d{1,2}) +(\d{1,2})
 # 0 ok, 1 power failure before the epoch, 6 cycle slip records, which carry the time of an observation epoch: it is
 # an epoch like the others. 2-5 are events (moved antenna, new site...): their time is not an observation time
 _OBSERVATION_FLAGS = "016"
+EXTERNAL_EVENT = 5  # the flag of an external event (a camera shot on the event pin): the time of the epoch is its
 _SATELLITE_V3 = re.compile(rf"^([{SYSTEMS}])\d\d")
 _NAV_RECORD_V3 = re.compile(rf"^([{SYSTEMS}])\d\d ")
 
@@ -381,6 +382,42 @@ def time_span(path: str | Path) -> tuple[datetime, datetime] | None:
     return _span(source, info, leap)
 
 
+def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple[tuple, int]]]:
+    """The external events (epoch flag 5: a shot on the event pin of the receiver) of an observation file, in the order
+    of the file: the header of the file, the leap seconds its header gives (None when it gives none) and, for each
+    event, its time as the file writes it - (year, month, day, hour, minute, seconds), in the time system of the file
+    (``RinexInfo.time_system``) - and its line in the plain text of the file (from 1). The lines an event announces
+    are its, not records. A file packed in layers is read through :func:`plain`; a navigation file is a ``ValueError``
+    naming it."""
+    path = Path(path)
+    info, _, leap, source = _read_header(path)
+    if info.kind != "obs":
+        raise ValueError(f"{path.name}: a navigation file has no events")
+    found: list[tuple[tuple, int]] = []
+    special = 0
+    number = 0
+    try:
+        with _open(source) as f:
+            for number, line in enumerate(f, 1):
+                if _header_end(line):
+                    break
+            for number, line in enumerate(f, number + 1):
+                if special:
+                    special -= 1
+                    continue
+                start = _record_start(line.rstrip("\r\n"), info.version)
+                if start is None:
+                    continue
+                _time, flag, count, fields = start
+                if 2 <= flag <= 5:
+                    special = count
+                if flag == EXTERNAL_EVENT and fields is not None:
+                    found.append((fields, number))
+    except (EOFError, gzip.BadGzipFile, zlib.error) as error:
+        raise ValueError(f"{path.name} is cut short or damaged ({error})") from None
+    return info, leap, found
+
+
 # --- one file from several --------------------------------------------------------------------------------------
 
 _EVENT_V2 = re.compile(r"^ {28}[2-5]")  # an event record of RINEX 2 without a time: blank up to its flag
@@ -618,6 +655,37 @@ def _joined_header(first: _Piece, interval: float | None, several: bool) -> tupl
     return lines, i
 
 
+def _event_key(fields: tuple) -> tuple:
+    """The time of an external event as the file writes it, (year, month, day, hour, minute, seconds to 1e-7 s): the
+    same event in two pieces."""
+    return (*fields[:5], round(fields[5], 7))
+
+
+def _insert_events(path: Path, events: list[tuple[datetime, list[str]]], version: float) -> None:
+    """The external event records ``events`` (their time, their lines) put into the observation file ``path`` before
+    the first epoch after them (rewritten beside itself and renamed when whole)."""
+    pending = sorted(events, key=lambda event: event[0])
+    with _writing(path) as f:
+        def emit(lines: list[str]) -> None:
+            f.write(("\n".join(lines) + "\n").encode("latin-1"))
+
+        with open(path, encoding="latin-1", newline="") as source:
+            lines = (line.rstrip("\r\n") for line in source)
+            top = []
+            for line in lines:
+                top.append(line)
+                if _header_end(line):
+                    break
+            emit(top)
+            for time, flag, record, _fields in _records(lines, version):
+                if time is not None and flag in (0, 1, 6):
+                    while pending and pending[0][0] < time:
+                        emit(pending.pop(0)[1])
+                emit(record)
+        for _time, record in pending:
+            emit(record)
+
+
 def _same_file(a: Path, b: Path) -> bool:
     return a.resolve() == b.resolve() or (a.exists() and b.exists() and os.path.samefile(a, b))
 
@@ -634,7 +702,9 @@ def join(paths: str | Path | Iterable[str | Path],
     file cut short or damaged (the base is never missing its end in silence) and an ``out`` that is one of the
     files. They are written in the order of their first epoch (the order given for those that begin together): the
     records of a file whose epoch is not later than the last one written are repeats and are left out, with the event
-    records that follow them; the other records, events included, are copied as they are. A header event inside a
+    records that follow them - except an external event (flag 5, a shot) that was not written yet: it goes after the
+    last epoch written, or back among the epochs before it when its time is earlier, so that no shot is lost at a cut
+    and none is written twice; the other records, events included, are copied as they are. A header event inside a
     piece that gives observation types other than its header's is refused when there are several pieces, the pieces
     after it would be read with them.
 
@@ -666,6 +736,8 @@ def join(paths: str | Path | Iterable[str | Path],
     last: datetime | None = None
     fields: tuple | None = None
     interval: float | None = None  # of the piece the last epoch written is in
+    external: set[tuple] = set()  # the external events written, by their time as the file writes it
+    late: list[tuple[datetime, list[str]]] = []  # external events to put back among the epochs written before them
     with _writing(out) as f:
         def emit(lines: list[str]) -> None:
             f.write(("\n".join(lines) + "\n").encode("latin-1"))
@@ -693,13 +765,24 @@ def join(paths: str | Path | Iterable[str | Path],
                             types.get(s) != t for s, t in _obs_types(lines[1:], version).items()):
                         raise ValueError(f"{piece.path.name} gives other observation types than its header inside its "
                                          "observations: it cannot be joined with other files")
+                    key = _event_key(record_fields) if flag == EXTERNAL_EVENT and time is not None else None
                     if not skipping:
                         emit(held + lines)
+                        if key is not None:
+                            external.add(key)
+                    elif key is not None and key not in external:  # among repeated epochs, and not written yet
+                        external.add(key)
+                        if time >= last:
+                            emit(lines)
+                        else:  # the piece written before has the epochs around it, not the event
+                            late.append((time, lines))
                     held = []
             if held and not skipping:
                 emit(held)
         f.seek(sum(len(line) + 1 for line in top[:mark]))
         f.write(_time_card(_LAST_OBS, fields, system).encode("latin-1"))
+    if late:
+        _insert_events(out, late, version)
     time_system, leap = first.info.time_system, first.leap
     return header(out), [(_to_gps(a, time_system, leap), _to_gps(b, time_system, leap)) for a, b in gaps]
 
