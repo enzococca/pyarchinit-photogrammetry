@@ -55,27 +55,61 @@ def rinex_events(path: str | Path) -> ShotSet:
     each with its time in GPS time (``gps_time``, and the GPS week and seconds of the week, to the tenth of a
     microsecond the file writes, in ``source["gps_week"]`` and ``source["tow"]``), converted from the time system of the
     file (``TIME OF FIRST OBS``: GPS by default; UTC and GLONASS less the leap seconds, BeiDou less 14 s), ``index``
-    the place of the shot (from 1), no position. An event within :data:`DOUBLE_EVENT_S` of the one kept before it is
-    left out and counted (``duplicates``, and a warning). A file without events gives no shots and the warning
+    the place of the shot (from 1), no position; ``valid`` False for a mark RTKLIB wrote with the comment "Time mark is
+    not valid" (the receiver had no valid GNSS fix when it took it: :func:`invalid_warning`). An event within
+    :data:`DOUBLE_EVENT_S` of the one kept before it is left out and counted (``duplicates``, and a warning). A file
+    without events gives no shots and the warning
     :data:`NO_EVENTS`. A file packed in layers is read through :func:`.rinex.plain`; a navigation file, or a file that
     is not RINEX, is a ``ValueError`` naming it."""
     path = Path(path)
     info, leap, found = rinex.external_events(path)
     system = info.time_system
     timed = []
-    for fields, line in found:
+    for fields, line, valid in found:
         week, tow = _week_and_seconds(fields, _ahead(system, fields, leap))
-        timed.append(((week, tow), line))
+        timed.append(((week, tow), line, valid))
     kept, doubles = _without_doubles(timed)
-    shots = [Shot(index=i, gps_time=week * float(_WEEK) + tow,
+    shots = [Shot(index=i, gps_time=week * float(_WEEK) + tow, valid=valid,
                   source={"file": str(path), "kind": "rinex_events", "line": line, "gps_week": week, "tow": tow,
-                          "time_system": system})
-             for i, ((week, tow), line) in enumerate(kept, 1)]
+                          "time_system": system, "time_valid": valid})
+             for i, ((week, tow), line, valid) in enumerate(kept, 1)]
     warnings = []
     if not found:
         warnings.append(NO_EVENTS)
+    warnings += invalid_warning([valid for _t, _line, valid in kept])
     warnings += _doubles_warning(doubles)
     return ShotSet(shots=shots, kind="rinex_events", name=path.name, warnings=warnings, duplicates=doubles)
+
+
+def rinex_event_times(path: str | Path) -> list[float]:
+    """The GPS times of every external event of a RINEX observation file, in the order of their times: doubles and
+    marks without a valid time too, as RTKLIB reads them (:func:`rinex_events` leaves doubles out)."""
+    info, leap, found = rinex.external_events(Path(path))
+    times = []
+    for fields, _line, _valid in found:
+        week, tow = _week_and_seconds(fields, _ahead(info.time_system, fields, leap))
+        times.append(week * float(_WEEK) + tow)
+    return sorted(times)
+
+
+def invalid_warning(valid: list[bool]) -> list[str]:
+    """The warning for the time marks without a valid time among marks in time order (``valid`` of each): the receiver
+    had no valid GNSS fix when it took them - before its first fix, or after losing it in flight (signals blocked)."""
+    invalid = [i for i, ok in enumerate(valid) if not ok]
+    if not invalid:
+        return []
+    first = next((i for i, ok in enumerate(valid) if ok), len(valid))
+    before = sum(i < first for i in invalid)
+    lost = len(invalid) - before
+    where = []
+    if before:
+        where.append(f"{before} before its first fix")
+    if lost:
+        where.append(f"{lost} after losing it in flight, e.g. signals blocked")
+    n = len(invalid)
+    return [f"{n} time mark{'s' if n > 1 else ''} without a valid time: the receiver had no valid GNSS fix when "
+            f"{'they were' if n > 1 else 'it was'} taken ({', '.join(where)}). Kept, marked as not valid: check "
+            f"{'those photos' if n > 1 else 'that photo'}"]
 
 
 def _without_doubles(timed: list) -> tuple[list, int]:
@@ -168,6 +202,12 @@ def _tm2_time(week: int, ms: int, sub_ns: int, utc: bool) -> tuple[int, float, i
     return week, whole_ms / 1000.0 + sub_ns * 1e-9, leap
 
 
+def _count_gaps(counts: list[int]) -> int:
+    """How many values the counter of TIM-TM2 skipped (unwrapped counts, in the order of the log)."""
+    values = sorted(set(counts))
+    return sum(b - a - 1 for a, b in zip(values, values[1:]) if b - a > 1)
+
+
 def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     """The time marks of a u-blox log (UBX-TIM-TM2 messages) as shots, in the order of their times: one for every
     message that announces a new ``edge`` ("falling", the default, or "rising") of the signal at the event input,
@@ -177,7 +217,9 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     mark in UTC is put in GPS time with the leap seconds of its day (``source["leap_seconds"]``); one in GNSS time is
     GPS time when the last CFG-TP5 before it sets the time grid to GPS, not valid when it sets BeiDou, Galileo or
     GLONASS (not converted: see :data:`_GRIDS`), else read as GPS time with a warning; one in receiver time likewise.
-    ``valid`` is False for a mark without a valid time (bit 6), with a warning; ``source["acc_ns"]`` the accuracy the
+    ``valid`` is False for a mark without a valid time (bit 6: the receiver had no valid GNSS fix at the mark, before
+    its first fix or lost in flight), with a warning (:func:`invalid_warning`); a gap of the counter (pulses the
+    receiver never reported) is warned of too; ``source["acc_ns"]`` the accuracy the
     receiver gives the time. A mark within :data:`DOUBLE_EVENT_S` of the one kept before it (a message repeated, a
     bouncing contact) is left out and counted; damaged frames are skipped and counted in a warning. A log without
     marks of ``edge`` gives no shots and a warning: :data:`NO_TIME_MARKS`, or one that names the other edge when the
@@ -199,12 +241,14 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
     timed = []
     others = 0
     channels = set()
+    counts = []
     wraps, last = 0, None
     for offset, grid, (channel, flags, count, wn_r, wn_f, ms_r, ns_r, ms_f, ns_f, acc) in marks:
         if last is not None and count < last - 32768:  # 65535 -> 0: the counter of 16 bits started again
             wraps += 1
         last = count
         index = count + wraps * 65536
+        counts.append(index)
         if not flags & _NEW_EDGE[edge]:
             others += bool(flags & _NEW_EDGE[other])
             continue
@@ -241,10 +285,12 @@ def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
         if n:
             warnings.append(f"{n} time mark{'s' if n > 1 else ''} in {system} time (the time grid the log sets): not "
                             "converted to GPS time, marked as not valid - set the time grid of the receiver to GPS")
-    invalid = sum(not s.source["time_valid"] for s in shots)
-    if invalid:
-        warnings.append(f"{invalid} time mark{'s' if invalid > 1 else ''} without a valid time (no time fix of the "
-                        "receiver yet): kept, marked as not valid")
+    warnings += invalid_warning([s.source["time_valid"] for s in shots])
+    missing = _count_gaps(counts)
+    if missing:
+        warnings.append(f"{missing} pulse{'s' if missing > 1 else ''} of the event input never reported (gaps in the "
+                        "counter of TIM-TM2): the receiver saw them but sent no message, so their photos have no time "
+                        "mark")
     if len(channels) > 1:
         warnings.append(f"time marks of {len(channels)} event inputs (channels {', '.join(map(str, sorted(channels)))})"
                         " mixed in one set")

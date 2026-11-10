@@ -393,19 +393,24 @@ def time_span(path: str | Path) -> tuple[datetime, datetime] | None:
     return _span(source, info, leap)
 
 
-def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple[tuple, int]]]:
+_NOT_VALID = "time mark is not valid"  # RTKLIB's comment after an event whose time is not valid (rinex.c)
+
+
+def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple[tuple, int, bool]]]:
     """The external events (epoch flag 5: a shot on the event pin of the receiver) of an observation file, in the order
     of the file: the header of the file, the leap seconds its header gives (None when it gives none) and, for each
     event, its time as the file writes it - (year, month, day, hour, minute, seconds), in the time system of the file
-    (``RinexInfo.time_system``) - and its line in the plain text of the file (from 1). The lines an event announces
-    are its, not records. A file packed in layers is read through :func:`plain`; a navigation file is a ``ValueError``
-    naming it."""
+    (``RinexInfo.time_system``) -, its line in the plain text of the file (from 1) and whether its time is valid: the
+    lines an event announces are its, not records, and RTKLIB writes there the comment "Time mark is not valid" for a
+    mark the receiver took without a valid GNSS fix (u-blox TIM-TM2 without its bit "time valid"). A file packed in
+    layers is read through :func:`plain`; a navigation file is a ``ValueError`` naming it."""
     path = Path(path)
     info, _, leap, source = _read_header(path)
     if info.kind != "obs":
         raise ValueError(f"{path.name}: a navigation file has no events")
-    found: list[tuple[tuple, int]] = []
+    found: list[tuple[tuple, int, bool]] = []
     special = 0
+    event = False
     number = 0
     try:
         with _open(source) as f:
@@ -415,7 +420,10 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
             for number, line in enumerate(f, number + 1):
                 if special:
                     special -= 1
+                    if event and _NOT_VALID in line.lower():
+                        found[-1] = (found[-1][0], found[-1][1], False)
                     continue
+                event = False
                 start = _record_start(line.rstrip("\r\n"), info.version)
                 if start is None:
                     continue
@@ -423,7 +431,8 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
                 if 2 <= flag <= 5:
                     special = count
                 if flag == EXTERNAL_EVENT and fields is not None:
-                    found.append((fields, number))
+                    found.append((fields, number, True))
+                    event = True
     except (EOFError, gzip.BadGzipFile, zlib.error) as error:
         raise ValueError(f"{path.name} is cut short or damaged ({error})") from None
     return info, leap, found
