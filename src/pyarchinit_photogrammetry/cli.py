@@ -3747,6 +3747,7 @@ def gnss_ppk(project: Path,
                        f"{', '.join(path.name for path in prepared.downloaded)}")
         solution = ppk.solve(rover, prepared.bases, prepared.navs or None, prepared.position,
                              folder=ppk.work_folder(ch), atx=prepared.atx)
+        inputs.record(solution)  # remembered with the files as they were named, not with their conversions
         if kind == "mrk":
             result = gnss.apply_ppk(ch, source_file, solution, photos, replace_fix=replace_fix)
         else:

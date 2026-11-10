@@ -683,3 +683,24 @@ def test_dat_rover_is_raw_as_a_dat_base(tmp_path):
                                 reader=lambda *_a: ShotSet([], "events_pos"))
     (done,) = inputs.converted
     assert done.kind == "rtcm3" and inputs.rover == done.obs and inputs.bases == [RTCM_OBS]
+
+
+@needs_a_converter
+def test_run_records_the_files_the_user_named(tmp_path, monkeypatch):
+    """A run on the RINEX of ppk_inputs (the window, the command line): its record names the raw logs the user gave,
+    the conversions are a note of their own (where the events of a raw rover are read), their navigation files not
+    among those the user chose."""
+    rover = _rover_2012(tmp_path / "rover")
+    monkeypatch.setattr(_native, "ppk_solve", lambda conf, files, out: (Path(out).write_text(pos_text(), newline=""),
+                                                                         (0, ""))[1])
+    inputs = sources.ppk_inputs("events", None, rover, [RTCM_LOG])
+    (done,) = inputs.converted
+    solution = ppk.solve(inputs.rover, inputs.bases, inputs.navs([RTCM_NAV]), base_position=GMSD,
+                         folder=tmp_path / "work")
+    assert solution.inputs["base"] == str(Path(done.obs).absolute())  # as RTKLIB was given it
+    inputs.record(solution)
+    assert solution.inputs["rover"] == str(rover.absolute()) and solution.inputs["base"] == str(RTCM_LOG.absolute())
+    assert solution.inputs["navs"] == [str(RTCM_NAV.absolute())]
+    (note,) = solution.inputs["converted"]
+    assert note["source"] == str(RTCM_LOG.absolute()) and note["obs"] == str(Path(done.obs).absolute())
+    assert note["kind"] == "rtcm3" and note["epochs"] == 64 and note["nav"] == str(Path(done.nav).absolute())

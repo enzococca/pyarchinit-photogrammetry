@@ -520,6 +520,16 @@ def test_window_ppk_from_the_dialog_with_a_raw_base(tmp_path, qt_app, monkeypatc
         (inputs,) = given
         assert len(inputs) >= 3, inputs  # the rover, the base and the navigation of the conversion, all there
         assert "PPK: 3 foto su 3" in w.log_pane.text(), w.log_pane.text()
+        # the run is remembered with the files the user named, not with those of the cache of conversions
+        from pyarchinit_photogrammetry.gnss import download, ppk
+
+        last = ppk.last_run(w.chunk)
+        cache = str(download.cache_dir("converted"))
+        assert last["rover"] == str(rover.absolute()) and last["base"] == str(dat.absolute()), last
+        assert not [nav for nav in last["navs"] if nav.startswith(cache)], last["navs"]
+        again = mw.PpkDialog(rover, w, ppk.work_folder(w.chunk), w.chunk)  # the dialog opened again: the user's files
+        assert again.base.paths() == [dat.absolute()] and again.rover.path() == rover
+        _close(qt_app, again)
     finally:
         w.setWindowModified(False)
         w.close()

@@ -147,6 +147,35 @@ class PpkInputs:
         return found
 
 
+    def record(self, solution) -> None:
+        """The record of a run made on these files (``solution.inputs``, what :func:`.ppk.last_run` remembers and
+        the dialog starts again from) with the files as the user named them: a raw log in the place of its
+        conversion, the conversions as a note of their own (``"converted"``, as :func:`.ppk.solve` writes it for
+        the logs it converts itself: where the events of a raw rover are read), their navigation files only there."""
+        if not self.converted:
+            return
+        inputs = dict(solution.inputs or {})
+        made = {str(Path(done.obs).absolute()): str(Path(done.source).absolute()) for done in self.converted}
+        navs = {str(Path(done.nav).absolute()) for done in self.converted if done.nav}
+
+        def named(value):
+            if isinstance(value, str):
+                return made.get(value, value)
+            return value if value is None else [made.get(item, item) for item in value]
+
+        inputs["rover"], inputs["base"] = named(inputs.get("rover")), named(inputs.get("base"))
+        inputs["navs"] = [nav for nav in inputs.get("navs") or [] if nav not in navs]
+        notes = list(inputs.get("converted") or [])
+        known = {note.get("source") for note in notes}
+        notes += [{"source": made[str(Path(done.obs).absolute())], "kind": done.kind,
+                   "obs": str(Path(done.obs).absolute()),
+                   "nav": str(Path(done.nav).absolute()) if done.nav else None, "epochs": done.epochs,
+                   "events": done.events}
+                  for done in self.converted if made[str(Path(done.obs).absolute())] not in known]
+        inputs["converted"] = notes
+        solution.inputs = inputs
+
+
 def ppk_inputs(kind: str, shots_file: str | Path | None, rover: str | Path, bases=(), *, approx_time=None,
                edge: str = "falling", message: str = "auto", camera: int | None = None, progress=None,
                reader=None) -> PpkInputs:
