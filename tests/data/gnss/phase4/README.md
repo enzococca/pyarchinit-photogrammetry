@@ -1,0 +1,44 @@
+# Test data of the GNSS work, phase 4: raw receiver logs converted to RINEX
+
+The raw logs are the first 64 KiB (65536 bytes, `head -c 65536`) of sample files of RTKLIB-EX
+(https://github.com/rtklibexplorer/RTKLIB, tag v2.5.1, commit 62d4677ed8425a4e2748c6d390b500d1afb493fc,
+`test/data/rcvraw/`), distributed with RTKLIB under its BSD 2-clause licence (Copyright (c) 2007-2020,
+T. Takasu; text in `native/vendor/rtklib/license.txt`). SHA-256 of the whole upstream files:
+
+| File here | Upstream file | SHA-256 of the upstream file |
+|---|---|---|
+| `ubx_20080526_64k.ubx` | `ubx_20080526.ubx` (u-blox, RXM-RAW and RXM-SFRB, GPS and SBAS) | `8986134fbac86b910c9a79f82c53c05dbc7b9442dd5cba669ae7be6a05b75870` |
+| `GMSD7_20121014_64k.rtcm3` | `GMSD7_20121014.rtcm3` (RTCM 3, Trimble NetR9, BeiDou MSM) | `8b466a6829122c21ee28053324811022b3e44baa6dcd878a51b9a746a10d8cb1` |
+| `oemv_200911218_64k.gps` | `oemv_200911218.gps` (NovAtel OEMV, GPS, GLONASS and SBAS) | `65c4e666c73598fac9a0dc0b915d340a606daa9628dc26cc81f1812f7dfa4d36` |
+
+The `.obs` and `.nav` files are what the official `convbin` of the same commit wrote from them, once, with the
+options the native core uses by default (RINEX 3.04, all frequencies, SBAS and NavIC left out, as `systems="GREJC"`).
+It was compiled from the upstream sources with the definitions of its makefile
+(`app/consapp/convbin/gcc/makefile`: `-DTRACE -DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOBS=3`)
+and run as:
+
+```
+convbin -r ubx   -v 3.04 -y S -y I -o ubx_20080526_64k.obs     -n ubx_20080526_64k.nav     ubx_20080526_64k.ubx
+convbin -r ubx   -v 3.04 -y S -y I -o ubx_20080526_64k_tm2.obs -n ubx_20080526_64k_tm2.nav ubx_20080526_64k_tm2.ubx
+convbin -r rtcm3 -tr 2012/10/14 00:00:00 -v 3.04 -y S -y I -o GMSD7_20121014_64k.obs -n GMSD7_20121014_64k.nav GMSD7_20121014_64k.rtcm3
+convbin -r nov   -v 3.04 -y S -y I -o oemv_200911218_64k.obs   -n oemv_200911218_64k.nav   oemv_200911218_64k.gps
+```
+
+They are equal to what the native core writes except the line `PGM / RUN BY / DATE` (program and date of the run)
+and the `COMMENT` line `log: <input file>` (its path). The navigation file of `ubx_20080526_64k_tm2.ubx` is the
+same as that of `ubx_20080526_64k.ubx` and is not kept.
+
+`ubx_20080526_64k_tm2.ubx` is not kept either: the tests make it again from `ubx_20080526_64k.ubx` with
+`tests/convbin_helpers.py` (`insert_time_marks`), which puts four UBX TIM-TM2 frames written from the u-blox
+Interface Description (UBX-18010854) after the first raw epoch at or after their time, GPS week 1481:
+
+| Count | Edge | Time base | Time of the edge | Expected event (GPS time) |
+|---|---|---|---|---|
+| 1 | falling | GNSS | 107975.5 s | 2008-05-26 05:59:35.5 |
+| 2 | falling | UTC | 107976.25 s (UTC) | 2008-05-26 05:59:50.25 (UTC + 14 s) |
+| 3 | falling | GNSS | 108005.123456789 s | 2008-05-26 06:00:05.1234568 |
+| 4 | rising only | GNSS | 108015.0 s | none: RTKLIB reads the falling edge only |
+
+No public sample with a clear licence was found for Septentrio SBF, Trimble RT-17 or Unicore: the core accepts
+these names but their decoders are not built (see `native/vendor/rtklib/VERSION`), and the tests check only
+that they are refused cleanly.
