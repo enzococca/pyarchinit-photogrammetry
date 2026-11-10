@@ -61,7 +61,14 @@ jobs:
           # thread are printed once with gdb, five minutes before the dump of faulthandler ends the run
           : > pytest.log
           (
+            n=0
             while sleep 60; do
+              n=$((n + 1))
+              # memory of the runner and of pytest every five minutes: a runner that "lost communication"
+              # may have been starved, and the last line seen in the live log tells
+              if [ $((n % 5)) -eq 0 ]; then
+                echo "[mem] $(free -m | awk '/^Mem:/ {print "used " $3 " MB, available " $7 " MB"} /^Swap:/ {print "swap " $3 " MB"}' | paste -sd, -), pytest rss $(ps -o rss= -C python | sort -n | tail -1 | awk '{print int($1 / 1024)}') MB, load $(cut -d' ' -f1 /proc/loadavg)"
+              fi
               age=$(( $(date +%s) - $(stat -c %Y pytest.log) ))
               if [ "$age" -gt 900 ]; then
                 pid=$(pgrep -f "python -m pytest" | head -1)
