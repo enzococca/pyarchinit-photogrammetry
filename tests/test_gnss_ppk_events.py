@@ -668,3 +668,18 @@ def test_raw_base_placed_by_the_rover_before_the_shots(tmp_path, monkeypatch):
     assert shotset.shots[0].gps_time // 86400 == first // 86400 + 1
     assert seen == [pytest.approx(first)] and inputs.approx_time == pytest.approx(first)
     assert sources.base_time(rover) == pytest.approx(first)
+
+
+@needs_a_converter
+def test_dat_rover_is_raw_as_a_dat_base(tmp_path):
+    """A D-RTK .DAT is a raw log whichever receiver it is given for: one rule (sources.is_raw) for the dialog and
+    the run, for the rover and for the base."""
+    import test_gnss_convert as convert_test
+
+    dat = convert_test._dji_dat(tmp_path)
+    assert sources.is_raw(dat) and sources.is_raw(RTCM_LOG) and not sources.is_raw(RTCM_OBS)
+    first = (rinex.time_span(RTCM_OBS)[0] - GPS_EPOCH).total_seconds()
+    inputs = sources.ppk_inputs("events-pos", tmp_path / "flight_events.pos", dat, [RTCM_OBS], approx_time=first,
+                                reader=lambda *_a: ShotSet([], "events_pos"))
+    (done,) = inputs.converted
+    assert done.kind == "rtcm3" and inputs.rover == done.obs and inputs.bases == [RTCM_OBS]
