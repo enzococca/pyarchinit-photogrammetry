@@ -642,6 +642,134 @@ def test_report_gnss_bases_placed_in_other_ways(tmp_path, monkeypatch):
     assert "ESA final orbits" in credits["Precise products"] and "Geoid" not in credits
 
 
+def _shot_events(tmp_path, count: int = 120):
+    """A flight of ``count`` photos and the events of its receiver read from a u-blox log on the rising edge: the event
+    of the 10th photo lost, that of the 20th recorded twice (10 ms apart); the moving solution of the flight, the log
+    converted for it."""
+    from datetime import timedelta
+
+    import test_gnss_shots as shots_test
+    from pyarchinit_photogrammetry.gnss.shots import Shot, ShotSet
+
+    exposures = shots_test._exposures(count)
+    ch = shots_test._photos(tmp_path / "volo", [f"IMG_{i:04d}.JPG" for i in range(1, count + 1)], exposures)
+    times = []
+    for k, t in enumerate(exposures):
+        if k == 9:
+            continue
+        times.append(t)
+        if k == 19:
+            times.append(t + timedelta(milliseconds=10))
+    shotset = ShotSet(shots=[Shot(index=i, gps_time=shots_test._gps(t),
+                                  source={"kind": "ubx_tim_tm2", "file": str(tmp_path / "rover.ubx"), "edge": "rising"})
+                             for i, t in enumerate(times, 1)], kind="ubx_tim_tm2", name="rover.ubx")
+    solution = shots_test._moving_solution(shots_test._gps(exposures[0]) - 5.0, 300.0, tmp_path / "solution-1.pos")
+    solution.inputs = {"rover": str(tmp_path / "rover.ubx"), "base": None, "navs": [],
+                       "converted": [{"source": str(tmp_path / "rover.ubx"), "kind": "ubx",
+                                      "obs": str(tmp_path / "cache" / "rover.obs"), "nav": None, "epochs": 1500,
+                                      "events": 120}]}
+    return ch, shotset, solution
+
+
+def test_report_gnss_shots_of_a_receiver(tmp_path):
+    """A PPK run whose shots are the events of the rover's receiver: its part of the report says where the shots come
+    from, the edge of the event signal, the latency, the lever arm in the body of the drone (and the photos given its
+    vertical part only), how the photos were paired, the double and the missing events, the conversions made - by the
+    names of the files, never their folders; English and Italian, and in the PDF."""
+    from pyarchinit_photogrammetry.gnss import apply
+
+    ch, shotset, solution = _shot_events(tmp_path)
+    result = apply.apply_ppk_shots(ch, shotset, solution, tmp_path / "volo", latency_s=0.035,
+                                   body_lever_mm=(120, 0, 85))
+    assert result["matched"] == 119 and result["doubles"] == 1
+    w = rc.Words("en")
+    sec = rc._gnss(ch, w)
+    parts = {s.title: s for s in rc.walk([sec]) if s is not sec}
+    run = _rows(parts["PPK: solution-1.pos"])
+    assert run["Source of the shots"] == "time marks of a u-blox log (TIM-TM2), rover.ubx"
+    assert run["Edge of the event signal"] == "rising"
+    assert run["Latency of the camera"] == "35 ms"
+    assert run["Lever arm in the body (forward / right / down)"] == (
+        "120 / 0 / 85 mm; only its vertical part for 119 photos (no attitude of the drone)")
+    assert run["Photos paired with the shots"] == "by their times"
+    assert run["Events"] == ("120 shots; doubles left out: 1; without a valid time: 0; without a photo: 0; photos "
+                             "without a shot: 1")
+    assert run["Conversions"] == "rover.ubx (u-blox) to RINEX: 1,500 epochs, 120 events"
+    assert not any(str(tmp_path) in value for value in run.values())  # names, never folders
+    run = _rows({s.title: s for s in rc.walk([rc._gnss(ch, rc.Words("it"))])}["PPK: solution-1.pos"])
+    assert run["Sorgente degli scatti"] == "marche di tempo di un log u-blox (TIM-TM2), rover.ubx"
+    assert run["Fronte del segnale dell'evento"] == "di salita"
+    assert run["Ritardo della fotocamera"] == "35 ms"
+    assert run["Braccio di leva nel corpo (avanti / destra / basso)"].startswith("120 / 0 / 85 mm; solo la parte verticale")
+    assert run["Foto abbinate agli scatti"] == "per orario"
+    assert run["Eventi"].startswith("120 scatti; doppi esclusi: 1;")
+    assert run["Conversioni"] == "rover.ubx (u-blox) in RINEX: 1.500 epoche, 120 eventi"
+    # the record of the run is saved with the project and read again
+    ch.document.save(tmp_path / "eventi.ppg")
+    again = ppg.Document.open(tmp_path / "eventi.ppg").chunks[0]
+    assert _rows({s.title: s for s in rc.walk([rc._gnss(again, w)])}["PPK: solution-1.pos"])["Events"] == \
+        _rows(parts["PPK: solution-1.pos"])["Events"]
+    text = pdf_text(generate_pdf_report(ch.document, tmp_path / "eventi.pdf", language="en").read_bytes())
+    for t in ("Source of the shots", "rover.ubx", "35 ms", "120 / 0 / 85 mm", "doubles left out: 1"):
+        assert t in text, t
+    # a run of an older project, with what its photos keep and no record of the run: no events, no conversions
+    ch.meta.pop(apply.SHOT_RUNS)
+    run = _rows({s.title: s for s in rc.walk([rc._gnss(ch, w)])}["PPK: solution-1.pos"])
+    assert run["Latency of the camera"] == "35 ms" and "Events" not in run and "Conversions" not in run
+    assert "Edge of the event signal" not in run
+
+
+def test_report_gnss_shots_of_an_autopilot_log(tmp_path):
+    """Photos placed by the shots of an autopilot log (no PPK): a part of their own named by the log, with the source,
+    the latency, the lever arm turned with the attitude and the pairing; the source among those of the positions by
+    its name; a second log replaces the record of the first."""
+    import test_gnss_shots as shots_test
+    from pyarchinit_photogrammetry.gnss import apply
+
+    exposures = shots_test._exposures(12)
+    ch = shots_test._photos(tmp_path / "volo", [f"IMG_{i:04d}.JPG" for i in range(1, 13)], exposures)
+    shotset = shots_test._events(exposures, kind="ardupilot_cam", name="flight.bin", antenna=(41.1, 14.2, 90.0),
+                                 height="msl", attitude=(1.0, -2.0, 45.0))
+    apply.apply_shots(ch, shotset, tmp_path / "volo", body_lever_mm=(-40, 10, 150))
+    w = rc.Words("en")
+    sec = rc._gnss(ch, w)
+    assert _rows(sec)["Where the positions come from"] == "ArduPilot log (CAM messages): 12"
+    parts = {s.title: s for s in rc.walk([sec]) if s is not sec}
+    run = _rows(parts["Shots of flight.bin"])
+    assert run["Source of the shots"] == "ArduPilot log (CAM messages), flight.bin"
+    assert run["Photos"] == "12"
+    assert run["Latency of the camera"] == "0 ms"
+    assert run["Lever arm in the body (forward / right / down)"] == "-40 / 10 / 150 mm"
+    assert run["Events"] == "12 shots; doubles left out: 0; without a valid time: 0; without a photo: 0; photos without a shot: 0"
+    assert "Edge of the event signal" not in run and "Conversions" not in run
+    assert "Scatti di flight.bin" in {s.title for s in rc.walk([rc._gnss(ch, rc.Words("it"))])}
+    assert list(ch.meta[apply.SHOT_RUNS]) == ["ardupilot_cam:flight.bin"]
+    # the photos placed again by another log: the record of the first, which no photo holds any more, goes
+    other = shots_test._events(exposures, kind="px4_capture", name="flight.ulg", antenna=(41.1, 14.2, 90.0),
+                               height="ellipsoidal")
+    apply.apply_shots(ch, other, tmp_path / "volo")
+    assert list(ch.meta[apply.SHOT_RUNS]) == ["px4_capture:flight.ulg"]
+    run = _rows({s.title: s for s in rc.walk([rc._gnss(ch, w)])}["Shots of flight.ulg"])
+    assert run["Source of the shots"] == "PX4 log (camera_capture), flight.ulg"
+    assert run["Lever arm in the body (forward / right / down)"] == "none"
+
+
+def test_report_gnss_without_shots_is_unchanged(tmp_path, monkeypatch):
+    """Photos placed by PPK on a DJI MRK and by their EXIF: the part of the PPK run has the rows it always had, and
+    nothing about shots."""
+    from pyarchinit_photogrammetry.gnss import apply
+
+    doc, ch = gnss_project(tmp_path, monkeypatch)
+    sec, parts = _gnss_parts(rc.collect(ch, language="en"))
+    assert set(parts) == {"Quality per flight", "PPK against the base PROV00ITA", "Credits"}
+    assert list(_rows(parts["PPK against the base PROV00ITA"])) == [
+        "Solution", "Observations of the drone", "Photos", "Position of the base", "Permanent station",
+        "Coordinates of the station", "Standard deviations of the station (E / N / U)", "Coordinates of the base",
+        "Frame and epoch of the base", "Antenna of the base", "Calibration of the base antenna",
+        "Distance from the flight (median)"]
+    assert apply.SHOT_RUNS not in ch.meta
+
+
 def test_report_without_gnss_has_no_section(tmp_path):
     """Photos without a position, or no photos: no GNSS part."""
     from pyarchinit_photogrammetry.core.camera import Camera, Sensor

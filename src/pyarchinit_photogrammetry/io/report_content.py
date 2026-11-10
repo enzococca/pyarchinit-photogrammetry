@@ -438,6 +438,51 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "calibration_none": ("non calibrata: a RTKLIB non è stato dato un file di calibrazioni delle antenne",
                          "not calibrated: RTKLIB was given no file of antenna calibrations"),
     "ppk_distance": ("Distanza dal volo (mediana)", "Distance from the flight (median)"),
+    # the shots of a receiver or of an autopilot (a drone built by its owner)
+    "shots_title": ("Scatti di {0}", "Shots of {0}"),
+    "shots_source": ("Sorgente degli scatti", "Source of the shots"),
+    "shots_source_value": ("{0}, {1}", "{0}, {1}"),
+    "shots_edge": ("Fronte del segnale dell'evento", "Edge of the event signal"),
+    "edge_falling": ("di discesa", "falling"),
+    "edge_rising": ("di salita", "rising"),
+    "shots_latency": ("Ritardo della fotocamera", "Latency of the camera"),
+    "shots_lever": ("Braccio di leva nel corpo (avanti / destra / basso)",
+                    "Lever arm in the body (forward / right / down)"),
+    "shots_lever_none": ("nessuno", "none"),
+    "shots_lever_vertical": ("{0}; solo la parte verticale per {1} foto (nessun assetto del drone)",
+                             "{0}; only its vertical part for {1} photos (no attitude of the drone)"),
+    "shots_by": ("Foto abbinate agli scatti", "Photos paired with the shots"),
+    "by_number": ("per numero", "by the number in their names"),
+    "by_time": ("per orario", "by their times"),
+    "by_order": ("per ordine", "by their order"),
+    "by_unconfirmed": ("{0}, non confermato dagli orari: posizioni da controllare",
+                       "{0}, not confirmed by the times: positions to check"),
+    "shots_events": ("Eventi", "Events"),
+    "shots_events_value": ("{0} scatti; doppi esclusi: {1}; senza un tempo valido: {2}; senza una foto: {3}; foto "
+                           "senza uno scatto: {4}",
+                           "{0} shots; doubles left out: {1}; without a valid time: {2}; without a photo: {3}; photos "
+                           "without a shot: {4}"),
+    "shots_converted": ("Conversioni", "Conversions"),
+    "shots_converted_value": ("{0} ({1}) in RINEX", "{0} ({1}) to RINEX"),
+    "shots_converted_counts": ("{0}: {1} epoche, {2} eventi", "{0}: {1} epochs, {2} events"),
+    "raw_ubx": ("u-blox", "u-blox"),
+    "raw_rtcm3": ("RTCM 3", "RTCM 3"),
+    "raw_sbf": ("Septentrio SBF", "Septentrio SBF"),
+    "raw_unicore": ("Unicore", "Unicore"),
+    "raw_rt17": ("Trimble RT-17", "Trimble RT-17"),
+    "raw_novatel": ("NovAtel", "NovAtel"),
+    "shot_rinex_events": ("eventi del ricevitore (RINEX)", "events of the receiver (RINEX)"),
+    "shot_ubx_tim_tm2": ("marche di tempo di un log u-blox (TIM-TM2)", "time marks of a u-blox log (TIM-TM2)"),
+    "shot_ardupilot_cam": ("log di ArduPilot (messaggi CAM)", "ArduPilot log (CAM messages)"),
+    "shot_ardupilot_trig": ("log di ArduPilot (messaggi TRIG)", "ArduPilot log (TRIG messages)"),
+    "shot_px4_capture": ("log di PX4 (camera_capture)", "PX4 log (camera_capture)"),
+    "shot_px4_trigger": ("log di PX4 (camera_trigger)", "PX4 log (camera_trigger)"),
+    "shot_events_pos": ("_events.pos di RTKLIB", "_events.pos of RTKLIB"),
+    "src_ardupilot_cam": ("log di ArduPilot (messaggi CAM)", "ArduPilot log (CAM messages)"),
+    "src_ardupilot_trig": ("log di ArduPilot (messaggi TRIG)", "ArduPilot log (TRIG messages)"),
+    "src_px4_capture": ("log di PX4 (camera_capture)", "PX4 log (camera_capture)"),
+    "src_px4_trigger": ("log di PX4 (camera_trigger)", "PX4 log (camera_trigger)"),
+    "src_events_pos": ("_events.pos di RTKLIB", "_events.pos of RTKLIB"),
     "status_fix": ("fix", "fix"),
     "status_float": ("float", "float"),
     "status_single": ("singola", "single"),
@@ -1460,7 +1505,8 @@ def _gnss(chunk, w: Words) -> Section | None:
     """The GNSS positions of the photos: how many have one, where they come from, their reference frames and epochs,
     the kinds of their heights; the system of the chunk with its heights (above a geoid: its grid and the SHA-256 of
     the grid) and how the positions in ITRF2020 reach its frame; a table of the quality of every flight; the base of
-    every PPK run (:func:`_ppk_run`); whom to credit for the data used (:func:`_credits`). None when no photo has a
+    every PPK run (:func:`_ppk_run`); the shots of an autopilot log that placed photos without a PPK
+    (:func:`_shots_rows`); whom to credit for the data used (:func:`_credits`). None when no photo has a
     position."""
     from collections import Counter
 
@@ -1511,7 +1557,13 @@ def _gnss(chunk, w: Words) -> Section | None:
     named = Counter((members[0].meta.get("gnss") or {}).get("base", {}).get("name") for _s, members in runs)
     for solution, members in runs:  # several runs against one base: told apart by the time of their first shot
         shared = named[(members[0].meta.get("gnss") or {}).get("base", {}).get("name")] > 1
-        sec.blocks.append(_ppk_run(w, solution, members, shared))
+        sec.blocks.append(_ppk_run(w, solution, members, shared, chunk))
+    for members in _shot_runs(chunk):  # the shots of an autopilot log, with no PPK
+        first = members[0].meta.get("gnss") or {}
+        sub = Section(w("shots_title", str((first.get("shots") or {}).get("file") or "-")), level=2)
+        source, *rest = _shots_rows(w, chunk, members)
+        sub.blocks.append(KeyValues([source, (w("ppk_photos"), w.integer(len(members))), *rest]))
+        sec.blocks.append(sub)
     credits = _credits(w, chunk, [(members[0].meta.get("gnss") or {}).get("base") or {} for _s, members in runs])
     if credits:
         sub = Section(w("credits"), level=2)
@@ -1748,14 +1800,84 @@ def _status_name(w: Words, state) -> str:
     return w(f"status_{state}") if f"status_{state}" in TEXT else str(state)
 
 
-def _ppk_run(w: Words, solution: str, cams: list, shared: bool = False) -> Section:
+def _shot_runs(chunk) -> list[list]:
+    """The photos placed by shots other than those of a DJI MRK and with no PPK (an autopilot log, an ``_events.pos``:
+    :func:`..gnss.apply.apply_shots`), by the run that placed them, in the order of their names."""
+    from ..gnss import apply as gnss_apply
+
+    runs: dict[str, list] = {}
+    for cam in chunk.cameras:
+        record = cam.meta.get("gnss") or {}
+        key = gnss_apply.shot_run_key(record)
+        if key is not None and record.get("source") != "ppk":
+            runs.setdefault(key, []).append(cam)
+    return [members for _key, members in sorted(runs.items())]
+
+
+def _milliseconds(w: Words, seconds) -> str:
+    value = float(seconds or 0.0) * 1000.0
+    return f"{w.number(value, 0 if abs(value - round(value)) < 0.05 else 1)} ms"
+
+
+def _shots_rows(w: Words, chunk, cams: list) -> list[tuple[str, str]]:
+    """What the report says of the shots that placed ``cams``, photos of one run with shots other than those of a DJI
+    MRK - the events of a receiver, an autopilot log: the source and its file, the edge of the event signal, the
+    latency of the camera, the lever arm in the body of the drone and the photos given its vertical part only, how the
+    photos were paired; then, from the record of the run (``chunk.meta``, :data:`..gnss.apply.SHOT_RUNS`; none in a
+    project of before it), the events - shots, doubles, without a valid time, without a photo, photos without a shot -
+    and the raw logs converted. Nothing for photos that keep no shots."""
+    from ..gnss import apply as gnss_apply
+
+    records = [c.meta.get("gnss") or {} for c in cams]
+    first = next((r for r in records if isinstance(r.get("shots"), dict)), None)
+    if first is None:
+        return []
+    shots = first["shots"]
+    kind = str(shots.get("kind"))
+    run = ((chunk.meta.get(gnss_apply.SHOT_RUNS) or {}) if chunk is not None else {}).get(
+        gnss_apply.shot_run_key(first)) or {}
+    rows = [(w("shots_source"), w("shots_source_value", w(f"shot_{kind}") if f"shot_{kind}" in TEXT else kind,
+                                  str(shots.get("file") or "-")))]
+    edge = run.get("edge")
+    if edge:
+        rows.append((w("shots_edge"), w(f"edge_{edge}") if f"edge_{edge}" in TEXT else str(edge)))
+    rows.append((w("shots_latency"), _milliseconds(w, shots.get("latency_s"))))
+    levers = [r.get("lever") for r in records if isinstance(r.get("lever"), dict) and r["lever"].get("body_frd_mm")]
+    if levers:
+        arm = " / ".join(w.number(v, 0 if float(v) == round(float(v)) else 1) for v in levers[0]["body_frd_mm"]) + " mm"
+        vertical = sum(1 for lever in levers if lever.get("note"))
+        rows.append((w("shots_lever"), w("shots_lever_vertical", arm, w.integer(vertical)) if vertical else arm))
+    else:
+        rows.append((w("shots_lever"), w("shots_lever_none")))
+    by = str(shots.get("by"))
+    how = w(f"by_{by}") if f"by_{by}" in TEXT else by
+    rows.append((w("shots_by"), w("by_unconfirmed", how) if shots.get("confirmed") is False else how))
+    if run:
+        rows.append((w("shots_events"), w("shots_events_value", *(w.integer(int(run.get(k) or 0)) for k in (
+            "shots", "doubles", "invalid", "extra_shots", "photos_without_shot")))))
+        done = []
+        for note in run.get("converted") or []:
+            raw = str(note.get("kind"))
+            text = w("shots_converted_value", str(note.get("source") or "-"),
+                     w(f"raw_{raw}") if f"raw_{raw}" in TEXT else raw)
+            if note.get("epochs") is not None:
+                text = w("shots_converted_counts", text, w.integer(int(note["epochs"])),
+                         w.integer(int(note.get("events") or 0)))
+            done.append(text)
+        if done:
+            rows.append((w("shots_converted"), "; ".join(done)))
+    return rows
+
+
+def _ppk_run(w: Words, solution: str, cams: list, shared: bool = False, chunk=None) -> Section:
     """A PPK run and its base, from what every photo keeps of it (:func:`..gnss.apply.apply_ppk`: the base of the
     solution, ``Solution.base``): the photos by state; how the base was placed; the permanent station it is or that
     placed it, where the station's coordinates come from and what their sigma is (:func:`_station_rows`); the static
     baseline or the static PPP and its products; the coordinates of the base, their frame and epoch and their standard
     deviations; its antenna and whether it was calibrated (:func:`_calibration_text`); how far it is from the flight.
     Titled by its base - with the time of its first shot when other runs share the base (``shared``) - or, with none
-    (a solution read from a file), by its solution file."""
+    (a solution read from a file), by its solution file. A run whose shots are not those of a DJI MRK ends with what
+    :func:`_shots_rows` says of them (``chunk`` holds the record of the run)."""
     from collections import Counter
 
     first = cams[0].meta.get("gnss") or {}
@@ -1817,6 +1939,7 @@ def _ppk_run(w: Words, solution: str, cams: list, shared: bool = False) -> Secti
     if distance is not None:
         rows.append((w("ppk_distance"), f"{w.number(distance, 0)} m" if distance < 1000.0 else
                      f"{w.number(distance / 1000.0, 2)} km"))
+    rows += _shots_rows(w, chunk, cams)
     sub.blocks.append(KeyValues(rows))
     return sub
 

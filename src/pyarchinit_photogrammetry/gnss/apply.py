@@ -18,6 +18,9 @@ FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
 NO_RTK = [5.0, 5.0, 10.0]
 
 # a PPK solution that puts the antenna this far (median, m) from the drone's own positions in the MRK: a warning
+# chunk.meta[SHOT_RUNS][key]: what a run with shots other than those of a DJI MRK leaves to say (_remember_shots), by
+# the key of the run (shot_run_key)
+SHOT_RUNS = "gnss_shot_runs"
 FAR_FROM_MRK_M = 50.0
 # where the drone's own RTK puts a photo: the XMP of a DJI photo (added with the photos) and a DJI Timestamp.MRK
 ONBOARD_SOURCES = (dji.SOURCE_XMP, dji.SOURCE_MRK)
@@ -186,6 +189,46 @@ def _report(pairing: Pairing) -> dict:
             "photos_ambiguous": [f.stem for f in pairing.photos_ambiguous]}
 
 
+def shot_run_key(record: dict) -> str | None:
+    """The key in ``chunk.meta[SHOT_RUNS]`` of the run that gave a photo the position recorded in ``record`` (its
+    ``meta["gnss"]``): the solution of a PPK run, else the kind and the file of the shots; None for a position that
+    comes from no shots, or from those of a DJI MRK."""
+    shots = record.get("shots")
+    if not isinstance(shots, dict):
+        return None
+    if record.get("source") == "ppk":
+        return str(record.get("solution") or "")
+    return f"{shots.get('kind')}:{shots.get('file')}"
+
+
+def _remember_shots(chunk: Chunk, pairing: Pairing, body_lever_mm, vertical_only: int, solution=None) -> None:
+    """Record in ``chunk.meta[SHOT_RUNS]`` what a run with shots other than those of a DJI MRK leaves to say and no
+    photo keeps (the report prints it): the ``kind`` and ``file`` of the shots, the ``edge`` of the event signal when
+    the source has one (the time marks of a u-blox log), ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``, how
+    many ``shots`` the source has, the ``doubles`` and the shots ``invalid`` left out, the ``extra_shots`` no photo
+    took, the ``photos_without_shot``, the photos given the vertical part of the arm only (``vertical_only``) and, for
+    a PPK ``solution``, the raw logs ``converted`` for it (the name of each, its ``kind``, ``epochs`` and ``events``:
+    names, never folders). The records no photo refers to any more go."""
+    if pairing.kind == "mrk":
+        return
+    name = Path(solution.path).name if solution is not None else None
+    key = name or f"{pairing.kind}:{pairing.name}"
+    edge = next((s.source.get("edge") for s in pairing.shots if (s.source or {}).get("edge")), None)
+    notes = (solution.inputs or {}).get("converted") or [] if solution is not None else []
+    runs = dict(chunk.meta.get(SHOT_RUNS) or {})
+    runs[key] = {
+        "kind": pairing.kind, "file": pairing.name, "edge": edge, "by": pairing.by,
+        "latency_s": float(pairing.latency_s),
+        "body_lever_mm": None if body_lever_mm is None else [float(v) for v in body_lever_mm],
+        "confirmed": pairing.confirmed, "shots": len(pairing.shots), "doubles": int(pairing.doubles),
+        "invalid": len(pairing.invalid), "extra_shots": len(pairing.extra_shots),
+        "photos_without_shot": len(pairing.photos_without_shot), "vertical_only": int(vertical_only),
+        "converted": [{"source": Path(str(note.get("source") or "")).name, "kind": note.get("kind"),
+                       "epochs": note.get("epochs"), "events": note.get("events")} for note in notes]}
+    held = {shot_run_key(cam.meta.get("gnss") or {}) for cam in chunk.cameras}
+    chunk.meta[SHOT_RUNS] = {k: v for k, v in runs.items() if k == key or k in held}
+
+
 def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None, *, by: str = "auto",
                 latency_s: float = 0.0, body_lever_mm=None) -> dict:
     """Give the photos of ``chunk`` the position of their shot in ``shotset`` (a DJI MRK, an autopilot log, an
@@ -236,6 +279,8 @@ def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None
                                 frame=frames.UNKNOWN, epoch=frames.decimal_year(when))
         placed.append((f, shot, state))
     warnings = _pairing_warnings(pairing, vertical_only)
+    if placed:
+        _remember_shots(chunk, pairing, body_lever_mm, vertical_only)
     if latency_s and not mrk:
         warnings.append(f"the latency of {latency_s * 1000:g} ms moved the times of the shots, not their positions: "
                         f"{pairing.name} gives the positions at the shots only")
@@ -423,6 +468,7 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
         warnings += ppk.events_check(solution, shotset)
     if placed:
         _remember(chunk, pairing, photos_folder, solution, replace_fix, body_lever_mm)
+        _remember_shots(chunk, pairing, body_lever_mm, vertical_only, solution)
     return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings,
             **_report(pairing)}
 
