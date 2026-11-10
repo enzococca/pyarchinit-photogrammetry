@@ -182,7 +182,8 @@ def test_mark_after_the_last_epoch_left_out(tmp_path, monkeypatch):
     rover = _rover_2005(tmp_path / "3040evts.05o", after)
     solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
     warnings = ppk.events_check(solution, events.rinex_events(rover))
-    assert len(warnings) == 1 and "4 of the 5 time marks" in warnings[0], warnings
+    assert len(warnings) == 1 and "1 of the 5 time marks of the rover are not in" in warnings[0], warnings
+    assert "outside the epochs it solved" in warnings[0]
 
 
 @needs_rtklib

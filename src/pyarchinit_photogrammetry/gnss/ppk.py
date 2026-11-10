@@ -37,7 +37,9 @@ MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no posi
 # a typed position of a base this far from the position of its RINEX header (horizontally, in height, metres) is
 # likely a mistake: latitude and longitude swapped or without their sign, a height above the sea level
 FAR_FROM_HEADER_M = (1000.0, 30.0)
-TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the millisecond
+# the coarsest resolution of the times of a solution: the millisecond of RTKLIB's default, of solutions made by other
+# programs (the runs of this package write the microsecond, out-timendec 6)
+TIME_RESOLUTION_S = 1e-3
 _SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8 s are floats to 1.2e-7 s
 # two epochs this much more than MAX_GAP_S apart are still next to each other: a receiver whose clock jumps by a
 # millisecond logs 1.001 s apart, which the floats of times of 8e8 s do not keep exactly
@@ -324,8 +326,10 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
             raise ValueError(problem)
         # posopt2 on: the variations with the angle from the zenith, not only the offset
         options += [("file-rcvantfile", path), ("pos1-posopt2", "on")]
+    # the times to the microsecond (RTKLIB's default is the millisecond: a shot between two epochs would be placed up to
+    # half a millisecond off, 4 mm at 8 m/s)
     options += [("out-solformat", "llh"), ("out-outhead", "on"), ("out-timesys", "gpst"), ("out-timeform", "tow"),
-                ("out-height", "ellipsoidal")]
+                ("out-timendec", "6"), ("out-height", "ellipsoidal")]
     if static_single:
         options.append(("out-solstatic", "single"))
     return "# RTKLIB options of a PPK run (pyarchinit-photogrammetry)\n" + "".join(
@@ -603,6 +607,37 @@ def _apart_s(times: np.ndarray, t: np.ndarray) -> np.ndarray:
     return np.minimum(np.abs(times[after] - t), np.abs(times[before] - t))
 
 
+def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, marks_name: str) -> list[str]:
+    """Why the events of the rover ``given`` (sorted) are not all among the marks RTKLIB ``written``: RTKLIB keeps one
+    time mark per observation epoch (the last event before it: an event between two epochs belongs to the later), so
+    of events closer than the interval of the observations only the last of each epoch is written; and it writes none
+    outside the epochs it solved."""
+    dropped = _apart_s(written, given) > MARK_TIME_S
+    if not dropped.any():
+        return []
+    times = np.asarray(solution.times, dtype=np.float64)
+    epoch = np.searchsorted(times, given - _SAME_EPOCH_S)  # the epoch at or after each event
+    shared = np.zeros(len(given), dtype=bool)
+    shared[:-1] = (epoch[:-1] == epoch[1:]) & (epoch[:-1] < len(times))  # a later event in the same epoch
+    _llh, _q, _sd, ok = at(solution, given)
+    out = []
+    n = int((dropped & shared).sum())
+    if n:
+        out.append(f"{n} of the {len(given)} events of the rover fall in the same observation epoch as a later event: "
+                   f"RTKLIB keeps one time mark per epoch, so its {marks_name} has only the last of each. Every shot "
+                   "takes its position from the solution at its own time, so none is lost")
+    n = int((dropped & ~shared & ~ok).sum())
+    if n:
+        out.append(f"{n} of the {len(given)} time marks of the rover are not in {marks_name}: RTKLIB writes none "
+                   "outside the epochs it solved (before the first, after the last, in a gap), and the solution has "
+                   "no position at their times either")
+    n = int((dropped & ~shared & ok).sum())
+    if n:
+        out.append(f"{n} of the {len(given)} time marks of the rover are not in {marks_name} although the solution "
+                   "has positions at their times: their shots take those positions, not checked against RTKLIB's")
+    return out
+
+
 def _solution_type(path: Path) -> str | None:
     """RTKLIB's pos1-soltype in the options file of the run beside the solution ``path``, None without one."""
     conf = path.with_suffix(".conf")
@@ -626,8 +661,10 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
       or flight, or shifted; the number and the largest gap. For a solution read from a file, whose rover is not
       known, or whose rover is no longer there (moved, or its conversion gone from the cache: said so), the shots are
       compared with the marks written in the file, which RTKLIB may simply not have written.
-    - Marks of the rover RTKLIB did not write: it writes none outside the epochs it solved (before the first, after
-      the last, in a gap).
+    - Marks of the rover RTKLIB did not write (:func:`_dropped_marks`): of events in the same observation epoch it
+      keeps the last only - said as that, no shot is lost -, and it writes none outside the epochs it solved (before
+      the first, after the last, in a gap). The rover's events are read whole for this, doubles and marks without a
+      valid time too.
     - Every mark of the file :func:`.rinex.gps_minus_utc` leap seconds from those of the rover: a rover file that
       writes its times in UTC, whose events RTKLIB reads as GPS time; said as that, and nothing else is checked.
     - Marks more than ``tolerance_m`` (metres, across or in height) from where :func:`at` puts the antenna at the time
@@ -662,8 +699,8 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
                         f"{marks_path.name} only")
     if rovers:
         try:
-            given = np.array(sorted(s.gps_time for rover in rovers for s in events.rinex_events(rover).shots
-                                    if s.valid), dtype=np.float64)
+            # every event, doubles and marks without a valid time too: RTKLIB is given them all
+            given = np.array(sorted(t for rover in rovers for t in events.rinex_event_times(rover)), dtype=np.float64)
         except (ValueError, OSError):
             given = None
     written = np.array(sorted(m.gps_time for m in marks), dtype=np.float64)
@@ -695,12 +732,7 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
                             "writes no mark outside the epochs it solved, or the events may be of another receiver "
                             "or flight: check the photos")
     if given is not None and len(given):
-        dropped = int((_apart_s(written, given) > MARK_TIME_S).sum())
-        if dropped:
-            warnings.append(f"RTKLIB wrote {len(given) - dropped} of the {len(given)} time marks of the rover in "
-                            f"{marks_path.name}: {dropped} left out, outside the epochs it solved (before the first, "
-                            "after the last, in a gap). Their shots take the position of the solution at their times "
-                            "where it has one, not checked against RTKLIB's")
+        warnings += _dropped_marks(solution, given, written, marks_path.name)
     placed = [m for m in marks if m.valid and m.antenna is not None]
     if placed:
         mark_times = np.array([m.gps_time for m in placed], dtype=np.float64)
