@@ -65,6 +65,9 @@ _RINEX_TIME_SYSTEMS = ("GPS", "GAL", "QZS", "IRN", "BDT", "GLO")
 # <name>_events.pos): the solutions of earlier runs stay, and the photos name the one of their run
 SOLUTION_PREFIX = "solution"
 EVENTS_SUFFIX = "_events.pos"
+# the line of an _events.pos for a time mark between epochs RTKLIB could not solve ("<time>   Q=0, Time mark is not
+# valid"): no position, left out by read_pos
+INVALID_TIME_MARK = "Time mark is not valid"
 INPUTS_FOLDER = "rtklib_inputs"  # in the work folder: only the copies of a run, emptied when a run starts
 # the copy of the antenna calibrations in there: RTKLIB tells an ANTEX file by its extension, ".atx" or ".ATX"
 ANTENNA_COPY = "antennas.atx"
@@ -358,7 +361,8 @@ def read_pos(path: str | Path) -> Solution:
     columns are found by their names in the header. A file without positions, in x/y/z or e/n/u, in degrees,
     minutes and seconds, on another datum or with heights above the geoid is a ``ValueError`` saying so, a row with a
     number that is not finite (nan, inf) one naming its line; a file that does not say what its heights are is read
-    as RTKLIB's default (above the ellipsoid), with a warning."""
+    as RTKLIB's default (above the ellipsoid), with a warning. The lines of an ``_events.pos`` for time marks RTKLIB
+    could not place (:data:`INVALID_TIME_MARK`) are left out: :func:`.events.events_pos` reads them."""
     path = Path(path)
     legend = columns = None
     rows: list[tuple[int, str]] = []
@@ -375,6 +379,8 @@ def read_pos(path: str | Path) -> Solution:
                     fields = _FIELDS.split(body)
                     if "Q" in fields and "ns" in fields:  # "%  GPST  latitude(deg) longitude(deg) ... Q  ns ..."
                         columns = fields
+                continue
+            if text.endswith(INVALID_TIME_MARK):  # an _events.pos: a time mark RTKLIB could not place (events.py)
                 continue
             rows.append((number, text))
     if not rows:

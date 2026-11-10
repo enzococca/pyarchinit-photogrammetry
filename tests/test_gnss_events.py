@@ -5,12 +5,17 @@ from __future__ import annotations
 
 import gzip
 import shutil
+import struct
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+import convbin_helpers as ubx
 from pyarchinit_photogrammetry.gnss import events, rinex, rinex_files, shots
+from pyarchinit_photogrammetry.gnss import ppk as ppk_module
+from gnss_helpers import PPK_BASE, PPK_NAV, PPK_ROVER, needs_rtklib
 from gnss_helpers import header_and_body, rinex_lines, rinex_piece, rinex_records
 
 DATA = Path(__file__).parent / "data"
@@ -34,9 +39,9 @@ def _event_v2(hour: int, minute: int, seconds: float) -> str:
     return f" 05  4  2 {hour:2d} {minute:2d}{seconds:11.7f}  5  0"
 
 
-def _with_events(target: Path, after: dict[int, list[str]]) -> Path:
-    """The sample of station 0759 with the event lines ``after[i]`` after its record ``i``."""
-    header, records = rinex_records(WHOLE)
+def _with_events(target: Path, after: dict[int, list[str]], source: Path = WHOLE) -> Path:
+    """The sample of station 0759 (or ``source``) with the event lines ``after[i]`` after its record ``i``."""
+    header, records = rinex_records(source)
     lines = list(header)
     for i, record in enumerate(records):
         lines += record + after.get(i, [])
@@ -237,3 +242,218 @@ def test_msl_height_counts_as_exif(monkeypatch):
     assert quality.summary(chunk(["msl", "msl"]))[0]["heights"] == {"msl": 2}
     assert len(heights.exif_heights_in_ellipsoidal_systems(chunk(["msl", "ellipsoidal"]))) == 1
     assert heights.check(chunk(["msl"] * 2)) == heights.check(chunk(["exif"] * 2)) != []
+
+
+# --- time marks of a u-blox log (UBX-TIM-TM2) and RTKLIB's _events.pos ------------------------------------------------
+
+PHASE4 = DATA / "gnss" / "phase4"
+
+
+def _tm2(count: int, flags: int, rising: tuple[int, int, int], falling: tuple[int, int, int], *, acc_ns: int = 20,
+         channel: int = 0) -> bytes:
+    """A TIM-TM2 frame (u-blox Interface Description, UBX-18010854) with its rising and falling edges each given as
+    (week, milliseconds of the week, nanoseconds of the millisecond)."""
+    payload = struct.pack("<BBHHHIIIII", channel, flags, count, rising[0], falling[0], rising[1], rising[2],
+                          falling[1], falling[2], acc_ns)
+    return ubx.ubx_frame(0x0D, 0x03, payload)
+
+
+RISING = 1 << 7
+
+
+def _write(path: Path, *frames: bytes) -> Path:
+    path.write_bytes(b"".join(frames))
+    return path
+
+
+def test_ubx_frames(tmp_path):
+    a = ubx.ubx_frame(0x01, 0x07, bytes(92))
+    b = ubx.ubx_frame(0x0D, 0x03, bytes(28))
+    noise = b"$GPGGA,123519,4807.038,N*47\r\n\xb5"  # NMEA and a lone sync byte between the frames
+    path = _write(tmp_path / "log.ubx", a, noise, b)
+    frames = list(events.ubx_frames(path))
+    assert [(c, i, len(p)) for c, i, p, _ in frames] == [(0x01, 0x07, 92), (0x0D, 0x03, 28)]
+    assert frames[0][3] == 0 and frames[1][3] == len(a) + len(noise)
+    assert list(events.ubx_frames(_write(tmp_path / "empty.ubx"))) == []
+
+
+def test_tim_tm2_falling_and_rising(tmp_path):
+    week = 2300
+    marks = [
+        # count 1: falling 0.2 s after the rising edge; count 2: both, the falling edge in the next week
+        _tm2(1, ubx.FALLING | RISING | ubx.BASE_GNSS | ubx.TIME_VALID, (week, 100_000, 125), (week, 100_200, 999_999)),
+        _tm2(2, ubx.FALLING | RISING | ubx.BASE_GNSS | ubx.TIME_VALID, (week, 604_799_999, 500_000),
+             (week + 1, 0, 1), acc_ns=7),
+        # count 3: no new edge (the receiver repeats the last one): no shot
+        _tm2(3, ubx.BASE_GNSS | ubx.TIME_VALID, (week, 3, 0), (week, 4, 0)),
+        # count 4: rising only
+        _tm2(4, RISING | ubx.BASE_GNSS | ubx.TIME_VALID, (week + 1, 2_000, 0), (week + 1, 1_000, 0)),
+    ]
+    path = _write(tmp_path / "marks.ubx", *marks)
+    falling = events.ubx_time_marks(path)
+    assert falling.kind == "ubx_tim_tm2" and falling.name == "marks.ubx" and falling.duplicates == 0
+    assert [s.index for s in falling.shots] == [1, 2]
+    assert [(s.source["gps_week"], s.source["tow"]) for s in falling.shots] == [(week, pytest.approx(100.200999999,
+                                                                                                    abs=1e-12)),
+                                                                                (week + 1, pytest.approx(1e-9,
+                                                                                                         abs=1e-15))]
+    assert falling.shots[0].source["tow_ms"] == 100_200 and falling.shots[0].source["tow_sub_ns"] == 999_999
+    assert falling.shots[1].gps_time == pytest.approx((week + 1) * 604800.0, abs=1e-6)
+    assert [s.source["acc_ns"] for s in falling.shots] == [20, 7]
+    assert falling.shots[0].source["edge"] == "falling" and falling.shots[0].source["time_base"] == "GNSS"
+    assert all(s.valid and s.antenna is None for s in falling.shots)
+    rising = events.ubx_time_marks(path, edge="rising")
+    assert [s.index for s in rising.shots] == [1, 2, 4]
+    assert [s.source["tow"] for s in rising.shots] == pytest.approx([100.000000125, 604799.9995, 2.0], abs=1e-9)
+    # GNSS time, but the log does not say of which system: taken as GPS time, and said
+    assert any("GPS time" in w for w in falling.warnings)
+    with pytest.raises(ValueError, match="edge"):
+        events.ubx_time_marks(path, edge="both")
+    # only the other edge in the log: no shots, and a word that names it
+    only_rising = events.ubx_time_marks(_write(tmp_path / "r.ubx", marks[3]))
+    assert only_rising.shots == [] and any("rising" in w for w in only_rising.warnings)
+    none = events.ubx_time_marks(_write(tmp_path / "none.ubx", ubx.ubx_frame(0x01, 0x07, bytes(92))))
+    assert none.shots == [] and none.warnings == [events.NO_TIME_MARKS]
+    # the same edge sent twice, and a bounce within DOUBLE_EVENT_S: left out and counted
+    flags = ubx.FALLING | ubx.BASE_GNSS | ubx.TIME_VALID
+    twice = events.ubx_time_marks(_write(tmp_path / "twice.ubx", _tm2(1, flags, (week, 0, 0), (week, 1000, 0)),
+                                         _tm2(1, flags, (week, 0, 0), (week, 1000, 0)),
+                                         _tm2(2, flags, (week, 0, 0), (week, 1002, 0)),
+                                         _tm2(3, flags, (week, 0, 0), (week, 2000, 0))))
+    assert [s.index for s in twice.shots] == [1, 3] and twice.duplicates == 2
+    assert any("double" in w for w in twice.warnings)
+
+
+def test_tim_tm2_gnss_time_base_from_the_time_pulse_settings(tmp_path):
+    """A CFG-TP5 of the time pulse 0 (version 1) in the log says which GNSS the time grid is: GPS, no warning;
+    another, a warning that the times may be off."""
+    def tp5(grid: int) -> bytes:
+        flags = (1 << 0) | (grid << 7)  # active, gridUtcGnss in bits 7-10
+        return ubx.ubx_frame(0x06, 0x31, struct.pack("<BBHhhIIIIiI", 0, 1, 0, 50, 0, 1, 1, 0, 0, 0, flags))
+
+    mark = _tm2(1, ubx.FALLING | ubx.BASE_GNSS | ubx.TIME_VALID, (2300, 0, 0), (2300, 5000, 0))
+    gps = events.ubx_time_marks(_write(tmp_path / "gps.ubx", tp5(1), mark))
+    assert gps.warnings == [] and gps.shots[0].source["time_base"] == "GPS"
+    galileo = events.ubx_time_marks(_write(tmp_path / "gal.ubx", tp5(4), mark))
+    assert len(galileo.shots) == 1 and any("Galileo" in w for w in galileo.warnings)
+
+
+def test_tim_tm2_utc_base_to_gps(tmp_path):
+    flags = ubx.FALLING | ubx.BASE_UTC | (1 << 5) | ubx.TIME_VALID
+    # 2020: 18 leap seconds; the last 10 s of a UTC week are GPS time of the next week
+    week = 2100
+    marks = events.ubx_time_marks(_write(tmp_path / "utc.ubx", _tm2(1, flags, (week, 0, 0), (week, 1_000, 250)),
+                                         _tm2(2, flags, (week, 0, 0), (week, 604_790_000, 0))))
+    assert [(s.source["gps_week"], s.source["tow"]) for s in marks.shots] == [
+        (week, pytest.approx(19.00000025, abs=1e-12)), (week + 1, pytest.approx(8.0, abs=1e-12))]
+    assert marks.shots[0].source["time_base"] == "UTC" and marks.shots[0].source["leap_seconds"] == 18
+    assert not any("GPS time" in w for w in marks.warnings)
+    # 2008: 14 leap seconds
+    old = events.ubx_time_marks(_write(tmp_path / "old.ubx", _tm2(1, flags, (1481, 0, 0), (1481, 107_976_250, 0))))
+    assert old.shots[0].source["tow"] == pytest.approx(107990.25, abs=1e-12)
+
+
+def test_bad_checksum_skipped_and_counted(tmp_path):
+    flags = ubx.FALLING | ubx.BASE_GNSS | ubx.TIME_VALID
+    good1 = _tm2(1, flags, (2300, 0, 0), (2300, 1000, 0))
+    bad = bytearray(_tm2(2, flags, (2300, 0, 0), (2300, 2000, 0)))
+    bad[-1] ^= 0xFF
+    good3 = _tm2(3, flags, (2300, 0, 0), (2300, 3000, 0))
+    path = _write(tmp_path / "bad.ubx", good1, bytes(bad), good3)
+    skipped: list[int] = []
+    frames = list(events.ubx_frames(path, skipped=skipped))
+    assert len(frames) == 2 and skipped == [len(good1)]
+    marks = events.ubx_time_marks(path)
+    assert [s.index for s in marks.shots] == [1, 3]
+    assert any("1 damaged UBX frame" in w for w in marks.warnings)
+
+
+def test_invalid_time_mark(tmp_path):
+    marks = events.ubx_time_marks(_write(tmp_path / "inv.ubx", _tm2(1, ubx.FALLING | ubx.BASE_GNSS, (2300, 0, 0),
+                                                                    (2300, 1000, 0))))
+    assert len(marks.shots) == 1 and not marks.shots[0].valid
+    assert any("not valid" in w for w in marks.warnings)
+    # RTKLIB's line for a time mark it could not place: a shot that is not valid, in time order with the others
+    pos = tmp_path / "run_events.pos"
+    pos.write_text(
+        "% program   : RTKLIB ver.demo5 b34k\n"
+        "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,ns=# of satellites)\n"
+        "%  GPST          latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)"
+        "  sdun(m) age(s)  ratio\n"
+        "1316   518445.123   35.648312345  139.789012345    61.2345   1   9   0.0040   0.0030   0.0090  -0.0010"
+        "   0.0010  -0.0020   0.00   12.3\n"
+        "1316   518400.500   Q=0, Time mark is not valid\n"
+        "1316   518475.000   35.648312400  139.789012400    61.2400   2   8   0.0500   0.0400   0.0900   0.0000"
+        "   0.0000   0.0000   0.00    0.0\n")
+    shotset = events.events_pos(pos)
+    assert shotset.kind == "events_pos" and [s.index for s in shotset.shots] == [1, 2, 3]
+    first, second, third = shotset.shots
+    assert not first.valid and first.antenna is None and first.status == "none"
+    assert first.gps_time == pytest.approx(1316 * 604800.0 + 518400.5, abs=1e-6)
+    assert second.valid and second.antenna == pytest.approx((35.648312345, 139.789012345, 61.2345), abs=1e-9)
+    assert second.height == "ellipsoidal" and second.status == "fix"
+    assert second.std == pytest.approx((0.004, 0.003, 0.009))  # north, east, up
+    assert third.status == "float" and third.source["q"] == 2 and third.source["ns"] == 8
+    assert any("1 time mark" in w and "not valid" in w for w in shotset.warnings)
+    # only marks RTKLIB could not place: shots all the same, none valid
+    lines = pos.read_text().splitlines()
+    only = tmp_path / "only_events.pos"
+    only.write_text("\n".join(lines[:3] + [lines[4]]) + "\n")
+    assert [s.valid for s in events.events_pos(only).shots] == [False]
+
+
+# the time marks that tests/data/gnss/phase4/ubx_20080526_64k_tm2.obs was converted from (README.md there): frame and
+# the GPS time it is put after
+WEEK_1481 = 1481 * 604800.0
+MARKS = [
+    (ubx.tim_tm2(1481, 107975.5, count=1), WEEK_1481 + 107975.5),
+    (ubx.tim_tm2(1481, 107990.25 - 14, flags=ubx.FALLING | ubx.BASE_UTC | ubx.TIME_VALID, count=2),
+     WEEK_1481 + 107990.25),
+    (ubx.tim_tm2(1481, 108005.123456789, count=3), WEEK_1481 + 108005.123456789),
+    (ubx.tim_tm2(1481, 108015.0, flags=(1 << 7) | ubx.BASE_GNSS | ubx.TIME_VALID, count=4), WEEK_1481 + 108015.0),
+]
+
+
+def test_same_events_as_convbin(tmp_path):
+    """The u-blox log read by the program and the RINEX file convbin made of it: the same events at the same times."""
+    data = (PHASE4 / "ubx_20080526_64k.ubx").read_bytes()
+    log = tmp_path / "ubx_20080526_64k_tm2.ubx"
+    log.write_bytes(ubx.insert_time_marks(data, [m for m, _ in MARKS], [t for _, t in MARKS]))
+    marks = events.ubx_time_marks(log)
+    converted = events.rinex_events(TM2)
+    assert [s.index for s in marks.shots] == [1, 2, 3] and len(converted.shots) == 3
+    for mark, event in zip(marks.shots, converted.shots):
+        assert mark.source["gps_week"] == event.source["gps_week"]
+        assert mark.source["tow"] == pytest.approx(event.source["tow"], abs=1e-7)  # RINEX writes 1e-7 s
+    assert marks.shots[1].source["time_base"] == "UTC" and marks.shots[1].source["leap_seconds"] == 14
+    assert [s.source["tow"] for s in marks.shots] == pytest.approx([107975.5, 107990.25, 108005.123456789], abs=1e-9)
+
+
+@needs_rtklib
+def test_events_pos_read(tmp_path, monkeypatch):
+    """The time marks of a rover processed by RTKLIB (``<solution>_events.pos``) read as shots: times of events of the
+    rover, the positions RTKLIB interpolated between the epochs around each one (within 1 mm of a linear interpolation
+    of the solution)."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    after = {1: [_event_v2(0, 0, 45.125)], 49: [_event_v2(0, 24, 31.5)], 79: [_event_v2(0, 39, 50.25)],
+             99: [_event_v2(0, 49, 50.25)]}
+    rover = _with_events(tmp_path / "3040evts.05o", after, source=PPK_ROVER)
+    solution = ppk_module.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    pos = solution.path.with_name(solution.path.stem + ppk_module.EVENTS_SUFFIX)
+    shotset = events.events_pos(pos)
+    expected = [_gps(*_week_tow(2005, 4, 2, *t)) for t in ((0, 0, 45.125), (0, 24, 31.5), (0, 39, 50.25),
+                                                          (0, 49, 50.25))]
+    # RTKLIB-EX 2.5.1 in combined mode (postpos.c, combres) writes a mark only where the combined row comes from the
+    # forward pass or both: where the backward row alone is taken (a better quality) the mark is lost - two of these
+    # four with this build; how many varies with the fixes
+    assert shotset.kind == "events_pos" and [s.index for s in shotset.shots] == list(range(1, len(shotset.shots) + 1))
+    assert len(shotset.shots) >= 1
+    for shot in shotset.shots:
+        assert min(abs(shot.gps_time - t) for t in expected) < 1e-3  # RTKLIB writes the times to the millisecond
+    placed = [s for s in shotset.shots if s.valid]
+    assert placed, shotset.warnings
+    for shot in placed:
+        assert shot.height == "ellipsoidal" and shot.status in ("fix", "float", "single")
+        lat, lon, h = (np.interp(shot.gps_time, solution.times, solution.llh[:, i]) for i in range(3))
+        assert shot.antenna[0] == pytest.approx(lat, abs=1e-8) and shot.antenna[1] == pytest.approx(lon, abs=1e-8)
+        assert shot.antenna[2] == pytest.approx(h, abs=1e-3)

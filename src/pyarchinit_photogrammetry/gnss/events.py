@@ -1,13 +1,19 @@
 """The external events of a receiver as shots: a cable from the flash shoe of the camera to the event pin of the
 receiver makes it record the time of each shot. A RINEX observation file writes them as epochs of flag 5 (Emlid Reach
 writes its "time marks" so, and convbin of RTKLIB from the TIM-TM2 messages of a u-blox log); their times, written to a
-tenth of a microsecond in the time system of the file, become GPS time."""
+tenth of a microsecond in the time system of the file, become GPS time. A u-blox receiver logs them as UBX-TIM-TM2
+messages (read here from the u-blox Interface Description, UBX-18010854, to the nanosecond), and RTKLIB writes the
+positions it interpolates at them in ``<solution>_events.pos``."""
 from __future__ import annotations
 
-from datetime import date, datetime
+import mmap
+import re
+import struct
+from collections.abc import Iterator
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import rinex
+from . import ppk, rinex
 from .shots import Shot, ShotSet
 
 DOUBLE_EVENT_S = 0.005  # two events closer than this are one shot recorded twice (a bouncing contact)
@@ -16,6 +22,8 @@ _GPS_START = date(1980, 1, 6)
 _WEEK = 604800
 _BDT_BEHIND_GPS = 14  # BeiDou time is GPS time less 14 s
 NO_EVENTS = "the receiver recorded no events"
+NO_TIME_MARKS = "the log has no time marks (UBX-TIM-TM2): the event input of the receiver recorded nothing"
+EDGES = ("falling", "rising")
 
 
 def _ahead(time_system: str, fields: tuple, leap: int | None) -> int:
@@ -63,22 +71,227 @@ def rinex_events(path: str | Path) -> ShotSet:
     for fields, line in found:
         week, tow = _week_and_seconds(fields, _ahead(system, fields, leap))
         timed.append(((week, tow), line))
-    timed.sort(key=lambda item: item[0])
-    shots: list[Shot] = []
-    doubles = 0
-    kept: tuple[int, float] | None = None
-    for (week, tow), line in timed:
-        if kept is not None and _apart(kept, (week, tow)) < DOUBLE_EVENT_S:
-            doubles += 1
-            continue
-        kept = (week, tow)
-        shots.append(Shot(index=len(shots) + 1, gps_time=week * float(_WEEK) + tow,
-                          source={"file": str(path), "kind": "rinex_events", "line": line, "gps_week": week,
-                                  "tow": tow, "time_system": system}))
+    kept, doubles = _without_doubles(timed)
+    shots = [Shot(index=i, gps_time=week * float(_WEEK) + tow,
+                  source={"file": str(path), "kind": "rinex_events", "line": line, "gps_week": week, "tow": tow,
+                          "time_system": system})
+             for i, ((week, tow), line) in enumerate(kept, 1)]
     warnings = []
     if not found:
         warnings.append(NO_EVENTS)
-    if doubles:
-        warnings.append(f"{doubles} double event{'s' if doubles > 1 else ''} within {DOUBLE_EVENT_S:g} s of the one "
-                        "before left out")
+    warnings += _doubles_warning(doubles)
     return ShotSet(shots=shots, kind="rinex_events", name=path.name, warnings=warnings, duplicates=doubles)
+
+
+def _without_doubles(timed: list) -> tuple[list, int]:
+    """``timed`` - items whose first element is a time (GPS week, seconds of the week) - in time order without those
+    within :data:`DOUBLE_EVENT_S` of the one kept before them, and how many were left out."""
+    kept_items: list = []
+    doubles = 0
+    kept: tuple[int, float] | None = None
+    for item in sorted(timed, key=lambda item: item[0]):
+        if kept is not None and _apart(kept, item[0]) < DOUBLE_EVENT_S:
+            doubles += 1
+            continue
+        kept = item[0]
+        kept_items.append(item)
+    return kept_items, doubles
+
+
+def _doubles_warning(doubles: int) -> list[str]:
+    if not doubles:
+        return []
+    return [f"{doubles} double event{'s' if doubles > 1 else ''} within {DOUBLE_EVENT_S:g} s of the one before left "
+            "out"]
+
+
+# --- u-blox logs: UBX-TIM-TM2 ---------------------------------------------------------------------------------------
+
+_SYNC = b"\xb5\x62"
+_TIM_TM2 = (0x0D, 0x03)  # class, id; payload of 28 bytes
+_CFG_TP5 = (0x06, 0x31)  # the settings of a time pulse (poll answer or command), 32 bytes in version 1
+_TM2 = struct.Struct("<BBHHHIIIII")  # ch, flags, count, wnR, wnF, towMsR, towSubMsR, towMsF, towSubMsF, accEst
+_TP5 = struct.Struct("<BB2xhhIIIIiI")  # tpIdx, version, antCableDelay, rfGroupDelay, ..., userConfigDelay, flags
+# TIM-TM2 flags: bit 2 newFallingEdge, bits 3-4 timeBase, bit 5 utc available, bit 6 time is valid, bit 7 newRisingEdge
+_NEW_EDGE = {"falling": 1 << 2, "rising": 1 << 7}
+_TIME_VALID = 1 << 6
+_BASES = {0: "receiver", 1: "GNSS", 2: "UTC"}
+# CFG-TP5 version 1, flags bits 7-10 (gridUtcGnss): the time grid of the time pulse - and of the time marks in "GNSS"
+# time base - 0 UTC, 1 GPS, 2 GLONASS, 3 BeiDou, 4 Galileo
+_GRIDS = {0: "UTC", 1: "GPS", 2: "GLONASS", 3: "BeiDou", 4: "Galileo"}
+
+
+def ubx_frames(path: str | Path, skipped: list[int] | None = None) -> Iterator[tuple[int, int, bytes, int]]:
+    """The UBX frames of a u-blox log as ``(class, id, payload, offset)``, in order. A frame is 0xB5 0x62, class, id,
+    the little-endian length of the payload, the payload and the two bytes of the 8-bit Fletcher checksum over class,
+    id, length and payload (u-blox Interface Description); the bytes between frames (NMEA, RTCM) are passed over. A
+    whole frame whose checksum is wrong is skipped - its offset appended to ``skipped`` when a list is given - and the
+    next sync bytes after its start are looked for, as are those after a frame cut by the end of the file."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        if path.stat().st_size == 0:
+            return
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            size = len(data)
+            i = data.find(_SYNC)
+            while 0 <= i and i + 8 <= size:
+                length = data[i + 4] | (data[i + 5] << 8)
+                end = i + 8 + length
+                if end <= size:
+                    a = b = 0
+                    for byte in data[i + 2:end - 2]:
+                        a = (a + byte) & 0xFF
+                        b = (b + a) & 0xFF
+                    if data[end - 2] == a and data[end - 1] == b:
+                        yield data[i + 2], data[i + 3], bytes(data[i + 6:end - 2]), i
+                        i = data.find(_SYNC, end)
+                        continue
+                    if skipped is not None:
+                        skipped.append(i)
+                i = data.find(_SYNC, i + 1)
+
+
+def _tm2_time(week: int, ms: int, sub_ns: int, utc: bool) -> tuple[int, float, int]:
+    """(GPS week, seconds of the week, leap seconds added) of an edge at ``ms`` milliseconds and ``sub_ns``
+    nanoseconds of the week ``week``, in UTC when ``utc`` (GPS time is ahead by the leap seconds of that day)."""
+    leap = 0
+    if utc:
+        leap = rinex.gps_minus_utc(datetime(1980, 1, 6) + timedelta(weeks=week, milliseconds=ms))
+    whole_ms = ms + leap * 1000
+    week, whole_ms = week + whole_ms // (_WEEK * 1000), whole_ms % (_WEEK * 1000)
+    return week, whole_ms / 1000.0 + sub_ns * 1e-9, leap
+
+
+def ubx_time_marks(path: str | Path, edge: str = "falling") -> ShotSet:
+    """The time marks of a u-blox log (UBX-TIM-TM2 messages) as shots, in the order of their times: one for every
+    message that announces a new ``edge`` ("falling", the default, or "rising") of the signal at the event input,
+    ``index`` the counter of the message (``count``), the time of that edge (``wn``, ``towMs``, ``towSubMs``: to the
+    nanosecond) in GPS time - ``gps_time`` and, exact, ``source["gps_week"]``, ``source["tow"]``, ``source["tow_ms"]``,
+    ``source["tow_sub_ns"]``. A mark in UTC is put in GPS time with the leap seconds of its day
+    (``source["leap_seconds"]``); one in GNSS time is GPS time when a CFG-TP5 in the log sets the time grid to GPS,
+    else read as GPS time with a warning (another GNSS named, or none); one in receiver time likewise.
+    ``valid`` is False for a mark without a valid time (bit 6), with a warning; ``source["acc_ns"]`` the accuracy the
+    receiver gives the time. A mark within :data:`DOUBLE_EVENT_S` of the one kept before it (a message repeated, a
+    bouncing contact) is left out and counted; damaged frames are skipped and counted in a warning. A log without
+    marks of ``edge`` gives no shots and a warning: :data:`NO_TIME_MARKS`, or one that names the other edge when the
+    log has those."""
+    if edge not in EDGES:
+        raise ValueError(f"edge must be one of {', '.join(EDGES)}, not {edge!r}")
+    other = EDGES[1 - EDGES.index(edge)]
+    path = Path(path)
+    skipped: list[int] = []
+    marks: list[tuple[int, tuple]] = []
+    grids: set[str] = set()
+    for cls, msg_id, payload, offset in ubx_frames(path, skipped):
+        if (cls, msg_id) == _TIM_TM2 and len(payload) == _TM2.size:
+            marks.append((offset, _TM2.unpack(payload)))
+        elif (cls, msg_id) == _CFG_TP5 and len(payload) == _TP5.size:
+            tp_index, version, *_, flags = _TP5.unpack(payload)
+            if tp_index == 0 and version >= 1:
+                grids.add(_GRIDS.get((flags >> 7) & 0xF, "unknown"))
+    timed = []
+    others = 0
+    channels = set()
+    for offset, (channel, flags, count, wn_r, wn_f, ms_r, ns_r, ms_f, ns_f, acc) in marks:
+        if not flags & _NEW_EDGE[edge]:
+            others += bool(flags & _NEW_EDGE[other])
+            continue
+        channels.add(channel)
+        week, ms, ns = (wn_f, ms_f, ns_f) if edge == "falling" else (wn_r, ms_r, ns_r)
+        base = _BASES.get((flags >> 3) & 0x3, "unknown")
+        gps_week, tow, leap = _tm2_time(week, ms, ns, base == "UTC")
+        if base == "GNSS" and grids == {"GPS"}:
+            base = "GPS"
+        source = {"file": str(path), "kind": "ubx_tim_tm2", "offset": offset, "edge": edge, "gps_week": gps_week,
+                  "tow": tow, "tow_ms": ms, "tow_sub_ns": ns, "time_base": base, "acc_ns": acc, "channel": channel}
+        if base == "UTC":
+            source["leap_seconds"] = leap
+        timed.append(((gps_week, tow), count, bool(flags & _TIME_VALID), source))
+    kept, doubles = _without_doubles(timed)
+    shots = [Shot(index=count, gps_time=week * float(_WEEK) + tow, valid=valid, source=source)
+             for (week, tow), count, valid, source in kept]
+    warnings = []
+    if skipped:
+        warnings.append(f"{len(skipped)} damaged UBX frame{'s' if len(skipped) > 1 else ''} (wrong checksum) "
+                        "skipped")
+    if not timed:
+        warnings.append(f"the log has no time marks of the {edge} edge, but {others} of the {other} edge: read them "
+                        f"with edge=\"{other}\"" if others else NO_TIME_MARKS)
+    bases = {s.source["time_base"] for s in shots}
+    if bases - {"GPS", "UTC"}:
+        named = sorted(grids - {"GPS"})
+        why = (f"the log sets the time grid to {' and '.join(named)} time" if named
+               else "the log does not say of which system")
+        warnings.append(f"the time marks are in {' and '.join(sorted(bases - {'GPS', 'UTC'}))} time and {why}: read as "
+                        "GPS time, they can be off by seconds if that is not GPS time")
+    invalid = sum(not s.valid for s in shots)
+    if invalid:
+        warnings.append(f"{invalid} time mark{'s' if invalid > 1 else ''} without a valid time (no time fix of the "
+                        "receiver yet): kept, marked as not valid")
+    if len(channels) > 1:
+        warnings.append(f"time marks of {len(channels)} event inputs (channels {', '.join(map(str, sorted(channels)))})"
+                        " mixed in one set")
+    warnings += _doubles_warning(doubles)
+    return ShotSet(shots=shots, kind="ubx_tim_tm2", name=path.name, warnings=warnings, duplicates=doubles)
+
+
+# --- RTKLIB's _events.pos -------------------------------------------------------------------------------------------
+
+_INVALID_LINE = re.compile(r"^(\S+)\s+(\S+)\s+Q=0,\s*" + re.escape(ppk.INVALID_TIME_MARK))
+
+
+def _time_scale(lines: list[str]) -> str:
+    """The time scale (GPST, UTC, JST) of a .pos file from the header line that names its columns."""
+    for line in lines:
+        if line.startswith("%"):
+            fields = ppk._FIELDS.split(line[1:].strip())
+            if "Q" in fields and "ns" in fields:
+                return fields[0]
+    return "GPST"
+
+
+def events_pos(path: str | Path) -> ShotSet:
+    """The time marks of an ``_events.pos`` file - the positions of the rover that RTKLIB (or Emlid Studio) interpolated
+    at the events of the rover - as shots in time order, ``index`` their place (from 1): each with the antenna
+    ``(lat, lon, h)`` above the WGS84 ellipsoid, ``std`` (north, east, up), ``status`` from RTKLIB's Q (``source["q"]``,
+    ``source["ns"]``) and its time in GPS time. A line "Q=0, Time mark is not valid" (a mark between epochs RTKLIB
+    could not solve) is a shot without a position, ``valid`` False and ``status`` "none", with a warning. The file is
+    read with :func:`.ppk.read_pos`; what it refuses is refused here."""
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    scale = _time_scale(lines)
+    if scale not in ppk._TIME_SCALES:
+        raise ValueError(f"{path.name}: its times are in {scale}, which is not GPS time (GPST), UTC or JST")
+    timed: list[tuple[float, Shot]] = []
+    for number, line in enumerate(lines, 1):
+        match = _INVALID_LINE.match(line.strip())
+        if match:
+            seconds = ppk._gps_seconds(ppk._file_seconds(match.group(1), match.group(2)), scale)
+            timed.append((seconds, Shot(index=None, gps_time=seconds, status="none", valid=False,
+                                        source={"file": str(path), "kind": "events_pos", "line": number, "q": 0})))
+    warnings: list[str] = []
+    try:
+        solution = ppk.read_pos(path)
+    except ppk.NoPositions:
+        if not timed:
+            raise
+    else:
+        warnings += solution.warnings
+        for t, (lat, lon, h), q, ns, (east, north, up) in zip(solution.times, solution.llh, solution.q, solution.ns,
+                                                               solution.sd):
+            timed.append((float(t), Shot(index=None, gps_time=float(t), antenna=(float(lat), float(lon), float(h)),
+                                         height="ellipsoidal", std=(float(north), float(east), float(up)),
+                                         status=ppk.status(int(q)),
+                                         source={"file": str(path), "kind": "events_pos", "q": int(q), "ns": int(ns)})))
+    timed.sort(key=lambda item: item[0])
+    shots = []
+    for i, (t, shot) in enumerate(timed, 1):
+        week = int(t // _WEEK)
+        shot.index = i
+        shot.source.update(gps_week=week, tow=t - week * _WEEK)
+        shots.append(shot)
+    invalid = sum(not s.valid for s in shots)
+    if invalid:
+        warnings.append(f"{invalid} time mark{'s' if invalid > 1 else ''} RTKLIB could not place (no solution at the "
+                        "epochs around it): not valid, without a position")
+    return ShotSet(shots=shots, kind="events_pos", name=path.name, warnings=warnings)
