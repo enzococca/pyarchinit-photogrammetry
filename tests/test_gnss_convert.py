@@ -364,6 +364,13 @@ def test_beidou_msm_in_gps_time_found_and_moved(tmp_path):
     standard = b"".join(_msm(1077, t) + _msm(1127, t - 14_000, 0) for t in tows)
     survey = convert.rtcm3_survey(_write_bytes(tmp_path / "std.rtcm3", standard))
     assert survey["bds_gps_time"] == 0 and survey["bds_standard"] == 3 and survey["repeated"] == 0
+    # a receiver that writes BeiDou before GPS: compared with the GPS MSM after it
+    first = b"".join(_msm(1127, t) + _msm(1077, t, 0) for t in tows)
+    survey = convert.rtcm3_survey(_write_bytes(tmp_path / "first.rtcm3", first))
+    assert survey["bds_gps_time"] == 3 and survey["bds_standard"] == 0
+    first = b"".join(_msm(1127, t - 14_000) + _msm(1077, t, 0) for t in tows)
+    survey = convert.rtcm3_survey(_write_bytes(tmp_path / "first_std.rtcm3", first))
+    assert survey["bds_gps_time"] == 0 and survey["bds_standard"] == 3
     # every MSM saying it ends its epoch: RTKLIB writes an epoch for each, the same time repeated
     repeated = b"".join(_msm(1077, t, 0) + _msm(1127, t - 14_000, 0) for t in tows)
     assert convert.rtcm3_survey(_write_bytes(tmp_path / "rep.rtcm3", repeated))["repeated"] == 3

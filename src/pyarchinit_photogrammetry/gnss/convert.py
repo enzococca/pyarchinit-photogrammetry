@@ -14,6 +14,7 @@ on logs of many signals a few observation types may be left out; :class:`Convert
 from __future__ import annotations
 
 import binascii
+import bisect
 import hashlib
 import json
 import mmap
@@ -41,7 +42,8 @@ DAY = 86400.0
 ROLLOVER_TOE = 4 * 3600.0  # an ephemeris with a toe this early in a week may name the week before (see _week_warning)
 WRONG_WEEK_DAYS = 3.0  # a conversion this far from where it should be is in another week
 DJI_DAT_REFUSED = "not an RTCM 3 log: export RINEX from DJI Terra (4.4 or later) or DJI Assistant 2"
-CACHE_VERSION = 2  # of what a conversion keeps: a new one converts the logs again (2: events counted in the file)
+CACHE_VERSION = 3  # of what a conversion keeps: a new one converts the logs again (2: events counted in the file;
+# 3: BeiDou MSM in GPS time found whichever system comes first)
 CORE_SIGNALS = 6  # signals of a satellite the core keeps in an epoch (NFREQ=3 + NEXOBS=3)
 _GPS_EPOCH = datetime(1980, 1, 6)
 
@@ -299,7 +301,7 @@ _GPS_TIMED = ("GPS", "Galileo", "QZSS")  # epoch times in GPS time
 BDS_BEHIND_MS = 14_000  # BeiDou time is GPS time less 14 s (RTCM: the BeiDou epoch time is in BeiDou time)
 _WEEK_MS = 604_800_000
 SURVEY_BYTES = 2 << 20  # the part of an RTCM 3 log looked at to tell how it writes its MSM
-MSM_NEAR_FRAMES = 12  # a BeiDou MSM is compared with the GPS MSM at most this many frames before it
+MSM_NEAR_FRAMES = 12  # a BeiDou MSM is compared with the GPS MSM at most this many frames before or after it
 BDS_GPS_TIME = ("{name}: the BeiDou MSM of the log carry their epoch in GPS time, not in BeiDou time as RTCM 3 says "
                 "(a receiver of before the standard): RTKLIB would put the BeiDou observations 14 s late and lose the "
                 "others; converted from a copy with the BeiDou epochs moved 14 s back")
@@ -321,8 +323,9 @@ def _msm_header(frame: bytes) -> tuple[int, int]:
 
 def rtcm3_survey(path: str | Path, limit: int = SURVEY_BYTES) -> dict:
     """How the first ``limit`` bytes of an RTCM 3 log write their observations: ``types`` the message types and how
-    many of each, ``bds_gps_time`` the BeiDou MSM whose epoch is the epoch of a GPS MSM just before them (BeiDou time
-    written as GPS time) and ``bds_standard`` those 14 s behind it (as the standard says), ``repeated`` the MSM that
+    many of each, ``bds_gps_time`` the BeiDou MSM whose epoch is the epoch of a GPS MSM near them (BeiDou time written
+    as GPS time; the GPS-timed MSM within :data:`MSM_NEAR_FRAMES` before or after, whichever order the receiver
+    writes the systems in) and ``bds_standard`` those 14 s behind it (as the standard says), ``repeated`` the MSM that
     say they are the last of their epoch (multiple message bit 0) followed by another MSM of the same time: RTKLIB
     writes an epoch for each, the same time repeated."""
     path = Path(path)
@@ -330,7 +333,8 @@ def rtcm3_survey(path: str | Path, limit: int = SURVEY_BYTES) -> dict:
         data = f.read(limit)
     types: dict[int, int] = {}
     pre = std = repeated = 0
-    last_gps: tuple[int, int] | None = None  # (frame number, epoch) of the last GPS-timed MSM
+    gps: list[tuple[int, int]] = []  # (frame number, epoch) of the GPS-timed MSM
+    beidou: list[tuple[int, int]] = []  # and of the BeiDou MSM
     previous = None  # (system, epoch, multiple bit) of the MSM before
     for number, (message, offset, size) in enumerate(rtcm3_frames(data)):
         types[message] = types.get(message, 0) + 1
@@ -340,15 +344,20 @@ def rtcm3_survey(path: str | Path, limit: int = SURVEY_BYTES) -> dict:
         system = kind[0]
         epoch, multiple = _msm_header(data[offset:offset + size])
         if system in _GPS_TIMED:
-            last_gps = (number, epoch)
-        elif system == "BeiDou" and last_gps is not None and number - last_gps[0] <= MSM_NEAR_FRAMES:
-            if epoch == last_gps[1]:
-                pre += 1
-            elif (last_gps[1] - epoch) % _WEEK_MS == BDS_BEHIND_MS:
-                std += 1
+            gps.append((number, epoch))
+        elif system == "BeiDou":
+            beidou.append((number, epoch))
         if previous is not None and previous[2] == 0 and _same_epoch(previous[:2], (system, epoch)):
             repeated += 1
         previous = (system, epoch, multiple)
+    numbers = [n for n, _e in gps]
+    for number, epoch in beidou:
+        k = bisect.bisect_left(numbers, number)
+        near = [gps[j] for j in (k - 1, k) if 0 <= j < len(gps) and abs(gps[j][0] - number) <= MSM_NEAR_FRAMES]
+        if any(epoch == e for _n, e in near):
+            pre += 1
+        elif any((e - epoch) % _WEEK_MS == BDS_BEHIND_MS for _n, e in near):
+            std += 1
     return {"types": types, "bds_gps_time": pre, "bds_standard": std, "repeated": repeated}
 
 
