@@ -523,3 +523,36 @@ def test_event_epochs_as_rtklib_gives_them(tmp_path):
     after = {1: [_event_v2(0, 0, 45.0)], 2: [_event_v2(0, 0, 50.0)], 49: [_event_v2(0, 24, 31.0)]}
     path = _with_events(tmp_path / "late0920.05o", after)
     assert [epoch for _t, epoch in events.rinex_event_epochs(path)] == [2, 2, 50]
+
+
+def _rinex_with(target: Path, after: dict[int, list[str]], skip: int | None = None, source: Path = WHOLE) -> Path:
+    """As :func:`_with_events`, record ``skip`` left out (a gap); ``after[-1]`` goes before the first record."""
+    header, records = rinex_records(source)
+    lines = list(header) + after.get(-1, [])
+    for i, record in enumerate(records):
+        if i != skip:
+            lines += record + after.get(i, [])
+    target.write_text("\n".join(lines) + "\n", newline="\n")
+    return target
+
+
+def _epoch_at(index: int, minute: int, seconds: float, source: Path = WHOLE) -> list[str]:
+    """Record ``index`` of ``source`` written again at 00:minute:seconds: the observations of an event, off the grid."""
+    record = list(rinex_records(source)[1][index])
+    record[0] = record[0][:13] + f"{minute:2d}{seconds:11.7f}" + record[0][26:]
+    return record
+
+
+@pytest.mark.parametrize("case, after, skip, epochs", [
+    ("three", {1: [_event_v2(0, 0, 40.0), _event_v2(0, 0, 45.0), _event_v2(0, 0, 50.0)]}, None, [2, 2, 2]),
+    ("gap", {9: [_event_v2(0, 5, 10.0)], 11: [_event_v2(0, 5, 40.0)]}, 10, [10, 11]),
+    ("first", {-1: [_event_v2(0, 0, 0.0)]}, None, [0]),
+    ("observed", {9: [_event_v2(0, 4, 40.0)] + _epoch_at(9, 4, 40.0), 11: [_event_v2(0, 5, 40.0)]}, None, [10, 12]),
+])
+def test_event_epochs_with_the_changed_rinex_reader(tmp_path, case, after, skip, epochs):
+    """The epochs RTKLIB gives events with the local change of rinex.c: three events between two epochs all go to
+    the next (the first kept); an epoch after a gap, or the first, is an epoch like any other; an epoch off the grid
+    right after an event (the observations of the event) is discarded, the event going to the next."""
+    path = _rinex_with(tmp_path / f"{case}0920.05o", after, skip)
+    assert [epoch for _t, epoch in events.rinex_event_epochs(path)] == epochs
+

@@ -4,7 +4,7 @@ tag:        v2.5.1
 commit:     62d4677ed8425a4e2748c6d390b500d1afb493fc
 license:    BSD 2-clause (license.txt beside this file)
 
-Local changes (the only two; every other file is as upstream):
+Local changes (the only three; every other file is as upstream):
 
   src/rtkpos.c, rtkpos() (line 2381 upstream, "} else rtk->sol.time=obs[0].time;"): the branch that
   skips the single point positioning of an epoch (when the variance of the position is below
@@ -26,6 +26,31 @@ Local changes (the only two; every other file is as upstream):
   The "% inp file" lines postpos.c writes in the header of a solution (.pos, _events.pos) are left as
   they are: a solution stays in its project, and the program reads those lines to find the rover's
   observations of a run (ppk._rover_observations: the check of the time marks).
+
+  src/rinex.c, readrnxobs() (line 1149 upstream, "if (flag == 5) {"): after an event (epoch flag 5)
+  upstream reads the next record and, when its interval from the epoch before differs from the
+  interval before that (DTTOL), reads one more in its place - meant to discard the observations some
+  receivers write at the time of the event (rtklibexplorer commit b04f7ed, "Discard event
+  observations"). It also discarded a real epoch with the event: the first epoch of a file, an epoch
+  after a gap or a change of rate; and when the record read was a second event, that event stood
+  in for the epoch: of two events between two epochs the first was written, of three none, of four
+  the last with the epoch after them lost. On the 30 s samples of tests/data/rtklib (3040 against
+  0759), the 00:05:00 epoch left out: an event at 00:05:10 lost the 00:05:30 epoch, and with a second
+  one at 00:05:40 both marks were lost. Now the events one after the other are read through (the
+  first kept) and the epoch after them is discarded only when it is off the grid of the epochs before
+  it: not a whole number of the shortest interval read so far (tint0) after the last, within DTTOL.
+      do {
+          n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+      } while (n == 0 && flag == 5);
+      if (n > 0 && tint0 > 0.0 && fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL) {
+          double k = timediff(data[0].time,time1)/tint0;
+          if (k < 0.5 || fabs(k-floor(k+0.5))*tint0 >= DTTOL)
+              n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+      }
+  with tint0 (0 at first) set after each epoch kept to its interval from the one before when shorter.
+  An observation epoch at the time of an event is still discarded (tests/test_gnss_ppk_events.py);
+  a change of rate to a rate not dividing the old one still loses one epoch, as upstream.
+  rinex.external_events emulates this reading. To be reported upstream, with the change of rtkpos.c.
 
 Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged
 (but for the change above), in src/:

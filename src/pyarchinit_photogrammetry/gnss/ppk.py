@@ -611,8 +611,9 @@ def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, m
                    epochs: list | None = None) -> list[str]:
     """Why the events of the rover ``given`` (sorted) are not all among the marks RTKLIB ``written``: RTKLIB keeps one
     time mark per observation epoch - an event goes to the observation record that follows it in the file
-    (``epochs``, of each event; without them the solved epoch at or after it) -, so of events that go to the same
-    epoch only one is written; and it writes none outside the epochs it solved."""
+    (``epochs``, of each event, :func:`.rinex.external_events`; without them the solved epoch at or after it) -, so
+    of events that go to the same epoch only the first is written; and it writes none outside the epochs it
+    solved."""
     dropped = _apart_s(written, given) > MARK_TIME_S
     if not dropped.any():
         return []
@@ -628,8 +629,8 @@ def _dropped_marks(solution: Solution, given: np.ndarray, written: np.ndarray, m
     n = int((dropped & shared).sum())
     if n:
         out.append(f"{n} of the {len(given)} events of the rover fall in the same observation epoch as another event: "
-                   f"RTKLIB keeps one time mark per epoch, so its {marks_name} has only one of each. Every shot takes "
-                   "its position from the solution at its own time, so none is lost")
+                   f"RTKLIB keeps one time mark per epoch, the first, so its {marks_name} has only that one. Every "
+                   "shot takes its position from the solution at its own time, so none is lost")
     n = int((dropped & ~shared & ~ok).sum())
     if n:
         out.append(f"{n} of the {len(given)} time marks of the rover are not in {marks_name}: RTKLIB writes none "
@@ -666,9 +667,11 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
       known, or whose rover is no longer there (moved, or its conversion gone from the cache: said so), the shots are
       compared with the marks written in the file, which RTKLIB may simply not have written.
     - Marks of the rover RTKLIB did not write (:func:`_dropped_marks`): of events in the same observation epoch it
-      keeps the last only - said as that, no shot is lost -, and it writes none outside the epochs it solved (before
-      the first, after the last, in a gap). The rover's events are read whole for this, doubles and marks without a
-      valid time too.
+      keeps the first only - said as that, no shot is lost -, and it writes none outside the epochs it solved (before
+      the first, after the last, in a gap). (Upstream RTKLIB-EX also lost every event of three or more between two
+      epochs, and the epoch after an event that follows a gap or begins the file, with the event; the vendored
+      rinex.c is changed for both - native/vendor/rtklib/VERSION.) The rover's events are read whole for this,
+      doubles and marks without a valid time too.
     - Every mark of the file :func:`.rinex.gps_minus_utc` leap seconds from those of the rover: a rover file that
       writes its times in UTC, whose events RTKLIB reads as GPS time; said as that, and nothing else is checked.
     - Marks more than ``tolerance_m`` (metres, across or in height) from where :func:`at` puts the antenna at the time

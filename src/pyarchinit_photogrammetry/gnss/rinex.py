@@ -403,9 +403,14 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
     (``RinexInfo.time_system``) -, its line in the plain text of the file (from 1) and whether its time is valid: the
     lines an event announces are its, not records, and RTKLIB writes there the comment "Time mark is not valid" for a
     mark the receiver took without a valid GNSS fix (u-blox TIM-TM2 without its bit "time valid") -, and the number
-    of the observation epoch RTKLIB gives it (from 0): the epoch whose record follows it, or the one before when the
-    event is earlier than that epoch (RTKLIB keeps one event per epoch). A file packed in layers is read through
-    :func:`plain`; a navigation file is a ``ValueError`` naming it."""
+    of the observation epoch RTKLIB gives it (from 0; RTKLIB keeps one event per epoch). As RTKLIB reads the file
+    (``rinex.c``, ``readrnxobs``, with the local change of ``native/vendor/rtklib/VERSION``): the events between two
+    epochs go to the epoch whose record follows them, or to the one before when the first of them is earlier than
+    that epoch (a receiver that writes an event after the epoch that follows it), and the first of them is the one
+    kept; an epoch that follows events off the grid of the epochs before it (not a whole number of their shortest
+    interval after the last, within :data:`EPOCH_TOLERANCE_S`) is the observations of the event, discarded - the
+    events go to the epoch after it. A file packed in layers is read through :func:`plain`; a navigation file is a
+    ``ValueError`` naming it."""
     path = Path(path)
     info, _, leap, source = _read_header(path)
     if info.kind != "obs":
@@ -413,8 +418,11 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
     found: list[tuple[tuple, int, bool, int]] = []
     special = 0
     event = False
-    epochs = 0  # the observation epochs read so far
+    epochs = 0  # the observation epochs kept so far
     last = None  # the time of the last of them
+    interval = shortest = 0.0  # the interval before it and the shortest between two of them (s)
+    waiting: list[int] = []  # the events since the last epoch (their places in found)
+    before = False  # the first of them is earlier than the last epoch: they go to it
     number = 0
     try:
         with _open(source) as f:
@@ -435,12 +443,22 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
                 if 2 <= flag <= 5:
                     special = count
                 if flag == EXTERNAL_EVENT and fields is not None:
-                    # the epoch RTKLIB gives it (rinex.c, readrnxobs): the next one, or the one before when the
-                    # event is earlier than that (a receiver that writes an event after the epoch that follows it)
-                    before = last is not None and _time is not None and _time < last
+                    if not waiting:
+                        before = last is not None and _time is not None and _time < last
+                    waiting.append(len(found))
                     found.append((fields, number, True, epochs - 1 if before else epochs))
                     event = True
                 elif flag in (0, 1, 6):
+                    step = (_time - last).total_seconds() if _time is not None and last is not None else None
+                    if waiting and step is not None and shortest > 0 and abs(step - interval) >= EPOCH_TOLERANCE_S:
+                        k = step / shortest
+                        if k < 0.5 or abs(k - math.floor(k + 0.5)) * shortest >= EPOCH_TOLERANCE_S:
+                            continue  # the observations of the event, off the grid: RTKLIB discards them
+                    waiting = []
+                    if step is not None:
+                        interval = step
+                        if step >= EPOCH_TOLERANCE_S and (shortest <= 0 or step < shortest):
+                            shortest = step
                     epochs += 1
                     last = _time
     except (EOFError, gzip.BadGzipFile, zlib.error) as error:
@@ -449,6 +467,8 @@ def external_events(path: str | Path) -> tuple[RinexInfo, int | None, list[tuple
 
 
 # --- one file from several --------------------------------------------------------------------------------------
+
+EPOCH_TOLERANCE_S = 0.025  # RTKLIB's DTTOL: two times this close are the same
 
 _EVENT_V2 = re.compile(r"^ {28}[2-5]")  # an event record of RINEX 2 without a time: blank up to its flag
 # header lines that count the observations of the file they are in: of no use, and wrong, for a file made of several

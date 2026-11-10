@@ -516,6 +516,40 @@ def test_two_events_in_one_epoch_said_as_such(tmp_path, monkeypatch):
     assert not any("outside the epochs" in w or "although the solution has positions" in w for w in warnings)
 
 
+@needs_rtklib
+@pytest.mark.parametrize("case", ["three", "gap", "observed"])
+def test_events_rtklib_reads_with_the_local_change(tmp_path, monkeypatch, case):
+    """rinex.c changed (native/vendor/rtklib/VERSION): of three events between two epochs the first is written
+    (upstream: none); two events around a gap (00:05:00 missing) are both written and the epoch after the gap is
+    solved (upstream: both marks and that epoch lost); an epoch off the grid right after an event, the observations
+    of the event, is still discarded. The check finds nothing to say but the events that share an epoch."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    header, records = rinex_records(PPK_ROVER)
+    observed = list(records[9])
+    observed[0] = observed[0][:13] + f"{4:2d}{40.0:11.7f}" + observed[0][26:]
+    after, skip, written = {
+        "three": ({1: [_event_2005(0, 40.0), _event_2005(0, 45.0), _event_2005(0, 50.0)]}, None, [40.0]),
+        "gap": ({9: [_event_2005(5, 10.0)], 11: [_event_2005(5, 40.0)]}, 10, [310.0, 340.0]),
+        "observed": ({9: [_event_2005(4, 40.0)] + observed}, None, [280.0]),
+    }[case]
+    lines = list(header)
+    for i, record in enumerate(records):
+        if i != skip:
+            lines += record + after.get(i, [])
+    rover = tmp_path / "3040evts.05o"
+    rover.write_text("\n".join(lines) + "\n", newline="\n")
+    solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    marks = events.events_pos(solution.path.with_name(solution.path.stem + ppk.EVENTS_SUFFIX))
+    assert [round(m.gps_time % 86400, 3) for m in marks.shots] == written
+    solved = set(np.round(np.asarray(solution.times) % 86400, 1).tolist())
+    assert solved == {float(t) for t in range(0, 3600, 30)} - ({300.0} if case == "gap" else set())
+    warnings = ppk.events_check(solution, events.rinex_events(rover))
+    if case == "three":
+        assert len(warnings) == 1 and warnings[0].startswith("2 of the 3 events") and "the first" in warnings[0]
+    else:
+        assert warnings == []
+
+
 def test_solution_times_to_the_microsecond(tmp_path):
     """The options of a run write the times of the solution to the microsecond: a shot between two epochs of a .pos
     written so is placed on the line between them to 1e-5 m, where the millisecond would put it up to 0.5 ms x the
