@@ -35,7 +35,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
-from .i18n import decimal_comma, number, thousands_points, tr, translate
+from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -415,7 +415,7 @@ class _StatusBar(QStatusBar):
     """The status bar: its messages in the language of the interface (also those of the engine)."""
 
     def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt name
-        super().showMessage(translate(text), timeout)
+        super().showMessage(engine(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SEARCH_WIDTH = (150, 300)  # the search of the commands in the top bar: narrowest and widest, pixels
 

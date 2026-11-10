@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QVBoxLayout, QWidget)
 
 from .flow_layout import FlowLayout
-from .i18n import decimal_comma, number, tr, translate
+from .i18n import decimal_comma, engine, number, tr, translate
 from .icons import PALETTE, icon
 from .image_views import to_qimage
 
@@ -1885,7 +1885,7 @@ class LogPane(QWidget):
 
     # ------------------------------------------------------------ API
     def log(self, level: int, text: str, details: str = "") -> None:
-        text = translate(text)  # also the messages of the engine and of the logger
+        text = engine(text)  # also the messages of the engine and of the logger
         self.entries.append((time.time(), int(level), text, details))
         if len(self.entries) > 5000:
             del self.entries[:1000]

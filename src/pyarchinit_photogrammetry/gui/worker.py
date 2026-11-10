@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QPlai
 
 from ..core.progress import Cancelled, Progress
 from . import app_settings
-from .i18n import tr, translate
+from .i18n import engine, tr
 from .icons import icon
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -293,7 +293,7 @@ class TaskRunner(QObject):
 
     @Slot(float, str)
     def _on_progress(self, fraction: float, message: str) -> None:
-        message = translate(message)  # the engine writes in English or Italian
+        message = engine(message)  # the engine writes in English or Italian
         if self.dialog is not None:
             self.dialog.update_progress(fraction, message)
         if self.status_widget is not None:

@@ -15,7 +15,7 @@ from ..gnss import dji, frames, heights, ppk
 from ..gnss.apply import ONLY_FIX
 from ..gnss.quality import mixed_heights, summary
 from .flow_layout import FlowLayout
-from .i18n import decimal_comma, number, tr
+from .i18n import decimal_comma, engine, number, tr
 from .icons import icon
 
 GEOID_MB = round(heights.GEOID_BYTES / 1e6)  # the size of the grid of EGM2008 the window says (81 MB)
@@ -180,7 +180,8 @@ def _check_lines(chunk) -> list[str]:
     """What does not fit between the heights of the photos of ``chunk`` and those of its system
     (:func:`.heights.check`): its common cases - the grid of EGM2008 missing, a system without heights of its own,
     heights above the sea level in a system of heights above the ellipsoid, positions in ITRF2020 and references in a
-    European frame together on WGS 84 - in the words of the window, any other as the engine says it."""
+    European frame together on WGS 84 - in the words of the window, any other as the engine says it, in the
+    language of the interface (:func:`.i18n.engine`)."""
     lines = []
     for text in heights.check(chunk):
         if heights.GEOID_GRID in text:
@@ -213,7 +214,7 @@ def _check_lines(chunk) -> list[str]:
                             "mare in Italia. Con marker a quote sul livello del mare scegli un sistema con le quote sul "
                             "geoide EGM2008 (Sistema del rilievo...).", chunk.crs))
         else:
-            lines.append(text)
+            lines.append(engine(text))
     return lines
 
 
@@ -229,7 +230,7 @@ def heights_state(chunk, geoid: bool | None = None) -> str:
     try:
         lines += _check_lines(chunk)
     except Exception as exc:  # noqa: BLE001 - a system PROJ cannot read: the pane says it, it does not stop
-        lines.append(str(exc))
+        lines.append(engine(str(exc)))
     return "\n".join(lines)
 
 

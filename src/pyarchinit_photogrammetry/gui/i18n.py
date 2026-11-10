@@ -200,7 +200,56 @@ def translate(text: str) -> str:
     return text
 
 
-# ---------------------------------------------------------------- widgets
+@lru_cache(maxsize=1)
+def _engine_patterns() -> tuple[dict[str, str], list]:
+    """The section ``engine`` of the catalog read the other way: English text -> Italian, and (longest fixed piece,
+    regex, fields, Italian template) of its messages with values, the most specific first."""
+    fixed: dict[str, str] = {}
+    out = []
+    for it, en in _data().get("engine", {}).items():
+        if not _FIELD.search(en):
+            fixed.setdefault(en, it)
+            continue
+        pieces = [piece.replace("{{", "{").replace("}}", "}") for piece in _FIELD.split(en)]
+        rx, fields = _regex(en)
+        out.append((len(_FIELD.sub("", en)), max(pieces, key=len), rx, fields, it))
+    out.sort(key=lambda x: -x[0])
+    return fixed, [x[1:] for x in out]
+
+
+@lru_cache(maxsize=512)
+def _engine_it(text: str) -> str:
+    fixed, patterns = _engine_patterns()
+    hit = fixed.get(text)
+    if hit is not None:
+        return hit
+    for piece, rx, fields, it in patterns:
+        if piece not in text:  # cheap: most messages are none of these
+            continue
+        m = rx.match(text)
+        if m:
+            values = {}
+            for n, v in zip(fields, m.groups()):
+                values.setdefault(n, fixed.get(v, v))
+            return _FIELD.sub(lambda f: values.get(int(f.group(1)), f.group(0)), it).replace("{{", "{").replace(
+                "}}", "}")
+    if "\n" in text:
+        return "\n".join(_engine_it(line) for line in text.split("\n"))
+    return text
+
+
+def engine(text: str) -> str:
+    """A message of the engine - written in English: warnings, errors, progress - in the language of the interface.
+    In Italian the section ``engine`` of the catalog (Italian -> English, as the others) is read the other way: a
+    fixed text, or a message with values recognised from its English and written with its Italian template (a value
+    that is itself a fixed text of the section in Italian too); line by line when it has several lines. A message the
+    section does not know - every Italian one among them - stays as it is. In English the message as
+    :func:`translate` gives it (the interface writes its own messages in Italian)."""
+    if not text:
+        return text
+    return _engine_it(text) if current() == "it" else translate(text)
+
+
 def _swap(old: str, setter) -> None:
     if old:
         new = lookup(old)
