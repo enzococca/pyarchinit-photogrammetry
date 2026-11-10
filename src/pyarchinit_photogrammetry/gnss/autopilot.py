@@ -266,28 +266,36 @@ def _clocks(gps: dict, sms: np.ndarray) -> list[dict]:
             a = sms[sel]
         else:
             base, a = "gps_timeus", gps["boot"][sel]
-        g = g[sel]
-        order = np.lexsort((a, g))  # by GPS time, then arrival: a fix logged twice is kept once, at its first time
-        a, g = a[order], g[order]
-        first = np.ones(len(g), bool)
-        first[1:] = g[1:] != g[:-1]
-        a, g = a[first], g[first]
-        order = np.argsort(a, kind="stable")
-        a, o = a[order], g[order] - a[order]
-        a, o, glitches, unsure = _without_glitches(a, o)
-        seg = _segment_ids(a, o)
-        envelope = base != "gpa_sms"
-        step_ms = int(round(float(np.median(np.diff(a + o))) * 1000.0)) if len(a) > 1 else 0
-        clock = {"instance": inst, "A": a, "O": o, "seg": seg, "base": base, "envelope": envelope, "step_ms": step_ms,
-                 "used": int(np.count_nonzero(mine & gps["used"])), "fixes": len(a), "glitches": glitches,
-                 "unsure": unsure,
-                 "lag_ms": lag_ms, "models": [_segment_model(a[seg == k], o[seg == k], envelope)
-                                              for k in range(int(seg[-1]) + 1)]}
+        clock = fit_clock(a, g[sel], base, base != "gpa_sms")
+        clock.update(instance=inst, used=int(np.count_nonzero(mine & gps["used"])), lag_ms=lag_ms)
         clocks.append(clock)
     physical = [c for c in clocks if c["instance"] != BLENDED] or clocks
     rest = [c for c in clocks if c not in physical]
     return (sorted(physical, key=lambda c: (-c["used"], -c["fixes"], c["instance"]))
             + sorted(rest, key=lambda c: (-c["used"], -c["fixes"])))
+
+
+def fit_clock(a: np.ndarray, g: np.ndarray, base: str, envelope: bool) -> dict:
+    """The clock that puts the boot times of an autopilot in GPS time, fitted to fixes: ``a`` the boot time (s) each fix
+    was given, ``g`` its GPS time (s). ``A`` the boot times of the fixes kept (sorted), ``O`` GPS time less boot time,
+    ``seg`` the stretch of each (:func:`_segment_ids`), ``models`` of the stretches (:func:`_segment_model`), ``base``,
+    ``envelope`` (the boot times are processing times: one-sided delays, the clock is their envelope; else the
+    median), ``step_ms`` (the period of the fixes in GPS time), ``fixes``, ``glitches`` and ``unsure``
+    (:func:`_without_glitches`). A fix logged twice is kept once, at its first boot time. Shared by the ArduPilot and
+    PX4 readers: the same problem of a boot clock against the GPS times of fixes (:func:`_to_gps` reads it)."""
+    order = np.lexsort((a, g))  # by GPS time, then arrival: a fix logged twice is kept once, at its first time
+    a, g = a[order], g[order]
+    first = np.ones(len(g), bool)
+    first[1:] = g[1:] != g[:-1]
+    a, g = a[first], g[first]
+    order = np.argsort(a, kind="stable")
+    a, o = a[order], g[order] - a[order]
+    a, o, glitches, unsure = _without_glitches(a, o)
+    seg = _segment_ids(a, o)
+    step_ms = int(round(float(np.median(np.diff(a + o))) * 1000.0)) if len(a) > 1 else 0
+    return {"instance": 0, "A": a, "O": o, "seg": seg, "base": base, "envelope": envelope, "step_ms": step_ms,
+            "used": 0, "fixes": len(a), "glitches": glitches, "unsure": unsure, "lag_ms": None,
+            "models": [_segment_model(a[seg == k], o[seg == k], envelope) for k in range(int(seg[-1]) + 1)]}
 
 
 def _segment_ids(a: np.ndarray, o: np.ndarray) -> np.ndarray:
