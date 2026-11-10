@@ -68,9 +68,9 @@ program).
 `sample_appended_multiple.ulg` is `test/sample_appended_multiple.ulg` of pyulog (https://github.com/PX4/pyulog,
 master at commit 0b392f8444f843b796405b9766cc15a6dddedf62, the file last changed in
 dd44f431deb1f9b2075b7d513d41073b459b1109), a log of PX4 with appended data and a topic of two instances, distributed
-under pyulog's BSD 3-clause licence (Copyright (c) 2016, PX4 Pro Drone Autopilot; all rights reserved; redistribution
-with its notice, conditions and disclaimer, which `pyulog_LICENSE.md` beside it reproduces, and the
-name of PX4 not used to endorse this program). SHA-256
+under pyulog's BSD 3-clause licence (Copyright (c) 2016, PX4 Pro Drone Autopilot; all rights reserved), whose
+notice, conditions and disclaimer `pyulog_LICENSE.md` beside it reproduces (its third clause names
+"GpsDrivers" and its contributors, as pyulog's licence file does). SHA-256
 `daf30f3224303e39d5c97701e048e84ba04480797e369502331f45ab2e99a2b7`.
 `sample_appended_multiple_info.txt` is the topic table (and the dropout line) of pyulog's
 `test/sample_appended_multiple_info.txt` of the same commit: the counts of an independent reader, which
