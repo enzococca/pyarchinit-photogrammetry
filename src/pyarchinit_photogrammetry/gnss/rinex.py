@@ -117,6 +117,17 @@ def gps_minus_utc(when: datetime) -> int:
     return seconds
 
 
+def gps_ahead(time_system: str, when: datetime, leap: int | None = None) -> int:
+    """The seconds GPS time is ahead of ``time_system`` (``RinexInfo.time_system``) at ``when``: GPS, Galileo, QZSS
+    and NavIC time are GPS time; UTC - and GLONASS time, which RINEX writes as UTC - is behind by the leap seconds
+    (``leap``, those of the header, when given, else those of the day); BeiDou time by 14 s."""
+    if time_system in ("GLO", "UTC"):
+        return leap or gps_minus_utc(when)
+    if time_system == "BDT":
+        return _BDT_BEHIND_GPS
+    return 0
+
+
 def _to_gps(when: datetime | None, time_system: str, leap: int | None) -> datetime | None:
     """A time of the file in GPS time. GPS, Galileo, QZSS and NavIC time are the same; BeiDou time is 14 s behind;
     GLONASS time is UTC, so GPS time is ahead of it by the leap seconds (those of the header when it has them)."""

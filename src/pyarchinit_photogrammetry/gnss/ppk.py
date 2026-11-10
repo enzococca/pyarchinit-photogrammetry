@@ -39,6 +39,10 @@ MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no posi
 FAR_FROM_HEADER_M = (1000.0, 30.0)
 TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the millisecond
 _SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8 s are floats to 1.2e-7 s
+# two epochs this much more than MAX_GAP_S apart are still next to each other: a receiver whose clock jumps by a
+# millisecond logs 1.001 s apart, which the floats of times of 8e8 s do not keep exactly
+GAP_SLACK_S = 1.5e-3
+INTERPOLATION_WARNING_M = 0.03  # the straight line between two epochs this far from the path: a warning
 
 MODES = ("kinematic", "static", "static-start", "dgps")  # RTKLIB's positioning modes that work with a base
 STATIC_MODES = ("static", "static-start")  # those of a rover standing still
@@ -475,10 +479,12 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
     whether there is a position at all (N,).
 
     A time on an epoch takes that epoch as it is. A time between two epochs at most :data:`MAX_GAP_S` apart, give or
-    take the millisecond the times of a solution are written to, takes the straight line between them (the longitude
+    take the millisecond the times of a solution are written to and a millisecond the clock of a receiver jumps
+    (:data:`GAP_SLACK_S`), takes the straight line between them (the longitude
     across the 180th meridian the short way, within [-180, 180)), the Q of the one with the worse status and the
     larger deviation on each axis. Where no such pair is around it - at the ends of the solution, next to a gap - a
-    time within that millisecond of an epoch takes the epoch. Any other time (in a gap, before the first epoch, after
+    time within that millisecond and a half of an epoch takes the epoch (RTKLIB writes the epochs of a receiver
+    whose clock is a fraction of a millisecond off at .999). Any other time (in a gap, before the first epoch, after
     the last) has no position, nor has one that would take an epoch with a number that is not finite: ``ok`` False,
     ``llh`` and ``sd`` NaN, ``q`` 0. A position is never taken from an epoch further away."""
     t = np.asarray(gps_seconds, dtype=np.float64).reshape(-1)
@@ -493,8 +499,8 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
     lo, hi = np.clip(after - 1, 0, last), np.clip(after, 0, last)
     nearest = np.where(np.abs(times[hi] - t) < np.abs(times[lo] - t), hi, lo)
     off = np.abs(times[nearest] - t)
-    close = (after > 0) & (after <= last) & (times[hi] - times[lo] <= MAX_GAP_S + TIME_RESOLUTION_S)
-    on_epoch = (off <= _SAME_EPOCH_S) | (~close & (off <= TIME_RESOLUTION_S))
+    close = (after > 0) & (after <= last) & (times[hi] - times[lo] <= MAX_GAP_S + GAP_SLACK_S)
+    on_epoch = (off <= _SAME_EPOCH_S) | (~close & (off <= GAP_SLACK_S))
     between = ~on_epoch & close & finite[lo] & finite[hi]
     on_epoch &= finite[nearest]
     k = nearest[on_epoch]
@@ -511,17 +517,81 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
     return llh, q, sd, on_epoch | between
 
 
+def _metres(llh: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Differences ``d`` of latitude, longitude (degrees) and height near ``llh`` as north, east, up metres."""
+    r = math.radians(1.0) * 6378137.0
+    return np.c_[d[:, 0] * r, d[:, 1] * r * np.cos(np.radians(llh[:, 0])), d[:, 2]]
+
+
+def interpolation_error(solution: Solution, gps_seconds) -> np.ndarray:
+    """How far (metres, N,) the straight line :func:`at` draws between two epochs may be from the path of the antenna
+    at each of ``gps_seconds``: the curvature of the path from the epochs around (the second difference of the epoch
+    before, the two of the interval and the one after, each where it is there and as close: :data:`MAX_GAP_S`), as
+    ``|p''| (t - t_a)(t_b - t) / 2`` - about ``|p- - 2 p0 + p+| / 8`` in the middle of an interval -, the larger of
+    the two ends. 0 on an epoch, where nothing is interpolated, and where no epoch around gives a curvature; NaN
+    where :func:`at` gives no position. A drone turning on a circle of 20 m at 10 m/s is 0.62 m off the line in the
+    middle of epochs 1 s apart, 25 mm at 5 Hz, 6 mm at 10 Hz."""
+    t = np.asarray(gps_seconds, dtype=np.float64).reshape(-1)
+    _llh, _q, _sd, ok = at(solution, t)
+    out = np.where(ok, 0.0, np.nan)
+    times = np.asarray(solution.times, dtype=np.float64)
+    llh = np.asarray(solution.llh, dtype=np.float64)
+    n = len(times)
+    if n < 3 or not ok.any():
+        return out
+    after = np.clip(np.searchsorted(times, t), 1, n - 1)
+    lo, hi = after - 1, after
+    inside = ok & (t - times[lo] > _SAME_EPOCH_S) & (times[hi] - t > _SAME_EPOCH_S)
+    near = MAX_GAP_S + GAP_SLACK_S
+
+    def curvature(k: np.ndarray) -> np.ndarray:  # |p''| at epoch k (m/s^2), NaN where an epoch around is missing
+        good = (k >= 1) & (k <= n - 2)
+        k0 = np.clip(k, 1, n - 2)
+        h1, h2 = times[k0] - times[k0 - 1], times[k0 + 1] - times[k0]
+        good &= (h1 > 0) & (h2 > 0) & (h1 <= near) & (h2 <= near)
+        d1, d2 = llh[k0] - llh[k0 - 1], llh[k0 + 1] - llh[k0]
+        for d in (d1, d2):
+            d[:, 1] = (d[:, 1] + 180.0) % 360.0 - 180.0
+        h1s, h2s = np.where(good, h1, 1.0)[:, None], np.where(good, h2, 1.0)[:, None]
+        second = 2.0 * (d2 / h2s - d1 / h1s) / (h1s + h2s)
+        value = np.linalg.norm(_metres(llh[k0], second), axis=1)
+        return np.where(good & np.isfinite(value), value, np.nan)
+
+    both = np.c_[curvature(lo), curvature(hi)]
+    worst = np.where(np.isnan(both).all(axis=1), 0.0, np.nanmax(np.where(np.isnan(both), -1.0, both), axis=1))
+    span = (t - times[lo]) * (times[hi] - t) / 2.0
+    out[inside] = (worst * span)[inside]
+    return out
+
+
+def epoch_rate_hz(solution: Solution) -> float | None:
+    """The rate the receiver logged at (epochs per second, from the median interval), None with fewer than 2 epochs."""
+    steps = np.diff(np.asarray(solution.times, dtype=np.float64))
+    steps = steps[steps > 0]
+    return float(1.0 / np.median(steps)) if len(steps) else None
+
+
 # --- the events of the rover against RTKLIB's time marks ----------------------------------------------------------
 
 
-def _rover_observations(solution: Solution) -> list[Path]:
-    """The RINEX observations of the rover of ``solution``'s run: its files (``inputs["rover"]``), those of a raw
-    log being its conversion (``inputs["converted"]``); none for a solution read from a file."""
+def _rover_observations(solution: Solution) -> tuple[list[Path], list[str]]:
+    """The RINEX observations of the rover of ``solution``'s run - its files (``inputs["rover"]``), those of a raw log
+    being its conversion (``inputs["converted"]``) - and what keeps them from being read: a conversion no longer in
+    the cache (:func:`.convert.to_rinex` removes old ones), a file moved. Nothing for a solution read from a file."""
     inputs = solution.inputs or {}
     given = inputs.get("rover")
     rovers = [given] if isinstance(given, str) else list(given or [])
     obs = {item.get("source"): item.get("obs") for item in inputs.get("converted") or []}
-    return [Path(obs.get(path) or path) for path in rovers]
+    paths, notes = [], []
+    for rover in rovers:
+        path = Path(obs.get(rover) or rover)
+        if path.is_file():
+            paths.append(path)
+        elif rover in obs:
+            notes.append(f"the conversion of the rover {Path(rover).name} is no longer in the cache of conversions")
+        else:
+            notes.append(f"the file of the rover {Path(rover).name} is no longer where it was")
+    return (paths, []) if not notes else ([], notes)
 
 
 def _apart_s(times: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -533,18 +603,40 @@ def _apart_s(times: np.ndarray, t: np.ndarray) -> np.ndarray:
     return np.minimum(np.abs(times[after] - t), np.abs(times[before] - t))
 
 
+def _solution_type(path: Path) -> str | None:
+    """RTKLIB's pos1-soltype in the options file of the run beside the solution ``path``, None without one."""
+    conf = path.with_suffix(".conf")
+    try:
+        for line in conf.read_text(errors="replace").splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == "pos1-soltype" and value.split():
+                return value.split()[0].strip()
+    except OSError:
+        pass
+    return None
+
+
 def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> list[str]:
     """The shots of ``shotset`` - the events of the rover's receiver (:data:`EVENT_KINDS`: the flag-5 epochs of its
     RINEX file, the TIM-TM2 of its u-blox log) - checked against the time marks RTKLIB wrote for the run of
-    ``solution`` (``<solution>_events.pos``, :func:`.events.events_pos`): a warning, with the number and the largest
-    gap, for the shots at no time mark of the rover (``MARK_TIME_S``: the events of another receiver or flight, or
-    shifted), for the marks of the rover RTKLIB left out of the file (RTKLIB-EX 2.5.1 loses some, in every mode of
-    the solution: the marks given are those of the rover's file, :func:`.events.rinex_events`) and for the marks
-    whose position is more than ``tolerance_m`` across or in height from where :func:`at` puts the antenna at the time
-    of the shot (where both have one). The marks of the rover are those of its observations (converted ones for a raw
-    log); a solution read from a file, whose rover is not known, is checked against the marks of the file alone.
-    Without the file of the marks, one warning says the shots were not checked. Shots without a valid time are left
-    out; nothing here is an error."""
+    ``solution`` (``<solution>_events.pos``, :func:`.events.events_pos`); a list of warnings, empty when all agree.
+
+    - Shots at no time mark (within :data:`MARK_TIME_S`) of the rover's observations - the events RTKLIB was given,
+      :func:`.events.rinex_events` of its files, or of the conversion of a raw log -: the events of another receiver
+      or flight, or shifted; the number and the largest gap. For a solution read from a file, whose rover is not
+      known, or whose rover is no longer there (moved, or its conversion gone from the cache: said so), the shots are
+      compared with the marks written in the file, which RTKLIB may simply not have written.
+    - Marks of the rover RTKLIB did not write: it writes none outside the epochs it solved (before the first, after
+      the last, in a gap).
+    - Every mark of the file :func:`.rinex.gps_minus_utc` leap seconds from those of the rover: a rover file that
+      writes its times in UTC, whose events RTKLIB reads as GPS time; said as that, and nothing else is checked.
+    - Marks more than ``tolerance_m`` (metres, across or in height) from where :func:`at` puts the antenna at the time
+      of the shot. In a backward solution RTKLIB places the marks from the epoch after them, and with a drone that
+      speeds up or turns the two disagree by more than a millimetre: the warning says so.
+
+    What it cannot see: a photo paired with the wrong event (one off, :func:`.shots.pair` checks that), and a shot
+    where :func:`at` has no position (in a gap, between epochs more than :data:`MAX_GAP_S` apart: nothing to compare).
+    Shots without a valid time are left out; nothing here is an error."""
     from . import events
 
     name = shotset.name or shotset.kind
@@ -562,8 +654,12 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
         marks = []
     except (ValueError, OSError) as exc:
         return [f"{marks_path.name} cannot be read ({exc}): the shots of {name} were not checked against it"]
+    warnings = []
     given = None  # the time marks of the rover's observations: those RTKLIB was given
-    rovers = _rover_observations(solution)
+    rovers, notes = _rover_observations(solution)
+    if notes:
+        warnings.append(f"{'; '.join(notes)}: the shots of {name} are compared with the marks RTKLIB wrote in "
+                        f"{marks_path.name} only")
     if rovers:
         try:
             given = np.array(sorted(s.gps_time for rover in rovers for s in events.rinex_events(rover).shots
@@ -572,24 +668,39 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
             given = None
     written = np.array(sorted(m.gps_time for m in marks), dtype=np.float64)
     t = np.array([shot.gps_time for shot in shots], dtype=np.float64)
+    if given is not None and len(given) and len(written):
+        leap = rinex.gps_minus_utc(_GPS_EPOCH + timedelta(seconds=float(given[0])))
+        shifted = any(np.all(_apart_s(given, written + sign * leap) <= MARK_TIME_S) for sign in (1, -1))
+        if shifted and not np.all(_apart_s(given, written) <= MARK_TIME_S):
+            return warnings + [
+                f"every time mark RTKLIB wrote in {marks_path.name} is {leap} s from an event of the rover "
+                f"{solution.rover}: its file writes its times in UTC, and RTKLIB writes the times of its events as "
+                f"they are, without the {leap} leap seconds. The shots of {name} are in GPS time, at the right time "
+                "in the solution: they were not checked against RTKLIB's marks"]
     reference = given if given is not None else written
-    where = f"the rover {solution.rover}" if given is not None else marks_path.name
     if not len(reference):
-        return [f"{where} has no time marks (events of the camera): the shots of {name} are not events of the "
-                "receiver of the run, and were not checked"]
-    warnings = []
+        where = f"the rover {solution.rover}" if given is not None else marks_path.name
+        return warnings + [f"{where} has no time marks (events of the camera): the shots of {name} were not checked "
+                           "against RTKLIB's"]
     apart = _apart_s(reference, t)
     off = apart > MARK_TIME_S
     if off.any():
-        warnings.append(f"{int(off.sum())} of the {len(t)} shots of {name} are at no time mark of {where}: up to "
-                        f"{float(apart[off].max()):.3f} s from the nearest. The events may be of another receiver or "
-                        "another flight, or their times shifted: check the photos")
+        if given is not None:
+            warnings.append(f"{int(off.sum())} of the {len(t)} shots of {name} are at no time mark of the rover "
+                            f"{solution.rover}: up to {float(apart[off].max()):.3f} s from the nearest. The events "
+                            "may be of another receiver or another flight, or their times shifted: check the photos")
+        else:
+            warnings.append(f"{int(off.sum())} of the {len(t)} shots of {name} are at no time mark RTKLIB wrote in "
+                            f"{marks_path.name}: up to {float(apart[off].max()):.3f} s from the nearest. RTKLIB "
+                            "writes no mark outside the epochs it solved, or the events may be of another receiver "
+                            "or flight: check the photos")
     if given is not None and len(given):
         dropped = int((_apart_s(written, given) > MARK_TIME_S).sum())
         if dropped:
             warnings.append(f"RTKLIB wrote {len(given) - dropped} of the {len(given)} time marks of the rover in "
-                            f"{marks_path.name}: {dropped} left out. Their shots take the position of the solution "
-                            "at their times all the same, not checked against RTKLIB's")
+                            f"{marks_path.name}: {dropped} left out, outside the epochs it solved (before the first, "
+                            "after the last, in a gap). Their shots take the position of the solution at their times "
+                            "where it has one, not checked against RTKLIB's")
     placed = [m for m in marks if m.valid and m.antenna is not None]
     if placed:
         mark_times = np.array([m.gps_time for m in placed], dtype=np.float64)
@@ -604,9 +715,13 @@ def events_check(solution: Solution, shotset, tolerance_m: float = 0.001) -> lis
         far = [gap for gap in gaps if gap > tolerance_m]
         if far:
             n = len(far)
-            warnings.append(f"{n} time mark{'s' if n > 1 else ''} of {marks_path.name} {'are' if n > 1 else 'is'} "
-                            f"more than {tolerance_m * 1000:g} mm from where the solution {path.name} puts the "
-                            f"antenna at the same time: up to {max(far) * 1000:.0f} mm, across or in height")
+            text = (f"{n} time mark{'s' if n > 1 else ''} of {marks_path.name} {'are' if n > 1 else 'is'} more than "
+                    f"{tolerance_m * 1000:g} mm from where the solution {path.name} puts the antenna at the same "
+                    f"time: up to {max(far) * 1000:.0f} mm, across or in height")
+            if _solution_type(path) == "backward":
+                text += (" (a backward solution: RTKLIB places the marks from the epoch after them, so with a drone "
+                         "that speeds up or turns some millimetres are expected)")
+            warnings.append(text)
     return warnings
 
 
@@ -774,12 +889,16 @@ def _navigation(navs, rovers: Sequence[Path], bases: Sequence[Path],
                 converted: Sequence[Path] = ()) -> list[tuple[Path, rinex.RinexInfo]]:
     """The navigation files of the run: those given (one or more; a ``ValueError`` for a file of observations), or
     those beside the files of the rover, or, when there are none, beside the files of the base
-    (:func:`navigation_beside`), or else the navigation files ``converted`` from raw logs of the run
-    (:func:`.convert.to_rinex`); the receivers named by their ``roles`` in the messages."""
+    (:func:`navigation_beside`); and, always and first, the navigation files ``converted`` from raw logs of the run
+    (:func:`.convert.to_rinex`), the ephemerides of the flight itself, which RTKLIB merges with the others (a navigation
+    file of another day beside a raw log would otherwise leave the run with no ephemeris); the receivers named by
+    their ``roles`` in the messages."""
     whose = ("of the base or of the drone" if tuple(roles) == RUN_ROLES[0] else
              f"of {ROLES[roles[0]]} or of {ROLES[roles[1]]}")
     if isinstance(navs, (str, os.PathLike)):
         navs = [navs]
+    own = [(Path(path), rinex.header(Path(path))) for path in converted]  # always: the ephemerides of the flight
+    mine = {path.resolve() for path, _ in own}
     if navs:
         given = []
         for path in map(Path, navs):
@@ -788,13 +907,11 @@ def _navigation(navs, rovers: Sequence[Path], bases: Sequence[Path],
                 raise ValueError(f"{path.name} holds observations, not navigation messages: give the navigation file "
                                  f"{whose} (.nav, .##n, .##p, *_MN.rnx)")
             given.append((path, info))
-        return given
+        return own + [item for item in given if item[0].resolve() not in mine]
     problems: list = []
     found = navigation_beside(rovers, problems) or navigation_beside(bases, problems)
-    if found:
-        return found
-    if converted:
-        return [(Path(path), rinex.header(Path(path))) for path in converted]
+    if found or converted:
+        return own + [item for item in found if item[0].resolve() not in mine]
     if problems:  # one is there and cannot be read: named, not "no navigation file"
         path, exc = problems[0]
         more = f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""
@@ -1172,19 +1289,30 @@ def run_rtklib(files: RunFiles, options: Callable[[], str], inputs: Sequence[tup
 
 def gps_span(path: str | Path) -> tuple[float, float]:
     """The first and last epoch of the RINEX observations ``path`` in seconds of GPS time since the GPS epoch, from its
-    epochs (:func:`rinex.time_span`); the epochs of a file that writes its times in UTC are put in GPS time with the
-    leap seconds (its header's, else those of the day), which :func:`rinex.time_span` leaves out. A ``ValueError`` for
-    a file without epochs."""
+    epochs, converted from the time system of the file as its events are (:func:`.rinex.gps_ahead`: UTC and GLONASS
+    time less the leap seconds of its header or of the day, BeiDou time less 14 s; :func:`.rinex.time_span` leaves
+    UTC as it is). A ``ValueError`` for a file without epochs."""
     path = Path(path)
-    info, _systems, leap, _source = rinex._read_header(path)
-    span = rinex.time_span(path)
-    if span is None:
+    info, _systems, leap, source = rinex._read_header(path)
+    if info.kind != "obs":
+        raise ValueError(f"{path.name}: a navigation file has no observation epochs")
+    first = rinex._first_epoch(source, info.version)
+    if first is None:
         raise ValueError(f"{path.name} has no observation epochs")
-    first, last = ((when - _GPS_EPOCH).total_seconds() for when in span)
-    if info.time_system == "UTC":
-        ahead = leap or rinex.gps_minus_utc(span[0])
-        first, last = first + ahead, last + ahead
-    return first, last
+    last = rinex._last_epoch(source, info.version) or first
+    return tuple((when - _GPS_EPOCH).total_seconds() + rinex.gps_ahead(info.time_system, when, leap)
+                 for when in (first, last))
+
+
+def _approx_span(path: Path) -> tuple[float, float]:
+    """The time of the RINEX observations ``path``, GPS seconds, for an approximate time of a day: the TIME OF FIRST
+    OBS and TIME OF LAST OBS of its header when it has both (nothing else read: a day of a station is gigabytes),
+    else its epochs (:func:`gps_span`)."""
+    info = rinex.header(path)
+    if info.first is not None and info.last is not None:
+        ahead = rinex.gps_ahead("UTC", info.first) if info.time_system == "UTC" else 0  # GLO, BDT converted already
+        return tuple((when - _GPS_EPOCH).total_seconds() + ahead for when in (info.first, info.last))
+    return gps_span(path)
 
 
 def _raw(path: Path) -> bool:
@@ -1203,17 +1331,18 @@ def _raw(path: Path) -> bool:
 
 
 def _middle(paths: Sequence[Path]) -> float:
-    """The middle of the time the RINEX observations ``paths`` span together, GPS seconds (:func:`gps_span`)."""
-    spans = [gps_span(path) for path in paths]
+    """The middle of the time the RINEX observations ``paths`` span together, GPS seconds (:func:`_approx_span`)."""
+    spans = [_approx_span(path) for path in paths]
     return (min(a for a, _ in spans) + max(b for _, b in spans)) / 2.0
 
 
-def _converted(rovers: list[Path], bases: list[Path], roles: tuple[str, str],
-               progress=None) -> tuple[list[Path], list[Path], list]:
+def _converted(rovers: list[Path], bases: list[Path], roles: tuple[str, str], progress=None,
+               approx_time: float | datetime | None = None) -> tuple[list[Path], list[Path], list]:
     """The RINEX files of the rover and of the base, one for each of ``rovers`` and ``bases``: a raw log converted
     (:func:`.convert.to_rinex`), any other file as it is; and the conversions (``Converted``), the rover's first. A log
-    that carries the time of the week only (RTCM 3) is placed by the middle of the time of the other receiver: of the
-    rover for the base, of a base in RINEX for the rover."""
+    that carries the time of the week only (RTCM 3) is placed by ``approx_time`` when given, else by the middle of the
+    time of the other receiver: of the rover for the base, of a base in RINEX for the rover (a ``ValueError`` naming
+    ``approx_time`` when there is none)."""
     raw_rovers, raw_bases = [_raw(path) for path in rovers], [_raw(path) for path in bases]
     if not any(raw_rovers) and not any(raw_bases):
         return list(rovers), list(bases), []
@@ -1223,14 +1352,17 @@ def _converted(rovers: list[Path], bases: list[Path], roles: tuple[str, str],
     converted = []
 
     def convert_one(path: Path, approx: float | None, whose: str) -> Path:
+        if approx_time is not None and _needs_time(path):
+            approx, whose = convert._gps_seconds(approx_time), "approx_time, as given"
         try:
             item = convert.to_rinex(path, approx_time=approx, progress=progress)
         except ValueError as exc:
             if approx is None:
                 raise
             when = span_text(approx, approx)[:19]
-            raise ValueError(f"{exc} (the approximate time of the log, {when} GPS time, was taken from the middle of "
-                             f"the time of {whose}: the log has to be of the same day)") from None
+            source = (whose if approx_time is not None else f"the middle of the time of {whose}")
+            raise ValueError(f"{exc} (the approximate time of the log, {when} GPS time, was taken from {source}: the "
+                             "log has to be of the same day)") from None
         converted.append(item)
         return item.obs
 
@@ -1239,6 +1371,10 @@ def _converted(rovers: list[Path], bases: list[Path], roles: tuple[str, str],
         plain_bases = [path for path, raw in zip(bases, raw_bases) if not raw]
         if plain_bases:
             rover_approx = _middle(plain_bases)
+        elif approx_time is None and any(_needs_time(path) for path, raw in zip(rovers, raw_rovers) if raw):
+            raise ValueError(f"{rover_noun} {_names(rovers)} is a log that carries the time of the week only (RTCM 3), "
+                             f"and {base_noun} {_names(bases)} has no RINEX file to take the day from: give the "
+                             "approximate time of the flight (approx_time, the day is enough)")
     rover_files = [convert_one(path, rover_approx if _needs_time(path) else None, f"{base_noun} {_names(bases)}")
                    if raw else path for path, raw in zip(rovers, raw_rovers)]
     base_approx = _middle(rover_files) if any(raw_bases) else None
@@ -1263,7 +1399,8 @@ def solve(rover: str | Path | Sequence[str | Path], base: str | Path | Sequence[
           base_position: BasePosition | Sequence[float] | None = None, *, folder: str | Path,
           atx: str | Path | None = "auto", mode: str = "kinematic", rover_antenna: str = "",
           solution: str = "combined", static_single: bool = False,
-          roles: tuple[str, str] = RUN_ROLES[0], progress=None) -> Solution:
+          roles: tuple[str, str] = RUN_ROLES[0], progress=None,
+          approx_time: float | datetime | None = None) -> Solution:
     """The PPK solution of the antenna of ``rover`` (its RINEX observations: one file, or several that
     :func:`rinex.join` joins, whose holes ``Solution.rover_holes`` gives) against ``base`` (the RINEX observations of a
     base: one file that covers the whole flight, or several that make it - pieces of an hour, say - which
@@ -1323,7 +1460,9 @@ def solve(rover: str | Path | Sequence[str | Path], base: str | Path | Sequence[
     2/3: :func:`.convert.raw_kind`), converted to RINEX first (:func:`.convert.to_rinex`, into its cache, ``progress``
     following it and able to cancel it), the rover first: an RTCM 3 log of the base, which carries the time of the
     week only, is placed by the middle of the time of the rover (:func:`gps_span`, GPS time), and one of the rover by
-    the middle of the time of a base in RINEX; a log that is not of that day is a ``ValueError`` saying where its
+    the middle of the time of a base in RINEX - or by ``approx_time`` (GPS seconds since the GPS epoch, or a datetime:
+    naive in GPS time, aware converted from UTC, as :func:`.convert.to_rinex` takes it) when given, which it needs
+    when no RINEX file gives the day (an RTCM 3 rover and a raw base); a log that is not of that day is a ``ValueError`` saying where its
     approximate time came from. ``Solution.inputs`` keeps the files as they were given, and ``"converted"`` (only when
     something was converted) lists the conversions, ``{"source", "kind", "obs", "nav", "epochs", "events"}`` (paths
     absolute; ``nav`` None when the log gave none); the navigation files of the conversions are those of the run when
@@ -1337,7 +1476,7 @@ def solve(rover: str | Path | Sequence[str | Path], base: str | Path | Sequence[
                          f"{roles!r}")
     roles = tuple(roles)
     rovers, bases = _files(rover, ROLES[roles[0]]), _files(base, ROLES[roles[1]])
-    rover_pieces, base_pieces, converted = _converted(rovers, bases, roles, progress)
+    rover_pieces, base_pieces, converted = _converted(rovers, bases, roles, progress, approx_time)
     if len(rovers) == 1 and len(bases) == 1:  # nothing to join: nothing is made before the checks
         return _solve(rovers, rover_pieces[0], [], bases, base_pieces[0], [], navs, base_position, folder, atx, run,
                       roles, base_pieces, converted)

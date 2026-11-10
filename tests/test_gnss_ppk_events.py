@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 from datetime import datetime, timedelta
+import math
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +25,8 @@ from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import convert, events, ppk, rinex
 from pyarchinit_photogrammetry.gnss.shots import Shot, ShotSet
-from gnss_helpers import PPK_BASE, PPK_NAV, PPK_ROVER, jpeg, needs_rtklib, pos_text, rinex_records
+from gnss_helpers import LEAP_2005, PPK_BASE, PPK_NAV, PPK_ROVER, START_2005, enu, jpeg, needs_rtklib, pos_text
+from gnss_helpers import rinex_records
 
 PHASE4 = Path(__file__).parent / "data" / "gnss" / "phase4"
 UBX_LOG = PHASE4 / "ubx_20080526_64k.ubx"
@@ -138,25 +140,214 @@ def test_events_check_reports_a_shift(tmp_path, monkeypatch):
     assert any("not checked" in w for w in ppk.events_check(solution, shotset))
 
 
-@needs_rtklib
-def test_events_check_counts_the_marks_the_combined_solution_drops(tmp_path, monkeypatch):
-    """RTKLIB-EX leaves out two of these four marks (test_gnss_events.test_events_pos_read pins it; with this build
-    the forward and backward solutions alone lose the same two): the check counts them against the rover's events."""
-    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+def _event_2005(minute: int, seconds: float, hour: int = 0) -> str:
+    """An external event of RINEX 2 on 2 April 2005, no special lines after it."""
+    return f" 05  4  2 {hour:2d} {minute:2d}{seconds:11.7f}  5  0"
 
-    def event(minute: int, seconds: float) -> str:
-        return f" 05  4  2  0 {minute:2d}{seconds:11.7f}  5  0"
 
-    after = {1: [event(0, 45.125)], 49: [event(24, 31.5)], 79: [event(39, 50.25)], 99: [event(49, 50.25)]}
+def _rover_2005(path: Path, after: dict[int, list[str]]) -> Path:
+    """Station 3040 (the rover of the 2005 pair, 3.3 km from 0759) with the event lines ``after[i]`` after its record
+    ``i`` (records every 30 s from 00:00:00)."""
     header, records = rinex_records(PPK_ROVER)
     lines = list(header)
     for i, record in enumerate(records):
         lines += record + after.get(i, [])
-    rover = tmp_path / "3040evts.05o"
-    rover.write_text("\n".join(lines) + "\n", newline="\n")
+    path.write_text("\n".join(lines) + "\n", newline="\n")
+    return path
+
+
+@needs_rtklib
+@pytest.mark.parametrize("solution_type", ["combined", "forward", "backward"])
+def test_every_mark_between_epochs_written(tmp_path, monkeypatch, solution_type):
+    """The 2005 pair (a real baseline of 3.3 km), four marks between epochs: RTKLIB writes all four in every mode.
+    Upstream RTKLIB-EX 2.5.1 lost two of them: an epoch whose single point positioning it skips (rtkpos.c) did not
+    take the time mark of the epoch (native/vendor/rtklib/VERSION)."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    after = {1: [_event_2005(0, 45.125)], 49: [_event_2005(24, 31.5)], 79: [_event_2005(39, 50.25)],
+             99: [_event_2005(49, 50.25)]}
+    rover = _rover_2005(tmp_path / "3040evts.05o", after)
+    solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work", solution=solution_type)
+    marks = events.events_pos(solution.path.with_name(solution.path.stem + ppk.EVENTS_SUFFIX))
+    assert len(marks.shots) == 4
+    assert ppk.events_check(solution, events.rinex_events(rover)) == []
+
+
+@needs_rtklib
+def test_mark_after_the_last_epoch_left_out(tmp_path, monkeypatch):
+    """A mark after the last epoch (00:59:30) has no epoch to be placed on: RTKLIB writes the four others, and the
+    check counts the one left out."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    after = {1: [_event_2005(0, 45.125)], 49: [_event_2005(24, 31.5)], 79: [_event_2005(39, 50.25)],
+             99: [_event_2005(49, 50.25)], 119: [_event_2005(59, 45.0)]}
+    rover = _rover_2005(tmp_path / "3040evts.05o", after)
     solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
     warnings = ppk.events_check(solution, events.rinex_events(rover))
-    assert len(warnings) == 1 and "2 of the 4 time marks" in warnings[0], warnings
+    assert len(warnings) == 1 and "4 of the 5 time marks" in warnings[0], warnings
+
+
+@needs_rtklib
+def test_marks_on_epochs_against_the_photos(tmp_path, monkeypatch):
+    """Marks exactly on epochs (whole seconds) of the 2005 pair: RTKLIB writes each at the row of its epoch, and the
+    photos placed with ``at`` are where RTKLIB's marks are, on positions that are not all the same (a float solution
+    of a station 3.3 km from the base moves by decimetres). RTKLIB writes the epochs at the time of the receiver's
+    clock corrected: 1 ms before the whole second at 10, 20 and 30 minutes (``at`` takes the epoch), 3 ms before it
+    at 40 minutes, where ``at`` takes nothing (epochs 30 s apart) and the photo keeps its position."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    minutes = (10, 20, 30, 40)
+    after = {2 * m: [_event_2005(m, 0.0)] for m in minutes}  # record 2m is the epoch of minute m
+    rover = _rover_2005(tmp_path / "3040evts.05o", after)
+    solution = ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    shotset = events.rinex_events(rover)
+    assert ppk.events_check(solution, shotset) == []
+    marks = events.events_pos(solution.path.with_name(solution.path.stem + ppk.EVENTS_SUFFIX)).shots
+    assert [round(m.gps_time - START_2005) for m in marks] == [60 * m for m in minutes]
+    row = {round(t - START_2005): llh for t, llh in zip(solution.times, solution.llh)}
+    for mark in marks:  # each at the row of its epoch
+        assert mark.antenna == pytest.approx(tuple(row[round(mark.gps_time - START_2005)]), abs=1e-9)
+    spread = enu(np.array([m.antenna for m in marks]), marks[0].antenna)
+    assert np.abs(spread).max() > 0.01  # not one position four times
+    ch = ppg.Document().add_chunk()
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    for i, shot in enumerate(shotset.shots, 1):
+        utc = GPS_EPOCH + timedelta(seconds=shot.gps_time - LEAP_2005)
+        jpeg(folder / f"IMG_{i:04d}.JPG", None, when=(utc + ZONE).replace(microsecond=0))
+    ch.add_photos([folder])
+    result = gnss_apply.apply_ppk_shots(ch, shotset, solution, folder, by="order")
+    assert result["matched"] == 3 and not any("time mark" in w for w in result["warnings"]), result["warnings"]
+    assert any("1 photo was taken where the solution" in w for w in result["warnings"])
+    assert result["unmatched"] == ["IMG_0004"]
+    for cam, mark in zip(sorted(ch.cameras, key=lambda c: c.label)[:3], marks):
+        lon, lat, h = cam.reference.location
+        assert ppk.horizontal_m(lat, lon, mark.antenna[0], mark.antenna[1]) < 2e-4
+        assert h == pytest.approx(mark.antenna[2], abs=2e-4)
+
+
+def _moving(times: np.ndarray, path: Path) -> ppk.Solution:
+    """A drone flying east at 10 m/s, fix all along, at ``times``."""
+    east = math.degrees(10.0 / (6378137.0 * math.cos(math.radians(41.134))))
+    llh = np.column_stack([np.full(len(times), 41.134), 14.266 + east * (times - times[0]),
+                           np.full(len(times), 94.35)])
+    return ppk.Solution(times=times, llh=llh, q=np.ones(len(times), dtype=int), ns=np.full(len(times), 8),
+                        sd=np.array([[0.003, 0.004, 0.009]] * len(times)), base={}, path=path)
+
+
+def test_events_check_tolerance_in_metres(tmp_path):
+    """A synthetic flight at 5 Hz and RTKLIB's marks written by hand: a mark 0.8 mm north of the line is within
+    1 mm, one 1.5 mm north and one 2 mm higher are not, whatever their latitude and longitude are in degrees."""
+    times = START_2005 + np.arange(0.0, 60.0, 0.2)
+    solution = _moving(times, tmp_path / "flight.pos")
+    shot_times = START_2005 + np.array([10.1, 20.3, 30.5, 40.7])
+    llh, _q, _sd, ok = ppk.at(solution, shot_times)
+    assert ok.all()
+    north = 1.0 / math.radians(1.0) / 6378137.0  # degrees of latitude in a metre
+    offsets = [(0.0008 * north, 0.0), (0.0015 * north, 0.0), (0.0, 0.002), (0.0, 0.0)]
+    rows = [(t, lat + dlat, lon, h + dh, 1, 8, 0.003, 0.004, 0.009)
+            for t, (lat, lon, h), (dlat, dh) in zip(shot_times, llh, offsets)]
+    marks = tmp_path / f"flight{ppk.EVENTS_SUFFIX}"
+    marks.write_text(pos_text(rows), newline="")
+    shotset = ShotSet(shots=[Shot(index=i, gps_time=float(t), source={"kind": "rinex_events"})
+                             for i, t in enumerate(shot_times, 1)], kind="rinex_events", name="rover.obs")
+    (warning,) = ppk.events_check(solution, shotset)
+    assert "2 time marks" in warning and "up to 2 mm" in warning and "backward" not in warning
+    assert ppk.events_check(solution, shotset, tolerance_m=0.003) == []
+    # in a backward run the warning says why a few millimetres are expected
+    (tmp_path / "flight.conf").write_text("pos1-soltype       =backward   # (0:forward,1:backward,2:combined)\n")
+    (warning,) = ppk.events_check(solution, shotset)
+    assert "backward solution" in warning
+    # a solution read from a file (no rover known): shots RTKLIB did not write are not called another flight
+    late = ShotSet(shots=shotset.shots + [Shot(index=5, gps_time=START_2005 + 70.0, source={})], kind="rinex_events")
+    texts = ppk.events_check(solution, late)
+    assert any("1 of the 5 shots" in w and "writes no mark outside the epochs" in w for w in texts), texts
+
+
+def test_events_check_rover_in_utc(tmp_path):
+    """A rover file that writes its times in UTC: RTKLIB writes its marks without the leap seconds. Said as that."""
+    lines = TM2_OBS.read_text().splitlines()
+    lines = [line[:48] + "UTC" + line[51:] if "TIME OF FIRST OBS" in line else line for line in lines]
+    rover = tmp_path / "utc.obs"
+    rover.write_text("\n".join(lines) + "\n")
+    shotset = events.rinex_events(rover)  # in GPS time: 14 s after the times the file writes
+    times = shotset.shots[0].gps_time - 30.0 + np.arange(0.0, 60.0, 0.2)
+    solution = _moving(times, tmp_path / "flight.pos")
+    solution.inputs = {"rover": str(rover), "base": "", "navs": []}
+    solution.rover = rover.name
+    rows = [(s.gps_time - LEAP_2008, 41.134, 14.266, 94.35, 1, 8, 0.003, 0.004, 0.009) for s in shotset.shots]
+    (tmp_path / f"flight{ppk.EVENTS_SUFFIX}").write_text(pos_text(rows), newline="")
+    (warning,) = ppk.events_check(solution, shotset)
+    assert "14 s from an event of the rover" in warning and "UTC" in warning
+
+
+def test_interpolation_error_on_a_turn(tmp_path):
+    """A drone on a circle of 20 m at 10 m/s: the straight line between epochs is 0.62 m off the path in the middle
+    of epochs 1 s apart, 25 mm at 5 Hz, 6 mm at 10 Hz; the estimate from the epochs around is within 10 %."""
+    r, v = 20.0, 10.0
+    lat0, metre = 41.134, 1.0 / math.radians(1.0) / 6378137.0
+    for hz, expected in ((1, 0.62), (5, 0.025), (10, 0.0063)):
+        times = START_2005 + np.arange(0.0, 30.0, 1.0 / hz)
+        angle = v / r * (times - times[0])
+
+        def where(a):
+            return np.column_stack([lat0 + r * np.sin(a) * metre,
+                                    14.266 + r * np.cos(a) * metre / math.cos(math.radians(lat0)),
+                                    np.full(len(a), 94.35)])
+
+        solution = ppk.Solution(times=times, llh=where(angle), q=np.ones(len(times), dtype=int),
+                                ns=np.full(len(times), 8), sd=np.full((len(times), 3), 0.01), base={},
+                                path=tmp_path / "circle.pos")
+        middle = times[5:-5] + 0.5 / hz
+        llh, _q, _sd, ok = ppk.at(solution, middle)
+        truth = where(v / r * (middle - times[0]))
+        off = np.linalg.norm(enu(llh, (lat0, 14.266, 94.35)) - enu(truth, (lat0, 14.266, 94.35)), axis=1)
+        assert off == pytest.approx(expected, rel=0.03)
+        estimate = ppk.interpolation_error(solution, middle)
+        assert estimate == pytest.approx(off, rel=0.1)
+        assert ppk.interpolation_error(solution, times[3:6]).tolist() == [0.0, 0.0, 0.0]  # on epochs
+        assert np.isnan(ppk.interpolation_error(solution, [times[-1] + 5.0]))[0]  # no position
+
+
+def test_turns_between_epochs_in_the_accuracy(tmp_path):
+    """Photos of a drone turning, its receiver at 1 Hz: their accuracy includes the interpolation, with a warning."""
+    exposures = shots_test._exposures(60)
+    ch = shots_test._photos(tmp_path / "f", [f"IMG_{i:04d}.JPG" for i in range(1, 61)], exposures)
+    t0 = shots_test._gps(exposures[0]) - 5.0
+    times = t0 + np.arange(0.0, 160.0, 1.0)
+    metre = 1.0 / math.radians(1.0) / 6378137.0
+    angle = 0.5 * (times - t0)  # 10 m/s on a circle of 20 m
+    llh = np.column_stack([41.134 + 20 * np.sin(angle) * metre,
+                           14.266 + 20 * np.cos(angle) * metre / math.cos(math.radians(41.134)),
+                           np.full(len(times), 94.35)])
+    solution = ppk.Solution(times=times, llh=llh, q=np.ones(len(times), dtype=int), ns=np.full(len(times), 8),
+                            sd=np.full((len(times), 3), 0.005), base={}, path=tmp_path / "rover.pos")
+    result = gnss_apply.apply_ppk_shots(ch, shots_test._events(exposures), solution, tmp_path / "f", by="number")
+    assert result["matched"] == 60
+    (warning,) = [w for w in result["warnings"] if "turns" in w]
+    assert "1 Hz" in warning and "5 Hz or more" in warning
+    worst = max(cam.meta["gnss"].get("interpolation_m", 0.0) for cam in ch.cameras)
+    assert 0.3 < worst < 0.65
+    for cam in ch.cameras:
+        off = cam.meta["gnss"].get("interpolation_m", 0.0)
+        assert min(cam.reference.accuracy) >= off - 1e-9
+
+
+@pytest.mark.parametrize("extra, interpolated", [(0.0009, True), (0.0010, True), (0.0011, True), (0.0025, False)])
+def test_epochs_a_millisecond_more_than_a_second_apart(tmp_path, extra, interpolated):
+    """A receiver whose clock jumps a millisecond logs epochs 1.001 s apart: still next to each other."""
+    times = np.array([START_2005, START_2005 + 1.0 + extra])
+    solution = _moving(times, tmp_path / "s.pos")
+    _llh, _q, _sd, ok = ppk.at(solution, [START_2005 + 0.5])
+    assert bool(ok[0]) is interpolated
+
+
+@pytest.mark.parametrize("system, ahead", [("GPS", 0), ("UTC", 14), ("GLO", 14), ("BDT", 14)])
+def test_spans_in_gps_time(tmp_path, system, ahead):
+    lines = UBX_OBS.read_text().splitlines()
+    lines = [line[:48] + system + line[51:] if "TIME OF FIRST OBS" in line else line for line in lines]
+    other = tmp_path / "other.obs"
+    other.write_text("\n".join(lines) + "\n")
+    first, last = ppk.gps_span(UBX_OBS)
+    assert ppk.gps_span(other) == pytest.approx((first + ahead, last + ahead))
+    assert ppk._approx_span(other) == pytest.approx((first + ahead, last + ahead), abs=0.01)
 
 
 @needs_rtklib
@@ -184,10 +375,11 @@ def test_ppk_with_a_ubx_rover(tmp_path, monkeypatch):
 
 
 @needs_a_converter
-def test_ppk_with_an_rtcm_base(tmp_path, monkeypatch):
-    """The RTCM 3 log of the base converted with the middle of the rover's time, and its RINEX given to RTKLIB. The
-    sample has too few BeiDou ephemerides for RTKLIB to compute anything: RTKLIB is stood in for by a solution of
-    the rows of gnss_helpers, and what it is given is looked at."""
+def test_rtcm_base_plumbing_with_rtklib_stood_in(tmp_path, monkeypatch):
+    """The plumbing of an RTCM 3 log of the base, not its solution: the log converted with the middle of the rover's
+    time and its RINEX given to RTKLIB. The sample has two ephemerides (one GPS, one BeiDou), too few for RTKLIB to
+    compute anything even from RINEX: RTKLIB is stood in for (it writes the rows of gnss_helpers) and what it is given
+    is looked at. Nothing here says that a solution against an RTCM 3 base is right."""
     rover = _alone(RTCM_OBS, tmp_path / "rover")
     seen, given = [], []
     to_rinex = convert.to_rinex
@@ -217,6 +409,17 @@ def test_ppk_with_an_rtcm_base(tmp_path, monkeypatch):
     seen.clear()
     solution = ppk.solve(RTCM_LOG, rover, [RTCM_NAV], base_position=GMSD, folder=tmp_path / "work")
     assert seen == [(RTCM_LOG.name, pytest.approx(middle))] and solution.inputs["rover"] == str(RTCM_LOG.absolute())
+    # an RTCM 3 rover and a raw base: no RINEX file gives the day, approx_time does
+    other = tmp_path / "base" / "GMSD7_copy.rtcm3"
+    other.parent.mkdir()
+    shutil.copy(RTCM_LOG, other)
+    with pytest.raises(ValueError, match="approx_time"):
+        ppk.solve(RTCM_LOG, other, [RTCM_NAV], base_position=GMSD, folder=tmp_path / "work")
+    seen.clear()
+    day = datetime(2012, 10, 14)
+    ppk.solve(RTCM_LOG, other, [RTCM_NAV], base_position=GMSD, folder=tmp_path / "work", approx_time=day)
+    assert [name for name, _ in seen] == [RTCM_LOG.name, other.name]
+    assert all(convert._gps_seconds(when) == convert._gps_seconds(day) for _, when in seen)
 
 
 @needs_a_converter
@@ -227,12 +430,69 @@ def test_raw_base_far_in_time_says_so(tmp_path):
     assert not (tmp_path / "work").exists() or not any((tmp_path / "work").glob("*.pos"))
 
 
-def test_rover_span_in_gps_time(tmp_path):
-    """The approximate time of a base taken from a rover whose file is in UTC: in GPS time, as everything else."""
-    lines = UBX_OBS.read_text().splitlines()
-    lines = [line[:48] + "UTC" + line[51:] if "TIME OF FIRST OBS" in line else line for line in lines]
-    utc = tmp_path / "utc.obs"
-    utc.write_text("\n".join(lines) + "\n")
-    gps_first, gps_last = ppk.gps_span(UBX_OBS)
-    first, last = ppk.gps_span(utc)
-    assert first - gps_first == pytest.approx(LEAP_2008) and last - gps_last == pytest.approx(LEAP_2008)
+@needs_rtklib
+@needs_a_converter
+def test_stale_navigation_beside_a_raw_rover(tmp_path, monkeypatch):
+    """A navigation file of 2012 beside a u-blox log of 2008: the ephemerides of the log itself are still given to
+    RTKLIB, with it, and the solution is the one without it."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    log = _ubx_rover(tmp_path / "rover")
+    shutil.copy(RTCM_NAV, tmp_path / "rover" / "old_flight_Rinex.nav")
+    base = _alone(UBX_OBS, tmp_path / "base")
+    by_hand = ppk.solve(TM2_OBS, base, [UBX_NAV], folder=tmp_path / "work")
+    raw = ppk.solve(log, base, folder=tmp_path / "work")
+    assert np.array_equal(raw.times, by_hand.times) and np.allclose(raw.llh, by_hand.llh, rtol=0, atol=1e-9)
+    (converted,) = raw.inputs["converted"]
+    assert raw.inputs["navs"] == [converted["nav"], str((tmp_path / "rover" / "old_flight_Rinex.nav").absolute())]
+    # and given by hand, the stale one alone would leave nothing: the conversion's come first all the same
+    given = ppk.solve(log, base, [RTCM_NAV], folder=tmp_path / "work")
+    assert np.allclose(given.llh, by_hand.llh, rtol=0, atol=1e-9) and given.inputs["navs"][0] == converted["nav"]
+
+
+@needs_rtklib
+@needs_a_converter
+def test_raw_rover_and_raw_base(tmp_path, monkeypatch):
+    """The u-blox log with the marks as the rover, the same log without them as the base (its position from the fix
+    of the receiver the conversion writes): the solution of the two RINEX files convbin made."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    log = _ubx_rover(tmp_path / "rover")
+    base_log = _alone(UBX_LOG, tmp_path / "base")
+    by_hand = ppk.solve(TM2_OBS, _alone(UBX_OBS, tmp_path / "base_obs"), [UBX_NAV], folder=tmp_path / "work")
+    raw = ppk.solve(log, base_log, folder=tmp_path / "work")
+    assert [item["kind"] for item in raw.inputs["converted"]] == ["ubx", "ubx"]
+    assert np.array_equal(raw.times, by_hand.times) and np.allclose(raw.llh, by_hand.llh, rtol=0, atol=1e-6)
+    assert ppk.events_check(raw, events.ubx_time_marks(log)) == []
+
+
+@needs_rtklib
+@needs_a_converter
+def test_raw_rover_in_two_pieces(tmp_path, monkeypatch):
+    """The u-blox log cut in two between raw epochs (as a receiver that starts a new file): each piece converted, the
+    two joined, the marks of both pieces checked."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    data = (_ubx_rover(tmp_path / "whole")).read_bytes()
+    epochs = ubx.raw_epochs(data)
+    cut = epochs[len(epochs) // 2][0]
+    first, second = tmp_path / "rover" / "rover_001.ubx", tmp_path / "rover" / "rover_002.ubx"
+    first.parent.mkdir()
+    first.write_bytes(data[:cut])
+    second.write_bytes(data[cut:])
+    base = _alone(UBX_OBS, tmp_path / "base")
+    by_hand = ppk.solve(TM2_OBS, base, [UBX_NAV], folder=tmp_path / "work")
+    pieces = ppk.solve([second, first], base, [UBX_NAV], folder=tmp_path / "work")
+    assert len(pieces.inputs["converted"]) == 2
+    assert np.array_equal(pieces.times, by_hand.times) and np.allclose(pieces.llh, by_hand.llh, rtol=0, atol=1e-9)
+    marks = ShotSet(shots=[s for path in (first, second) for s in events.ubx_time_marks(path).shots],
+                    kind="ubx_tim_tm2", name="rover")
+    assert len(marks.shots) == 3 and ppk.events_check(pieces, marks) == []
+
+
+@needs_rtklib
+@needs_a_converter
+def test_converted_rover_gone_from_the_cache(tmp_path, monkeypatch):
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    log = _ubx_rover(tmp_path / "rover")
+    raw = ppk.solve(log, _alone(UBX_OBS, tmp_path / "base"), folder=tmp_path / "work")
+    shutil.rmtree(Path(raw.inputs["converted"][0]["obs"]).parent)
+    (warning,) = ppk.events_check(raw, events.ubx_time_marks(log))
+    assert "no longer in the cache" in warning and "marks RTKLIB wrote" in warning

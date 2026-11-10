@@ -20,7 +20,6 @@ DOUBLE_EVENT_S = 0.005  # two events closer than this are one shot recorded twic
 
 _GPS_START = date(1980, 1, 6)
 _WEEK = 604800
-_BDT_BEHIND_GPS = 14  # BeiDou time is GPS time less 14 s
 NO_EVENTS = "the receiver recorded no events"
 NO_TIME_MARKS = "the log has no time marks (UBX-TIM-TM2): the event input of the receiver recorded nothing"
 EDGES = ("falling", "rising")
@@ -32,11 +31,7 @@ def _ahead(time_system: str, fields: tuple, leap: int | None) -> int:
     gives them, else those of the day); BeiDou time by 14 s."""
     # rinex._to_gps (header().first/last, time_span) reads a "UTC" file as GPS time - phase 3 behaviour, kept: for
     # such a file those times are the leap seconds (18 s today) away from its events, which are converted here
-    if time_system in ("GLO", "UTC"):
-        return leap or rinex.gps_minus_utc(datetime(*fields[:5]))
-    if time_system == "BDT":
-        return _BDT_BEHIND_GPS
-    return 0
+    return rinex.gps_ahead(time_system, datetime(*fields[:5]), leap)
 
 
 def _week_and_seconds(fields: tuple, ahead: int) -> tuple[int, float]:

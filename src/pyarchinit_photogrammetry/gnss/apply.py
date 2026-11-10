@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -294,7 +295,11 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
     than an MRK what :func:`apply_shots` keeps (the antenna being the one of the solution), and the run its ``shots``
     (``kind``, ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``) with ``mrk`` None. The events of
     the rover's receiver (:data:`.ppk.EVENT_KINDS`) are checked against the time marks RTKLIB wrote for the run
-    (:func:`.ppk.events_check`), its warnings among the others.
+    (:func:`.ppk.events_check`), its warnings among the others. For any source but a DJI MRK (whose results
+    stay as they were) a shot between two epochs adds in quadrature to the accuracy of its photo how far the straight
+    line between them may be from the path of the drone (:func:`.ppk.interpolation_error`, kept as
+    ``meta["gnss"]["interpolation_m"]``), with a warning when that is more than
+    :data:`.ppk.INTERPOLATION_WARNING_M` (a receiver logging at 1 Hz on a drone that turns).
 
     Returns what :func:`apply_ppk` returns with what :func:`apply_shots` adds about the pairing."""
     _check_lever(shotset, body_lever_mm)
@@ -315,12 +320,17 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
     frame = base.get("frame") or frames.UNKNOWN
     system = frames.crs_of(frame)
     held = frames.frame_and_epoch(frame, base.get("epoch"))[1] if frame in frames.DYNAMIC else None
-    llh, q, sd, ok = ppk.at(solution, [shot.gps_time + late for _f, shot, _cam in pairing.kept])
+    when = [shot.gps_time + late for _f, shot, _cam in pairing.kept]
+    llh, q, sd, ok = ppk.at(solution, when)
+    # the straight line between two epochs off the path of a drone that turns: in the accuracy of the photos (not for
+    # a DJI MRK, whose results stay as they always were)
+    curve = np.zeros(len(when)) if pairing.kind == "mrk" else np.nan_to_num(ppk.interpolation_error(solution, when))
+    curved = []  # the photos whose line is more than INTERPOLATION_WARNING_M off
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse
     worse = 0  # the photos whose onboard float or single is better than the state the PPK gives them
     vertical_only = 0  # the photos given only the vertical part of an arm in the body
-    for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
+    for (f, shot, cam), antenna, quality, deviations, found, off in zip(pairing.kept, llh, q, sd, ok, curve):
         onboard, before = onboard_fix(cam), onboard_state(cam)
         if not found:
             if onboard and not replace_fix:
@@ -345,7 +355,13 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
         vertical_only += vertical
         extra = {**_source_record(pairing, shot, [lon, lat, h], lever_record), "q": int(quality),
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
-        positions.append((f, shot, cam, location, accuracy(state, [float(v) for v in deviations]), state, extra))
+        acc = accuracy(state, [float(v) for v in deviations])
+        if off > 0:
+            acc = [math.hypot(v, float(off)) for v in acc]
+            extra["interpolation_m"] = round(float(off), 4)
+            if off > ppk.INTERPOLATION_WARNING_M:
+                curved.append(float(off))
+        positions.append((f, shot, cam, location, acc, state, extra))
     baseline = ppk.baseline_km(solution)
     retyped = None
     if base.get("position_source") == "typed" and base.get("position"):
@@ -364,6 +380,12 @@ def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, phot
         warnings.append(f"{gaps} {photos} taken where the solution {name} has no position (a gap of more than "
                         f"{ppk.MAX_GAP_S:g} s between two of its epochs, or before the first or after the last): "
                         f"{keep}")
+    if curved:
+        rate = ppk.epoch_rate_hz(solution)
+        photos = f"{len(curved)} photos were" if len(curved) > 1 else "1 photo was"
+        warnings.append(f"{photos} taken between epochs of {name} where the drone turns or changes speed: the straight "
+                        f"line between the epochs is up to {max(curved) * 100:.0f} cm off its path there (the "
+                        f"receiver logs at {rate:.3g} Hz). Their accuracy includes it; log at 5 Hz or more")
     if apart and float(np.median(apart)) > FAR_FROM_MRK_M:
         where = (f"drone's own receiver put it in {pairing.name}" if pairing.kind == "mrk"
                  else f"{pairing.name} puts it")
