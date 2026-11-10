@@ -895,6 +895,29 @@ def test_deterministic_sawtooth(tmp_path, ppm):
         assert -0.0205 <= errors.min() and errors.max() <= TIME_TOL_S, errors
     assert any("early by up to 20 ms" in w and "varies along the flight" in w for w in shotset.warnings)
     assert all(s.source["sms_lag_ms"] < 2 for s in shotset.shots)
+    assert all(abs(s.source["clock_ppm"] + ppm) <= 6 for s in shotset.shots)  # SMS in whole ms: a few ppm off
+    slow = [w for w in shotset.warnings if "ppm from GPS time (under 35 ppm" in w]
+    if ppm < 35:
+        assert slow and slow[0].startswith("60 shots") and "fixes every 200 ms" in slow[0], shotset.warnings
+        assert "early by up to 20 ms" in slow[0]
+    else:
+        assert not slow
+
+
+@pytest.mark.parametrize("hz, early_ms", [(4, 10), (8, 5), (3, 0)])
+def test_slow_clock_grain_of_the_fix_period(tmp_path, hz, early_ms):
+    """A clock 2 ppm from GPS time with fixes whose period is not a multiple of the loop: they step through it, the
+    times early by up to the greatest common divisor of the two (250 ms: 10 ms, 125 ms: 5 ms); 333 ms samples every
+    delay - no warning."""
+    log, expected = flight(60, gps_hz=hz, interval_ms=30_000, sms="tick", drift_ppm=2.0, seed=3)
+    shotset = autopilot.ardupilot(_write(tmp_path, log))
+    errors = _errors(shotset, expected)
+    assert -(early_ms / 1000.0) - TIME_TOL_S <= errors.min() and errors.max() <= TIME_TOL_S, errors
+    slow = [w for w in shotset.warnings if "under 35 ppm" in w]
+    if early_ms:
+        assert slow and f"early by up to {early_ms} ms" in slow[0], shotset.warnings
+    else:
+        assert not slow
 
 
 @pytest.mark.parametrize("sms", ["corrected", "tick"])
