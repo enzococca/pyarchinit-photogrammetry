@@ -1,7 +1,10 @@
 """PX4 logs (ULog): the reader against pyulog's counts, and the camera shots of logs written by tests/gnss_ulog.py."""
 from __future__ import annotations
 
+import contextlib
 import re
+import signal
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -200,3 +203,76 @@ def ulog_writer_without_camera():
 def test_not_a_ulog(tmp_path):
     with pytest.raises(ValueError, match="not a ULog"):
         ulog.read_ulog(_write(tmp_path, b"notalog" * 10, "x.ulg"))
+
+
+@contextlib.contextmanager
+def _within(seconds: float):
+    """A read that does not end in ``seconds`` fails the test instead of hanging it (where SIGALRM exists)."""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def stop(*_args):
+        raise TimeoutError(f"still reading after {seconds} s")
+
+    old = signal.signal(signal.SIGALRM, stop)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+_T_FORMAT = gnss_ulog.message("F", b"t:uint64_t timestamp;double v;")
+_T_SUBSCRIBE = gnss_ulog.message("A", struct.pack("<BH", 0, 0) + b"t")
+
+
+def _t(t: int) -> bytes:
+    return gnss_ulog.message("D", struct.pack("<HQd", 0, t, t * 0.5))
+
+
+def _read(tmp_path: Path, raw: bytes, **options):
+    with _within(10.0):
+        return ulog.read_ulog(_write(tmp_path, raw, "crafted.ulg"), **options)
+
+
+@pytest.mark.parametrize("where", ["at_itself", "into_header", "past_the_end"])
+def test_appended_offset_not_ahead_ignored(tmp_path, where):
+    """An offset of appended data at or before the flag bits that give it, or past the end of the file, is no
+    appended data: the log read once, in order (it looped for ever)."""
+    body = _T_FORMAT + _T_SUBSCRIBE + _t(1) + _t(2)
+    offset = {"at_itself": 16, "into_header": 3, "past_the_end": 10_000}[where]
+    log = _read(tmp_path, gnss_ulog.header() + gnss_ulog.flag_bits(offset) + body)
+    assert log.get("t")["timestamp"].tolist() == [1, 2]
+    assert not log.appended and log.damaged == 0
+    assert any("appended data" in w for w in log.warnings), log.warnings
+
+
+def test_flag_bits_only_first(tmp_path):
+    """Flag bits after other messages (the specification puts them first, right after the header) are ignored, an
+    offset back to the start of the file with them."""
+    raw = gnss_ulog.header() + _T_FORMAT + _T_SUBSCRIBE + _t(1) + gnss_ulog.flag_bits(16) + _t(2)
+    log = _read(tmp_path, raw)
+    assert log.get("t")["timestamp"].tolist() == [1, 2] and not log.appended
+
+
+@pytest.mark.parametrize("blocks", [2, 3])
+def test_appended_blocks_each_cut(tmp_path, blocks):
+    """Data appended at two or three offsets, the log and every block but the last cut in the middle of a data
+    message (as the specification allows at each offset): reading goes on at each offset, nothing damaged."""
+    start = 16 + 3 + 40
+    parts = [_T_FORMAT + _T_SUBSCRIBE + _t(1) + _t(2) + _t(3)[:7]]
+    parts.append(_t(10) + _t(11) + _t(12)[:9])
+    if blocks == 3:
+        parts.append(_t(20) + _t(21)[:3])
+    parts.append(_t(30) + _t(31))
+    offsets, at = [], start
+    for part in parts[:-1]:
+        at += len(part)
+        offsets.append(at)
+    log = _read(tmp_path, gnss_ulog.header() + gnss_ulog.flag_bits(*offsets) + b"".join(parts))
+    expected = [1, 2, 10, 11] + ([20] if blocks == 3 else []) + [30, 31]
+    assert log.get("t")["timestamp"].tolist() == expected
+    assert log.get("t")["v"].tolist() == [t * 0.5 for t in expected]
+    assert log.appended and log.damaged == 0 and not log.warnings

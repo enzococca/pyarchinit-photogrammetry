@@ -6,9 +6,11 @@ header of 16 bytes - the magic ``ULog`` 0x01 0x12 0x35, the version (1) and the 
 and a sequence of messages, each a header of 3 bytes (``msg_size`` uint16, ``msg_type`` a character) and
 ``msg_size`` bytes, all little-endian:
 
-- ``B`` flag bits (first after the header, optional): 8 compatible and 8 incompatible flag bytes and three file
-  offsets of appended data; bit 0 of the first incompatible byte says data was appended at the first non-zero
-  offset (the log before it may stop in the middle of a message); any other incompatible bit: a log this reader
+- ``B`` flag bits (only first after the header, optional; anywhere else ignored): 8 compatible and 8 incompatible
+  flag bytes and three file offsets of appended data; bit 0 of the first incompatible byte says data was appended at
+  the non-zero offsets, each where the file ended when that data was appended - the log before the first offset and
+  each block before the next may stop in the middle of a message, reading goes on at the offset (an offset not
+  beyond the one before, or past the end of the file, is not taken); any other incompatible bit: a log this reader
   cannot read.
 - ``F`` the format of a topic: ``name:type field;type field;...``, types ``int8_t`` to ``uint64_t``, ``float``,
   ``double``, ``bool``, ``char`` or the name of another format (nested), each with an optional ``[n]`` array; the
@@ -47,7 +49,7 @@ class ULog:
     ``params``, ``subscriptions`` (``msg_id`` -> ``(topic, multi_id)``), ``data`` ((topic, multi_id) -> structured
     array, of the topics read), ``counts`` (data messages of every subscription, read or not), ``dropouts`` and
     ``dropout_ms``, ``logged`` (``(level, timestamp, text)`` of the ``L`` and ``C`` messages), ``appended`` (whether
-    data was appended), ``damaged`` (bytes skipped to find the next sync)."""
+    data was appended), ``offsets_ignored`` (offsets of appended data not taken), ``damaged`` (bytes skipped to find the next sync)."""
     path: str
     version: int = 1
     start_us: int = 0
@@ -62,6 +64,7 @@ class ULog:
     dropout_ms: int = 0
     logged: list = field(default_factory=list)
     appended: bool = False
+    offsets_ignored: int = 0
     damaged: int = 0
 
     def topics(self) -> list[str]:
@@ -81,6 +84,9 @@ class ULog:
         out = []
         if self.damaged:
             out.append(f"{Path(self.path).name}: {self.damaged} damaged bytes skipped (to the next sync message)")
+        if self.offsets_ignored:
+            out.append(f"{Path(self.path).name}: an offset of appended data before the data it follows or past the end "
+                       "of the file: no appended data read from it on")
         if self.dropouts:
             out.append(f"{Path(self.path).name}: {self.dropouts} dropout{'s' if self.dropouts > 1 else ''} of the log "
                        f"({self.dropout_ms} ms in all): data lost while the log could not write")
@@ -151,101 +157,135 @@ def read_ulog(path: str | Path, topics=None) -> ULog:
     log = ULog(path=str(path), version=raw[7], start_us=struct.unpack_from("<Q", raw, 8)[0])
     if log.version > 1:
         raise ValueError(f"{path.name}: ULog version {log.version}, this reader knows version 1")
-    wanted = None if topics is None else set(topics)
-    formats: dict = {}
-    reading: dict = {}  # msg_id -> [(topic, multi_id), dtype, payloads] of a subscription read
-    done: list = []  # those whose msg_id was given to another subscription
+    state = _State(raw=raw, log=log, wanted=None if topics is None else set(topics))
     end = len(raw)
-    jump = None  # (where the log before the appended data ends, where that data starts)
     pos = 16
-    while pos + 3 <= end:
-        if jump is not None and pos >= jump[0]:
-            pos, jump = jump[1], None
-            continue
-        size, kind = struct.unpack_from("<HB", raw, pos)
-        stop = pos + 3 + size
-        if kind not in _KNOWN or stop > end or (jump is not None and stop > jump[0]):
-            if jump is not None and stop > jump[0] and kind in _KNOWN:
-                pos, jump = jump[1], None  # cut short where the appended data starts
+    blocks = [(16, end)]  # (start, stop) of the log and of each block of appended data, in the file's order
+    if end >= 19 and raw[18] == ord("B"):
+        pos, blocks = _flag_bits(raw, log)
+    for b, (start, block_end) in enumerate(blocks):
+        last = b == len(blocks) - 1
+        pos = max(pos, start)
+        while pos + 3 <= block_end:
+            size, kind = struct.unpack_from("<HB", raw, pos)
+            stop = pos + 3 + size
+            if kind in _KNOWN and stop > block_end and not last:
+                break  # the block stops in the middle of a message: reading goes on at the next offset
+            if kind not in _KNOWN or stop > block_end:
+                found = raw.find(SYNC, pos + 1, block_end)
+                if found < 0:
+                    log.damaged += block_end - pos
+                    break
+                log.damaged += max(0, found - 3 - pos)  # up to the header of the sync message
+                pos = found + len(SYNC)  # the message after the sync
                 continue
-            found = raw.find(SYNC, pos + 1)
-            if found < 0:
-                log.damaged += end - pos
-                break
-            log.damaged += max(0, found - 3 - pos)  # up to the header of the sync message
-            pos = found + len(SYNC)  # the message after the sync
-            continue
-        body = raw[pos + 3:stop]
-        pos = stop
-        if kind == ord("D"):
-            if size < 2:
-                continue
-            msg_id = struct.unpack_from("<H", body)[0]
-            key = log.subscriptions.get(msg_id)
-            if key is None:
-                log.damaged += size + 3
-                continue
-            log.counts[key] = log.counts.get(key, 0) + 1
-            if msg_id in reading:
-                reading[msg_id][2].append(body[2:])
-        elif kind == ord("A"):
-            if size < 3:
-                continue
-            multi_id, msg_id = struct.unpack_from("<BH", body)
-            name = body[3:].decode("ascii", "replace").strip("\0")
-            log.subscriptions[msg_id] = (name, multi_id)
-            log.counts.setdefault((name, multi_id), 0)
-            if msg_id in reading:
-                done.append(reading.pop(msg_id))
-            if (wanted is None or name in wanted) and name in formats:
-                reading[msg_id] = [(name, multi_id), np.dtype(_flatten(name, formats)), []]
-        elif kind == ord("F"):
-            name, fields = _parse_format(body.decode("ascii", "replace").strip("\0"))
-            formats[name] = fields
-        elif kind == ord("B"):
-            if size >= 40:
-                incompat = body[8:16]
-                offsets = struct.unpack_from("<3Q", body, 16)
-                if incompat[0] & ~APPENDED & 0xFF or any(incompat[1:]):
-                    raise ValueError(f"{path.name}: incompatible ULog flags this reader does not know")
-                if incompat[0] & APPENDED and offsets[0]:
-                    log.appended = True
-                    if offsets[0] < end:
-                        jump = (offsets[0], offsets[0])
-        elif kind in (ord("I"), ord("P"), ord("Q"), ord("M")):
-            skip = {ord("I"): 0, ord("P"): 0, ord("Q"): 1, ord("M"): 1}[kind]
-            if size < skip + 1:
-                continue
-            klen = body[skip]
-            key = body[skip + 1:skip + 1 + klen].decode("ascii", "replace")
-            type_, _, name = key.partition(" ")
-            value = _value(type_, body[skip + 1 + klen:], formats)
-            if kind == ord("I"):
-                log.info[name] = value
-            elif kind == ord("M"):
-                log.multi_info.setdefault(name, []).append(value)
-            elif kind == ord("P"):
-                log.params[name] = value
-        elif kind == ord("O"):
-            if size >= 2:
-                log.dropouts += 1
-                log.dropout_ms += struct.unpack_from("<H", body)[0]
-        elif kind == ord("L"):
-            if size >= 9:
-                level, t = struct.unpack_from("<BQ", body)
-                log.logged.append((level, t, body[9:].decode("utf-8", "replace").strip("\0")))
-        elif kind == ord("C"):
-            if size >= 11:
-                level, _tag, t = struct.unpack_from("<BHQ", body)
-                log.logged.append((level, t, body[11:].decode("utf-8", "replace").strip("\0")))
-    for key, dt, parts in done + list(reading.values()):
+            if kind != ord("B"):  # flag bits anywhere but first: ignored
+                _message(state, kind, raw[pos + 3:stop])
+            pos = stop
+    for key, dt, parts in state.done + list(state.reading.values()):
         n = dt.itemsize
         buf = b"".join(p[:n] if len(p) >= n else p + b"\0" * (n - len(p)) for p in parts)
         arr = np.frombuffer(buf, dtype=dt).copy() if buf else np.zeros(0, dtype=dt)
         old = log.data.get(key)
         log.data[key] = arr if old is None else np.concatenate([old, arr])
+    formats = state.formats
     log.formats = {name: _flatten(name, formats) for name in formats if _flattens(name, formats)}
     return log
+
+
+def _flag_bits(raw: bytes, log: ULog) -> tuple[int, list[tuple[int, int]]]:
+    """The flag bits message, first after the header: where the messages after it start and the blocks to read - the
+    log up to the first offset of appended data, then each block of appended data up to the next offset (or the end
+    of the file). An offset is taken only beyond the flag bits and the offset before it and within the file; one that
+    is not ends the offsets (counted in ``offsets_ignored``)."""
+    end = len(raw)
+    size = struct.unpack_from("<H", raw, 16)[0]
+    pos = 19 + size
+    if pos > end or size < 40:
+        return 16, [(16, end)]  # no room for the flags: read as any message (damaged or skipped)
+    body = raw[19:pos]
+    incompat = body[8:16]
+    if incompat[0] & ~APPENDED & 0xFF or any(incompat[1:]):
+        raise ValueError(f"{Path(log.path).name}: incompatible ULog flags this reader does not know")
+    cuts: list[int] = []
+    if incompat[0] & APPENDED:
+        for offset in struct.unpack_from("<3Q", body, 16):
+            if not offset:
+                break
+            if offset < (cuts[-1] if cuts else pos) or offset > end:
+                log.offsets_ignored += 1
+                break
+            cuts.append(offset)
+    log.appended = bool(cuts)
+    edges = [pos, *cuts, end]
+    return pos, list(zip(edges[:-1], edges[1:]))
+
+
+@dataclass
+class _State:
+    raw: bytes
+    log: ULog
+    wanted: set | None
+    formats: dict = field(default_factory=dict)
+    reading: dict = field(default_factory=dict)  # msg_id -> [(topic, multi_id), dtype, payloads] of a subscription read
+    done: list = field(default_factory=list)  # those whose msg_id was given to another subscription
+
+
+def _message(state: _State, kind: int, body: bytes) -> None:
+    """One message (not the flag bits) of type ``kind`` read into ``state``."""
+    log, formats, reading = state.log, state.formats, state.reading
+    size = len(body)
+    if kind == ord("D"):
+        if size < 2:
+            return
+        msg_id = struct.unpack_from("<H", body)[0]
+        key = log.subscriptions.get(msg_id)
+        if key is None:
+            log.damaged += size + 3
+            return
+        log.counts[key] = log.counts.get(key, 0) + 1
+        if msg_id in reading:
+            reading[msg_id][2].append(body[2:])
+    elif kind == ord("A"):
+        if size < 3:
+            return
+        multi_id, msg_id = struct.unpack_from("<BH", body)
+        name = body[3:].decode("ascii", "replace").strip("\0")
+        log.subscriptions[msg_id] = (name, multi_id)
+        log.counts.setdefault((name, multi_id), 0)
+        if msg_id in reading:
+            state.done.append(reading.pop(msg_id))
+        if (state.wanted is None or name in state.wanted) and name in formats:
+            reading[msg_id] = [(name, multi_id), np.dtype(_flatten(name, formats)), []]
+    elif kind == ord("F"):
+        name, fields = _parse_format(body.decode("ascii", "replace").strip("\0"))
+        formats[name] = fields
+    elif kind in (ord("I"), ord("P"), ord("Q"), ord("M")):
+        skip = {ord("I"): 0, ord("P"): 0, ord("Q"): 1, ord("M"): 1}[kind]
+        if size < skip + 1:
+            return
+        klen = body[skip]
+        key = body[skip + 1:skip + 1 + klen].decode("ascii", "replace")
+        type_, _, name = key.partition(" ")
+        value = _value(type_, body[skip + 1 + klen:], formats)
+        if kind == ord("I"):
+            log.info[name] = value
+        elif kind == ord("M"):
+            log.multi_info.setdefault(name, []).append(value)
+        elif kind == ord("P"):
+            log.params[name] = value
+    elif kind == ord("O"):
+        if size >= 2:
+            log.dropouts += 1
+            log.dropout_ms += struct.unpack_from("<H", body)[0]
+    elif kind == ord("L"):
+        if size >= 9:
+            level, t = struct.unpack_from("<BQ", body)
+            log.logged.append((level, t, body[9:].decode("utf-8", "replace").strip("\0")))
+    elif kind == ord("C"):
+        if size >= 11:
+            level, _tag, t = struct.unpack_from("<BHQ", body)
+            log.logged.append((level, t, body[11:].decode("utf-8", "replace").strip("\0")))
 
 
 def _flattens(name: str, formats: dict) -> bool:

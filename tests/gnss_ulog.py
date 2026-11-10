@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import struct
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 
@@ -17,6 +17,20 @@ LEAP_2025 = 18
 
 def _message(kind: str, body: bytes) -> bytes:
     return struct.pack("<HB", len(body), ord(kind)) + body
+
+
+message = _message
+
+
+def header(start_us: int = 0) -> bytes:
+    """The 16 bytes that start a ULog file of version 1."""
+    return MAGIC + bytes([1]) + struct.pack("<Q", start_us)
+
+
+def flag_bits(*offsets: int) -> bytes:
+    """A ``B`` message with the flag of appended data and up to three ``offsets`` (the rest zero)."""
+    padded = (list(offsets) + [0, 0, 0])[:3]
+    return _message("B", bytes(8) + bytes([1]) + bytes(7) + struct.pack("<3Q", *padded))
 
 
 class ULogWriter:
