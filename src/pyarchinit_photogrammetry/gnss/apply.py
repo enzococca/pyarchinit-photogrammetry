@@ -10,8 +10,7 @@ import numpy as np
 from ..core.camera import Camera, Reference
 from ..core.chunk import Chunk
 from . import dji, frames, lever, ppk, rinex, shots as shots_module
-from .shots import (CLOCK_TOLERANCE_S, ZONE_MAX_S, ZONE_STEP_S, ZONE_TOLERANCE_S, Pairing, Shot, ShotSet,  # noqa: F401
-                    _clock, _off_zone, _on_time, _signed, photo_time)
+from .shots import Pairing, Shot, ShotSet, photo_time  # noqa: F401  (photo_time: read here by positions)
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
@@ -133,10 +132,11 @@ def _camera(shot: Shot, lat: float, lon: float, h: float, body_lever_mm) -> tupl
         return [lon_c, lat_c, h_c], {"ned_mm": list(shot.lever_ned_mm)}, False
     if body_lever_mm is None:
         return [float(lon), float(lat), float(h)], None, False
+    body = [float(v) for v in body_lever_mm]  # plain numbers: the project is saved as JSON
     attitude = None if shot.attitude is None else [float(v) for v in shot.attitude]
-    lon_c, lat_c, h_c, note = lever.camera_from_antenna(lat, lon, h, body_frd_mm=body_lever_mm, attitude=attitude)
-    return ([lon_c, lat_c, h_c], {"body_frd_mm": list(body_lever_mm), "attitude": attitude, "note": note},
-            note is not None)
+    lon_c, lat_c, h_c, note = lever.camera_from_antenna(lat, lon, h, body_frd_mm=body, attitude=attitude)
+    return [float(lon_c), float(lat_c), float(h_c)], {"body_frd_mm": body, "attitude": attitude, "note": note}, \
+        note is not None
 
 
 def _source_record(pairing: Pairing, shot: Shot, antenna: list[float], lever_record: dict | None) -> dict:
@@ -146,15 +146,22 @@ def _source_record(pairing: Pairing, shot: Shot, antenna: list[float], lever_rec
     ``antenna`` ``[lon, lat, h]`` and the ``utc`` of the shot."""
     if pairing.kind == "mrk":
         return _shot_record(pairing.name, shot, antenna)
-    return {"shots": {"kind": pairing.kind, "file": pairing.name, "index": shot.index, "gps_time": shot.gps_time,
-                      "latency_s": pairing.latency_s, "by": pairing.by},
-            "lever": lever_record, "antenna": list(antenna), "utc": shots_module.utc(shot).isoformat()}
+    return {"shots": {"kind": pairing.kind, "file": pairing.name,
+                      "index": None if shot.index is None else int(shot.index), "gps_time": float(shot.gps_time),
+                      "latency_s": pairing.latency_s, "by": pairing.by, "confirmed": pairing.confirmed},
+            "lever": lever_record, "antenna": [float(v) for v in antenna], "utc": shots_module.utc(shot).isoformat()}
 
 
 def _pairing_warnings(pairing: Pairing, vertical_only: int) -> list[str]:
     """What the pairing and the lever arm leave to say: shots without a valid time, doubles left out, photos given
     only the vertical part of the arm."""
-    warnings = []
+    warnings = list(pairing.warnings)
+    if pairing.photos_ambiguous:
+        n = len(pairing.photos_ambiguous)
+        warnings.append(f"{n} photo{'s have' if n > 1 else ' has'} more than one shot of {pairing.name} within "
+                        f"{shots_module.NEAR_SHOT_S:g} s of {'their' if n > 1 else 'its'} time, which cannot tell "
+                        f"which is {'theirs' if n > 1 else 'its own'}: left without a shot (the first, "
+                        f"{pairing.photos_ambiguous[0].name})")
     if pairing.invalid:
         n = len(pairing.invalid)
         warnings.append(f"{n} shot{'s' if n > 1 else ''} of {pairing.name} without a valid time left out")
@@ -174,7 +181,8 @@ def _report(pairing: Pairing) -> dict:
     return {"by": pairing.by, "clock_s": pairing.clock_s, "latency_s": pairing.latency_s,
             "extra_shots": [s.index for s in pairing.extra_shots],
             "photos_without_shot": [f.stem for f in pairing.photos_without_shot], "doubles": pairing.doubles,
-            "invalid": len(pairing.invalid)}
+            "invalid": len(pairing.invalid), "confirmed": pairing.confirmed,
+            "photos_ambiguous": [f.stem for f in pairing.photos_ambiguous]}
 
 
 def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None, *, by: str = "auto",
@@ -183,7 +191,7 @@ def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None
     ``_events.pos``...): the camera, not the antenna - the arm of the shot (an MRK) or ``body_lever_mm`` (forward,
     right, down in mm in the body of the drone) turned with the attitude of the shot, only its vertical part without
     one (:func:`.lever.camera_from_antenna`, with a warning) -, with the accuracy of the shot's standard deviations
-    and status (:func:`accuracy`), in the frame ``"unknown"`` at the epoch of the shot. An ellipsoidal height stays
+    and status (:func:`accuracy`; deviations without a status: twice them, never below a centimetre), in the frame ``"unknown"`` at the epoch of the shot. An ellipsoidal height stays
     one (``EPSG:4979``), any other is above the sea level (``height`` ``"msl"``, ``EPSG:4326``: never taken for an
     ellipsoidal one). The photos are paired with the shots by :func:`.shots.pair` (``by``, ``latency_s``: the times of
     the shots, not their positions, which the source gives at the shots only), with its errors.
@@ -194,7 +202,8 @@ def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None
     PPK solution, :func:`apply_ppk_shots`) and for an arm in the body with shots that carry their own.
 
     Returns what :func:`apply_mrk` returns with ``by``, ``clock_s``, ``latency_s``, ``extra_shots`` (their indices),
-    ``photos_without_shot`` (labels), ``doubles``, ``invalid`` (a count) and ``warnings``."""
+    ``photos_without_shot`` and ``photos_ambiguous`` (labels), ``doubles``, ``invalid`` (a count), ``confirmed``
+    (:class:`.shots.Pairing`) and ``warnings`` (among them, a pairing by number or by order the times cannot confirm)."""
     _check_lever(shotset, body_lever_mm)
     missing = sum(s.valid and s.antenna is None for s in shotset.shots)
     if missing:
@@ -209,7 +218,10 @@ def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None
         vertical_only += vertical
         state = shot.status
         north, east, up = shot.std if shot.std is not None else (None, None, None)
-        acc = accuracy(state, [east, north, up] if shot.std is not None else None)
+        if state is None and shot.std is not None and not mrk:  # deviations without a status: they say enough
+            acc = [max(FACTOR * float(v), FLOORS["fix"]) for v in (east, north, up)]
+        else:
+            acc = accuracy(state, [east, north, up] if shot.std is not None else None)
         when = shots_module.utc(shot)
         if mrk:
             set_camera_position(cam, location, frames.crs_of(frames.UNKNOWN), acc, dji.SOURCE_MRK, status=state,

@@ -190,18 +190,19 @@ def test_pair_by_number_generic_names(tmp_path):
         pairing = shots.pair(ch, _events(utcs, kind="px4_capture"), tmp_path / folder)
         assert pairing.by == "number" and len(pairing.kept) == 5
     # the numbers of the photos are those of another counter: fewer than half coincide, the times pair them
-    utcs = _exposures(61)
-    ch = _photos(tmp_path / "c", [f"IMG_{i:04d}.JPG" for i in range(5001, 5061)], utcs[:60])
+    # (120 photos, three turns: with 60 and one turn a shift by one shot came within two pairs of the right pairing)
+    utcs = _exposures(121)
+    ch = _photos(tmp_path / "c", [f"IMG_{i:04d}.JPG" for i in range(5001, 5121)], utcs[:120])
     pairing = shots.pair(ch, _events(utcs, kind="ardupilot_cam"), tmp_path / "c")
-    assert pairing.by == "time" and [s.index for _f, s, _c in pairing.kept] == list(range(1, 61))
+    assert pairing.by == "time" and [s.index for _f, s, _c in pairing.kept] == list(range(1, 121))
     # the event counter of a receiver is no image number: never paired by number in "auto"
-    names = [f"IMG_{i:04d}.JPG" for i in range(1, 61)]
-    ch = _photos(tmp_path / "d", names, utcs[1:61])
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 121)]
+    ch = _photos(tmp_path / "d", names, utcs[1:121])
     pairing = shots.pair(ch, _events(utcs), tmp_path / "d")
-    assert pairing.by == "time" and [s.index for _f, s, _c in pairing.kept] == list(range(2, 62))
+    assert pairing.by == "time" and [s.index for _f, s, _c in pairing.kept] == list(range(2, 122))
     assert [s.index for s in pairing.extra_shots] == [1]
     # forced by number: what the user asked
-    assert shots.pair(ch, _events(utcs[1:61]), tmp_path / "d", by="number").by == "number"
+    assert shots.pair(ch, _events(utcs[1:121]), tmp_path / "d", by="number").by == "number"
     with pytest.raises(ValueError, match="by"):
         shots.pair(ch, _events(utcs), tmp_path / "d", by="colour")
 
@@ -211,14 +212,14 @@ def test_pair_by_time_with_double_and_missing_events(tmp_path):
     names = [f"IMG_{i:04d}.JPG" for i in range(1, 412)]
     ch = _photos(tmp_path / "survey", names, exposures)
     missing = {99, 299}  # the receiver lost the events of the 100th and the 300th photo
-    doubles = {49, 199, 349}  # a bouncing contact: a second event 50 ms after these
+    doubles = {49, 199, 349}  # a bouncing contact: a second event 10 ms after these
     events = []
     for k, t in enumerate(exposures):
         if k in missing:
             continue
         events.append(t)
         if k in doubles:
-            events.append(t + timedelta(milliseconds=50))
+            events.append(t + timedelta(milliseconds=10))
     assert len(events) == 412
     shotset = _events(events, name="rover.obs")
     pairing = shots.pair(ch, shotset, tmp_path / "survey")
@@ -229,7 +230,7 @@ def test_pair_by_time_with_double_and_missing_events(tmp_path):
     assert [f.name for f in pairing.photos_without_shot] == ["IMG_0100.JPG", "IMG_0300.JPG"]
     # the second event of each double left out, the first one kept
     assert pairing.doubles == 3 and pairing.extra_shots == []
-    assert sorted(s.gps_time for s in pairing.left_doubles) == sorted(_gps(exposures[k]) + 0.05 for k in doubles)
+    assert sorted(s.gps_time for s in pairing.left_doubles) == sorted(_gps(exposures[k]) + 0.01 for k in doubles)
     # never by order when the counts differ
     with pytest.raises(ValueError, match="order"):
         shots.pair(ch, shotset, tmp_path / "survey", by="order")
@@ -250,9 +251,9 @@ def test_two_flights_in_one_folder_refused(tmp_path):
     later = [t + timedelta(hours=1) for t in exposures]
     ch = _photos(tmp_path / "two", names, exposures + later)
     before = snapshot(ch)
-    with pytest.raises(ValueError, match="more than one flight"):
+    with pytest.raises(ValueError, match="more than one clock of the camera"):
         shots.pair(ch, _events(exposures), tmp_path / "two")
-    with pytest.raises(ValueError, match="more than one flight"):
+    with pytest.raises(ValueError, match="more than one clock of the camera"):
         gnss_apply.apply_shots(ch, _events(exposures, antenna=(41.1, 14.2, 90.0), height="ellipsoidal"),
                                tmp_path / "two")
     assert snapshot(ch) == before
@@ -312,3 +313,185 @@ def test_mrk_behaviour_unchanged(tmp_path):
     assert sorted(got) == sorted(expected)
     for key in expected:
         assert got[key] == expected[key], key
+
+
+# --- pairings by number or by order confirmed by the times ---------------------------------------------------------
+
+
+def _regular(count: int, interval: float = 2.0) -> list[datetime]:
+    """Exposures at exactly ``interval`` seconds, no turn: a timer that never varies."""
+    return [START + timedelta(seconds=interval * k) for k in range(count)]
+
+
+def _never_wrong(call, truth: dict) -> None:
+    """``call`` pairs every photo it keeps with its own shot (``truth``: photo name -> GPS time), or refuses."""
+    try:
+        pairing = call()
+    except ValueError:
+        return
+    wrong = [f.name for f, shot, _cam in pairing.kept if shot.gps_time != truth[f.name]]
+    assert wrong == [], f"{len(wrong)} photos with the shot of another"
+
+
+def test_camera_counter_one_ahead_never_paired_wrong(tmp_path):
+    exposures = _exposures(200)
+    names = [f"IMG_{i:04d}.JPG" for i in range(2, 202)]  # the camera numbers from 2, the log from 1
+    ch = _photos(tmp_path / "ahead", names, exposures)
+    shotset = _events(exposures, kind="ardupilot_cam")
+    truth = {n: _gps(t) for n, t in zip(names, exposures)}
+    with pytest.raises(ValueError, match="IMG_0002"):  # the first photo whose time disagrees is named
+        shots.pair(ch, shotset, tmp_path / "ahead")
+    _never_wrong(lambda: shots.pair(ch, shotset, tmp_path / "ahead", by="number"), truth)
+    pairing = shots.pair(ch, shotset, tmp_path / "ahead", by="time")
+    assert len(pairing.kept) == 200 and pairing.confirmed is True
+    assert all(shot.gps_time == truth[f.name] for f, shot, _cam in pairing.kept)
+
+
+def test_missed_trigger_mid_flight_never_paired_wrong(tmp_path):
+    exposures = _exposures(200)
+    # the camera missed the 100th trigger: no photo, and its counter did not move on
+    taken = [t for k, t in enumerate(exposures) if k != 99]
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 200)]
+    ch = _photos(tmp_path / "missed", names, taken)
+    truth = {n: _gps(t) for n, t in zip(names, taken)}
+    shotset = _events(exposures, kind="ardupilot_cam")
+    _never_wrong(lambda: shots.pair(ch, shotset, tmp_path / "missed"), truth)
+    with pytest.raises(ValueError):
+        shots.pair(ch, shotset, tmp_path / "missed", by="number")
+    pairing = shots.pair(ch, shotset, tmp_path / "missed", by="time")
+    assert len(pairing.kept) == 199 and all(shot.gps_time == truth[f.name] for f, shot, _cam in pairing.kept)
+
+
+def test_order_with_one_missing_and_one_extra_event_refused(tmp_path):
+    exposures = _exposures(150)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 151)]
+    ch = _photos(tmp_path / "order", names, exposures)
+    # the receiver lost the 40th event and recorded one 6 s before the first: as many events as photos
+    events = [exposures[0] - timedelta(seconds=6)] + [t for k, t in enumerate(exposures) if k != 39]
+    with pytest.raises(ValueError, match="disagree"):
+        shots.pair(ch, _events(events), tmp_path / "order", by="order")
+
+
+def test_regular_intervals_pairing_by_number_not_confirmed(tmp_path):
+    exposures = _regular(60)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 61)]
+    ch = _photos(tmp_path / "timer", names, exposures)
+    shotset = _events(exposures, kind="ardupilot_cam", antenna=(41.134, 14.266, 94.35), height="ellipsoidal")
+    pairing = shots.pair(ch, shotset, tmp_path / "timer")
+    assert pairing.by == "number" and len(pairing.kept) == 60 and pairing.confirmed is False
+    result = gnss_apply.apply_shots(ch, shotset, tmp_path / "timer")
+    assert result["confirmed"] is False
+    assert any("not confirmed by the times" in w and "control point" in w for w in result["warnings"])
+    # irregular intervals: the times confirm it
+    exposures = _exposures(60)
+    ch = _photos(tmp_path / "irregular", names, exposures)
+    assert shots.pair(ch, _events(exposures, kind="ardupilot_cam"), tmp_path / "irregular").confirmed is True
+    # photos without a date: nothing confirms it
+    ch = _photos(tmp_path / "undated", names[:5], [None] * 5)
+    pairing = shots.pair(ch, _events(exposures[:5], kind="ardupilot_cam"), tmp_path / "undated")
+    assert pairing.by == "number" and len(pairing.kept) == 5 and pairing.confirmed is False
+    assert any("not confirmed by the times" in w for w in pairing.warnings)
+    # an MRK is checked as it always was
+    assert shots.pair(ch, _events(exposures[:5], kind="mrk"), tmp_path / "undated", by="order").confirmed is None
+
+
+def test_ambiguous_time_pairing_says_number_and_order_are_not_checked(tmp_path):
+    exposures = _regular(60)
+    ch = _photos(tmp_path / "timer", [f"a{chr(97 + k // 26)}{chr(97 + k % 26)}.JPG" for k in range(60)], exposures)
+    with pytest.raises(ValueError, match="not checked by the times") as error:
+        shots.pair(ch, _events(exposures + [exposures[-1] + timedelta(seconds=2)]), tmp_path / "timer")
+    assert "more than one" in str(error.value)
+
+
+def test_near_double_events_leave_their_photo_without_a_shot(tmp_path):
+    exposures = _exposures(60)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 61)]
+    ch = _photos(tmp_path / "near", names, exposures)
+    # an event 300 ms after the 21st shot, one 100 ms before the 41st: which one is the photo's cannot be told
+    events = sorted(exposures + [exposures[20] + timedelta(milliseconds=300),
+                                 exposures[40] - timedelta(milliseconds=100)])
+    pairing = shots.pair(ch, _events(events), tmp_path / "near")
+    truth = {n: _gps(t) for n, t in zip(names, exposures)}
+    assert all(shot.gps_time == truth[f.name] for f, shot, _cam in pairing.kept)
+    assert [f.name for f in pairing.photos_ambiguous] == ["IMG_0021.JPG", "IMG_0041.JPG"]
+    assert len(pairing.kept) == 58 and {"IMG_0021.JPG", "IMG_0041.JPG"} <= {f.name for f in pairing.photos_without_shot}
+    result = gnss_apply.apply_shots(ch, _events(events, kind="events_pos", antenna=(41.1, 14.2, 90.0),
+                                                height="ellipsoidal"), tmp_path / "near")
+    assert result["matched"] == 58 and any("2 photos" in w and "more than one shot" in w for w in result["warnings"])
+
+
+def test_lever_of_numpy_values_saved_with_the_project(tmp_path):
+    exposures = _exposures(4)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 5)]
+    folder = tmp_path / "np"
+    folder.mkdir()
+    for name, utc in zip(names, exposures):
+        jpeg(folder / name, None, when=_photo_time(utc))
+    doc = ppg.Document()
+    ch = doc.add_chunk()
+    ch.add_photos([folder])
+    shotset = ShotSet(shots=[Shot(index=np.int64(i), gps_time=np.float64(_gps(t)), antenna=(41.134, 14.266, 94.35),
+                                  height="ellipsoidal", attitude=np.array([0.0, 0.0, 90.0]))
+                             for i, t in enumerate(exposures, 1)], kind="ardupilot_cam", name="flight.bin")
+    gnss_apply.apply_shots(ch, shotset, folder, body_lever_mm=np.array([100.0, 0.0, 200.0]))
+    path = doc.save(tmp_path / "np.ppg")
+    cam = ppg.Document.open(path).chunks[0].cameras[0]
+    assert cam.meta["gnss"]["lever"]["body_frd_mm"] == [100.0, 0.0, 200.0]
+    assert cam.meta["gnss"]["lever"]["attitude"] == [0.0, 0.0, 90.0] and cam.meta["gnss"]["shots"]["index"] == 1
+
+
+def test_quaternion_straight_to_ned_at_ninety_degrees():
+    def q_axis(axis, deg):
+        half = math.radians(deg) / 2
+        v = [0.0, 0.0, 0.0]
+        v[axis] = math.sin(half)
+        return np.array([math.cos(half), *v])
+
+    def q_mul(a, b):
+        w1, x1, y1, z1 = a
+        w2, x2, y2, z2 = b
+        return np.array([w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2])
+
+    arm = (300.0, 200.0, 350.0)
+    for roll, pitch, yaw in ((25.0, 90.0, 40.0), (-10.0, -90.0, 170.0), (5.0, 30.0, -60.0)):
+        q = q_mul(q_mul(q_axis(2, yaw), q_axis(1, pitch)), q_axis(0, roll))
+        conj = q * np.array([1, -1, -1, -1])
+        expected = q_mul(q_mul(q, np.array([0.0, *arm])), conj)[1:]
+        assert lever.quaternion_to_ned(arm, *q) == pytest.approx(expected, abs=1e-9)
+        assert lever.body_to_ned(arm, roll, pitch, yaw) == pytest.approx(expected, abs=1e-9)
+        # a 4-tuple is a quaternion, a 3-tuple angles
+        lon, lat, h, note = lever.camera_from_antenna(41.134, 14.266, 94.35, body_frd_mm=arm, attitude=tuple(q))
+        assert (lon, lat, h, note) == (*dji.lever_arm(41.134, 14.266, 94.35, tuple(expected)), None)
+    with pytest.raises(ValueError, match="attitude"):
+        lever.camera_from_antenna(41.134, 14.266, 94.35, body_frd_mm=arm, attitude=(1.0, 2.0))
+
+
+def test_pairings_that_cannot_be_made_say_why(tmp_path):
+    exposures = _exposures(5)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 6)]
+    ch = _photos(tmp_path / "undated", names, [None] * 5)
+    with pytest.raises(ValueError, match="no date"):
+        shots.pair(ch, _events(exposures), tmp_path / "undated", by="time")
+    every_invalid = ShotSet(shots=[Shot(index=i, gps_time=_gps(t), valid=False) for i, t in enumerate(exposures, 1)],
+                            kind="ubx_tim_tm2", name="rover.ubx")
+    with pytest.raises(ValueError, match="no valid time"):
+        shots.pair(ch, every_invalid, tmp_path / "undated")
+    without_numbers = ShotSet(shots=[Shot(index=None, gps_time=_gps(t)) for t in exposures], kind="events_pos",
+                              name="rover_events.pos")
+    with pytest.raises(ValueError, match="carry no numbers"):
+        shots.pair(ch, without_numbers, tmp_path / "undated", by="number")
+
+
+def test_accuracy_from_the_deviations_without_a_status(tmp_path):
+    exposures = _exposures(4)
+    names = [f"IMG_{i:04d}.JPG" for i in range(1, 5)]
+    ch = _photos(tmp_path / "std", names, exposures)
+    shotset = _events(exposures, kind="ardupilot_cam", antenna=(41.134, 14.266, 94.35), height="ellipsoidal",
+                      std=(0.8, 0.6, 1.5))
+    gnss_apply.apply_shots(ch, shotset, tmp_path / "std")
+    assert ch.cameras[0].reference.accuracy == pytest.approx([1.2, 1.6, 3.0])  # twice east, north, up
+    shotset = _events(exposures, kind="ardupilot_cam", antenna=(41.134, 14.266, 94.35), height="ellipsoidal",
+                      std=(0.001, 0.001, 0.002))
+    gnss_apply.apply_shots(ch, shotset, tmp_path / "std")
+    assert ch.cameras[0].reference.accuracy == pytest.approx([0.01, 0.01, 0.01])  # never below a centimetre

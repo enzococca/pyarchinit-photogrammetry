@@ -526,7 +526,10 @@ def last_run(chunk) -> dict | None:
     one of :data:`BASE_SOURCES`, ``position`` the typed one ``[lon, lat, h]`` (None for any other source), ``frame``
     and ``epoch`` those of the position of the base, ``station`` the permanent station of a base that is a station or
     was placed by a baseline from one (``{"id", "name", "networks", "lat", "lon", "h", "xyz"}``, None otherwise); a run
-    recorded before the frames lacks the last three. None when there was none."""
+    recorded before the frames lacks the last three. A run with shots other than a DJI MRK (:func:`.apply.apply_ppk_shots`:
+    the events of a receiver, an autopilot log) has ``mrk`` None and ``shots`` (``{"kind", "file", "by", "latency_s",
+    "body_lever_mm"}``: the kind of the shots, their file as an absolute path, how the photos were paired, the latency
+    added to the shots, the lever arm in the body of the drone or None). None when there was none."""
     record = (getattr(chunk, "meta", None) or {}).get(MEMORY) if chunk is not None else None
     last = record.get("last") if isinstance(record, dict) else None
     return dict(last) if isinstance(last, dict) else None

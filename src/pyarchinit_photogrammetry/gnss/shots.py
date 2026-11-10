@@ -56,13 +56,15 @@ class Shot:
 @dataclass
 class ShotSet:
     """The shots read from one source, in the order of their times: ``kind`` (one of :data:`KINDS`), ``name`` (of the
-    file), ``warnings`` (sentences about what was read), ``duplicates`` (how many double shots were left out)."""
+    file), ``warnings`` (sentences about what was read), ``duplicates`` (how many double shots were left out), ``path``
+    (of the file, when the reader gives it)."""
 
     shots: list[Shot]
     kind: str
     name: str = ""
     warnings: list[str] = field(default_factory=list)
     duplicates: int = 0
+    path: str = ""  # of the file read, when there is one (where its photos are by default)
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -83,7 +85,7 @@ def from_mrk(path: str | Path) -> ShotSet:
                   source={"file": str(path), "kind": "mrk", "gps_week": m.gps_week, "tow": m.gps_seconds,
                           "flag": m.flag})
              for m in dji.read_mrk(path)]
-    return ShotSet(shots=shots, kind="mrk", name=path.name)
+    return ShotSet(shots=shots, kind="mrk", name=path.name, path=str(path))
 
 
 def utc(shot: Shot) -> datetime:
@@ -101,11 +103,20 @@ CLOCK_TOLERANCE_S = 3.0  # a photo belongs to its shot when its time is this clo
 ZONE_STEP_S = 900.0  # the camera keeps the local time: whole quarter hours from UTC ...
 ZONE_TOLERANCE_S = 120.0  # ... give or take the drift of its clock ...
 ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
-# paired by their times, a photo and a shot are within this of the clock of the flight (the median of the pairs): the
-# camera writes whole seconds, so on a steady clock every photo is within half a second of it; a tenth more for the
-# delay of the camera
+# paired by their times, a photo and a shot are within this of the clock of the flight: the camera writes whole
+# seconds, so on a steady clock the offsets photo - shot of a flight lie in a band one second wide, and the clock is
+# the middle of the band of 2 x PAIR_WINDOW_S holding the most of them (a tenth of a second either side for the delay
+# of the camera); never the median, which the seconds of a camera shooting every whole number of seconds can push to
+# an edge of the band
 PAIR_WINDOW_S = 0.6
-DOUBLE_SHOT_S = 0.25  # paired by their times, a shot this close after the one before is the same shot twice
+DOUBLE_SHOT_S = 0.02  # paired by their times, a shot this close after the one before is the same shot twice (a
+# bouncing contact; the readers of the events already leave out those within 5 ms)
+NEAR_SHOT_S = 1.0  # paired by their times, a photo whose shot has another this close cannot tell which one is its own
+# a pairing by number or by order whose photos disagree with the times of their shots (by more than PAIR_WINDOW_S
+# from the median) in more than this many photos - or this share of them, whichever is more - is refused; fewer are
+# left without a shot, with a warning
+DISAGREE_MAX = 2
+DISAGREE_SHARE = 0.02
 # the sources whose index is the number of the image (DJI MRK, ArduPilot CAM Img, PX4 camera_capture seq), which
 # "auto" pairs by the numbers in the names of the photos; the counter of a receiver's events is no image number
 NUMBERED_KINDS = ("mrk", "ardupilot_cam", "px4_capture")
@@ -145,7 +156,12 @@ class Pairing:
     on, None when no photo has a date. ``invalid`` are the shots without a valid time (never paired),
     ``left_doubles`` the shots left out as the second of a double when pairing by time, ``doubles`` those plus the
     doubles the source itself left out; ``paired`` every photo of the folder with the shot it was given first (None for
-    none), before the times were checked; ``latency_s`` what was added to the time of every shot."""
+    none), before the times were checked; ``latency_s`` what was added to the time of every shot. ``confirmed`` says
+    whether the times confirm the pairing: True paired by time, or by number or order and the times pair them so too;
+    False by number or by order where the times cannot tell (no date, intervals so regular that a shift by whole shots
+    looks like the clock of the camera): positions to check; None for a DJI MRK, checked as it always was.
+    ``photos_ambiguous`` are the photos left without a shot because another shot was within :data:`NEAR_SHOT_S` of
+    theirs (also in ``photos_without_shot``); ``warnings`` what the pairing leaves to say."""
 
     name: str  # of the source of the shots
     kind: str
@@ -161,12 +177,16 @@ class Pairing:
     invalid: list[Shot] = field(default_factory=list)
     left_doubles: list[Shot] = field(default_factory=list)
     doubles: int = 0
+    confirmed: bool | None = None
+    photos_ambiguous: list[Path] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def _folder_of(shotset: ShotSet, photos_folder: str | Path | None) -> Path:
     if photos_folder:
         return Path(photos_folder)
-    files = [s.source.get("file") for s in shotset.shots if s.source.get("file")]
+    files = [s.source.get("file") for s in shotset.shots if s.source.get("file")] + [shotset.path]
+    files = [f for f in files if f]
     if not files:
         raise ValueError(f"{shotset.name or shotset.kind}: say in which folder the photos of these shots are")
     return Path(files[0]).parent
@@ -202,42 +222,123 @@ def pair(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None
     in_chunk = [cameras.get(f.resolve()) for f in files]
     valid = [s for s in shotset.shots if s.valid]
     invalid = [s for s in shotset.shots if not s.valid]
+    if shotset.shots and not valid:
+        raise ValueError(f"{name}: its {len(shotset.shots)} shots have no valid time: they cannot be paired "
+                         "with photos")
     dji_numbers = [dji.shot_number(f.name) for f in files]
     numbers = dji_numbers if any(n is not None for n in dji_numbers) else [photo_number(f.name) for f in files]
     if by == "auto":
         by = _auto(shotset.kind, valid, files, numbers, dji_numbers, in_chunk)
+    dated = [(f, cam, photo_time(cam)) for f, cam in zip(files, in_chunk) if cam is not None]
+    dated = [(f, cam, t) for f, cam, t in dated if t is not None]
+
+    def timed():
+        if not dated:
+            raise ValueError(f"{name}: the photos of {folder} in the chunk have no date: they cannot be paired by "
+                             "time")
+        kept_shots, doubles = _without_doubles(valid, latency_s)
+        return (*_by_time(dated, kept_shots, latency_s, name, noun), doubles)
+
     left_doubles: list[Shot] = []
-    clock = None
-    if by == "number":
-        by_index = {}
-        for shot in valid:
-            if shot.index in by_index:
-                raise ValueError(f"{name}: shot {shot.index} appears twice")
-            by_index[shot.index] = shot
-        paired = [(f, by_index.get(n)) for f, n in zip(files, numbers)]
-    elif by == "order":
-        if len(valid) != len(files):
-            raise ValueError(_order_refused(name, len(valid), folder, len(files), shotset.kind))
-        paired = list(zip(files, valid))
-    else:
-        dated = [(f, cam, photo_time(cam)) for f, cam in zip(files, in_chunk) if cam is not None]
-        kept_shots, left_doubles = _without_doubles(valid, latency_s)
-        pairs, clock = _by_time([(f, cam, t) for f, cam, t in dated if t is not None], kept_shots, latency_s, name,
-                                noun)
+    ambiguous: list[Path] = []
+    warnings: list[str] = []
+    confirmed = None
+    if by == "time":
+        pairs, clock, ambiguous, left_doubles = timed()
         given = {f: shot for f, shot, _cam in pairs}
         paired = [(f, given.get(f)) for f in files]
-    if by != "time":
-        candidates = [(f, shot, cam) for (f, shot), cam in zip(paired, in_chunk) if shot is not None and cam is not None]
-        kept, clock = _on_time(candidates, name, latency_s, noun)
+        kept = [(f, given[f], cam) for f, cam in zip(files, in_chunk) if f in given]
+        confirmed = True
     else:
-        kept = [(f, shot, cam) for (f, shot), cam in zip(paired, in_chunk) if shot is not None]
+        if by == "number":
+            if any(shot.index is None for shot in valid):
+                raise ValueError(f"{name}: these shots carry no numbers: they cannot be paired by number")
+            by_index = {}
+            for shot in valid:
+                if shot.index in by_index:
+                    raise ValueError(f"{name}: shot {shot.index} appears twice")
+                by_index[shot.index] = shot
+            paired = [(f, by_index.get(n)) for f, n in zip(files, numbers)]
+        else:
+            if len(valid) != len(files):
+                raise ValueError(_order_refused(name, len(valid), folder, len(files), shotset.kind))
+            paired = list(zip(files, valid))
+        candidates = [(f, shot, cam) for (f, shot), cam in zip(paired, in_chunk) if shot is not None and cam is not None]
+        if shotset.kind == "mrk":  # as it always was
+            kept, clock = _on_time(candidates, name, latency_s, noun)
+        else:
+            kept, clock, confirmed, warnings = _confirmed(candidates, timed, name, by, latency_s)
     used = {id(shot) for _f, shot, _cam in kept} | {id(s) for s in left_doubles}
     placed = {f for f, _shot, _cam in kept}
     return Pairing(name=name, kind=shotset.kind, shots=list(shotset.shots), files=files, paired=paired, kept=kept,
                    by=by, clock_s=clock, latency_s=float(latency_s),
                    extra_shots=[s for s in valid if id(s) not in used],
                    photos_without_shot=[f for f in files if f not in placed], invalid=invalid,
-                   left_doubles=left_doubles, doubles=shotset.duplicates + len(left_doubles))
+                   left_doubles=left_doubles, doubles=shotset.duplicates + len(left_doubles), confirmed=confirmed,
+                   photos_ambiguous=ambiguous, warnings=warnings)
+
+
+def _confirmed(candidates: list[tuple], timed, name: str, by: str,
+               latency_s: float) -> tuple[list[tuple], float | None, bool, list[str]]:
+    """A pairing by number or by order (``candidates``: ``(file, shot, camera)``) of a source other than a DJI MRK
+    checked by the times of the photos: ``(kept, clock, confirmed, warnings)``.
+
+    Without a date nothing is checked: all kept, not confirmed. Else the pairing by time (``timed``) is made too: a
+    photo it gives another shot is a ``ValueError`` naming the first; when the times alone cannot pair the photos, the
+    pairing is kept but not confirmed (a shift by whole shots cannot be excluded), with a warning. Then every photo
+    must be within :data:`PAIR_WINDOW_S` of the clock of the offsets photo - shot (:func:`_band`), a time zone from
+    UTC: more than
+    :data:`DISAGREE_MAX` (or :data:`DISAGREE_SHARE` of them) that are not is a ``ValueError`` naming the first, fewer
+    are left without a shot with a warning; photos without a date among dated ones keep no shot (with a warning)."""
+    times = [photo_time(cam) for _f, _shot, cam in candidates]
+    if not any(times):
+        return candidates, None, False, [_not_confirmed(by, "the photos have no date")]
+    late = timedelta(seconds=latency_s)
+    offsets = [None if t is None else (t - (utc(shot).replace(tzinfo=None) + late)).total_seconds()
+               for t, (_f, shot, _cam) in zip(times, candidates)]
+    try:
+        by_time, why = {f: shot for f, shot, _cam in timed()[0]}, None
+    except ValueError as exc:
+        by_time, why = None, exc
+    if by_time is not None:
+        clash = [(f, shot, by_time[f]) for f, shot, _cam in candidates if f in by_time and by_time[f] is not shot]
+        if clash:
+            f, shot, other = clash[0]
+            raise ValueError(f"{name}: paired by {by}, {len(clash)} photo{'s' if len(clash) > 1 else ''} disagree with "
+                             f"the times, which pair {'them' if len(clash) > 1 else 'it'} with other shots: the first, "
+                             f"{f.name}, has shot {shot.index} by {by} and shot {other.index} by time. Pair them by "
+                             "time")
+    dated = [o for o in offsets if o is not None]
+    clock = _band(dated)
+    if _off_zone(clock) > ZONE_TOLERANCE_S:
+        raise ValueError(f"{name}: paired by {by}, the photos were taken {_signed(clock)} (most of them) from the UTC of "
+                         f"their shots, {_signed(_off_zone(clock))} from the nearest time zone: the times disagree "
+                         f"with this pairing")
+    disagree = [(p, o) for p, o in zip(candidates, offsets) if o is not None and abs(o - clock) > PAIR_WINDOW_S]
+    if len(disagree) > max(DISAGREE_MAX, DISAGREE_SHARE * len(dated)):
+        (f, _shot, _cam), o = disagree[0]
+        raise ValueError(f"{name}: paired by {by}, {len(disagree)} of {len(dated)} photos disagree with the times of "
+                         f"their shots by more than {PAIR_WINDOW_S:g} s (the first, {f.name}, by {_signed(o - clock)}): "
+                         f"the {by} pairs photos with the shots of others. Pair them by time")
+    kept = [p for p, o in zip(candidates, offsets) if o is not None and abs(o - clock) <= PAIR_WINDOW_S]
+    warnings = []
+    if disagree:
+        n = len(disagree)
+        warnings.append(f"{n} photo{'s' if n > 1 else ''} paired by {by} disagree{'' if n > 1 else 's'} with the time "
+                        f"of {'their shots' if n > 1 else 'its shot'} by more than {PAIR_WINDOW_S:g} s and "
+                        f"{'are' if n > 1 else 'is'} left without a shot (the first, {disagree[0][0][0].name})")
+    undated = sum(o is None for o in offsets)
+    if undated:
+        warnings.append(f"{undated} photo{'s' if undated > 1 else ''} without a date left without a shot: the times "
+                        f"cannot check {'them' if undated > 1 else 'it'}")
+    if by_time is None:
+        warnings.append(_not_confirmed(by, f"the times alone cannot pair the photos ({str(why).split(': ', 1)[-1]})"))
+    return kept, clock, by_time is not None, warnings
+
+
+def _not_confirmed(by: str, why: str) -> str:
+    return (f"pairing by {by} not confirmed by the times: {why}; a shift by whole shots cannot be excluded, check the "
+            "positions on a control point")
 
 
 def _auto(kind: str, valid: list[Shot], files: list[Path], numbers: list, dji_numbers: list, in_chunk: list) -> str:
@@ -358,11 +459,24 @@ AMBIGUOUS_PAIRS = 2
 MIN_INTERVAL_S = 1.5  # shots closer than this (median) cannot be paired with photos timed to the whole second
 
 
-def _ambiguous(name: str, clocks: list[float]) -> ValueError:
-    return ValueError(f"{name}: the times of the photos fit more than one way of pairing them with the shots (clock of "
-                      f"the camera {', '.join(_signed(c) for c in clocks)} from UTC): the shots came at intervals too "
-                      "regular for photos timed to the second to tell which shot each photo is; pair them by number, "
-                      "or by order with as many photos as shots")
+def _ambiguous(name: str, found: list[tuple[float, int]]) -> ValueError:
+    """The times pair the photos with the shots about as well on several clocks of the camera (``(clock, pairs)``)."""
+    clocks = ", ".join(f"{_signed(c)} ({n} photos)" for c, n in found)
+    return ValueError(f"{name}: the times of the photos fit more than one way of pairing them with the shots, on the "
+                      f"clocks of the camera {clocks} from UTC: the photos cannot be paired by time, and paired by "
+                      "number or by order they are not checked by the times either")
+
+
+def _several_clocks(name: str, clocks: list[float]) -> ValueError:
+    return ValueError(f"{name}: the times of the photos fit the shots on more than one clock of the camera, "
+                      f"{', '.join(_signed(c) for c in clocks)} from UTC, as well as each other: the photos cannot be "
+                      "paired by time, and paired by number or by order they are not checked by the times either")
+
+
+def _off_any_zone(name: str, clock: float) -> ValueError:
+    return ValueError(f"{name}: the times of the photos fit the shots best on a clock of the camera {_signed(clock)} "
+                      f"from UTC, {_signed(_off_zone(clock))[1:]} from the nearest time zone (more than "
+                      f"{ZONE_TOLERANCE_S:g} s): the photos cannot be paired by time")
 
 
 def _clocks_of_times(photos: np.ndarray, shots: np.ndarray, name: str, noun: str) -> list[float]:
@@ -372,8 +486,7 @@ def _clocks_of_times(photos: np.ndarray, shots: np.ndarray, name: str, noun: str
     :data:`_AROUND_S`) by :data:`_SIGNIFICANT` times the square root of those, by how many more, within
     :data:`ZONE_TOLERANCE_S` of the first, at most :data:`_CANDIDATES` a second or more apart. A ``ValueError`` when no
     window stands out, or when another window on a time zone more than :data:`ZONE_TOLERANCE_S` away stands out at
-    least half as much: the photos of another flight in the folder whose shots came at the same intervals, or - the
-    other clock within the time the shots took - shots at intervals too regular to tell."""
+    least half as much."""
     keys, counts = [], []
     rows = max(1, _BLOCK // max(1, len(shots)))
     for start in range(0, len(photos), rows):
@@ -397,11 +510,9 @@ def _clocks_of_times(photos: np.ndarray, shots: np.ndarray, name: str, noun: str
     plausible = np.flatnonzero((off <= ZONE_TOLERANCE_S) & (excess >= needed))
     if not len(plausible):
         if np.any(off <= ZONE_TOLERANCE_S) or not np.any(excess >= needed):
-            raise ValueError(f"{name}: the times of the photos do not fit the times of the shots on any clock of the "
-                             "camera that is a time zone from UTC: these are not the photos of this "
-                             f"{noun}, the clock of the camera was wrong, or the shots came too close together for "
-                             "photos timed to the second")
-        raise _no_zone(name, float(centres[np.argmax(excess)]), noun)
+            raise ValueError(f"{name}: the times of the photos fit the times of the shots on no clock of the camera "
+                             f"within {ZONE_TOLERANCE_S:g} s of a time zone: the photos cannot be paired by time")
+        raise _off_any_zone(name, float(centres[np.argmax(excess)]))
     best = plausible[np.lexsort((off[plausible], -excess[plausible]))[0]]
     clock, size = float(centres[best]), float(excess[best])
     rivals = plausible[(excess[plausible] >= size / 2.0) & (np.abs(centres[plausible] - clock) > ZONE_TOLERANCE_S)]
@@ -413,9 +524,7 @@ def _clocks_of_times(photos: np.ndarray, shots: np.ndarray, name: str, noun: str
                     found[-1] = (float(centres[i]), float(excess[i]))
                 continue
             found.append((float(centres[i]), float(excess[i])))
-        if all(abs(c - clock) < shots[-1] - shots[0] for c, _n in found):
-            raise _ambiguous(name, [clock] + [c for c, _n in found])
-        raise _more_than_one_flight(name, [clock] + [c for c, _n in found])
+        raise _several_clocks(name, [clock] + [c for c, _n in found])
     near = plausible[np.abs(centres[plausible] - clock) <= ZONE_TOLERANCE_S]
     clocks: list[float] = []
     for i in near[np.lexsort((off[near], -excess[near]))]:
@@ -472,26 +581,37 @@ def _chain(photos: np.ndarray, shots: np.ndarray, clock: float, window: float) -
     return chain[::-1], best[0]
 
 
+def _band(offsets) -> float:
+    """The middle of the band ``2 x PAIR_WINDOW_S`` wide holding the most of ``offsets`` (photo - shot, seconds): the
+    clock of the camera less UTC of a flight (:data:`PAIR_WINDOW_S`)."""
+    v = np.sort(np.asarray(offsets, float))
+    ends = np.searchsorted(v, v + 2 * PAIR_WINDOW_S, "right")
+    first = int(np.argmax(ends - np.arange(len(v))))
+    return float((v[first] + v[ends[first] - 1]) / 2.0)
+
+
 def _alignment(photos: np.ndarray, shots: np.ndarray, clock: float) -> tuple[int, float, float, list]:
     """``(pairs, weight, clock, chain)`` of the photos and the shots near ``clock`` (known to a second): paired
-    loosely, the clock taken again as the median of the pairs, paired again within :data:`PAIR_WINDOW_S`."""
+    loosely, the clock taken again as the middle of the band of the pairs (:func:`_band`), paired again within
+    :data:`PAIR_WINDOW_S`."""
     chain, _weight = _chain(photos, shots, clock, PAIR_WINDOW_S + _WINDOW_BINS * _BIN_S / 2.0)
     if not chain:
         return 0, 0.0, clock, []
-    clock = float(np.median([photos[i] - shots[j] for i, j in chain]))
+    clock = _band([photos[i] - shots[j] for i, j in chain])
     chain, weight = _chain(photos, shots, clock, PAIR_WINDOW_S)
     return len(chain), weight, clock, chain
 
 
 def _by_time(dated: list[tuple[Path, Camera, datetime]], shots: list[tuple[Shot, float]], latency_s: float,
-             name: str, noun: str) -> tuple[list[tuple[Path, Shot, Camera]], float | None]:
-    """The photos with a date paired with the ``(shot, seconds)`` by their times (see :func:`pair`) and the clock of
-    the camera less UTC they agree on (the median of the pairs): of the clocks of :func:`_clocks_of_times` and those
-    around the likeliest, the one that pairs the most photos one to one (then the closest). A ``ValueError`` when the
-    shots are too close together (:data:`MIN_INTERVAL_S`), when another clock pairs them almost as well
-    (:data:`AMBIGUOUS_PAIRS`), or when fewer than half of them are paired."""
+             name: str, noun: str) -> tuple[list[tuple[Path, Shot, Camera]], float | None, list[Path]]:
+    """The photos with a date paired with the ``(shot, seconds)`` by their times (see :func:`pair`), the clock of the
+    camera less UTC they agree on (:func:`_band`) and the photos left without a shot because another shot
+    is within :data:`NEAR_SHOT_S` of theirs (which of the two is the photo's cannot be told): of the clocks of
+    :func:`_clocks_of_times` and those around the likeliest, the one that pairs the most photos one to one (then the
+    closest). A ``ValueError`` when the shots are too close together (:data:`MIN_INTERVAL_S`), when another clock
+    pairs them almost as well (:data:`AMBIGUOUS_PAIRS`), or when fewer than half of them are paired."""
     if not dated or not shots:
-        return [], None
+        return [], None, []
     times = np.array([t for _shot, t in shots])
     if len(times) > 1 and float(np.median(np.diff(times))) < MIN_INTERVAL_S:
         raise ValueError(f"{name}: the shots came every {float(np.median(np.diff(times))):.2g} s (median): photos "
@@ -507,16 +627,21 @@ def _by_time(dated: list[tuple[Path, Camera, datetime]], shots: list[tuple[Shot,
             found.append(result)
     found.sort(key=lambda r: (-r[0], -r[1]))
     if not found:
-        raise _no_zone(name, clocks[0], noun)
+        raise _off_any_zone(name, clocks[0])
     count, _weight, clock, chain = found[0]
     best = set(chain)
     # another way of pairing them: most of its pairs are not those of the best
     rivals = [r for r in found[1:] if r[0] >= count - AMBIGUOUS_PAIRS and 2 * len(best & set(r[3])) < r[0]]
     if rivals:
-        raise _ambiguous(name, [r[2] for r in [found[0]] + rivals])
+        raise _ambiguous(name, [(r[2], r[0]) for r in [found[0]] + rivals])
     if 2 * count < min(len(dated), len(shots)):
-        raise ValueError(f"{name}: only {count} of {min(len(dated), len(shots))} photos were taken at the time "
-                         f"of a shot (clock of the camera {_signed(clock)} from UTC): the {noun} is of another "
-                         "flight, or the folder holds the photos of other flights too")
-    clock = float(np.median([photos[i] - times[j] for i, j in chain]))
-    return [(dated[i][0], shots[j][0], dated[i][1]) for i, j in chain], clock
+        raise ValueError(f"{name}: only {count} of {min(len(dated), len(shots))} photos have a shot at their time, on "
+                         f"the clock of the camera that pairs the most ({_signed(clock)} from UTC): the photos cannot "
+                         "be paired by time")
+    clock = _band([photos[i] - times[j] for i, j in chain])
+    near = [(i, j) for i, j in chain
+            if (j > 0 and times[j] - times[j - 1] < NEAR_SHOT_S) or (j + 1 < len(times) and times[j + 1] - times[j]
+                                                                       < NEAR_SHOT_S)]
+    kept = [(i, j) for i, j in chain if (i, j) not in set(near)]
+    return ([(dated[i][0], shots[j][0], dated[i][1]) for i, j in kept], clock,
+            sorted((dated[i][0] for i, _j in near), key=lambda f: f.name))
