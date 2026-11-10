@@ -47,3 +47,18 @@ Interface Description (UBX-18010854) after the first raw epoch at or after their
 No public sample with a clear licence was found for Septentrio SBF, Trimble RT-17 or Unicore: the core accepts
 these names but their decoders are not built (see `native/vendor/rtklib/VERSION`), and the tests check only
 that they are refused cleanly.
+
+## `mrk_behaviour.json`
+
+What `apply_mrk` and `apply_ppk` returned (or the text of their errors), and the state of the photos after each run, on
+the three synthetic DJI projects that `tests/gnss_mrk_projects.py` builds (photos paired by shot number, by order, and
+a PPK flight on the day of RTKLIB's sample data). It was written by the code of these two functions as it was before
+the shots of any source were paired with the photos (commit 8c0ff9d), with:
+
+```
+PYTHONPATH=src:tests python tests/gnss_mrk_projects.py
+```
+
+`test_gnss_shots.test_mrk_behaviour_unchanged` builds the projects again and compares: the results of a DJI MRK must
+never change. Folders of the run are written `<tmp>`. Synthetic data, made for these tests (GPL-2.0-or-later, as the
+program).
