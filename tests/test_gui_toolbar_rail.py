@@ -441,3 +441,21 @@ def test_command_search_shortcut_wins_over_a_text_field(window, qapp):
     ref = weakref.ref(w._shortcut_keeper)
     assert not any(isinstance(r, type(w)) for r in gc.get_referents(ref()))  # no cycle with the window
     field.deleteLater()
+
+
+def test_the_pin_skips_the_rail_of_a_deleted_window(window):
+    """The rail of a window that Qt has deleted may live on as a Python object: the pin leaves it alone."""
+    import shiboken6
+    from pyarchinit_photogrammetry.gui import tool_rail
+    from pyarchinit_photogrammetry.gui.main_window import MainWindow
+
+    w = window
+    other = MainWindow(w.doc, autoconnect=False, check_updates=False)
+    dead = other.raster_rail
+    assert dead in tool_rail._RAILS
+    shiboken6.delete(other)
+    assert not shiboken6.isValid(dead) and dead in tool_rail._RAILS
+    w.raster_rail.set_pinned(True)
+    w.raster_rail.set_text(True)
+    w.raster_rail.set_pinned(False)
+    w.raster_rail.set_text(False)
