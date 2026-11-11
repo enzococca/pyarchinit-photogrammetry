@@ -270,6 +270,10 @@ def test_a_feature_of_a_plugin_layer_deleted_in_the_program_stays_deleted_after_
     app.processEvents()
     assert plugin.drawn > drawn
     assert [a["n"] for a in v.features(LAYER)] == [0, 1, 3, 4] and [a["n"] for a in v.features(STONES)] == [1]
+    import pyarchinit_photogrammetry as ppg
+
+    kept = ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS]  # in the project file too
+    assert len(kept[LAYER]["deleted"]) == 1 and len(kept[STONES]["deleted"]) == 1
     if live:
         w._export_qgis_layers()
         assert sorted(_by_n(_rows(path, "linee"))) == [0, 1, 3, 4] and len(_rows(path, "poligoni")) == 1
@@ -285,6 +289,31 @@ def test_a_feature_of_a_plugin_layer_deleted_in_the_program_stays_deleted_after_
     w.redo()
     app.processEvents()
     assert [a["n"] for a in v.features(LAYER)] == [0, 1, 3, 4] and [a["n"] for a in v.features(STONES)] == [1]
+
+
+def _wait(app, done, seconds=5.0):
+    end = time.monotonic() + seconds
+    while not done() and time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    return done()
+
+
+def test_what_changes_in_the_2d_view_reaches_the_live_file_by_itself(trench):
+    """The program to QGIS: a feature drawn differently and one deleted are in the file within the delay of the link,
+    nothing called by hand."""
+    w, app, mw = trench
+    Plugin(w)
+    v = w.ortho_view
+    path = _live(w)
+    assert len(_rows(path, "linee")) == 5
+    v.add_line([[X0 + 1, Y0 + 6], [X0 + 2, Y0 + 6]], "#ff4081", "", layer=LAYER, attrs={"photocad": "abc", "n": 9})
+    assert _wait(app, lambda: 9 in _by_n(_rows(path, "linee")))
+    v.select_items([v.layers[LAYER]["features"][2][0]])
+    assert w.delete_selected(confirm=False) == 1
+    assert _wait(app, lambda: sorted(_by_n(_rows(path, "linee"))) == [0, 1, 3, 4, 9])
+    w._poll_qgis()
+    assert _from_qgis(w) == []  # its own writes are no edit of QGIS
 
 
 # ---------------------------------------------------------------- large layers
