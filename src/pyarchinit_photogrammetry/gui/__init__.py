@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
             _hard_exit(code)
         return code
     try:
-        from PySide6.QtCore import QTimer, Qt
+        from PySide6.QtCore import QEventLoop, QTimer, Qt
         from PySide6.QtWidgets import QApplication
     except ImportError:  # pragma: no cover - depends on the installation
         print("The interface needs PySide6: pip install \"pyarchinit-photogrammetry[gui]\"", file=sys.stderr)
@@ -205,6 +205,12 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     if QApplication.instance() is None:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     qapp = QApplication.instance() or QApplication([sys.argv[0]] + argv)
+    try:  # a project double-clicked in the Finder comes as an event, not in argv
+        import ppg_launcher as _launcher
+
+        _launcher.catch_file_open(qapp)
+    except ImportError:  # pragma: no cover - the launcher module is part of the distribution
+        _launcher = None
     from .gc_guard import install as collect_in_this_thread
 
     # Python's garbage collector from now on runs only here, in the GUI thread: a collection
@@ -232,6 +238,9 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     from .main_window import MainWindow
 
     project = next((a for a in argv if a.endswith(".ppg")), None)
+    if project is None and _launcher is not None and "--check" not in argv:
+        qapp.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)  # the event of the launch, if not seen yet
+        project = _launcher.take_opened_file()
     open_error = None
     if project:
         step(88, tr("Apertura di {0}", os.path.basename(project)))
@@ -250,6 +259,9 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     if splash is not None:
         step(100, tr("Pronto"))
         splash.close()
+    if _launcher is not None and "--check" not in argv:  # and while the program runs: asks to save, then opens
+        _launcher.on_file_open(lambda path: QTimer.singleShot(0, lambda: (win.raise_(), win.activateWindow(),
+                                                                         win.open_document(path))))
     import logging
 
     times = ", ".join(f"{k} {v:.1f} s" for k, v in (import_times or {}).items() if v >= 0.1)
@@ -332,6 +344,8 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     try:
         return qapp.exec()
     finally:
+        if _launcher is not None:
+            _launcher.on_file_open(None)  # the window is gone
         collector.stop()
 
 
