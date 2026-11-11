@@ -750,6 +750,49 @@ def test_ppk_dialog_asks_the_day_of_an_rtcm3_rover_with_its_own_events(qt_app, t
     _close(qt_app, d)
 
 
+def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, monkeypatch):
+    """The dialog with everything it can show (the events of the rover, the lever arm open, an error under the
+    form) is taller than the screen of a 13" laptop: it is never taller than the room the screen has, the form
+    scrolls, no text is cut, the buttons and the error stay in sight and every field is reached by scrolling."""
+    from PySide6.QtWidgets import QDialogButtonBox, QLabel
+
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+    d = _dialog(qt_app, events_test.RTCM_OBS)
+    assert d.kind() == "events"
+    d.b_lever.setChecked(True)
+    d.refresh()
+    qt_app.processEvents()
+    d.accept()  # no base yet: said under the form
+    assert d.lever_panel.isVisibleTo(d) and d.error.isVisible() and d.error.text()
+    buttons = d.findChild(QDialogButtonBox)
+
+    def fits(room: int) -> None:
+        assert d.height() <= room and d.scroll.verticalScrollBar().isVisible(), (d.height(), room)
+        assert d.body.height() > d.scroll.viewport().height()  # the whole form is there, scrolled
+        for widget in (buttons, d.error):  # outside the form, whole inside the dialog
+            assert widget.isVisible() and d.rect().contains(widget.geometry()), widget
+        assert buttons.geometry().top() >= d.scroll.geometry().bottom()
+        cut = [label.text()[:40] for label in d.findChildren(QLabel) if label.isVisible() and label.wordWrap()
+               and label.text() and label.heightForWidth(label.width()) > label.height()]
+        assert cut == []
+        for field in (d.rover.edit, d.lever_panel.down, d.replace_fix):  # the top, the lever, the bottom of the form
+            d.scroll.ensureWidgetVisible(field)
+            qt_app.processEvents()
+            assert not field.visibleRegion().isEmpty(), field
+
+    available = d.screen().availableGeometry()
+    assert available.contains(d.frameGeometry())
+    fits(available.height())
+    for room in (800, 720, 600):  # a 13" laptop (about 800 points of usable height), and less
+        monkeypatch.setattr(d, "_room", lambda room=room: room)
+        d.refresh()
+        d.accept()  # the error again: a refresh takes it away
+        qt_app.processEvents()
+        assert d.error.text() == "Scegli le osservazioni della base."
+        fits(min(room, available.height()))
+    _close(qt_app, d)
+
+
 @needs_a_converter
 def test_ppk_dialog_dji_dat_base(qt_app, tmp_path):
     """A D-RTK .DAT as the base: read as RTCM 3 on the day of the rover, with the position of the station its
