@@ -119,7 +119,14 @@ around the turntable axis: it takes away the mat and the targets before meshing 
   faithful and with the colours of the photos, without the dense cloud) or the *dense cloud*, of which only the
   ticked classes can be meshed;
 * **Surface type**: *arbitrary* (3D) or *height field* (2.5D, for terrain);
-* **Number of faces**, and the voxel of the fusion of the depth maps (0 = automatic).
+* **Number of faces**, and the voxel of the fusion of the depth maps (0 = automatic);
+* **Close holes up to** (metres, 0 = none): for the height field, closes the holes whose gap between measured
+  points is at most this size. The part that is closed is interpolated, not measured: the log says how many holes
+  were closed and how many square metres in plan they are. What is outside the outline of the survey is never
+  closed.
+
+The height field follows the density of the points place by place: where the cloud is sparser the faces are
+larger, without holes, and only the areas without points stay open ([Height field](../api.md#height-field)).
 
 Poisson reconstruction runs in a child process: if the native code crashes, the step retries at a shallower depth
 and finally builds a 2.5D height field.

@@ -27,6 +27,23 @@ anelli**:
   pivot al centro della vista, alla stessa distanza.
 * *Vista iniziale* mostra di nuovo tutta la scena, *Dall'alto* guarda dritto verso il basso.
 
+## Proiezione ortografica
+
+**Proiezione ortografica** (gruppo *Vista* della colonna, *Vista > Proiezione ortografica*, tasto ++o++) disegna la
+scena con linee di vista parallele al posto della prospettiva: le linee parallele restano parallele e una cosa ha la
+stessa dimensione sullo schermo ovunque sia, vicina o lontana. È la proiezione di piante e prospetti: con
+*Dall'alto*, ++f++ e ++l++ la vista è una vera pianta, vista di fronte o di lato, senza la fuga della prospettiva
+(in questa proiezione *Dall'alto* guarda esattamente verso il basso).
+
+* Il cambio non fa saltare la vista: quello che sta alla distanza del centro di rotazione mantiene la sua dimensione.
+* La **rotella** cambia la scala della vista (non c'è una distanza da accorciare) e continua a zoomare verso il punto
+  sotto il mouse; lo spostamento, la trackball, il doppio clic per il centro di rotazione, i marker, le misure, le
+  sezioni, il lazo e i disegni funzionano come in prospettiva, ciascuno sulla linea di vista del suo pixel.
+* La scelta è ricordata tra le sessioni, e le immagini prese dalla vista (schermate) sono nella
+  proiezione mostrata.
+* [Guardare da una foto](#guardare-da-una-foto) è sempre in prospettiva, quella della camera; la proiezione scelta
+  torna all'uscita dalla foto. Anche il video di sorvolo è in prospettiva.
+
 ## Quando si vede la trackball
 
 Il pulsante **Trackball** della barra, o *Vista > Trackball*, ha tre modi, ricordati tra una sessione e l'altra:
@@ -153,6 +170,7 @@ Con la vista 3D attiva:
 | ++t++ | dall'alto |
 | ++f++ | di fronte (guardando verso +y) |
 | ++l++ | da sinistra (guardando verso +x) |
+| ++o++ | proiezione ortografica sì e no |
 | ++page-down++ ++page-up++ | guardando da una foto: la foto successiva e la precedente (anche ++right++ ++left++) |
 | ++esc++ | esce dalla foto |
 
