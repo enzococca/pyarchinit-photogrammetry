@@ -8328,11 +8328,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if classes == []:
                 self._warn("Scegli almeno una classe.")
                 return
-            if v["fill_holes"] and v["surface"] != "height_field":
+            fill = v.get("fill_holes") or None  # metres; 0: nothing is closed
+            if fill and v["surface"] != "height_field":
                 self.log_pane.warning("I buchi si chiudono solo nel campo di altezze: la superficie arbitraria "
                                       "è già chiusa.")
             self.run_task("Modello", self._versioned("model", v, lambda p: self.chunk.build_model(
-                v["source"], v["surface"], v["face_count"], classes=classes, fill_holes=v["fill_holes"] or None,
+                v["source"], v["surface"], v["face_count"], classes=classes, fill_holes=fill,
                 progress=p, **kw)),
                 lambda _m: (self._log_interpolated(), self._show_model("model")))
 
