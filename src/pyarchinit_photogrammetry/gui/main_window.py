@@ -12422,9 +12422,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             # the markers: the survey's control; the TIN: a product; the free drawings: their own 3D tables
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
                       if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
-            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
+            # the free drawings in the same transaction: another chunk's never over edits of the one before
+            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None,
+                               free=self.chunk)
             self._export_elevation_tables(link)
-            self._export_free_tables(link)
             self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
             previous, self._live_previous = self._live_previous, None
             if previous is not None and previous is not link:
@@ -12478,7 +12479,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _export_free_tables(self, link) -> None:
         """The free drawings in 3D of the active chunk into the live GeoPackage (:meth:`.LiveLink.write_free`, three
-        tables with Z, one-way): QGIS and RustGIS show them with the plan."""
+        tables with Z, row by row: what QGIS edits there comes back, :meth:`_qgis_free`): QGIS and RustGIS show them
+        with the plan."""
         if self.chunk is None:
             return
         try:
@@ -12553,8 +12555,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     # ---------------------------------------------------------------- QGIS: its edits back here
     def _poll_qgis(self, force: bool = False, source: str | None = None) -> bool:
         """Once a second while a live link is on (QGIS's or RustGIS's): what was saved in QGIS, or
-        pulled from RustGIS, since the last look (units, spot heights, sections) comes into the
-        window. Not while a step runs or a dialog waits: it stays in the GeoPackage and comes at the
+        pulled from RustGIS, since the last look (units, spot heights, sections, free drawings in
+        3D) comes into the window. Not while a step runs or a dialog waits: it stays in the GeoPackage and comes at the
         next look; nor while a look at RustGIS runs, which may be writing RustGIS's edits into the
         file: they come with its answer. ``force``: now, whatever the window is doing - RustGIS's
         last edits, before the active chunk, its system or the project change, or the window asks
@@ -12713,9 +12715,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         the drawings stored in the chunk; the proxies of the units whose polygon changed are built
         again, the sections whose trace moved cut again. ``source``: who made them, as
         :meth:`_poll_qgis` says. ``chunk``: another chunk than the active one, whose drawings the
-        file held when they were made - its units and spot heights changed in its stored drawings
-        (the window shows another chunk: no undo, its proxies left as they were, said), the sections
-        (the project's) as always. Returns the lines."""
+        file held when they were made - its units, spot heights and free drawings in 3D changed in
+        its stored drawings (the window shows another chunk: no undo, its proxies left as they were,
+        said), the sections (the project's) as always. Returns the lines."""
         from ..io import gpkg
 
         self._live_from = source or self._live_source()
@@ -12742,14 +12744,17 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if other:
                 theirs = (self.units, self.quote, self.probe_points)
                 self.units, self.quote, self.probe_points = shown
-        unit_lines = len(lines)
+        drawn = len(lines)
+        lines += self._qgis_free(target, changes, srs, said)
+        free = len(lines) > drawn
+        unit_lines = len(lines)  # those of the chunk: its units, spot heights and free drawings
         sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
         if sections:
             lines += self._qgis_sections(changes["sezioni"], srs, recut)
         if not lines:
             return []
         if other:
-            if unit_lines:
+            if drawn:
                 self._store_chunk_drawings(chunk, *theirs)
             moved = [self._unit_name(u) for u, _before, polygon in proxies if polygon]
             if moved and chunk.meta.get("proxies"):
@@ -12762,6 +12767,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.sections_pane.set_sections(self.sections)
         self._update_pa_save_button()
         self._redraw_overlays()  # and the GeoPackage brought to the program's version of these rows
+        if free and not other:
+            self._draw_free()
+        if free:
+            self._schedule_qgis()  # also when the 2D view shows none of them
         self.setWindowModified(True)
         undone = lines if not other else lines[unit_lines:]  # another chunk's edits are not undone here
         if self.history is not None and undone:
@@ -12980,6 +12989,84 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return tr("quota {0}", f"{float(z):.2f}")
         except (TypeError, ValueError):
             return tr("quota {0}", "?")
+
+    def _qgis_free(self, target, changes: dict, srs: int, said) -> list[str]:
+        """Free drawings in 3D changed, drawn or deleted in QGIS (the tables ``disegni_3d_*`` of ``changes``) into the
+        chunk ``target``: each row made a drawing by :func:`..io.free_drawings.from_row` - a vertex without a height,
+        or added there at QGIS's 0, takes the DEM's (not one built in another system of the chunk), else the one
+        interpolated along the drawing. A row that makes no drawing is said (``said``: the line with its source) and
+        left: the next write puts the program's drawing back, or takes the row away. Returns the lines."""
+        from ..core import free_drawings as fd
+        from ..io import free_drawings as fio
+
+        if target is None:
+            return []
+        stale = None
+
+        def heights(xy):
+            nonlocal stale
+            if stale is None:
+                stale = bool(target.dem_path) and bool(stamps.is_stale(target, "dem"))
+            if stale:
+                return [None] * len(xy)
+            if target is self.chunk:
+                return self._dem_values(xy)
+            try:
+                return fd.raster_values(target.dem_path, xy)
+            except Exception:  # noqa: BLE001 - a DEM that cannot be read gives no heights
+                return [None] * len(xy)
+
+        lines = []
+        for kind, (table, _gtype) in fio.TABLES.items():
+            ch = changes.get(table)
+            if not ch or ch.refused:
+                continue
+            by_id = {r["id"]: r for r in fd.features(target)}
+            for f in ch.changed + ch.added:
+                old = by_id.get(f.id)
+                label = tr("disegno 3D {0}", (old or {}).get("name") or str(f.values.get("name") or "").strip()
+                           or tr("senza nome"))
+                if f.srs_id is not None and f.srs_id != srs:
+                    self.log_pane.warning(said(tr("{0} è nel sistema di riferimento {1}, il progetto nel {2}: non "
+                                                  "ripreso", label, f.srs_id, srs)))
+                    continue
+                if f.geometry is None or f.geometry.is_empty:
+                    self.log_pane.warning(said(tr("{0} senza geometria leggibile, non ripreso", label)))
+                    continue
+                try:
+                    if old is not None and old["kind"] != kind:
+                        raise ValueError("another kind of drawing")
+                    got = fio.from_row(kind, f.geometry, f.values, old, heights)
+                    fields = {k: got[k] for k in ("layer", "xyz", "attributes", "colour")}
+                    if old is None:
+                        rec = fd.add(target, kind, name=got["name"], id=f.id, **fields)
+                        line = tr("disegno 3D {0} aggiunto al layer {1}", rec["name"], rec["layer"])
+                    else:
+                        rec = fd.update(target, f.id, name=got["name"] or old["name"], **fields)
+                        line = tr("disegno 3D {0} modificato", rec["name"])
+                except fio.NoHeights:
+                    self.log_pane.warning(said(
+                        tr("{0} non ripreso: non ha quote, e il DEM va rifatto prima di prenderle da lì", label)
+                        if stale else tr("{0} non ripreso: non ha quote, e il DEM non ne ha sotto i suoi vertici",
+                                         label)))
+                    continue
+                except ValueError:
+                    self.log_pane.warning(said(tr("{0} non ripreso: la sua geometria non fa un disegno di questo "
+                                                  "layer", label)))
+                    continue
+                by_id[f.id] = rec
+                if got["dem"]:
+                    line = tr("{0} ({1} quote prese dal DEM)", line, got["dem"])
+                if got["dropped"]:
+                    line = tr("{0} (di più parti, tenuta la prima)", line)
+                if got["holes"]:
+                    line = tr("{0} (senza i suoi fori)", line)
+                lines.append(line)
+            gone = {key[0] for key in ch.deleted}
+            for rec in [r for r in fd.features(target) if r["id"] in gone]:
+                lines.append(tr("disegno 3D {0} eliminato", rec["name"]))
+            fd.remove(target, gone)
+        return lines
 
     def _qgis_quote(self, ch, srs: int) -> list[str]:
         """Spot heights changed, drawn or deleted in QGIS."""
