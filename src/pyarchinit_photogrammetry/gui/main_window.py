@@ -8305,7 +8305,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             Field("face_count", "Numero di facce", "medium",
                   choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
             Field("voxel", "Voxel per le mappe di profondità (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
-                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
+                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie"),
+            Field("fill_holes", "Chiudi i buchi fino a (m, 0 = nessuno)", 0.0, minimum=0.0, maximum=1000.0,
+                  decimals=3, tip="Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati "
+                                  "fino a questa misura. La parte chiusa è interpolata, non misurata.")]
             + self._class_fields("Classi (solo dalla nuvola densa)") + self._version_fields("model"),
             intro=(tr("Con le mappe di profondità la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
                       "senza passare dalla nuvola densa: più fedele e con i colori delle foto.") if depth_maps else
@@ -8321,9 +8324,23 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if classes == []:
                 self._warn("Scegli almeno una classe.")
                 return
+            if v["fill_holes"] and v["surface"] != "height_field":
+                self.log_pane.warning("I buchi si chiudono solo nel campo di altezze: la superficie arbitraria "
+                                      "è già chiusa.")
             self.run_task("Modello", self._versioned("model", v, lambda p: self.chunk.build_model(
-                v["source"], v["surface"], v["face_count"], classes=classes, progress=p, **kw)),
-                lambda _m: self._show_model("model"))
+                v["source"], v["surface"], v["face_count"], classes=classes, fill_holes=v["fill_holes"] or None,
+                progress=p, **kw)),
+                lambda _m: (self._log_interpolated(), self._show_model("model")))
+
+    def _log_interpolated(self) -> None:
+        """Says in the log how much of the height field closes holes: interpolated, not measured."""
+        report = self.chunk.meta.get("model") or {}
+        if report.get("holes_filled"):
+            self.log_pane.warning(tr("Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)",
+                                     report["holes_filled"], number(report.get("interpolated_area", 0.0), 2)))
+        if report.get("holes_left") and report.get("fill_holes"):
+            self.log_pane.info(tr("Modello: {0} buchi più larghi di {1} m lasciati aperti", report["holes_left"],
+                                  number(report["fill_holes"], 2)))
 
     def build_texture(self) -> None:
         if not self._need_chunk(aligned=True, product="model"):

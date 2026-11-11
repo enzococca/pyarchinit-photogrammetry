@@ -1435,6 +1435,9 @@ def mesh(project: Path,
          voxel_size: Optional[float] = typer.Option(None, help="depth_maps: voxel in the chunk units "
                                                                "(default: twice the depth-map pixel)"),
          classes: Optional[str] = typer.Option(None, help="dense cloud: only these " + CLASSES_HELP),
+         fill_holes: Optional[float] = typer.Option(None, help="height field: close the holes up to this gap between "
+                                                               "measured points, in metres (interpolated surface; "
+                                                               "default: none)"),
          texture: bool = True,
          texture_size: int = typer.Option(4096, help="side of the texture in pixels; above 8192 it is split into "
                                                      "pages of 8192 (16384: 4 pages, 32768: 16)"),
@@ -1444,7 +1447,12 @@ def mesh(project: Path,
     """Mesh (Poisson, height field or fusion of the depth maps) and texture."""
     doc, ch = _open(project, chunk)
     m = ch.build_model(source=source, surface=surface, face_count=int(faces) if faces.isdigit() else faces,
-                       voxel_size=voxel_size, classes=_classes(classes), progress=print_progress)
+                       voxel_size=voxel_size, classes=_classes(classes), fill_holes=fill_holes,
+                       progress=print_progress)
+    report = ch.meta.get("model") or {}
+    if report.get("holes_filled"):
+        typer.echo(f"{report['holes_filled']} holes closed: {report['interpolated_area']:.2f} m2 in plan are "
+                   "interpolated, not measured")
     if texture:
         ch.build_texture(texture_size=texture_size, progress=print_progress, skip_unreadable=skip_unreadable,
                          colour_correction=colour)
