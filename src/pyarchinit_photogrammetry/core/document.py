@@ -12,6 +12,7 @@ import logging
 import shutil
 import tempfile
 import threading
+import weakref
 from pathlib import Path
 
 from .chunk import Chunk
@@ -19,6 +20,23 @@ from .chunk import Chunk
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 FORMAT_VERSION = 1
+# the temporary folders of the documents never saved that are still alive: each is removed with its document or when
+# the interpreter ends, but not when the process leaves through os._exit (remove_temporary_folders is for that)
+_TEMPORARY: weakref.WeakSet = weakref.WeakSet()
+
+
+def remove_temporary_folders() -> None:
+    """Remove the temporary folders of the documents never saved (``ppg_*`` in the temporary folder of the system).
+    For a process about to leave without the finalisation of the interpreter (``os._exit``), which would leave them
+    behind; the documents are not to be used after it."""
+    for folder in list(_TEMPORARY):
+        try:
+            folder.cleanup()
+        except OSError:  # a file still open on Windows: what can be removed is
+            shutil.rmtree(folder.name, ignore_errors=True)
+    _TEMPORARY.clear()
+
+
 _CHUNK_LOCK = threading.Lock()  # a key and a place in the list for one new chunk at a time (module-level: a Document
 #                                stays copyable with copy.deepcopy, which cannot copy a lock)
 
@@ -49,6 +67,7 @@ class Document:
         else:
             if self._tmp is None:
                 self._tmp = tempfile.TemporaryDirectory(prefix="ppg_")
+                _TEMPORARY.add(self._tmp)
             d = Path(self._tmp.name)
         d.mkdir(parents=True, exist_ok=True)
         return d

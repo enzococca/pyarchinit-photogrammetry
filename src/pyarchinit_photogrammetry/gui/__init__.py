@@ -25,6 +25,12 @@ def _hard_exit(code: int) -> None:
     """Leave the packaged application on macOS/Linux without interpreter finalisation
     (segmentation faults with VTK/Open3D/SpatiaLite loaded). On Windows the normal exit is
     the safe one: skipping it ends in an access violation in the DLL detach callbacks."""
+    try:  # the temporary folders of the documents never saved: no finalisation removes them
+        from ..core.document import remove_temporary_folders
+
+        remove_temporary_folders()
+    except Exception:
+        pass
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()

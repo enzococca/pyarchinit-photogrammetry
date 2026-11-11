@@ -456,6 +456,12 @@ def pytest_sessionfinish(session, exitstatus):
     _exit_status["code"] = int(exitstatus)
     for path in _MADE:  # the temporary folders of the session (the exit guard skips the handlers of atexit)
         shutil.rmtree(path, ignore_errors=True)
+    try:  # and those of the documents never saved that the tests left alive
+        from pyarchinit_photogrammetry.core.document import remove_temporary_folders
+
+        remove_temporary_folders()
+    except Exception:
+        pass
 
 
 def pytest_unconfigure(config):
