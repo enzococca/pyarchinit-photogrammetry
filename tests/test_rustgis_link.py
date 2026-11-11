@@ -2929,7 +2929,8 @@ def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
         other = "0" * 32 if prefix != "0" * 32 else "1" * 32
         for elsewhere in (f"/{other}/{name}", f"/{prefix}/{other}.tif", f"/{prefix}/", f"/{prefix}", "/",
                           f"/{prefix}/segreto.tif", f"/{prefix}/../segreto.tif", f"/{prefix}/{name}/../segreto.tif",
-                          f"/{prefix}/%2e%2e/segreto.tif", f"/{name}", f"/{prefix}/ortofoto.tif", str(secret),
+                          f"/{prefix}/%2e%2e/segreto.tif", f"/{name}", f"/{prefix}/ortofoto.tif",
+                          urllib.parse.quote(secret.as_posix()),  # as a client writes it: a folder may have a space
                           f"{path}/", f"{path}x"):
             status, _, body = _http(port, elsewhere)
             assert (status, body) == (404, b""), elsewhere
