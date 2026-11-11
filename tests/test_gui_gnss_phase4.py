@@ -550,6 +550,38 @@ def test_ppk_dialog_dji_dat_base(qt_app, tmp_path):
 
 
 # ------------------------------------------------------------------ the autopilot log
+def test_autopilot_dialog_with_room_shows_all_without_a_scrollbar(qt_app, tmp_path):
+    """On a screen with room the dialog holds all it says, with no scrollbar: a scrollbar that came out while the
+    dialog was still short takes some width, the texts wrap on more lines and it would stay for ever. On a short
+    screen, and when the user makes the dialog short, the scrollbar is there."""
+    from pyarchinit_photogrammetry.gui.autopilot_dialog import AutopilotDialog
+
+    class Roomy(AutopilotDialog):
+        tall = 4000
+
+        def max_height(self) -> int:
+            return self.tall
+
+    log, _expected, project, _folder = _px4_flight(tmp_path, separation=None, layout="1.7")
+    doc = ppg.Document.open(project)
+    d = Roomy(doc.chunk, log)
+    d.show()
+    assert _wait_until(lambda: d.b_apply.isEnabled()), d.summary.text() + d.error.text()
+    _wait_until(lambda: False, 0.05)
+    view, bar = d.scroll.viewport(), d.scroll.verticalScrollBar()
+    assert not bar.isVisible()
+    assert view.height() >= d.scroll.widget().layout().totalHeightForWidth(view.width())
+    d.resize(d.width(), 300)  # made short by the user: scrolled, never cut
+    assert _wait_until(bar.isVisible)
+    _close(qt_app, d)
+    Roomy.tall = 300  # a short screen
+    d = Roomy(doc.chunk, log)
+    d.show()
+    assert _wait_until(lambda: d.b_apply.isEnabled()), d.summary.text() + d.error.text()
+    assert _wait_until(d.scroll.verticalScrollBar().isVisible)
+    _close(qt_app, d)
+
+
 def test_autopilot_dialog_summary_and_pairing(qt_app, tmp_path):
     """The dialog of an autopilot log: what the log holds (its kind, the captures, the heights, the span), the pairing
     proposed with its counts, the camera and the message, the lever arm and the latency in its answer."""

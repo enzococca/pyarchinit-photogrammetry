@@ -178,13 +178,36 @@ class AutopilotDialog(QDialog):
     def _update(self) -> None:
         """What the dialog says (:meth:`_say`), the dialog grown to hold it: never smaller, never beyond the screen."""
         self._say()
-        outer, margins = self.layout(), self.layout().contentsMargins()
-        width = self.width() - margins.left() - margins.right()
-        need = (self.scroll.widget().layout().totalHeightForWidth(width) + margins.top() + margins.bottom()
-                + outer.spacing() + self._buttons.sizeHint().height())
-        need = min(need, self.max_height())
+        need = min(self._content_height() + self._chrome_height(), self.max_height())
         if need > self.height():
             self.resize(self.width(), need)
+        self._fit_scrollbar()
+
+    def _content_height(self) -> int:
+        """How tall what the dialog says is, on the whole width of the dialog (no scrollbar beside it)."""
+        margins = self.layout().contentsMargins()
+        width = self.width() - margins.left() - margins.right()
+        layout = self.scroll.widget().layout()
+        layout.activate()  # the texts just written: the heights it remembers are those of the texts before
+        return layout.totalHeightForWidth(width)
+
+    def _chrome_height(self) -> int:
+        """The height of the dialog that is not of its scrolled part: the margins and the buttons."""
+        outer, margins = self.layout(), self.layout().contentsMargins()
+        return margins.top() + margins.bottom() + outer.spacing() + self._buttons.sizeHint().height()
+
+    def _fit_scrollbar(self) -> None:
+        """The scrollbar only when the dialog cannot hold what it says. Left to the scroll area, a scrollbar that
+        came out while the dialog was still short would stay: it takes some width, the texts wrap on more lines
+        and no longer fit in the height that was enough without it."""
+        fits = self._content_height() + self._chrome_height() <= self.height()
+        policy = Qt.ScrollBarPolicy.ScrollBarAlwaysOff if fits else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        if self.scroll.verticalScrollBarPolicy() != policy:
+            self.scroll.setVerticalScrollBarPolicy(policy)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt
+        super().resizeEvent(event)
+        self._fit_scrollbar()
 
     def max_height(self) -> int:
         """How tall the dialog grows: the screen less its title bar and a margin."""
