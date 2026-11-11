@@ -2802,6 +2802,42 @@ def test_the_drone_rinex_beside_its_mrk(tmp_path, qt_app):
     assert rover_beside(other / "Timestamp.MRK") is None
 
 
+def test_ppk_dialog_says_a_receiver_or_an_antenna_the_header_does_not_name(tmp_path, qt_app, monkeypatch):
+    """A RINEX header without the receiver or the antenna (a converted log, a file cut by hand): the dialog says so in
+    words, never with a dash in their place."""
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+
+    def header(receiver: str, antenna: str) -> list[str]:
+        return [_line(receiver, "REC # / TYPE / VERS") if h.endswith("REC # / TYPE / VERS") else
+                _line(antenna, "ANT # / TYPE") if h.endswith("ANT # / TYPE") else h for h in V2_HEADER]
+
+    rover = _rinex2(tmp_path / "rover.24o", header("", ""))
+    dlg = PpkDialog(rover)
+    dlg.refresh()
+    assert dlg.rover_info.text() == ("Ricevitore non indicato; osservazioni dal 2024-05-12 10:30:00 al "
+                                     "2024-05-12 10:30:02 (ora GPS).")
+    for receiver, antenna, said in (
+            ("", "", "Base BASE: ricevitore non indicato, antenna non indicata; osservazioni dal"),
+            ("SN123               TRIMBLE NETR9       5.45", "", "Base BASE: ricevitore TRIMBLE NETR9, antenna non "
+                                                                 "indicata; osservazioni dal"),
+            ("", "1234                TRM57971.00     NONE", "Base BASE: ricevitore non indicato, antenna "
+                                                             "TRM57971.00 NONE; osservazioni dal")):
+        folder = tmp_path / f"base{len(receiver)}{len(antenna)}"
+        folder.mkdir()
+        base = _rinex2(folder / "base.24o", header(receiver, antenna))
+        _choose(dlg, dlg.base, base)
+        assert dlg.base_info.text().startswith(said), dlg.base_info.text()
+        assert " -" not in dlg.rover_info.text() + dlg.base_info.text().split("\n")[0]
+    pieces = [Path(shutil.copyfile(base, base.parent / f"pezzo{i}.24o")) for i in (1, 2)]
+    dlg.base.set_paths([base, *pieces])
+    dlg.refresh()
+    assert dlg.base_info.text().startswith("Base BASE: 3 file, ricevitore non indicato, antenna TRM57971.00 NONE; ")
+    dlg.close()
+    dlg.deleteLater()
+
+
 def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkeypatch):
     from PySide6.QtWidgets import QDialog
 

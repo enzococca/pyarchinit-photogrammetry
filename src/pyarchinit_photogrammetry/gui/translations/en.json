@@ -3499,7 +3499,9 @@
   "La vista 3D in proiezione ortografica (parallela) o in prospettiva": "The 3D view in orthographic (parallel) projection or in perspective",
   "Chiudi i buchi fino a (m, 0 = nessuno)": "Close holes up to (m, 0 = none)",
   "Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata.": "Height field only: closes the holes whose gap between measured points is up to this size. The closed part is interpolated, not measured.",
-  "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed."
+  "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed.",
+  "non indicato": "not given",
+  "non indicata": "not given"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

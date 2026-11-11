@@ -277,6 +277,16 @@ class _FilesField(_FileField):
         return paths[0] if paths else None
 
 
+def _receiver(info) -> str:
+    """The receiver the RINEX header ``info`` names, or the words that say it names none."""
+    return " ".join((info.receiver or "").split()) or tr("non indicato")
+
+
+def _antenna(info) -> str:
+    """The antenna the RINEX header ``info`` names, or the words that say it names none."""
+    return " ".join((info.antenna or "").split()) or tr("non indicata")
+
+
 class PpkDialog(QDialog):
     """The files and the base of a PPK run: the shots, the drone's observations, how the base is placed
     (:data:`MODES`), the base's observations - one file, or several that make it,
@@ -1144,7 +1154,7 @@ class PpkDialog(QDialog):
         if isinstance(info, str):
             return info
         return "\n".join(self._conversion_lines([self.rover.path()]) + [
-            tr("Ricevitore {0}; osservazioni dal {1} al {2} (ora GPS).", info.receiver or "-", _when(info.first),
+            tr("Ricevitore {0}; osservazioni dal {1} al {2} (ora GPS).", _receiver(info), _when(info.first),
                _when(info.last))])
 
     def _describe_base(self, paths: list[Path], infos: list) -> str:
@@ -1170,10 +1180,10 @@ class PpkDialog(QDialog):
         lines = self._conversion_lines(paths)
         if len(paths) == 1:
             lines.append(tr("Base {0}: ricevitore {1}, antenna {2}; osservazioni dal {3} al {4} (ora GPS).", name,
-                            info.receiver or "-", info.antenna or "-", _when(first), _when(last)))
+                            _receiver(info), _antenna(info), _when(first), _when(last)))
         else:
             lines.append(tr("Base {0}: {1} file, ricevitore {2}, antenna {3}; osservazioni dal {4} al {5} (ora GPS).",
-                            name, len(paths), info.receiver or "-", info.antenna or "-", _when(first), _when(last)))
+                            name, len(paths), _receiver(info), _antenna(info), _when(first), _when(last)))
         if info.approx_xyz is not None:
             lat, lon, h = rinex.ecef_to_llh(info.approx_xyz)
             lines.append(tr("Posizione nell'intestazione: {0}, {1}, {2} m sull'ellissoide.", number(lat, 7),
