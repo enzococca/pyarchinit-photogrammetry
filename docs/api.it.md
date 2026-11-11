@@ -906,8 +906,18 @@ celle prenderebbero senza alcuna patch, dentro una patch dalle sue celle (`engin
 **`chunk.calibrate_colours(...)`** stima la vignettatura come `v(r) = b1 r^2 + b2 r^4 + b3 r^6` sul
 raggio rapportato alla mezza diagonale, da punti della superficie visti da più foto, minimi quadrati
 su tutte le osservazioni insieme (`scipy.sparse.linalg.lsqr`, valori anomali lasciati fuori tra un
-giro e l'altro, guadagno logaritmico medio zero); `chunk.meta["colour"]` conserva il risultato con la
-dispersione dei colori prima/dopo.
+giro e l'altro); `chunk.meta["colour"]` conserva il risultato con la dispersione dei colori
+prima/dopo (`rms_before`, `rms_after`: la dispersione dei colori logaritmici di un punto tra le foto
+che lo vedono, sulle stesse osservazioni). I punti sono quelli della nuvola più altrettanti
+distribuiti in modo uniforme sul DEM (sulla mesh se il DEM manca), così anche le foto ai bordi del
+blocco vengono misurate. Si misurano solo le differenze tra le foto: l'esposizione comune è scelta in
+modo che il mosaico conservi il tono delle foto (la metà centrale delle correzioni della foto da cui
+ogni punto della superficie prende il colore ha media zero). Una foto con meno di 50 osservazioni
+prende l'esposizione delle quattro foto misurate più vicine (elencate in `from_neighbours`); la
+vignettatura di un obiettivo è stimata solo se le sue osservazioni coprono abbastanza del raggio, ed
+è tenuta costante oltre il raggio fino a cui è stata misurata (`vignetting_radius`). Una calibrazione
+che non riduce la dispersione di almeno il 2 % non viene applicata: `applied` è `False`, i guadagni
+sono vuoti e ortofoto e texture usano le foto come sono.
 
 **`build_orthomosaic(colour_correction=None)`** e `build_texture` applicano la correzione
 (`engine.colour.Correction.correct(cam, image)`) man mano che le foto vengono lette.

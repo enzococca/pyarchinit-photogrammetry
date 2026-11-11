@@ -9376,14 +9376,28 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return
 
         def done(info):
+            if not info.get("applied", True):
+                self._info("Colori delle foto", tr(
+                    "Le foto hanno già gli stessi colori: su {0} osservazioni di punti visti da più foto la differenza "
+                    "è {1}% e la correzione non la abbassa.\n\nNon viene applicata: ortofoto e texture usano le foto "
+                    "come sono.", _it(info['observations']), _it(info['rms_before'] * 100, 1)))
+                return
             gains = [sum(g) / 3 for g in info["gains"].values()]
             text = tr("Correzione misurata su {0} osservazioni di punti visti da più foto.\n\nDifferenza di colore "
                       "tra le foto: {1}% prima, {2}% dopo.\nEsposizione delle foto: da {3} a {4} volte la media.",
                       _it(info['observations']), _it(info['rms_before'] * 100, 1), _it(info['rms_after'] * 100, 1),
                       _it(min(gains), 2), _it(max(gains), 2))
+            if info.get("from_neighbours"):
+                text += tr("\n{0} foto con troppo poche osservazioni prendono l'esposizione delle foto vicine.",
+                           len(info["from_neighbours"]))
             import math
 
-            corner = [100 * (1 - math.exp(sum(b))) for b in info["vignetting"].values()]  # at the corners (r = 1)
+            from ..engine.colour import _falloff
+
+            # at the corners (r = 1), or as far as the falloff was measured
+            reach = info.get("vignetting_radius") or {}
+            corner = [100 * (1 - math.exp(float(_falloff(b, min(1.0, reach.get(k) or 1.0)))))
+                      for k, b in info["vignetting"].items()]
             if any(abs(c) >= 1 for c in corner):
                 text += tr("\nVignettatura agli angoli: ") + ", ".join(
                     tr("{0:.0f}% più {1}", abs(c), tr('scuri') if c > 0 else tr('chiari')) for c in corner)

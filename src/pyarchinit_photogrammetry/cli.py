@@ -2398,11 +2398,20 @@ def calibrate_colours(project: Path, vignetting: bool = True, samples: int = 200
     doc, ch = _open(project, chunk)
     info = ch.calibrate_colours(vignetting=vignetting, samples=samples, progress=print_progress)
     doc.save()
+    if not info.get("applied", True):
+        typer.echo(f"{info['observations']:,} observations; colour scatter {info['rms_before']:.3f}: the correction "
+                   "does not lower it and is not applied")
+        return
     gains = [sum(g) / 3 for g in info["gains"].values()]
     typer.echo(f"{info['observations']:,} observations; colour scatter {info['rms_before']:.3f} -> "
                f"{info['rms_after']:.3f}; gains {min(gains):.2f}-{max(gains):.2f}")
+    if info.get("from_neighbours"):
+        typer.echo(f"{len(info['from_neighbours'])} photos with too few observations take the gain of their neighbours")
+    from .engine.colour import _falloff
+
     for sensor, b in info["vignetting"].items():
-        typer.echo(f"sensor {sensor}: falloff at the corners {sum(b):+.3f} (log)")
+        reach = min(1.0, (info.get("vignetting_radius") or {}).get(sensor) or 1.0)
+        typer.echo(f"sensor {sensor}: falloff {float(_falloff(b, reach)):+.3f} (log) at {reach:.2f} of the half diagonal")
 
 
 @app.command()
