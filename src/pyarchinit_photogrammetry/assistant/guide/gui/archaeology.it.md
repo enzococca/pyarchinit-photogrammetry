@@ -89,9 +89,10 @@ una sezione la cui traccia si è spostata viene tagliata di nuovo.
 
 !!! note
     Un contorno non valido viene reso valido (o saltato), un layer in un altro sistema di riferimento viene rifiutato,
-    un file che QGIS tiene mentre salva viene letto un momento dopo. Curve di livello, zone, pietre, patch e i disegni
-    dei plugin si calcolano qui e vanno in un solo senso (per modificarne uno in QGIS, importalo prima come disegno
-    libero). I dettagli in [QGIS dal vivo](../integrations.md#qgis-dal-vivo).
+    un file che QGIS tiene mentre salva viene letto un momento dopo. Tornano anche i layer dei plugin (*Poligoni*,
+    *Linee*, *Punti (ppg)*): un elemento spostato, cambiato, disegnato o eliminato lì resta con il chunk e rimane sul
+    layer quando il plugin lo ridisegna. Curve di livello, zone, pietre e patch si calcolano qui e vanno in un solo
+    senso (il log lo dice, e le righe tornano com'erano). I dettagli in [QGIS dal vivo](../integrations.md#qgis-dal-vivo).
 
 ??? example "Riga di comando e API"
     `io.qgis_link.LiveLink` (`write`, `external_change`, `read_changes`), `export_layers`, `build_project`

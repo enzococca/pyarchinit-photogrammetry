@@ -66,6 +66,14 @@ STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: 
 PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section cuts the model
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
+QGIS_LAYER = "Disegni da QGIS"  # what is drawn in QGIS in a table of the plan without the name of a layer
+# chunk.meta: the edits made by hand (in QGIS, or deletions in the 2D view) to the layers the program holds no data of
+# (those of the plugins, drawn again from their own results), layer by layer: {"rev", "changed": {identity: {"geom",
+# "attrs"}}, "deleted": [identity], "added": {identity: {"kind", "geom", "attrs", "color"}}} - put on the layer again
+# each time it is drawn (:meth:`MainWindow._sync_plan_edits`)
+PLAN_EDITS = "plan_edits"
+_PLAN_KINDS = {"poligoni": "polygon", "curve": "line", "linee": "line", "punti": "point"}
+_PLAN_GEOM = {"polygon": "Polygon", "line": "LineString", "point": "Point"}
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
 
 
@@ -836,7 +844,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._qgis_timer = QTimer(self)
         self._qgis_timer.setSingleShot(True)
         self._qgis_timer.timeout.connect(self._qgis_timer_fired)
+        self.ortho_view.layers_changed.connect(self._sync_plan_later)  # before the file gets the layers
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
+        self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
+        self._plan_busy = self._plan_waiting = False
+        self._plan_said: set[str] = set()  # the layers said one-way in the log, once each
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
         self._qgis_poll.setInterval(1000)
         self._qgis_poll.timeout.connect(self._poll_qgis)
@@ -6594,7 +6606,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                          free={"features": (ch.meta.get("drawings") or {}).get("free") or [],
                                "layers": (ch.meta.get("drawings") or {}).get("free_layers") or [],
                                "basis": (ch.meta.get("drawings") or {}).get("free_basis")},
-                         plugins=self._plugin_meta(ch))
+                         plan=ch.meta.get(PLAN_EDITS), plugins=self._plugin_meta(ch))
         return state
 
     @staticmethod
@@ -6783,6 +6795,13 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._undo_patches(state)
         if ch is not None and "free" in state:
             self._undo_free(ch, state["free"] or {})
+        if ch is not None and "plan" in state:  # the edits made by hand to the layers of the plan, and the layers
+            if state["plan"]:
+                ch.meta[PLAN_EDITS] = state["plan"]
+            else:
+                ch.meta.pop(PLAN_EDITS, None)
+            self._sync_plan_edits()
+            self._schedule_qgis()
         if ch is not None and "plugins" in state:
             self._undo_plugins(ch, state["plugins"] or {})
         if products:
@@ -12063,6 +12082,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     except KeyError:  # the elevation or the patch is gone already
                         pass
         self._update_pa_save_button()
+        self._plan_deleted([(layer, attrs) for layer, _idx, attrs in sel if id(attrs) in skip])
         self._redraw_overlays(skip=skip)
         self._dirty(True)
         self.log_pane.info(tr("Eliminati {0} elementi", len(sel)))
@@ -12183,6 +12203,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         skip = skip or set()
         self._ensure_ppg_ids()  # copies of a unit (a part split off) get an identity of their own
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
+        stamps = {n: lay["plan_stamp"] for n, lay in v.layers.items() if "plan_stamp" in lay}
         order = list(v.layer_order)
         modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
                                             PROFILE_LAYER, LINES_LAYER, TIN_LAYER}
@@ -12194,8 +12215,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             for item, _label, attrs in lay["features"]:
                 if id(attrs) in skip:
                     continue
-                color = (item.brush().color() if lay["kind"] == "point" else item.pen().color()).name()
-                others.append((name, lay["kind"], dict(attrs), color))
+                others.append((name, lay["kind"], dict(attrs), self._feature_style(lay["kind"], item)))
         v.clear_overlays()
         for i, u in enumerate(self.shown_units):
             self._draw_unit(u, i)
@@ -12218,17 +12238,11 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._draw_lines()
         self._draw_stones()
         self._draw_free_2d()
-        for name, kind, attrs, color in others:
-            gtype, coords = attrs.get("_geom", (None, None))
-            label = attrs.get("etichetta", "")
-            extra = {k: val for k, val in attrs.items()
-                     if (not k.startswith("_") or k == "_default_label") and k not in ("etichetta", "x", "y")}
-            if gtype == "Point":
-                v.add_point(coords[0], coords[1], color, label, layer=name, attrs=extra)
-            elif gtype == "LineString":
-                v.add_line(coords, color, label, layer=name, attrs=extra)
-            elif gtype == "Polygon":
-                v.add_polygon(coords, label, color, layer=name, attrs=extra)
+        for name, _kind, attrs, style in others:
+            self._add_view_feature(name, attrs, style)
+        for name, stamp in stamps.items():  # still the features the edits made by hand were put on
+            if name in v.layers:
+                v.layers[name]["plan_stamp"] = stamp
         v.layer_order = [n for n in order if n in v.layers] + [n for n in v.layer_order if n not in order]
         for name, vis in visible.items():
             if not vis and name in v.layers:
@@ -12560,10 +12574,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 self._export_elevation_tables(link)
                 self._export_free_tables(link)
                 return {t: link.path for t in LIVE_TABLES}
-            view = self.ortho_view
             # the markers: the survey's control; the TIN: a product; the free drawings: their own 3D tables
-            layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
-                      if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
+            layers = self._plan_layers()
             # the free drawings in the same transaction: another chunk's never over edits of the one before
             files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None,
                                free=self.chunk)
@@ -12889,6 +12901,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         drawn = len(lines)
         lines += self._qgis_free(target, changes, srs, said)
         free = len(lines) > drawn
+        if any(changes.get(t) and not changes[t].refused for t in _PLAN_KINDS):
+            lines += self._qgis_plan(changes, srs, said, other)
+            self._schedule_qgis()  # what was not taken is put back as it was in the file
         unit_lines = len(lines)  # those of the chunk: its units, spot heights and free drawings
         sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
         if sections:
@@ -13131,6 +13146,353 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return tr("quota {0}", f"{float(z):.2f}")
         except (TypeError, ValueError):
             return tr("quota {0}", "?")
+
+    # ---------------------------------------------------------------- layers of the plan edited by hand
+    @staticmethod
+    def _feature_style(kind: str, item) -> tuple:
+        """(colour, width of the line, opacity of the fill) of a feature of the 2D view, to draw it again."""
+        if kind == "point":
+            return item.brush().color().name(), None, None
+        pen = item.pen()
+        return pen.color().name(), pen.widthF(), item.brush().color().alpha() if kind == "polygon" else None
+
+    def _add_view_feature(self, name: str, attrs: dict, style) -> None:
+        """A feature held by the 2D view alone drawn (again) in the layer ``name`` from its attributes (with its
+        ``_geom``) and its style (:meth:`_feature_style`, or the colour alone)."""
+        v = self.ortho_view
+        color, width, alpha = style if isinstance(style, tuple) else (style, None, None)
+        gtype, coords = attrs.get("_geom", (None, None))
+        label = attrs.get("etichetta", "")
+        extra = {k: val for k, val in attrs.items()
+                 if (not k.startswith("_") or k == "_default_label") and k not in ("etichetta", "x", "y")}
+        if gtype == "Point":
+            v.add_point(coords[0], coords[1], color, label, layer=name, attrs=extra)
+        elif gtype == "LineString":
+            v.add_line(coords, color, label, layer=name, attrs=extra, **({} if width is None else {"width": width}))
+        elif gtype == "Polygon":
+            item = v.add_polygon(coords, label, color, layer=name, attrs=extra,
+                                 **({} if alpha is None else {"fill_alpha": alpha}))
+            if width is not None:
+                item.setPen(v._pen(color, width))
+
+    def _plan_layers(self) -> dict:
+        """The layers of the 2D view that go into the live GeoPackage, as ``LiveLink.write`` takes them."""
+        view = self.ortho_view
+        if self._plan_waiting:  # with the edits made by hand on those just drawn again
+            self._sync_plan_edits()
+        return {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
+                if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
+
+    def _plan_one_way(self, name: str) -> bool:
+        """Whether the layer ``name`` of the plan is drawn by the program from its own data (units, spot heights,
+        sections, contours and slices, zones, stones, break lines, patches, measuring points, ties, the areas and
+        previews of its dialogs): it is changed in the program, what is edited of it in QGIS is not taken and the next
+        write puts it back. The others - those of the plugins, those drawn in QGIS - are held by the 2D view alone:
+        their edits come back and are kept with the chunk (:data:`PLAN_EDITS`)."""
+        from ..engine import mosaic
+        from .colour_mask_dialog import PREVIEW_LAYER
+        from .common_points import PENDING_LAYER, RESIDUAL_LAYER, TIE_LAYER
+        from .mosaic_dialog import AREAS_VIEW_LAYER
+        from .water_dialog import EDGE_LAYER
+
+        if name in self.line_layers or name in (
+                "Sezioni", "Marker", QUOTE_LAYER, PROBE_LAYER, CROP_LAYER, PATCH_LAYER, STONES_LAYER, PROFILE_LAYER,
+                LINES_LAYER, TIN_LAYER, PREVIEW_LAYER, TIE_LAYER, PENDING_LAYER, RESIDUAL_LAYER, AREAS_VIEW_LAYER,
+                EDGE_LAYER, mosaic.AREAS_LAYER, "Unita' stratigrafiche"):
+            return True
+        if name.startswith((LAYER_PREFIX, "US ", "Sezioni", tr("Zone {0}", ""))) or name.startswith("Zone "):
+            return True
+        lay = self.ortho_view.layers.get(name)  # a feature that points to its record in the program's data
+        return lay is not None and any(str(k).startswith("_") and k not in ("_geom", "_default_label", "_shape")
+                                       for _i, _l, attrs in lay["features"][:50] for k in attrs)
+
+    def _plan_edits(self, name: str | None = None, create: bool = False):
+        """The edits made by hand to the layers of the plan of the active chunk (:data:`PLAN_EDITS`), or those of the
+        layer ``name`` - ``create``: an empty record made for it."""
+        if self.chunk is None:
+            return {}
+        edits = self.chunk.meta.get(PLAN_EDITS)
+        if name is None:
+            return edits or {}
+        if create:
+            edits = self.chunk.meta.setdefault(PLAN_EDITS, {})
+            return edits.setdefault(name, {"rev": "", "changed": {}, "deleted": [], "added": {}})
+        return (edits or {}).get(name) or {}
+
+    def _plan_touch(self, name: str) -> None:
+        """The edits of the layer ``name`` changed: a new revision of them, or none left to keep."""
+        from ..io.qgis_link import new_id
+
+        edits = self.chunk.meta.get(PLAN_EDITS) or {}
+        ed = edits.get(name)
+        if ed is None:
+            return
+        if ed.get("changed") or ed.get("deleted") or ed.get("added"):
+            ed["rev"] = new_id()
+            return
+        del edits[name]
+        if not edits:
+            self.chunk.meta.pop(PLAN_EDITS, None)
+
+    def _plan_capture(self, name: str) -> dict:
+        """The features of the layer ``name`` as they are drawn now, each with the identity of its row in the live
+        GeoPackage, kept as the layer without the edits made by hand (once: a layer they are on already keeps the one
+        taken before them)."""
+        from ..io.qgis_link import plan_identities
+
+        v = self.ortho_view
+        lay = v.layers.get(name)
+        if lay is None:
+            base = self._plan_base[name] = {"kind": None, "features": []}
+            return base
+        stamp = lay.get("plan_stamp")
+        if stamp is not None and stamp[1] == len(lay["features"]) and name in self._plan_base:
+            return self._plan_base[name]
+        ids = plan_identities({name: {"kind": lay["kind"], "features": v.features(name)}})
+        by = {id(attrs): pid for pid, (_table, _name, attrs) in ids.items()}
+        base = self._plan_base[name] = {"kind": lay["kind"], "features": [
+            (by.get(id(attrs)), dict(attrs), self._feature_style(lay["kind"], item))
+            for item, _label, attrs in lay["features"]]}
+        return base
+
+    def _plan_build(self, name: str) -> None:
+        """The layer ``name`` drawn from its features as its maker drew them (:meth:`_plan_capture`) with the edits
+        made by hand: the changed ones with their new outline and attributes (under the identity of their row), the
+        deleted ones left out, the added ones at the end. Its place among the layers and its visibility kept."""
+        v = self.ortho_view
+        base = self._plan_base.get(name) or {"kind": None, "features": []}
+        ed = self._plan_edits(name)
+        changed, deleted, added = ed.get("changed") or {}, set(ed.get("deleted") or []), ed.get("added") or {}
+        feats = []
+        for pid, attrs, style in base["features"]:
+            if pid is not None and (pid in deleted or pid in added):
+                continue
+            e = changed.get(pid) if pid is not None else None
+            if e:
+                attrs = {**attrs, **(e.get("attrs") or {}), ID_FIELD: pid}
+                if e.get("geom") is not None:
+                    attrs["_geom"] = (attrs["_geom"][0], e["geom"])
+            feats.append((attrs, style))
+        for pid, e in added.items():
+            feats.append(({**(e.get("attrs") or {}), "_geom": (_PLAN_GEOM[e["kind"]], e["geom"]), ID_FIELD: pid},
+                          e.get("color") or "#ff9800"))
+        lay = v.layers.get(name)
+        visible = lay["visible"] if lay is not None else True
+        order = list(v.layer_order)
+        v.remove_layer(name)
+        for attrs, style in feats:
+            self._add_view_feature(name, attrs, style)
+        if name not in v.layers:
+            return
+        if name in order:
+            v.layer_order = [n for n in order if n in v.layers] + [n for n in v.layer_order if n not in order]
+        if not visible:
+            v.set_layer_visible(name, False)
+        if ed:
+            v.layers[name]["plan_stamp"] = (ed.get("rev"), len(v.layers[name]["features"]))
+
+    def _sync_plan_later(self) -> None:
+        """The layers of the 2D view changed: :meth:`_sync_plan_edits` once this turn of the event loop is over - a
+        plugin that draws thousands of features one by one, a change of the layers for each, costs one look."""
+        if self._plan_busy or self._plan_waiting or not self._plan_edits() and not self._plan_base:
+            return
+        self._plan_waiting = True
+        QTimer.singleShot(0, self._sync_plan_edits)
+
+    def _sync_plan_edits(self) -> None:
+        """The edits made by hand to the layers of the plan (:data:`PLAN_EDITS` of the active chunk) put on the layers
+        of the 2D view that do not show them: one a plugin has just drawn again from its results (after a save, a
+        step, another raster), one whose edits changed (made now, undone, redone), one drawn in QGIS that is not there
+        yet. Called at every change of the layers: nothing to do for those that show them already."""
+        v = self.ortho_view
+        self._plan_waiting = False
+        if self._plan_busy or self.chunk is None or v.tr is None or self.drawings_frame is not None:
+            return
+        edits = self._plan_edits()
+        todo = []
+        for name in list(edits) + [n for n, lay in v.layers.items() if "plan_stamp" in lay and n not in edits]:
+            ed, lay = edits.get(name), v.layers.get(name)
+            if lay is None:
+                if ed and ed.get("added"):
+                    self._plan_capture(name)
+                    todo.append(name)
+                continue
+            stamp = lay.get("plan_stamp")
+            if stamp is None:  # drawn by its maker now
+                if not self._plan_one_way(name):
+                    self._plan_capture(name)
+                    todo.append(name)
+            elif stamp[0] != (ed or {}).get("rev"):  # other edits than those it shows
+                if name not in self._plan_base:
+                    self._plan_capture(name)
+                todo.append(name)
+            elif stamp[1] != len(lay["features"]):  # features added to it, or taken away, meanwhile
+                lay.pop("plan_stamp")
+                self._plan_capture(name)
+                todo.append(name)
+        if not todo:
+            return
+        self._plan_busy = True
+        try:
+            with v.batch():
+                for name in todo:
+                    self._plan_build(name)
+        finally:
+            self._plan_busy = False
+
+    def _plan_deleted(self, features: list) -> None:
+        """Features held by the 2D view alone deleted in the program (``(layer, attributes)``): kept among the edits
+        made by hand of their layers, so that they stay deleted when their maker draws the layer again (a save, a
+        step) - and in QGIS."""
+        from ..io.qgis_link import plan_identities
+
+        if self.chunk is None or self.drawings_frame is not None:
+            return
+        gone = {id(attrs) for _layer, attrs in features}
+        for name in {layer for layer, _attrs in features}:
+            if self._plan_one_way(name) or name not in self.ortho_view.layers:
+                continue
+            base = self._plan_capture(name)
+            lay = self.ortho_view.layers[name]
+            ids = plan_identities({name: {"kind": lay["kind"], "features": self.ortho_view.features(name)}})
+            pids = [pid for pid, (_table, _name, attrs) in ids.items() if id(attrs) in gone]
+            if not pids:
+                continue
+            ed = self._plan_edits(name, create=True)
+            known = {pid for pid, _attrs, _style in base["features"]}
+            for pid in pids:
+                ed["changed"].pop(pid, None)
+                if ed["added"].pop(pid, None) is None and pid in known and pid not in ed["deleted"]:
+                    ed["deleted"].append(pid)
+            self._plan_touch(name)
+            lay.setdefault("plan_stamp", (None, len(lay["features"])))  # drawn again from what was kept now
+
+    @staticmethod
+    def _plan_coords(kind: str, g):
+        """``(coordinates as the 2D view keeps them, parts dropped, holes dropped)`` of the geometry of a row of a
+        table of the plan for a layer of ``kind``, None when it makes no feature of it."""
+        dropped = False
+        if hasattr(g, "geoms"):
+            parts = [p for p in g.geoms if not p.is_empty]
+            if not parts:
+                return None
+            dropped, g = len(parts) > 1, parts[0]
+        holes = False
+        if kind == "point" and g.geom_type == "Point":
+            coords = [float(g.x), float(g.y)]
+        elif kind == "line" and g.geom_type == "LineString" and len(g.coords) >= 2:
+            coords = [[float(c[0]), float(c[1])] for c in g.coords]
+        elif kind == "polygon" and g.geom_type == "Polygon" and len(g.exterior.coords) >= 4:
+            coords = [[float(c[0]), float(c[1])] for c in list(g.exterior.coords)[:-1]]
+            holes = bool(g.interiors)
+        else:
+            return None
+        if not np.all(np.isfinite(np.asarray(coords, float))):
+            return None
+        return coords, dropped, holes
+
+    def _qgis_plan(self, changes: dict, srs: int, said, other: bool) -> list[str]:
+        """The other drawings of the plan changed, drawn or deleted in QGIS (the tables ``poligoni``, ``curve``,
+        ``linee``, ``punti`` of ``changes``), feature by feature with the layer of each. Those of a layer the 2D view
+        alone holds (a plugin's, one drawn in QGIS) are taken: kept with the chunk (:data:`PLAN_EDITS`) and put on the
+        layer, now and each time it is drawn again; a feature drawn there goes to the layer named in its column
+        ``layer`` (made when missing; :data:`QGIS_LAYER` without a name). Those of a layer the program draws from its
+        own data are not (:meth:`_plan_one_way`: said once per layer), nor any while the view shows an elevation or
+        the file holds another chunk's drawings: the next write puts the rows back. Returns the lines."""
+        import shapely
+
+        from ..io.qgis_link import TECHNICAL_FIELDS, _column, _value, classify_layer, plan_identities
+
+        if other or self.chunk is None or self.drawings_frame is not None or self.ortho_view.tr is None:
+            self.log_pane.warning(said(tr("le modifiche ai disegni della pianta (layer dei plugin, linee, poligoni, "
+                                          "punti) si riprendono con il loro chunk attivo e la pianta nella vista 2D: "
+                                          "non riprese")))
+            return []
+        v = self.ortho_view
+        known = plan_identities(self._plan_layers())
+        lines, touched = [], set()
+
+        def one_way(name):
+            if not self._plan_one_way(name):
+                return False
+            if name not in self._plan_said:
+                self._plan_said.add(name)
+                self.log_pane.warning(said(tr("il layer {0} è disegnato dal programma dai suoi dati e si modifica nel "
+                                              "programma: le modifiche fatte lì non sono riprese, il layer torna "
+                                              "com'era", name)))
+            return True
+
+        def title(name, text):
+            text = str(text or "").strip()
+            return tr("elemento «{0}» del layer {1}", text, name) if text else tr("elemento del layer {0}", name)
+
+        for table, kind in _PLAN_KINDS.items():
+            ch = changes.get(table)
+            if not ch or ch.refused:
+                continue
+            for f in ch.changed + ch.added:
+                hit = known.get(f.id)
+                name = hit[1] if hit else (str(f.values.get("layer") or "").strip() or QGIS_LAYER)
+                label = title(name, f.values.get("etichetta"))
+                if one_way(name):
+                    continue
+                if f.srs_id is not None and f.srs_id != srs:
+                    self.log_pane.warning(said(tr("{0} è nel sistema di riferimento {1}, il progetto nel {2}: non "
+                                                  "ripreso", label, f.srs_id, srs)))
+                    continue
+                g = f.geometry
+                if g is None or g.is_empty:
+                    self.log_pane.warning(said(tr("{0} senza geometria leggibile, non ripreso", label)))
+                    continue
+                lay = v.layers.get(name)
+                got = self._plan_coords(lay["kind"] if lay is not None else kind, shapely.force_2d(g))
+                if got is None or (hit is None and classify_layer(name, kind, {}) != table):
+                    self.log_pane.warning(said(tr("{0} non ripreso: la sua geometria non fa un disegno di questo "
+                                                  "layer", label)))
+                    continue
+                coords, dropped, holes = got
+                values = {k: val for k, val in f.values.items()
+                          if k not in TECHNICAL_FIELDS and k != "layer" and not (kind == "point" and k in ("x", "y"))}
+                base = {pid: attrs for pid, attrs, _style in self._plan_capture(name)["features"]}
+                ed = self._plan_edits(name, create=True)
+                if f.id in base and f.id not in ed["added"]:
+                    was = base[f.id]
+                    keys = {_column(k): k for k in was if not str(k).startswith("_")}
+                    attrs = {keys.get(c, c): val for c, val in values.items()
+                             if _value(c, was.get(keys.get(c, c))) != _value(c, val)}
+                    ed["changed"][f.id] = {"geom": coords, "attrs": attrs}
+                    line = tr("{0} modificato", label)
+                else:
+                    new = f.id not in ed["added"]
+                    color = (ed["added"].get(f.id) or {}).get("color") or (
+                        self._feature_style(lay["kind"], lay["features"][-1][0])[0]
+                        if lay is not None and lay["features"] else "#ff9800")
+                    ed["added"][f.id] = {"kind": lay["kind"] if lay is not None else kind, "geom": coords,
+                                         "attrs": {k: val for k, val in values.items() if val not in (None, "")},
+                                         "color": color}
+                    line = tr("{0} aggiunto", label) if new else tr("{0} modificato", label)
+                if dropped:
+                    line = tr("{0} (di più parti, tenuta la prima)", line)
+                if holes:
+                    line = tr("{0} (senza i suoi fori)", line)
+                lines.append(line)
+                touched.add(name)
+            for pid, _part in ch.deleted:
+                hit = known.get(pid)
+                if hit is None or one_way(hit[1]):
+                    continue
+                name = hit[1]
+                base = {p for p, _attrs, _style in self._plan_capture(name)["features"]}
+                ed = self._plan_edits(name, create=True)
+                ed["changed"].pop(pid, None)
+                if ed["added"].pop(pid, None) is None and pid in base and pid not in ed["deleted"]:
+                    ed["deleted"].append(pid)
+                lines.append(tr("{0} eliminato", title(name, hit[2].get("etichetta"))))
+                touched.add(name)
+        for name in touched:
+            self._plan_touch(name)
+        self._sync_plan_edits()
+        return lines
 
     def _qgis_free(self, target, changes: dict, srs: int, said) -> list[str]:
         """Free drawings in 3D changed, drawn or deleted in QGIS (the tables ``disegni_3d_*`` of ``changes``) into the

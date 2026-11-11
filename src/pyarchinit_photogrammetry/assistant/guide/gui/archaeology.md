@@ -89,8 +89,10 @@ again.
 
 !!! note
     An outline that is not valid is made valid (or skipped), a layer in another reference system is refused, a file
-    QGIS holds while saving is read a moment later. Contour lines, zones, stones, patches and the drawings of the
-    plugins are computed here and stay one-way (to edit one in QGIS, import it as a free drawing first). Details in
+    QGIS holds while saving is read a moment later. The layers of the plugins (*Poligoni*, *Linee*, *Punti (ppg)*)
+    come back too: a feature moved, changed, drawn or deleted there is kept with the chunk and stays on the layer when
+    the plugin draws it again. Contour lines, zones, stones and patches are computed here and stay one-way (the log
+    says so, and the rows go back as they were). Details in
     [QGIS, live](../integrations.md#qgis-live).
 
 ??? example "Command line and API"
