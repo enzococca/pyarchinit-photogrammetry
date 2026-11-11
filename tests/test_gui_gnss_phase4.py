@@ -760,8 +760,13 @@ def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, m
     d = _dialog(qt_app, events_test.RTCM_OBS)
     assert d.kind() == "events"
     d.b_lever.setChecked(True)
-    d.refresh()
-    qt_app.processEvents()
+
+    def settled() -> None:  # a file read in the background ends in a refresh, which takes the error away
+        d.refresh()
+        assert _wait_until(lambda: not (d._pending or d._aside._running or d._timer.isActive()))
+        qt_app.processEvents()
+
+    settled()
     d.accept()  # no base yet: said under the form
     qt_app.processEvents()  # the label of the error laid out with its text, as the event loop does
     assert d.lever_panel.isVisibleTo(d) and d.error.isVisible() and d.error.text()
@@ -786,7 +791,7 @@ def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, m
     fits(available.height())
     for room in (800, 720, 600):  # a 13" laptop (about 800 points of usable height), and less
         monkeypatch.setattr(d, "_room", lambda room=room: room)
-        d.refresh()
+        settled()
         d.accept()  # the error again: a refresh takes it away
         qt_app.processEvents()
         assert d.error.text() == "Scegli le osservazioni della base."
