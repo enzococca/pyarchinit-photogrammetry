@@ -218,6 +218,47 @@ STEPS = [
 ]  # the others (OpenCV, trimesh, scikit-learn...) load when first needed
 
 
+_OPENED = {"pending": [], "handler": None, "filter": None}
+
+
+def catch_file_open(qapp) -> None:
+    """Projects opened from the file manager. On macOS a double click on a ``.ppg`` (or a file dropped on the
+    icon) does not reach ``sys.argv``: the system sends the application a ``QFileOpenEvent``, also while it starts.
+    From this call on they are kept until :func:`on_file_open` gives them a handler."""
+    if qapp is None or _OPENED["filter"] is not None:
+        return
+    from PySide6.QtCore import QEvent, QObject
+
+    class _Catcher(QObject):
+        def eventFilter(self, _obj, ev) -> bool:  # noqa: N802 - Qt name
+            if ev.type() != QEvent.Type.FileOpen:
+                return False
+            path = ev.file() or ev.url().toLocalFile()
+            path = os.path.normpath(path) if path else path  # Qt spells the path with "/" on Windows too
+            if path:
+                handler = _OPENED["handler"]
+                handler(path) if handler is not None else _OPENED["pending"].append(path)
+            return True
+
+    _OPENED["filter"] = _Catcher(qapp)
+    qapp.installEventFilter(_OPENED["filter"])
+
+
+def take_opened_file(suffix: str = ".ppg") -> str | None:
+    """The last file the system asked to open so far (the others are dropped), or None."""
+    files = [f for f in _OPENED["pending"] if f.lower().endswith(suffix)]
+    _OPENED["pending"].clear()
+    return files[-1] if files else None
+
+
+def on_file_open(handler) -> None:
+    """``handler(path)`` receives the files asked from now on, and at once the last one already waiting."""
+    _OPENED["handler"] = handler
+    waiting = take_opened_file() if handler is not None else None
+    if waiting:
+        handler(waiting)
+
+
 def c_numbers() -> None:
     """Numbers in the C locale for the C and C++ libraries. Qt sets the locale of the system when
     the application starts (on macOS and Linux): with an Italian system the libraries reading
@@ -346,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     if QApplication.instance() is None:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
         QApplication([sys.argv[0]] + argv)
+    catch_file_open(QApplication.instance())  # before the first events are processed
     c_numbers()
     splash = Splash()
     splash.step(2, _t("Avvio"))
