@@ -12934,7 +12934,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             name = said if not other else self._from
             self.history.record(name(undone[0] if len(undone) == 1 else tr("{0} modifiche", len(undone))))
         for line in lines:
-            self.log_pane.info(said(line))
+            log.info("%s", said(line))  # in the pane and in the log file: what came from the other program
         if not other:
             added = {f.id for f in (changes.get("unita").added if changes.get("unita") else [])} - had
             self._matrix_hint([u for u in self.units if (u.attributes or {}).get(ID_FIELD) in added])

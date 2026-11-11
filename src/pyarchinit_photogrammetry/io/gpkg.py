@@ -97,8 +97,9 @@ def create(con: sqlite3.Connection, srs: tuple[int, str, str]) -> None:
     """GeoPackage metadata tables and spatial reference systems (idempotent)."""
     from pyproj import CRS
 
-    con.execute(f"PRAGMA application_id = {GPKG_APPLICATION_ID}")
-    con.execute("PRAGMA user_version = 10200")
+    for name, value in (("application_id", GPKG_APPLICATION_ID), ("user_version", 10200)):
+        if con.execute(f"PRAGMA {name}").fetchone()[0] != value:  # set once: a write of the header is a change of
+            con.execute(f"PRAGMA {name} = {value}")  # the file every program that reads it would look at again
     for statement in _SCHEMA.split(";"):  # not executescript(): it would commit an open transaction
         if statement.strip():
             con.execute(statement)

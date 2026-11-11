@@ -838,7 +838,7 @@ def test_a_chunks_edits_that_cannot_be_read_are_copied_aside(trench, monkeypatch
         assert caplog.text.count("occupato da un altro programma") == 1
         cause["error"] = sqlite3.DatabaseError("database disk image is malformed")
         assert w._export_qgis_layers()  # the fifth failure in a row, not a lock: the copy at once
-    assert caplog.text.count("malformed") == 1
+    assert caplog.text.count("non lette: database disk image is malformed") == 1  # and once in the notice of the copy
     (kept,) = w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.gpkg")
     con = sqlite3.connect(kept)
     assert [r[0] for r in con.execute('SELECT us_s FROM "unita"')] == ["12"]

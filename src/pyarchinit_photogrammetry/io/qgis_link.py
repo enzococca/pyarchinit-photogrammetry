@@ -836,17 +836,26 @@ class LiveLink:
         return {(pid, int(part)): int(fid) for pid, part, fid in
                 con.execute(f"SELECT ppg_id, part, fid FROM {ROWS_TABLE} WHERE name = ?", (table,))}
 
-    @staticmethod
-    def _record(con, table: str, rows: dict[tuple, int]) -> None:
-        """``rows`` (``{(identity, part): fid}``) as the record of ``table``, in the transaction under way."""
-        con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
-        con.execute(f"CREATE TABLE IF NOT EXISTS {ROWS_TABLE} (name TEXT NOT NULL, ppg_id TEXT NOT NULL, "
-                    "part INTEGER NOT NULL, fid INTEGER NOT NULL, PRIMARY KEY (name, ppg_id, part))")
-        con.execute(f"DELETE FROM {ROWS_TABLE} WHERE name = ?", (table,))
-        con.executemany(f"INSERT OR REPLACE INTO {ROWS_TABLE} (name, ppg_id, part, fid) VALUES (?, ?, ?, ?)",
-                        [(table, pid, int(part or 1), int(fid)) for (pid, part), fid in rows.items()
-                         if pid is not None])
-        con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES (?, '1')", (f"rows:{table}",))
+    @classmethod
+    def _record(cls, con, table: str, rows: dict[tuple, int]) -> None:
+        """``rows`` (``{(identity, part): fid}``) as the record of ``table``, in the transaction under way: only the
+        entries that differ from the record are written, so a write or a read that changed no row leaves the file as
+        it is (nothing for another program to read again, no thousands of rows written at every edit)."""
+        want = {(pid, int(part or 1)): int(fid) for (pid, part), fid in rows.items() if pid is not None}
+        have = cls._recorded(con, table)
+        if have is None:
+            con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
+            con.execute(f"CREATE TABLE IF NOT EXISTS {ROWS_TABLE} (name TEXT NOT NULL, ppg_id TEXT NOT NULL, "
+                        "part INTEGER NOT NULL, fid INTEGER NOT NULL, PRIMARY KEY (name, ppg_id, part))")
+            con.execute(f"DELETE FROM {ROWS_TABLE} WHERE name = ?", (table,))  # left by a record forgotten
+            con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES (?, '1')", (f"rows:{table}",))
+            have = {}
+        gone = [(table, pid, part) for pid, part in have.keys() - want.keys()]
+        put = [(table, pid, part, fid) for (pid, part), fid in want.items() if have.get((pid, part)) != fid]
+        if gone:
+            con.executemany(f"DELETE FROM {ROWS_TABLE} WHERE name = ? AND ppg_id = ? AND part = ?", gone)
+        if put:
+            con.executemany(f"INSERT OR REPLACE INTO {ROWS_TABLE} (name, ppg_id, part, fid) VALUES (?, ?, ?, ?)", put)
 
     @staticmethod
     def _stored_key(con) -> str | None:

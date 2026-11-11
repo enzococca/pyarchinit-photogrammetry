@@ -1817,6 +1817,8 @@ class LogHandler(logging.Handler):
         self.bridge = _LogBridge()
 
     def emit(self, record) -> None:
+        if getattr(record, "from_pane", False):
+            return  # a line the pane wrote itself, kept in the log file: already shown
         try:
             text, _, details = record.getMessage().partition("\n")
             if record.exc_info:
@@ -1825,6 +1827,8 @@ class LogHandler(logging.Handler):
         except RuntimeError:
             pass
 
+
+_pane_log = logging.getLogger("pyarchinit_photogrammetry.gui.pane")
 
 LEVELS = {logging.DEBUG: ("debug", "info"), logging.INFO: ("info", "info"), logging.WARNING: ("avviso", "warning"),
           logging.ERROR: ("errore", "error"), logging.CRITICAL: ("errore", "error")}
@@ -1903,9 +1907,17 @@ class LogPane(QWidget):
 
     def warning(self, text: str) -> None:
         self.log(logging.WARNING, text)
+        self._to_file(logging.WARNING, text)
 
     def error(self, text: str, details: str = "") -> None:
         self.log(logging.ERROR, text, details)
+        self._to_file(logging.ERROR, text, details)
+
+    @staticmethod
+    def _to_file(level: int, text: str, details: str = "") -> None:
+        """A warning or an error the window says in the pane, kept in the log file too (what went wrong in a
+        session is read there afterwards); not shown a second time (:class:`LogHandler`)."""
+        _pane_log.log(level, "%s", f"{text}\n{details}" if details else text, extra={"from_pane": True})
 
     def appendPlainText(self, text: str) -> None:  # compatibility with the previous pane
         self.info(text)
