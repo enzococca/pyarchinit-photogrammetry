@@ -1518,6 +1518,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.a_show_background.setEnabled(False)  # no raster yet (the view follows: _sync_background_action)
         self.a_show_background.toggled.connect(self._background_toggled)
         m.addAction(self.a_show_background)
+        m.addAction(self.model_view.a_ortho)  # the projection of the 3D view (key O on the view)
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
