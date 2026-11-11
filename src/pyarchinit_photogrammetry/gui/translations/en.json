@@ -2814,6 +2814,9 @@
   "Porta al centro della vista il centro di rotazione (doppio clic su un punto del modello o della nuvola per sceglierlo)": "Brings the centre of rotation to the middle of the view (double click on a point of the model or the cloud to choose it)",
   "La sfera di rotazione: trascina dentro per ruotare liberamente, su un anello per ruotare intorno al suo asse, fuori per girare intorno alla linea di vista; tasto destro o centrale (o Maiusc+trascina) sposta, la rotella avvicina verso il cursore (Maiusc+rotella senza spostare il centro), doppio clic sceglie il centro di rotazione. Tasti: frecce ruotano di 15 gradi, Maiusc+frecce spostano, + e - avvicinano, Home vista iniziale, T dall'alto, F di fronte, L da sinistra": "The sphere of rotation: drag inside it to rotate freely, on a ring to rotate about its axis, outside it to roll about the line of sight; right or middle button (or Shift+drag) pans, the wheel zooms toward the cursor (Shift+wheel without moving the centre), double click chooses the centre of rotation. Keys: arrows rotate by 15 degrees, Shift+arrows pan, + and - zoom, Home initial view, T from above, F front, L from the left",
   "Quando il mouse è sulla vista": "When the mouse is over the view",
+  "Proiezione ortografica": "Orthographic projection",
+  "Proiezione ortografica (parallela) al posto della prospettiva: le linee parallele restano parallele e le dimensioni non dipendono dalla distanza, per piante e viste laterali (Dall'alto, F di fronte, L da sinistra); la rotella cambia la scala (tasto O)": "Orthographic (parallel) projection instead of the perspective: parallel lines stay parallel and sizes do not depend on the distance, for plans and side views (From above, F front, L from the left); the wheel changes the scale (O key)",
+  "La vista 3D in proiezione ortografica (parallela) o in prospettiva": "The 3D view in orthographic (parallel) projection or in perspective",
   "Sempre": "Always",
   "Mai": "Never",
   "Tipo di linea di rottura": "Kind of break line",
@@ -3402,7 +3405,10 @@
   "coppie di traverso": "pairs across the axis",
   "altre direzioni": "other directions",
   "Coppie di linee sciolte: la vicina successiva almeno (volte)": "Pairs of loose lines: the next neighbour at least (times)",
-  "Linee sciolte (non poligoni): due parallele sono una coppia se la linea successiva accanto a ognuna è almeno questo numero di volte più lontana. 1: basta che siano le più vicine (ordinate larghe quanto il loro intervallo); 0: le più vicine per prime": "Loose lines (not polygons): two parallel lines are a pair when the next line beside each is at least this many times farther. 1: being the nearest is enough (frames as wide as their gaps); 0: the nearest first"
+  "Linee sciolte (non poligoni): due parallele sono una coppia se la linea successiva accanto a ognuna è almeno questo numero di volte più lontana. 1: basta che siano le più vicine (ordinate larghe quanto il loro intervallo); 0: le più vicine per prime": "Loose lines (not polygons): two parallel lines are a pair when the next line beside each is at least this many times farther. 1: being the nearest is enough (frames as wide as their gaps); 0: the nearest first",
+  "Chiudi i buchi fino a (m, 0 = nessuno)": "Close holes up to (m, 0 = none)",
+  "Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata.": "Height field only: closes the holes whose gap between measured points is up to this size. The closed part is interpolated, not measured.",
+  "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4560,6 +4566,8 @@
   "{0} tratti dritti, {1} elementi. ": "{0} straight pieces, {1} elements. ",
   ". Larghezza delle coppie: da {0} a {1} m": ". Width of the pairs: from {0} to {1} m",
   "File: {0}": "File: {0}",
-  "Classifica un disegno: il sistema del chunk {0} è cambiato dopo la classificazione. Classifica di nuovo prima di scrivere i layer.": "Classify a drawing: the system of the chunk {0} changed after the classification. Classify again before writing the layers."
+  "Classifica un disegno: il sistema del chunk {0} è cambiato dopo la classificazione. Classifica di nuovo prima di scrivere i layer.": "Classify a drawing: the system of the chunk {0} changed after the classification. Classify again before writing the layers.",
+  "Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)": "Model: {0} holes closed, {1} m² in plan interpolated (not measured)",
+  "Modello: {0} buchi più larghi di {1} m lasciati aperti": "Model: {0} holes wider than {1} m left open"
  }
 }

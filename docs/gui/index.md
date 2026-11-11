@@ -164,7 +164,7 @@ them (in the workspace ++f2++ renames instead).
 
     Above the view one row chooses what is shown and how (*Show*, the colours, the size of the points, *Cameras*,
     *Marker*, *Region*); the tools that work in 3D are in the rail on its left, in four groups that open a panel
-    as in the 2D view: *View* (*From above*, *Home view*, *Centre the view on the point*, *Trackball*,
+    as in the 2D view: *View* (*From above*, *Home view*, [*Orthographic projection*](view3d.md#orthographic-projection), *Centre the view on the point*, *Trackball*,
     [*Look through a photo*](view3d.md#looking-through-a-photo), *Vertical exaggeration*), *Points* (*Marker*, *Photos of the point*, *Lasso*), *Cuts and elevations* (*Section*, *Plan
     slice*, *Cut*, *Elevation*) and *Draw*:
 

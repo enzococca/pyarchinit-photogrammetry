@@ -419,6 +419,7 @@ Come funziona il collegamento nei due sensi è spiegato in [QGIS dal vivo](../in
 | **Assistente** | *Apri l'assistente*; **Azioni**: *Chiedi sempre*, *Subito le rapide* (predefinito), *Esegui tutto (script ed esportazioni chiedono)* - quando partono le azioni dell'assistente ([Azioni](assistant.md#azioni)) |
 | **Modello** ++f2++ · **Ortofoto / DEM** ++f3++ · **Foto** ++f4++ | le tre viste centrali (nell'area di lavoro ++f2++ rinomina) |
 | **Mostra lo sfondo (ortofoto, DEM, prospetto)** ++ctrl+shift+b++ | nasconde o mostra il raster della vista 2D sotto i disegni, come la riga *Sfondo* del [pannello Layer](panes.md#layer), dove c'è anche l'opacità (1.7.5) |
+| **Proiezione ortografica** | la vista 3D con linee di vista parallele al posto della prospettiva, per piante e viste laterali; anche il tasto ++o++ e il gruppo *Vista* della colonna ([Vista 3D e trackball](view3d.md#proiezione-ortografica)) |
 | **Trackball** | quando si disegna la sfera di rotazione della vista 3D: quando il mouse è sulla vista, sempre, mai ([Vista 3D e trackball](view3d.md)) |
 | **Barre** | *Barra di disegno classica*: la vecchia barra orizzontale degli strumenti di disegno sotto la barra in alto, al posto della [barra laterale](index.md#la-barra-laterale-della-vista-2d) della vista 2D; ricordata |
 | **Tema** | chiaro o scuro, ricordato |

@@ -123,7 +123,14 @@ la mesh di un oggetto.
   Metashape: più fedele e con i colori delle foto, senza la nuvola densa) o la *nuvola densa*, di cui si possono
   usare solo le classi spuntate;
 * **Tipo di superficie**: *arbitraria* (3D) o *campo di altezze* (2,5D, per il terreno);
-* **Numero di facce**, e il voxel della fusione delle mappe di profondità (0 = automatico).
+* **Numero di facce**, e il voxel della fusione delle mappe di profondità (0 = automatico);
+* **Chiudi i buchi fino a** (metri, 0 = nessuno): per il campo di altezze, chiude i buchi con un vuoto tra i
+  punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata: il log dice quanti buchi
+  sono stati chiusi e quanti metri quadrati in pianta sono. Quello che è fuori dal contorno del rilievo non si
+  chiude mai.
+
+Il campo di altezze segue la densità dei punti posto per posto: dove la nuvola è più rada le facce sono più
+grandi, senza buchi, e restano aperte solo le aree senza punti ([Campo di altezze](../api.md#campo-di-altezze)).
 
 La ricostruzione di Poisson lavora in un processo separato: se il codice nativo si blocca, il passo riprova a una
 profondità minore e alla fine costruisce un campo di altezze 2,5D.

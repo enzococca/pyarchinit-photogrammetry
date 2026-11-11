@@ -279,8 +279,10 @@ def _upward(chunk: Chunk, verts, faces) -> tuple[np.ndarray, np.ndarray]:
 
 def choose_mapping(chunk: Chunk, verts, faces) -> str:
     """``orthophoto`` for large models that mostly face the sky (85 % of the area within 60
-    degrees of horizontal), ``generic`` otherwise."""
-    if len(faces) < 200_000:
+    degrees of horizontal) and for height fields that do, whatever their size (one height
+    per place: the view from above shows every face); ``generic`` otherwise."""
+    height_field = (chunk.meta.get("model") or {}).get("surface") == "height_field"  # asked for, not the fallback
+    if len(faces) < 200_000 and not height_field:
         return "generic"
     nz, area = _upward(chunk, verts, faces)
     return "orthophoto" if area[nz > 0.5].sum() >= 0.85 * max(area.sum(), 1e-20) else "generic"

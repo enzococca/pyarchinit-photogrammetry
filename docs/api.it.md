@@ -32,7 +32,7 @@ spiegazioni più lunghe seguono la tabella.
 | `update_transform(use_cameras=None)` | la similarità sui riferimenti (pesata, 7 parametri); restituisce l'RMSE di controllo e di verifica e l'errore di ogni marker e di ogni barra |
 | `build_depth_maps(quality, filter_mode, backend)` | mappe di profondità; backend `auto`, `cpu`, `patchmatch`, `colmap`, `openmvs` |
 | `build_point_cloud()` | la nuvola densa dalle mappe di profondità |
-| `build_model(source, surface, face_count, voxel_size, vertex_colors)` | la mesh da `point_cloud`, `tie_points` o `depth_maps` (*Mesh dalle mappe di profondità*, sotto) |
+| `build_model(source, surface, face_count, voxel_size, vertex_colors, classes, fill_holes)` | la mesh da `point_cloud`, `tie_points` o `depth_maps` (*Mesh dalle mappe di profondità* e *Campo di altezze*, sotto) |
 | `build_texture(texture_size, page_size=8192)` | la texture del modello, a pagine sopra `page_size` (*Pagine della texture*, sotto) |
 | `build_dem(resolution, source)` | il DEM, un GeoTIFF nel CRS del chunk |
 | `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | l'ortofoto sul DEM o sul modello (*Ortofoto senza cuciture e correzione del colore*) |
@@ -558,6 +558,29 @@ restituisce la superficie fusa (`FusedMesh`, sistema interno) senza salvarla. Su
 dei test (mappe di profondità a qualità `high`) impiega circa 4 s ed è più vicina alla superficie vera
 della mesh Poisson della nuvola densa: distanza mediana 0,9 mm, 90° percentile 2,2 mm (Poisson 1,0 e
 2,8 mm). CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
+
+### Campo di altezze
+
+`chunk.build_model(surface="height_field", fill_holes=None)` triangola i punti in pianta (Delaunay, una quota
+per posto: terreno, pavimenti, il fondo di una trincea) e toglie le facce che scavalcano più di quanto i punti
+intorno permettono. Il limite è locale: un lato resta quando è più corto di 4 volte la spaziatura dei punti ai
+suoi due estremi (la media delle due; la spaziatura di un punto è la distanza dal suo 8° vicino in pianta). Una
+nuvola di densità non uniforme - densa dove molte foto si sovrappongono, più rada ai margini o su terreno scuro
+e uniforme - dà quindi una superficie senza buchi dove è più rada, mentre le aree senza punti e le facce lunghe
+attraverso il margine esterno sono ancora tagliate. (Fino alla 1.7.7 valeva un limite solo per tutta la nuvola,
+4 volte il lato mediano: lo fissava la parte densa, e le parti più rade uscivano piene di buchi.)
+
+`fill_holes` è il vuoto più largo, in metri, da chiudere: un buco rimasto si chiude con le facce della
+triangolazione che lo coprono quando nessuna ha un lato più lungo di questo, cioè quando non si uniscono due
+punti misurati più lontani. Quello che arriva al contorno della nuvola è l'esterno del rilievo e non si chiude
+mai. Il valore predefinito è `None`, non si chiude niente: la superficie resta dove qualcosa è stato misurato, e
+un buco dice che lì non lo è stato. Le facce che chiudono un buco sono interpolate tra i punti del suo bordo,
+non misurate, e `chunk.meta["model"]` dice quanto: `fill_holes`, `holes_filled`, `holes_left` (buchi più larghi
+del vuoto) e `interpolated_area` (metri quadrati in pianta). L'opzione vale solo per il campo di altezze (anche
+dalle mappe di profondità e quando Poisson ripiega su di esso); la superficie arbitraria è già chiusa da
+Poisson. Con `mapping="auto"` la texture di un campo di altezze usa la mappatura da ortofoto quando la
+superficie guarda in gran parte il cielo, qualunque sia il numero di facce. CLI:
+`ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`.
 
 ## Allineare e unire i chunk
 
@@ -1969,6 +1992,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | `window.model_view.pivot()` | il centro di rotazione della vista 3D (coordinate mondo del chunk), o None |
 | `window.model_view.set_pivot(point, recentre=False)` | un nuovo centro di rotazione; la vista si sposta solo con `recentre` ([Vista 3D e trackball](gui/view3d.md)) |
 | `window.model_view.set_trackball_mode(mode)` | quando si disegna la trackball: `"auto"`, `"always"`, `"never"` |
+| `window.model_view.set_ortho(on)` · `ortho()` | la proiezione ortografica (parallela) della vista 3D attiva o no, e se lo è ([Proiezione ortografica](gui/view3d.md#proiezione-ortografica)) |
 
 
 ## Aggiunte nella 0.3
