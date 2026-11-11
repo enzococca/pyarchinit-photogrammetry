@@ -880,8 +880,19 @@ cells would take without any patch, inside a patch from its own cells (`engine.o
 
 **`chunk.calibrate_colours(...)`** fits the vignetting as `v(r) = b1 r^2 + b2 r^4 + b3 r^6` on the
 radius over the half diagonal, from surface points seen by several photos, least squares on all
-the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds, mean log
-gain zero); `chunk.meta["colour"]` keeps the result with the colour scatter before/after.
+the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds);
+`chunk.meta["colour"]` keeps the result with the colour scatter before/after (`rms_before`,
+`rms_after`: the scatter of the log colours of a point among the photos that see it, on the same
+observations). The points are those of the cloud plus as many spread evenly over the DEM (the mesh
+without a DEM), so that the photos at the edges of the block are measured too. Only the differences
+between the photos are measured: the common exposure is set so that the mosaic keeps the tone of
+the photos (the middle half of the corrections of the photo each point of the surface takes its
+colour from is zero on average). A photo with fewer than 50 observations takes the exposure of its
+four nearest measured photos (`from_neighbours` lists them); the falloff of a lens is fitted only
+when its observations span enough of the radius, and is held constant beyond the radius it was
+measured to (`vignetting_radius`). A calibration that does not lower the scatter by at least 2 % is
+not applied: `applied` is `False`, the gains are empty and the orthomosaic and the texture use the
+photos as they are.
 
 **`build_orthomosaic(colour_correction=None)`** and `build_texture` apply the correction
 (`engine.colour.Correction.correct(cam, image)`) as the photos are read.
