@@ -1054,3 +1054,22 @@ def test_companions_of_the_files_of_an_archive(tmp_path):
         (folder / name).write_bytes(b"")
     assert [p.name for p in rinex.find_companions(folder / "ABCD00ITA_R_20241330000_01H_30S_MO.crx.gz")] == [
         "ABCD00ITA_R_20241330000_01H_GN.rnx.Z", "ABCD00ITA_R_20241330000_01H_MN.rnx.gz"]
+
+
+def test_parked_99_a_cut_navigation_file_is_named_not_skipped(tmp_path, gnss_folder):
+    """``navigation_info`` hands the file it could not read, with its error, to whoever asks for the problems; the
+    companions that are read stay, and the one that is cut is among the problems by its name."""
+    flight = tmp_path / "flight"
+    flight.mkdir()
+    rover = Path(shutil.copyfile(PPK_ROVER, flight / PPK_ROVER.name))
+    cut = flight / "30400920.05n.Z"
+    cut.write_bytes(_literal_z(PPK_NAV.read_bytes()[:-1]))
+    problems: list = []
+    assert ppk.navigation_info(cut, problems=problems) is None
+    assert [(path.name, type(exc)) for path, exc in problems] == [(cut.name, ValueError)]
+    assert "cut short" in str(problems[0][1])
+    assert ppk.navigation_info(cut) is None and ppk.navigation_info(rover) is None  # asked without the list: as before
+    whole = Path(shutil.copyfile(PPK_NAV, flight / "30400920.05n"))
+    problems = []
+    assert [path.name for path, _info in ppk.navigation_beside([rover], problems)] == [whole.name]
+    assert [path.name for path, _exc in problems] == [cut.name]

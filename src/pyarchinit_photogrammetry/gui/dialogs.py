@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..archaeo.stratigraphy import US_TYPES
-from .i18n import NO_TRANSLATE, decimal_comma, number, thousands_points, tr, translate
+from .i18n import NO_TRANSLATE, decimal_comma, engine, number, thousands_points, tr, translate
 
 
 @dataclass
@@ -831,7 +831,7 @@ def message(parent, kind: str, title: str, text: str, details: str = "", buttons
 def _message_box(parent, kind: str, title: str, text: str, details: str = "", buttons=None, default=None):
     from PySide6.QtWidgets import QMessageBox
 
-    title, text = translate(title), translate(text)
+    title, text = translate(title), engine(text)
     icons = {"info": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
              "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
     box = QMessageBox(icons.get(kind, QMessageBox.Icon.NoIcon), title, text, parent=parent)
@@ -960,7 +960,7 @@ class ErrorDialog(QDialog):
 
         from .icons import icon
 
-        title, summary = translate(title), translate(summary)
+        title, summary = translate(title), engine(summary)
         self.setWindowTitle(title)
         self.setMinimumWidth(560)
         self.details = details

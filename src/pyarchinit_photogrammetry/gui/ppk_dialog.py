@@ -1,5 +1,8 @@
-"""The files of a PPK run and the position of its base, asked before RTKLIB runs: the Timestamp.MRK and its shots, the
-drone's RINEX found beside it, how the base is placed - at the position of its RINEX header (with the warning that it
+"""The files of a PPK run and the position of its base, asked before RTKLIB runs: the shots - a DJI Timestamp.MRK,
+the events of the rover's receiver, the time marks of a u-blox log, an autopilot log, an ``_events.pos`` - with the
+photos they pair with, the lever arm and the latency of a self-built drone, the drone's observations (the RINEX found
+beside the MRK, or the raw log of its receiver, converted in a thread), how the base is placed - at the position of
+its RINEX header (with the warning that it
 can be metres off), at a position typed in the frame of its coordinates, a permanent station near the flight as the
 base, the user's own base placed by a static baseline from a station or by a static PPP - the base's RINEX (one file or
 several) with what its header says, the navigation files beside them, the calibration of the antenna of the base
@@ -9,11 +12,12 @@ here: the files, their times, the work folder of the PPK; files packed in gzip, 
 read in a thread of their own, never in the thread of the interface."""
 from __future__ import annotations
 
+import errno
 import math
 import os
 import re
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer, Signal, Slot
@@ -22,13 +26,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget,
                                QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
+from ..core.progress import Progress
 from ..gnss import atx as antex
+from ..gnss import autopilot, convert, dji, events, frames, ppk, rinex, sources
 from ..gnss import base as gbase
-from ..gnss import dji, frames, ppk, rinex
+from ..gnss import shots as gshots
 from ..gnss.apply import onboard_fix
 from ..gnss.stations import Station
+from . import shots_widgets as sw
 from .gnss_pane import length
-from .i18n import decimal_comma, number, tr
+from .i18n import decimal_comma, engine, number, tr
 from .stations_dialog import StationsDialog
 
 _DJI_ROVER = "_rinex.obs"  # what a DJI drone writes beside its <flight>_Timestamp.MRK: <flight>_Rinex.obs
@@ -42,6 +49,14 @@ _NOTE = "color: #6c7a89"
 # every way a RINEX file comes: plain, Hatanaka (.crx, .##d), and packed in gzip, the Unix compress or zip
 _OBSERVATION_PATTERNS = "*.obs *.??o *.??d *.rnx *.crx *.gz *.Z *.zip"
 _NAVIGATION_PATTERNS = "*.nav *.??n *.??g *.??p *.??l *.??c *.rnx *.gz *.Z *.zip"
+_RAW_PATTERNS = "*.ubx *.rtcm *.rtcm3 *.sbf *.dat *.DAT"  # the raw logs of a receiver the program converts
+_LOG_SUFFIXES = (".bin", ".log", ".ulg")  # the logs of an autopilot
+_WITH_FILE = ("mrk", "log", "events-pos")  # the sources of the shots that are a file of their own
+_RAW_NAMES = {"ubx": "u-blox", "rtcm3": "RTCM 3", "sbf": "Septentrio SBF", "unicore": "Unicore",
+              "rt17": "Trimble RT-17"}
+_DAY_IT = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})([ T].+)?")  # 04/05/2026, as it is written in Italy
+_GPS_START = datetime(1980, 1, 6)
+_WAIT = object()  # the approximate time of a log is not known yet: what tells it is still being read
 MODES = gbase.BASE_MODES  # how the position of the base is set (values()["base_mode"])
 _WITH_STATION = ("station", "baseline")  # the modes that need a permanent station
 _ATX_MB = 62  # the size of igs20.atx the dialog says
@@ -136,10 +151,41 @@ def station_of(record) -> Station | None:
 
 
 class _Pending:
-    """What :meth:`PpkDialog._observations` gives for a file whose header is being read in the background."""
+    """What :meth:`PpkDialog._observations` gives for a file whose header is being read in the background, or -
+    ``converting`` - for a raw log being converted to RINEX there."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, converting: bool = False):
         self.path = path
+        self.converting = converting
+
+
+def opening_kind(path: Path) -> str:
+    """The source of the shots (:data:`.sources.KINDS`) the file the dialog is opened with tells: a ``.MRK`` the
+    shots of a DJI drone, a ``.pos`` a file of events, a PX4 log (by its first bytes) and a ``.bin`` ``.log`` ``.ulg``
+    an autopilot log, a RINEX file or the raw log of a receiver the rover with its events; anything else an MRK."""
+    suffix = path.suffix.lower()
+    if suffix == ".mrk":
+        return "mrk"
+    if suffix == ".pos":
+        return "events-pos"
+    if suffix == ".ulg" or sources.is_ulog(path):
+        return "log"
+    try:
+        raw = convert.raw_kind(path)
+    except OSError:
+        raw = None
+    if raw is not None:
+        return "events"
+    return "log" if suffix in _LOG_SUFFIXES else "mrk"
+
+
+def _stamp(path) -> tuple | None:
+    """The time and size of the file ``path``, None when it is not there."""
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 class _Reading(Exception):
@@ -231,9 +277,19 @@ class _FilesField(_FileField):
         return paths[0] if paths else None
 
 
+def _receiver(info) -> str:
+    """The receiver the RINEX header ``info`` names, or the words that say it names none."""
+    return " ".join((info.receiver or "").split()) or tr("non indicato")
+
+
+def _antenna(info) -> str:
+    """The antenna the RINEX header ``info`` names, or the words that say it names none."""
+    return " ".join((info.antenna or "").split()) or tr("non indicata")
+
+
 class PpkDialog(QDialog):
-    """The files and the base of a PPK run: the shots of the ``mrk`` (read at once), the drone's observations (found
-    beside it), how the base is placed (:data:`MODES`), the base's observations - one file, or several that make it,
+    """The files and the base of a PPK run: the shots, the drone's observations, how the base is placed
+    (:data:`MODES`), the base's observations - one file, or several that make it,
     with what their header says - the navigation files (found beside both, taken away or added by hand), the
     calibration of the antenna of the base and whether the photos with an RTK fix of the drone itself take the PPK
     position too. ``work`` is the work folder of the PPK, which no input may be in. *OK* checks everything that can be
@@ -252,7 +308,20 @@ class PpkDialog(QDialog):
     fixes, and the drone's observations too when the MRK is the one of that run. The files named in the fields are
     read after a pause in typing, once while they stay the same - those packed in gzip, compress, zip or Hatanaka in a
     thread of their own, while the dialog says it is reading them; the dialog is as tall as what it shows (the form
-    scrolls only on a screen too short for it)."""
+    scrolls only on a screen too short for it).
+
+    ``mrk`` is the file the dialog is opened with, which tells the source of the shots (:func:`opening_kind`,
+    changed in :attr:`kind_combo`): a DJI ``Timestamp.MRK`` (read at once, the drone's RINEX found beside it), the
+    rover itself - a RINEX with the events of its receiver, or its raw log - a u-blox log with time marks, an
+    autopilot log, an ``_events.pos``. :attr:`shots_file` is the file of the shots where the source has one,
+    :attr:`shots_info` what it holds and the photos of ``chunk`` its shots pair with (:func:`.shots.pair`),
+    :attr:`edge`, :attr:`message`, :attr:`camera` and :attr:`by` the options of the source; the lever arm from the
+    antenna to the camera and the latency of the camera (:attr:`lever_panel`) are behind :attr:`b_lever`, and count
+    whenever they are not zero, the panel open or closed (closed, the button and the summary of the shots say
+    them); a DJI MRK takes none of them. A raw log named as the rover or the base (u-blox, RTCM 3,
+    Septentrio SBF, Unicore, Trimble RT-17, a D-RTK ``.DAT``) is converted to RINEX in a thread
+    (:func:`.convert.to_rinex`, kept in the cache of the program) while the dialog says so; closing the dialog
+    cancels the conversion and waits for nothing."""
 
     def __init__(self, mrk, parent=None, work=None, chunk=None):
         super().__init__(parent)
@@ -268,13 +337,18 @@ class PpkDialog(QDialog):
         self._added: list[Path] = []  # navigation files added by hand
         self._removed: set[Path] = set()  # navigation files taken away: not listed again when found beside a file
         self._sources: tuple | None = None  # the rover and base the navigation files were listed for
-        self._flight: set | None = None  # the keys of the cameras in the folder of the MRK (this run replaces them)
+        self._flight: tuple | None = None  # the folder of the photos of this run, the keys of the cameras in it
         self._atx_choice = True  # the user's choice about igs20.atx, kept while a computed base forces it
-        try:
-            self.shots = dji.read_mrk(self.mrk)
-            self._mrk_problem = None if self.shots else tr("Il file non ha scatti.")
-        except (OSError, ValueError) as exc:
-            self.shots, self._mrk_problem = [], tr("Il file non si legge: {0}", exc)
+        self._raw: dict[str, tuple] = {}  # path -> (its time and size, whether it is a raw log to convert)
+        self._timeless: dict[str, tuple] = {}  # path -> (its time and size, whether it has the time of the week only)
+        self._converted: dict[str, tuple] = {}  # raw log -> (its time and size, its :class:`.convert.Converted`)
+        self._mrk_read: tuple | None = None  # the MRK read: (its path, time and size), its shots, its problem
+        self.shots: list = []  # the shots of the MRK (:func:`.dji.read_mrk`), none for another source
+        self._mrk_problem: str | None = None
+        self._progress = Progress()  # of the conversions: cancelled when the dialog closes
+        self._aside = sw.Aside(self)  # conversions, shots and pairings, each in a thread of its own
+        self._aside.done.connect(self._aside_done)
+        opened = opening_kind(self.mrk)
         self._relay = _ReadRelay(self)
         self._relay.read.connect(self._read_done)
         self._timer = QTimer(self)
@@ -285,23 +359,35 @@ class PpkDialog(QDialog):
         lay = QVBoxLayout(self)
         intro = QLabel(tr("RTKLIB calcola dove era l'antenna del drone dalle sue osservazioni e da quelle di una base "
                           "che registrava durante il volo; ogni foto prende poi la posizione della camera al suo "
-                          "scatto nel Timestamp.MRK, con il suo stato (fix, float, singola) e la sua accuratezza."))
+                          "scatto - nel Timestamp.MRK di DJI, negli eventi del ricevitore o nel log dell'autopilota - "
+                          "con il suo stato (fix, float, singola) e la sua accuratezza."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.body = QWidget()
         form = QFormLayout(self.body)
         form.setContentsMargins(0, 0, 0, 0)
-        mrk_name = QLabel(self.mrk.name)
-        mrk_name.setTextFormat(Qt.TextFormat.PlainText)
-        mrk_name.setToolTip(str(self.mrk))
-        self.mrk_info = _label()
-        form.addRow(tr("Timestamp.MRK"), _stack(mrk_name, self.mrk_info))
-        observations = tr("Osservazioni RINEX ({0});;Tutti i file (*)", _OBSERVATION_PATTERNS)
-        rover = rover_beside(self.mrk)
-        self.rover = _FileField(str(rover) if rover else "", tr("Osservazioni del drone"), observations,
-                                self.mrk.parent)
+        form.addRow(tr("Scatti"), self._shots_section(opened))
+        observations = tr("Osservazioni RINEX o log del ricevitore ({0});;Tutti i file (*)",
+                          _OBSERVATION_PATTERNS + " " + _RAW_PATTERNS)
+        rover = self.mrk if opened == "events" else rover_beside(self.mrk) if opened == "mrk" else None
+        self._rover_beside = str(rover) if rover and opened == "mrk" else ""  # found beside the MRK, not named
+        self.rover = _FileField(self._rover_beside or (str(rover) if rover else ""), tr("Osservazioni del drone"),
+                                observations, self.mrk.parent)
         self.rover_info = _label()
-        form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.rover_info))
+        self.day = QLineEdit()
+        self.day.setPlaceholderText(tr("AAAA-MM-GG"))
+        self.day.setMaximumWidth(220)
+        self.day.setToolTip(tr("Un log RTCM 3 o Trimble RT-17 porta solo il tempo della settimana: il giorno del volo "
+                               "(tempo GPS; anche con l'ora, 2026-05-04 09:30) dice in quale settimana cade. Serve "
+                               "quando gli scatti sono gli eventi del log stesso: un file degli scatti lo dice da "
+                               "sé."))
+        self.day_row = QWidget()
+        day_lay = QHBoxLayout(self.day_row)
+        day_lay.setContentsMargins(0, 0, 0, 0)
+        day_lay.addWidget(QLabel(tr("Giorno del volo")))
+        day_lay.addWidget(self.day)
+        day_lay.addStretch(1)
+        form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.day_row, self.rover_info))
         form.addRow(tr("Posizione della base"), self._position_section())
         self.base = _FilesField("", tr("Osservazioni della base"), observations, self.mrk.parent)
         self.base_info = _label()
@@ -342,6 +428,7 @@ class PpkDialog(QDialog):
                "la spunta prendono anche loro la posizione PPK, così tutte stanno nel sistema della base."))
         form.addRow(tr("Fix RTK del drone"), _stack(self.replace_fix, self.fix_note))
 
+        self._show_kind(self.kind())  # before the form is measured: what the source does not ask for is not there
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.body)
         self.scroll.setWidgetResizable(True)
@@ -357,12 +444,21 @@ class PpkDialog(QDialog):
         self.error.setStyleSheet("color: #b91c1c; font-weight: bold")
         lay.addWidget(self.error)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Avvia"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Annulla"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
         self._prefill(ppk.last_run(chunk))  # before the fields are watched: read once below
+        self.kind_combo.currentIndexChanged.connect(lambda _index: self._update())
+        self.shots_file.edit.textChanged.connect(self._typing)
+        for combo in (self.edge, self.message, self.camera, self.by):
+            combo.currentIndexChanged.connect(lambda _index: self._update())
+        self.b_lever.toggled.connect(lambda _on: self._update())
+        self.lever_panel.changed.connect(self._typing)
         self.rover.edit.textChanged.connect(self._typing)
+        self.day.textChanged.connect(self._typing)
         self.base.edit.textChanged.connect(self._typing)
         self._modes.buttonToggled.connect(lambda _button, on: self._update() if on else None)
         for edit in (self.lat, self.lon, self.ellh, self.epoch):
@@ -373,6 +469,124 @@ class PpkDialog(QDialog):
         self.b_add_nav.clicked.connect(self._add_navs)
         self.b_remove_nav.clicked.connect(self._remove_navs)
         self._update()
+
+    def _shots_section(self, opened: str) -> QWidget:
+        """Where the shots come from: the source, its file, its options (the edge of the time marks, the message and
+        the camera of an autopilot log, how the photos are paired), what it holds, the lever arm and the latency."""
+        self.kind_combo = QComboBox()
+        names = sw.kind_names()
+        for kind in sources.KINDS:
+            self.kind_combo.addItem(names[kind], kind)
+        self.kind_combo.setCurrentIndex(self.kind_combo.findData(opened))
+        self.shots_file = _FileField("" if opened == "events" else str(self.mrk), tr("File degli scatti"),
+                                     tr("Tutti i file (*)"), self.mrk.parent)
+
+        def option(title: str, combo: QComboBox) -> QWidget:
+            row = QWidget()
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(QLabel(title))
+            lay.addWidget(combo)
+            lay.addStretch(1)
+            return row
+
+        self.edge = QComboBox()
+        for edge, name in zip(events.EDGES, (tr("discesa"), tr("salita"))):
+            self.edge.addItem(name, edge)
+        self.edge.setToolTip(tr("Il fronte del segnale dello scatto che il ricevitore ha marcato."))
+        self.message = QComboBox()
+        sw.fill_messages(self.message, sources.is_ulog(self.mrk))
+        self.message.setToolTip(tr("Gli scatti confermati dalla camera sono più precisi dei comandi di scatto; "
+                                   "automatico prende i confermati quando il log li ha."))
+        self.camera = QComboBox()
+        self.camera.addItem(tr("una sola"), None)
+        self.by = sw.by_combo()
+        self.edge_row, self.message_row = option(tr("Fronte"), self.edge), option(tr("Messaggi"), self.message)
+        self.camera_row, self.by_row = option(tr("Camera"), self.camera), option(tr("Abbinamento"), self.by)
+        self.options_row = QWidget()
+        options = QVBoxLayout(self.options_row)  # one under the other: side by side they would widen the dialog
+        options.setContentsMargins(0, 0, 0, 0)
+        options.setSpacing(2)
+        for row in (self.edge_row, self.message_row, self.camera_row, self.by_row):
+            options.addWidget(row)
+        self.shots_info = _label()
+        self.mrk_info = self.shots_info  # the name it had while the shots were those of an MRK only
+        self.b_lever = QPushButton(tr("Braccio di leva e latenza..."))
+        self.b_lever.setCheckable(True)
+        self.b_lever.setToolTip(tr("Per un drone autocostruito: dove è la camera rispetto all'antenna e quanto dopo "
+                                   "il segnale dello scatto espone. I valori diversi da zero contano anche a "
+                                   "pannello chiuso: restano scritti sul pulsante."))
+        lever_row = QWidget()
+        lever_lay = QHBoxLayout(lever_row)
+        lever_lay.setContentsMargins(0, 0, 0, 0)
+        lever_lay.addWidget(self.b_lever)
+        lever_lay.addStretch(1)
+        self.lever_row = lever_row
+        self.lever_panel = sw.LeverPanel()
+        self.lever_forward, self.lever_right = self.lever_panel.forward, self.lever_panel.right
+        self.lever_down, self.latency = self.lever_panel.down, self.lever_panel.latency
+        return _stack(self.kind_combo, self.shots_file, self.options_row, self.shots_info, lever_row,
+                      self.lever_panel)
+
+    def kind(self) -> str:
+        """The source of the shots: one of :data:`.sources.KINDS`."""
+        return self.kind_combo.currentData()
+
+    def set_kind(self, kind: str) -> None:
+        self.kind_combo.setCurrentIndex(self.kind_combo.findData(kind))
+
+    def _show_kind(self, kind: str) -> None:
+        """What the source of the shots shows and asks for."""
+        path = self.shots_file.path()
+        self.shots_file.setEnabled(kind != "events")
+        self.shots_file.edit.setPlaceholderText(
+            tr("gli eventi sono nel file del rover") if kind == "events" else
+            tr("vuoto: il log è il file del rover") if kind == "ubx" else "")
+        self.shots_file.filters = {
+            "mrk": tr("Timestamp.MRK (*.MRK *.mrk);;Tutti i file (*)"),
+            "ubx": tr("Log u-blox (*.ubx);;Tutti i file (*)"),
+            "log": tr("Log dell'autopilota (*.bin *.BIN *.log *.ulg);;Tutti i file (*)"),
+            "events-pos": tr("File di eventi (*.pos);;Tutti i file (*)")}.get(kind, tr("Tutti i file (*)"))
+        self.edge_row.setVisible(kind == "ubx")
+        self.message_row.setVisible(kind == "log")
+        if kind == "log":
+            sw.fill_messages(self.message, path is not None and sources.is_ulog(path))
+        self.camera_row.setVisible(kind == "log" and self.camera.count() > 1)
+        self.by_row.setVisible(kind != "mrk")
+        self.options_row.setVisible(kind != "mrk")
+        self.lever_row.setVisible(kind != "mrk")
+        self.lever_panel.setVisible(kind != "mrk" and self.b_lever.isChecked())
+        self._show_lever()
+
+    def _camera(self) -> int | None:
+        """The camera of an autopilot log the shots are read of: None while the log has one."""
+        return self.camera.currentData() if self.kind() == "log" and self.camera.count() > 1 else None
+
+    def _lever(self) -> tuple[float, float, float] | None:
+        """The lever arm that counts: the one typed, whatever the state of its panel, for a source that takes it;
+        None when it is all zeros."""
+        return self.lever_panel.lever() if self.kind() != "mrk" else None
+
+    def _latency_ms(self) -> float:
+        """The latency that counts, as :meth:`_lever`."""
+        return self.lever_panel.latency_ms() if self.kind() != "mrk" else 0.0
+
+    def _latency_s(self) -> float:
+        return self._latency_ms() / 1000.0
+
+    def _show_lever(self) -> None:
+        """The button of the lever arm: with its panel closed it says the values that count."""
+        short = None if self.b_lever.isChecked() else sw.lever_short(self._lever(), self._latency_ms())
+        text = tr("Braccio di leva e latenza...") if short is None else tr("Braccio di leva e latenza: {0}", short)
+        if self.b_lever.text() != text:
+            self.b_lever.setText(text)
+
+    def _photos(self) -> Path | None:
+        """The folder of the photos of the shots (:func:`.shots_widgets.photos_folder`): None for an MRK (its own
+        folder, as it always was) and when nothing tells (the window asks)."""
+        if self.kind() == "mrk":
+            return None
+        return sw.photos_folder(self.chunk, self.shots_file.path() if self.kind() != "events" else self.rover.path())
 
     def _position_section(self) -> QWidget:
         """The five ways to place the base, the typed position with its frame and epoch, the permanent station, and
@@ -457,7 +671,16 @@ class PpkDialog(QDialog):
         dialog takes one)."""
         if not last:
             return
-        same = _same_file(last.get("mrk"), self.mrk)
+        shots = last.get("shots") if isinstance(last.get("shots"), dict) else None
+        same = _same_file(shots.get("file") if shots else last.get("mrk"), self.mrk)
+        if shots and self.kind() != "mrk":  # the drone is the same: its lever arm and the latency of its camera
+            lever, latency = shots.get("body_lever_mm"), float(shots.get("latency_s") or 0.0)
+            if (lever and any(lever)) or latency:
+                self.lever_panel.set_lever(lever)
+                self.lever_panel.latency.setValue(latency * 1000.0)
+                self.b_lever.setChecked(True)
+            if same and shots.get("by") in gshots.BY:
+                self.by.setCurrentIndex(self.by.findData(shots["by"]))
         rover = last.get("rover") if isinstance(last.get("rover"), str) else None  # a list: the drone in pieces
         if same and rover and Path(rover).is_file():
             self.rover.edit.setText(rover)
@@ -493,12 +716,21 @@ class PpkDialog(QDialog):
         return sum(1 for cam in self.chunk.cameras if onboard_fix(cam)) if self.chunk is not None else 0
 
     def _flight_keys(self) -> set:
-        """The keys of the cameras whose photos are in the folder of the MRK: this run gives them their positions."""
-        if self._flight is None:
-            folder = self.mrk.resolve().parent
-            self._flight = {cam.key for cam in (self.chunk.cameras if self.chunk is not None else [])
-                            if Path(cam.path).resolve().parent == folder}
-        return self._flight
+        """The keys of the cameras whose photos are in the folder of the photos of the shots (for an MRK its own
+        folder): this run gives them their positions."""
+        photos = self._photos()
+        folder = (photos if photos is not None else (self.shots_file.path() or self.mrk).parent).resolve()
+        if self._flight is None or self._flight[0] != folder:
+            self._flight = (folder, {cam.key for cam in (self.chunk.cameras if self.chunk is not None else [])
+                                     if Path(cam.path).resolve().parent == folder})
+        return self._flight[1]
+
+    def done(self, result: int) -> None:
+        """The dialog closes: the conversions still running are cancelled and nothing waits for them."""
+        self._timer.stop()
+        self._progress.cancel()
+        self._aside.stop()
+        super().done(result)
 
     # ------------------------------------------------------------ the size
     def showEvent(self, event) -> None:
@@ -609,11 +841,174 @@ class PpkDialog(QDialog):
         self._sources = None  # the navigation files listed again, with this one read
         self._update()
 
+    def _aside_done(self) -> None:
+        """A conversion, some shots or a pairing are there: everything the dialog says looked at again."""
+        self._sources = None  # the navigation files listed again, with those of a conversion
+        self._update()
+
+    def _is_raw(self, path: Path) -> tuple | None:
+        """The time and size of ``path`` when it is the raw log of a receiver, to convert (:func:`.sources.is_raw`,
+        as the run takes it); None for anything else."""
+        stamp = _stamp(path)
+        if stamp is None:
+            return None
+        known = self._raw.get(str(path))
+        if known is None or known[0] != stamp:
+            try:
+                raw = sources.is_raw(path)
+            except OSError:
+                raw = False
+            known = self._raw[str(path)] = (stamp, raw)
+        return stamp if known[1] else None
+
+    def _file_shots(self):
+        """The shots of the file of the shots (never those read from the rover): a :class:`.shots.ShotSet`,
+        :data:`.shots_widgets.RUNNING` while they are read, the exception that stopped the reading; None when the
+        source has no file of its own, or none is named."""
+        kind, path = self.kind(), self.shots_file.path()
+        if kind in ("mrk", "events") or path is None:
+            return None
+        stamp = _stamp(path)
+        if stamp is None:
+            return FileNotFoundError(tr("Il file non esiste."))
+        if path.is_dir():  # said by its name: the readers would give the error of the system, or their own
+            return IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(path))
+        edge, message, camera = self.edge.currentData(), self.message.currentData(), self._camera()
+        if kind != "log":
+            message, camera = "auto", None
+        return self._aside.get(("shots", kind, str(path), stamp, edge if kind == "ubx" else None, message, camera),
+                               lambda: sources.read(kind, path, edge, message, camera))
+
+    def _shotset(self, rover_info):
+        """The shots of a source other than an MRK, as :meth:`_file_shots` gives them; those of the rover - its
+        events, the time marks of a u-blox rover - once its header ``rover_info`` is there (None until then)."""
+        kind, path, rover = self.kind(), self.shots_file.path(), self.rover.path()
+        if kind == "mrk":
+            return None
+        if kind == "events" or (kind == "ubx" and path is None):
+            if rover is None or not isinstance(rover_info, rinex.RinexInfo):
+                return None
+            source = rover
+            if kind == "events" and self._is_raw(rover) is not None:  # the events of a raw rover: in its conversion
+                source = self._converted[str(rover)][1].obs
+            stamp, edge = _stamp(source), self.edge.currentData()
+            return self._aside.get(("shots", kind, str(source), stamp, edge if kind == "ubx" else None, "auto", None),
+                                   lambda: sources.read(kind, source, edge))
+        return self._file_shots()
+
+    def _asks_day(self) -> bool:
+        """Whether the day of the flight is asked: the rover is a raw log that carries the time of the week only
+        (RTCM 3, Trimble RT-17) and the shots are its own events, so that no file of shots tells its day."""
+        rover = self.rover.path()
+        if self.kind() != "events" or rover is None:
+            return False
+        stamp = self._is_raw(rover)
+        if stamp is None:
+            return False
+        known = self._timeless.get(str(rover))
+        if known is None or known[0] != stamp:
+            known = self._timeless[str(rover)] = (stamp, ppk._needs_time(rover))
+        return known[1]
+
+    def _day(self):
+        """The day of the flight typed (a datetime in GPS time: ``2026-05-04``, ``04/05/2026``, with the time too),
+        None when the field is empty or not asked, the text that says it is not a day."""
+        text = self.day.text().strip()
+        if not text or not self._asks_day():
+            return None
+        found = _DAY_IT.fullmatch(text)
+        if found:
+            text = f"{found.group(3)}-{int(found.group(2)):02d}-{int(found.group(1)):02d}{found.group(4) or ''}"
+        try:
+            when = datetime.fromisoformat(text)
+        except ValueError:
+            return tr("Il giorno del volo si scrive AAAA-MM-GG (anche con l'ora: 2026-05-04 09:30), non «{0}».",
+                      self.day.text().strip())
+        if when.tzinfo is not None or when < _GPS_START:
+            return tr("Il giorno del volo è una data in tempo GPS, dal 1980 in poi, senza fuso orario.")
+        return when
+
+    def _approx_time(self, path: Path):
+        """The approximate time (GPS seconds) for the conversion of the raw log ``path``, the one
+        :func:`.sources.ppk_inputs` takes (so that the run finds the conversion of the dialog): for the rover the
+        first shot of a file of shots, or the day of the flight typed when the shots are its own events
+        (:meth:`_asks_day`); for a base :func:`.sources.base_time`, the first epoch of the rover, else that shot.
+        None when nothing tells, :data:`_WAIT` while what tells is being read."""
+        rover = self.rover.path()
+        if rover is not None and path == rover and self._asks_day():
+            when = self._day()
+            return (when - _GPS_START).total_seconds() if isinstance(when, datetime) else None
+        if rover is not None and path != rover:
+            info = self._observations(rover)
+            if isinstance(info, _Pending):
+                return _WAIT
+            if isinstance(info, rinex.RinexInfo):
+                when = sources.first_epoch(info)
+                if when is not None:
+                    return when
+        if self.kind() == "mrk":
+            return self.shots[0].gps_time if self.shots else None
+        shotset = self._file_shots()
+        if shotset is sw.RUNNING:
+            return _WAIT
+        return sources.first_shot(shotset) if isinstance(shotset, gshots.ShotSet) else None
+
+    def _convert(self, path: Path, stamp: tuple):
+        """The header of the conversion to RINEX of the raw log ``path`` (done once, in a thread), the text that says
+        why it cannot be converted, or a :class:`_Pending` while it is."""
+        when = self._approx_time(path)
+        if when is _WAIT:
+            return _Pending(path, converting=True)
+        if when is None and path == self.rover.path() and self._asks_day():  # nothing to convert with: said here
+            typed = self._day()
+            return typed if isinstance(typed, str) else tr(
+                "Indica il giorno del volo: un log {0} porta solo il tempo della settimana.",
+                _RAW_NAMES.get(convert.raw_kind(path), "RTCM 3"))
+        progress = self._progress
+
+        def work():
+            done = convert.to_rinex(path, approx_time=when, progress=progress)
+            return done, rinex.header(done.obs)
+
+        day = None if when is None else int(when // 86400.0)
+        got = self._aside.get(("convert", str(path), stamp, day), work)
+        if got is sw.RUNNING:
+            return _Pending(path, converting=True)
+        if isinstance(got, Exception):
+            return engine(str(got))
+        self._converted[str(path)] = (stamp, got[0])
+        return got[1]
+
+    def _conversion(self, path: Path | None):
+        """The :class:`.convert.Converted` of the raw log ``path`` as it is now, None when it is not converted."""
+        known = self._converted.get(str(path)) if path is not None else None
+        return known[1] if known is not None and known[0] == _stamp(path) else None
+
+    def _conversion_lines(self, paths: list) -> list[str]:
+        """What the conversion of each raw log among ``paths`` gave: its kind, epochs and events, the position of the
+        station an RTCM 3 log carries, its warnings."""
+        lines = []
+        for path in paths:
+            done = self._conversion(path)
+            if done is None:
+                continue
+            text = tr("Log {0} convertito: {1} epoche, {2} eventi", _RAW_NAMES.get(done.kind, done.kind), done.epochs,
+                      done.events)
+            if done.station_position is not None:
+                text += tr(", posizione della stazione dall'RTCM")
+            lines.append((text if len(paths) == 1 else tr("{0}: {1}", path.name, text)) + ".")
+            lines += [sw.said(w) for w in done.warnings]
+        return lines
+
     def _observations(self, path: Path | None):
-        """The header of the observations in ``path``, the text that says why they cannot be used, or a
-        :class:`_Pending` while it is read in the background; None without a file."""
+        """The header of the observations in ``path`` - of its conversion to RINEX, for a raw log -, the text that
+        says why they cannot be used, or a :class:`_Pending` while it is read or converted in the background; None
+        without a file."""
         if path is None:
             return None
+        raw = self._is_raw(path)
+        if raw is not None:
+            return self._convert(path, raw)
         try:
             info = self._read(path)
         except _Reading:
@@ -621,7 +1016,7 @@ class PpkDialog(QDialog):
         except FileNotFoundError:
             return tr("Il file non esiste.")
         except (OSError, ValueError) as exc:
-            return tr("Il file non si legge: {0}", exc)
+            return tr("Il file non si legge: {0}", sw.unread(exc))
         if info.kind != "obs":
             return tr("Questo file ha messaggi di navigazione, non osservazioni.")
         return info
@@ -638,6 +1033,101 @@ class PpkDialog(QDialog):
             return None
         return min(a for a, _ in spans), max(b for _, b in spans)
 
+    def _read_mrk(self) -> None:
+        """The shots of the MRK named in the field of the shots, read once while the file stays the same; none, and
+        no problem, for another source."""
+        path = self.shots_file.path() if self.kind() == "mrk" else None
+        if path is None:
+            self.shots, self._mrk_problem, self._mrk_read = [], None, None
+            return
+        key = (str(path), _stamp(path))
+        if self._mrk_read is None or self._mrk_read[0] != key:
+            try:
+                shots = dji.read_mrk(path)
+                problem = None if shots else tr("Il file non ha scatti.")
+            except (OSError, ValueError) as exc:
+                shots, problem = [], tr("Il file non si legge: {0}", sw.unread(exc))
+            self._mrk_read = (key, shots, problem)
+        self.shots, self._mrk_problem = self._mrk_read[1], self._mrk_read[2]
+
+    def _fill_cameras(self) -> None:
+        """The cameras of an ArduPilot log with several (:func:`.autopilot.cameras`, read in a thread) in their
+        combo; one entry for any other log."""
+        path = self.shots_file.path()
+        stamp = _stamp(path) if path is not None and self.kind() == "log" else None
+        cameras = []
+        if stamp is not None and not sources.is_ulog(path):
+            cameras = self._aside.get(("cameras", str(path), stamp), lambda: autopilot.cameras(path))
+        cameras = cameras if isinstance(cameras, list) and len(cameras) > 1 else []
+        wanted = [int(entry["instance"]) for entry in cameras] or [None]
+        if [self.camera.itemData(i) for i in range(self.camera.count())] != wanted:
+            self.camera.blockSignals(True)
+            self.camera.clear()
+            for entry in cameras:
+                self.camera.addItem(tr("Camera {0}: {1} CAM, {2} TRIG", entry["instance"], entry["cam"],
+                                       entry["trig"]), int(entry["instance"]))
+            if not cameras:
+                self.camera.addItem(tr("una sola"), None)
+            self.camera.blockSignals(False)
+
+    def _pairing(self, shotset):
+        """The photos of the chunk paired with ``shotset`` (:func:`.shots.pair`, in a thread): a
+        :class:`.shots.Pairing`, :data:`.shots_widgets.RUNNING`, the exception that says why they cannot be paired;
+        None without a chunk or without the folder of the photos."""
+        chunk, folder = self.chunk, self._photos()
+        if chunk is None or folder is None:
+            return None
+        by, latency = self.by.currentData(), self._latency_s()
+        return self._aside.get(("pair", id(shotset), str(folder), by, latency),
+                               lambda: gshots.pair(chunk, shotset, folder, by=by, latency_s=latency))
+
+    def _describe_shots(self, rover_info) -> str:
+        """What the source of the shots holds: for an MRK as it always was; for the others the events (or shots) and
+        their span, those outside the observations of the drone, the photos they pair with, the warnings."""
+        kind = self.kind()
+        if kind == "mrk":
+            return self._describe_mrk(rover_info) if self.shots_file.path() is not None else ""
+        shotset = self._shotset(rover_info)
+        if shotset is None:
+            if kind == "events" or (kind == "ubx" and self.shots_file.path() is None):
+                return (tr("Gli eventi vengono letti dal file del rover: le osservazioni del drone.")
+                        if kind == "events" else
+                        tr("Gli eventi vengono letti dal log del rover; oppure scegli un altro log u-blox."))
+            return (tr("Il log dell'autopilota del volo: ArduPilot (.bin, .log) o PX4 (.ulg).") if kind == "log" else
+                    tr("Il file di eventi che RTKLIB scrive accanto alla soluzione (*_events.pos)."))
+        source = self.shots_file.path() or self.rover.path()
+        if shotset is sw.RUNNING:
+            return tr("Lettura di {0} in corso...", source.name)
+        if isinstance(shotset, Exception):
+            return tr("Il file non si legge: {0}", sw.unread(shotset))
+        times = [s.gps_time for s in shotset.shots if s.valid]
+        text = (tr("{0} scatti ({1} con un tempo valido)", len(shotset.shots), len(times)) if kind == "log" else
+                tr("{0} eventi ({1} con un tempo valido)", len(shotset.shots), len(times)))
+        if times:
+            text += tr(", dal {0} al {1} (ora GPS)", _when(min(times)), _when(max(times)))
+        text += "."
+        span = _span(rover_info)
+        if span is not None:
+            outside = sum(1 for t in times if not span[0] - _SLACK_S <= t <= span[1] + _SLACK_S)
+            if 0 < outside < len(times):
+                text += " " + tr("Scatti fuori dalle osservazioni del drone: {0}; le loro foto terranno la posizione "
+                                 "che hanno.", outside)
+        lines = [text] + [sw.said(w) for w in shotset.warnings]
+        lever = sw.lever_words(self._lever(), self._latency_ms())
+        if lever is not None:
+            lines.append(lever + ".")
+        if times and self.chunk is not None:
+            pairing = self._pairing(shotset)
+            if pairing is None:
+                lines.append(tr("La cartella delle foto di questi scatti viene chiesta all'avvio del calcolo."))
+            elif pairing is sw.RUNNING:
+                lines.append(tr("Abbinamento delle foto in corso..."))
+            elif isinstance(pairing, Exception):
+                lines.append(sw.said(str(pairing)))
+            else:
+                lines.append(sw.pairing_text(pairing))
+        return "\n".join(lines)
+
     def _describe_mrk(self, rover_info) -> str:
         if self._mrk_problem:
             return self._mrk_problem
@@ -653,13 +1143,19 @@ class PpkDialog(QDialog):
 
     def _describe_rover(self, info) -> str:
         if info is None:
+            if self.kind() != "mrk":
+                return tr("Il RINEX del drone, o il log del suo ricevitore (u-blox, RTCM 3, Septentrio SBF, Unicore, "
+                          "Trimble RT-17), che il programma converte in RINEX.")
             return tr("Il RINEX del drone: per un drone DJI il file *_Rinex.obs accanto al Timestamp.MRK.")
         if isinstance(info, _Pending):
+            if info.converting:
+                return tr("Conversione di {0} in RINEX in corso...", info.path.name)
             return tr("Lettura di {0} in corso...", info.path.name)
         if isinstance(info, str):
             return info
-        return tr("Ricevitore {0}; osservazioni dal {1} al {2} (ora GPS).", info.receiver or "-", _when(info.first),
-                  _when(info.last))
+        return "\n".join(self._conversion_lines([self.rover.path()]) + [
+            tr("Ricevitore {0}; osservazioni dal {1} al {2} (ora GPS).", _receiver(info), _when(info.first),
+               _when(info.last))])
 
     def _describe_base(self, paths: list[Path], infos: list) -> str:
         if self.mode() == "station":
@@ -670,6 +1166,8 @@ class PpkDialog(QDialog):
                       "che insieme lo coprono; la tua base, o una stazione permanente vicina.")
         pending = next((info for info in infos if isinstance(info, _Pending)), None)
         if pending is not None:
+            if pending.converting:
+                return tr("Conversione di {0} in RINEX in corso...", pending.path.name)
             return tr("Lettura di {0} in corso...", pending.path.name)
         wrong = next(((path, info) for path, info in zip(paths, infos) if isinstance(info, str)), None)
         if wrong is not None:
@@ -679,12 +1177,13 @@ class PpkDialog(QDialog):
         first, last = ((info.first, info.last) if span is None else
                        (_GPS_EPOCH + timedelta(seconds=span[0]), _GPS_EPOCH + timedelta(seconds=span[1])))
         name = ppk.base_name(paths[0], info)
+        lines = self._conversion_lines(paths)
         if len(paths) == 1:
-            lines = [tr("Base {0}: ricevitore {1}, antenna {2}; osservazioni dal {3} al {4} (ora GPS).", name,
-                        info.receiver or "-", info.antenna or "-", _when(first), _when(last))]
+            lines.append(tr("Base {0}: ricevitore {1}, antenna {2}; osservazioni dal {3} al {4} (ora GPS).", name,
+                            _receiver(info), _antenna(info), _when(first), _when(last)))
         else:
-            lines = [tr("Base {0}: {1} file, ricevitore {2}, antenna {3}; osservazioni dal {4} al {5} (ora GPS).",
-                        name, len(paths), info.receiver or "-", info.antenna or "-", _when(first), _when(last))]
+            lines.append(tr("Base {0}: {1} file, ricevitore {2}, antenna {3}; osservazioni dal {4} al {5} (ora GPS).",
+                            name, len(paths), _receiver(info), _antenna(info), _when(first), _when(last)))
         if info.approx_xyz is not None:
             lat, lon, h = rinex.ecef_to_llh(info.approx_xyz)
             lines.append(tr("Posizione nell'intestazione: {0}, {1}, {2} m sull'ellissoide.", number(lat, 7),
@@ -740,11 +1239,28 @@ class PpkDialog(QDialog):
         self._timer.stop()
         self._update()
 
+    def _follow_mrk(self) -> None:
+        """The observations of the drone beside the MRK named now (:func:`rover_beside`), while the field holds the
+        ones found beside another MRK, or nothing: what the user named stays."""
+        path = self.shots_file.path() if self.kind() == "mrk" else None
+        text = self.rover.edit.text().strip()
+        if path is None or not path.is_file() or text not in ("", self._rover_beside):
+            return
+        found = rover_beside(path)
+        self._rover_beside = str(found) if found else ""
+        if self._rover_beside != text:
+            self.rover.edit.setText(self._rover_beside)
+
     def _update(self) -> None:
+        self._follow_mrk()
+        self._read_mrk()
+        self._fill_cameras()
+        self._show_kind(self.kind())
         rover, bases = self.rover.path(), self.base.paths()
         station = self.mode() == "station"
         rover_info, base_infos = self._observations(rover), ([] if station else self._base_headers())
-        self.mrk_info.setText(self._describe_mrk(rover_info))
+        self.day_row.setVisible(self._asks_day())
+        self.shots_info.setText(self._describe_shots(rover_info))
         self.rover_info.setText(self._describe_rover(rover_info))
         self.base_info.setText(self._describe_base(bases, base_infos))
         sources = (rover, None if station else (tuple(bases) or None))
@@ -785,6 +1301,10 @@ class PpkDialog(QDialog):
         rover, bases = self._sources or (None, None)
         found: list[Path] = []
         for obs in (rover, *(bases or ())):
+            done = self._conversion(obs)
+            if done is not None:  # a raw log: the navigation messages it carried
+                found += [p for p in ([Path(done.nav)] if done.nav else []) if p.is_file() and p not in found]
+                continue
             found += [p for p in self._companions(obs) if p not in found]
         paths = [p for p in found if p not in self._removed] + [p for p in self._added if p not in found]
         self.navs.clear()
@@ -845,11 +1365,25 @@ class PpkDialog(QDialog):
             return tr("Scrivi l'epoca della posizione in ITRF2020: un anno decimale fra 1980 e 2100 (2026,82) o una "
                       "data (2026-10-27), o lasciala vuota per la metà delle osservazioni del drone.")
 
+    def _timed_shots(self) -> list:
+        """The shots of a source other than an MRK that have a valid time, as far as they are read."""
+        shotset = self._shotset(self._observations(self.rover.path())) if self.kind() != "mrk" else None
+        return [s for s in shotset.shots if s.valid] if isinstance(shotset, gshots.ShotSet) else []
+
     def _flight_place(self) -> tuple[float, float] | None:
-        """Where the drone flew: the median latitude and longitude of the shots of the MRK; None without shots."""
-        if not self.shots:
+        """Where the drone flew: the median latitude and longitude of the shots of the MRK; for another source those
+        of the antenna at its shots (an autopilot log), else the approximate position in the header of the drone's
+        observations; None when nothing tells."""
+        places = [(shot.lat, shot.lon) for shot in self.shots]
+        if self.kind() != "mrk":
+            places = [(s.antenna[0], s.antenna[1]) for s in self._timed_shots() if s.antenna is not None]
+            info = self._observations(self.rover.path())
+            if not places and isinstance(info, rinex.RinexInfo) and info.approx_xyz is not None:
+                lat, lon, _h = rinex.ecef_to_llh(info.approx_xyz)
+                return lat, lon
+        if not places:
             return None
-        lats, lons = sorted(shot.lat for shot in self.shots), sorted(shot.lon for shot in self.shots)
+        lats, lons = sorted(lat for lat, _ in places), sorted(lon for _, lon in places)
         middle = len(lats) // 2
         if len(lats) % 2:
             return lats[middle], lons[middle]
@@ -877,9 +1411,14 @@ class PpkDialog(QDialog):
         """The permanent station chosen among those near the flight (:class:`.StationsDialog`)."""
         place = self._station_place()
         if place is None:
-            self.error.setText(tr("Il programma non sa dove è il rilievo: il Timestamp.MRK non ha scatti."))
+            self.error.setText(tr("Il programma non sa dove è il rilievo: il Timestamp.MRK non ha scatti.")
+                               if self.kind() == "mrk" else
+                               tr("Il programma non sa dove è il rilievo: scegli prima le osservazioni del drone."))
             return
         when = min(self.shots, key=lambda shot: shot.gps_time).utc if self.shots else None
+        timed = self._timed_shots()
+        if timed:
+            when = gshots.utc(min(timed, key=lambda shot: shot.gps_time))
         chosen = StationsDialog.ask(self, place[0], place[1], when)
         if chosen is not None:
             self.station = chosen
@@ -1016,6 +1555,9 @@ class PpkDialog(QDialog):
         read first; one still being read in the background is waited for."""
         if self._timer.isActive():
             self.refresh()
+        kind = self.kind()
+        if kind in _WITH_FILE and self.shots_file.path() is None:
+            return tr("Scegli il file degli scatti.")
         if self._mrk_problem:
             return tr("Il Timestamp.MRK non si può usare: {0}", self._mrk_problem)
         mode = self.mode()
@@ -1049,7 +1591,28 @@ class PpkDialog(QDialog):
                 return tr("Il drone (dal {0} al {1}) e la base (dal {2} al {3}) non hanno ore in comune: la base deve "
                           "registrare mentre il drone vola.", _when(rover_info.first), _when(rover_info.last),
                           _when(base_span[0]), _when(base_span[1]))
-        if rover_span and not any(rover_span[0] - _SLACK_S <= t <= rover_span[1] + _SLACK_S for t in times):
+        if kind != "mrk":
+            shotset = self._shotset(rover_info)
+            source = self.shots_file.path() or rover
+            if shotset is sw.RUNNING or shotset is None:
+                return tr("Il programma sta ancora leggendo {0}: attendi un momento.", source.name)
+            if isinstance(shotset, Exception):
+                return tr("Gli scatti non si possono usare: {0}", sw.unread(shotset))
+            times = [s.gps_time for s in shotset.shots if s.valid]
+            if not times:
+                return tr("Nessuno scatto con un tempo valido in {0}.", source.name)
+            if rover_span and not any(rover_span[0] - _SLACK_S <= t <= rover_span[1] + _SLACK_S for t in times):
+                return tr("Gli scatti (dal {0} al {1}) sono fuori dalle osservazioni del drone (dal {2} al {3}): non "
+                          "sono dello stesso volo.", _when(min(times)), _when(max(times)), _when(rover_info.first),
+                          _when(rover_info.last))
+            pairing = self._pairing(shotset) if self.chunk is not None else None
+            if pairing is sw.RUNNING:
+                return tr("Il programma sta ancora abbinando le foto agli scatti: attendi un momento.")
+            if isinstance(pairing, Exception):
+                return engine(str(pairing))
+            if pairing is not None and not pairing.kept:
+                return tr("Nessuna foto del chunk trova il suo scatto.")
+        elif rover_span and not any(rover_span[0] - _SLACK_S <= t <= rover_span[1] + _SLACK_S for t in times):
             return tr("Gli scatti del Timestamp.MRK (dal {0} al {1}) sono fuori dalle osservazioni del drone (dal {2} "
                       "al {3}): non sono dello stesso volo.", _when(min(times)), _when(max(times)),
                       _when(rover_info.first), _when(rover_info.last))
@@ -1090,7 +1653,13 @@ class PpkDialog(QDialog):
         placed (:data:`MODES`), the frame of the typed position and the epoch of its coordinates (in ITRF2020; None
         otherwise), the permanent station (:class:`.stations.Station`) for a station as the base or a baseline,
         ``"download"`` when igs20.atx is to be downloaded when the program has none, else ``"auto"``. A
-        ``ValueError`` for a typed position or epoch that is not one (see :meth:`problem`)."""
+        ``ValueError`` for a typed position or epoch that is not one (see :meth:`problem`).
+
+        This is the whole answer for the Timestamp.MRK the dialog was opened with; for any other source of the shots
+        (and for another MRK named in the field) the keys of :meth:`shots_values` are there too. A raw log is
+        answered as it was named: the run converts it (at once: the conversion is kept); ``"approx_time"`` (a datetime
+        in GPS time) is there when the day of the flight was asked and typed (:meth:`_asks_day`): the approximate time
+        of that conversion."""
         mode = self.mode()
         typed = frame = epoch = None
         if mode == "typed":
@@ -1100,10 +1669,31 @@ class PpkDialog(QDialog):
                     raise ValueError(wrong)
         bases = self.base.paths()
         base = None if mode == "station" else (bases[0] if len(bases) == 1 else (bases or None))
-        return {"rover": self.rover.path(), "base": base, "navs": self.nav_paths(), "base_position": typed,
-                "replace_fix": self.replace_fix.isChecked(), "base_mode": mode, "base_frame": frame,
-                "base_epoch": epoch, "station": self.station if mode in _WITH_STATION else None,
-                "atx": "download" if self.atx_download.isChecked() else "auto"}
+        out = {"rover": self.rover.path(), "base": base, "navs": self.nav_paths(), "base_position": typed,
+               "replace_fix": self.replace_fix.isChecked(), "base_mode": mode, "base_frame": frame,
+               "base_epoch": epoch, "station": self.station if mode in _WITH_STATION else None,
+               "atx": "download" if self.atx_download.isChecked() else "auto"}
+        if self.kind() != "mrk" or self.shots_file.path() != self.mrk:
+            out.update(self.shots_values())
+        day = self._day()
+        if isinstance(day, datetime):
+            out["approx_time"] = day
+        return out
+
+    def shots_values(self) -> dict:
+        """``{"shots", "lever_body_mm", "latency_ms", "by"}``: the source of the shots - ``{"kind"`` (one of
+        :data:`.sources.KINDS`), ``"file"`` (None for the events of the rover, and for a u-blox rover with its own time
+        marks), ``"edge"``, ``"message"``, ``"camera"``, ``"photos"}`` (the folder of the photos, None for an MRK and
+        when the window is to ask) -, the lever arm from the antenna to the camera in the body of the drone (mm
+        forward, right, down; None when all zero), the latency of the camera in milliseconds - both as typed, with
+        their panel open or closed -, how the photos are paired (:data:`.shots.BY`)."""
+        kind = self.kind()
+        return {"shots": {"kind": kind, "file": None if kind == "events" else self.shots_file.path(),
+                          "edge": self.edge.currentData() if kind == "ubx" else events.EDGES[0],
+                          "message": self.message.currentData() if kind == "log" else "auto",
+                          "camera": self._camera(), "photos": self._photos()},
+                "lever_body_mm": self._lever(), "latency_ms": self._latency_ms(),
+                "by": self.by.currentData() if kind != "mrk" else "auto"}
 
     def accept(self) -> None:
         problem = self.problem()
@@ -1115,7 +1705,11 @@ class PpkDialog(QDialog):
 
     @classmethod
     def ask(cls, parent, mrk, work=None, chunk=None) -> dict | None:
-        """The answer of the dialog for the Timestamp.MRK ``mrk``, the work folder ``work`` and the chunk ``chunk``
-        (its last run, its photos: :class:`PpkDialog`) (:meth:`values`), None when it is cancelled."""
+        """The answer of the dialog for the file ``mrk`` (a Timestamp.MRK, or what else tells the shots:
+        :func:`opening_kind`), the work folder ``work`` and the chunk ``chunk`` (its last run, its photos:
+        :class:`PpkDialog`) (:meth:`values`), None when it is cancelled."""
         dialog = cls(mrk, parent, work, chunk)
-        return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        try:
+            return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()

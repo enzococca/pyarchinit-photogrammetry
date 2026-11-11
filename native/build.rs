@@ -1,8 +1,13 @@
 //! Builds RTKLIB (vendor/rtklib, rtklibexplorer's v2.5.1, BSD 2-clause) and the shim that offers
-//! its post-processing to Rust (src/ppk_shim.c) into a static library of the extension.
+//! its post-processing and its conversion of raw receiver logs to Rust (src/ppk_shim.c) into a
+//! static library of the extension.
 //!
 //! The sources are those rnx2rtkp is made of, with the settings of its builds (all the satellite
-//! systems, three frequencies, three extended observation codes); RTKLIB's files are not changed.
+//! systems, three frequencies, three extended observation codes), and those of convbin's
+//! conversion (convrnx.c, rcvraw.c) with five of its receiver decoders (rcv/ublox.c, rcv/novatel.c,
+//! rcv/septentrio.c, rcv/rt17.c, rcv/unicore.c); RTKLIB's files are not changed but for two local
+//! changes (vendor/rtklib/VERSION). The entry points of the other decoders, which rcvraw.c calls, are
+//! stubs of ours (src/rcv_stubs.c).
 //! postpos.c is compiled through the shim (see ppk_shim.c). sofa.c, which rnx2rtkp's makefile also
 //! lists, is not here: it holds routines of the IAU SOFA library (own licence), which rtkcmn.c calls
 //! only if SUNPOS_SOFA or MOONPOS_SOFA is defined, and neither is (see vendor/rtklib/VERSION).
@@ -18,11 +23,13 @@
 use std::env;
 use std::path::Path;
 
-/// RTKLIB's sources of rnx2rtkp (app/consapp/rnx2rtkp/gcc/makefile), postpos.c apart.
+/// RTKLIB's sources of rnx2rtkp (app/consapp/rnx2rtkp/gcc/makefile), postpos.c apart, and of convbin's conversion.
 const SOURCES: &[&str] = &[
     "rtkcmn.c", "trace.c", "rinex.c", "rtkpos.c", "solution.c", "lambda.c", "geoid.c", "sbas.c", "preceph.c",
     "pntpos.c", "ephemeris.c", "options.c", "ppp.c", "ppp_ar.c", "rtcm.c", "rtcm2.c", "rtcm3.c", "rtcm3e.c",
     "ionex.c", "tides.c",
+    // convbin's conversion (app/consapp/convbin/gcc/makefile) and the decoders built
+    "convrnx.c", "rcvraw.c", "rcv/ublox.c", "rcv/novatel.c", "rcv/septentrio.c", "rcv/rt17.c", "rcv/unicore.c",
 ];
 
 fn main() {
@@ -57,6 +64,7 @@ fn main() {
         build.file(src.join(name));
     }
     build.file("src/ppk_shim.c");
+    build.file("src/rcv_stubs.c");
     build.compile("rtklib");
 
     if windows {
@@ -67,5 +75,6 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=vendor/rtklib/src");
     println!("cargo:rerun-if-changed=src/ppk_shim.c");
+    println!("cargo:rerun-if-changed=src/rcv_stubs.c");
     println!("cargo:rerun-if-changed=build.rs");
 }

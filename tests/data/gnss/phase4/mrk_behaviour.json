@@ -1,0 +1,1841 @@
+{
+ "empty_mrk": {
+  "result": {
+   "matched": 0,
+   "photos": 2,
+   "shots": 0,
+   "shots_unmatched": [],
+   "status": {},
+   "unmatched": [
+    "DJI_0001",
+    "DJI_0002"
+   ]
+  }
+ },
+ "empty_names_mrk": {
+  "error": "Timestamp.MRK has 0 shots and <tmp>/empty_names has 2 photos, and the photo names carry no shot number: they cannot be paired by order"
+ },
+ "empty_names_ppk": {
+  "error": "Timestamp.MRK has 0 shots and <tmp>/empty_names has 2 photos, and the photo names carry no shot number: they cannot be paired by order"
+ },
+ "empty_names_state": {
+  "cameras": {
+   "a": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ],
+   "b": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ]
+  },
+  "memory": null
+ },
+ "empty_ppk": {
+  "error": "Timestamp.MRK: it has no shots, and the solution drone.pos has positions from 2005-04-02 00:00:00 to 2005-04-02 00:59:30 GPS time: they are not of the same flight"
+ },
+ "empty_state": {
+  "cameras": {
+   "DJI_0001": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ],
+   "DJI_0002": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ]
+  },
+  "memory": null
+ },
+ "numbered": {
+  "result": {
+   "matched": 3,
+   "photos": 5,
+   "shots": 5,
+   "shots_unmatched": [
+    3,
+    6
+   ],
+   "status": {
+    "fix": 2,
+    "single": 1
+   },
+   "unmatched": [
+    "DJI_20240512103015_0001_V",
+    "DJI_20240512103015_0003_V"
+   ]
+  }
+ },
+ "numbered_again": {
+  "result": {
+   "matched": 3,
+   "photos": 5,
+   "shots": 5,
+   "shots_unmatched": [
+    3,
+    6
+   ],
+   "status": {
+    "fix": 2,
+    "single": 1
+   },
+   "unmatched": [
+    "DJI_20240512103015_0001_V",
+    "DJI_20240512103015_0003_V"
+   ]
+  }
+ },
+ "numbered_state": {
+  "cameras": {
+   "DJI_20240512103015_0001_V": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "diff_age": null,
+     "epoch": null,
+     "flag": 50,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "dji_xmp",
+     "status": "fix",
+     "std": [
+      0.004,
+      0.004,
+      0.009
+     ]
+    },
+    "EPSG:4326"
+   ],
+   "DJI_20240512103015_0002_V": [
+    [
+     14.265996409827167,
+     41.13402108051507,
+     94.161
+    ],
+    [
+     0.022,
+     0.024,
+     0.044
+    ],
+    true,
+    {
+     "accuracy": [
+      0.022,
+      0.024,
+      0.044
+     ],
+     "antenna": [
+      14.26600034,
+      41.13402,
+      94.35
+     ],
+     "epoch": 2024.3616240196823,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      120.0,
+      -330.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 2,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2024-05-12T08:30:19.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_20240512103015_0003_V": [
+    [
+     14.25,
+     41.13333333333333,
+     123.4
+    ],
+    [
+     5.0,
+     5.0,
+     10.0
+    ],
+    true,
+    {
+     "accuracy": [
+      5.0,
+      5.0,
+      10.0
+     ],
+     "epoch": null,
+     "frame": "unknown",
+     "height": "exif",
+     "source": "exif",
+     "status": null
+    },
+    "EPSG:4326"
+   ],
+   "DJI_20240512103015_0004_V": [
+    [
+     14.266000471005801,
+     41.134039981991414,
+     94.161
+    ],
+    [
+     1.0,
+     1.0,
+     1.0
+    ],
+    true,
+    {
+     "accuracy": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "antenna": [
+      14.26600034,
+      41.13404,
+      94.35
+     ],
+     "epoch": 2024.3616241461748,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -2.0,
+      11.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 4,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2024-05-12T08:30:23.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_20240512103015_0005_V": [
+    [
+     14.265999863615196,
+     41.134050315150226,
+     94.17999999999999
+    ],
+    [
+     0.022,
+     0.024,
+     0.044
+    ],
+    true,
+    {
+     "accuracy": [
+      0.022,
+      0.024,
+      0.044
+     ],
+     "antenna": [
+      14.26600034,
+      41.13405,
+      94.35
+     ],
+     "epoch": 2024.3616242094213,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      35.0,
+      -40.0,
+      170.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 5,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2024-05-12T08:30:25.400000+00:00"
+    },
+    "EPSG:4979"
+   ]
+  },
+  "memory": null
+ },
+ "order": {
+  "result": {
+   "matched": 4,
+   "photos": 4,
+   "shots": 4,
+   "shots_unmatched": [],
+   "status": {
+    "fix": 2,
+    "float": 1,
+    "single": 1
+   },
+   "unmatched": []
+  }
+ },
+ "order_refused": {
+  "error": "Timestamp.MRK has 5 shots and <tmp>/order has 4 photos, and the photo names carry no shot number: they cannot be paired by order"
+ },
+ "order_state": {
+  "cameras": {
+   "a": [
+    [
+     14.266000280392154,
+     41.200010090041886,
+     94.19999999999999
+    ],
+    [
+     0.022,
+     0.024,
+     0.044
+    ],
+    true,
+    {
+     "accuracy": [
+      0.022,
+      0.024,
+      0.044
+     ],
+     "antenna": [
+      14.26600034,
+      41.20001,
+      94.35
+     ],
+     "epoch": 2024.3616239880591,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      10.0,
+      -5.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 1,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2024-05-12T08:30:18.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "b": [
+    [
+     14.266000220784289,
+     41.200020180083776,
+     94.19999999999999
+    ],
+    [
+     0.2,
+     0.2,
+     0.2
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.2
+     ],
+     "antenna": [
+      14.26600034,
+      41.20002,
+      94.35
+     ],
+     "epoch": 2024.3616240829285,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      20.0,
+      -10.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 2,
+     "source": "dji_mrk",
+     "status": "float",
+     "utc": "2024-05-12T08:30:21.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "c": [
+    [
+     14.266000161176407,
+     41.20003027012566,
+     94.19999999999999
+    ],
+    [
+     1.0,
+     1.0,
+     1.0
+    ],
+    true,
+    {
+     "accuracy": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "antenna": [
+      14.26600034,
+      41.20003,
+      94.35
+     ],
+     "epoch": 2024.361624177798,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      30.0,
+      -15.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 3,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2024-05-12T08:30:24.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "d": [
+    [
+     14.266000101568507,
+     41.20004036016755,
+     94.19999999999999
+    ],
+    [
+     0.022,
+     0.024,
+     0.044
+    ],
+    true,
+    {
+     "accuracy": [
+      0.022,
+      0.024,
+      0.044
+     ],
+     "antenna": [
+      14.26600034,
+      41.20004,
+      94.35
+     ],
+     "epoch": 2024.3616242726675,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      40.0,
+      -20.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 4,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2024-05-12T08:30:27.400000+00:00"
+    },
+    "EPSG:4979"
+   ]
+  },
+  "memory": null
+ },
+ "other_day": {
+  "error": "Timestamp.MRK: its shots were taken from 2005-04-03 00:00:05 to 2005-04-03 00:00:10 GPS time, and the solution drone.pos has positions from 2005-04-02 00:00:00 to 2005-04-02 00:59:30 GPS time: they are not of the same flight"
+ },
+ "ppk": {
+  "result": {
+   "baseline_km": null,
+   "kept_fix": 2,
+   "matched": 4,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [
+    1,
+    4,
+    9
+   ],
+   "status": {
+    "fix": 1,
+    "float": 3
+   },
+   "unmatched": [
+    "DJI_0001",
+    "DJI_0004",
+    "DJI_0009"
+   ],
+   "warnings": [
+    "3 photos were taken where the solution drone.pos has no position (a gap of more than 1 s between two of its epochs, or before the first or after the last): they keep the position they had",
+    "2 photos with an onboard RTK fix kept their positions, which are 2.93 m (median) from the PPK positions of the same shots: the base is likely in another reference frame than the drone's RTK corrections (a network in ETRF and a base in ITRF, or the other way round) or at a wrong position, and the flight now mixes the two. Check the position of the base, or compute again replacing the onboard fixes too, so that every photo is in the frame of the base"
+   ]
+  }
+ },
+ "ppk_far": {
+  "result": {
+   "baseline_km": null,
+   "kept_fix": 0,
+   "matched": 6,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [
+    1,
+    4,
+    9
+   ],
+   "status": {
+    "fix": 2,
+    "float": 3,
+    "single": 1
+   },
+   "unmatched": [
+    "DJI_0001",
+    "DJI_0004",
+    "DJI_0009"
+   ],
+   "warnings": [
+    "3 photos were taken where the solution drone.pos has no position (a gap of more than 1 s between two of its epochs, or before the first or after the last): they keep the position they had",
+    "the solution drone.pos puts the antenna 159 m (median) from where the drone's own receiver put it in Timestamp.MRK: the rover's observations may be those of the base, or of another receiver"
+   ]
+  }
+ },
+ "ppk_far_mrk": {
+  "result": {
+   "matched": 9,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [],
+   "status": {
+    "single": 9
+   },
+   "unmatched": []
+  }
+ },
+ "ppk_far_state": {
+  "cameras": {
+   "DJI_0001": [
+    [
+     139.6242801206925,
+     35.13349998197294,
+     73.911
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.1335,
+      74.1
+     ],
+     "epoch": 2005.249313704972,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -2.0,
+      11.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 1,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-01T23:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0002": [
+    [
+     139.62429737928957,
+     35.13206708162369,
+     75.501
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "antenna": [
+      139.624301,
+      35.132066,
+      75.69
+     ],
+     "base": {},
+     "epoch": 2005.2493146562658,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      120.0,
+      -330.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 1,
+     "rover": "",
+     "shot": 2,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "fix",
+     "utc": "2005-04-01T23:59:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0003": [
+    [
+     139.6243011,
+     35.1320661,
+     75.541
+    ],
+    [
+     0.2,
+     0.2,
+     0.2
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.2
+     ],
+     "antenna": [
+      139.6243011,
+      35.1320661,
+      75.691
+     ],
+     "base": {},
+     "epoch": 2005.2493156075723,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      0.0,
+      0.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 3,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:00:17.000400+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0004": [
+    [
+     139.62427956111821,
+     35.133500315473576,
+     73.92999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.1335,
+      74.1
+     ],
+     "epoch": 2005.2493170345003,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      35.0,
+      -40.0,
+      170.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 4,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:01:02+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0005": [
+    [
+     139.62430157429625,
+     35.13206575918816,
+     75.533
+    ],
+    [
+     0.5,
+     0.6,
+     1.0
+    ],
+    true,
+    {
+     "accuracy": [
+      0.5,
+      0.6,
+      1.0
+     ],
+     "antenna": [
+      139.6243013,
+      35.1320663,
+      75.693
+     ],
+     "base": {},
+     "epoch": 2005.2493175101472,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -60.0,
+      25.0,
+      160.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 4,
+     "rover": "",
+     "shot": 5,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:01:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0006": [
+    [
+     139.62430238746649,
+     35.13206712108246,
+     75.554
+    ],
+    [
+     1.0,
+     1.0,
+     1.8
+    ],
+    true,
+    {
+     "accuracy": [
+      1.0,
+      1.0,
+      1.8
+     ],
+     "antenna": [
+      139.6243014,
+      35.1320664,
+      75.694
+     ],
+     "base": {},
+     "epoch": 2005.249318461441,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      80.0,
+      90.0,
+      140.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 5,
+     "rover": "",
+     "shot": 6,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "single",
+     "utc": "2005-04-02T00:01:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0007": [
+    [
+     139.62430397436995,
+     35.132066604797025,
+     75.52179999959468
+    ],
+    [
+     0.2,
+     0.2,
+     0.24
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.24
+     ],
+     "antenna": [
+      139.62430177999997,
+      35.132066739999985,
+      75.70179999959468
+     ],
+     "base": {},
+     "epoch": 2005.2493194254187,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -15.0,
+      200.0,
+      180.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 7,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:02:17.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0008": [
+    [
+     139.6243127902815,
+     35.1320779901353,
+     75.634
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "antenna": [
+      139.6243129,
+      35.1320779,
+      75.809
+     ],
+     "base": {},
+     "epoch": 2005.2494278602232,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      10.0,
+      -10.0,
+      175.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 1,
+     "rover": "",
+     "shot": 8,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "fix",
+     "utc": "2005-04-02T00:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0009": [
+    [
+     139.62428005486024,
+     35.13350004506765,
+     73.94999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.1335,
+      74.1
+     ],
+     "epoch": 2005.249428177321,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      5.0,
+      5.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 9,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:59:27+00:00"
+    },
+    "EPSG:4979"
+   ]
+  },
+  "memory": {
+   "last": {
+    "base": null,
+    "base_name": null,
+    "epoch": null,
+    "frame": null,
+    "mrk": "<tmp>/ppk_far/Timestamp.MRK",
+    "navs": [],
+    "photos": null,
+    "position": null,
+    "position_source": null,
+    "replace_fix": false,
+    "rover": null,
+    "solution": "drone.pos",
+    "station": null
+   }
+  }
+ },
+ "ppk_mrk": {
+  "result": {
+   "matched": 9,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [],
+   "status": {
+    "fix": 2,
+    "float": 1,
+    "single": 6
+   },
+   "unmatched": []
+  }
+ },
+ "ppk_replace": {
+  "result": {
+   "baseline_km": null,
+   "kept_fix": 0,
+   "matched": 6,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [
+    1,
+    4,
+    9
+   ],
+   "status": {
+    "fix": 2,
+    "float": 3,
+    "single": 1
+   },
+   "unmatched": [
+    "DJI_0001",
+    "DJI_0004",
+    "DJI_0009"
+   ],
+   "warnings": [
+    "3 photos were taken where the solution drone.pos has no position (a gap of more than 1 s between two of its epochs, or before the first or after the last): they keep the position they had",
+    "1 photo had an onboard RTK fix and now has a PPK position that is not fix (float or single)"
+   ]
+  }
+ },
+ "ppk_replace_mrk": {
+  "result": {
+   "matched": 9,
+   "photos": 9,
+   "shots": 9,
+   "shots_unmatched": [],
+   "status": {
+    "fix": 2,
+    "float": 1,
+    "single": 6
+   },
+   "unmatched": []
+  }
+ },
+ "ppk_replace_state": {
+  "cameras": {
+   "DJI_0001": [
+    [
+     139.6242801206904,
+     35.132079981972936,
+     73.911
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.249313704972,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -2.0,
+      11.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 1,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-01T23:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0002": [
+    [
+     139.62429737928957,
+     35.13206708162369,
+     75.501
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "antenna": [
+      139.624301,
+      35.132066,
+      75.69
+     ],
+     "base": {},
+     "epoch": 2005.2493146562658,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      120.0,
+      -330.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 1,
+     "rover": "",
+     "shot": 2,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "fix",
+     "utc": "2005-04-01T23:59:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0003": [
+    [
+     139.6243011,
+     35.1320661,
+     75.541
+    ],
+    [
+     0.2,
+     0.2,
+     0.2
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.2
+     ],
+     "antenna": [
+      139.6243011,
+      35.1320661,
+      75.691
+     ],
+     "base": {},
+     "epoch": 2005.2493156075723,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      0.0,
+      0.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 3,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:00:17.000400+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0004": [
+    [
+     139.62427956112583,
+     35.13208031547366,
+     73.92999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.2493170345003,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      35.0,
+      -40.0,
+      170.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 4,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:01:02+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0005": [
+    [
+     139.62430157429625,
+     35.13206575918816,
+     75.533
+    ],
+    [
+     0.5,
+     0.6,
+     1.0
+    ],
+    true,
+    {
+     "accuracy": [
+      0.5,
+      0.6,
+      1.0
+     ],
+     "antenna": [
+      139.6243013,
+      35.1320663,
+      75.693
+     ],
+     "base": {},
+     "epoch": 2005.2493175101472,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -60.0,
+      25.0,
+      160.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 4,
+     "rover": "",
+     "shot": 5,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:01:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0006": [
+    [
+     139.62430238746649,
+     35.13206712108246,
+     75.554
+    ],
+    [
+     1.0,
+     1.0,
+     1.8
+    ],
+    true,
+    {
+     "accuracy": [
+      1.0,
+      1.0,
+      1.8
+     ],
+     "antenna": [
+      139.6243014,
+      35.1320664,
+      75.694
+     ],
+     "base": {},
+     "epoch": 2005.249318461441,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      80.0,
+      90.0,
+      140.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 5,
+     "rover": "",
+     "shot": 6,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "single",
+     "utc": "2005-04-02T00:01:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0007": [
+    [
+     139.62430397436995,
+     35.132066604797025,
+     75.52179999959468
+    ],
+    [
+     0.2,
+     0.2,
+     0.24
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.24
+     ],
+     "antenna": [
+      139.62430177999997,
+      35.132066739999985,
+      75.70179999959468
+     ],
+     "base": {},
+     "epoch": 2005.2493194254187,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -15.0,
+      200.0,
+      180.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 7,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:02:17.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0008": [
+    [
+     139.6243127902815,
+     35.1320779901353,
+     75.634
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "antenna": [
+      139.6243129,
+      35.1320779,
+      75.809
+     ],
+     "base": {},
+     "epoch": 2005.2494278602232,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      10.0,
+      -10.0,
+      175.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 1,
+     "rover": "",
+     "shot": 8,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "fix",
+     "utc": "2005-04-02T00:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0009": [
+    [
+     139.62428005485927,
+     35.13208004506767,
+     73.94999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.249428177321,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      5.0,
+      5.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 9,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:59:27+00:00"
+    },
+    "EPSG:4979"
+   ]
+  },
+  "memory": {
+   "last": {
+    "base": null,
+    "base_name": null,
+    "epoch": null,
+    "frame": null,
+    "mrk": "<tmp>/ppk_replace/Timestamp.MRK",
+    "navs": [],
+    "photos": null,
+    "position": null,
+    "position_source": null,
+    "replace_fix": true,
+    "rover": null,
+    "solution": "drone.pos",
+    "station": null
+   }
+  }
+ },
+ "ppk_state": {
+  "cameras": {
+   "DJI_0001": [
+    [
+     139.6242801206904,
+     35.132079981972936,
+     73.911
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.249313704972,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -2.0,
+      11.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 1,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-01T23:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0002": [
+    [
+     139.62427637928803,
+     35.13208108162396,
+     73.911
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.2493146562658,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      120.0,
+      -330.0,
+      189.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 2,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2005-04-01T23:59:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0003": [
+    [
+     139.6243011,
+     35.1320661,
+     75.541
+    ],
+    [
+     0.2,
+     0.2,
+     0.2
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.2
+     ],
+     "antenna": [
+      139.6243011,
+      35.1320661,
+      75.691
+     ],
+     "base": {},
+     "epoch": 2005.2493156075723,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      0.0,
+      0.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 3,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:00:17.000400+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0004": [
+    [
+     139.62427956112583,
+     35.13208031547366,
+     73.92999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.2493170345003,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      35.0,
+      -40.0,
+      170.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 4,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:01:02+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0005": [
+    [
+     139.62430157429625,
+     35.13206575918816,
+     75.533
+    ],
+    [
+     0.5,
+     0.6,
+     1.0
+    ],
+    true,
+    {
+     "accuracy": [
+      0.5,
+      0.6,
+      1.0
+     ],
+     "antenna": [
+      139.6243013,
+      35.1320663,
+      75.693
+     ],
+     "base": {},
+     "epoch": 2005.2493175101472,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -60.0,
+      25.0,
+      160.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 4,
+     "rover": "",
+     "shot": 5,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:01:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0006": [
+    [
+     139.6242809874669,
+     35.13208072108264,
+     73.96
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.249318461441,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      80.0,
+      90.0,
+      140.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 6,
+     "source": "dji_mrk",
+     "status": "fix",
+     "utc": "2005-04-02T00:01:47+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0007": [
+    [
+     139.62430397436995,
+     35.132066604797025,
+     75.52179999959468
+    ],
+    [
+     0.2,
+     0.2,
+     0.24
+    ],
+    true,
+    {
+     "accuracy": [
+      0.2,
+      0.2,
+      0.24
+     ],
+     "antenna": [
+      139.62430177999997,
+      35.132066739999985,
+      75.70179999959468
+     ],
+     "base": {},
+     "epoch": 2005.2493194254187,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      -15.0,
+      200.0,
+      180.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 2,
+     "rover": "",
+     "shot": 7,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "float",
+     "utc": "2005-04-02T00:02:17.400000+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0008": [
+    [
+     139.6243127902815,
+     35.1320779901353,
+     75.634
+    ],
+    [
+     0.01,
+     0.01,
+     0.018
+    ],
+    true,
+    {
+     "accuracy": [
+      0.01,
+      0.01,
+      0.018
+     ],
+     "antenna": [
+      139.6243129,
+      35.1320779,
+      75.809
+     ],
+     "base": {},
+     "epoch": 2005.2494278602232,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      10.0,
+      -10.0,
+      175.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "q": 1,
+     "rover": "",
+     "shot": 8,
+     "solution": "drone.pos",
+     "source": "ppk",
+     "status": "fix",
+     "utc": "2005-04-02T00:59:17+00:00"
+    },
+    "EPSG:4979"
+   ],
+   "DJI_0009": [
+    [
+     139.62428005485927,
+     35.13208004506767,
+     73.94999999999999
+    ],
+    [
+     2.8,
+     2.4,
+     5.8
+    ],
+    true,
+    {
+     "accuracy": [
+      2.8,
+      2.4,
+      5.8
+     ],
+     "antenna": [
+      139.62428,
+      35.13208,
+      74.1
+     ],
+     "epoch": 2005.249428177321,
+     "frame": "unknown",
+     "height": "ellipsoidal",
+     "lever_arm_ned_mm": [
+      5.0,
+      5.0,
+      150.0
+     ],
+     "mrk": "Timestamp.MRK",
+     "shot": 9,
+     "source": "dji_mrk",
+     "status": "single",
+     "utc": "2005-04-02T00:59:27+00:00"
+    },
+    "EPSG:4979"
+   ]
+  },
+  "memory": {
+   "last": {
+    "base": null,
+    "base_name": null,
+    "epoch": null,
+    "frame": null,
+    "mrk": "<tmp>/ppk/Timestamp.MRK",
+    "navs": [],
+    "photos": null,
+    "position": null,
+    "position_source": null,
+    "replace_fix": false,
+    "rover": null,
+    "solution": "drone.pos",
+    "station": null
+   }
+  }
+ }
+}

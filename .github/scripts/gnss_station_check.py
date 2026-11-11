@@ -3,7 +3,7 @@ of the EPN 20 to 60 km away and the Hatanaka files of the archive, checked again
 gnss-check runs it on demand, with the native core built from the branch:
 
     python .github/scripts/gnss_station_check.py [--station MEDI00ITA] [--day 2026-10-06] [--partner BOLG00ITA]
-        [--crx2rnx RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX] [--work DIR]
+        [--crx2rnx RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX] [--receiver-log no|yes|only] [--work DIR]
 
 The program downloads what it needs as it does for a user - the day of the two stations from BKG
 (stations.download_observations), the precise products of ESA, CODE or the IGS (ppp.products), igs20.atx, the broadcast
@@ -24,6 +24,15 @@ The checks; every number is printed, and the script exits with 1 when one fails:
 * every Hatanaka file of the two stations decoded by the program (rinex.plain: gzip, then the crx2rnx of the native
   core) and by the official CRX2RNX: the same bytes. One difference is known and told as such: CRX2RNX 4.2.0 writes a
   negative receiver clock offset of whole tenths of a millisecond one tenth nearer zero (tests/data/crinex/README.md).
+* with ``--receiver-log yes`` (``only``: this check alone, which needs neither a station nor CRX2RNX) the raw log of a
+  receiver as a self-built drone carries one: a u-blox ZED-F9P standing 20 minutes beside a surveyed point, 2.8 km from
+  the permanent station whose RINEX file is its base, of the dataset of Tomaštík and Everett (:data:`DATASET`, CC BY
+  4.0). The three files are downloaded from Mendeley Data by the addresses of version 2 and checked by their SHA-256;
+  the log is converted (convert.to_rinex) and solved as a static baseline (ppk.solve) from the base at the position
+  of its header, which is in the frame of the surveyed point. The antenna stood 7.5 cm east of the point, as the
+  dataset says: the position must be fixed and at most 0.03 m in plan from there. The height is printed only: the
+  files do not say how high the antenna stood above the point. When Mendeley Data cannot be reached the check is
+  told as not made and fails nothing; a file that is not the published one fails it.
 """
 from __future__ import annotations
 
@@ -52,6 +61,23 @@ PARTNER_KM = (20.0, 60.0)  # how far the station of the baseline is, an EPN stat
 # the shorter sessions, hours of GPS time: around midday, when drones fly and the ionosphere is at its strongest
 SHORT_SESSIONS = (("4 h", 10, 14), ("2 h", 11, 13))  # PPPs, printed only
 BASELINE_HOURS = (11, 13)  # the static baseline
+
+# the raw log of a receiver (--receiver-log): Tomaštík, J., Everett, T. (2023), "u-Blox F9P and Google Pixel 5
+# (repeated 20 minutes static measurements under variable conditions)", Mendeley Data, V2, doi:10.17632/83bvxzx3bj.2
+# (CC BY 4.0);
+# the paper of the dataset: https://doi.org/10.3390/s23063136
+DATASET = "https://data.mendeley.com/datasets/83bvxzx3bj/2"
+DATASET_FILES = "https://data.mendeley.com/public-files/datasets/83bvxzx3bj/files/{0}/file_downloaded"
+# the open area, leaf-off, 2022-02-24: name, the id of the file in version 2, SHA-256
+RECEIVER_LOG = ("COM16_220224_102025.ubx", "43842d4d-4013-4d3d-9ce1-82ae3968d1d9",
+                "0c50b2ea70bcab92833cdcfb282ce8a6e2e83cd174b6e4278abac9203f5e07d8")
+RECEIVER_BASE = ("ZVOL055K00.22o", "9a38491d-153b-4a48-91c6-e8436c718853",
+                 "2b5fef72ec55a873d0e4f17f8ec709d77d888312aa6c23257b31076abc6dac87")
+RECEIVER_POINTS = ("reference.txt", "1e7f75de-d4ae-4aab-a21b-5b37a2c33bf5",
+                   "cb35da2904c0e8e9166285254b9ad412bed7483a5c1f08b5e88303cbb412f489")
+RECEIVER_EAST_M = 0.075  # the antenna of the receiver east of the surveyed point (reference.txt)
+RECEIVER_LIMIT = 0.03  # m, plan: a fixed static baseline of 20 minutes over 2.8 km against the surveyed point
+POINT = re.compile(r"\[\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\]")
 # the multi-year solution of the EPN in IGS20: those in ETRF2000, ETRF2014, ETRF2020 have the frame in the name, the
 # stations with less than 3 years are in the _short file (positions only)
 SSC_NAME = re.compile(r"EUR0OPSSNX_\d{7}_\d{7}_\d{2}[A-Z]_SOL\.SSC")
@@ -468,6 +494,45 @@ def check_baseline(main, partner, main_day: Path, partner_day: Path, day: date, 
                                    f"{1000 * height_limit:g})", ok)
 
 
+def check_receiver_log(folder: Path) -> Outcome:
+    """The raw log of a u-blox receiver of :data:`DATASET` converted and solved as a static baseline from the
+    permanent station of the dataset, against the surveyed point the antenna stood :data:`RECEIVER_EAST_M` east of.
+    Not made (printed only) when the files cannot be downloaded."""
+    from pyarchinit_photogrammetry.gnss import convert, download, ppk
+
+    files = []
+    for name, file_id, sha256 in (RECEIVER_LOG, RECEIVER_BASE, RECEIVER_POINTS):
+        try:
+            files.append(download.fetch(DATASET_FILES.format(file_id), folder / "files" / name, sha256=sha256))
+        except download.DownloadError as exc:
+            if "SHA-256" in str(exc):  # the file is there and is another one: to be looked at
+                raise
+            say(f"    {name}: {exc}")
+            return Outcome("Receiver log", f"not made: {name} could not be downloaded from Mendeley Data", None)
+    log, base_obs, points = files
+    found = POINT.search(points.read_text(encoding="utf-8", errors="replace"))
+    if not found:
+        raise CheckError(f"{points.name}: no surveyed point in it")
+    point = tuple(float(v) for v in found.groups())  # the first one: the open area
+    converted = convert.to_rinex(log, folder / "converted")
+    say(f"  {log.name}: {converted.kind}, {converted.epochs} epochs, {converted.events} events, navigation "
+        f"{converted.nav.name if converted.nav else 'none'}; {len(converted.warnings)} warnings")
+    solution = ppk.solve(converted.obs, base_obs, navs=[converted.nav] if converted.nav else None,
+                         folder=folder / "baseline", mode="static", static_single=True)
+    (lat, lon, h), q, sd = ppk.static_position(solution.path)
+    km = ppk.baseline_km(solution)
+    say(f"    {km:.3f} km from {solution.base['name']} (its position: {solution.base['position_source']}), "
+        f"{ppk.status(q)} (Q={q}), formal sigma east north up {mm(sd)}; {len(solution.warnings)} warnings")
+    for warning in solution.warnings:
+        say(f"      {warning}")
+    d = enu(ecef(lat, lon, h) - ecef(*point), point[0], point[1]) - np.array([RECEIVER_EAST_M, 0.0, 0.0])
+    plan, up = difference(f"antenna - the point {1000 * RECEIVER_EAST_M:g} mm east of the surveyed one", d)
+    ok = q == 1 and plan <= RECEIVER_LIMIT
+    return Outcome("Receiver log", f"u-blox log, {converted.epochs} epochs, {km:.1f} km, {ppk.status(q)}: plan "
+                                   f"{1000 * plan:.1f} mm (at most {1000 * RECEIVER_LIMIT:g}); height "
+                                   f"{1000 * up:+.1f} mm above the point (printed only)", ok)
+
+
 # --- the run ---------------------------------------------------------------------------------------------------------
 
 
@@ -481,6 +546,9 @@ def arguments(argv=None) -> argparse.Namespace:
                         help="the station of the baseline; empty: the nearest station of the EPN 20-60 km away that "
                              "has coordinates in the multi-year solution and its day at 30 s")
     parser.add_argument("--crx2rnx", default="", help="the official CRX2RNX of RNXCMP; empty: CRX2RNX in the PATH")
+    parser.add_argument("--receiver-log", choices=("no", "yes", "only"), default="no",
+                        help="the raw log of a u-blox receiver of a public dataset, converted and solved against its "
+                             "base (yes), or that check alone (only); default no")
     parser.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "ppg-gnss-check"),
                         help="the folder of the downloads and of the runs; default ppg-gnss-check in the temporary "
                              "folder of the system")
@@ -495,6 +563,27 @@ def run(args: argparse.Namespace, work: Path) -> list[Outcome]:
         f"{sys.version.split()[0]}; GNSS folder {os.environ['PPG_GNSS_DIR']}")
     if not (_native.supports("ppk") and _native.supports("crinex")):
         raise CheckError("the native core with RTKLIB and crx2rnx (0.6 or later) is not installed, or PPG_NATIVE is 0")
+    outcomes: list[Outcome] = []
+
+    def attempt(name: str, check):
+        try:
+            return check()
+        except Exception as exc:  # one check that cannot be made does not stop the others
+            traceback.print_exc(file=sys.stdout)
+            outcomes.append(Outcome(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}", False))
+            return None
+
+    def receiver_log() -> None:
+        say(f"\nThe raw log of a receiver ({DATASET})")
+        found = attempt("Receiver log", lambda: check_receiver_log(work / "receiver"))
+        if found:
+            outcomes.append(found)
+
+    if args.receiver_log == "only":
+        if not _native.supports("convbin"):
+            raise CheckError("the native core cannot convert raw logs")
+        receiver_log()
+        return outcomes
     crx2rnx = args.crx2rnx or shutil.which("CRX2RNX")
     if not crx2rnx:
         raise CheckError("no official CRX2RNX: give --crx2rnx (RNXCMP 4.2.0, https://terras.gsi.go.jp/ja/crx2rnx.html)")
@@ -528,16 +617,6 @@ def run(args: argparse.Namespace, work: Path) -> list[Outcome]:
     main_day, main_pieces = observations(main, day, work / "obs")
     partner_day, partner_pieces = observations(partner, day, work / "obs")
 
-    outcomes: list[Outcome] = []
-
-    def attempt(name: str, check):
-        try:
-            return check()
-        except Exception as exc:  # one check that cannot be made does not stop the others
-            traceback.print_exc(file=sys.stdout)
-            outcomes.append(Outcome(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}", False))
-            return None
-
     say("\nHatanaka: the program against the official CRX2RNX")
     found = attempt("Hatanaka", lambda: check_hatanaka(main_pieces + partner_pieces, crx2rnx, work / "hatanaka"))
     if found:
@@ -561,6 +640,8 @@ def run(args: argparse.Namespace, work: Path) -> list[Outcome]:
                                                            reference))
     if found:
         outcomes.append(found)
+    if args.receiver_log == "yes":
+        receiver_log()
     return outcomes
 
 
@@ -592,7 +673,9 @@ def main(argv=None) -> int:
             traceback.print_exc(file=sys.stdout)
         say(f"\nThe check could not be made: {exc}")
         return 1
-    report(outcomes, f"GNSS check of {args.station.upper()} on {day_of(args.day)}")
+    title = (f"GNSS check of {args.station.upper()} on {day_of(args.day)}" if args.receiver_log != "only"
+             else "GNSS check of the raw log of a receiver")
+    report(outcomes, title)
     return 0 if outcomes and all(o.passed is not False for o in outcomes) else 1
 
 

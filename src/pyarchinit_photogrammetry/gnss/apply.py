@@ -2,26 +2,25 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
-from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 
 from ..core.camera import Camera, Reference
-from ..core.chunk import IMAGE_EXTENSIONS, Chunk
-from . import dji, frames, ppk, rinex
+from ..core.chunk import Chunk
+from . import dji, frames, lever, ppk, rinex, shots as shots_module
+from .shots import Pairing, Shot, ShotSet, photo_time  # noqa: F401  (photo_time: read here by positions)
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
 NO_RTK = [5.0, 5.0, 10.0]
 
-CLOCK_TOLERANCE_S = 3.0  # a photo belongs to its shot when its time is this close to the clock of the flight
-ZONE_STEP_S = 900.0  # the camera keeps the local time: whole quarter hours from UTC ...
-ZONE_TOLERANCE_S = 120.0  # ... give or take the drift of its clock ...
-ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
 # a PPK solution that puts the antenna this far (median, m) from the drone's own positions in the MRK: a warning
+# chunk.meta[SHOT_RUNS][key]: what a run with shots other than those of a DJI MRK leaves to say (_remember_shots), by
+# the key of the run (shot_run_key)
+SHOT_RUNS = "gnss_shot_runs"
 FAR_FROM_MRK_M = 50.0
 # where the drone's own RTK puts a photo: the XMP of a DJI photo (added with the photos) and a DJI Timestamp.MRK
 ONBOARD_SOURCES = (dji.SOURCE_XMP, dji.SOURCE_MRK)
@@ -114,18 +113,178 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
     Returns ``{"matched", "shots", "photos", "status": {status: count}, "unmatched": [label],
     "shots_unmatched": [index]}``: ``unmatched`` are the photos of the folder left without a position (no line
     for them, not in the chunk, or not on time), ``shots_unmatched`` the shots that gave no photo theirs."""
-    pairing = _pair_shots(chunk, mrk_path, photos_folder)
-    placed = []
+    result = apply_shots(chunk, shots_module.from_mrk(mrk_path), photos_folder, by="auto")
+    return {key: result[key] for key in _RESULT}
+
+
+_RESULT = ("matched", "shots", "photos", "status", "unmatched", "shots_unmatched")  # what apply_mrk returns
+_PPK_RESULT = _RESULT + ("kept_fix", "baseline_km", "warnings")  # and apply_ppk
+
+
+def _check_lever(shotset: ShotSet, body_lever_mm) -> None:
+    if body_lever_mm is not None and any(s.lever_ned_mm is not None for s in shotset.shots):
+        raise ValueError(f"{shotset.name or shotset.kind}: its shots carry their own lever arm (north, east, down): "
+                         "a lever arm in the body of the drone is not for them")
+
+
+def _camera(shot: Shot, lat: float, lon: float, h: float, body_lever_mm) -> tuple[list[float], dict | None, bool]:
+    """The camera ``[lon, lat, h]`` of ``shot`` whose antenna is at ``lat, lon, h``: with the arm of the shot (an MRK)
+    or ``body_lever_mm`` turned with its attitude (:func:`.lever.camera_from_antenna`); what ``meta["gnss"]["lever"]``
+    keeps of it; whether only its vertical part was applied (no attitude)."""
+    if shot.lever_ned_mm is not None:
+        lon_c, lat_c, h_c, _note = lever.camera_from_antenna(lat, lon, h, ned_mm=shot.lever_ned_mm)
+        return [lon_c, lat_c, h_c], {"ned_mm": list(shot.lever_ned_mm)}, False
+    if body_lever_mm is None:
+        return [float(lon), float(lat), float(h)], None, False
+    body = [float(v) for v in body_lever_mm]  # plain numbers: the project is saved as JSON
+    attitude = None if shot.attitude is None else [float(v) for v in shot.attitude]
+    lon_c, lat_c, h_c, note = lever.camera_from_antenna(lat, lon, h, body_frd_mm=body, attitude=attitude)
+    return [float(lon_c), float(lat_c), float(h_c)], {"body_frd_mm": body, "attitude": attitude, "note": note}, \
+        note is not None
+
+
+def _source_record(pairing: Pairing, shot: Shot, antenna: list[float], lever_record: dict | None) -> dict:
+    """What ``meta["gnss"]`` keeps of the shot a position comes from: for a DJI MRK as it always did
+    (:func:`_shot_record`); for any other source ``shots`` (its ``kind``, ``file``, the ``index`` and ``gps_time`` of the
+    shot, the ``latency_s`` added to it, ``by`` how its photo was paired), ``lever`` (the arm, None without one), the
+    ``antenna`` ``[lon, lat, h]`` and the ``utc`` of the shot."""
+    if pairing.kind == "mrk":
+        return _shot_record(pairing.name, shot, antenna)
+    return {"shots": {"kind": pairing.kind, "file": pairing.name,
+                      "index": None if shot.index is None else int(shot.index), "gps_time": float(shot.gps_time),
+                      "latency_s": pairing.latency_s, "by": pairing.by, "confirmed": pairing.confirmed},
+            "lever": lever_record, "antenna": [float(v) for v in antenna], "utc": shots_module.utc(shot).isoformat()}
+
+
+def _pairing_warnings(pairing: Pairing, vertical_only: int) -> list[str]:
+    """What the pairing and the lever arm leave to say: shots without a valid time, doubles left out, photos given
+    only the vertical part of the arm."""
+    warnings = list(pairing.warnings)
+    if pairing.photos_ambiguous:
+        n = len(pairing.photos_ambiguous)
+        warnings.append(f"{n} photo{'s have' if n > 1 else ' has'} more than one shot of {pairing.name} within "
+                        f"{shots_module.NEAR_SHOT_S:g} s of {'their' if n > 1 else 'its'} time, which cannot tell "
+                        f"which is {'theirs' if n > 1 else 'its own'}: left without a shot (the first, "
+                        f"{pairing.photos_ambiguous[0].name})")
+    if pairing.invalid:
+        n = len(pairing.invalid)
+        warnings.append(f"{n} shot{'s' if n > 1 else ''} of {pairing.name} without a valid time left out")
+    if pairing.left_doubles:
+        n = len(pairing.left_doubles)
+        warnings.append(f"{n} double shot{'s' if n > 1 else ''} of {pairing.name} (within "
+                        f"{shots_module.DOUBLE_SHOT_S:g} s of the one before) left out: the first of each kept")
+    if vertical_only:
+        photos = f"{vertical_only} photos have" if vertical_only > 1 else "1 photo has"
+        warnings.append(f"{photos} no attitude of the drone in {pairing.name}: only the vertical part of the lever "
+                        "arm was applied (vertical only: no attitude)")
+    return warnings
+
+
+def _report(pairing: Pairing) -> dict:
+    """How the photos were paired, for the result of :func:`apply_shots` and :func:`apply_ppk_shots`."""
+    return {"by": pairing.by, "clock_s": pairing.clock_s, "latency_s": pairing.latency_s,
+            "extra_shots": [s.index for s in pairing.extra_shots],
+            "photos_without_shot": [f.stem for f in pairing.photos_without_shot], "doubles": pairing.doubles,
+            "invalid": len(pairing.invalid), "confirmed": pairing.confirmed,
+            "photos_ambiguous": [f.stem for f in pairing.photos_ambiguous]}
+
+
+def shot_run_key(record: dict) -> str | None:
+    """The key in ``chunk.meta[SHOT_RUNS]`` of the run that gave a photo the position recorded in ``record`` (its
+    ``meta["gnss"]``): the solution of a PPK run, else the kind and the file of the shots; None for a position that
+    comes from no shots, or from those of a DJI MRK."""
+    shots = record.get("shots")
+    if not isinstance(shots, dict):
+        return None
+    if record.get("source") == "ppk":
+        return str(record.get("solution") or "")
+    return f"{shots.get('kind')}:{shots.get('file')}"
+
+
+def _remember_shots(chunk: Chunk, pairing: Pairing, body_lever_mm, vertical_only: int, solution=None) -> None:
+    """Record in ``chunk.meta[SHOT_RUNS]`` what a run with shots other than those of a DJI MRK leaves to say and no
+    photo keeps (the report prints it): the ``kind`` and ``file`` of the shots, the ``edge`` of the event signal when
+    the source has one (the time marks of a u-blox log), ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``, how
+    many ``shots`` the source has, the ``doubles`` and the shots ``invalid`` left out, the ``extra_shots`` no photo
+    took, the ``photos_without_shot``, the photos given the vertical part of the arm only (``vertical_only``) and, for
+    a PPK ``solution``, the raw logs ``converted`` for it (the name of each, its ``kind``, ``epochs`` and ``events``:
+    names, never folders). The records no photo refers to any more go."""
+    if pairing.kind == "mrk":
+        return
+    name = Path(solution.path).name if solution is not None else None
+    key = name or f"{pairing.kind}:{pairing.name}"
+    edge = next((s.source.get("edge") for s in pairing.shots if (s.source or {}).get("edge")), None)
+    notes = (solution.inputs or {}).get("converted") or [] if solution is not None else []
+    runs = dict(chunk.meta.get(SHOT_RUNS) or {})
+    runs[key] = {
+        "kind": pairing.kind, "file": pairing.name, "edge": edge, "by": pairing.by,
+        "latency_s": float(pairing.latency_s),
+        "body_lever_mm": None if body_lever_mm is None else [float(v) for v in body_lever_mm],
+        "confirmed": pairing.confirmed, "shots": len(pairing.shots), "doubles": int(pairing.doubles),
+        "invalid": len(pairing.invalid), "extra_shots": len(pairing.extra_shots),
+        "photos_without_shot": len(pairing.photos_without_shot), "vertical_only": int(vertical_only),
+        "converted": [{"source": Path(str(note.get("source") or "")).name, "kind": note.get("kind"),
+                       "epochs": note.get("epochs"), "events": note.get("events")} for note in notes]}
+    held = {shot_run_key(cam.meta.get("gnss") or {}) for cam in chunk.cameras}
+    chunk.meta[SHOT_RUNS] = {k: v for k, v in runs.items() if k == key or k in held}
+
+
+def apply_shots(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None, *, by: str = "auto",
+                latency_s: float = 0.0, body_lever_mm=None) -> dict:
+    """Give the photos of ``chunk`` the position of their shot in ``shotset`` (a DJI MRK, an autopilot log, an
+    ``_events.pos``...): the camera, not the antenna - the arm of the shot (an MRK) or ``body_lever_mm`` (forward,
+    right, down in mm in the body of the drone) turned with the attitude of the shot, only its vertical part without
+    one (:func:`.lever.camera_from_antenna`, with a warning) -, with the accuracy of the shot's standard deviations
+    and status (:func:`accuracy`; deviations without a status: twice them, never below a centimetre), in the frame ``"unknown"`` at the epoch of the shot. An ellipsoidal height stays
+    one (``EPSG:4979``), any other is above the sea level (``height`` ``"msl"``, ``EPSG:4326``: never taken for an
+    ellipsoidal one). The photos are paired with the shots by :func:`.shots.pair` (``by``, ``latency_s``: the times of
+    the shots, not their positions, which the source gives at the shots only), with its errors.
+
+    A DJI MRK is recorded as :func:`apply_mrk` always did; any other source keeps in ``meta["gnss"]`` its kind as
+    ``source``, ``shots``, ``lever``, ``antenna`` and ``utc`` (:func:`_source_record`). A ``ValueError`` and nothing
+    changed for valid shots without the position of the antenna (the events of a receiver: those take theirs from a
+    PPK solution, :func:`apply_ppk_shots`) and for an arm in the body with shots that carry their own.
+
+    Returns what :func:`apply_mrk` returns with ``by``, ``clock_s``, ``latency_s``, ``extra_shots`` (their indices),
+    ``photos_without_shot`` and ``photos_ambiguous`` (labels), ``doubles``, ``invalid`` (a count), ``confirmed``
+    (:class:`.shots.Pairing`) and ``warnings`` (among them, a pairing by number or by order the times cannot confirm)."""
+    _check_lever(shotset, body_lever_mm)
+    missing = sum(s.valid and s.antenna is None for s in shotset.shots)
+    if missing:
+        raise ValueError(f"{shotset.name or shotset.kind}: {missing} of its shots carry no position of the antenna (the "
+                         "events of a receiver): they take one from a PPK solution")
+    pairing = shots_module.pair(chunk, shotset, photos_folder, by=by, latency_s=latency_s)
+    mrk = pairing.kind == "mrk"
+    placed, vertical_only = [], 0
     for f, shot, cam in pairing.kept:
-        state = dji.STATUS.get(shot.flag, "unknown")
-        north, east, vertical = shot.std
-        set_camera_position(cam, list(dji.camera_position(shot)), frames.crs_of(frames.UNKNOWN),
-                            accuracy(state, [east, north, vertical]), dji.SOURCE_MRK, status=state,
-                            height="ellipsoidal",
-                            extra=_shot_record(pairing.mrk, shot, [shot.lon, shot.lat, shot.ellh]),
-                            frame=frames.UNKNOWN, epoch=frames.decimal_year(shot.utc))
+        lat, lon, h = shot.antenna
+        location, lever_record, vertical = _camera(shot, lat, lon, h, body_lever_mm)
+        vertical_only += vertical
+        state = shot.status
+        north, east, up = shot.std if shot.std is not None else (None, None, None)
+        if state is None and shot.std is not None and not mrk:  # deviations without a status: they say enough
+            acc = [max(FACTOR * float(v), FLOORS["fix"]) for v in (east, north, up)]
+        else:
+            acc = accuracy(state, [east, north, up] if shot.std is not None else None)
+        when = shots_module.utc(shot)
+        if mrk:
+            set_camera_position(cam, location, frames.crs_of(frames.UNKNOWN), acc, dji.SOURCE_MRK, status=state,
+                                height="ellipsoidal", extra=_shot_record(pairing.name, shot, [lon, lat, h]),
+                                frame=frames.UNKNOWN, epoch=frames.decimal_year(when))
+        else:
+            ellipsoidal = shot.height == "ellipsoidal"
+            set_camera_position(cam, location, frames.crs_of(frames.UNKNOWN) if ellipsoidal else "EPSG:4326", acc,
+                                pairing.kind, status=state, height="ellipsoidal" if ellipsoidal else "msl",
+                                extra=_source_record(pairing, shot, [lon, lat, h], lever_record),
+                                frame=frames.UNKNOWN, epoch=frames.decimal_year(when))
         placed.append((f, shot, state))
-    return _result(pairing, placed)
+    warnings = _pairing_warnings(pairing, vertical_only)
+    if placed:
+        _remember_shots(chunk, pairing, body_lever_mm, vertical_only)
+    if latency_s and not mrk:
+        warnings.append(f"the latency of {latency_s * 1000:g} ms moved the times of the shots, not their positions: "
+                        f"{pairing.name} gives the positions at the shots only")
+    return {**_result(pairing, placed), **_report(pairing), "warnings": warnings}
 
 
 def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
@@ -165,27 +324,58 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     too when both heights are ellipsoidal) from the PPK positions of the same shots, the onboard fixes replaced by
     positions that are not fix, and the photos whose onboard float (a DJI XMP or MRK) is single in the PPK, which take
     the PPK position all the same."""
-    pairing = _pair_shots(chunk, mrk_path, photos_folder)
+    result = apply_ppk_shots(chunk, shots_module.from_mrk(mrk_path), solution, photos_folder, replace_fix=replace_fix)
+    return {key: result[key] for key in _PPK_RESULT}
+
+
+def apply_ppk_shots(chunk: Chunk, shotset: ShotSet, solution: ppk.Solution, photos_folder: str | Path | None = None,
+                    *, by: str = "auto", latency_s: float = 0.0, body_lever_mm=None, replace_fix: bool = False) -> dict:
+    """Give the photos of ``chunk`` the PPK position of their shot in ``shotset`` (a DJI MRK, the events of a
+    receiver, an autopilot log...): the antenna where ``solution`` puts it at the GPS time of the shot plus
+    ``latency_s`` (the camera exposes that long after the event), plus the arm of the shot (an MRK) or ``body_lever_mm``
+    (forward, right, down in mm in the body of the drone) turned with the attitude of the shot, only its vertical part
+    without one (with a warning). Everything else - the frame and epoch, the status and accuracy, the onboard fixes
+    kept unless ``replace_fix``, the errors, the warnings, the run recorded - as :func:`apply_ppk`, whose contract this
+    is; the photos paired by :func:`.shots.pair` (``by``, ``latency_s``). ``meta["gnss"]`` keeps for a source other
+    than an MRK what :func:`apply_shots` keeps (the antenna being the one of the solution), and the run its ``shots``
+    (``kind``, ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``) with ``mrk`` None. The events of
+    the rover's receiver (:data:`.ppk.EVENT_KINDS`) are checked against the time marks RTKLIB wrote for the run
+    (:func:`.ppk.events_check`), its warnings among the others. For every source, a DJI MRK too, a shot between
+    two epochs adds in quadrature to the accuracy of its photo how far the straight line between them may be from
+    the path of the drone (:func:`.ppk.interpolation_error`, kept as
+    ``meta["gnss"]["interpolation_m"]``), with a warning when that is more than
+    :data:`.ppk.INTERPOLATION_WARNING_M` (a receiver logging at 1 Hz on a drone that turns).
+
+    Returns what :func:`apply_ppk` returns with what :func:`apply_shots` adds about the pairing."""
+    _check_lever(shotset, body_lever_mm)
+    pairing = shots_module.pair(chunk, shotset, photos_folder, by=by, latency_s=latency_s)
+    late = float(latency_s)
     name = Path(solution.path).name
     times = np.asarray(solution.times, dtype=np.float64)
-    shot_times = np.array([shot.gps_time for shot in pairing.shots])
+    shot_times = np.array([shot.gps_time + late for shot in pairing.shots if shot.valid])
     if not len(times) or not np.any((shot_times >= times[0] - ppk.TIME_RESOLUTION_S)
                                     & (shot_times <= times[-1] + ppk.TIME_RESOLUTION_S)):
         shots = (f"its shots were taken from {ppk.span_text(shot_times.min(), shot_times.max())}" if len(shot_times)
                  else "it has no shots")
         covered = f"has positions from {ppk.span_text(times[0], times[-1])}" if len(times) else "has no positions"
-        raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} {covered}: they are not of the same flight")
+        raise ValueError(f"{pairing.name}: {shots}, and the solution {name} {covered}: they are not of the same flight")
     base = solution.base or {}
     # rover = base + baseline: the positions are in the frame of the base and, in a frame that moves with time, at the
     # epoch of its coordinates (checked here, before anything changes)
     frame = base.get("frame") or frames.UNKNOWN
     system = frames.crs_of(frame)
     held = frames.frame_and_epoch(frame, base.get("epoch"))[1] if frame in frames.DYNAMIC else None
-    llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
+    when = [shot.gps_time + late for _f, shot, _cam in pairing.kept]
+    llh, q, sd, ok = ppk.at(solution, when)
+    # the straight line between two epochs off the path of a drone that turns: in the accuracy of the photos (a DJI MRK
+    # too, from 1.7.8)
+    curve = np.nan_to_num(ppk.interpolation_error(solution, when))
+    curved = []  # the photos whose line is more than INTERPOLATION_WARNING_M off
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse
     worse = 0  # the photos whose onboard float or single is better than the state the PPK gives them
-    for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
+    vertical_only = 0  # the photos given only the vertical part of an arm in the body
+    for (f, shot, cam), antenna, quality, deviations, found, off in zip(pairing.kept, llh, q, sd, ok, curve):
         onboard, before = onboard_fix(cam), onboard_state(cam)
         if not found:
             if onboard and not replace_fix:
@@ -193,8 +383,9 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
             continue
         lat, lon, h = (float(v) for v in antenna)
         state = ppk.status(quality)
-        location = list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm))
-        apart.append(ppk.horizontal_m(shot.lat, shot.lon, lat, lon))
+        location, lever_record, vertical = _camera(shot, lat, lon, h, body_lever_mm)
+        if shot.antenna is not None:
+            apart.append(ppk.horizontal_m(shot.antenna[0], shot.antenna[1], lat, lon))
         if onboard and not replace_fix:
             kept.append((f, shot))
             if cam.reference.location and cam.meta.get("reference_crs") in ("EPSG:4326", "EPSG:4979"):
@@ -206,9 +397,16 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
             downgraded += 1
         elif before in ("float", "single") and ppk.RANK[state] > ppk.RANK[before]:
             worse += 1
-        extra = {**_shot_record(pairing.mrk, shot, [lon, lat, h]), "q": int(quality),
+        vertical_only += vertical
+        extra = {**_source_record(pairing, shot, [lon, lat, h], lever_record), "q": int(quality),
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
-        positions.append((f, shot, cam, location, accuracy(state, [float(v) for v in deviations]), state, extra))
+        acc = accuracy(state, [float(v) for v in deviations])
+        if off > 0:
+            acc = [math.hypot(v, float(off)) for v in acc]
+            extra["interpolation_m"] = round(float(off), 4)
+            if off > ppk.INTERPOLATION_WARNING_M:
+                curved.append(float(off))
+        positions.append((f, shot, cam, location, acc, state, extra))
     baseline = ppk.baseline_km(solution)
     retyped = None
     if base.get("position_source") == "typed" and base.get("position"):
@@ -217,7 +415,7 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     placed = []
     for f, shot, cam, location, acc, state, extra in positions:
         set_camera_position(cam, location, system, acc, "ppk", status=state, height="ellipsoidal", extra=extra,
-                            frame=frame, epoch=frames.decimal_year(shot.utc) if held is None else held)
+                            frame=frame, epoch=frames.decimal_year(shots_module.utc(shot)) if held is None else held)
         placed.append((f, shot, state))
     warnings = list(solution.warnings)
     gaps = len(pairing.kept) - len(placed) - len(kept)
@@ -227,10 +425,17 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
         warnings.append(f"{gaps} {photos} taken where the solution {name} has no position (a gap of more than "
                         f"{ppk.MAX_GAP_S:g} s between two of its epochs, or before the first or after the last): "
                         f"{keep}")
+    if curved:
+        rate = ppk.epoch_rate_hz(solution)
+        photos = f"{len(curved)} photos were" if len(curved) > 1 else "1 photo was"
+        warnings.append(f"{photos} taken between epochs of {name} where the drone turns or changes speed: the straight "
+                        f"line between the epochs is up to {max(curved) * 100:.0f} cm off its path there (the "
+                        f"receiver logs at {rate:.3g} Hz). Their accuracy includes it; log at 5 Hz or more")
     if apart and float(np.median(apart)) > FAR_FROM_MRK_M:
+        where = (f"drone's own receiver put it in {pairing.name}" if pairing.kind == "mrk"
+                 else f"{pairing.name} puts it")
         warnings.append(f"the solution {name} puts the antenna {float(np.median(apart)):.0f} m (median) from where the "
-                        f"drone's own receiver put it in {pairing.mrk}: the rover's observations may be those of the "
-                        "base, or of another receiver")
+                        f"{where}: the rover's observations may be those of the base, or of another receiver")
     if baseline is not None and baseline > ppk.BASELINE_WARNING_KM:
         warnings.append(f"the base {base.get('name')} is {baseline:.1f} km from the flight: beyond "
                         f"{ppk.BASELINE_WARNING_KM:g} km the ambiguities are hard to fix, and the positions are mostly "
@@ -258,9 +463,14 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
                         f"in the PPK): {'their PPK positions are' if worse > 1 else 'its PPK position is'} used all "
                         "the same. The base may be too far from the flight or share too few satellites with the "
                         "drone: check its distance and its observations")
+    warnings += _pairing_warnings(pairing, vertical_only)
+    if shotset.kind in ppk.EVENT_KINDS:  # the events of the rover: checked against RTKLIB's time marks
+        warnings += ppk.events_check(solution, shotset)
     if placed:
-        _remember(chunk, mrk_path, photos_folder, solution, replace_fix)
-    return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings}
+        _remember(chunk, pairing, photos_folder, solution, replace_fix, body_lever_mm)
+        _remember_shots(chunk, pairing, body_lever_mm, vertical_only, solution)
+    return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings,
+            **_report(pairing)}
 
 
 def _station_of(base: dict) -> dict | None:
@@ -285,70 +495,39 @@ def _station_of(base: dict) -> dict | None:
             "xyz": [float(v) for v in xyz]}
 
 
-def _remember(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None, solution: ppk.Solution,
-              replace_fix: bool) -> None:
+def _remember(chunk: Chunk, pairing: Pairing, photos_folder: str | Path | None, solution: ppk.Solution,
+              replace_fix: bool, body_lever_mm=None) -> None:
     """Record the run in ``chunk.meta`` (:func:`.ppk.last_run`): its files, its base and how it was placed (the typed
     position ``[lon, lat, h]``, the frame and the epoch of its position, the permanent station it came from), whether
-    it replaced the onboard fixes."""
+    it replaced the onboard fixes; for shots other than those of a DJI MRK, ``mrk`` None and ``shots`` (``kind``,
+    ``file``, ``by``, ``latency_s``, ``body_lever_mm``, ``confirmed``)."""
     base, inputs = solution.base or {}, solution.inputs or {}
     typed = base.get("position_source") == "typed" and base.get("position")
-    chunk.meta[ppk.MEMORY] = {"last": {
-        "mrk": str(Path(mrk_path).absolute()), "photos": str(Path(photos_folder).absolute()) if photos_folder else None,
+    files = [s.source.get("file") for s in pairing.shots if s.source.get("file")]
+    source = str(Path(files[0]).absolute()) if files else None
+    last = {
+        "mrk": source if pairing.kind == "mrk" else None,
+        "photos": str(Path(photos_folder).absolute()) if photos_folder else None,
         "rover": inputs.get("rover"), "base": inputs.get("base"), "navs": list(inputs.get("navs") or []),
         "base_name": base.get("name"), "position_source": base.get("position_source"),
         "position": [float(v) for v in base["position"]] if typed else None, "frame": base.get("frame"),
         "epoch": base.get("epoch"), "station": _station_of(base), "replace_fix": bool(replace_fix),
-        "solution": Path(solution.path).name}}
+        "solution": Path(solution.path).name}
+    if pairing.kind != "mrk":
+        last["shots"] = {"kind": pairing.kind, "file": source, "by": pairing.by, "latency_s": pairing.latency_s,
+                         "body_lever_mm": None if body_lever_mm is None else [float(v) for v in body_lever_mm],
+                         "confirmed": pairing.confirmed}
+    chunk.meta[ppk.MEMORY] = {"last": last}
 
 
-@dataclass
-class _Pairing:
-    """The photos of a folder paired with the shots of a ``Timestamp.MRK`` (:func:`_pair_shots`)."""
-
-    mrk: str  # the name of the MRK file
-    shots: list[dji.MrkShot]  # in the order of the file
-    files: list[Path]  # the photos of the folder, by name
-    paired: list[tuple[Path, dji.MrkShot | None]]  # every photo with its shot, None when the MRK has none for it
-    kept: list[tuple[Path, dji.MrkShot, Camera]]  # the pairs whose photo is in the chunk and was taken at its shot
+def _shot_record(mrk: str, shot: Shot, antenna: list[float]) -> dict:
+    """What ``meta["gnss"]`` keeps of the MRK shot a position comes from, to check the camera against it: the MRK and
+    the shot, its time in UTC, its lever arm and the position ``[lon, lat, h]`` of the antenna."""
+    return {"mrk": mrk, "shot": shot.index, "utc": shots_module.utc(shot).isoformat(),
+            "lever_arm_ned_mm": list(shot.lever_ned_mm), "antenna": list(antenna)}
 
 
-def _pair_shots(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None) -> _Pairing:
-    """The photos of ``photos_folder`` (default: the folder of the MRK) paired with the shots of the DJI
-    ``Timestamp.MRK`` ``mrk_path`` by shot number or by order, and checked against the times of the photos in
-    ``chunk``, as :func:`apply_mrk` says; a ``ValueError`` when they cannot be."""
-    mrk_path = Path(mrk_path)
-    shots = dji.read_mrk(mrk_path)
-    folder = Path(photos_folder) if photos_folder else mrk_path.parent
-    files = sorted((f for f in folder.iterdir() if f.is_file() and not f.name.startswith(".")
-                    and f.suffix.lower() in IMAGE_EXTENSIONS), key=lambda f: f.name)
-    numbers = [dji.shot_number(f.name) for f in files]
-    if any(n is not None for n in numbers):
-        by_index = {}
-        for shot in shots:
-            if shot.index in by_index:
-                raise ValueError(f"{mrk_path.name}: shot {shot.index} appears twice")
-            by_index[shot.index] = shot
-        paired = [(f, by_index.get(n)) for f, n in zip(files, numbers)]
-    elif len(shots) == len(files):
-        paired = list(zip(files, shots))
-    else:
-        raise ValueError(f"{mrk_path.name} has {len(shots)} shots and {folder} has {len(files)} photos, and the "
-                         "photo names carry no shot number: they cannot be paired by order")
-    cameras = {Path(c.path).resolve(): c for c in chunk.cameras}
-    candidates = [(f, shot, cameras.get(f.resolve())) for f, shot in paired]
-    kept = _on_time([p for p in candidates if p[1] is not None and p[2] is not None], mrk_path.name)
-    return _Pairing(mrk_path.name, shots, files, paired, kept)
-
-
-def _shot_record(mrk: str, shot: dji.MrkShot, antenna: list[float]) -> dict:
-    """What ``meta["gnss"]`` keeps of the shot a position comes from, to check the camera against it: the MRK and the
-    shot, its time in UTC, its lever arm and the position ``[lon, lat, h]`` of the antenna."""
-    return {"mrk": mrk, "shot": shot.index, "utc": shot.utc.isoformat(), "lever_arm_ned_mm": list(shot.offset_ned_mm),
-            "antenna": list(antenna)}
-
-
-def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]],
-            kept: list[tuple[Path, dji.MrkShot]] = ()) -> dict:
+def _result(pairing: Pairing, placed: list[tuple[Path, Shot, str]], kept: list[tuple[Path, Shot]] = ()) -> dict:
     """What :func:`apply_mrk` returns once the ``(photo, shot, status)`` of ``placed`` took the position of their
     shot; the ``(photo, shot)`` of ``kept`` kept a position of their shot they had (an onboard RTK fix): neither
     matched nor unmatched."""
@@ -358,69 +537,6 @@ def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]],
             "status": dict(Counter(state for _f, _shot, state in placed)),
             "unmatched": [f.stem for f, _shot in pairing.paired if f not in files],
             "shots_unmatched": [s.index for s in pairing.shots if id(s) not in used]}
-
-
-def photo_time(cam: Camera) -> datetime | None:
-    """The time the camera wrote in the EXIF of the photo (its clock: the local time, to the second); None without
-    one."""
-    try:
-        return datetime.strptime(str(cam.meta.get("datetime"))[:19], "%Y:%m:%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
-def _off_zone(offset: float) -> float:
-    """Seconds from ``offset`` (local time less UTC) to the nearest time zone: a whole quarter hour within 14 hours."""
-    zone = min(max(round(offset / ZONE_STEP_S) * ZONE_STEP_S, -ZONE_MAX_S), ZONE_MAX_S)
-    return abs(offset - zone)
-
-
-def _signed(seconds: float) -> str:
-    return ("-" if seconds < 0 else "+") + str(timedelta(seconds=round(abs(seconds))))
-
-
-def _clock(offsets: np.ndarray, name: str) -> float:
-    """The offset between the clock of the photos and UTC (seconds) of the flight of the MRK ``name``: of the groups
-    of offsets within :data:`CLOCK_TOLERANCE_S` of each other that lie on a time zone, the largest (its median),
-    between groups as large the nearest to a time zone. ``ValueError`` when no group lies on a time zone, or when
-    another group on a time zone has two photos or more and is at least half as large (another flight in the folder:
-    the times cannot tell which one the MRK is of - its own flight may have lost photos)."""
-    s = np.sort(np.asarray(offsets, float))
-    lo = np.searchsorted(s, s - CLOCK_TOLERANCE_S, "left")
-    hi = np.searchsorted(s, s + CLOCK_TOLERANCE_S, "right")
-    groups = sorted({(int(b - a), float(np.median(s[a:b]))) for a, b in zip(lo, hi)},
-                    key=lambda g: (-g[0], _off_zone(g[1])))
-    plausible = [g for g in groups if _off_zone(g[1]) <= ZONE_TOLERANCE_S]
-    if not plausible:
-        raise ValueError(f"{name}: the times of the photos and of the shots do not agree: by the clock of the camera "
-                         f"the photos were taken {_signed(groups[0][1])} from the UTC of their shots, which is no "
-                         "time zone. These are not the photos of this MRK, or the clock of the camera was wrong")
-    size, clock = plausible[0]
-    # another flight: at least two photos and half as many as the best group (a single photo late is just late)
-    rivals = sorted({round(c) for n, c in plausible
-                     if n >= max(2, size / 2) and abs(c - clock) > 2 * CLOCK_TOLERANCE_S})
-    if rivals:
-        raise ValueError(f"{name}: the times of the photos fit the shots of more than one flight (at "
-                         f"{', '.join(_signed(c) for c in [clock] + rivals)} from UTC): keep the photos of each flight "
-                         "in a folder of their own")
-    return clock
-
-
-def _on_time(pairs: list[tuple], name: str) -> list[tuple]:
-    """The ``(file, shot, camera)`` pairs whose photo was taken at the time of its shot (see :func:`apply_mrk`), or
-    all of them when no photo has a date."""
-    times = [photo_time(cam) for _f, _shot, cam in pairs]
-    if not any(times):
-        return pairs
-    offsets = [None if t is None else (t - shot.utc.replace(tzinfo=None)).total_seconds()
-               for t, (_f, shot, _cam) in zip(times, pairs)]
-    clock = _clock(np.array([o for o in offsets if o is not None]), name)
-    kept = [p for p, o in zip(pairs, offsets) if o is not None and abs(o - clock) <= CLOCK_TOLERANCE_S]
-    if 2 * len(kept) < len(pairs):
-        raise ValueError(f"{name}: only {len(kept)} of {len(pairs)} photos were taken at the time of their shot "
-                         f"(clock of the camera {_signed(clock)} from UTC): the MRK is of another flight, or the "
-                         "folder holds the photos of other flights too")
-    return kept
 
 
 ONLY_FIX = "gnss_only_fix"

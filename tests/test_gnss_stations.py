@@ -1003,8 +1003,8 @@ def _http_error(url: str, code: int) -> urllib.error.HTTPError:
 
 @pytest.fixture
 def web(monkeypatch):
-    """``urlopen`` that answers from a plan (a reply, or an exception to raise, one after the other) and the waiting
-    of the retries recorded instead of done."""
+    """The ``urlopen`` of the downloads answering from a plan (a reply, or an exception to raise, one after the other)
+    and the waiting of the retries recorded instead of done."""
     class Web:
         def __init__(self):
             self.plan: list = []
@@ -1019,7 +1019,7 @@ def web(monkeypatch):
             return outcome
 
     fake = Web()
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(download, "_urlopen", fake)
     monkeypatch.setattr(download, "_sleep", fake.sleeps.append)
     return fake
 
@@ -1258,7 +1258,7 @@ def test_a_site_that_does_not_answer_is_given_up_within_half_a_minute(web, tmp_p
         progress.cancel()
         raise socket.timeout("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", first)
+    monkeypatch.setattr(download, "_urlopen", first)
     download._LISTINGS.clear()
     with pytest.raises(Cancelled):
         stations.download_observations(ring, _t(26, 10), _t(26, 10, 30), tmp_path / "out", progress=progress)
@@ -2325,3 +2325,112 @@ def test_navigation_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch
     web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 6
     with pytest.raises(ValueError, match="BKG could not be reached.*igs.bkg.bund.de"):
         stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+
+
+# --- the parked items of phase 3 (design/gnss-phase3-reviews/parked-items.md) --------------------------------------
+
+
+def test_parked_92_user_agent_built_at_the_first_request():
+    """``gnss.download`` loads while the package is still being imported (before ``__version__`` is there): the name
+    the program introduces itself with is built when the first request needs it."""
+    import subprocess
+
+    code = ("import importlib, sys\n"
+            "import pyarchinit_photogrammetry as ppg\n"
+            "version = ppg.__version__\n"
+            "del ppg.__version__\n"
+            "for name in [n for n in sys.modules if n.startswith('pyarchinit_photogrammetry.gnss')]:\n"
+            "    del sys.modules[name]\n"
+            "download = importlib.import_module('pyarchinit_photogrammetry.gnss.download')\n"
+            "ppg.__version__ = version\n"
+            "print(download.user_agent(), download.USER_AGENT)\n")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    agent = f"pyarchinit-photogrammetry/{__version__}"
+    assert done.stdout.split()[-2:] == [agent, agent]
+    assert download.user_agent() == download.USER_AGENT == agent
+
+
+def test_parked_93_a_redirection_from_https_to_plain_http_is_not_followed(tmp_path):
+    """A server on this computer that sends its visitor on to a plain http address: the second address is never asked
+    (the refusal comes with the redirection, not after the answer), and a plain http address is not asked at all."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    asked: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            asked.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/target")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            self.wfile.write(b"data")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        here = f"http://127.0.0.1:{server.server_address[1]}"
+        # the opener of the downloads, asked directly (fetch itself refuses the http address of this server)
+        request = urllib.request.Request(f"{here}/start", headers={"User-Agent": download.user_agent()})
+        with pytest.raises(download.DownloadError, match="not HTTPS") as error:
+            download._urlopen(request, timeout=5.0, context=None)
+        assert "/target" in str(error.value) and asked == ["/start"]
+        with pytest.raises(download.DownloadError, match="not HTTPS"):
+            download.fetch(f"{here}/target", tmp_path / "a.bin", retries=1)
+        with pytest.raises(download.DownloadError, match="not HTTPS"):
+            download.listing(f"{here}/start")
+        assert asked == ["/start"] and list(tmp_path.iterdir()) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_parked_120_a_single_system_file_is_taken_when_there_is_no_mixed_one(trees, caplog, tmp_path):
+    """A station that publishes the observations of one constellation (``_GO``, GPS alone) and no mixed file
+    (``_MO``): its file is found, with a note that says which constellation; the mixed file is preferred whatever its
+    source, GPS among several single ones."""
+    kraw = _made("KRAW00POL", "EPN")
+    folder = "EUREF/nrt/299/10/"
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+
+    def chosen() -> list[str]:
+        download._LISTINGS.clear()
+        caplog.clear()
+        return _names(stations.observation_files(kraw, *span, rate="30s"))
+
+    gps, glonass = KRAW_NAME.replace("_MO.", "_GO."), KRAW_NAME.replace("_MO.", "_RO.")
+    _put(trees.bkg, folder + glonass)
+    _put(trees.bkg, folder + "KRAW00POL_R_20262991000_01H_30S_GN.rnx.gz")  # navigation, not observations
+    assert chosen() == [glonass]
+    notes = [text for text in _warnings(caplog) if glonass in text]
+    assert len(notes) == 1 and "GLONASS alone" in notes[0] and "_MO" in notes[0], _warnings(caplog)
+    _put(trees.bkg, folder + gps)
+    _put(trees.bkg, folder + KRAW_NAME.replace("_MO.", "_EO."))
+    assert chosen() == [gps]
+    assert any("GPS alone" in text and gps in text for text in _warnings(caplog))
+    mixed = "KRAW00POL_S_20262991000_01H_30S_MO.crx.gz"  # from the stream, and still before the single ones
+    _put(trees.bkg, folder + mixed)
+    assert chosen() == [mixed] and _warnings(caplog) == []
+    assert not (download.gnss_dir() / "stations").exists()
+
+
+@needs_a_decoder
+def test_parked_120_a_single_system_file_is_downloaded_and_joined(trees, tmp_path, caplog):
+    kraw = _made("KRAW00POL", "EPN")
+    name = KRAW_NAME.replace("_MO.", "_GO.")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{name}", gzip.compress(KRAW_HOUR.read_bytes()))
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert _epochs(out) > 10 and (download.gnss_dir() / "stations" / "KRAW00POL" / name).is_file()
+    assert any("GPS alone" in text for text in _warnings(caplog))

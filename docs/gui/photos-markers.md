@@ -330,6 +330,167 @@ stops it before anything is read). A flight whose photos all kept their onboard 
 warnings, and the options that give it to `ppg gnss ppk`
 (`--base-position ... --base-frame ITRF2020 --base-epoch ...`).
 
+### Self-built drones
+
+A drone you built yourself - a frame with an ArduPilot or PX4 autopilot, a u-blox or Emlid receiver, a camera
+triggered by the autopilot - writes no `Timestamp.MRK`. What it does write is enough for the same result: the raw
+log of the receiver becomes the observations of the PPK, and the moment of every shot comes from the time marks
+of the receiver or from the log of the autopilot. Two windows take these files: *Tools > GNSS > PPK
+corrections...* (or *Compute PPK...* in the GNSS pane), which computes the position of the antenna at every shot
+against a base, and *Tools > GNSS > Autopilot log...*, which gives every photo the position the autopilot itself
+logged, with no PPK. A text file of positions made elsewhere is still read by *Positions file...*, as above.
+
+#### Where the shots come from
+
+In the PPK window the row *Shots* chooses the source, and under it the file and the options it needs:
+
+| *Shots* | The file | What it tells |
+|---|---|---|
+| *DJI MRK* | the `Timestamp.MRK` of a DJI drone | the time of every shot and its own lever arm, as in the sections above |
+| *Events of the receiver (in the file of the rover)* | none: the observations of the drone | the time marks the receiver wrote among its observations: a RINEX file with event records (epoch flag 5, as an Emlid Reach writes them), or a raw u-blox log with `TIM-TM2` messages |
+| *Events of a u-blox log (.ubx)* | a u-blox log with `TIM-TM2` messages (empty: the log of the rover) | the time marks of that log, when they are not in the file of the observations |
+| *Autopilot log (ArduPilot, PX4)* | a DataFlash log (`.bin`, `.log`) or a ULog (`.ulg`) | the time of the camera messages of the autopilot, put on GPS time by the GPS messages of the same log |
+| *Events file (_events.pos)* | the `_events.pos` RTKLIB or Emlid Studio writes | the times of the events of that solution: the positions are computed again by this PPK |
+
+A time mark is the instant the receiver saw the signal of the camera (the hot shoe, or the trigger line) on its
+event input, on the clock of its own observations: it is the most accurate source. *Edge* says which edge of the signal
+the receiver marked, *falling* (the default) or *rising*: it depends on the wiring, and the wrong one moves every
+shot by the length of the pulse. Two marks less than 5 ms apart are one shot (a bouncing contact): the second is
+left out and counted. A mark without a valid time is never paired with a photo.
+
+The events of a receiver have no position of their own: they need the PPK. An autopilot log has both, so it can
+be used twice: as the source of the shots of a PPK (its times, the positions from the PPK) or by itself, in
+*Autopilot log...* (its times and its positions).
+
+![The PPK corrections window for a self-built drone: the shots from the time marks of a u-blox log, their edge, the pairing of the photos, the lever arm and the latency](../img/gui/dialog-ppk-events.png)
+
+#### Raw logs of the receivers
+
+*Observations of the drone* and the files of the base take a RINEX file or the raw log of the receiver, which the
+program converts to RINEX 3.04 (observations and navigation) once and keeps in its cache: the window says the
+format it recognised, the epochs and the events of the conversion.
+
+| Receiver log | Told by its content | Notes |
+|---|---|---|
+| u-blox (`.ubx`: `RXM-RAWX`, `RXM-SFRBX`, `TIM-TM2`) | yes | the logs of an Emlid Reach in UBX are these |
+| RTCM 3 (MSM messages, ephemerides) | yes | carries the time of the week only: the day of the flight is needed |
+| Septentrio SBF | yes | |
+| Unicore | yes | |
+| Trimble RT-17 | yes | carries the time of the week only: the day of the flight is needed |
+| NovAtel OEM | no: `--kind novatel` on the command line | |
+| DJI D-RTK base (`.DAT`) | only when its bytes are RTCM 3 | otherwise refused: export RINEX from DJI Terra (4.4 or later) or DJI Assistant 2 |
+
+For the logs that carry the time of the week only the window takes the day from the first shot or from the
+observations of the drone; when the log is the one of the drone and the shots are its own events no file tells
+it, and the field **Day of the flight** appears under the observations of the drone (`2026-05-04` or
+`04/05/2026`, in GPS time, with the time too). On the command line it is `--approx-time` (or `--like` with a
+RINEX file of the same day). The converter keeps three frequencies and up to 6 signals per satellite at each epoch: a log with more has
+a warning, and the PPK works on those it kept.
+
+#### Autopilot logs
+
+*Tools > GNSS > Autopilot log...* reads an ArduPilot log (DataFlash) or a PX4 log (ULog). *Messages of the shots*
+chooses between the shots the camera confirmed (`CAM` in ArduPilot, `camera_capture` in PX4) and the trigger
+commands (`TRIG`, `camera_trigger`): the confirmed ones are more accurate, and *automatic* takes them when the
+log has them. *Camera* chooses among the cameras of an ArduPilot log (a PX4 log has one). The window says how
+many shots it found, between which times, and the kind of their heights.
+
+![The Autopilot log window on an ArduPilot log: what the log holds, the photos paired with its shots, the lever arm and the latency](../img/gui/dialog-autopilot-log.png)
+
+Every photo takes the position the autopilot logged at its shot: the navigation solution of the flight
+controller, as good as its receiver, not a PPK position. The heights are above mean sea level, and are kept as
+such, never taken for ellipsoidal ones, unless the log gives the separation of the geoid as well (some PX4 logs
+do): see [Heights above the geoid and the system of the survey](#heights-above-the-geoid-and-the-system-of-the-survey).
+For centimetres, use the same log as the source of the *Shots* of a PPK with the raw log of the receiver.
+
+#### Lever arm and latency
+
+*Lever arm and latency* (in both windows) says where the camera is from the antenna in the body of the drone, in
+millimetres: *Camera forward of the antenna*, *Camera to the right of the antenna*, *Camera below the antenna*.
+The arm is turned by the attitude of every shot (yaw, pitch, roll of the autopilot log) and added to the position
+of the antenna, so the photo gets the position of the camera. Without an attitude - the events of a receiver have
+none - only the vertical part is applied, and the report says so: with an antenna straight above the camera
+nothing is lost; with an arm of some centimetres forward or sideways the error is at most that arm.
+
+*Latency of the camera* is how long after the signal the camera exposes, in milliseconds: it moves the times of
+the shots, not the positions. At 10 m/s, 10 ms are 10 cm along the track: measure it for a camera triggered by
+a command; a signal taken from the hot shoe comes with the exposure and wants 0. A `Timestamp.MRK` carries its
+own arm for every shot: a body arm is refused with it.
+
+#### Pairing the photos with the shots
+
+*Pairing* (*Pairing of the photos* in the autopilot window) says how each photo finds its shot:
+
+* *by number*: the number of the shot is in the name of the photo, as a DJI drone writes it;
+* *by time*: the time of the photo (EXIF) against the time of the shot. The clock of the camera need not be on
+  UTC: the program finds the time zone it is set to and how far it is off (up to two minutes), tells it, and
+  gives each photo the nearest shot on that clock. Times that fit more than one way - a short series of evenly
+  spaced shots - are refused, not guessed;
+* *by order*: as many photos as shots, in the order of their times. One shot without a photo (a card that missed
+  one) breaks it: the window says how many there are of each;
+* *automatic* chooses from the kind of the shots and from the photos.
+
+The window says how many photos found a shot, the photos without a shot and the shots without a photo, the clock
+offset, and, when the times of the photos do not confirm a pairing by order, that the positions are to be
+checked. The report keeps all of it: its GNSS part has, for each run, the source of the shots and its file, the
+edge, the logs converted with their epochs and events, the arm and the latency, the pairing, and the double and
+invalid events left out.
+
+#### What to expect, and the limits
+
+* **Rate of the receiver**: the position at a shot is interpolated between two epochs. At 1 Hz a turning or
+  accelerating drone is not where the interpolation puts it: the program estimates by how much, adds it to the
+  accuracy of the photo and warns. Log at 5 Hz or more.
+* **First and last epoch**: a shot exactly on the first epoch of the observations, or after the last, gets no
+  position; they are listed among the shots left without one. Start the log before the first photo and stop it
+  after the last.
+* **Times of an autopilot log**: the camera messages are stamped by the clock of the board, put on GPS time by the
+  GPS messages of the log. With ArduPilot logs that do not carry the corrected time of the GPS messages and a
+  board clock that runs within 35 ppm of GPS time, the shot times can be up to 20 ms early (a warning says so);
+  the `CAM` messages of ArduPilot 3.x are 0-20 ms late; a sparse log with poor fixes 12-18 ms late. At 10 m/s,
+  20 ms are 20 cm along the track: for centimetres, wire the hot shoe to the event input of the receiver. A jump
+  of the GPS time inside the log is left out with a warning; the shots after a jump at the very end of the log
+  have no time.
+* **Not checked on real files**: the Septentrio, Trimble and Unicore decoders (those of RTKLIB) are tested on
+  RTKLIB's samples only, and no D-RTK `.DAT` in RTCM 3 was found to try; the corrected GPS time of ArduPilot 4.5
+  and later with `CAM` messages is read but was not verified from the log to the positions. Some PX4 logs are
+  refused with a message that says what is missing. Tell us when a log of yours is not read.
+* **RTCM 3 and RT-17** need the day of the flight; an RTCM 3 log whose ephemerides are of another week is refused
+  with a message that speaks of the week.
+
+#### Self-built drones from the command line
+
+```bash
+ppg gnss convert rover.ubx base.rtcm3 --approx-time 2026-05-18     # raw logs to RINEX 3.04, kept in the cache
+#   --kind novatel (a format that is not told by its content), --like FILE.obs (the day of a RINEX file),
+#   --out DIR (a copy of the RINEX there); prints the RINEX written, the epochs and the events
+ppg gnss events rover.ubx --edge rising                            # the time marks: number, GPS time, UTC, validity
+#   a RINEX file with events, a u-blox log with TIM-TM2, or an _events.pos
+ppg gnss log survey.ppg flight.bin --lever 0,0,250 --latency 40    # the positions of the autopilot, no PPK
+#   --message auto|cam|trig|capture|trigger, --camera I (ArduPilot), --by auto|number|time|order,
+#   --photos DIR, --dry-run (what it would do, nothing saved), --chunk NAME
+ppg gnss ppk survey.ppg --rover rover.ubx --base base.obs --shots events --lever 0,0,250
+#   --shots mrk|events|ubx|log|events-pos, --shots-file FILE (the MRK, the u-blox log, the autopilot log,
+#       the _events.pos; --mrk FILE is --shots mrk --shots-file FILE)
+#   --rover and --base take raw logs: they are converted first (--approx-time for RTCM 3 and RT-17)
+#   --edge falling|rising, --message, --camera, --by, --lever F,R,D (mm), --latency MS
+```
+
+`--lever` is forward, right, down in millimetres. `ppg gnss log` and `ppg gnss ppk` print the pairing (how, the
+clock offset, the photos without a shot and the shots without a photo), the warnings of the log and of the
+conversion, and save the project; they stop with an error, changing nothing, when a file cannot be used or an
+option does not fit the source (`--camera` with a PX4 log, a body arm with an MRK).
+
+#### Software and data
+
+The raw logs are decoded by the receiver decoders of RTKLIB (T. Takasu) in the version of RTKLIB-EX
+(rtklibexplorer), BSD 2-clause, built into the native core; the PPK is RTKLIB's. The reader of PX4 logs is
+checked against a sample log of pyulog (PX4, BSD 3-clause), the converters against the sample logs of RTKLIB-EX.
+The conversion and the static solution of a real u-blox ZED-F9P log are checked on demand on the dataset of J.
+Tomaštík and T. Everett, "u-Blox F9P and Google Pixel 5 (repeated 20 minutes static measurements under variable
+conditions)", Mendeley Data, V2, 2023, [doi:10.17632/83bvxzx3bj.2](https://doi.org/10.17632/83bvxzx3bj.2) (CC BY
+4.0).
+
 ### Reference frames and epochs
 
 Every position of a photo keeps the reference frame and the epoch of its coordinates, and the program converts it

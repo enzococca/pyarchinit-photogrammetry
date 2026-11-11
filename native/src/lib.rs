@@ -4,6 +4,7 @@
 //! stays the fallback and the reference of the tests. The work runs without the GIL on all cores.
 
 mod camera;
+mod convert;
 mod crinex;
 mod depth;
 mod gpu;
@@ -12,6 +13,7 @@ mod gpu_patchmatch;
 mod gpu_sift;
 mod patchmatch;
 mod ppk;
+mod rtklib;
 mod tin;
 
 use std::collections::HashMap;
@@ -28,8 +30,8 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
-/// 10: the TIN kernels).
-const API: u32 = 10;
+/// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel).
+const API: u32 = 11;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -845,6 +847,8 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gpu_patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(ppk::ppk_solve, m)?)?;
     m.add_function(wrap_pyfunction!(crinex::crx2rnx, m)?)?;
+    m.add_function(wrap_pyfunction!(convert::raw_to_rinex, m)?)?;
+    m.add_function(wrap_pyfunction!(convert::convert_cancel, m)?)?;
     m.add_function(wrap_pyfunction!(tin_triangulate, m)?)?;
     m.add_function(wrap_pyfunction!(tin_rasterize, m)?)?;
     m.add_function(wrap_pyfunction!(tin_contours, m)?)?;

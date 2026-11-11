@@ -92,3 +92,24 @@ def test_fork_after_spatialite(tmp_path):
         pytest.skip("mod_spatialite not found")
     assert r.returncode == 0 and "FORK_OK" in r.stdout, (r.returncode, r.stdout[-2000:], r.stderr[-3000:])
     assert "resource_tracker: process died" not in r.stderr
+
+
+def test_a_hard_exit_leaves_no_folder_of_a_document_never_saved(tmp_path):
+    """A document never saved keeps its files in a temporary folder (``ppg_*``) that the end of the interpreter
+    removes; a process that leaves through ``os._exit`` (the packaged application, the tests) removes it itself."""
+    import subprocess
+    import sys
+
+    code = ("import os, tempfile, pyarchinit_photogrammetry as ppg\n"
+            "from pyarchinit_photogrammetry.gui import _hard_exit\n"
+            "doc = ppg.Document()\n"
+            "folder = doc.files_dir\n"
+            "(folder / 'cloud.ply').write_text('x')\n"
+            "assert folder.parent.samefile(tempfile.gettempdir()) and folder.name.startswith('ppg_')\n"
+            "print(folder, flush=True)\n"
+            "_hard_exit(0)\n")
+    env = dict(os.environ, TMPDIR=str(tmp_path), TEMP=str(tmp_path), TMP=str(tmp_path))
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300)
+    assert done.returncode == 0, done.stderr
+    folder = done.stdout.strip().splitlines()[-1]
+    assert folder and not os.path.exists(folder) and not list(tmp_path.glob("ppg_*"))

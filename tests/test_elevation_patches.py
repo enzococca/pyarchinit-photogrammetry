@@ -114,6 +114,31 @@ def _share(img, inside, rgb):
     return float((np.abs(img[:3, inside].T.astype(int) - rgb).max(axis=1) <= 1).mean())
 
 
+def _own_area(ch, entry, img, half=(0.2, 0.12)):
+    """The photo that paints by itself the most cells of an area of this half size (metres) somewhere along the
+    elevation, and the (u, v) of the centre of that area. The centres are the cells farthest from the edge of the
+    relief (as ``surface_cell``, which takes the middle one of them): where the photos meet depends on the mesh of
+    the run, and around the middle cell the mosaic can be all seams, each photo painting a few cells by itself."""
+    from scipy.ndimage import distance_transform_edt, uniform_filter
+
+    t = _transform(E.elevation_paths(ch, entry)[0])
+    relief = np.isfinite(_read(E.elevation_paths(ch, entry)[1])[0])
+    depth = distance_transform_edt(np.pad(relief, 1))[1:-1, 1:-1]
+    deep = depth >= 0.9 * depth.max()
+    size = (2 * int(round(half[1] / abs(t.e))) + 1, 2 * int(round(half[0] / abs(t.a))) + 1)
+    best = (-1.0, None, 0, 0)
+    for cam in ch.cameras:
+        own = (np.abs(img[:3].astype(int) - plain_colour(ch, cam.label)[:, None, None]).max(axis=0) <= 1) & relief
+        if not own.any():
+            continue
+        count = np.where(deep, uniform_filter(own.astype(float), size, mode="constant"), -1.0)
+        r, c = np.unravel_index(int(np.argmax(count)), count.shape)
+        if count[r, c] > best[0]:
+            best = (float(count[r, c]), cam.label, int(r), int(c))
+    _n, label, r, c = best
+    return label, t.c + (c + 0.5) * t.a, t.f + (r + 0.5) * t.e
+
+
 def test_a_photo_assigned_on_the_wall_paints_its_cells_only(wall, plain_photos):
     ch, eid, entry = wall
     path0 = E.elevation_paths(ch, entry)[0]
@@ -157,15 +182,15 @@ def test_a_photo_assigned_on_the_wall_paints_its_cells_only(wall, plain_photos):
 def test_an_excluded_photo_is_left_out_on_the_wall(wall, plain_photos):
     ch, eid, entry = wall
     before = _read(E.elevation_paths(ch, entry)[0])
-    u, v = _surface_cell(ch, entry)
+    # the area where a photo paints the most cells by itself, and that photo: around the middle cell of the wall the
+    # photos can meet (the mesh of each platform moves the seams: under 5 % for the best photo there on Linux, some
+    # runs), and the photos' "used" estimate and the cells painted can differ
+    label, u, v = _own_area(ch, entry, before)
     poly = box(u - 0.2, v - 0.12, u + 0.2, v + 0.12)
     inside, outside = _cells(ch, entry, poly, before.shape[1:])
-    # the photo that paints the most of the area now (the photos' "used" estimate and the cells painted can differ
-    # with the mesh of each platform: 4 % on Linux with Python 3.11 for the photo "used" the most)
-    most = max(P.photos_for_area(ch, poly, frame=eid), key=lambda c: _share(before, inside, plain_colour(ch, c["label"])))
-    colour = plain_colour(ch, most["label"])
+    colour = plain_colour(ch, label)
     assert _share(before, inside, colour) > 0.05
-    P.add_patch(ch, poly, [most["label"]], mode="exclude", frame=eid)
+    P.add_patch(ch, poly, [label], mode="exclude", frame=eid)
     after = _read(P.update_elevation(ch, eid))
     assert _share(after, inside, colour) < 0.01
     assert (after[:, outside] == before[:, outside]).all()

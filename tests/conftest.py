@@ -27,9 +27,9 @@ def _folder(prefix: str) -> str:
 if "PPG_PLUGINS_DIR" not in os.environ:
     os.environ["PPG_PLUGINS_DIR"] = _folder("ppg-test-plugins-")
 os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
-# the GNSS downloads and caches of the tests go to a folder of their own, never to the user's
-if "PPG_GNSS_DIR" not in os.environ:
-    os.environ["PPG_GNSS_DIR"] = _folder("ppg-test-gnss-")
+# the GNSS downloads and caches of the tests (the conversions of raw logs among them) go to a folder of their own,
+# never to the user's: forced, whatever the shell says, and set again before every test (gnss_dir_of_the_tests)
+_GNSS_DIR = os.environ["PPG_GNSS_DIR"] = _folder("ppg-test-gnss-")
 # nor do they read RustGIS's settings folder of the user (its token), or the run folder where a RUNNING RustGIS
 # publishes the address of its agent interface (the doctor would then ask the app, and the link would send it its
 # token): empty folders, whatever the shell says. The test of the open app (test_rustgis_app.py) is the exception.
@@ -85,6 +85,13 @@ def _this_computer(host) -> bool:
         return ipaddress.ip_address(host.decode() if isinstance(host, bytes) else str(host).split("%")[0]).is_loopback
     except ValueError:
         return False
+
+
+@pytest.fixture(autouse=True)
+def gnss_dir_of_the_tests(monkeypatch):
+    """Every test starts with the GNSS folder of the session (``PPG_GNSS_DIR``): a test that removed or changed it
+    cannot leave the next one writing into the user's (the cache of conversions, downloads)."""
+    monkeypatch.setenv("PPG_GNSS_DIR", _GNSS_DIR)
 
 
 @pytest.fixture(autouse=True)
@@ -449,6 +456,12 @@ def pytest_sessionfinish(session, exitstatus):
     _exit_status["code"] = int(exitstatus)
     for path in _MADE:  # the temporary folders of the session (the exit guard skips the handlers of atexit)
         shutil.rmtree(path, ignore_errors=True)
+    try:  # and those of the documents never saved that the tests left alive
+        from pyarchinit_photogrammetry.core.document import remove_temporary_folders
+
+        remove_temporary_folders()
+    except Exception:
+        pass
 
 
 def pytest_unconfigure(config):

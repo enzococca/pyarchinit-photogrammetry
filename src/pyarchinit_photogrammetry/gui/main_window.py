@@ -30,12 +30,14 @@ from ..core.document import Document
 from ..core.progress import Cancelled
 from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
 from . import i18n, theme
+from . import shots_widgets as sw
+from .autopilot_dialog import AutopilotDialog
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
-from .i18n import decimal_comma, number, thousands_points, tr, translate
+from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -415,7 +417,7 @@ class _StatusBar(QStatusBar):
     """The status bar: its messages in the language of the interface (also those of the engine)."""
 
     def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt name
-        super().showMessage(translate(text), timeout)
+        super().showMessage(engine(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SEARCH_WIDTH = (150, 300)  # the search of the commands in the top bar: narrowest and widest, pixels
 
@@ -769,6 +771,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.gnss_pane.mrk_requested.connect(self.gnss_apply_mrk)
         self.gnss_pane.positions_requested.connect(self.gnss_apply_positions)
         self.gnss_pane.ppk_requested.connect(self.gnss_ppk)
+        self.gnss_pane.autopilot_requested.connect(self.gnss_autopilot_log)
         self.gnss_pane.survey_crs_requested.connect(lambda: self.gnss_survey_crs())
         self.gnss_pane.geoid_requested.connect(lambda: self.gnss_download_geoid())
         self.gnss_pane.only_fix_toggled.connect(self.gnss_only_fix)
@@ -1419,6 +1422,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                   tip=tr("Un file di testo con una riga per foto: nome, x, y, quota e, se ci sono, le "
                          "deviazioni standard o l'accuratezza e lo stato (drone costruito in casa, "
                          "soluzione PPK di un altro programma)"))
+        self._act(gnss_menu, tr("Log dell'autopilota..."), self.gnss_autopilot_log, icon_name="load",
+                  tip=tr("Il log di un autopilota ArduPilot (DataFlash .bin) o PX4 (ULog .ulg): la posizione che "
+                         "l'autopilota registra a ogni scatto della camera"))
         from .gnss_pane import ppk_tip
 
         self._act(gnss_menu, tr("Correzioni PPK..."), self.gnss_ppk, processing=True, icon_name="run", tip=ppk_tip())
@@ -5814,16 +5820,79 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                      ", ".join(shots[:8]) + (" ..." if len(shots) > 8 else "")))
         self._gnss_changed()
 
+    def gnss_autopilot_log(self) -> None:
+        """*Strumenti > GNSS > Log dell'autopilota* and the button of the GNSS pane: the log of an ArduPilot or PX4
+        autopilot, then its shots, the photos they pair with, the lever arm and the latency (:class:`AutopilotDialog`);
+        every photo the position the autopilot logged at its shot (:func:`gnss.apply.apply_shots`), its height above
+        the sea level or the ellipsoid as the log gives it. A log that cannot be read, or shots that cannot be paired,
+        are said and nothing changes."""
+        if not self._need_chunk():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, tr("Log dell'autopilota"), self._last_dir(),
+                                              tr("Log dell'autopilota (*.bin *.BIN *.log *.ulg);;Tutti i file (*)"))
+        if not path:
+            return
+        v = AutopilotDialog.ask(self, self.chunk, path)
+        if not v:
+            return
+        from ..gnss import apply as gnss
+        from .gnss_pane import status_names
+
+        try:
+            shotset = sw.log_shots(path, v.get("message") or "auto", v.get("camera"))
+            result = gnss.apply_shots(self.chunk, shotset, v.get("photos"), by=v.get("by") or "auto",
+                                      latency_s=float(v.get("latency_ms") or 0.0) / 1000.0,
+                                      body_lever_mm=v.get("lever_body_mm"))
+        except (OSError, ValueError) as exc:
+            self._exc(tr("Lettura del log dell'autopilota non riuscita"), exc)
+            return
+        if not result["matched"]:
+            self._warn(tr("Nessuna foto del chunk ha trovato il suo scatto nel log: controlla la cartella delle foto "
+                          "e come sono abbinate."))
+            return
+        names = status_names()
+        detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
+        self._gnss_done(tr("Log dell'autopilota: {0} foto su {1} hanno la posizione del loro scatto ({2})",
+                           result["matched"], result["photos"], detail), result["unmatched"])
+        lever = sw.lever_words(v.get("lever_body_mm"), float(v.get("latency_ms") or 0.0))
+        for line in sw.pairing_words(result) + ([lever] if lever is not None else []):
+            self.log_pane.info(line)
+        for warning in list(shotset.warnings) + list(result["warnings"]):
+            self.log_pane.warning(warning)
+        self._gnss_changed()
+
+    @staticmethod
+    def _ppk_shots_problem(v: dict) -> str | None:
+        """Why the answer ``v`` of :class:`PpkDialog` cannot be run, as ``ppg gnss ppk`` refuses it: an edge for
+        anything but the time marks of a u-blox log, a message or a camera for anything but an autopilot log, a lever
+        arm, a latency or a way of pairing for a DJI MRK; None when it can."""
+        shots = v.get("shots") or {}
+        kind = shots.get("kind") or "mrk"
+        if kind != "ubx" and (shots.get("edge") or "falling") != "falling":
+            return tr("Il fronte del segnale dello scatto si sceglie solo per gli eventi di un log u-blox.")
+        if kind != "log" and ((shots.get("message") or "auto") != "auto" or shots.get("camera") is not None):
+            return tr("I messaggi e la camera si scelgono solo per il log di un autopilota.")
+        lever = v.get("lever_body_mm")
+        if kind == "mrk" and ((lever is not None and any(lever)) or float(v.get("latency_ms") or 0.0)
+                              or (v.get("by") or "auto") != "auto"):
+            return tr("Un MRK di DJI porta il braccio di leva di ogni scatto e si abbina come sempre: braccio di "
+                      "leva, latenza e abbinamento sono per le altre sorgenti degli scatti.")
+        return None
+
     def gnss_ppk(self) -> None:
-        """*Strumenti > GNSS > Correzioni PPK* and *Calcola PPK* of the GNSS pane: the ``Timestamp.MRK``, then the RINEX
-        of the drone and of a base, the navigation files, how the base is placed and whether the onboard RTK fixes take
-        the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when the MRK
-        is away from them; then in the background (:meth:`_ppk_job`) what the base needs - igs20.atx, the observations
+        """*Strumenti > GNSS > Correzioni PPK* and *Calcola PPK* of the GNSS pane: the file that tells the shots - a
+        DJI ``Timestamp.MRK``, the RINEX or the raw log of the rover's receiver with its events, an autopilot log, an
+        ``_events.pos`` -, then the source of the shots with its options, the observations of the drone and of a base
+        (RINEX, or raw logs converted first: :func:`gnss.sources.ppk_inputs`), the navigation files, how the base is
+        placed and whether the onboard RTK fixes take the PPK position too (:class:`PpkDialog`, from the last run of
+        the chunk), the folder of the photos when nothing tells it; then in the background (:meth:`_ppk_job`)
+        what the base needs - igs20.atx, the observations
         and coordinates of a permanent station, a static baseline or PPP of the user's base, the navigation of the
         flight -, RTKLIB in the folder of the chunk (:func:`gnss.ppk.solve`), and every photo the camera below the
         antenna of the solution at its shot, with the status and accuracy of the solution
-        (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is, with its
-        message and traceback; nothing changes then."""
+        (:func:`gnss.apply.apply_ppk` for an MRK, :func:`gnss.apply.apply_ppk_shots` for the other sources, with the
+        lever arm in the body of the drone and the latency of the camera). What goes wrong in the background is
+        shown as every failed step is, with its message and traceback; nothing changes then."""
         if self.runner.busy:  # as the menu, which is off while a step runs
             self.statusBar().showMessage(tr("Un'elaborazione è già in corso"), 8000)
             return
@@ -5835,27 +5904,62 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                           "\"pyarchinit-photogrammetry-core>=0.5\"), oppure il programma rnx2rtkp di RTKLIB-EX 2.5 "
                           "indicato in PPG_RNX2RTKP."))
             return
-        path, _ = QFileDialog.getOpenFileName(self, tr("Timestamp.MRK di DJI"), self._last_dir(),
-                                              tr("File MRK (*.MRK *.mrk);;Tutti i file (*)"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("Scatti del volo: Timestamp.MRK, osservazioni del drone o log dell'autopilota"), self._last_dir(),
+            tr("Scatti (*.MRK *.mrk *.obs *.??o *.rnx *.ubx *.rtcm *.rtcm3 *.sbf *.bin *.BIN *.log *.ulg *.pos);;"
+               "File MRK (*.MRK *.mrk);;Tutti i file (*)"))
         if not path:
             return
         from ..gnss import apply as gnss
-        from ..gnss import ppk
+        from ..gnss import ppk, sources
 
         ch = self.chunk
         v = PpkDialog.ask(self, path, ppk.work_folder(ch), chunk=ch)
         if not v:
             return
-        photos = self._photos_of_mrk(path)
-        if photos is None:
+        problem = self._ppk_shots_problem(v)
+        if problem:
+            self._warn(problem)
             return
+        shots = v.get("shots") or {"kind": "mrk", "file": path}
+        kind, shots_file = shots.get("kind") or "mrk", shots.get("file")
+        if kind == "mrk":
+            shots_file = shots_file or path
+            photos = self._photos_of_mrk(str(shots_file))
+        else:
+            photos = shots.get("photos") or QFileDialog.getExistingDirectory(
+                self, tr("Cartella delle foto di questi scatti"), str(Path(shots_file or v["rover"]).parent))
+        if photos is None or (kind != "mrk" and not photos):
+            return
+        bases = v.get("base") or []
+        bases = [bases] if isinstance(bases, (str, Path)) else list(bases)
 
         def job(p):
-            solution, notes = self._ppk_job(ch, v, p)
+            p(0.0, "Lettura degli scatti e delle osservazioni")
+            inputs = sources.ppk_inputs(kind, shots_file, v["rover"], bases, approx_time=v.get("approx_time"),
+                                        edge=shots.get("edge") or "falling", message=shots.get("message") or "auto",
+                                        camera=shots.get("camera"), progress=p.sub(0.0, 0.1))
+            base = inputs.bases[0] if len(inputs.bases) == 1 else (inputs.bases or None)
+            # the navigation of a raw log is the one of the conversion of this run, not a file the dialog saw
+            solution, notes = self._ppk_job(ch, {**v, "rover": inputs.rover, "base": base,
+                                                 "navs": inputs.navs(v.get("navs"))}, p.sub(0.1, 0.8))
+            inputs.record(solution)  # remembered with the files the user named, not with their conversions
+            notes = [w for done in inputs.converted for w in done.warnings] + notes
             p(0.9, "Posizioni delle foto agli scatti")
-            return solution, gnss.apply_ppk(ch, path, solution, photos or None,
-                                            replace_fix=bool(v.get("replace_fix"))), notes
+            if kind == "mrk":
+                result = gnss.apply_ppk(ch, shots_file, solution, photos or None,
+                                        replace_fix=bool(v.get("replace_fix")))
+            else:
+                result = gnss.apply_ppk_shots(ch, inputs.shotset, solution, photos, by=v.get("by") or "auto",
+                                              latency_s=float(v.get("latency_ms") or 0.0) / 1000.0,
+                                              body_lever_mm=v.get("lever_body_mm"),
+                                              replace_fix=bool(v.get("replace_fix")))
+                notes += list(inputs.shotset.warnings)
+            return solution, result, notes
 
+        lever = None if kind == "mrk" else sw.lever_words(v.get("lever_body_mm"), float(v.get("latency_ms") or 0.0))
+        if lever is not None:  # what the run counts with, in its log
+            self.log_pane.info(lever)
         # like an MRK or a positions file: the positions change and the project is to be saved, not saved at once
         self.run_task("Calcolo PPK", job, self._ppk_done, refresh=False, save=False)
 
@@ -5908,12 +6012,16 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     "drone».", kept))
                 return
             self._warn(tr("Nessuna foto del chunk ha preso una posizione PPK: controlla la cartella delle foto e che "
-                          "l'MRK sia del volo delle osservazioni del drone."))
+                          "l'MRK sia del volo delle osservazioni del drone.") if "by" not in result else
+                       tr("Nessuna foto del chunk ha preso una posizione PPK: controlla la cartella delle foto e che "
+                          "gli scatti siano del volo delle osservazioni del drone."))
             return
         names = status_names()
         detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
         self._gnss_done(tr("PPK: {0} foto su {1} hanno la posizione corretta del loro scatto ({2})", result["matched"],
                            result["photos"], detail), result["unmatched"])
+        for line in sw.pairing_words(result):  # the shots of a receiver or of an autopilot: how they were paired
+            self.log_pane.info(line)
         if kept:
             self.log_pane.info(tr("Foto che hanno tenuto il fix RTK del drone stesso: {0}", kept))
         baseline = result.get("baseline_km")
@@ -5924,7 +6032,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                                   Path(solution.path).name))
         shots = [str(i) for i in result["shots_unmatched"]]
         if shots:
-            self.log_pane.warning(tr("Scatti dell'MRK senza posizione PPK ({0}): {1}", len(shots),
+            self.log_pane.warning(tr("Scatti dell'MRK senza posizione PPK ({0}): {1}" if "by" not in result else
+                                     "Scatti senza posizione PPK ({0}): {1}", len(shots),
                                      ", ".join(shots[:8]) + (" ..." if len(shots) > 8 else "")))
         for text in result["warnings"]:
             self.log_pane.warning(text)

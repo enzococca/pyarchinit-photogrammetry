@@ -4,11 +4,107 @@ tag:        v2.5.1
 commit:     62d4677ed8425a4e2748c6d390b500d1afb493fc
 license:    BSD 2-clause (license.txt beside this file)
 
-Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged,
-in src/: rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
-ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c). The receiver decoders
-(src/rcv), streams, servers, downloads and the applications are left out. Compile-time settings
-come from native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
+Local changes (the only three; every other file is as upstream):
+
+  src/rtkpos.c, rtkpos() (line 2381 upstream, "} else rtk->sol.time=obs[0].time;"): the branch that
+  skips the single point positioning of an epoch (when the variance of the position is below
+  STD_PREC_VAR_THRESH) now also copies the time mark of the epoch,
+      } else { rtk->sol.time=obs[0].time; rtk->sol.eventime=obs[0].eventime; }
+  pntpos() (pntpos.c, sol->eventime = obs[0].eventime) is the only place that sets it, so upstream an
+  event (RINEX epoch flag 5, u-blox TIM-TM2) on such an epoch was lost and the mark of an earlier epoch
+  was written again on later ones: on the 30 s samples of tests/data/rtklib (3040 against 0759) two
+  of four marks were missing from <solution>_events.pos in forward, backward and combined mode. With
+  the change all four are written, and the .pos files are byte for byte the same. To be reported upstream.
+
+  src/convrnx.c, setopt_file() (line 363 upstream, rnxcomment(opt,"log: %s",paths[j]);): the comment
+  "log:" of the headers of the RINEX files a conversion writes now names the log by its file name,
+  not by its whole path, which carried the folders of the user (their name, the layout of their
+  disk) into every RINEX file the program writes and the user may pass on:
+      const char *name=paths[j], *p;
+      for (p=paths[j];*p;p++) if (*p=='/'||*p=='\\') name=p+1;
+      rnxcomment(opt,"log: %s",name);
+  The "% inp file" lines postpos.c writes in the header of a solution (.pos, _events.pos) are left as
+  they are: a solution stays in its project, and the program reads those lines to find the rover's
+  observations of a run (ppk._rover_observations: the check of the time marks).
+
+  src/rinex.c, readrnxobs() (line 1149 upstream, "if (flag == 5) {"): after an event (epoch flag 5)
+  upstream reads the next record and, when its interval from the epoch before differs from the
+  interval before that (DTTOL), reads one more in its place - meant to discard the observations some
+  receivers write at the time of the event (rtklibexplorer commit b04f7ed, "Discard event
+  observations"). It also discarded a real epoch with the event: the first epoch of a file, an epoch
+  after a gap or a change of rate; and when the record read was a second event, that event stood
+  in for the epoch: of two events between two epochs the first was written, of three none, of four
+  the last with the epoch after them lost. On the 30 s samples of tests/data/rtklib (3040 against
+  0759), the 00:05:00 epoch left out: an event at 00:05:10 lost the 00:05:30 epoch, and with a second
+  one at 00:05:40 both marks were lost. Now the events one after the other, and the records of
+  header lines (flags 3 and 4) after them, are read through (the first event kept; upstream such a
+  record stood in for the discarded epoch and the event went to the epoch after it, which is where it
+  goes now too) and the epoch after them is discarded only when it is off the grid of the epochs
+  before it: not a whole number of the shortest interval read so far (tint0) after the last, within
+  DTTOL.
+      do {
+          n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+      } while (n == 0 && (flag == 5 || flag == 3 || flag == 4));
+      if (n > 0 && tint0 > 0.0 && fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL) {
+          double k = timediff(data[0].time,time1)/tint0;
+          if (k < 0.5 || fabs(k-floor(k+0.5))*tint0 >= DTTOL)
+              n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+      }
+  with tint0 (0 at first) set after each epoch kept but the first - which has no epoch before it -
+  to its interval from the one before when shorter:
+      n1=n;dtime1=timediff(data[0].time,time1);
+      if (n>0&&time1.time!=0&&dtime1>=DTTOL&&(tint0<=0.0||dtime1<tint0)) tint0=dtime1;
+      time1=data[0].time;
+  (upstream: "n1=n;dtime1=timediff(data[0].time,time1);time1=data[0].time;" and no tint0), so an
+  event between the first two epochs keeps the second.
+  An observation epoch at the time of an event is still discarded (tests/test_gnss_ppk_events.py);
+  a change of rate to a rate not dividing the old one still loses one epoch, as upstream.
+  rinex.external_events emulates this reading. To be reported upstream, with the change of rtkpos.c.
+
+Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged
+(but for the change above), in src/:
+rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
+ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c), and, from 0.8 of the core,
+those of convbin's conversion of raw receiver logs (app/consapp/convbin/gcc/makefile) with five of its
+receiver decoders, unchanged too (but for the change of convrnx.c above): src/convrnx.c, src/rcvraw.c,
+src/rcv/ublox.c, src/rcv/novatel.c and, from 2026-11-10, src/rcv/septentrio.c, src/rcv/rt17.c and
+src/rcv/unicore.c (fetched from raw.githubusercontent.com/rtklibexplorer/RTKLIB/<commit above>/src/rcv,
+SHA-256 88c85144...b498 septentrio.c, 3dd6bdc8...0c51 rt17.c, 06ad88e1...38ed unicore.c).
+Streams, servers, downloads and the applications are left out. Compile-time settings come from
+native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
+
+The receiver decoders (src/rcv) were vendored one by one after reading the header of each. No file
+of src/rcv names a licence: each has a copyright line, most with "All rights reserved".
+
+  ublox.c     "Copyright (C) 2007-2020 by T.TAKASU" and "Copyright (C) 2014 by T.SUZUKI": RTKLIB's
+              author, the copyright holder of license.txt (T. Suzuki's changes are part of RTKLIB's
+              own releases), "All rights reserved", no licence named. Vendored: u-blox UBX (RXM-RAWX,
+              RXM-SFRBX, TIM-TM2, ...).
+  novatel.c   "Copyright (C) 2007-2020 by T.TAKASU, All rights reserved", no licence named. Vendored:
+              NovAtel OEM4/OEMV/OEM6/OEM7, OEMStar.
+  septentrio.c "Copyright (C) 2013 by Fabrizio Tappero. Copyright (C) 2015 by Jens Reimann", no licence
+              in the file. Vendored (2026-11-10): Septentrio SBF.
+  rt17.c      "Copyright (C) 2016 Daniel A. Cook, All rights reserved. Copyright (C) 2020 T.TAKASU",
+              and "Copyright (C) 2014, 2016 by Daniel A. Cook. All Rights Reserved." in its text, "written
+              ... for inclusion into the RTKLIB library", no licence named. Vendored (2026-11-10):
+              Trimble RT-17.
+  unicore.c   "Copyright (C) 2024 Avinab Malla, All rights reserved.", no licence in the file. Vendored
+              (2026-11-10): Unicore UM980/981/982 binary.
+  crescent.c, skytraq.c, javad.c, nvs.c, binex.c, swiftnav.c, tersus.c, comnav.c: formats the
+              program does not take; not looked at, not vendored.
+
+ublox.c and novatel.c are T. Takasu's, the holder of license.txt: BSD 2-clause for them is an
+inference from the distribution. septentrio.c, rt17.c and unicore.c carry no licence header of their
+own and name other authors; they are distributed with RTKLIB-EX, whose licence as a whole is the BSD
+2-clause of license.txt, and are taken here on that basis, by the decision of the maintainer of this
+package (2026-11-10), with their copyright lines kept as they are. RT-17 carries the time of the week
+only (an approximate time of the log is needed, as for RTCM 3). The entry points that rcvraw.c calls for
+the other receivers are stubs of ours in native/src/rcv_stubs.c, which decode nothing; ppg_convbin()
+does not take those formats. RTCM 3 needs no file of src/rcv: rtcm.c and rtcm3.c decode it.
+
+RINEX is never an input of convrnx() here (ppg_convbin() takes u-blox, RTCM 3, NovAtel, Septentrio,
+RT-17 and Unicore only):
+convrnx() would decompress a compressed RINEX file through a shell command (rtk_uncompress).
 
 Also left out: src/sofa.c, which the makefile of rnx2rtkp lists. It is a bundle of routines of the
 IAU SOFA library (epv00 and moon98 with the functions they need), and SOFA has a licence of its

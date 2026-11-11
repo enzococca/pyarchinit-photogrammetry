@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QHB
                                QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..gnss import stations
-from .i18n import current, number, tr
+from .i18n import current, engine, number, tr
 
 WITHIN_KM = 200.0  # beyond this a base hardly fixes the ambiguities of a flight
 LIMIT = 30  # the stations listed at most
@@ -120,7 +120,7 @@ class StationsDialog(QDialog):
         if error is not None:
             self.table.setRowCount(0)
             self.status.setText(tr("L'elenco delle stazioni non si scarica: {0}. Controlla la connessione e premi "
-                                   "Riprova.", str(error).rstrip(".")))
+                                   "Riprova.", engine(str(error)).rstrip(".")))
             self.b_retry.setVisible(True)
             self._chosen()
             return

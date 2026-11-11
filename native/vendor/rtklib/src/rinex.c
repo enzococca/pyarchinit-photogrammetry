@@ -1135,7 +1135,7 @@ static int readrnxobs(FILE *fp, gtime_t ts, gtime_t te, double tint,
     obsd_t *data;
     uint8_t slips[MAXSAT][NFREQ+NEXOBS]={{0}};
     int i,n,n1=0,flag=0,stat=0;
-    double dtime1=0;
+    double dtime1=0,tint0=0; /* tint0: local change, the shortest interval between the epochs read */
 
     trace(4,"readrnxobs: rcv=%d ver=%.2f tsys=%d\n",rcv,ver,*tsys);
 
@@ -1148,9 +1148,19 @@ static int readrnxobs(FILE *fp, gtime_t ts, gtime_t te, double tint,
 
         if (flag == 5) {
             eventime = data[0].eventime;
-            n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
-            if (fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL)
+            /* local change: of events one after the other the first is kept (upstream a second one was
+               read in place of the epoch, a third lost them all); the epoch that follows is discarded as
+               the observations of the event only when it is off the grid of the epochs before it (the
+               shortest interval between them) - not after a gap, nor as the first epoch, which upstream
+               were lost with the event; records of header lines (flags 3, 4) after it are read through */
+            do {
                 n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+            } while (n == 0 && (flag == 5 || flag == 3 || flag == 4));
+            if (n > 0 && tint0 > 0.0 && fabs(timediff(data[0].time,time1)-dtime1)>=DTTOL) {
+                double k = timediff(data[0].time,time1)/tint0;
+                if (k < 0.5 || fabs(k-floor(k+0.5))*tint0 >= DTTOL)
+                    n = readrnxobsb(fp,opt,ver,tsys,tobs,&flag,data,sta);
+            }
         }
 
         if (eventime.time==0 || obs->n-n1<=0 || timediff(eventime,time1)>=0) {
@@ -1185,7 +1195,9 @@ static int readrnxobs(FILE *fp, gtime_t ts, gtime_t te, double tint,
             /* save obs data */
             if ((stat=addobsdata(obs,data+i))<0) break;
         }
-        n1=n;dtime1=timediff(data[0].time,time1);time1=data[0].time;
+        n1=n;dtime1=timediff(data[0].time,time1);
+        if (n>0&&time1.time!=0&&dtime1>=DTTOL&&(tint0<=0.0||dtime1<tint0)) tint0=dtime1; /* local change */
+        time1=data[0].time;
     }
     trace(4,"readrnxobs: nobs=%d stat=%d\n",obs->n,stat);
 

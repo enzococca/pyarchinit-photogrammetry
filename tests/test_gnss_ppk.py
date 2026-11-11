@@ -763,6 +763,7 @@ def test_config_with_a_typed_base_position():
     assert options["out-height"] == "ellipsoidal"
     assert options["out-timesys"] == "gpst"
     assert options["out-timeform"] == "tow"
+    assert options["out-timendec"] == "6"  # the times of the solution to the microsecond
     assert options["out-outhead"] == "on"
     # only options RTKLIB knows, no file of any kind, values without a "#" (a comment for RTKLIB) or blanks
     assert set(options) <= _rtklib_option_names()
@@ -2801,6 +2802,42 @@ def test_the_drone_rinex_beside_its_mrk(tmp_path, qt_app):
     assert rover_beside(other / "Timestamp.MRK") is None
 
 
+def test_ppk_dialog_says_a_receiver_or_an_antenna_the_header_does_not_name(tmp_path, qt_app, monkeypatch):
+    """A RINEX header without the receiver or the antenna (a converted log, a file cut by hand): the dialog says so in
+    words, never with a dash in their place."""
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+
+    def header(receiver: str, antenna: str) -> list[str]:
+        return [_line(receiver, "REC # / TYPE / VERS") if h.endswith("REC # / TYPE / VERS") else
+                _line(antenna, "ANT # / TYPE") if h.endswith("ANT # / TYPE") else h for h in V2_HEADER]
+
+    rover = _rinex2(tmp_path / "rover.24o", header("", ""))
+    dlg = PpkDialog(rover)
+    dlg.refresh()
+    assert dlg.rover_info.text() == ("Ricevitore non indicato; osservazioni dal 2024-05-12 10:30:00 al "
+                                     "2024-05-12 10:30:02 (ora GPS).")
+    for receiver, antenna, said in (
+            ("", "", "Base BASE: ricevitore non indicato, antenna non indicata; osservazioni dal"),
+            ("SN123               TRIMBLE NETR9       5.45", "", "Base BASE: ricevitore TRIMBLE NETR9, antenna non "
+                                                                 "indicata; osservazioni dal"),
+            ("", "1234                TRM57971.00     NONE", "Base BASE: ricevitore non indicato, antenna "
+                                                             "TRM57971.00 NONE; osservazioni dal")):
+        folder = tmp_path / f"base{len(receiver)}{len(antenna)}"
+        folder.mkdir()
+        base = _rinex2(folder / "base.24o", header(receiver, antenna))
+        _choose(dlg, dlg.base, base)
+        assert dlg.base_info.text().startswith(said), dlg.base_info.text()
+        assert " -" not in dlg.rover_info.text() + dlg.base_info.text().split("\n")[0]
+    pieces = [Path(shutil.copyfile(base, base.parent / f"pezzo{i}.24o")) for i in (1, 2)]
+    dlg.base.set_paths([base, *pieces])
+    dlg.refresh()
+    assert dlg.base_info.text().startswith("Base BASE: 3 file, ricevitore non indicato, antenna TRM57971.00 NONE; ")
+    dlg.close()
+    dlg.deleteLater()
+
+
 def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkeypatch):
     from PySide6.QtWidgets import QDialog
 
@@ -3320,8 +3357,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     # in the menu Strumenti > GNSS
     menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
-    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Correzioni PPK...",
-                                                 "Pannello GNSS"]
+    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...",
+                                                 "Log dell'autopilota...", "Correzioni PPK...", "Pannello GNSS"]
 
 
 def test_ppk_step_asks_for_rtklib_and_for_the_photos(ppk_window, fake_rtklib, monkeypatch, tmp_path):
@@ -3641,6 +3678,7 @@ def test_stations_dialog_offline_retry(qt_app, monkeypatch):
     assert _wait_until(lambda: dlg.b_retry.isVisibleTo(dlg))
     assert dlg.status.text().startswith("L'elenco delle stazioni non si scarica: https://gnss-metadata.eu")
     assert dlg.status.text().endswith("Controlla la connessione e premi Riprova.") and dlg.table.rowCount() == 0
+    assert "connessione non riuscita (offline) (dopo 3 tentativi)" in dlg.status.text()  # the reason in Italian too
     dlg.b_retry.click()
     assert _wait_until(lambda: dlg.table.rowCount() == 2)
     assert not dlg.b_retry.isVisibleTo(dlg) and calls == [False, False]

@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "ppg_core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytemuck",
  "cc",

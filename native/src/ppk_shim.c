@@ -1,5 +1,6 @@
 /*------------------------------------------------------------------------------
-* ppk_shim.c : RTKLIB's post-processing (rnx2rtkp -k) as one function of ppg_core
+* ppk_shim.c : RTKLIB's post-processing (rnx2rtkp -k) and its conversion of raw
+*              receiver logs into RINEX (convbin) as functions of ppg_core
 *
 * RTKLIB (native/vendor/rtklib, BSD 2-clause, unchanged) asks the program it is
 * built into for three callbacks (showmsg, settspan, settime) and keeps its state
@@ -38,7 +39,43 @@
 static char ppg_last[PPG_MSGLEN];  /* the last message of the run */
 static char ppg_error[PPG_MSGLEN]; /* the last error message of the run */
 
-/* RTKLIB's messages: kept, never printed; 0 = go on (RTKLIB aborts on 1) ------*/
+/* the state of a conversion (ppg_convbin), read by showmsg(): set and read by the thread that holds the lock of
+   RTKLIB (convert.rs), so plain variables. ppg_convert_cancelled() is an atomic flag of convert.rs, raised by
+   convert_cancel() from any thread */
+extern int ppg_convert_cancelled(void);
+static int ppg_converting;    /* a conversion runs: showmsg() reads the flag and the counts */
+static int ppg_cancel_seen;   /* showmsg() told RTKLIB to stop */
+static int ppg_stat[11];      /* the counts of convrnx's last status line, by the letters of PPG_STAT_TYPES */
+static char ppg_stat_line[PPG_MSGLEN]; /* that line */
+#define PPG_STAT_TYPES "ONGHQLCISET" /* convrnx.c, showstat(): files, then errors (E) and events (T) */
+
+/* a status line of convrnx ("<times>: O=62 N=9 E=1 T=3 ", or "<times>: " before anything is converted): its counts
+   into ppg_stat and 1; 0 for any other message */
+static int ppg_read_stat(const char *text)
+{
+    const char *p = strrchr(text, ':');
+    int stat[11] = {0};
+
+    if (!p || p[1] != ' ') return 0;
+    for (p += 2; *p; ) {
+        const char *type;
+        char *end;
+        long value;
+
+        if (*p == ' ') { p++; continue; }
+        if (!(type = strchr(PPG_STAT_TYPES, *p)) || !*type || p[1] != '=') return 0;
+        value = strtol(p + 2, &end, 10);
+        if (end == p + 2 || (*end && *end != ' ') || value < 0 || value > 2000000000L) return 0;
+        stat[type - PPG_STAT_TYPES] = (int)value;
+        p = end;
+    }
+    memcpy(ppg_stat, stat, sizeof(ppg_stat));
+    snprintf(ppg_stat_line, sizeof(ppg_stat_line), "%s", text);
+    return 1;
+}
+
+/* RTKLIB's messages: kept, never printed; 0 = go on (RTKLIB aborts on 1): a
+   conversion stops on 1 when convert_cancel() was called --------------------*/
 extern int showmsg(const char *format, ...)
 {
     char buff[PPG_MSGLEN];
@@ -48,9 +85,15 @@ extern int showmsg(const char *format, ...)
     va_start(arg, format);
     vsnprintf(buff, sizeof(buff), format, arg);
     va_end(arg);
-    if (!buff[0]) return 0;
-    snprintf(ppg_last, sizeof(ppg_last), "%s", buff);
-    if (!strncmp(buff, "error", 5)) snprintf(ppg_error, sizeof(ppg_error), "%s", buff);
+    /* a conversion keeps its status lines apart, and its progress ("scanning: <time> <systems>") nowhere */
+    if (buff[0] && !(ppg_converting && (ppg_read_stat(buff) || !strncmp(buff, "scanning: ", 10)))) {
+        snprintf(ppg_last, sizeof(ppg_last), "%s", buff);
+        if (!strncmp(buff, "error", 5)) snprintf(ppg_error, sizeof(ppg_error), "%s", buff);
+    }
+    if (ppg_converting && ppg_convert_cancelled()) {
+        ppg_cancel_seen = 1;
+        return 1;
+    }
     return 0;
 }
 extern void settspan(gtime_t ts, gtime_t te) { (void)ts; (void)te; }
@@ -255,4 +298,233 @@ int ppg_ppk(const char *conf, const char **infiles, int n, const char *outfile,
     stat = ppg_run(conf, infiles, n, outfile, msg, msglen);
     ppg_locale_back(&saved);
     return stat;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+* The conversion of raw receiver logs into RINEX: what convbin (app/consapp/convbin of RTKLIB-EX) does with
+* convrnx() of convrnx.c, for the formats whose decoders this package builds
+*-----------------------------------------------------------------------------------------------------------------*/
+
+/* the formats ppg_convbin() knows by name, with whether their decoder is built here (all are, from 0.8: a format
+   whose decoder were left out would be refused with code -6; see native/vendor/rtklib/VERSION) */
+typedef struct {
+    const char *name; /* the name raw_to_rinex() takes */
+    int format;       /* STRFMT_ of RTKLIB */
+    int built;        /* its decoder is part of this package */
+} ppg_format_t;
+
+static const ppg_format_t ppg_formats[] = {
+    {"ubx", STRFMT_UBX, 1},         /* u-blox UBX: rcv/ublox.c */
+    {"rtcm3", STRFMT_RTCM3, 1},     /* RTCM 3: rtcm.c, rtcm3.c */
+    {"novatel", STRFMT_OEM4, 1},    /* NovAtel OEM4/V/6/7, OEMStar: rcv/novatel.c */
+    {"sbf", STRFMT_SEPT, 1},        /* Septentrio SBF: rcv/septentrio.c */
+    {"rt17", STRFMT_RT17, 1},       /* Trimble RT-17: rcv/rt17.c */
+    {"unicore", STRFMT_UNICORE, 1}, /* Unicore: rcv/unicore.c */
+};
+#define PPG_NFORMATS ((int)(sizeof(ppg_formats) / sizeof(*ppg_formats)))
+
+/* the STRFMT_ code of a format name of ppg_formats (exact spelling), or -1 */
+int ppg_convbin_format(const char *name)
+{
+    int i;
+
+    for (i = 0; name && i < PPG_NFORMATS; i++) {
+        if (!strcmp(name, ppg_formats[i].name)) return ppg_formats[i].format;
+    }
+    return -1;
+}
+
+static const ppg_format_t *ppg_format_of(int format)
+{
+    int i;
+
+    for (i = 0; i < PPG_NFORMATS; i++) {
+        if (ppg_formats[i].format == format) return ppg_formats + i;
+    }
+    return NULL;
+}
+
+/* convrnx() expands wild cards (*) in the input path and replaces %-keywords (%Y, %r, ...) in all its paths
+   (expath, reppath of rtkcmn.c): a path with either is refused, as one of 1000 bytes or more (ppg_too_long) */
+static int ppg_bad_path(const char *what, const char *path, char *msg, int msglen)
+{
+    char text[PPG_MSGLEN];
+
+    if (!path || !*path) {
+        snprintf(text, sizeof(text), "error : the %s has no name", what);
+        ppg_message(msg, msglen, text);
+        return 1;
+    }
+    if (ppg_too_long(what, path, msg, msglen)) return 1;
+    if (strchr(path, '*') || strchr(path, '%')) {
+        snprintf(text, sizeof(text), "error : the path of the %s holds '*' or '%%', which RTKLIB would replace: "
+                 "rename it (%s)", what, path);
+        ppg_message(msg, msglen, text);
+        return 1;
+    }
+    return 0;
+}
+
+#define PPG_NOUTFILE 9 /* the output files of convrnx(): obs, nav, gnav, hnav, qnav, lnav, cnav, inav, sbas */
+
+/* the RTKLIB part of ppg_convbin(): runs in the C locale, the options as convbin sets them ---------------------*/
+static int ppg_run_convbin(int format, const char *infile, double approx_gps_seconds, int rinex_version,
+                           int navsys, const char *obs_out, const char *nav_out)
+{
+    rnxopt_t *opt;
+    char ofile_[PPG_NOUTFILE][1024] = {{0}}, *ofile[PPG_NOUTFILE];
+    int i, j, stat;
+
+    if (!(opt = (rnxopt_t *)calloc(1, sizeof(rnxopt_t)))) {
+        showmsg("error : out of memory");
+        return 0;
+    }
+    /* convbin's defaults (cmdopts of convbin.c): observations of code and carrier phase, every frequency (-f 6), a
+       tolerance of 5 ms between epochs, no signal masked */
+    opt->rnxver = rinex_version;
+    opt->obstype = OBSTYPE_PR | OBSTYPE_CP;
+    opt->navsys = navsys;
+    opt->ttol = 0.005;
+    for (i = 0; i < RNX_NUMSYS; i++) {
+        for (j = 0; j < MAXCODE; j++) opt->mask[i][j] = '1';
+        opt->mask[i][MAXCODE] = '\0';
+    }
+    opt->freqtype = FREQTYPE_L1 | FREQTYPE_L2 | FREQTYPE_L3 | FREQTYPE_L4 | FREQTYPE_L5 | FREQTYPE_L6;
+    if (approx_gps_seconds > 0.0) {
+        /* gpst2time() takes the seconds of a week (it drops more than 1e9 s) */
+        int week = (int)floor(approx_gps_seconds / 604800.0);
+        opt->trtcm = gpst2time(week, approx_gps_seconds - week * 604800.0);
+    }
+    snprintf(opt->prog, sizeof(opt->prog), "%s %s %s", "PPG_CORE", VER_RTKLIB, PATCH_LEVEL);
+
+    for (i = 0; i < PPG_NOUTFILE; i++) ofile[i] = ofile_[i];
+    snprintf(ofile[0], 1024, "%s", obs_out);
+    snprintf(ofile[1], 1024, "%s", nav_out);
+
+    stat = convrnx(format, opt, infile, ofile);
+    free(opt);
+    return stat;
+}
+
+/* a raw receiver log converted into RINEX observations and navigation, as convbin -r <format> -v <version>
+*  [-tr <approximate time>] -o obs_out -n nav_out infile
+* args   : int    format             I   STRFMT_UBX, STRFMT_RTCM3, STRFMT_OEM4, STRFMT_SEPT, STRFMT_RT17 or
+*                                        STRFMT_UNICORE (ppg_convbin_format())
+*          char  *infile             I   the log
+*          double approx_gps_seconds I   an approximate time of the log, seconds since 1980-01-06 GPS time (needed
+*                                        by RTCM 3 and RT-17, which carry the time of the week only); 0 = none
+*          int    rinex_version      I   RINEX version x100, 300 to 305 (one navigation file for all the systems)
+*          int    navsys             I   the systems converted, SYS_ mask
+*          char  *obs_out, *nav_out  I   the RINEX observation and navigation files written
+*          int   *counts             O   counts[4]: epochs, events, navigation messages, errors (convrnx's n[])
+*          char  *msg                O   RTKLIB's last message, or the error
+*          int    msglen             I   size of msg
+* return : 0 done, 1 cancelled (convert_cancel), -1 the log could not be read or an output could not be opened
+*          for writing, -2 nothing decoded (not a log of
+*          that format, or damaged; RTKLIB's message), -3 bad arguments (a path of 1000 bytes or more or with '*' or
+*          '%', a format not known, no approximate time for RTCM 3, a version or systems out of range), -5 the
+*          thread could not be put in the "C" locale for numbers, -6 the format is known but its decoder is not
+*          part of this package
+* notes  : not reentrant (RTKLIB's globals): the caller (convert.rs) holds the lock shared with ppg_ppk(). The
+*          outputs may be left behind, whole or not, on any code but 0: the caller writes to temporary names and
+*          removes them. RINEX is never an input (convrnx would decompress it through a shell command).
+*-----------------------------------------------------------------------------------------------------------------*/
+int ppg_convbin(int format, const char *infile, double approx_gps_seconds, int rinex_version, int navsys,
+                const char *obs_out, const char *nav_out, int *counts, char *msg, int msglen)
+{
+    const ppg_format_t *known = ppg_format_of(format);
+    ppg_locale_t saved;
+    char text[PPG_MSGLEN];
+    FILE *fp;
+    int i, stat;
+
+    ppg_last[0] = ppg_error[0] = '\0';
+    ppg_message(msg, msglen, "");
+    for (i = 0; counts && i < 4; i++) counts[i] = 0;
+
+    if (!counts) {
+        ppg_message(msg, msglen, "error : no room for the counts");
+        return -3;
+    }
+    if (!known) {
+        snprintf(text, sizeof(text), "error : the format %d is not one of the raw formats converted here", format);
+        ppg_message(msg, msglen, text);
+        return -3;
+    }
+    if (ppg_bad_path("input file", infile, msg, msglen) || ppg_bad_path("observation file", obs_out, msg, msglen) ||
+        ppg_bad_path("navigation file", nav_out, msg, msglen)) {
+        return -3;
+    }
+    if (!strcmp(obs_out, nav_out) || !strcmp(obs_out, infile) || !strcmp(nav_out, infile)) {
+        ppg_message(msg, msglen, "error : the input, observation and navigation files must be three files");
+        return -3;
+    }
+    if (rinex_version < 300 || rinex_version > 305) {
+        snprintf(text, sizeof(text), "error : RINEX version %d.%02d: 3.00 to 3.05 are written here",
+                 rinex_version / 100, rinex_version % 100);
+        ppg_message(msg, msglen, text);
+        return -3;
+    }
+    if (!(navsys & (SYS_GPS | SYS_GLO | SYS_GAL | SYS_QZS | SYS_SBS | SYS_CMP | SYS_IRN))) {
+        ppg_message(msg, msglen, "error : no satellite system to convert");
+        return -3;
+    }
+    if (!known->built) {
+        snprintf(text, sizeof(text), "error : the decoder of the %s format is not built into this package (its "
+                 "licence is not checked: see vendor/rtklib/VERSION of the native core); convert the log with "
+                 "convbin of RTKLIB or the receiver's software", known->name);
+        ppg_message(msg, msglen, text);
+        return -6;
+    }
+    if ((format == STRFMT_RTCM3 || format == STRFMT_RT17) && !(approx_gps_seconds > 0.0)) {
+        ppg_message(msg, msglen, format == STRFMT_RT17 ?
+                    "error : RT-17 carries the time of the week only: an approximate time of the log (its day) is "
+                    "needed" :
+                    "error : RTCM 3 carries the time of the week only: an approximate time of the log (its day) is "
+                    "needed");
+        return -3;
+    }
+    if (!(fp = fopen(infile, "rb"))) {
+        snprintf(text, sizeof(text), "error : cannot read %s", infile);
+        ppg_message(msg, msglen, text);
+        return -1;
+    }
+    fclose(fp);
+
+    if (!ppg_locale_c(&saved)) {
+        ppg_message(msg, msglen, "error : cannot put the thread in the C locale for numbers, "
+                    "in which RTKLIB reads and writes them");
+        return -5;
+    }
+    memset(ppg_stat, 0, sizeof(ppg_stat));
+    ppg_stat_line[0] = '\0';
+    ppg_cancel_seen = 0;
+    ppg_converting = 1;
+    stat = ppg_run_convbin(format, infile, approx_gps_seconds, rinex_version, navsys, obs_out, nav_out);
+    ppg_converting = 0;
+    ppg_locale_back(&saved);
+
+    counts[0] = ppg_stat[0];                                     /* O: observation epochs */
+    counts[1] = ppg_stat[10];                                    /* T: events */
+    for (i = 1; i <= 7; i++) counts[2] += ppg_stat[i];           /* N G H Q L C I: navigation messages */
+    counts[3] = ppg_stat[9];                                     /* E: errors */
+
+    if (ppg_cancel_seen) {
+        ppg_message(msg, msglen, "cancelled");
+        return 1;
+    }
+    if (stat <= 0 && !strncmp(ppg_last, "file open error: ", 17)) { /* openfile() of convrnx.c */
+        snprintf(text, sizeof(text), "error : cannot write %s (a folder missing or not writable)", ppg_last + 17);
+        ppg_message(msg, msglen, text);
+        return -1;
+    }
+    if (stat <= 0 || counts[0] <= 0) {
+        snprintf(text, sizeof(text), "error : no observations decoded from %s: not a log of the %s format, or damaged%s%s",
+                 infile, known->name, ppg_last[0] ? " (RTKLIB: " : "", ppg_last[0] ? ppg_last : "");
+        if (ppg_last[0]) strncat(text, ")", sizeof(text) - strlen(text) - 1);
+        ppg_message(msg, msglen, text);
+        return -2;
+    }
+    ppg_message(msg, msglen, ppg_stat_line);
+    return 0;
 }

@@ -3299,6 +3299,249 @@ def gnss_mrk(project: Path, file: Path,
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a photo")
 
 
+SHOT_SOURCES = ("mrk", "events", "ubx", "log", "events-pos")  # as gnss.sources.KINDS
+LOG_MESSAGES = ("auto", "cam", "trig", "capture", "trigger")
+
+
+def _lever(text: str | None) -> tuple[float, float, float] | None:
+    """``--lever``: forward, right, down of the camera from the antenna in the body of the drone, in mm."""
+    if text is None:
+        return None
+    parts = text.split(",")
+    try:
+        if len(parts) != 3:
+            raise ValueError
+        return tuple(float(part.strip()) for part in parts)
+    except ValueError:
+        raise typer.BadParameter(f"--lever takes F,R,D: how far the camera is from the antenna forward, right and "
+                                 f"down in the body of the drone (mm), three numbers with a point for the decimals: "
+                                 f"{text!r}") from None
+
+
+def _approx_time(text: str | None, like: Path | None):
+    """``--approx-time`` (an ISO date or date and time, GPS time) or the first epoch of the RINEX ``--like``."""
+    from datetime import datetime
+
+    from .gnss import rinex
+
+    if text is not None and like is not None:
+        raise typer.BadParameter("give --approx-time or --like, not both")
+    if text is not None:
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            raise typer.BadParameter(f"--approx-time takes a date, or a date and time (2025-05-18 or "
+                                     f"2025-05-18T10:30), not {text!r}") from None
+    if like is not None:
+        try:
+            span = rinex.time_span(like)
+        except (OSError, ValueError) as exc:
+            raise typer.BadParameter(f"--like: {exc}") from None
+        if span is None:
+            raise typer.BadParameter(f"--like: {like.name} has no epochs")
+        return span[0]
+    return None
+
+
+def _log_shots(path: Path, message: str = "auto", camera: Optional[int] = None):
+    """The shots of an autopilot log: PX4 (ULog) or ArduPilot (DataFlash) (:func:`.gnss.sources.log_shots`), an
+    option that does not fit the log a usage error."""
+    from .gnss import sources
+
+    try:
+        sources.check_log_options(path, message, camera)
+    except sources.OptionError as exc:
+        raise typer.BadParameter(str(exc), param_hint=exc.option) from None
+    return sources.log_shots(path, message, camera)
+
+
+def _shot_source(kind: str, path: Path, edge: str = "falling", message: str = "auto",
+                 camera: Optional[int] = None):
+    """The shots of ``path`` read as ``kind`` (:data:`SHOT_SOURCES`, :func:`.gnss.sources.read`)."""
+    from .gnss import sources
+
+    if kind == "log":
+        return _log_shots(path, message, camera)
+    return sources.read(kind, path, edge)
+
+
+def _pairing_words(result: dict) -> list[str]:
+    """How the photos were paired, for the commands that apply shots."""
+    from .gnss.shots import clock_text
+
+    lines = []
+    by = result.get("by")
+    if by:
+        clock = result.get("clock_s")
+        lines.append(f"paired by {by}" + (f", the clock of the camera {clock_text(clock)} from UTC" if clock is not None
+                                          else "") + ("" if result.get("confirmed") is not False else
+                                                      " - not confirmed by the times: check the positions"))
+    if result.get("doubles"):
+        lines.append(f"{result['doubles']} double shots left out")
+    if result.get("invalid"):
+        lines.append(f"{result['invalid']} shots without a valid time never paired")
+    return lines
+
+
+@gnss_app.command("convert")
+def gnss_convert(files: list[Path] = typer.Argument(..., exists=True, dir_okay=False,
+                                                     help="raw receiver logs (u-blox, RTCM 3, Septentrio, Unicore, "
+                                                     "Trimble RT-17, NovAtel with --kind, a DJI D-RTK .DAT) or RINEX"),
+                 kind: Optional[str] = typer.Option(None, "--kind", help="the format of the logs when it cannot be "
+                                                    "told from their content (novatel)"),
+                 approx_time: Optional[str] = typer.Option(None, "--approx-time", help="the day (and time) of the "
+                                                           "logs, GPS time: RTCM 3 and RT-17 carry the time of the "
+                                                           "week only"),
+                 like: Optional[Path] = typer.Option(None, "--like", exists=True, dir_okay=False, help="a RINEX file "
+                                                     "of the same day: its first epoch is the approximate time"),
+                 out: Optional[Path] = typer.Option(None, "--out", file_okay=False, help="a folder to copy the "
+                                                    "RINEX into (default: they stay in the cache of the program)")):
+    """Convert raw receiver logs into RINEX 3.04 observations and navigation, as the PPK does.
+
+    The conversion is kept in the cache of the program and used again while the log is the same; --out copies the
+    RINEX into a folder, named after each log (two logs of the same name are refused: the first is kept). Prints the RINEX written, the epochs and the events (the shots on the
+    event pin), and what the conversion has to say."""
+    import shutil
+
+    from .gnss import convert
+
+    when = _approx_time(approx_time, like)
+    if out is not None:
+        out.mkdir(parents=True, exist_ok=True)
+    failed = False
+    written: dict[str, Path] = {}  # the names written into --out in this run (case apart) and the log of each
+    for path in files:
+        try:
+            done = convert.to_rinex(path, kind=kind, approx_time=when, progress=print_progress)
+        except (OSError, ValueError, RuntimeError) as exc:
+            typer.echo(f"error: {path.name}: {exc}", err=True)
+            failed = True
+            continue
+        obs, nav = done.obs, done.nav
+        if out is not None and done.kind != "rinex":
+            first = written.get(path.stem.lower())
+            if first is not None:
+                typer.echo(f"error: {path}: --out: {path.stem}.obs is written from {first} in this run, not written "
+                           "over: give the logs different names or convert them apart", err=True)
+                failed = True
+                continue
+            written[path.stem.lower()] = path
+            obs = Path(shutil.copyfile(done.obs, out / f"{path.stem}.obs"))
+            if done.nav is not None:
+                nav = Path(shutil.copyfile(done.nav, out / f"{path.stem}.nav"))
+        counts = ("" if done.epochs is None else f": {done.epochs} epochs, {done.events} events")
+        typer.echo(f"{path.name} ({done.kind}){counts}")
+        typer.echo(f"  observations: {obs}")
+        if nav is not None:
+            typer.echo(f"  navigation: {nav}")
+        for warning in done.warnings:
+            typer.echo(f"warning: {warning}")
+    if failed:
+        raise typer.Exit(1)
+
+
+@gnss_app.command("events")
+def gnss_events(file: Path = typer.Argument(..., exists=True, dir_okay=False, help="RINEX observations with events "
+                                            "(epoch flag 5), a u-blox log with TIM-TM2, or RTKLIB's _events.pos"),
+                edge: Optional[str] = typer.Option(None, "--edge", help="u-blox: the edge of the signal at the event "
+                                                   "input (falling, the default, or rising)")):
+    """List the shots on the event pin of a receiver: their number, GPS time, UTC and whether their time is valid."""
+    from .gnss import convert, events, shots
+
+    if edge is not None and edge not in events.EDGES:
+        raise typer.BadParameter(f"one of {', '.join(events.EDGES)}", param_hint="--edge")
+    ubx = not file.name.endswith(".pos") and convert.raw_kind(file) == "ubx"
+    if edge is not None and not ubx:
+        raise typer.BadParameter("the edge is that of the time marks of a u-blox log: RINEX and RTKLIB's events "
+                                 "carry no edge to choose", param_hint="--edge")
+    edge = edge or "falling"
+    try:
+        if file.name.endswith(".pos"):
+            shotset = events.events_pos(file)
+        elif convert.raw_kind(file) == "ubx":
+            shotset = events.ubx_time_marks(file, edge)
+        else:
+            shotset = events.rinex_events(file)
+    except (OSError, ValueError) as exc:
+        _gnss_failed(exc)
+    valid = sum(s.valid for s in shotset.shots)
+    typer.echo(f"{file.name}: {len(shotset.shots)} events ({shotset.kind}), {valid} with a valid time")
+    typer.echo(f"{'index':>7}  {'GPS week':>8} {'seconds of week':>16}  {'UTC':<26}valid")
+    for s in shotset.shots:
+        week = int(s.gps_time // 604800)
+        index = "-" if s.index is None else str(s.index)
+        typer.echo(f"{index:>7}  {week:>8} {s.gps_time - week * 604800:>16.6f}  "
+                   f"{shots.utc(s).isoformat(sep=' ', timespec='microseconds'):<26}{'yes' if s.valid else 'no'}")
+    for warning in shotset.warnings:
+        typer.echo(f"warning: {warning}")
+
+
+@gnss_app.command("log")
+def gnss_log(project: Path, log: Path = typer.Argument(..., exists=True, dir_okay=False,
+                                                        help="an ArduPilot log (.bin, .log) or a PX4 log (.ulg)"),
+             message: str = typer.Option("auto", "--message", help="ArduPilot: cam or trig; PX4: capture or "
+                                         "trigger; auto: the confirmed shots when the log has them"),
+             camera: Optional[int] = typer.Option(None, "--camera", help="ArduPilot: the camera (I) of a log with "
+                                                  "several"),
+             photos: Optional[Path] = typer.Option(None, "--photos", file_okay=False, help="folder of the photos "
+                                                   "(default: the folder of the log)"),
+             by: str = typer.Option("auto", "--by", help="how the photos are paired with the shots: auto, number, "
+                                    "time or order"),
+             lever: Optional[str] = typer.Option(None, "--lever", help="F,R,D: the camera from the antenna in the "
+                                                 "body of the drone (mm forward, right, down), turned with the "
+                                                 "attitude of each shot"),
+             latency: float = typer.Option(0.0, "--latency", help="ms the camera exposes after the time of the shot "
+                                           "(moves the times, not the positions)"),
+             dry_run: bool = typer.Option(False, "--dry-run", help="print how the photos pair with the shots and "
+                                          "change nothing"),
+             chunk: Optional[str] = None):
+    """Give the photos the position of their shot in the log of the autopilot (ArduPilot or PX4).
+
+    The position is the autopilot's estimate at the shot (no PPK): its height above the sea level unless the GPS of
+    the log gives the separation of its geoid (PX4), so mostly heights "msl", never taken for ellipsoidal ones
+    (``ppg gnss status`` lists them). With PPK, ``ppg gnss ppk --shots log`` gives the antenna of the solution at the
+    times of the log instead."""
+    from .gnss import apply as gnss
+    from .gnss import shots as gshots
+
+    if by not in gshots.BY:
+        raise typer.BadParameter(f"one of {', '.join(gshots.BY)}", param_hint="--by")
+    arm = _lever(lever)
+    doc, ch = _open(project, chunk)
+    try:
+        shotset = _log_shots(log, message, camera)
+        typer.echo(f"{log.name}: {len(shotset.shots)} shots ({shotset.kind}), "
+                   f"{sum(s.valid for s in shotset.shots)} with a valid time")
+        if dry_run:
+            pairing = gshots.pair(ch, shotset, photos, by=by, latency_s=latency / 1000.0)
+            typer.echo(f"{len(pairing.kept)} of {len(pairing.files)} photos pair with a shot (by {pairing.by})"
+                       + ("" if pairing.confirmed is not False else ", not confirmed by the times"))
+            for f, shot, _cam in pairing.kept[:20]:
+                typer.echo(f"  {f.name} <- shot {shot.index} at {gshots.utc(shot).isoformat(sep=' ')} UTC")
+            if len(pairing.kept) > 20:
+                typer.echo(f"  ... and {len(pairing.kept) - 20} more")
+            for warning in shotset.warnings + pairing.warnings:
+                typer.echo(f"warning: {warning}")
+            _unmatched([f.stem for f in pairing.photos_without_shot], "photos without a shot")
+            _unmatched([str(s.index) for s in pairing.extra_shots], "shots without a photo")
+            typer.echo("dry run: nothing changed")
+            return
+        result = gnss.apply_shots(ch, shotset, photos, by=by, latency_s=latency / 1000.0, body_lever_mm=arm)
+    except (OSError, ValueError) as exc:
+        _gnss_failed(exc)
+    if not result["matched"]:
+        _gnss_failed(ValueError(f"no photo of the chunk found its shot in {log.name}: check the folder of the photos"))
+    doc.save()
+    states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
+    typer.echo(f"{result['matched']} of {result['photos']} photos took the position of their shot ({states})")
+    for line in _pairing_words(result):
+        typer.echo(line)
+    for warning in shotset.warnings + result["warnings"]:
+        typer.echo(f"warning: {warning}")
+    _unmatched(result["unmatched"], "without a position from the log")
+    _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the log without a photo")
+
+
 def _base_position(text: str) -> tuple[float, float, float]:
     """``--base-position``: latitude, longitude and height above the ellipsoid as three numbers with a point for the
     decimals and commas between them (spaces allowed)."""
@@ -3358,10 +3601,35 @@ def _station_by_id(sid: str):
 
 @gnss_app.command("ppk")
 def gnss_ppk(project: Path,
-             mrk: Path = typer.Option(..., "--mrk", exists=True, dir_okay=False,
-                                      help="the Timestamp.MRK of the flight"),
+             mrk: Optional[Path] = typer.Option(None, "--mrk", exists=True, dir_okay=False,
+                                                help="the Timestamp.MRK of the flight (as --shots mrk --shots-file)"),
              rover: Path = typer.Option(..., "--rover", exists=True, dir_okay=False,
-                                        help="the RINEX observations of the drone (DJI: *_Rinex.obs beside the MRK)"),
+                                        help="the observations of the drone: RINEX (DJI: *_Rinex.obs beside the MRK) "
+                                        "or a raw log of its receiver, converted"),
+             shots_kind: Optional[str] = typer.Option(None, "--shots", help="where the times of the shots are: mrk "
+                                                      "(a DJI Timestamp.MRK), events (the events of the rover's "
+                                                      "RINEX), ubx (the TIM-TM2 of a u-blox log), log (an ArduPilot "
+                                                      "or PX4 log), events-pos (an _events.pos of RTKLIB)"),
+             shots_file: Optional[Path] = typer.Option(None, "--shots-file", exists=True, dir_okay=False,
+                                                       help="the file of the shots (default for events and ubx: the "
+                                                       "rover)"),
+             lever: Optional[str] = typer.Option(None, "--lever", help="F,R,D: the camera from the antenna in the "
+                                                 "body of the drone (mm forward, right, down), turned with the "
+                                                 "attitude of each shot when the source gives it"),
+             latency: float = typer.Option(0.0, "--latency", help="ms the camera exposes after the time of the "
+                                           "shot"),
+             edge: Optional[str] = typer.Option(None, "--edge", help="--shots ubx: the edge of the signal at the "
+                                                "event input (falling, the default, or rising)"),
+             message: str = typer.Option("auto", "--message", help="--shots log: as for ppg gnss log - ArduPilot: "
+                                         "cam or trig; PX4: capture or trigger; auto: the confirmed shots when the "
+                                         "log has them"),
+             camera: Optional[int] = typer.Option(None, "--camera", help="--shots log: the camera (I) of an "
+                                                  "ArduPilot log with several"),
+             by: str = typer.Option("auto", "--by", help="how the photos are paired with the shots: auto, number, "
+                                    "time or order"),
+             approx_time: Optional[str] = typer.Option(None, "--approx-time", help="the day of the flight (GPS time), "
+                                                       "for a rover or base log of RTCM 3 or RT-17 (default: from "
+                                                       "the other files)"),
              base: Optional[list[Path]] = typer.Option(None, "--base", exists=True, dir_okay=False,
                                                        help="the RINEX observations of a base that recorded during the "
                                                        "flight: your own, or a permanent station; repeat it for a "
@@ -3409,10 +3677,17 @@ def gnss_ppk(project: Path,
     of the base; a photo shot where the solution has no position keeps the one it had, and so does a photo with an RTK
     fix of the drone itself unless --replace-fix. The photos are paired with the shots as by ``ppg gnss mrk``. RTKLIB
     works in the folder of the chunk (gnss/ppk, a solution-<date>-<time>.pos per run); it needs the native core 0.5 or
-    later, or PPG_RNX2RTKP."""
+    later, or PPG_RNX2RTKP.
+
+    The shots can come from elsewhere than a DJI MRK (--shots, --shots-file): the events of the rover's receiver (its
+    RINEX, or a u-blox log: --edge), an ArduPilot or PX4 log (--message, --camera, as for ``ppg gnss log``), an
+    _events.pos; then --lever places the camera from the antenna in the body of the drone, --latency adds the delay of
+    the camera to the times of the shots, and --by says how the photos pair with them. A raw rover or base (u-blox,
+    RTCM 3, ...) is converted to RINEX first, as ``ppg gnss convert`` does."""
     from .gnss import apply as gnss
     from .gnss import base as gbase
-    from .gnss import download, frames, ppk
+    from .gnss import download, frames, ppk, sources
+    from .gnss import shots as gshots
 
     if atx not in gbase.ATX_CHOICES:
         raise typer.BadParameter(f"one of {', '.join(gbase.ATX_CHOICES)}", param_hint="--atx")
@@ -3429,6 +3704,33 @@ def gnss_ppk(project: Path,
         raise typer.BadParameter("a static PPP needs the antenna calibrations of the IGS (igs20.atx): the precise "
                                  "orbits are of the centres of mass of the satellites, whose antennas are up to metres "
                                  "from them - give --atx auto or download", param_hint="--atx")
+    kind = shots_kind or ("mrk" if mrk is not None else None)
+    if kind is None:
+        _gnss_failed(ValueError("give the shots: --mrk, or --shots with --shots-file"))
+    if kind not in SHOT_SOURCES:
+        raise typer.BadParameter(f"one of {', '.join(SHOT_SOURCES)}", param_hint="--shots")
+    if mrk is not None and (kind != "mrk" or shots_file is not None):
+        _gnss_failed(ValueError("--mrk is --shots mrk --shots-file MRK: give one of the two"))
+    if by not in gshots.BY:
+        raise typer.BadParameter(f"one of {', '.join(gshots.BY)}", param_hint="--by")
+    arm = _lever(lever)
+    if edge is not None and edge not in ("falling", "rising"):
+        raise typer.BadParameter("falling or rising", param_hint="--edge")
+    if edge is not None and kind != "ubx":
+        raise typer.BadParameter("the edge of the time marks of a u-blox log, for --shots ubx only", param_hint="--edge")
+    edge = edge or "falling"
+    if kind != "log" and (message != "auto" or camera is not None):
+        raise typer.BadParameter("the messages and the camera of an autopilot log, for --shots log only",
+                                 param_hint="--message/--camera")
+    if kind == "mrk" and (arm is not None or latency or by != "auto"):
+        _gnss_failed(ValueError("a DJI MRK carries the lever arm of each shot and is paired as it always was: "
+                                "--lever, --latency and --by are for the other sources of shots"))
+    source_file = mrk if mrk is not None else shots_file
+    if source_file is None and kind in ("events", "ubx"):
+        source_file = rover
+    if source_file is None:
+        _gnss_failed(ValueError(f"--shots {kind} needs --shots-file"))
+    when = _approx_time(approx_time, None)
     position = _base_position(base_position) if base_position is not None else None
     ways = [way for way, given in (("--base-station", base_station), ("--base-baseline", base_baseline),
                                    ("--base-ppp", base_ppp), ("--base-position", base_position is not None)) if given]
@@ -3447,6 +3749,11 @@ def gnss_ppk(project: Path,
     frame = base_frame or frames.UNKNOWN
     doc, ch = _open(project, chunk)
     try:
+        inputs = sources.ppk_inputs(kind, source_file, rover, bases, approx_time=when, edge=edge, message=message,
+                                    camera=camera, progress=print_progress, reader=_shot_source)
+        shotset, rover, bases, converted = inputs.shotset, inputs.rover, inputs.bases, inputs.converted
+        for done in converted:
+            typer.echo(f"{done.source.name} ({done.kind}) converted: {done.epochs} epochs, {done.events} events")
         station = _station_by_id(base_station or base_baseline) if mode in ("station", "baseline") else None
         prepared = gbase.prepare_base(mode, rover, bases or None, folder=ppk.work_folder(ch).parent, station=station,
                                       typed=position, frame=frame, epoch=epoch, navs=nav, atx=atx,
@@ -3459,10 +3766,17 @@ def gnss_ppk(project: Path,
                        f"{', '.join(path.name for path in prepared.downloaded)}")
         solution = ppk.solve(rover, prepared.bases, prepared.navs or None, prepared.position,
                              folder=ppk.work_folder(ch), atx=prepared.atx)
-        result = gnss.apply_ppk(ch, mrk, solution, photos, replace_fix=replace_fix)
+        inputs.record(solution)  # remembered with the files as they were named, not with their conversions
+        if kind == "mrk":
+            result = gnss.apply_ppk(ch, source_file, solution, photos, replace_fix=replace_fix)
+        else:
+            result = gnss.apply_ppk_shots(ch, shotset, solution, photos, by=by, latency_s=latency / 1000.0,
+                                          body_lever_mm=arm, replace_fix=replace_fix)
     except (OSError, ValueError, RuntimeError, download.DownloadError) as exc:
         _gnss_failed(exc)
-    notes = prepared.notes
+    notes = [w for done in converted for w in done.warnings] + prepared.notes
+    if kind != "mrk":
+        notes += shotset.warnings
     states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
     if result["matched"]:
         typer.echo(f"{result['matched']} of {result['photos']} photos took the PPK position of their shot ({states})")
@@ -3483,7 +3797,8 @@ def gnss_ppk(project: Path,
         typer.echo(f"warning: {warning}")
     if not result["matched"] and not kept:
         _gnss_failed(ValueError("no photo of the chunk took a PPK position: check the folder of the photos and that "
-                                "the MRK is of the flight of the drone's observations"))
+                                f"the {'MRK' if kind == 'mrk' else 'shots'} are of the flight of the drone's "
+                                "observations"))
     if result["matched"]:
         gnss.keep_only_fix(ch)
         doc.save()
@@ -3495,7 +3810,8 @@ def gnss_ppk(project: Path,
             text += f" and {left} {'are' if left > 1 else 'is'} without a PPK position"
         typer.echo(text)
     _unmatched(result["unmatched"], "without a PPK position")
-    _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a PPK position")
+    _unmatched([str(i) for i in result["shots_unmatched"]],
+               f"shots of the {'MRK' if kind == 'mrk' else source_file.name} without a PPK position")
 
 
 def _deviations(sd) -> str:

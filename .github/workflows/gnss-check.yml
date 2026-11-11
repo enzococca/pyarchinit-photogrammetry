@@ -3,9 +3,11 @@ name: gnss-check
 # The GNSS engine on a real day of a permanent station, run on demand: the static PPP of the station (24 hours checked,
 # 4 and 2 hours printed), a static baseline of 2 hours to a station of the EPN 20-60 km away and the Hatanaka files of
 # the archive, against the multi-year solution of the EPN and the official CRX2RNX (what is checked and how far:
-# .github/scripts/gnss_station_check.py). The program and the native core are built from the branch it runs on;
-# everything is downloaded from public archives that ask for no account (BKG, the EPN Central Bureau, ESA, CODE, the
-# IGS, GSI), and no secret is used.
+# .github/scripts/gnss_station_check.py), and, unless it is switched off, the raw log of a u-blox receiver of a public
+# dataset (Mendeley Data, doi:10.17632/83bvxzx3bj.2, CC BY 4.0) converted and solved against its base: not made, and
+# nothing failed, when that archive cannot be reached. The program and the native core are built from the branch it
+# runs on; everything is downloaded from public archives that ask for no account (BKG, the EPN Central Bureau, ESA,
+# CODE, the IGS, GSI, Mendeley Data), and no secret is used.
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +23,10 @@ on:
         description: "The station of the baseline (empty: the nearest of the EPN 20-60 km away that has the day)"
         type: string
         default: ""
+      receiver_log:
+        description: "Also the raw log of a u-blox receiver of a public dataset, against its base"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -52,7 +58,9 @@ jobs:
           STATION: ${{ inputs.station }}
           DAY: ${{ inputs.day }}
           PARTNER: ${{ inputs.partner }}
+          RECEIVER_LOG: ${{ inputs.receiver_log && 'yes' || 'no' }}
           PPG_GNSS_DIR: ${{ runner.temp }}/gnss
         run: >
           python .github/scripts/gnss_station_check.py --station "$STATION" --day "$DAY" --partner "$PARTNER"
+          --receiver-log "$RECEIVER_LOG"
           --crx2rnx "$RUNNER_TEMP/RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX" --work "$RUNNER_TEMP/work"

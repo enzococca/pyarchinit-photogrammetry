@@ -1,0 +1,24 @@
+Logging start time: 0:00:12, duration: 0:00:09
+No Dropouts
+
+Name (multi id, message size in bytes)    number of data points, total bytes
+ actuator_controls_0 (0, 48)                   95       4560
+ actuator_outputs (0, 76)                      95       7220
+ actuator_outputs (1, 76)                      96       7296
+ commander_state (0, 9)                        95        855
+ control_state (0, 134)                        95      12730
+ cpuload (0, 16)                               10        160
+ ekf2_innovations (0, 140)                    184      25760
+ ekf2_timestamps (0, 20)                     2373      47460
+ estimator_status (0, 267)                     48      12816
+ sensor_combined (0, 72)                     2373     170856
+ sensor_preflight (0, 16)                     184       2944
+ system_power (0, 17)                          32        544
+ task_stack_info (0, 26)                       20        520
+ vehicle_attitude (0, 36)                     306      11016
+ vehicle_attitude_setpoint (0, 55)            306      16830
+ vehicle_land_detected (0, 15)                  1         15
+ vehicle_local_position (0, 148)               95      14060
+ vehicle_rates_setpoint (0, 24)               306       7344
+ vehicle_status (0, 45)                        43       1935
+ wind_estimate (0, 24)                         95       2280

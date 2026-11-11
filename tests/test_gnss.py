@@ -1077,8 +1077,8 @@ def test_gnss_mrk_copied_away_from_its_photos(gnss_window, monkeypatch, tmp_path
     # the menu has the four commands
     menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
-    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Correzioni PPK...",
-                                                 "Pannello GNSS"]
+    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...",
+                                                 "Log dell'autopilota...", "Correzioni PPK...", "Pannello GNSS"]
 
 
 ITALY = ((14.266, 41.134), (14.270, 41.136), (14.272, 41.131))  # longitude, latitude of three shots near Capua
