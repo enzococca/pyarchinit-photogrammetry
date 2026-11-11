@@ -763,6 +763,7 @@ def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, m
     d.refresh()
     qt_app.processEvents()
     d.accept()  # no base yet: said under the form
+    qt_app.processEvents()  # the label of the error laid out with its text, as the event loop does
     assert d.lever_panel.isVisibleTo(d) and d.error.isVisible() and d.error.text()
     buttons = d.findChild(QDialogButtonBox)
 
