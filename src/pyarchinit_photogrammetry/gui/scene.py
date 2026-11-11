@@ -579,13 +579,22 @@ def sample_mesh_colors(sd: SceneData, n: int = 350_000, light=(0.3, -0.4, 0.85))
 class OrbitCamera:
     """A camera looking at ``target`` from ``distance``, with an orientation of its own: the rows of
     :meth:`basis` (right, down, forward). ``yaw`` and ``pitch`` are read from the orientation and
-    setting one of them gives back the camera without roll at those angles, as before the trackball."""
+    setting one of them gives back the camera without roll at those angles, as before the trackball.
+
+    ``ortho``: an orthographic (parallel) projection instead of the perspective one. What is at the
+    distance of the target keeps the size it has in perspective (half the height of the view is
+    ``distance * tan(fov / 2)`` there), so changing the projection does not make the view jump, and
+    ``distance`` is the zoom: nothing gets nearer, the scale changes. The lines of sight are parallel;
+    they start, and the depths are measured, on a plane ``max(distance, back)`` behind the target:
+    the canvases set ``back`` so that the whole scene is in front of it."""
 
     def __init__(self, target, distance: float, yaw: float = -60.0, pitch: float = 35.0, fov: float = 40.0,
-                 up=None):
+                 up=None, ortho: bool = False, back: float = 0.0):
         self.target = np.asarray(target, np.float64)
         self.distance = float(distance)
         self.fov = float(fov)
+        self.ortho = bool(ortho)
+        self.back = float(back)
         self.up = np.array([0.0, 0.0, 1.0]) if up is None else np.asarray(up, np.float64)
         self.R = self._from_angles(yaw, pitch)
 
@@ -649,18 +658,50 @@ class OrbitCamera:
 
     @property
     def eye(self) -> np.ndarray:
-        return self.target - self.basis()[2] * self.distance
+        """Where the lines of sight start: the eye, or in an orthographic view the middle of the plane they leave."""
+        d = max(self.distance, self.back) if self.ortho else self.distance
+        return self.target - self.basis()[2] * d
+
+    def focal(self, height: int) -> float:
+        """The focal length in pixels of the perspective view ``height`` pixels high."""
+        return 0.5 * height / np.tan(np.radians(self.fov) / 2)
+
+    def pixel_size(self, depth: float, height: int) -> float:
+        """Scene units of one pixel at ``depth`` along the line of sight (the same at every depth when
+        orthographic)."""
+        return (self.distance if self.ortho else float(depth)) / self.focal(height)
 
     def project(self, pts: np.ndarray, width: int, height: int):
+        """Pixels ``x``, ``y`` of scene points, their depth along the line of sight and whether they are in front."""
         R = self.basis()
         pc = (np.asarray(pts, np.float64) - self.eye) @ R.T
-        f = 0.5 * height / np.tan(np.radians(self.fov) / 2)
+        f = self.focal(height)
         z = pc[:, 2]
+        if self.ortho:
+            k = f / self.distance
+            return k * pc[:, 0] + width / 2, k * pc[:, 1] + height / 2, z, z > 0
         ok = z > self.distance * 1e-3
         with np.errstate(divide="ignore", invalid="ignore"):
             x = f * pc[:, 0] / z + width / 2
             y = f * pc[:, 1] / z + height / 2
         return x, y, z, ok
+
+    def unproject(self, x, y, depth, width: int, height: int) -> np.ndarray:
+        """The scene points seen at pixels (x, y) at ``depth``: the inverse of :meth:`project`."""
+        x, y, depth = np.broadcast_arrays(np.asarray(x, np.float64), np.asarray(y, np.float64),
+                                          np.asarray(depth, np.float64))
+        k = self.pixel_size(1.0, height) * (1.0 if self.ortho else depth)
+        pc = np.stack([(x - width / 2) * k, (y - height / 2) * k, depth], axis=-1)
+        return self.eye + pc @ self.basis()
+
+    def ray(self, x: float, y: float, width: int, height: int):
+        """The line of sight through pixel (x, y): origin and unit direction."""
+        R = self.basis()
+        if self.ortho:
+            return self.unproject(x, y, 0.0, width, height), R[2].copy()
+        f = self.focal(height)
+        d = R.T @ np.array([(x - width / 2) / f, (y - height / 2) / f, 1.0])
+        return self.eye.copy(), d / np.linalg.norm(d)
 
 
 def _nearest(pts: np.ndarray, cam: OrbitCamera, width: int, height: int, size: int):

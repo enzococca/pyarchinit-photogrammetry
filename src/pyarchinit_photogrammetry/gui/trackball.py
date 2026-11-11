@@ -111,7 +111,7 @@ class Trackball:
         return self.pivot
 
     def focal(self, cam: OrbitCamera, h: int) -> float:
-        return 0.5 * h / np.tan(np.radians(cam.fov) / 2)
+        return cam.focal(h)
 
     def geometry(self, cam: OrbitCamera | None = None, samples: int = 96) -> dict:
         """Where the trackball is on the screen: the pivot (``centre``, pixels, and ``depth``), the
@@ -127,7 +127,7 @@ class Trackball:
         depth = float(z[0]) if ok[0] else float(cam.distance)
         centre = (float(x[0]), float(y[0])) if ok[0] else (w / 2.0, h / 2.0)
         r_px = RADIUS * min(w, h)
-        r_world = r_px * depth / self.focal(cam, h)
+        r_world = r_px * cam.pixel_size(depth, h)
         R = cam.basis()
         t = np.linspace(0, 2 * np.pi, samples, endpoint=False)
         rings = {}
@@ -176,7 +176,7 @@ class Trackball:
         place on the screen (the scene point at the pivot's depth follows the cursor)."""
         cam = self.canvas.get_cam()
         geo = self.geometry(cam)
-        k = geo["depth"] / self.focal(cam, geo["size"][1])
+        k = cam.pixel_size(geo["depth"], geo["size"][1])  # the same at every depth in an orthographic view
         R = cam.basis()
         shift = -R[0] * dx * k - R[1] * dy * k
         cam.target = cam.target + shift
@@ -189,7 +189,9 @@ class Trackball:
         and the pivot toward ``c``, both by the zoom factor: the point under the cursor stays under
         it and the pivot keeps its place on the screen (the brief's "the pivot slides along the
         cursor's ray by the zoom factor" read this way). ``dolly``: the camera moves along its own
-        line of sight and the pivot stays where it is."""
+        line of sight and the pivot stays where it is. In an orthographic view the distance is the scale
+        of the view: the picture grows or shrinks around the cursor (around the middle with ``dolly``)
+        and nothing gets nearer."""
         k = ZOOM_STEP ** steps
         cam = self.canvas.get_cam()
         p = self._pivot(cam)
@@ -200,13 +202,10 @@ class Trackball:
         w, h = self.canvas.view_size()
         if x is None:
             x, y = w / 2.0, h / 2.0
-        f = self.focal(cam, h)
-        R = cam.basis()
-        eye = cam.eye
-        depth = float((p - eye) @ R[2])
+        depth = float((p - cam.eye) @ cam.basis()[2])
         if depth <= 0:
             depth = cam.distance
-        c = eye + R.T @ np.array([(x - w / 2) / f, (y - h / 2) / f, 1.0]) * depth
+        c = cam.unproject(x, y, depth, w, h)
         cam.target = c + k * (cam.target - c)
         cam.distance *= k
         self.pivot = c + k * (p - c)
@@ -221,13 +220,14 @@ class Trackball:
             self.canvas.redraw()
 
     def centre_on_pivot(self) -> None:
-        """Move the view so that the pivot is in its middle, at the same depth."""
+        """Move the view so that the pivot is in its middle, at the same depth (at the same scale when the view is
+        orthographic)."""
         cam = self.canvas.get_cam()
         p = self._pivot(cam)
         R = cam.basis()
         depth = float((p - cam.eye) @ R[2])
         cam.target = p.copy()
-        if depth > 0:
+        if depth > 0 and not cam.ortho:
             cam.distance = depth
         self.canvas.set_cam(cam)
 
