@@ -65,8 +65,9 @@ def test_calibration_finds_gains_and_vignetting(darkened):
     assert info is ch.meta["colour"] and info["rms_after"] < 0.3 * info["rms_before"]
     est = np.array([np.mean(info["gains"][str(c.key)]) for c in ch.aligned_cameras])
     true = np.array([gains[c.key] for c in ch.aligned_cameras])
-    true /= np.exp(np.mean(np.log(true)))  # the mean log gain is kept at zero
-    assert np.max(np.abs(est / true - 1)) < 0.02
+    ratio = est / true  # up to the constant of the gauge, set where the mosaic takes its colours
+    assert np.max(np.abs(ratio / np.exp(np.mean(np.log(ratio))) - 1)) < 0.02
+    assert 0.7 < np.exp(np.mean(np.log(ratio))) ** -1 < 1.0  # between the two exposures of the photos
     (b,) = info["vignetting"].values()
     for r in (0.5, 0.8):
         assert abs(b[0] * r ** 2 + b[1] * r ** 4 + b[2] * r ** 6 - FALLOFF * r ** 2) < 0.02
@@ -175,10 +176,15 @@ def test_interface_calibrates_and_builds_with_the_options(processed, tmp_path, m
     w.runner.show_dialog = False
     shown = []
     monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: shown.append((title, text)))
+    w.calibrate_colours()  # the photos as they are: they already agree, nothing to correct
+    w.runner.wait()
+    assert not w.chunk.meta["colour"]["applied"] and not colour.Correction(w.chunk)
+    assert shown[-1][0] == "Colori delle foto" and "Non viene applicata" in shown[-1][1]
+    _darken(w.chunk)
     w.calibrate_colours()
     w.runner.wait()
-    assert w.chunk.meta.get("colour") and shown and shown[-1][0] == "Colori delle foto"
-    assert "osservazioni" in shown[-1][1]
+    assert w.chunk.meta["colour"]["applied"] and shown[-1][0] == "Colori delle foto"
+    assert "osservazioni" in shown[-1][1] and "Vignettatura" in shown[-1][1]
     seen = []
 
     def fake(cls, parent, title, fields, intro=""):

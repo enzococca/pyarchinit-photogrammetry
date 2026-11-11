@@ -854,7 +854,8 @@ class Chunk:
                           progress: ProgressCallback | None = None) -> dict:
         """Measure the exposure gain of every photo and the vignetting of every lens on points of
         the surface seen by several photos (:mod:`engine.colour`); the orthomosaic and the
-        texture use them from now on. Returns the gains, the falloff and the scatter before/after."""
+        texture use them from now on. Returns the gains, the falloff and the scatter before/after;
+        ``applied`` is False (and the gains empty) when the calibration does not lower the scatter."""
         from ..engine import colour
 
         return colour.estimate(self, samples=samples, vignetting=vignetting, progress=as_progress(progress))
