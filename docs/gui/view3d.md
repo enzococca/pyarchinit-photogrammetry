@@ -26,6 +26,23 @@ As in Metashape, a **sphere with three rings** is drawn around the centre of rot
   the middle of the view, at the same distance.
 * *Home view* shows the whole scene again, *From above* looks straight down.
 
+## Orthographic projection
+
+**Orthographic projection** (group *View* of the rail, *View > Orthographic projection*, key ++o++) draws the
+scene with parallel lines of sight instead of the perspective: parallel lines stay parallel and a thing has the same
+size on the screen wherever it is, near or far. It is the projection of plans and elevations: with *From above*,
+++f++ and ++l++ the view is a true plan, front or side view, without the vanishing of the perspective (in this
+projection *From above* looks exactly down).
+
+* Switching does not make the view jump: what is at the distance of the centre of rotation keeps its size.
+* The **wheel** changes the scale of the view (there is no distance to shorten) and still zooms towards the point
+  under the mouse; panning, the trackball, the double click for the centre of rotation, markers, measurements,
+  sections, the lasso and the drawings work as in perspective, each on the line of sight of its pixel.
+* The choice is remembered between sessions, and the pictures taken from the view (screenshots) are in
+  the projection shown.
+* [Looking through a photo](#looking-through-a-photo) is always in perspective, the one of the camera; the
+  projection chosen comes back on leaving the photo. The fly-through video is in perspective too.
+
 ## When the trackball is shown
 
 The **Trackball** button of the bar, or *View > Trackball*, has three modes, remembered between sessions:
@@ -152,6 +169,7 @@ With the 3D view focused:
 | ++t++ | from above |
 | ++f++ | from the front (looking towards +y) |
 | ++l++ | from the left (looking towards +x) |
+| ++o++ | orthographic projection on and off |
 | ++page-down++ ++page-up++ | looking through a photo: the next and the previous photo (also ++right++ ++left++) |
 | ++esc++ | leave the photo |
 

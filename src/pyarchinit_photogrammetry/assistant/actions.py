@@ -69,7 +69,9 @@ BUILD_PARAMS: dict[str, dict[str, tuple]] = {
         "surface": ("string", "Tipo di superficie", "Kind of surface", ["arbitrary", "height_field"]),
         "face_count": (["string", "integer"], "Numero di facce (low, medium, high o un numero)",
                        "Number of faces (low, medium, high or a number)", None),
-        "classes": ("array", "Solo i punti di queste classi", "Only the points of these classes", None)},
+        "classes": ("array", "Solo i punti di queste classi", "Only the points of these classes", None),
+        "fill_holes": ("number", "Campo di altezze: chiude i buchi fino a questo vuoto in metri (interpolati)",
+                       "Height field: closes the holes up to this gap in metres (interpolated)", None)},
     "texture": {
         "texture_size": ("integer", "Lato della texture in pixel", "Side of the texture in pixels", None),
         "mapping": ("string", "Mappatura", "Mapping", ["auto", "orthophoto", "generic"]),
@@ -744,7 +746,9 @@ def _build_dense(chunk, progress, params):
 
 def _build_model(chunk, progress, params):
     chunk.build_model(progress=progress, **params)
-    return _ply_facts(chunk.product_path("model"))
+    report = chunk.meta.get("model") or {}
+    return {**_ply_facts(chunk.product_path("model")),
+            **{k: report[k] for k in ("holes_filled", "holes_left", "interpolated_area") if report.get(k)}}
 
 
 def _build_texture(chunk, progress, params):

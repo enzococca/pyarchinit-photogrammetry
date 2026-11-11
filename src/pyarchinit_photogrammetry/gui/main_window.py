@@ -1524,6 +1524,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.a_show_background.setEnabled(False)  # no raster yet (the view follows: _sync_background_action)
         self.a_show_background.toggled.connect(self._background_toggled)
         m.addAction(self.a_show_background)
+        m.addAction(self.model_view.a_ortho)  # the projection of the 3D view (key O on the view)
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
@@ -8417,7 +8418,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             Field("face_count", "Numero di facce", "medium",
                   choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
             Field("voxel", "Voxel per le mappe di profondità (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
-                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
+                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie"),
+            Field("fill_holes", "Chiudi i buchi fino a (m, 0 = nessuno)", 0.0, minimum=0.0, maximum=1000.0,
+                  decimals=3, tip="Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati "
+                                  "fino a questa misura. La parte chiusa è interpolata, non misurata.")]
             + self._class_fields("Classi (solo dalla nuvola densa)") + self._version_fields("model"),
             intro=(tr("Con le mappe di profondità la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
                       "senza passare dalla nuvola densa: più fedele e con i colori delle foto.") if depth_maps else
@@ -8433,9 +8437,24 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if classes == []:
                 self._warn("Scegli almeno una classe.")
                 return
+            fill = v.get("fill_holes") or None  # metres; 0: nothing is closed
+            if fill and v["surface"] != "height_field":
+                self.log_pane.warning("I buchi si chiudono solo nel campo di altezze: la superficie arbitraria "
+                                      "è già chiusa.")
             self.run_task("Modello", self._versioned("model", v, lambda p: self.chunk.build_model(
-                v["source"], v["surface"], v["face_count"], classes=classes, progress=p, **kw)),
-                lambda _m: self._show_model("model"))
+                v["source"], v["surface"], v["face_count"], classes=classes, fill_holes=fill,
+                progress=p, **kw)),
+                lambda _m: (self._log_interpolated(), self._show_model("model")))
+
+    def _log_interpolated(self) -> None:
+        """Says in the log how much of the height field closes holes: interpolated, not measured."""
+        report = self.chunk.meta.get("model") or {}
+        if report.get("holes_filled"):
+            self.log_pane.warning(tr("Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)",
+                                     report["holes_filled"], number(report.get("interpolated_area", 0.0), 2)))
+        if report.get("holes_left") and report.get("fill_holes"):
+            self.log_pane.info(tr("Modello: {0} buchi più larghi di {1} m lasciati aperti", report["holes_left"],
+                                  number(report["fill_holes"], 2)))
 
     def build_texture(self) -> None:
         if not self._need_chunk(aligned=True, product="model"):
@@ -9485,14 +9504,28 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return
 
         def done(info):
+            if not info.get("applied", True):
+                self._info("Colori delle foto", tr(
+                    "Le foto hanno già gli stessi colori: su {0} osservazioni di punti visti da più foto la differenza "
+                    "è {1}% e la correzione non la abbassa.\n\nNon viene applicata: ortofoto e texture usano le foto "
+                    "come sono.", _it(info['observations']), _it(info['rms_before'] * 100, 1)))
+                return
             gains = [sum(g) / 3 for g in info["gains"].values()]
             text = tr("Correzione misurata su {0} osservazioni di punti visti da più foto.\n\nDifferenza di colore "
                       "tra le foto: {1}% prima, {2}% dopo.\nEsposizione delle foto: da {3} a {4} volte la media.",
                       _it(info['observations']), _it(info['rms_before'] * 100, 1), _it(info['rms_after'] * 100, 1),
                       _it(min(gains), 2), _it(max(gains), 2))
+            if info.get("from_neighbours"):
+                text += tr("\n{0} foto con troppo poche osservazioni prendono l'esposizione delle foto vicine.",
+                           len(info["from_neighbours"]))
             import math
 
-            corner = [100 * (1 - math.exp(sum(b))) for b in info["vignetting"].values()]  # at the corners (r = 1)
+            from ..engine.colour import _falloff
+
+            # at the corners (r = 1), or as far as the falloff was measured
+            reach = info.get("vignetting_radius") or {}
+            corner = [100 * (1 - math.exp(float(_falloff(b, min(1.0, reach.get(k) or 1.0)))))
+                      for k, b in info["vignetting"].items()]
             if any(abs(c) >= 1 for c in corner):
                 text += tr("\nVignettatura agli angoli: ") + ", ".join(
                     tr("{0:.0f}% più {1}", abs(c), tr('scuri') if c > 0 else tr('chiari')) for c in corner)
@@ -12531,9 +12564,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             # the markers: the survey's control; the TIN: a product; the free drawings: their own 3D tables
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
                       if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
-            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
+            # the free drawings in the same transaction: another chunk's never over edits of the one before
+            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None,
+                               free=self.chunk)
             self._export_elevation_tables(link)
-            self._export_free_tables(link)
             self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
             previous, self._live_previous = self._live_previous, None
             if previous is not None and previous is not link:
@@ -12587,7 +12621,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
     def _export_free_tables(self, link) -> None:
         """The free drawings in 3D of the active chunk into the live GeoPackage (:meth:`.LiveLink.write_free`, three
-        tables with Z, one-way): QGIS and RustGIS show them with the plan."""
+        tables with Z, row by row: what QGIS edits there comes back, :meth:`_qgis_free`): QGIS and RustGIS show them
+        with the plan."""
         if self.chunk is None:
             return
         try:
@@ -12662,8 +12697,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     # ---------------------------------------------------------------- QGIS: its edits back here
     def _poll_qgis(self, force: bool = False, source: str | None = None) -> bool:
         """Once a second while a live link is on (QGIS's or RustGIS's): what was saved in QGIS, or
-        pulled from RustGIS, since the last look (units, spot heights, sections) comes into the
-        window. Not while a step runs or a dialog waits: it stays in the GeoPackage and comes at the
+        pulled from RustGIS, since the last look (units, spot heights, sections, free drawings in
+        3D) comes into the window. Not while a step runs or a dialog waits: it stays in the GeoPackage and comes at the
         next look; nor while a look at RustGIS runs, which may be writing RustGIS's edits into the
         file: they come with its answer. ``force``: now, whatever the window is doing - RustGIS's
         last edits, before the active chunk, its system or the project change, or the window asks
@@ -12822,9 +12857,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         the drawings stored in the chunk; the proxies of the units whose polygon changed are built
         again, the sections whose trace moved cut again. ``source``: who made them, as
         :meth:`_poll_qgis` says. ``chunk``: another chunk than the active one, whose drawings the
-        file held when they were made - its units and spot heights changed in its stored drawings
-        (the window shows another chunk: no undo, its proxies left as they were, said), the sections
-        (the project's) as always. Returns the lines."""
+        file held when they were made - its units, spot heights and free drawings in 3D changed in
+        its stored drawings (the window shows another chunk: no undo, its proxies left as they were,
+        said), the sections (the project's) as always. Returns the lines."""
         from ..io import gpkg
 
         self._live_from = source or self._live_source()
@@ -12851,14 +12886,17 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if other:
                 theirs = (self.units, self.quote, self.probe_points)
                 self.units, self.quote, self.probe_points = shown
-        unit_lines = len(lines)
+        drawn = len(lines)
+        lines += self._qgis_free(target, changes, srs, said)
+        free = len(lines) > drawn
+        unit_lines = len(lines)  # those of the chunk: its units, spot heights and free drawings
         sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
         if sections:
             lines += self._qgis_sections(changes["sezioni"], srs, recut)
         if not lines:
             return []
         if other:
-            if unit_lines:
+            if drawn:
                 self._store_chunk_drawings(chunk, *theirs)
             moved = [self._unit_name(u) for u, _before, polygon in proxies if polygon]
             if moved and chunk.meta.get("proxies"):
@@ -12871,6 +12909,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.sections_pane.set_sections(self.sections)
         self._update_pa_save_button()
         self._redraw_overlays()  # and the GeoPackage brought to the program's version of these rows
+        if free and not other:
+            self._draw_free()
+        if free:
+            self._schedule_qgis()  # also when the 2D view shows none of them
         self.setWindowModified(True)
         undone = lines if not other else lines[unit_lines:]  # another chunk's edits are not undone here
         if self.history is not None and undone:
@@ -13089,6 +13131,84 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return tr("quota {0}", f"{float(z):.2f}")
         except (TypeError, ValueError):
             return tr("quota {0}", "?")
+
+    def _qgis_free(self, target, changes: dict, srs: int, said) -> list[str]:
+        """Free drawings in 3D changed, drawn or deleted in QGIS (the tables ``disegni_3d_*`` of ``changes``) into the
+        chunk ``target``: each row made a drawing by :func:`..io.free_drawings.from_row` - a vertex without a height,
+        or added there at QGIS's 0, takes the DEM's (not one built in another system of the chunk), else the one
+        interpolated along the drawing. A row that makes no drawing is said (``said``: the line with its source) and
+        left: the next write puts the program's drawing back, or takes the row away. Returns the lines."""
+        from ..core import free_drawings as fd
+        from ..io import free_drawings as fio
+
+        if target is None:
+            return []
+        stale = None
+
+        def heights(xy):
+            nonlocal stale
+            if stale is None:
+                stale = bool(target.dem_path) and bool(stamps.is_stale(target, "dem"))
+            if stale:
+                return [None] * len(xy)
+            if target is self.chunk:
+                return self._dem_values(xy)
+            try:
+                return fd.raster_values(target.dem_path, xy)
+            except Exception:  # noqa: BLE001 - a DEM that cannot be read gives no heights
+                return [None] * len(xy)
+
+        lines = []
+        for kind, (table, _gtype) in fio.TABLES.items():
+            ch = changes.get(table)
+            if not ch or ch.refused:
+                continue
+            by_id = {r["id"]: r for r in fd.features(target)}
+            for f in ch.changed + ch.added:
+                old = by_id.get(f.id)
+                label = tr("disegno 3D {0}", (old or {}).get("name") or str(f.values.get("name") or "").strip()
+                           or tr("senza nome"))
+                if f.srs_id is not None and f.srs_id != srs:
+                    self.log_pane.warning(said(tr("{0} è nel sistema di riferimento {1}, il progetto nel {2}: non "
+                                                  "ripreso", label, f.srs_id, srs)))
+                    continue
+                if f.geometry is None or f.geometry.is_empty:
+                    self.log_pane.warning(said(tr("{0} senza geometria leggibile, non ripreso", label)))
+                    continue
+                try:
+                    if old is not None and old["kind"] != kind:
+                        raise ValueError("another kind of drawing")
+                    got = fio.from_row(kind, f.geometry, f.values, old, heights)
+                    fields = {k: got[k] for k in ("layer", "xyz", "attributes", "colour")}
+                    if old is None:
+                        rec = fd.add(target, kind, name=got["name"], id=f.id, **fields)
+                        line = tr("disegno 3D {0} aggiunto al layer {1}", rec["name"], rec["layer"])
+                    else:
+                        rec = fd.update(target, f.id, name=got["name"] or old["name"], **fields)
+                        line = tr("disegno 3D {0} modificato", rec["name"])
+                except fio.NoHeights:
+                    self.log_pane.warning(said(
+                        tr("{0} non ripreso: non ha quote, e il DEM va rifatto prima di prenderle da lì", label)
+                        if stale else tr("{0} non ripreso: non ha quote, e il DEM non ne ha sotto i suoi vertici",
+                                         label)))
+                    continue
+                except ValueError:
+                    self.log_pane.warning(said(tr("{0} non ripreso: la sua geometria non fa un disegno di questo "
+                                                  "layer", label)))
+                    continue
+                by_id[f.id] = rec
+                if got["dem"]:
+                    line = tr("{0} ({1} quote prese dal DEM)", line, got["dem"])
+                if got["dropped"]:
+                    line = tr("{0} (di più parti, tenuta la prima)", line)
+                if got["holes"]:
+                    line = tr("{0} (senza i suoi fori)", line)
+                lines.append(line)
+            gone = {key[0] for key in ch.deleted}
+            for rec in [r for r in fd.features(target) if r["id"] in gone]:
+                lines.append(tr("disegno 3D {0} eliminato", rec["name"]))
+            fd.remove(target, gone)
+        return lines
 
     def _qgis_quote(self, ch, srs: int) -> list[str]:
         """Spot heights changed, drawn or deleted in QGIS."""

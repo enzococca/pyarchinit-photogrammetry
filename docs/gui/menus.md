@@ -419,6 +419,7 @@ How the link works both ways is in [QGIS, live](../integrations.md#qgis-live).
 | **Assistant** | *Open the assistant*; **Actions**: *Always ask*, *Quick ones at once* (default), *Run everything (scripts and exports ask)* - when the assistant's actions run ([Actions](assistant.md#actions)) |
 | **Model** ++f2++ · **Orthophoto / DEM** ++f3++ · **Photos** ++f4++ | the three central views (in the workspace ++f2++ renames) |
 | **Show the background (orthophoto, DEM, elevation)** ++ctrl+shift+b++ | hides or shows the raster of the 2D view under the drawings, as the row *Background* of the [Layer pane](panes.md#layer), where its opacity is (1.7.5) |
+| **Orthographic projection** | the 3D view with parallel lines of sight instead of the perspective, for plans and side views; also the key ++o++ and the group *View* of the rail ([3D view and trackball](view3d.md#orthographic-projection)) |
 | **Trackball** | when the sphere of rotation of the 3D view is drawn: when the mouse is over the view, always, never ([3D view and trackball](view3d.md)) |
 | **Bars** | *Classic drawing bar*: the old horizontal bar of the drawing tools under the top bar, instead of the [tool rail](index.md#the-tool-rail-of-the-2d-view) of the 2D view; remembered |
 | **Theme** | light or dark, remembered |

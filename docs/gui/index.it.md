@@ -166,7 +166,7 @@ all'altra (nell'area di lavoro ++f2++ invece rinomina).
 
     Sopra la vista una riga sceglie cosa si vede e come (*Mostra*, i colori, la dimensione dei punti, *Camere*,
     *Marker*, *Regione*); gli strumenti che lavorano in 3D sono nella barra laterale alla sua sinistra, in quattro
-    gruppi che aprono un pannello come nella vista 2D: *Vista* (*Dall'alto*, *Vista iniziale*, *Centra la vista sul
+    gruppi che aprono un pannello come nella vista 2D: *Vista* (*Dall'alto*, *Vista iniziale*, [*Proiezione ortografica*](view3d.md#proiezione-ortografica), *Centra la vista sul
     punto*, *Trackball*, [*Guarda dalla foto*](view3d.md#guardare-da-una-foto), *Esagerazione verticale*),
     *Punti* (*Marker*, *Foto del punto*, *Lazo*), *Taglia e prospetti* (*Sezione*, *Pianta a quota*, *Taglia*, *Prospetto*) e *Disegna*:
 

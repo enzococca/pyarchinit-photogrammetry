@@ -3493,7 +3493,13 @@
   "AAAA-MM-GG": "YYYY-MM-DD",
   "Giorno del volo": "Day of the flight",
   "Un log RTCM 3 o Trimble RT-17 porta solo il tempo della settimana: il giorno del volo (tempo GPS; anche con l'ora, 2026-05-04 09:30) dice in quale settimana cade. Serve quando gli scatti sono gli eventi del log stesso: un file degli scatti lo dice da sé.": "An RTCM 3 or Trimble RT-17 log carries the time of the week only: the day of the flight (GPS time; with the time too, 2026-05-04 09:30) tells which week it is in. It is needed when the shots are the events of the log itself: a file of shots tells it by itself.",
-  "Il giorno del volo è una data in tempo GPS, dal 1980 in poi, senza fuso orario.": "The day of the flight is a date in GPS time, from 1980 on, without a time zone."
+  "Il giorno del volo è una data in tempo GPS, dal 1980 in poi, senza fuso orario.": "The day of the flight is a date in GPS time, from 1980 on, without a time zone.",
+  "Proiezione ortografica": "Orthographic projection",
+  "Proiezione ortografica (parallela) al posto della prospettiva: le linee parallele restano parallele e le dimensioni non dipendono dalla distanza, per piante e viste laterali (Dall'alto, F di fronte, L da sinistra); la rotella cambia la scala (tasto O)": "Orthographic (parallel) projection instead of the perspective: parallel lines stay parallel and sizes do not depend on the distance, for plans and side views (From above, F front, L from the left); the wheel changes the scale (O key)",
+  "La vista 3D in proiezione ortografica (parallela) o in prospettiva": "The 3D view in orthographic (parallel) projection or in perspective",
+  "Chiudi i buchi fino a (m, 0 = nessuno)": "Close holes up to (m, 0 = none)",
+  "Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata.": "Height field only: closes the holes whose gap between measured points is up to this size. The closed part is interpolated, not measured.",
+  "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4682,7 +4688,23 @@
   "{0} non esiste": "{0} does not exist",
   "{0} non si può aprire: manca il permesso di leggerlo": "{0} cannot be opened: no permission to read it",
   "Il giorno del volo si scrive AAAA-MM-GG (anche con l'ora: 2026-05-04 09:30), non «{0}».": "The day of the flight is written YYYY-MM-DD (with the time too: 2026-05-04 09:30), not “{0}”.",
-  "Indica il giorno del volo: un log {0} porta solo il tempo della settimana.": "Give the day of the flight: an {0} log carries the time of the week only."
+  "Indica il giorno del volo: un log {0} porta solo il tempo della settimana.": "Give the day of the flight: an {0} log carries the time of the week only.",
+  "Le foto hanno già gli stessi colori: su {0} osservazioni di punti visti da più foto la differenza è {1}% e la correzione non la abbassa.\n\nNon viene applicata: ortofoto e texture usano le foto come sono.": "The photos already have the same colours: on {0} observations of points seen by several photos the difference is {1}% and the correction does not lower it.\n\nIt is not applied: orthophoto and texture use the photos as they are.",
+  "\n{0} foto con troppo poche osservazioni prendono l'esposizione delle foto vicine.": "\n{0} photos with too few observations take the exposure of the photos near them.",
+  "disegno 3D {0}": "3D drawing {0}",
+  "disegno 3D {0} aggiunto al layer {1}": "3D drawing {0} added to the layer {1}",
+  "disegno 3D {0} modificato": "3D drawing {0} changed",
+  "disegno 3D {0} eliminato": "3D drawing {0} deleted",
+  "{0} è nel sistema di riferimento {1}, il progetto nel {2}: non ripreso": "{0} is in reference system {1}, the project in {2}: not taken",
+  "{0} senza geometria leggibile, non ripreso": "{0} has no readable geometry, not taken",
+  "{0} non ripreso: non ha quote, e il DEM va rifatto prima di prenderle da lì": "{0} not taken: it has no heights, and the DEM must be rebuilt before they are taken from it",
+  "{0} non ripreso: non ha quote, e il DEM non ne ha sotto i suoi vertici": "{0} not taken: it has no heights, and the DEM has none under its vertices",
+  "{0} non ripreso: la sua geometria non fa un disegno di questo layer": "{0} not taken: its geometry makes no drawing of this layer",
+  "{0} ({1} quote prese dal DEM)": "{0} ({1} heights taken from the DEM)",
+  "{0} (di più parti, tenuta la prima)": "{0} (of several parts, the first one kept)",
+  "{0} (senza i suoi fori)": "{0} (without its holes)",
+  "Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)": "Model: {0} holes closed, {1} m² in plan interpolated (not measured)",
+  "Modello: {0} buchi più larghi di {1} m lasciati aperti": "Model: {0} holes wider than {1} m left open"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

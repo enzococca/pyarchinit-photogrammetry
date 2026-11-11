@@ -32,7 +32,7 @@ longer explanations follow the table.
 | `update_transform(use_cameras=None)` | the similarity onto the references (weighted, 7 parameters); returns the control and check RMSE and the error of every marker and bar |
 | `build_depth_maps(quality, filter_mode, backend)` | depth maps; backends `auto`, `cpu`, `patchmatch`, `colmap`, `openmvs` |
 | `build_point_cloud()` | the dense cloud from the depth maps |
-| `build_model(source, surface, face_count, voxel_size, vertex_colors)` | the mesh from `point_cloud`, `tie_points` or `depth_maps` (*Mesh from depth maps*, below) |
+| `build_model(source, surface, face_count, voxel_size, vertex_colors, classes, fill_holes)` | the mesh from `point_cloud`, `tie_points` or `depth_maps` (*Mesh from depth maps* and *Height field*, below) |
 | `build_texture(texture_size, page_size=8192)` | the texture of the model, in pages above `page_size` (*Texture pages*, below) |
 | `build_dem(resolution, source)` | the DEM, a GeoTIFF in the chunk CRS |
 | `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | the orthomosaic on the DEM or on the model (*Seamless orthomosaic and colour correction*) |
@@ -540,6 +540,28 @@ the fused surface (`FusedMesh`, internal frame) without saving it. On the synthe
 mesh of the dense cloud: median distance 0.9 mm, 90th percentile 2.2 mm (Poisson 1.0 and 2.8 mm).
 CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 
+### Height field
+
+`chunk.build_model(surface="height_field", fill_holes=None)` triangulates the points in plan (Delaunay, one
+height per place: terrain, floors, the bottom of a trench) and drops the faces that span more than the points
+around them allow. The limit is local: an edge is kept when it is shorter than 4 times the spacing of the points
+at its two ends (the mean of the two; the spacing of a point is the distance to its 8th neighbour in plan). A
+cloud of uneven density - dense where many photos overlap, sparser at the margins or on dark, uniform ground -
+therefore gives a surface without holes where it is sparser, while the areas without points and the long faces
+across the outside margin are still cut. (Up to 1.7.7 one limit held for the whole cloud, 4 times the median
+edge: the dense part set it, and the sparser parts came out riddled with holes.)
+
+`fill_holes` is the largest gap, in metres, to close: a hole that is left is closed with the faces of the
+triangulation over it when none of them has an edge longer than this, that is when no two measured points
+further apart get joined. What reaches the outline of the cloud is the outside of the survey and is never
+closed. The default is `None`, nothing is closed: the surface stays where something was measured, and a hole
+says that nothing was. The faces that close a hole are interpolated between the points of its rim, not
+measured, and `chunk.meta["model"]` says how much: `fill_holes`, `holes_filled`, `holes_left` (holes wider than
+the gap) and `interpolated_area` (square metres in plan). The option counts for the height field only (also
+from the depth maps and when Poisson falls back to it); the arbitrary surface is closed by Poisson already.
+With `mapping="auto"` the texture of a height field uses the orthophoto mapping when the surface mostly faces
+the sky, whatever the number of faces. CLI: `ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`.
+
 ## Align and merge chunks
 
 Chunks are aligned separately (each in its own arbitrary frame), brought into one frame,
@@ -880,8 +902,19 @@ cells would take without any patch, inside a patch from its own cells (`engine.o
 
 **`chunk.calibrate_colours(...)`** fits the vignetting as `v(r) = b1 r^2 + b2 r^4 + b3 r^6` on the
 radius over the half diagonal, from surface points seen by several photos, least squares on all
-the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds, mean log
-gain zero); `chunk.meta["colour"]` keeps the result with the colour scatter before/after.
+the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds);
+`chunk.meta["colour"]` keeps the result with the colour scatter before/after (`rms_before`,
+`rms_after`: the scatter of the log colours of a point among the photos that see it, on the same
+observations). The points are those of the cloud plus as many spread evenly over the DEM (the mesh
+without a DEM), so that the photos at the edges of the block are measured too. Only the differences
+between the photos are measured: the common exposure is set so that the mosaic keeps the tone of
+the photos (the middle half of the corrections of the photo each point of the surface takes its
+colour from is zero on average). A photo with fewer than 50 observations takes the exposure of its
+four nearest measured photos (`from_neighbours` lists them); the falloff of a lens is fitted only
+when its observations span enough of the radius, and is held constant beyond the radius it was
+measured to (`vignetting_radius`). A calibration that does not lower the scatter by at least 2 % is
+not applied: `applied` is `False`, the gains are empty and the orthomosaic and the texture use the
+photos as they are.
 
 **`build_orthomosaic(colour_correction=None)`** and `build_texture` apply the correction
 (`engine.colour.Correction.correct(cam, image)`) as the photos are read.
@@ -1904,6 +1937,7 @@ assistant ("limited for scripts" under 2).
 | `window.model_view.pivot()` | the centre of rotation of the 3D view (world coordinates of the chunk), or None |
 | `window.model_view.set_pivot(point, recentre=False)` | a new centre of rotation; the view moves only with `recentre` ([3D view and trackball](gui/view3d.md)) |
 | `window.model_view.set_trackball_mode(mode)` | when the trackball is drawn: `"auto"`, `"always"`, `"never"` |
+| `window.model_view.set_ortho(on)` · `ortho()` | the orthographic (parallel) projection of the 3D view on or off, and whether it is on ([Orthographic projection](gui/view3d.md#orthographic-projection)) |
 
 
 ## Added in 0.3

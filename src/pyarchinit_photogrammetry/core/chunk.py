@@ -699,18 +699,22 @@ class Chunk:
 
     def build_model(self, source: str = "point_cloud", surface: str = "arbitrary", face_count: int | str = "medium",
                     voxel_size: float | None = None, vertex_colors: bool = True, classes=None,
-                    progress: ProgressCallback | None = None):
+                    fill_holes: float | None = None, progress: ProgressCallback | None = None):
         """Build a mesh. ``surface='arbitrary'`` (Poisson, true 3D) or ``'height_field'`` (2.5D, for terrain).
 
         ``source='depth_maps'`` fuses the depth maps of :meth:`build_depth_maps` (TSDF, no
         dense cloud needed); ``voxel_size`` (chunk CRS units, e.g. metres) sets its detail,
         by default twice the size of a depth-map pixel on the surface. ``classes``: only the
-        dense points of these classes (e.g. without vegetation and excavation tools)."""
+        dense points of these classes (e.g. without vegetation and excavation tools).
+
+        ``fill_holes`` (height field; metres): closes the holes of the surface up to this gap
+        between measured points. By default nothing is closed; what is closed is interpolated
+        and ``meta["model"]`` reports it (``holes_filled``, ``interpolated_area`` in m²)."""
         from ..engine import meshing
 
         return meshing.build_model(self, source=source, surface=surface, face_count=face_count,
                                    voxel_size=voxel_size, vertex_colors=vertex_colors, classes=classes,
-                                   progress=as_progress(progress))
+                                   fill_holes=fill_holes, progress=as_progress(progress))
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None,
                       skip_unreadable: bool = False, mapping: str = "auto",
@@ -854,7 +858,8 @@ class Chunk:
                           progress: ProgressCallback | None = None) -> dict:
         """Measure the exposure gain of every photo and the vignetting of every lens on points of
         the surface seen by several photos (:mod:`engine.colour`); the orthomosaic and the
-        texture use them from now on. Returns the gains, the falloff and the scatter before/after."""
+        texture use them from now on. Returns the gains, the falloff and the scatter before/after;
+        ``applied`` is False (and the gains empty) when the calibration does not lower the scatter."""
         from ..engine import colour
 
         return colour.estimate(self, samples=samples, vignetting=vignetting, progress=as_progress(progress))

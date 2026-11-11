@@ -62,7 +62,8 @@ def exaggeration_text(factor: float) -> str:
 
 KEY_NAMES = {Qt.Key.Key_Left: "left", Qt.Key.Key_Right: "right", Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down",
              Qt.Key.Key_Plus: "plus", Qt.Key.Key_Equal: "plus", Qt.Key.Key_Minus: "minus",
-             Qt.Key.Key_F: "front", Qt.Key.Key_L: "left_side", Qt.Key.Key_Home: "home", Qt.Key.Key_T: "top"}
+             Qt.Key.Key_F: "front", Qt.Key.Key_L: "left_side", Qt.Key.Key_Home: "home", Qt.Key.Key_T: "top",
+             Qt.Key.Key_O: "ortho"}
 
 
 def _icon(name: str) -> QIcon:
@@ -77,6 +78,7 @@ class _TrackballCanvas:
     def _init_trackball(self) -> None:
         self.trackball = Trackball(self)
         self.look_on = False  # looking through a photo: the camera is the photo's until the view is moved
+        self.ortho = False  # the projection chosen: orthographic (parallel) or perspective
         self._fov_before: float | None = None  # the field of view before, given back by Home and T
         self._fade_timer = QTimer(self)
         self._fade_timer.setInterval(50)
@@ -84,6 +86,23 @@ class _TrackballCanvas:
 
     def view_size(self) -> tuple[int, int]:
         return max(self.width(), 1), max(self.height(), 1)
+
+    def set_ortho(self, on: bool) -> None:
+        """The orthographic (parallel) projection, or the perspective one: what is at the distance of the middle
+        of the view keeps its size, so the view does not jump. A photo looked through stays in perspective (it is
+        one): the projection chosen comes back when the view leaves it."""
+        self.ortho = bool(on)
+        if self.look_on:
+            return
+        cam = self.get_cam()
+        cam.ortho = self.ortho
+        self._put_cam(cam)
+
+    def _ortho_back(self, cam: OrbitCamera) -> float:
+        """How far behind its target an orthographic camera stands: the whole scene in front of it, whatever the
+        zoom (the picture does not depend on it)."""
+        sd = self.sd
+        return 2.0 * float(sd.extent) + float(np.linalg.norm(np.asarray(sd.center, np.float64) - cam.target))
 
     def scene_up(self) -> np.ndarray:
         return np.asarray(self.sd.up, np.float64)
@@ -141,6 +160,10 @@ class _TrackballCanvas:
             return
         self.look_on = False
         self.set_photo(None, None)
+        if self.ortho:  # the photo was seen in perspective: back to the projection chosen
+            cam = self.get_cam()
+            cam.ortho = True
+            self._put_cam(cam)
         self.look_left.emit()
 
     def _fov_back(self) -> float | None:
@@ -156,12 +179,15 @@ class _TrackballCanvas:
             self.reset_view()
         elif name == "top":
             self.top_view()
+        elif name == "ortho":
+            self.ortho_key.emit()
         elif name is None or not self.trackball.key(name, shift):
             return False
         self._mouse_seen()
         return True
 
 
+ORTHO_SETTING = "view/orthographic"  # the projection of the 3D view, kept between sessions
 AXES_COLOURS = ("#e0382d", "#2da12d", "#2d5fe0")  # x, y, z of the axes previewed
 ORIENT_PURPOSES = {"orient_p": "A", "orient_p2": "B", "orient_p3": "C"}  # picks for the rows of the orientation
 
@@ -264,6 +290,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
 
     pivot_requested = Signal(float, float)  # a double click: the centre of rotation at this pixel
     look_left = Signal()  # the view moved away from the photo it looked through
+    ortho_key = Signal()  # the key O: the other projection
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -296,6 +323,8 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
 
     def set_cam(self, cam: OrbitCamera) -> None:
         self.end_look()  # the view moved: no longer the photo's
+        cam.ortho = self.ortho
+        cam.back = self._ortho_back(cam)
         self.cam = cam
         self._dragging = True  # the light preview while it moves, the whole scene a moment after
         self._dirty = True
@@ -306,6 +335,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         self.update()
 
     def _put_cam(self, cam: OrbitCamera) -> None:
+        cam.back = self._ortho_back(cam)
         self.cam = cam
         self._dragging = False
         self._dirty = True
@@ -367,6 +397,7 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
             self.others.append(((pts, cols), light))
         if reset:
             self.reset_view()
+        self.cam.back = self._ortho_back(self.cam)  # the scene changed size
         self._dirty = True
         self.update()
 
@@ -382,7 +413,8 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
 
     def reset_view(self) -> None:
         self._fov_back()  # a new camera: the field of view of every view
-        self.cam = OrbitCamera(self.sd.center.astype(float), self.sd.extent * 1.1, up=self.sd.up)
+        self.cam = OrbitCamera(self.sd.center.astype(float), self.sd.extent * 1.1, up=self.sd.up, ortho=self.ortho)
+        self.cam.back = self._ortho_back(self.cam)
         self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
@@ -391,9 +423,10 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         fov = self._fov_back()
         if fov is not None:
             self.cam.fov = fov
-        self.cam.pitch = 89.5
-        self.cam.yaw = -90.0
+        # straight down in an orthographic view (a plan); in perspective a hair off the vertical, as it always was
+        self.cam.R = self.cam._from_angles(-90.0, 90.0 if self.ortho else 89.5)
         self.cam.target = self.sd.center.astype(float)
+        self.cam.back = self._ortho_back(self.cam)
         self.trackball.pivot = None  # back to the middle of the scene
         self._dirty = True
         self.update()
@@ -649,9 +682,13 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
         """Line of sight through widget pixel (x, y): origin and unit direction in scene
         coordinates, and the size of a pixel at a distance (a function of the distance)."""
         w, h = max(self.width(), 1), max(self.height(), 1)
-        f = 0.5 * h / np.tan(np.radians(self.cam.fov) / 2)
-        d = self.cam.basis().T @ np.array([(x - w / 2) / f, (y - h / 2) / f, 1.0])
-        return self.cam.eye.copy(), d / np.linalg.norm(d), (lambda dist: dist / f)
+        cam = self.cam
+        origin, d = cam.ray(x, y, w, h)
+        if cam.ortho:  # parallel lines of sight: a pixel is as large at every distance
+            size = cam.pixel_size(0.0, h)
+            return origin, d, (lambda dist: size)
+        f = cam.focal(h)
+        return origin, d, (lambda dist: dist / f)
 
     def grab_array(self) -> np.ndarray:
         img = self._grab().convertToFormat(QImage.Format.Format_RGB888)
@@ -717,7 +754,7 @@ def _trackball_style(canvas):
             key = {"Left": Qt.Key.Key_Left, "Right": Qt.Key.Key_Right, "Up": Qt.Key.Key_Up, "Down": Qt.Key.Key_Down,
                    "plus": Qt.Key.Key_Plus, "equal": Qt.Key.Key_Equal, "minus": Qt.Key.Key_Minus,
                    "KP_Add": Qt.Key.Key_Plus, "KP_Subtract": Qt.Key.Key_Minus, "Home": Qt.Key.Key_Home,
-                   "f": Qt.Key.Key_F, "l": Qt.Key.Key_L, "t": Qt.Key.Key_T}.get((iren.GetKeySym() or "").lower()
+                   "f": Qt.Key.Key_F, "l": Qt.Key.Key_L, "t": Qt.Key.Key_T, "o": Qt.Key.Key_O}.get((iren.GetKeySym() or "").lower()
                                                                               if len(iren.GetKeySym() or "") == 1
                                                                               else iren.GetKeySym())
             if key is not None:
@@ -741,6 +778,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
 
     pivot_requested = Signal(float, float)
     look_left = Signal()  # the view moved away from the photo it looked through
+    ortho_key = Signal()  # the key O: the other projection
     TB_ALPHA = {"back": 90, "outline": 150, "cross": 230}  # of 255, as the software canvas draws them
 
     def __init__(self, parent=None):
@@ -809,15 +847,23 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         d = float(np.linalg.norm(focal - pos)) or 1.0
         cam = OrbitCamera(focal, d, fov=c.GetViewAngle(), up=self.sd.up)
         cam.R = OrbitCamera.looking((focal - pos) / d, np.array(c.GetViewUp()))
+        if c.GetParallelProjection():  # the scale of the view is its "distance", the camera stands further back
+            cam.ortho, cam.back = True, d
+            cam.distance = float(c.GetParallelScale()) / np.tan(np.radians(cam.fov) / 2)
         return cam
 
     def set_cam(self, cam: OrbitCamera) -> None:
         self.end_look()  # the view moved: no longer the photo's
+        cam.ortho = self.ortho
         self._put_cam(cam)
 
     def _put_cam(self, cam: OrbitCamera) -> None:
         c = self.plotter.renderer.GetActiveCamera()
         c.SetViewAngle(float(cam.fov))
+        c.SetParallelProjection(bool(cam.ortho))
+        if cam.ortho:  # half the height of the view, as the perspective shows it at the distance of the target
+            cam.back = self._ortho_back(cam)
+            c.SetParallelScale(cam.distance * np.tan(np.radians(cam.fov) / 2))
         c.SetPosition(*cam.eye)
         c.SetFocalPoint(*cam.target)
         c.SetViewUp(*(-cam.basis()[1]))
@@ -1027,6 +1073,8 @@ class VtkCanvas(_TrackballCanvas, QWidget):
             pl.add_text(exaggeration_text(sd.exaggeration), position="lower_left", font_size=10, color="#c8c8c8")
         if reset:
             self.reset_view()
+        elif self.ortho and not self.look_on:  # the scene changed size: the camera far enough behind all of it
+            self._put_cam(self.get_cam())
         pl.render()
 
     def _add_other(self, ly, opacity: float):
@@ -1121,6 +1169,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         fov = self._fov_back()
         if fov is not None:
             pl.renderer.GetActiveCamera().SetViewAngle(fov)
+        pl.renderer.GetActiveCamera().SetParallelProjection(self.ortho)
         c = self.sd.center
         up = self.sd.up
         d = self.sd.extent * 1.1
@@ -1135,6 +1184,7 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         fov = self._fov_back()
         if fov is not None:
             self.plotter.renderer.GetActiveCamera().SetViewAngle(fov)
+        self.plotter.renderer.GetActiveCamera().SetParallelProjection(self.ortho)
         c, up = self.sd.center, self.sd.up
         self.plotter.camera_position = [tuple(c + up * self.sd.extent * 1.2), tuple(c), (0, 1, 0)]
         self.plotter.reset_camera()
@@ -1164,13 +1214,19 @@ class VtkCanvas(_TrackballCanvas, QWidget):
         m = cam.GetCompositeProjectionTransformMatrix(ren.GetTiledAspectRatio(), -1, 1)
         M = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)])
 
+        parallel = bool(cam.GetParallelProjection())
+        eye, ahead = np.array(cam.GetPosition()), np.array(cam.GetDirectionOfProjection())
+
         def project(pts):
-            P = np.c_[np.asarray(pts, float), np.ones(len(pts))] @ M.T
+            pts = np.asarray(pts, float)
+            P = np.c_[pts, np.ones(len(pts))] @ M.T
             wv = P[:, 3]
             with np.errstate(divide="ignore", invalid="ignore"):
                 ndc = P[:, :3] / wv[:, None]
             ok = (wv > 0) & (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1)
-            return (ndc[:, 0] + 1) / 2 * w, (1 - ndc[:, 1]) / 2 * h, wv, ok
+            # a parallel projection has w = 1 everywhere: the depth is the distance along the line of sight
+            depth = (pts - eye) @ ahead if parallel else wv
+            return (ndc[:, 0] + 1) / 2 * w, (1 - ndc[:, 1]) / 2 * h, depth, ok
 
         return project
 
@@ -1565,6 +1621,12 @@ class ModelView(QWidget, LookThrough):
         b_reset.setToolTip(tr("La vista iniziale di tutta la scena (tasto Home)"))
         self.b_top = b_top = QPushButton(_icon("top_view"), tr("Dall'alto"))
         b_top.setToolTip(tr("La vista dall'alto (tasto T); F di fronte (verso +y), L da sinistra (verso +x)"))
+        self.b_ortho = QPushButton(_icon("ortho_view"), tr("Proiezione ortografica"))
+        self.b_ortho.setCheckable(True)
+        self.b_ortho.setToolTip(tr("Proiezione ortografica (parallela) al posto della prospettiva: le linee parallele "
+                                   "restano parallele e le dimensioni non dipendono dalla distanza, per piante e "
+                                   "viste laterali (Dall'alto, F di fronte, L da sinistra); la rotella cambia la "
+                                   "scala (tasto O)"))
         self.b_center = QPushButton(tr("Centra la vista sul punto"))
         self.b_center.setToolTip(tr("Porta al centro della vista il centro di rotazione (doppio clic su un punto "
                                     "del modello o della nuvola per sceglierlo)"))
@@ -1590,6 +1652,10 @@ class ModelView(QWidget, LookThrough):
             tb_menu.addAction(a)
             self.trackball_actions[mode] = a
         self.b_trackball.setMenu(tb_menu)
+        self.a_ortho = QAction(_icon("ortho_view"), tr("Proiezione ortografica"), self, checkable=True)
+        self.a_ortho.setStatusTip(tr("La vista 3D in proiezione ortografica (parallela) o in prospettiva"))
+        self.a_ortho.toggled.connect(lambda on: self.set_ortho(on))
+        self.b_ortho.clicked.connect(lambda on=False: self.a_ortho.setChecked(bool(on)))
         self.exaggeration = 1.0
         self._axes = None  # (origin, axes, size) of a new local system previewed, world coordinates
         self.exag_spin = QDoubleSpinBox()
@@ -1736,7 +1802,7 @@ class ModelView(QWidget, LookThrough):
         self.a_look_exit = look_menu.addAction(tr("Esci dalla foto (Esc)"), self.leave_look)
         self.b_look.setMenu(look_menu)
         self.rail.add_group("view", tr("Vista"), "rail_view",
-                            [b_top, b_reset, self.b_center, self.b_trackball, self.b_look, None, exag])
+                            [b_top, b_reset, self.b_ortho, self.b_center, self.b_trackball, self.b_look, None, exag])
         self.rail.add_group("points", tr("Punti"), "rail_points", [self.b_marker, self.b_photos, self.b_lasso])
         self.rail.add_group("cut", tr("Taglia e prospetti"), "rail_cut",
                             [self.b_section, self.b_slice, self.b_cut, self.b_elevation])
@@ -1758,6 +1824,7 @@ class ModelView(QWidget, LookThrough):
         b_top.clicked.connect(lambda: self.canvas.top_view())
         self.b_center.clicked.connect(lambda: self.canvas.centre_on_pivot())
         self.canvas.pivot_requested.connect(self._pivot_at)
+        self.canvas.ortho_key.connect(self.a_ortho.toggle)
         self._init_look()
         for part in self.look_parts:
             bar.addWidget(part)
@@ -1835,6 +1902,32 @@ class ModelView(QWidget, LookThrough):
             # pick, lasso or photo
         self._update_tools()
         self.set_trackball_mode(self._saved_trackball_mode(), save=False)
+        self.set_ortho(self._saved_ortho(), save=False)
+
+    # ----------------------------------------------------------- projection
+    @staticmethod
+    def _saved_ortho() -> bool:
+        from . import app_settings
+
+        return app_settings().value(ORTHO_SETTING, "false") in ("true", True)
+
+    def set_ortho(self, on: bool, save: bool = True) -> None:
+        """The 3D view in orthographic (parallel) projection, or in perspective; the choice is kept for the next
+        sessions. Picks, measures, drawings and frames taken from the view follow the projection shown."""
+        on = bool(on)
+        for widget in (self.a_ortho, self.b_ortho):
+            if widget.isChecked() != on:
+                blocked = widget.blockSignals(True)
+                widget.setChecked(on)
+                widget.blockSignals(blocked)
+        self.canvas.set_ortho(on)
+        if save:
+            from . import app_settings
+
+            app_settings().setValue(ORTHO_SETTING, "true" if on else "false")
+
+    def ortho(self) -> bool:
+        return bool(self.canvas.ortho)
 
     # ----------------------------------------------------------- trackball
     @staticmethod

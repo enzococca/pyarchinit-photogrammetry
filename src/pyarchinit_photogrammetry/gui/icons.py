@@ -69,7 +69,7 @@ ICONS = {
     "assistant": ("mdi6.robot-outline", "teal"),
     "log": ("mdi6.text-box-outline", "grey"), "theme": ("mdi6.theme-light-dark", "grey"),
     "language": ("mdi6.translate", "grey"),
-    "top_view": ("mdi6.arrow-collapse-down", "grey"), "home_view": ("mdi6.home-outline", "grey"),
+    "top_view": ("mdi6.arrow-collapse-down", "grey"), "ortho_view": ("mdi6.cube-outline", "grey"), "home_view": ("mdi6.home-outline", "grey"),
     "workspace": ("mdi6.file-tree-outline", "slate"), "reference_pane": ("mdi6.table", "indigo"),
     "panes": ("mdi6.page-layout-sidebar-left", "grey"), "reset_layout": ("mdi6.backup-restore", "grey"),
     # help and status

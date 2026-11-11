@@ -78,7 +78,8 @@ link with QGIS (both ways)* keeps them linked both ways:
 
 * what is drawn here reaches QGIS within a second;
 * what is saved in QGIS (*Save Layer Edits*, or the end of an edit session) in the layers *Unita' stratigrafiche
-  (ppg)*, *Quote (ppg)* and *Sezioni (ppg)* (units, spot heights, sections) comes back here within a second:
+  (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* and *Disegni 3D (ppg)* (units, spot heights, sections, free drawings) comes
+  back here within a second:
   outlines and attributes changed, features drawn there (they get their identity, `ppg_id`), features deleted.
 
 Each save is one entry of *Edit > Undo* and a line of the log. The units take the columns of `pyunitastratigrafiche`
@@ -89,7 +90,8 @@ again.
 !!! note
     An outline that is not valid is made valid (or skipped), a layer in another reference system is refused, a file
     QGIS holds while saving is read a moment later. Contour lines, zones, stones, patches and the drawings of the
-    plugins are computed here and stay one-way. Details in [QGIS, live](../integrations.md#qgis-live).
+    plugins are computed here and stay one-way (to edit one in QGIS, import it as a free drawing first). Details in
+    [QGIS, live](../integrations.md#qgis-live).
 
 ??? example "Command line and API"
     `io.qgis_link.LiveLink` (`write`, `external_change`, `read_changes`), `export_layers`, `build_project`
