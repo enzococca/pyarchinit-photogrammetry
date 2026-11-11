@@ -64,6 +64,10 @@ LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
     "quote": ("Quote (ppg)", "POINT"),  # the columns of pyarchinit_quote
 }
 TWO_WAY_TABLES = ("unita", "quote", "sezioni")  # what is edited there in QGIS comes back
+# the other drawings of the plan: polygons, lines and points of the layers of the 2D view (those of the plugins, the
+# computed ones). What another program edits there is read back too (since 1.7.8), row by row with the layer of the row:
+# the window takes the edits of the layers whose features it can change and puts the others back as they were
+PLAN_TABLES = ("poligoni", "curve", "linee", "punti")
 # the drawings of every elevation and section of the chunk, placed on the survey in 3D (one-way): tables
 # ``prospetto_<elevation id>_<unita|quote|punti|pietre|profilo|linee>`` (``engine.elevation.world_tables``)
 ELEVATION_PREFIX = "prospetto_"
@@ -87,11 +91,12 @@ ROWS_TABLE = "ppg_rows"
 
 
 def two_way_tables() -> tuple[str, ...]:
-    """Every table whose edits by another program come back: units, spot heights, sections (:data:`TWO_WAY_TABLES`) and
-    the three tables of the free drawings in 3D (:data:`.free_drawings.TABLES`)."""
+    """Every table whose edits by another program come back: units, spot heights, sections (:data:`TWO_WAY_TABLES`),
+    the other drawings of the plan (:data:`PLAN_TABLES`) and the three tables of the free drawings in 3D
+    (:data:`.free_drawings.TABLES`)."""
     from .free_drawings import TABLES
 
-    return (*TWO_WAY_TABLES, *(table for table, _gtype in TABLES.values()))
+    return (*TWO_WAY_TABLES, *PLAN_TABLES, *(table for table, _gtype in TABLES.values()))
 
 
 class UnreadEdits(RuntimeError):
@@ -215,6 +220,54 @@ def _feature_shape(attrs: dict):
     if shape is not None:
         return shape
     return _shape(*attrs["_geom"])
+
+
+def _identified(table: str, feats: list, keep: list | None = None):
+    """``((identity, part), geometry, WKB, values)`` of every feature of ``feats`` (``(layer, attributes)``) that goes
+    into ``table``, as its row has them: its own identity (``ppg_id`` among its attributes), else one from its content
+    (table, layer, geometry, attributes) - the same content, the same row; the same identity twice is another feature
+    (of a unit, another part). A feature without geometry has no row; ``keep``: filled with the features that have one,
+    in the order of the result."""
+    import shapely
+
+    counts: dict[str, int] = {}
+    for name, attrs in feats:
+        geom = _feature_shape(attrs)
+        if geom is None or geom.is_empty:
+            continue
+        raw = shapely.to_wkb(geom, byte_order=1, output_dimension=2)
+        vals = {_column(k): v for k, v in attrs.items() if not str(k).startswith("_")}
+        vals["layer"] = name
+        pid = str(vals.get(ID_FIELD) or "").strip() or None
+        explicit = pid is not None
+        if not explicit:  # a feature the program keeps no identity for: one from its content
+            pid = stable_id(table, name, hashlib.sha1(raw).hexdigest(),
+                            sorted((k, str(v)) for k, v in vals.items() if k not in TECHNICAL_FIELDS))
+        n = counts[pid] = counts.get(pid, 0) + 1
+        part = 1
+        if n > 1 and (table != "unita" or not explicit):  # the same identity twice: another feature
+            pid = stable_id(pid, n)
+            counts[pid] = counts.get(pid, 0) + 1
+        elif table == "unita":
+            part = n
+        if keep is not None:
+            keep.append((name, attrs))
+        yield (pid, part), geom, raw, vals
+
+
+def plan_identities(layers: dict[str, dict]) -> dict[str, tuple[str, str, dict]]:
+    """``{identity: (table, layer, attributes)}`` of the features of the layers of the raster view (as
+    :meth:`LiveLink.write` takes them) that go into the tables of the other drawings of the plan
+    (:data:`PLAN_TABLES`): the identity each has in its row of the live GeoPackage, to find the feature an edit read
+    from there (:meth:`LiveLink.read_changes`) belongs to."""
+    out = {}
+    for table, feats in LiveLink._group(layers).items():
+        if table not in PLAN_TABLES:
+            continue
+        kept: list = []
+        for ((pid, _part), _geom, _raw, _vals), (name, attrs) in zip(list(_identified(table, feats, kept)), kept):
+            out[pid] = (table, name, attrs)
+    return out
 
 
 def new_id() -> str:
@@ -385,7 +438,7 @@ class LiveLink:
             gtype, coords = attrs["_geom"]
             n = len(coords) if coords is not None else 0
             sig.append((name, id(attrs["_geom"]), id(attrs.get("_shape")), gtype, n, str(coords[0]) if n else "",
-                        str(coords[-1]) if n else "",
+                        str(coords[n // 2]) if n else "", str(coords[-1]) if n else "",
                         tuple(sorted((str(k), str(v)) for k, v in attrs.items() if not str(k).startswith("_")))))
         return hash(tuple(sig))
 
@@ -433,7 +486,7 @@ class LiveLink:
                     raise UnreadEdits(f"the file holds edits of chunk {stored} not read yet")
                 for table, feats in todo.items():
                     known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread)
-                    if table in TWO_WAY_TABLES:
+                    if table in _READ_BACK:
                         self._record(con, table, known[table])
                 if free_todo:
                     known.update(self._write_free(con, free, srs[0], drop=drop_unread))
@@ -605,29 +658,8 @@ class LiveLink:
                 for kind, (table, gtype) in TABLES.items() if table in have]
 
     def _wanted(self, table: str, feats: list, cols: list[str], types: dict) -> list[_Wanted]:
-        import shapely
-
-        counts: dict[str, int] = {}
         out = []
-        for name, attrs in feats:
-            geom = _feature_shape(attrs)
-            if geom is None or geom.is_empty:
-                continue
-            raw = shapely.to_wkb(geom, byte_order=1, output_dimension=2)
-            vals = {_column(k): v for k, v in attrs.items() if not str(k).startswith("_")}
-            vals["layer"] = name
-            pid = str(vals.get(ID_FIELD) or "").strip() or None
-            explicit = pid is not None
-            if not explicit:  # a feature the program keeps no identity for: one from its content
-                pid = stable_id(table, name, hashlib.sha1(raw).hexdigest(),
-                                sorted((k, str(v)) for k, v in vals.items() if k not in TECHNICAL_FIELDS))
-            n = counts[pid] = counts.get(pid, 0) + 1
-            part = 1
-            if n > 1 and (table != "unita" or not explicit):  # the same identity twice: another feature
-                pid = stable_id(pid, n)
-                counts[pid] = counts.get(pid, 0) + 1
-            elif table == "unita":
-                part = n
+        for (pid, part), geom, raw, vals in _identified(table, feats):
             vals[ID_FIELD] = pid
             if table == "unita":
                 vals[PART_FIELD] = part
@@ -700,7 +732,7 @@ class LiveLink:
         types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})")}
         if before and ID_FIELD not in before:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
-        two_way = table in TWO_WAY_TABLES and not drop  # the rows edited elsewhere kept until read
+        two_way = table in _READ_BACK and not drop  # the rows edited elsewhere kept until read
         known = {} if recreated else self._known_rows(con, table)
         return self._put_rows(con, table, cols, self._wanted(table, feats, cols, types), srs_id, two_way, known,
                               content=two_way or force or drop)
@@ -915,6 +947,9 @@ class LiveLink:
         self.read_chunk = owner
         if any(table.startswith(FREE_PREFIX) for table in out):
             self._signatures.pop(FREE_PREFIX, None)  # the next write compares the rows with the drawings again
+        for table in out:
+            if table in PLAN_TABLES:  # the next write compares its rows with the layers again: what the window did
+                self._signatures.pop(table, None)  # not take of them is put back as it was
         return out
 
     def _read_table(self, con, table: str, cols: list[str]) -> tuple[TableChanges, dict]:
@@ -974,6 +1009,9 @@ class LiveLink:
                     for t in LIVE_TABLES}
         finally:
             con.close()
+
+
+_READ_BACK = (*TWO_WAY_TABLES, *PLAN_TABLES)  # the tables of the plan whose rows are kept until read, and recorded
 
 
 def _readable(table: str, cols: list[str]) -> bool:
@@ -1242,4 +1280,4 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 __all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
            "INFO_TABLE", "UnreadEdits", "ELEVATION_PREFIX", "ELEVATION_TABLES",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
-           "TableChanges", "new_id", "stable_id", "row_signature"]
+           "TableChanges", "new_id", "stable_id", "row_signature", "PLAN_TABLES", "plan_identities", "two_way_tables"]
