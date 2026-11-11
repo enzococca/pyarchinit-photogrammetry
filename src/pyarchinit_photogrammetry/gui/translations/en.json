@@ -3247,7 +3247,7 @@
   "Legami a coordinate note del progetto": "Known ties of the project",
   "Scegli il file CSV dei punti noti.": "Choose the CSV file of the known points.",
   "Nessun chunk con un'ortofoto: costruiscila prima.": "No chunk with an orthophoto: build it first.",
-  "chunk non trovato": "chunk not found",
+  "il chunk dei marker scelti non c'è più": "the chunk of the chosen markers is no longer there",
   "Cerca picchetti: nessun punto noto nella sorgente scelta.": "Find stakes: no known point in the chosen source.",
   "Cerca picchetti: la testa più piccola deve essere minore della più grande.": "Find stakes: the smallest head must be smaller than the largest.",
   "sospetto: le distanze dagli altri punti non tornano": "suspect: the distances to the other points do not agree",

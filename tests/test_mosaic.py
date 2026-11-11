@@ -387,3 +387,53 @@ def test_moving_the_project_folder_keeps_the_mosaic_fresh(tmp_path):
     old["sources"] = {k: {"file": str(moved.files_dir / v["file"]), "mtime_ns": v["mtime_ns"]}
                       for k, v in rec2["sources"].items()}
     assert mosaic.is_stale(moved, old) == []
+
+
+def test_source_at_keeps_the_sources_in_memory(tmp_path, monkeypatch):
+    """The cursor readout over a merged product: sources.tif read once, not opened at every mouse move; no file handle
+    kept (Windows moves and deletes the folder); read again when the file changes; dropped when the product goes."""
+    doc, c = project(tmp_path)
+    rec = mosaic.build(doc, [c["B"], c["A"], c["C"]])
+    mosaic.release_sources()
+    opened = []
+    real = rasterio.open
+
+    def counting(*a, **k):
+        opened.append(str(a[0]))
+        return real(*a, **k)
+
+    monkeypatch.setattr(rasterio, "open", counting)
+    for i in range(20):
+        assert mosaic.source_at(doc, rec["id"], X0 + 3.0 + i * 0.01, Y1 - 2.0) == "B"
+    assert mosaic.source_at(doc, rec["id"], X0 + 1.0, Y1 - 2.0) == "A"
+    assert len(opened) == 1
+    path = mosaic.path_of(doc, rec, "sources")
+    renamed = path.with_name("moved.tif")
+    path.rename(renamed)  # no handle kept: the file can be moved while the readout is in memory
+    renamed.rename(path)
+    with real(path, "r+") as dst:  # the file written again: read again
+        arr = dst.read(1)
+        arr[:] = 3
+        dst.write(arr, 1)
+    import os
+
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+    assert mosaic.source_at(doc, rec["id"], X0 + 1.0, Y1 - 2.0) == "C"
+    assert len(opened) == 2
+    mosaic.remove(doc, rec["id"])
+    assert not mosaic._SOURCES
+    assert not path.exists()
+
+
+def test_source_at_large_sources_decimated(tmp_path, monkeypatch):
+    """A sources band over the memory cap is kept decimated: the readout still names the chunks away from the seams."""
+    doc, c = project(tmp_path)
+    rec = mosaic.build(doc, [c["B"], c["A"], c["C"]])
+    mosaic.release_sources()
+    monkeypatch.setattr(mosaic, "SOURCES_CELLS", 400)
+    assert mosaic.source_at(doc, rec["id"], X0 + 0.5, Y1 - 2.0) == "A"
+    assert mosaic.source_at(doc, rec["id"], X0 + 4.0, Y1 - 2.0) == "B"
+    assert mosaic.source_at(doc, rec["id"], X0 + 7.5, Y1 - 2.0) == "C"
+    assert mosaic.source_at(doc, rec["id"], X0 + 100.0, Y1 - 2.0) is None
+    assert next(iter(mosaic._SOURCES.values()))[2].size <= 400

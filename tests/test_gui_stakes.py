@@ -262,3 +262,44 @@ def test_a_failure_half_way_is_still_one_step(qapp, tmp_path, monkeypatch, scene
         assert ties.ties_of(doc) == []
     finally:
         _close(w)
+
+
+def test_the_window_follows_chunks_removed_while_open(qapp, tmp_path, monkeypatch, scene):
+    """Chunks removed (Rimuovi in the Area di lavoro) with the window open: the chunk searched leaves the combo, the
+    proposals are said to be of a chunk gone, the picture cleared, accepting refused; a chunk whose markers were a
+    source leaves the sources; Annulla brings the chunk back to the combo. Nothing raises."""
+    from pyarchinit_photogrammetry.gui.stakes_dialog import find_data
+
+    sc, truth = scene
+    doc, ch = project(tmp_path, sc)
+    other = doc.add_chunk("Rilievo")
+    other.crs = CRS
+    other.add_marker("GCP1", reference=(*truth[next(iter(truth))][:2], 1.0))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _searched(w, qapp, tmp_path, truth)
+        assert find_data(dlg.c_source, ("chunk", other.key)) >= 0
+        assert w.remove_workspace_items([("chunk", other, None)], confirm=False)
+        qapp.processEvents()
+        assert find_data(dlg.c_source, ("chunk", other.key)) < 0  # its markers no longer a source
+        assert dlg.c_chunk.findData(ch.key) >= 0 and dlg.proposals
+        dlg.select([dlg.proposals[0].point.name])
+        dlg.wait_preview()
+        assert dlg.preview_pixmap() is not None
+        key = ch.key
+        assert w.remove_workspace_items([("chunk", ch, None)], confirm=False)
+        qapp.processEvents()
+        assert dlg.isVisible() and dlg.c_chunk.findData(key) < 0
+        assert "non c&#x27;è più" in dlg.summary.text()
+        assert dlg.preview_pixmap() is None
+        dlg.select([dlg.proposals[1].point.name])  # a row of a chunk gone: no picture, no crash
+        qapp.processEvents()
+        assert dlg.preview_pixmap() is None
+        w.said.clear()
+        assert dlg.accept_selected() == [] and w.said[-1][0] == "warn"
+        assert not dlg.search() and w.said[-1][0] == "warn"
+        w.history.undo()
+        qapp.processEvents()
+        assert dlg.c_chunk.findData(key) >= 0
+    finally:
+        _close(w)
