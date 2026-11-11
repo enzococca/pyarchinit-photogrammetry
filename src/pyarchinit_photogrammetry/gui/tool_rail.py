@@ -32,6 +32,14 @@ from .icons import icon
 _RAILS: "weakref.WeakSet[ToolRail]" = weakref.WeakSet()  # a choice of the context menu or the pin goes to all
 
 
+def _live_rails() -> "list[ToolRail]":
+    """The rails that Qt still has: the rail of a window already deleted can outlive it for a while as a
+    Python object (something still holds it), and touching its widgets raises."""
+    import shiboken6
+
+    return [rail for rail in list(_RAILS) if shiboken6.isValid(rail)]
+
+
 def _settings():
     from . import app_settings
 
@@ -307,7 +315,7 @@ class ToolRail(QWidget):
             _settings().setValue("rail/pinned", "true" if on else "false")
         except Exception:  # noqa: BLE001
             pass
-        for rail in list(_RAILS):
+        for rail in _live_rails():
             rail._pinned = on
             rail._apply_pin()
 
@@ -331,7 +339,7 @@ class ToolRail(QWidget):
             _settings().setValue("rail/text", "true" if on else "false")
         except Exception:  # noqa: BLE001
             pass
-        for rail in list(_RAILS):
+        for rail in _live_rails():
             rail._text = on
             rail._apply_text()
 
