@@ -234,6 +234,80 @@ ENGLISH = re.compile(r"\b(the|of|is|are|not|and|or|by|with|from|to|its|their|the
                      r"photos?|shots?|times?)\b")
 
 
+#: what the stations and the downloads say, as the window of the GNSS shows it: built as gnss/stations.py and
+#: gnss/download.py build them
+STATION_NOTES = (
+    "AQUI00ITA: no observation files can be had for 2026-05-04 09:10 to 09:42 (GPS time).\n"
+    "gnss.bkg.bund.de could not be reached: https://igs.bkg.bund.de/root_ftp/EUREF/obs/2026/124/: could not connect "
+    "(timed out) (after 3 attempts)\n"
+    "1 s files:\n"
+    "  BKG EPN, 15 minute 1 s files: AQUI00ITA_[RSU]_20261240900_15M_01S_MO.crx.gz is not in "
+    "https://igs.bkg.bund.de/root_ftp/EUREF/highrate/2026/124/j/ - not published yet: BKG 15 minute files are online "
+    "after each quarter of an hour\n"
+    "  RING, hourly 1 s files: AQUI00ITA_[RSU]_20261240900_01H_01S_MO.crx.gz is not in "
+    "https://webring.gm.ingv.it:44324/rinex/RING/2026/124/\n"
+    "  and 3 more\n"
+    "The 30 s files for these hours are online: ask for the rate \"30s\" (or \"auto\").",
+    "AQUI00ITA: no observation files can be had for 2026-05-04 23:50 to 2026-05-05 00:20 (GPS time).\n"
+    "30 s files:\n"
+    "  BKG IGS, daily 30 s files: AQUI00ITA_[RSU]_20261240000_01D_30S_MO.crx.gz is not in "
+    "https://igs.bkg.bund.de/root_ftp/IGS/obs/2026/124/\n"
+    "The 1 s files for these hours are not there either.",
+    "AQUI00ITA: the observations have no epoch from 2026-05-04 09:20:00 to 09:31:30 (GPS time) during the flight, "
+    "2026-05-04 09:10:00 to 09:42:00 (and 2 more): a hole of more than 300 s is not accepted\n"
+    "The 30 s files, tried next, do not do either: AQUI00ITA: the observations run from 2026-05-04 09:15:00 to "
+    "2026-05-04 09:30:00 (GPS time) and do not cover the flight, 2026-05-04 09:10:00 to 09:42:00",
+    "AQUI00ITA: the observations have no epoch (GPS time) and do not cover the flight, 2026-05-04 09:10:00 to 09:42:00",
+    "AQUI00ITA: the base has 3 holes during the flight, the longest, from 2026-05-04 09:20:00 to 09:20:40 (GPS time), "
+    "40 s: accepted, RTKLIB takes base data up to 300 s old",
+    "AQUI00ITA: the base has a hole during the flight, from 2026-05-04 09:20:00 to 09:20:40 (GPS time), 40 s: "
+    "accepted, RTKLIB takes base data up to 300 s old",
+    "AQUI00ITA: the coordinates from RING were not used: https://webring.gm.ingv.it:44324/x.pos: could not connect "
+    "(timed out) (RING is on port 44324; a firewall may block it)",
+    "AQUI00ITA: only the approximate position of the list is known, good to metres",
+    "AQUI00ITA: no mixed file (_MO) for 2026-05-04 09:00 in https://igs.bkg.bund.de/root_ftp/EUREF/obs/2026/124/: "
+    "AQUI00ITA_R_20261240900_01H_30S_GO.crx.gz is used, which holds the observations of GPS alone - the satellites of "
+    "the other constellations of the drone are left out of the solution",
+    "https://example.org/list.json: the server answered HTTP 503; trying again in 2 s (attempt 2 of 3)",
+    "http://example.org/list.json: not HTTPS - only https and file addresses are downloaded, what comes over plain "
+    "http can be changed on the way",
+    "https://example.org/a.gz: the connection closed after only 1200 of 88000 bytes (after 3 attempts)",
+    "https://example.org/list.json: not the list of stations that was expected (an empty list, without a single "
+    "station); using the list of stations saved on 2026-05-01",
+    "AQUI00ITA_R_20261240900_01H_30S_MO.crx.gz (https://example.org/a.gz) is no good, not even when downloaded "
+    "again: AQUI00ITA_R_20261240900_01H_30S_MO.crx.gz is cut short or damaged (not gzip)",
+    "No broadcast navigation file for 2026-05-04: BRDC00WRD_R_20261240000_01D_MN.rnx.gz is not in "
+    "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/124/ - not published yet: BKG daily files are online about 30 "
+    "minutes after midnight UTC",
+    "AQUI00ITA is in none of the networks (EPN, IGS, RING): there is no archive that this program reads to ask for "
+    "its observations",
+    "Joining the 4 files of AQUI00ITA",
+    "Contacting igs.bkg.bund.de (attempt 2 of 3)",
+)
+
+
+def test_station_and_download_notes_in_italian():
+    """What the stations and the downloads say is shown in Italian in the window of the GNSS, each line of a message
+    of several lines too; the names, the addresses and the times stay as they are."""
+    i18n.set_current("it")
+    for message in STATION_NOTES:
+        shown = i18n.engine(message)
+        assert shown.count("\n") == message.count("\n"), shown
+        words = ENGLISH.findall(re.sub(r"https?://\S+|\S+\.gz", "", shown))
+        assert not words, (words, shown)
+    shown = i18n.engine(STATION_NOTES[0]).split("\n")
+    assert shown[0] == ("AQUI00ITA: non si possono avere file di osservazioni dalle 2026-05-04 09:10 alle 09:42 "
+                        "(tempo GPS).")
+    assert shown[2] == "File a 1 s:" and shown[5] == "  e altri 3"
+    assert shown[3].startswith("  BKG EPN, file di 15 minuti a 1 s: AQUI00ITA_[RSU]_20261240900_15M_01S_MO.crx.gz ")
+    assert "44324" in i18n.engine(STATION_NOTES[6]) and "firewall" in i18n.engine(STATION_NOTES[6])
+    i18n.set_current("en")
+    try:
+        assert all(i18n.engine(message) == message for message in STATION_NOTES)
+    finally:
+        i18n.set_current("it")
+
+
 def test_engine_refusals_in_italian():
     """What the engine refuses, and what it warns of, reaches the dialogs in Italian whole: the name of the file and
     the values kept, a reason inside another message and a list of values in Italian too; nothing of the English is

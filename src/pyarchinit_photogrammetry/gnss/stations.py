@@ -1345,7 +1345,7 @@ def _covered(station: Station, out: Path, gaps: list[tuple[datetime, datetime]],
                           "not accepted")
     span = rinex.time_span(out)
     if span is None or span[0] > start or span[1] < end:
-        got = "no epoch" if span is None else f"run from {span[0]} to {span[1]}"
+        got = "have no epoch" if span is None else f"run from {span[0]} to {span[1]}"
         raise _NotCovered(f"{station.id}: the observations {got} (GPS time) and do not cover the flight, {flight}")
     if inside:  # one warning, however many: a receiver that drops a few epochs does it again and again
         a, b = max(inside, key=lambda hole: hole[1] - hole[0])

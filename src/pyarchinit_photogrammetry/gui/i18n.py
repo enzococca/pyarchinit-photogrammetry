@@ -223,6 +223,8 @@ def _engine_it(text: str) -> str:
     hit = fixed.get(text)
     if hit is not None:
         return hit
+    if "\n" in text:  # line by line first: a message of one line would take the other lines for one of its values
+        return "\n".join(_engine_it(line) for line in text.split("\n"))
     for piece, rx, fields, it in patterns:
         if piece not in text:  # cheap: most messages are none of these
             continue
@@ -233,8 +235,6 @@ def _engine_it(text: str) -> str:
                 values.setdefault(n, _engine_value(v))
             return _FIELD.sub(lambda f: values.get(int(f.group(1)), f.group(0)), it).replace("{{", "{").replace(
                 "}}", "}")
-    if "\n" in text:
-        return "\n".join(_engine_it(line) for line in text.split("\n"))
     head, colon, rest = text.partition(": ")  # "flight.MRK: <a message the section has without the name>"
     if colon:
         shown = _engine_it(rest)

@@ -3642,6 +3642,7 @@ def test_stations_dialog_offline_retry(qt_app, monkeypatch):
     assert _wait_until(lambda: dlg.b_retry.isVisibleTo(dlg))
     assert dlg.status.text().startswith("L'elenco delle stazioni non si scarica: https://gnss-metadata.eu")
     assert dlg.status.text().endswith("Controlla la connessione e premi Riprova.") and dlg.table.rowCount() == 0
+    assert "connessione non riuscita (offline) (dopo 3 tentativi)" in dlg.status.text()  # the reason in Italian too
     dlg.b_retry.click()
     assert _wait_until(lambda: dlg.table.rowCount() == 2)
     assert not dlg.b_retry.isVisibleTo(dlg) and calls == [False, False]
