@@ -361,6 +361,22 @@ def test_ppk_dialog_folder_as_shots_and_another_mrk(qt_app, tmp_path):
     _close(qt_app, d)
 
 
+def test_a_folder_refused_as_on_windows_is_said_a_folder(qt_app, tmp_path):
+    """Windows refuses a folder opened as a file with a PermissionError, not an IsADirectoryError: it is said a
+    folder all the same; a file that cannot be read stays a matter of permission."""
+    import errno
+
+    from pyarchinit_photogrammetry.gui import shots_widgets as sw
+
+    folder, file = tmp_path / "flight2", tmp_path / "locked.MRK"
+    folder.mkdir()
+    file.write_text("")
+    assert sw.unread(PermissionError(errno.EACCES, "Permission denied", str(folder))) == (
+        "flight2 è una cartella, non un file")
+    assert sw.unread(PermissionError(errno.EACCES, "Permission denied", str(file))) == (
+        "locked.MRK non si può aprire: manca il permesso di leggerlo")
+
+
 def test_summaries_start_their_sentences_with_a_capital(qt_app, tmp_path):
     """What the engine notes is written in the summaries of the dialogs as a sentence, its first letter a capital;
     a note that starts with the name of a file, a number or a word of the log is left as it is. The buttons of the

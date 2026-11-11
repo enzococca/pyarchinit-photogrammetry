@@ -286,12 +286,20 @@ def said(message: str) -> str:
     return text[0].upper() + text[1:] if first.isalpha() and first.islower() else text
 
 
+def _is_folder(path) -> bool:
+    try:
+        return Path(str(path)).is_dir()
+    except OSError:
+        return False
+
+
 def unread(exc: Exception) -> str:
     """Why a file could not be read, for a dialog: an error of the system in Italian with the short name of the file
     (never its whole path), a message of the engine in the language of the interface."""
     if isinstance(exc, OSError) and exc.filename:
         name = Path(str(exc.filename)).name
-        if isinstance(exc, IsADirectoryError):
+        # a folder opened as a file is an IsADirectoryError on Unix, a PermissionError on Windows
+        if isinstance(exc, IsADirectoryError) or (isinstance(exc, PermissionError) and _is_folder(exc.filename)):
             return tr("{0} è una cartella, non un file", name)
         if isinstance(exc, FileNotFoundError):
             return tr("{0} non esiste", name)
