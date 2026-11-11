@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -612,6 +613,41 @@ def test_ppk_dialog_converts_a_ubx_rover_in_background(qt_app, tmp_path):
     started = time.monotonic()
     _close(qt_app, d)  # while it converts
     assert time.monotonic() - started < 2.0
+
+
+@needs_a_converter
+def test_ppk_dialog_asks_the_day_of_an_rtcm3_rover_with_its_own_events(qt_app, tmp_path):
+    """An RTCM 3 log as the rover, the shots its own events: no file of shots tells its day, so the dialog asks the
+    day of the flight, says so while it is missing or is not a day, converts the log with it and answers it for the
+    run, which finds that conversion; a rover in RINEX is asked nothing."""
+    from datetime import datetime
+
+    from pyarchinit_photogrammetry.gnss import sources
+
+    rover = tmp_path / "rover.rtcm3"
+    shutil.copyfile(PHASE4 / "GMSD7_20121014_64k.rtcm3", rover)
+    d = _dialog(qt_app, rover)
+    assert d.kind() == "events" and d.rover.path() == rover and d.day_row.isVisibleTo(d)
+    assert d.rover_info.text() == "Indica il giorno del volo: un log RTCM 3 porta solo il tempo della settimana."
+    assert "Indica il giorno del volo" in d.problem() and "approx_time" not in d.values()
+    d.day.setText("14 ottobre")
+    d.refresh()
+    assert d.rover_info.text().startswith("Il giorno del volo si scrive AAAA-MM-GG") and "14 ottobre" in d.problem()
+    d.day.setText("14/10/2012")  # as it is written in Italy; 2012-10-14 is the same day
+    d.refresh()
+    assert _wait_until(lambda: "convertito" in d.rover_info.text(), 60), d.rover_info.text()
+    assert re.search(r"convertito: 64 epoche, 0 eventi", d.rover_info.text()), d.rover_info.text()
+    assert d.values()["approx_time"] == datetime(2012, 10, 14) and d.values()["rover"] == rover
+    done = d._conversion(rover)
+    inputs = sources.ppk_inputs("events", None, rover, approx_time=d.values()["approx_time"])
+    assert inputs.rover == done.obs  # the conversion of the dialog, not another one
+    d.day.setText("2012-10-14 09:30")
+    d.refresh()
+    assert d.values()["approx_time"] == datetime(2012, 10, 14, 9, 30) and "convertito" in d.rover_info.text()
+    d.rover.edit.setText(str(events_test.RTCM_OBS))
+    d.refresh()
+    assert not d.day_row.isVisibleTo(d) and "approx_time" not in d.values()
+    _close(qt_app, d)
 
 
 @needs_a_converter

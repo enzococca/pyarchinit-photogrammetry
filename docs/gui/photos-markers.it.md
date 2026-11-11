@@ -385,7 +385,9 @@ dice il formato riconosciuto, le epoche e gli eventi della conversione.
 | Base DJI D-RTK (`.DAT`) | solo se i suoi byte sono RTCM 3 | altrimenti rifiutato: esporta il RINEX da DJI Terra (4.4 o successivo) o DJI Assistant 2 |
 
 Per i log che portano solo il tempo della settimana la finestra prende il giorno dal primo scatto o dalle
-osservazioni del drone; dalla riga di comando è `--approx-time` (o `--like` con un file RINEX dello stesso
+osservazioni del drone; quando il log è quello del drone e gli scatti sono i suoi stessi eventi nessun file lo
+dice, e sotto le osservazioni del drone compare il campo **Giorno del volo** (`2026-05-04` o `04/05/2026`, in
+tempo GPS, anche con l'ora). Dalla riga di comando è `--approx-time` (o `--like` con un file RINEX dello stesso
 giorno). Il convertitore tiene tre frequenze e fino a 6 segnali per satellite a ogni epoca: un log che ne ha di
 più ha un avviso, e il PPK lavora su quelli tenuti.
 

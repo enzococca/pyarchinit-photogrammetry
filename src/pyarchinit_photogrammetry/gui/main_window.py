@@ -5935,9 +5935,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         def job(p):
             p(0.0, "Lettura degli scatti e delle osservazioni")
-            inputs = sources.ppk_inputs(kind, shots_file, v["rover"], bases, edge=shots.get("edge") or "falling",
-                                        message=shots.get("message") or "auto", camera=shots.get("camera"),
-                                        progress=p.sub(0.0, 0.1))
+            inputs = sources.ppk_inputs(kind, shots_file, v["rover"], bases, approx_time=v.get("approx_time"),
+                                        edge=shots.get("edge") or "falling", message=shots.get("message") or "auto",
+                                        camera=shots.get("camera"), progress=p.sub(0.0, 0.1))
             base = inputs.bases[0] if len(inputs.bases) == 1 else (inputs.bases or None)
             # the navigation of a raw log is the one of the conversion of this run, not a file the dialog saw
             solution, notes = self._ppk_job(ch, {**v, "rover": inputs.rover, "base": base,

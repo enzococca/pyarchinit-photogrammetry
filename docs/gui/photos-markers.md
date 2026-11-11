@@ -379,8 +379,10 @@ format it recognised, the epochs and the events of the conversion.
 | DJI D-RTK base (`.DAT`) | only when its bytes are RTCM 3 | otherwise refused: export RINEX from DJI Terra (4.4 or later) or DJI Assistant 2 |
 
 For the logs that carry the time of the week only the window takes the day from the first shot or from the
-observations of the drone; on the command line it is `--approx-time` (or `--like` with a RINEX file of the same
-day). The converter keeps three frequencies and up to 6 signals per satellite at each epoch: a log with more has
+observations of the drone; when the log is the one of the drone and the shots are its own events no file tells
+it, and the field **Day of the flight** appears under the observations of the drone (`2026-05-04` or
+`04/05/2026`, in GPS time, with the time too). On the command line it is `--approx-time` (or `--like` with a
+RINEX file of the same day). The converter keeps three frequencies and up to 6 signals per satellite at each epoch: a log with more has
 a warning, and the PPK works on those it kept.
 
 #### Autopilot logs

@@ -17,7 +17,7 @@ import math
 import os
 import re
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer, Signal, Slot
@@ -54,6 +54,8 @@ _LOG_SUFFIXES = (".bin", ".log", ".ulg")  # the logs of an autopilot
 _WITH_FILE = ("mrk", "log", "events-pos")  # the sources of the shots that are a file of their own
 _RAW_NAMES = {"ubx": "u-blox", "rtcm3": "RTCM 3", "sbf": "Septentrio SBF", "unicore": "Unicore",
               "rt17": "Trimble RT-17"}
+_DAY_IT = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})([ T].+)?")  # 04/05/2026, as it is written in Italy
+_GPS_START = datetime(1980, 1, 6)
 _WAIT = object()  # the approximate time of a log is not known yet: what tells it is still being read
 MODES = gbase.BASE_MODES  # how the position of the base is set (values()["base_mode"])
 _WITH_STATION = ("station", "baseline")  # the modes that need a permanent station
@@ -328,6 +330,7 @@ class PpkDialog(QDialog):
         self._flight: tuple | None = None  # the folder of the photos of this run, the keys of the cameras in it
         self._atx_choice = True  # the user's choice about igs20.atx, kept while a computed base forces it
         self._raw: dict[str, tuple] = {}  # path -> (its time and size, whether it is a raw log to convert)
+        self._timeless: dict[str, tuple] = {}  # path -> (its time and size, whether it has the time of the week only)
         self._converted: dict[str, tuple] = {}  # raw log -> (its time and size, its :class:`.convert.Converted`)
         self._mrk_read: tuple | None = None  # the MRK read: (its path, time and size), its shots, its problem
         self.shots: list = []  # the shots of the MRK (:func:`.dji.read_mrk`), none for another source
@@ -361,7 +364,20 @@ class PpkDialog(QDialog):
         self.rover = _FileField(self._rover_beside or (str(rover) if rover else ""), tr("Osservazioni del drone"),
                                 observations, self.mrk.parent)
         self.rover_info = _label()
-        form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.rover_info))
+        self.day = QLineEdit()
+        self.day.setPlaceholderText(tr("AAAA-MM-GG"))
+        self.day.setMaximumWidth(220)
+        self.day.setToolTip(tr("Un log RTCM 3 o Trimble RT-17 porta solo il tempo della settimana: il giorno del volo "
+                               "(tempo GPS; anche con l'ora, 2026-05-04 09:30) dice in quale settimana cade. Serve "
+                               "quando gli scatti sono gli eventi del log stesso: un file degli scatti lo dice da "
+                               "sé."))
+        self.day_row = QWidget()
+        day_lay = QHBoxLayout(self.day_row)
+        day_lay.setContentsMargins(0, 0, 0, 0)
+        day_lay.addWidget(QLabel(tr("Giorno del volo")))
+        day_lay.addWidget(self.day)
+        day_lay.addStretch(1)
+        form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.day_row, self.rover_info))
         form.addRow(tr("Posizione della base"), self._position_section())
         self.base = _FilesField("", tr("Osservazioni della base"), observations, self.mrk.parent)
         self.base_info = _label()
@@ -432,6 +448,7 @@ class PpkDialog(QDialog):
         self.b_lever.toggled.connect(lambda _on: self._update())
         self.lever_panel.changed.connect(self._typing)
         self.rover.edit.textChanged.connect(self._typing)
+        self.day.textChanged.connect(self._typing)
         self.base.edit.textChanged.connect(self._typing)
         self._modes.buttonToggled.connect(lambda _button, on: self._update() if on else None)
         for edit in (self.lat, self.lon, self.ellh, self.epoch):
@@ -869,12 +886,48 @@ class PpkDialog(QDialog):
                                    lambda: sources.read(kind, source, edge))
         return self._file_shots()
 
+    def _asks_day(self) -> bool:
+        """Whether the day of the flight is asked: the rover is a raw log that carries the time of the week only
+        (RTCM 3, Trimble RT-17) and the shots are its own events, so that no file of shots tells its day."""
+        rover = self.rover.path()
+        if self.kind() != "events" or rover is None:
+            return False
+        stamp = self._is_raw(rover)
+        if stamp is None:
+            return False
+        known = self._timeless.get(str(rover))
+        if known is None or known[0] != stamp:
+            known = self._timeless[str(rover)] = (stamp, ppk._needs_time(rover))
+        return known[1]
+
+    def _day(self):
+        """The day of the flight typed (a datetime in GPS time: ``2026-05-04``, ``04/05/2026``, with the time too),
+        None when the field is empty or not asked, the text that says it is not a day."""
+        text = self.day.text().strip()
+        if not text or not self._asks_day():
+            return None
+        found = _DAY_IT.fullmatch(text)
+        if found:
+            text = f"{found.group(3)}-{int(found.group(2)):02d}-{int(found.group(1)):02d}{found.group(4) or ''}"
+        try:
+            when = datetime.fromisoformat(text)
+        except ValueError:
+            return tr("Il giorno del volo si scrive AAAA-MM-GG (anche con l'ora: 2026-05-04 09:30), non «{0}».",
+                      self.day.text().strip())
+        if when.tzinfo is not None or when < _GPS_START:
+            return tr("Il giorno del volo è una data in tempo GPS, dal 1980 in poi, senza fuso orario.")
+        return when
+
     def _approx_time(self, path: Path):
         """The approximate time (GPS seconds) for the conversion of the raw log ``path``, the one
         :func:`.sources.ppk_inputs` takes (so that the run finds the conversion of the dialog): for the rover the
-        first shot of a file of shots; for a base :func:`.sources.base_time`, the first epoch of the rover, else that
-        shot. None when nothing tells, :data:`_WAIT` while what tells is being read."""
+        first shot of a file of shots, or the day of the flight typed when the shots are its own events
+        (:meth:`_asks_day`); for a base :func:`.sources.base_time`, the first epoch of the rover, else that shot.
+        None when nothing tells, :data:`_WAIT` while what tells is being read."""
         rover = self.rover.path()
+        if rover is not None and path == rover and self._asks_day():
+            when = self._day()
+            return (when - _GPS_START).total_seconds() if isinstance(when, datetime) else None
         if rover is not None and path != rover:
             info = self._observations(rover)
             if isinstance(info, _Pending):
@@ -896,6 +949,11 @@ class PpkDialog(QDialog):
         when = self._approx_time(path)
         if when is _WAIT:
             return _Pending(path, converting=True)
+        if when is None and path == self.rover.path() and self._asks_day():  # nothing to convert with: said here
+            typed = self._day()
+            return typed if isinstance(typed, str) else tr(
+                "Indica il giorno del volo: un log {0} porta solo il tempo della settimana.",
+                _RAW_NAMES.get(convert.raw_kind(path), "RTCM 3"))
         progress = self._progress
 
         def work():
@@ -1191,6 +1249,7 @@ class PpkDialog(QDialog):
         rover, bases = self.rover.path(), self.base.paths()
         station = self.mode() == "station"
         rover_info, base_infos = self._observations(rover), ([] if station else self._base_headers())
+        self.day_row.setVisible(self._asks_day())
         self.shots_info.setText(self._describe_shots(rover_info))
         self.rover_info.setText(self._describe_rover(rover_info))
         self.base_info.setText(self._describe_base(bases, base_infos))
@@ -1588,7 +1647,9 @@ class PpkDialog(QDialog):
 
         This is the whole answer for the Timestamp.MRK the dialog was opened with; for any other source of the shots
         (and for another MRK named in the field) the keys of :meth:`shots_values` are there too. A raw log is
-        answered as it was named: the run converts it (at once: the conversion is kept)."""
+        answered as it was named: the run converts it (at once: the conversion is kept); ``"approx_time"`` (a datetime
+        in GPS time) is there when the day of the flight was asked and typed (:meth:`_asks_day`): the approximate time
+        of that conversion."""
         mode = self.mode()
         typed = frame = epoch = None
         if mode == "typed":
@@ -1604,6 +1665,9 @@ class PpkDialog(QDialog):
                "atx": "download" if self.atx_download.isChecked() else "auto"}
         if self.kind() != "mrk" or self.shots_file.path() != self.mrk:
             out.update(self.shots_values())
+        day = self._day()
+        if isinstance(day, datetime):
+            out["approx_time"] = day
         return out
 
     def shots_values(self) -> dict:
