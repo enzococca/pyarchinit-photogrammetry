@@ -22,7 +22,8 @@ appears in QGIS by itself, without *Refresh*.
 
 With *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* on (it is turned on by *Apri in
 QGIS*, and stays on for a project already linked), what is saved in QGIS comes back too. Edit
-the layers *Unita' stratigrafiche (ppg)*, *Quote (ppg)* or *Sezioni (ppg)* in QGIS as any layer
+the layers *Unita' stratigrafiche (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* or the three *Disegni 3D
+(ppg)* in QGIS as any layer
 (*Toggle Editing*, draw, move vertices, change attributes in the attribute table, delete) and save
 the edits: within a second the window has them.
 
@@ -38,6 +39,21 @@ the edits: within a second the window has them.
   trace moved, or drawn in QGIS, is cut again in the background with the options of the chunk,
   when it has the model (or the dense cloud); the drawings of a section deleted in QGIS stay in
   `sezioni/`.
+* **Free drawings** (*Disegni 3D - linee / poligoni / punti (ppg)*, tables `disegni_3d_linee`,
+  `disegni_3d_poligoni`, `disegni_3d_punti`): the geometry with its heights, the layer (`layer`),
+  the name (`name`), the colour (`colour`, `#rrggbb`) and the attributes, each in its column. A
+  column added in QGIS is a new attribute, an emptied one takes the attribute away; the JSON of
+  the column `attributes` is read too, and a column edited beside it wins. A feature drawn in QGIS
+  becomes a free drawing of the layer written in `layer` (made when it does not exist; *Disegni*
+  when empty); a feature deleted there is removed here. **Heights**: a vertex keeps the Z it has
+  in QGIS. A vertex without one - a layer edited without Z, or a vertex added in QGIS, which
+  writes it with Z 0 - takes the height of the DEM under it, or, where the DEM has none, the
+  height between its neighbours along the drawing; the log says how many heights came from the
+  DEM. With a DEM to be made again and no other height to go by, the feature is not taken (a line
+  in the log), and the next change made here writes the program's drawing over it: make the DEM
+  again first. A feature of several parts keeps the first, a
+  polygon loses its holes: the log says so. The three tables exist once the chunk has a free
+  drawing (make one here, then *Apri in QGIS*).
 
 Each save made in QGIS is one entry of *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; several features: *Da QGIS: 3 modifiche*) and a line of the log for each feature.
@@ -67,7 +83,12 @@ again (deletions made meanwhile excepted: the program writes those features agai
   in the log), as is a single feature written in another one.
 * **QGIS holding the file** while it saves: the window reads a moment later.
 * **One way only**: contour lines, zones, stones, patches, measuring points and the drawings of
-  plugins are computed by the program; an edit made to them in QGIS is not read back.
+  plugins (the tables `poligoni`, `linee`, `punti`) are computed by the program: an edit made to
+  them in QGIS is not read back, and is written over at the next change. To work in QGIS on a
+  drawing of a plugin, make it a free drawing first: for a PhotoCAD conversion,
+  [*Free drawings...*](plugins/photocad.md#free-drawings) of its pane; for any other, *File >
+  Import > 3D drawings...* of its export. The drawings on elevations and sections are one-way
+  too (below), as are the free drawings in RustGIS.
 
 Up to 0.4.1 the drawings were GeoJSON files set to *reload data every second*, and new
 drawings appeared only after *Refresh*: QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42

@@ -22,7 +22,7 @@ disegni qui compare in QGIS da solo, senza *Aggiorna*.
 
 Con *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* acceso (lo accende *Apri in QGIS*, e
 resta acceso per un progetto già collegato), anche ciò che si salva in QGIS torna qui. Modifica in
-QGIS i layer *Unita' stratigrafiche (ppg)*, *Quote (ppg)* o *Sezioni (ppg)* come un layer
+QGIS i layer *Unita' stratigrafiche (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* o i tre *Disegni 3D (ppg)* come un layer
 qualsiasi (*Attiva modifiche*, disegna, sposta i vertici, cambia gli attributi nella tabella
 attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
 
@@ -38,6 +38,21 @@ attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
   la traccia spostata, o disegnata in QGIS, viene tagliata di nuovo in background con le opzioni
   del chunk, quando c'è il modello (o la nuvola densa); i disegni di una sezione eliminata in QGIS
   restano in `sezioni/`.
+* **Disegni liberi** (*Disegni 3D - linee / poligoni / punti (ppg)*, tabelle `disegni_3d_linee`,
+  `disegni_3d_poligoni`, `disegni_3d_punti`): la geometria con le sue quote, il layer (`layer`), il
+  nome (`name`), il colore (`colour`, `#rrggbb`) e gli attributi, ognuno nella sua colonna. Una
+  colonna aggiunta in QGIS è un attributo nuovo, una svuotata toglie l'attributo; viene letto anche
+  il JSON della colonna `attributes`, e una colonna modificata accanto vince. Un elemento disegnato
+  in QGIS diventa un disegno libero del layer scritto in `layer` (creato se non esiste; *Disegni*
+  se è vuoto); un elemento eliminato lì viene tolto qui. **Quote**: un vertice tiene la Z che ha in
+  QGIS. Un vertice che non ne ha - un layer modificato senza Z, o un vertice aggiunto in QGIS, che
+  lo scrive con Z 0 - prende la quota del DEM sotto di sé o, dove il DEM non ne ha, la quota fra i
+  suoi vicini lungo il disegno; il log dice quante quote vengono dal DEM. Con un DEM da rifare e
+  nessun'altra quota a cui appoggiarsi, l'elemento non viene ripreso (una riga nel log), e il
+  prossimo cambiamento fatto qui gli riscrive sopra il disegno del programma: rifai prima il DEM.
+  Di un elemento di più parti resta la prima, un poligono perde i fori: il log
+  lo dice. Le tre tabelle esistono da quando il chunk ha un disegno libero (fanne uno qui, poi
+  *Apri in QGIS*).
 
 Ogni salvataggio fatto in QGIS è una voce di *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; più elementi: *Da QGIS: 3 modifiche*) e una riga del log per ogni elemento. I
@@ -68,7 +83,12 @@ modifiche fatte in QGIS mentre il programma era chiuso tornano quando il progett
   progetto viene rifiutato (una riga nel log), come un singolo elemento scritto in un altro.
 * **QGIS che tiene il file** mentre salva: la finestra legge un attimo dopo.
 * **Solo in un senso**: curve di livello, zone, pietre, patch, punti di misura e i disegni dei
-  plugin li calcola il programma; una modifica fatta loro in QGIS non viene ripresa.
+  plugin (le tabelle `poligoni`, `linee`, `punti`) li calcola il programma: una modifica fatta loro
+  in QGIS non viene ripresa, e viene sovrascritta al prossimo cambiamento. Per lavorare in QGIS su
+  un disegno di un plugin, fanne prima un disegno libero: per una conversione di PhotoCAD,
+  [*Disegni liberi...*](plugins/photocad.md#disegni-liberi) del suo pannello; per gli altri, *File >
+  Importa > Disegni 3D...* della loro esportazione. Anche i disegni sui prospetti e sulle sezioni
+  vanno in un solo senso (sotto), come i disegni liberi in RustGIS.
 
 Fino alla 0.4.1 i disegni erano file GeoJSON impostati per *ricaricare i dati ogni secondo*, e i
 disegni nuovi comparivano solo dopo *Aggiorna*: QGIS tiene il GeoJSON in memoria, e QGIS 3.34-3.42

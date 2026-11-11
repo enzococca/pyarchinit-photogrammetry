@@ -3,8 +3,9 @@
 * GeoPackage with Z: three tables, :data:`TABLES` (``disegni_3d_linee`` LINESTRINGZ, ``disegni_3d_poligoni``
   POLYGONZ, ``disegni_3d_punti`` POINTZ; ``z = 1`` in ``gpkg_geometry_columns``), columns ``ppg_id``, ``layer``,
   ``name``, ``attributes`` (the attributes as JSON text) and one column per attribute whose name fits a column
-  (:data:`COLUMN_NAME`) and is not taken; the same tables go into the live GeoPackage of QGIS and RustGIS, one-way
-  (:meth:`.qgis_link.LiveLink.write_free`).
+  (:data:`COLUMN_NAME`) and is not taken; the same tables go into the live GeoPackage of QGIS and RustGIS
+  (:meth:`.qgis_link.LiveLink.write_free`), where a row edited, drawn or deleted in QGIS comes back into the chunk
+  (:func:`from_row` makes a drawing of a row; since 1.7.8).
 * GeoJSON: the coordinates as they are, with the legacy ``crs`` member for a chunk in an EPSG system (none for a local
   one), properties ``ppg_id``, ``layer``, ``kind``, ``name``, ``attributes`` (an object), ``colour`` when it has one.
 * DXF: one DXF layer per user layer (its colour), lines and polygons as 3D POLYLINE (polygons closed), points as POINT;
@@ -334,6 +335,133 @@ def _attributes_of(values: dict, skip=RESERVED | {"colour", "ppg_sig", "ppg_part
         except ValueError:
             pass
     return {k: v for k, v in values.items() if k not in skip and v is not None}
+
+
+class NoHeights(ValueError):
+    """A row has no height at all (:func:`from_row`): no Z in its geometry, none to take under its vertices."""
+
+
+_COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_NOT_ATTRIBUTES = {c.lower() for c in RESERVED | {"ppg_sig", "ppg_parte"}}
+
+
+def _text(value) -> str | None:
+    """``value`` as a text column of the tables holds it (:func:`_row`)."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _typed(value, like):
+    """``value`` of a column, of the type of the attribute ``like`` it replaces: a number stays a number, a list, an
+    object or true/false is read from its JSON; the text as it is when it cannot be."""
+    if not isinstance(value, str):
+        return value
+    try:
+        if isinstance(like, bool) or isinstance(like, (list, dict)):
+            return json.loads(value)
+        if isinstance(like, int):
+            try:
+                return int(value)
+            except ValueError:
+                return float(value)
+        if isinstance(like, float):
+            return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _row_attributes(values: dict, old: dict | None) -> dict:
+    """The attributes a row of the tables stands for. Its ``attributes`` JSON when it is an object (else those the
+    drawing had), then the columns: one whose value is no longer what was written from those attributes was edited
+    there and wins (emptied: the attribute goes), one the attributes do not have is a new attribute."""
+    before = dict((old or {}).get("attributes") or {})
+    raw = values.get("attributes")
+    attrs = None
+    if isinstance(raw, dict):
+        attrs = dict(raw)
+    elif isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            got = json.loads(raw)
+            attrs = got if isinstance(got, dict) else None
+        except ValueError:
+            pass
+    if attrs is None:
+        attrs = dict(before)
+    written = before if old is not None else dict(attrs)  # what the columns were written from
+    keys = {k.lower(): k for k in written if isinstance(k, str)}
+    for column, value in values.items():
+        if not isinstance(column, str) or column.lower() in _NOT_ATTRIBUTES:
+            continue
+        key = keys.get(column.lower())
+        if key is None:
+            if value is not None:
+                attrs[column] = value
+        elif _text(value) != _text(written[key]):
+            if value is None:
+                attrs.pop(key, None)
+            else:
+                attrs[key] = _typed(value, written[key])
+    return attrs
+
+
+def from_row(kind: str, geometry, values: dict, old: dict | None = None, heights=None) -> dict:
+    """The free drawing a row of the table of ``kind`` stands for, as another program (QGIS) left it: ``{"layer",
+    "name" ("" when it has none: the chunk names it), "xyz", "attributes", "colour" (None: the layer's), "dem" (the
+    vertices that took their height from ``heights``), "dropped" (the other parts of a geometry of several, left out),
+    "holes" (of a polygon, left out)}``. ``old``: the drawing the row was written from (None for a row drawn there):
+    what the row does not say - an empty name or layer, a colour that is not ``#rrggbb`` - stays as it was, and the
+    attributes are those of :func:`_row_attributes`.
+
+    The heights: a vertex keeps its Z. One without (a geometry without Z, a Z that is not a number), and one added
+    there whose Z is exactly 0 - what QGIS gives a new vertex; a vertex the drawing had at 0, moved or not, keeps it -
+    takes it from ``heights`` (``heights(xy) -> [z or None]``: the DEM), else interpolated along the drawing between
+    the vertices that have one (:func:`..core.free_drawings.fill_missing`); when none has, the zeros of the file stay.
+    ``ValueError`` when the geometry is not of the kind or has too few vertices, :class:`NoHeights` when it has no
+    height at all."""
+    part = next((g for g in _parts(geometry) if _KIND_OF.get(g.geom_type) == kind), None)
+    if part is None:
+        raise ValueError(f"not a {kind}")
+    _kind, pts, _has_z = _coords(part)
+    if len(pts) < free_drawings.MIN_VERTICES[kind]:
+        raise ValueError("too few vertices")
+    was = [[float(v) for v in p] for p in (old or {}).get("xyz") or []]
+    had = {(p[0], p[1]) for p in was}
+    now = {(p[0], p[1]) for p in pts}
+    moved = sum(1 for p in was if p[2] == 0.0 and (p[0], p[1]) not in now)  # at 0 in the drawing, no longer there
+    zeros = [i for i, p in enumerate(pts) if p[2] == 0.0 and (p[0], p[1]) not in had]
+    if len(zeros) <= moved:
+        zeros = []  # the vertices at 0 the drawing had, moved
+    z = [p[2] if p[2] is not None and np.isfinite(p[2]) else None for p in pts]
+    for i in zeros:
+        z[i] = None
+    missing = [i for i, v in enumerate(z) if v is None]
+    taken = 0
+    if missing:
+        if heights is not None:
+            for i, h in zip(missing, heights([(pts[i][0], pts[i][1]) for i in missing])):
+                if h is not None and np.isfinite(h):
+                    z[i] = float(h)
+                    taken += 1
+        filled = fill_missing(z, [(p[0], p[1]) for p in pts])
+        if filled is None:  # no height anywhere: the zeros of the file are all there is
+            if any(pts[i][2] != 0.0 for i in missing):
+                raise NoHeights("no heights")
+            filled = [0.0] * len(pts)
+        z = filled
+    name = str(values.get("name") or "").strip() or str((old or {}).get("name") or "")
+    layer = str(values.get("layer") or "").strip() or (old or {}).get("layer") or free_drawings.DEFAULT_LAYER
+    colour = values.get("colour")
+    if colour is not None and not (isinstance(colour, str) and _COLOUR.match(colour)):
+        colour = (old or {}).get("colour")
+    if "colour" not in values:
+        colour = (old or {}).get("colour")
+    return {"layer": layer, "name": name, "xyz": [[p[0], p[1], float(v)] for p, v in zip(pts, z)],
+            "attributes": _row_attributes(values, old), "colour": colour or None, "dem": taken,
+            "dropped": len(_parts(geometry)) - 1, "holes": _holes(part)}
 
 
 def _read_gpkg(path: Path) -> list[dict]:

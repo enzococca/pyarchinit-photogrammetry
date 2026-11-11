@@ -20,9 +20,10 @@ signature lives in the file, so it also tells the edits made in QGIS while the p
 closed. Of the tables in :data:`TWO_WAY_TABLES` (units, spot heights, sections) such edits come
 back (:meth:`LiveLink.read_changes`): rows changed, rows drawn in QGIS (no identity yet: they
 get one; or under an identity never known here and never signed by the program, which they keep)
-and rows deleted; the program never overwrites them before it has read them. The
-other tables are computed by the program (contour lines, zones, plugin drawings) and stay
-one-way.
+and rows deleted; the program never overwrites them before it has read them. The same holds for
+the free drawings in 3D (the three tables ``disegni_3d_*`` of :mod:`.free_drawings`, with Z; since
+1.7.8): :func:`two_way_tables`. The other tables are computed by the program (contour lines, zones,
+plugin drawings, the drawings of the elevations) and stay one-way.
 
 Only the drawings of the plan are in the file: while an elevation or a section is shown the window leaves the
 GeoPackage as it is, and what is drawn there - in the (u, v) of the elevation - goes out with the elevation
@@ -83,6 +84,14 @@ INFO_TABLE = "ppg_info"
 # back; ``INFO_TABLE`` "rows:<table>" says the record of that table was made (an empty record is not a missing one).
 # Not a layer, not listed in gpkg_contents.
 ROWS_TABLE = "ppg_rows"
+
+
+def two_way_tables() -> tuple[str, ...]:
+    """Every table whose edits by another program come back: units, spot heights, sections (:data:`TWO_WAY_TABLES`) and
+    the three tables of the free drawings in 3D (:data:`.free_drawings.TABLES`)."""
+    from .free_drawings import TABLES
+
+    return (*TWO_WAY_TABLES, *(table for table, _gtype in TABLES.values()))
 
 
 class UnreadEdits(RuntimeError):
@@ -381,7 +390,7 @@ class LiveLink:
         return hash(tuple(sig))
 
     def write(self, layers: dict[str, dict], force: bool = False, chunk=None,
-              drop_unread: bool = False) -> dict[str, Path]:
+              drop_unread: bool = False, free=None) -> dict[str, Path]:
         """Bring the GeoPackage up to date with the layers of the raster view
         (``{name: {"kind", "features"}}``, features as attribute dicts with ``_geom`` or the
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
@@ -392,8 +401,11 @@ class LiveLink:
         the file with them (:meth:`stored_chunk`). Another chunk's drawings go in only when the file
         holds no edit of another program not read yet - checked in the write's own transaction, so a
         save of QGIS a moment before is never written over: :class:`UnreadEdits` then, nothing
-        written; ``drop_unread``: those rows were kept elsewhere (they could not be read), and go."""
+        written; ``drop_unread``: those rows were kept elsewhere (they could not be read), and go. ``free``: the
+        chunk whose free drawings in 3D go into their tables in the same transaction (:meth:`write_free`; the
+        tables left as they are when None)."""
         from . import gpkg
+        from .free_drawings import FREE_PREFIX
 
         groups = self._group(layers)
         new = not gpkg.is_geopackage(self.path)
@@ -409,7 +421,9 @@ class LiveLink:
         if rekey and stored is not None:  # another chunk's drawings: every table compared row by row, whatever the
             force = True  # window wrote last (rows read from another program belong to the chunk before)
         todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
-        if todo or rekey:
+        free_sig = None if free is None else self._free_signature(free)
+        free_todo = free is not None and (force or new or rekey or self._signatures.get(FREE_PREFIX) != free_sig)
+        if todo or rekey or free_todo:
             srs = gpkg.srs_of(self.crs)
             known = {}
             try:
@@ -421,6 +435,8 @@ class LiveLink:
                     known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread)
                     if table in TWO_WAY_TABLES:
                         self._record(con, table, known[table])
+                if free_todo:
+                    known.update(self._write_free(con, free, srs[0], drop=drop_unread))
                 if rekey:
                     con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
                     con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES ('chunk', ?)", (key,))
@@ -432,6 +448,8 @@ class LiveLink:
             self._known.update(known)
             for table, feats in todo.items():
                 self._signatures[table] = self._signature(feats)
+            if free_todo:
+                self._signatures[FREE_PREFIX] = free_sig
         return {t: self.path for t in LIVE_TABLES}
 
     def write_elevations(self, elevations: dict[str, tuple[str, dict]]) -> list[str]:
@@ -479,37 +497,89 @@ class LiveLink:
             "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
             "table_name", (ELEVATION_PREFIX + "*",))]
 
+    def _free_signature(self, chunk) -> int:
+        from ..core import free_drawings as fd
+
+        return hash((str(self.crs), json.dumps(fd.features(chunk), sort_keys=True, default=str)))
+
     def write_free(self, chunk) -> list[str]:
         """The free drawings in 3D of ``chunk`` (:mod:`..core.free_drawings`) as the three tables ``disegni_3d_*`` of the
-        GeoPackage (:data:`.free_drawings.TABLES`, with Z, in the chunk's system). One-way: what QGIS or RustGIS edit
-        there does not come back; a chunk without free drawings has none of those tables. Nothing is written when they
-        did not change since the last write, nor before the window made the file. Returns the tables written."""
-        from ..core import free_drawings as fd
-        from . import free_drawings as fio
+        GeoPackage (:data:`.free_drawings.TABLES`, with Z, in the chunk's system), row by row by identity as the
+        two-way tables: a row keeps its ``fid`` while its drawing lives, and a row another program edited, deleted or
+        drew and nobody read yet is left as it is (:meth:`read_changes` gives it back). A chunk without free drawings
+        has none of those tables (one holding rows not read yet stays until they are). Nothing is written when the
+        drawings did not change since the last write, nor before the window made the file. The drawings of another
+        chunk than the one the file holds go in with :meth:`write` (``free``), which refuses to write over edits
+        not read. Returns the tables written."""
         from . import gpkg
+        from .free_drawings import FREE_PREFIX
 
-        sig = hash((str(self.crs), json.dumps(fd.features(chunk), sort_keys=True, default=str)))
-        if not gpkg.is_geopackage(self.path) or sig == self._signatures.get(fio.FREE_PREFIX):
+        sig = self._free_signature(chunk)
+        if not gpkg.is_geopackage(self.path) or sig == self._signatures.get(FREE_PREFIX):
             return []
         con = self._connection()
         try:
             con.execute("BEGIN IMMEDIATE")
             srs = gpkg.srs_of(self.crs)
             gpkg.create(con, srs)
-            if fd.features(chunk):
-                written = fio.write_tables(con, chunk, srs[0])
-            else:  # none (left): no tables, so that QGIS and RustGIS have no empty layers of them
-                written = []
-                for (table,) in con.execute("SELECT table_name FROM gpkg_contents WHERE table_name GLOB ?",
-                                            (fio.FREE_PREFIX + "*",)).fetchall():
-                    gpkg.drop_table(con, table)
+            known = self._write_free(con, chunk, srs[0])
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
             raise
-        self._signatures[fio.FREE_PREFIX] = sig
-        return written
+        self._known.update(known)
+        self._signatures[FREE_PREFIX] = sig
+        return list(known)
+
+    def _write_free(self, con, chunk, srs_id: int, drop: bool = False) -> dict[str, dict]:
+        """The tables of the free drawings of ``chunk`` brought to its drawings, in the transaction under way;
+        ``{table: {key: fid}}`` of the tables there are now (all three while the chunk has a free drawing). ``drop``:
+        as in :meth:`_write_table`."""
+        import shapely
+
+        from ..core import free_drawings as fd
+        from . import free_drawings as fio
+        from . import gpkg
+
+        q = gpkg.quote
+        feats = fd.features(chunk)
+        technical = {c.lower() for c in TECHNICAL_FIELDS}
+        out = {}
+        for kind, (table, gtype) in fio.TABLES.items():
+            have = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})")]
+            if have and gpkg.table_srs(con, table) not in (None, srs_id):
+                gpkg.drop_table(con, table)  # in the system the chunk had before: made again in this one
+                self._forget(con, table)
+                have = []
+            unsigned = bool(have) and not (ID_FIELD in have and SIG_FIELD in have)  # as 1.7.7 wrote it (one-way)
+            if not feats:  # none (left): no tables, so that QGIS and RustGIS have no empty layers of them
+                if have and (drop or unsigned or not self._table_unread(con, table)):
+                    gpkg.drop_table(con, table)
+                    self._forget(con, table)
+                continue
+            mine = [r for r in feats if r["kind"] == kind]
+            names = {c.lower(): c for c in have}  # a column is the same in any case
+            extra = [c for c in fio.attribute_columns(mine) if c.lower() not in technical]
+            columns = {c: "TEXT" for c in (*fio.BASE_COLUMNS, *(names.get(c.lower(), c) for c in extra), SIG_FIELD)}
+            # the base type in gpkg_geometry_columns (LINESTRING...), z = 1: the standard's way
+            cols = gpkg.ensure_table(con, table, gtype.removesuffix("Z"), columns, srs_id,
+                                     identifier=fio.TITLES[kind], z=True)
+            if unsigned:
+                con.execute(f"DELETE FROM {q(table)}")  # rows without signature: written again
+            types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})")}
+            names = {c.lower(): c for c in cols}
+            wanted = []
+            for rec in mine:
+                geom = fio._geometry(rec)
+                raw = shapely.to_wkb(geom, byte_order=1, output_dimension=3, flavor="iso")
+                row = {names.get(k.lower(), k): v for k, v in fio._row(rec, extra).items()}
+                values = {c: _bind(_affinity(types.get(c, "")), row.get(c)) for c in cols if c != SIG_FIELD}
+                wanted.append(_Wanted((rec["id"], 1), geom, raw, values, row_signature(raw, values)))
+            known = {} if unsigned else self._known_rows(con, table)
+            out[table] = self._put_rows(con, table, cols, wanted, srs_id, not drop, known, z=True)
+            self._record(con, table, out[table])
+        return out
 
     def free_tables(self) -> list[tuple[str, str]]:
         """``(table, geometry type)`` of the tables of the free drawings the GeoPackage holds (:meth:`write_free`)."""
@@ -632,15 +702,27 @@ class LiveLink:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
         two_way = table in TWO_WAY_TABLES and not drop  # the rows edited elsewhere kept until read
         known = {} if recreated else self._known_rows(con, table)
-        primary, others = self._sort(self._scan(con, table, cols, content=two_way or force or drop), known)
+        return self._put_rows(con, table, cols, self._wanted(table, feats, cols, types), srs_id, two_way, known,
+                              content=two_way or force or drop)
+
+    def _put_rows(self, con, table: str, cols: list[str], wanted: list[_Wanted], srs_id: int, two_way: bool,
+                  known: dict, content: bool = True, z: bool = False) -> dict:
+        """The rows of ``table`` brought to ``wanted`` one by one, by identity; returns ``{key: fid}`` of its rows.
+        ``two_way``: the rows another program edited, deleted (``known``: those the program last wrote or read) or drew
+        and nobody read yet are left as they are. ``content``: the rows compared by what they hold, not only by their
+        signature. ``z``: the geometries written with their Z."""
+        from . import gpkg
+
+        q = gpkg.quote
+        primary, others = self._sort(self._scan(con, table, cols, content=content), known)
         written = [c for c in cols if c != SIG_FIELD]
         names = "".join(f", {q(c)}" for c in written)
         insert = f"INSERT INTO {q(table)} (geom{names}) VALUES ({', '.join('?' * (len(written) + 1))})"
         update = f"UPDATE {q(table)} SET geom = ?{''.join(f', {q(c)} = ?' for c in written)} WHERE fid = ?"
         touched, after, changed = [], {}, False
-        for w in self._wanted(table, feats, cols, types):
+        for w in wanted:
             s = primary.pop(w.key, None)
-            row = [gpkg.blob(w.geom, srs_id)] + [w.values.get(c) for c in written]
+            row = [gpkg.blob(w.geom, srs_id, z)] + [w.values.get(c) for c in written]
             if s is None and two_way and w.key in known:
                 after[w.key] = known[w.key]  # deleted in QGIS and not read back yet: the reader takes it first
                 continue
@@ -673,20 +755,31 @@ class LiveLink:
 
     def _unread(self, con) -> bool:
         """Whether a two-way table holds a row another program edited or drew and nobody read yet: its content not
-        the one signed, or no identity (a deletion is told only by what this link knows)."""
+        the one signed, or no identity; or lacks a row the program last wrote or read there (deleted meanwhile)."""
+        return any(self._table_unread(con, table) for table in two_way_tables())
+
+    def _table_unread(self, con, table: str) -> bool:
         from . import gpkg
 
-        for table in TWO_WAY_TABLES:
-            cols = [r[1] for r in con.execute(f"PRAGMA table_info({gpkg.quote(table)})") if r[1] not in ("fid", "geom")]
-            if ID_FIELD not in cols:
-                continue
-            rows = self._scan(con, table, cols, content=True)
-            if any(s.external or s.key[0] is None for s in rows):
-                return True
-            here = {s.key for s in rows}
-            if any(key not in here for key in self._known_rows(con, table)):
-                return True
-        return False
+        cols = [r[1] for r in con.execute(f"PRAGMA table_info({gpkg.quote(table)})") if r[1] not in ("fid", "geom")]
+        if not _readable(table, cols):
+            return False
+        rows = self._scan(con, table, cols, content=True)
+        if any(s.external or s.key[0] is None for s in rows):
+            return True
+        here = {s.key for s in rows}
+        return any(key not in here for key in self._known_rows(con, table))
+
+    def _forget(self, con, table: str) -> None:
+        """The record of the rows of ``table`` (dropped) taken away, in the transaction under way."""
+        self._known.pop(table, None)
+        for sql, args in ((f"DELETE FROM {ROWS_TABLE} WHERE name = ?", (table,)),
+                          (f"DELETE FROM {INFO_TABLE} WHERE name = ?", (f"rows:{table}",))):
+            try:
+                con.execute(sql, args)
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
 
     # ------------------------------------------------------------------ the record of the rows
     def _known_rows(self, con, table: str) -> dict[tuple, int]:
@@ -769,7 +862,8 @@ class LiveLink:
 
     def read_changes(self, busy_ms: int = 250, any_srs: bool = False,
                      before_commit: Callable[[dict], None] | None = None) -> dict[str, TableChanges]:
-        """What another program (QGIS) changed in the two-way tables since the last write or read:
+        """What another program (QGIS) changed in the two-way tables (:func:`two_way_tables`: units, spot heights,
+        sections, the three tables of the free drawings in 3D) since the last write or read:
         ``{table: TableChanges}``, only the tables with changes. The rows drawn there get their
         identity and every row read its signature, in the same transaction: a change is given once.
         :attr:`read_chunk` is then the key of the chunk the file held the drawings of (read in that
@@ -781,6 +875,7 @@ class LiveLink:
         written before they count as read). :class:`sqlite3.OperationalError` (database locked)
         when QGIS holds the file: try again."""
         from . import gpkg
+        from .free_drawings import FREE_PREFIX
 
         if not gpkg.is_geopackage(self.path):
             return {}
@@ -794,9 +889,9 @@ class LiveLink:
             try:
                 version = con.execute("PRAGMA data_version").fetchone()[0]
                 owner = self._stored_key(con)
-                for table in TWO_WAY_TABLES:
+                for table in two_way_tables():
                     cols = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})") if r[1] not in ("fid", "geom")]
-                    if ID_FIELD not in cols:
+                    if not _readable(table, cols):
                         continue  # not written by this version yet
                     have = gpkg.table_srs(con, table)
                     if have is not None and have != srs and not any_srs:
@@ -818,6 +913,8 @@ class LiveLink:
         self._data_version = version
         self._known.update(known)
         self.read_chunk = owner
+        if any(table.startswith(FREE_PREFIX) for table in out):
+            self._signatures.pop(FREE_PREFIX, None)  # the next write compares the rows with the drawings again
         return out
 
     def _read_table(self, con, table: str, cols: list[str]) -> tuple[TableChanges, dict]:
@@ -877,6 +974,14 @@ class LiveLink:
                     for t in LIVE_TABLES}
         finally:
             con.close()
+
+
+def _readable(table: str, cols: list[str]) -> bool:
+    """Whether the rows of a two-way ``table`` with the columns ``cols`` can be told apart and compared: they have
+    their identity; those of the free drawings their signature too (1.7.7 wrote them with the identity alone)."""
+    if ID_FIELD not in cols:
+        return False
+    return table in TWO_WAY_TABLES or SIG_FIELD in cols
 
 
 def _bounds(con, table: str) -> list:

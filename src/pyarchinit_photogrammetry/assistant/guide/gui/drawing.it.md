@@ -197,8 +197,10 @@ tutto il contorno. *Misura area* su un poligono libero selezionato mostra le ste
 **Fuori e di nuovo dentro.** *File > Esporta > Disegni 3D...* li scrive tutti, o un layer, in DXF 3D (un layer DXF per
 layer), GeoPackage con Z, GeoJSON o un CSV dei vertici; *File > Importa > Disegni 3D...* legge un GeoPackage, un
 GeoJSON o un DXF ([esportazioni](exports.md#disegni-3d)). Con il collegamento dal vivo arrivano in QGIS e in RustGIS
-come tre layer *Disegni 3D - linee / poligoni / punti (ppg)*, in un solo verso ([QGIS dal vivo](archaeology.md#qgis-dal-vivo));
-i disegni fatti dopo aver creato il progetto QGIS chiedono di crearlo di nuovo (*QGIS > Apri in QGIS*), come per i
+come tre layer *Disegni 3D - linee / poligoni / punti (ppg)*. Con QGIS il collegamento è nei due sensi: un disegno
+libero modificato, eliminato o disegnato lì e salvato torna qui, con le sue quote (un vertice che non ne ha prende
+quella del DEM) - vedi [QGIS dal vivo](../integrations.md#nei-due-sensi); con RustGIS va in un solo senso. Il primo
+disegno libero fatto dopo aver creato il progetto QGIS chiede di crearlo di nuovo (*QGIS > Apri in QGIS*), come per i
 prospetti. Dalla riga di comando: `ppg drawings3d progetto.ppg list | export --out FILE | import FILE`.
 
 ## Un disegno classificato per orientamento
