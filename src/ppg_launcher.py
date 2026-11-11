@@ -234,6 +234,7 @@ def catch_file_open(qapp) -> None:
             if ev.type() != QEvent.Type.FileOpen:
                 return False
             path = ev.file() or ev.url().toLocalFile()
+            path = os.path.normpath(path) if path else path  # Qt spells the path with "/" on Windows too
             if path:
                 handler = _OPENED["handler"]
                 handler(path) if handler is not None else _OPENED["pending"].append(path)
