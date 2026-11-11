@@ -12,7 +12,7 @@ HTML. **Dopo il volo** confronta il piano con le foto scattate e la copertura ot
     gru), il meteo né le regole del tuo paese. Controllare che il volo sia consentito e sicuro, e chiedere i permessi,
     spetta al pilota. Guarda la rotta sulla mappa e nell'app di volo prima di decollare.
 
-Questa pagina descrive la versione 0.1.1 del plugin, che **richiede pyarchinit-photogrammetry 1.7.4**. Il pianificatore -
+Questa pagina descrive la versione 0.1.2 del plugin, che **richiede pyarchinit-photogrammetry 1.7.4**. Il pianificatore -
 griglie a serpentina, anelli, percorsi punto per punto, tratte che stanno in una batteria, i profili delle camere -
 viene dal pianificatore di Photo3D dello stesso autore. Il README e il codice sono nel [repository dei
 plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/flightplan).
@@ -96,6 +96,10 @@ minuti di volo su cui conti per una batteria: un piano più lungo si divide in t
 - **Scatto per punto** (un waypoint per ogni foto) o **Scatto a intervallo** (la camera scatta ogni tot secondi).
 - **Progetta** fa il piano.
 
+Sotto i parametri alcune righe dicono perché il piano è fatto così: la quota scelta (dall'obiettivo, o scritta a
+mano) con il GSD reale, poi **una sola frase** con la direzione, la sovrapposizione avanti e laterale e la velocità con
+cui volano davvero le griglie nadirali - i valori del pannello, non quelli dell'obiettivo.
+
 Le sovrapposizioni sono quelle delle strisciate su un suolo piano alla quota del decollo. Quello che il piano dà davvero
 sul suolo - dove il terreno sale, ai bordi, sulle strisciate corte - è nel passo [Copertura](#coverage): guardalo lì.
 
@@ -110,7 +114,16 @@ sotto il decollo.
 
 - **Decollo sulla vista**: clic dove decolla il drone. Le quote di tutti i file sono **sopra il punto di decollo**.
 - **Decollo di questa tratta**: un decollo proprio per la tratta scelta nella tabella (ogni tratta di un volo lungo può
-  partire da un altro posto); le sue quote si correggono con la differenza del suolo.
+  partire da un altro posto); le sue quote si correggono con la differenza del suolo. Dove una tratta decolla **più in
+  basso** del piano, i punti che il piano teneva al minimo (10 m sul decollo del piano, dove il suolo scende più
+  dell'altezza dal suolo) si ricalcolano dal suolo sotto di loro, così volano all'altezza dal suolo prevista e non più
+  in alto del dislivello; dove quel suolo non è noto l'esportazione della tratta si rifiuta. Un decollo di una tratta a
+  più di **2 km** da ogni punto della sua tratta non vale come suo decollo: il pannello lo dice e l'esportazione si
+  rifiuta finché non lo sposti vicino alla tratta o lo togli.
+
+Dopo un nuovo *Progetta* sulla stessa area i decolli delle tratte restano per numero di tratta: se le tratte sono
+cambiate, una riga delle spiegazioni nomina le tratte il cui decollo tenuto ora può trovarsi accanto a un'altra parte
+del volo - controllali, o rimettili.
 
 Sulla vista 2D i layer *Piano di volo: area*, *strisciate*, *scatti*, *decollo*, *target* mostrano il piano.
 
@@ -122,8 +135,18 @@ Sulla vista 2D i layer *Piano di volo: area*, *strisciate*, *scatti*, *decollo*,
 ### 5. Terreno { #terrain }
 
 **Segui il terreno** dà a ogni punto una quota propria sul decollo, così l'altezza dal suolo - e il GSD - resta la
-stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - suolo al decollo), tenuta fra 10 m e
-500 m sul decollo.
+stessa in salita e in discesa: quota = altezza dal suolo + (suolo nel punto - suolo al decollo), mai sotto 10 m sul
+decollo.
+
+I droni si fermano a un tetto tecnico di **500 m sul decollo**. Un punto che avrebbe bisogno di 500 m o più (il suolo
+sale tanto da dove il drone decolla) **non si taglia lì**: tagliato, il drone volerebbe più vicino al suolo del
+previsto, su un pendio ripido contro il suolo. *Segui il terreno* rifiuta il blocco prima di toccare qualsiasi blocco, e
+l'esportazione rifiuta un piano con quote al tetto - un blocco che segue il terreno (un piano calcolato dalla 0.1.1, che
+tagliava e avvisava soltanto) o una tratta qualsiasi, compresi i suoi punti speciali e le tratte con un decollo proprio.
+Il messaggio nomina i blocchi e le tratte, quanti punti, fino a che quota, e le vie d'uscita: spostare più in alto il
+decollo del piano (o di quella tratta), abbassare la quota dal suolo o dividere l'area. Quando *Progetta* non riesce a
+calcolare il terreno i blocchi restano «segue il terreno» senza quote e l'esportazione si rifiuta finché il terreno non
+si ricalcola o non togli il volo sul terreno: un piano non torna mai a una quota costante senza dirlo.
 
 <figure markdown="span">
   ![Quote lungo una strisciata che attraversa la collina](../img/plugins/flightplan/terrain-profile.jpg)
@@ -284,9 +307,11 @@ computer). Il plugin sostituisce quei file con le tratte:
 2. Collega il telecomando al computer. **Copia in DJI Fly...** trova da solo la cartella dei waypoint quando il
    dispositivo è visibile come percorso (Linux, una scheda SD, un percorso che incolli); su Windows raggiunge il
    dispositivo MTP attraverso la shell del sistema (PowerShell).
-3. Il plugin riempie prima gli spazi sicuri (missioni fittizie, tratte di prima di questo piano), dice cosa contiene
-   ogni spazio, chiede prima di sovrascrivere una tua missione o una tratta di un altro piano, e tiene una copia di ogni file che sostituisce in
-   `<dati del chunk>/flightplan/djifly_backup/`.
+3. Il plugin riempie prima gli spazi sicuri (missioni fittizie, tratte di prima di questo piano), elenca cosa contiene
+   ogni spazio e chiede prima di sovrascrivere una tua missione o una tratta di un altro piano (*Sovrascrivi (una copia
+   resta)*). Il sì vale **solo per le missioni elencate**: uno spazio diventato una tua missione dopo la domanda (una
+   missione salvata nel frattempo in DJI Fly) ferma la copia, non si scrive nulla e il plugin chiede di nuovo
+   nominandolo. Una copia di ogni file che sostituisce resta in `<dati del chunk>/flightplan/djifly_backup/`.
 4. Dove non c'è un percorso (un Mac con l'RC 2), esporta **DJI Fly: cartelle pronte da trascinare (zip)** e trascina le
    cartelle nella cartella dei waypoint con un programma per i file dei dispositivi Android.
 
@@ -338,5 +363,7 @@ rifanno quando il piano cambia. Le esportazioni vanno dove scegli; le copie dell
   provali prima di volare.
 - La copertura ottenuta non è ancora stata provata su un volo vero allineato.
 - Senza un'ortofoto nel progetto le mappe delle tratte hanno lo **sfondo grigio** (nessuna tegola di mappe di terzi).
+- Le quote al **tetto di 500 m** sul decollo e i decolli di una tratta a più di 2 km da essa si rifiutano, non si
+  tagliano né si ignorano: sposta il decollo, abbassa la quota o dividi l'area.
 - Le **riprese ravvicinate** (una trincea, una parete) non sono nella 0.1.
 - Spazio aereo, permessi, ostacoli e meteo sono del pilota.
