@@ -233,7 +233,8 @@ PROGRAM_KEYS = frozenset((
     "date", "dem", "dem_edits", "dem_precision", "dense", "drawings", "elevations", "field_check", "gnss",
     "gnss_only_fix", "import", "layer_labels", "levelled", "live_links", "marker_excluded", "marker_frames", "merge",
     "metric", "model", "multispectral", "normal_map", "optimize", "orientation", "orthomosaic", "panorama",
-    "point_cloud_cleaning", "point_cloud_source", "pottery", "precision", "proxies", "quality", "region", "relief",
+    "plan_edits", "point_cloud_cleaning", "point_cloud_source", "pottery", "precision", "proxies", "quality", "region",
+    "relief",
     "satellite", "scans", "section_options", "sfm", "sharpness", "stones", "texture", "thermal", "tin", "versions",
     "video", "view", "water",
 ))
