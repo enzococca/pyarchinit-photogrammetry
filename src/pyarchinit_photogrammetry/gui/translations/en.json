@@ -4926,7 +4926,6 @@
   "{0}; uso la soluzione dell'EPN {1} salvata il {2}": "{0}; using the solution of the EPN {1} saved on {2}",
   "{0} non è un'epoca SINEX (YY:DDD:SSSSS)": "{0} is not a SINEX epoch (YY:DDD:SSSSS)",
   "{0}: non è un file SINEX (la prima riga dovrebbe cominciare con %=SNX): questo programma non legge un file fatto così": "{0}: not a SINEX file (the first line should start with %=SNX): its layout is not one this program reads",
-  "{0}, riga {1}: {2}": "{0}, line {1}: {2}",
   "{0}: non è un file SINEX di coordinate (manca il blocco SOLUTION/ESTIMATE)": "{0}: not a SINEX file of coordinates (it has no SOLUTION/ESTIMATE block)",
   "{0}: {1} ha più punti ({2})": "{0}: {1} has several points ({2})",
   "{0}: {1} non ha una soluzione con posizione, velocità, la loro epoca e l'intervallo dei suoi dati": "{0}: {1} has no solution with a position, a velocity, an epoch for them and the span of its data",
@@ -5019,6 +5018,7 @@
   "Nessun file di navigazione trasmesso per il {0}: {1} non è in {2}": "No broadcast navigation file for {0}: {1} is not in {2}",
   "Nessun file di navigazione trasmesso per il {0}: {1} non è in {2} - non ancora pubblicato: {3}": "No broadcast navigation file for {0}: {1} is not in {2} - not published yet: {3}",
   "{0} non è un file di messaggi di navigazione ({1})": "{0} is not a file of navigation messages ({1})",
-  "{0} contiene {1}, non messaggi di navigazione": "{0} holds {1}, not navigation messages"
+  "{0} contiene {1}, non messaggi di navigazione": "{0} holds {1}, not navigation messages",
+  "{0}, riga {1}: manca l'epoca di riferimento": "{0}, line {1}: no reference epoch"
  }
 }
