@@ -39,8 +39,17 @@ def _state(chunk, tmp: Path) -> dict:
 
 
 def _plain(value, tmp: Path):
-    """``value`` as JSON gives it back, the folder of the run written ``<tmp>``."""
-    return json.loads(json.dumps(value, default=str).replace(str(tmp), "<tmp>"))
+    """``value`` as JSON gives it back, the folder of the run written ``<tmp>`` and the paths below it with ``/``
+    (the backslashes of Windows too, which JSON writes doubled)."""
+    if isinstance(value, dict):
+        return {str(key): _plain(item, tmp) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item, tmp) for item in value]
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, str):
+        return value.replace(str(tmp), "<tmp>").replace("\\", "/") if str(tmp) in value else value
+    return json.loads(json.dumps(value, default=str))
 
 
 def _attempt(call, tmp: Path):
