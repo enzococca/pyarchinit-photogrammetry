@@ -46,13 +46,27 @@ attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
   in QGIS diventa un disegno libero del layer scritto in `layer` (creato se non esiste; *Disegni*
   se è vuoto); un elemento eliminato lì viene tolto qui. **Quote**: un vertice tiene la Z che ha in
   QGIS. Un vertice che non ne ha - un layer modificato senza Z, o un vertice aggiunto in QGIS, che
-  lo scrive con Z 0 - prende la quota del DEM sotto di sé o, dove il DEM non ne ha, la quota fra i
+  lo scrive con Z 0 o senza alcun numero (NaN: QGIS 3.42, un vertice inserito in una linea con le
+  quote) - prende la quota del DEM sotto di sé o, dove il DEM non ne ha, la quota fra i
   suoi vicini lungo il disegno; il log dice quante quote vengono dal DEM. Con un DEM da rifare e
   nessun'altra quota a cui appoggiarsi, l'elemento non viene ripreso (una riga nel log), e il
   prossimo cambiamento fatto qui gli riscrive sopra il disegno del programma: rifai prima il DEM.
   Di un elemento di più parti resta la prima, un poligono perde i fori: il log
   lo dice. Le tre tabelle esistono da quando il chunk ha un disegno libero (fanne uno qui, poi
   *Apri in QGIS*).
+* **Gli altri disegni della pianta** (*Poligoni (ppg)*, *Linee (ppg)*, *Punti (ppg)*, tabelle
+  `poligoni`, `linee`, `punti`): i layer che ha solo la vista 2D - quelli disegnati da un plugin
+  (*PhotoCAD: Ortofoto 1*...), quelli disegnati in QGIS. Un elemento spostato, cambiato nelle sue
+  colonne o eliminato in QGIS viene spostato, cambiato o eliminato nel suo layer qui (lo dice la
+  colonna `layer`); le colonne del plugin restano come sono. Un elemento disegnato in QGIS va nel
+  layer scritto in `layer`, creato se non esiste (*Disegni da QGIS* se è vuoto). Di un elemento di
+  più parti resta la prima, un poligono perde i fori, e una geometria che non fa un elemento del
+  suo layer (una linea in un layer di poligoni) non viene ripresa: il log lo dice. Queste
+  modifiche restano con il chunk (`plan_edits`) e si salvano con il progetto: quando il plugin
+  ridisegna il suo layer dai suoi risultati - dopo *Salva*, un passo, un altro raster mostrato -
+  vi vengono rimesse, così un elemento eliminato qui o in QGIS resta eliminato. Una nuova
+  esecuzione del plugin che fa altri elementi (una nuova conversione) riparte dai suoi nuovi
+  risultati. Le tabelle si leggono con la pianta del chunk attivo nella vista 2D.
 
 Ogni salvataggio fatto in QGIS è una voce di *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; più elementi: *Da QGIS: 3 modifiche*) e una riga del log per ogni elemento. I
@@ -82,13 +96,22 @@ modifiche fatte in QGIS mentre il programma era chiuso tornano quando il progett
 * **Sistema di riferimento**: un layer in un sistema di riferimento diverso da quello del
   progetto viene rifiutato (una riga nel log), come un singolo elemento scritto in un altro.
 * **QGIS che tiene il file** mentre salva: la finestra legge un attimo dopo.
-* **Solo in un senso**: curve di livello, zone, pietre, patch, punti di misura e i disegni dei
-  plugin (le tabelle `poligoni`, `linee`, `punti`) li calcola il programma: una modifica fatta loro
-  in QGIS non viene ripresa, e viene sovrascritta al prossimo cambiamento. Per lavorare in QGIS su
-  un disegno di un plugin, fanne prima un disegno libero: per una conversione di PhotoCAD,
-  [*Disegni liberi...*](plugins/photocad.md#disegni-liberi) del suo pannello; per gli altri, *File >
-  Importa > Disegni 3D...* della loro esportazione. Anche i disegni sui prospetti e sulle sezioni
-  vanno in un solo senso (sotto), come i disegni liberi in RustGIS.
+* **Solo in un senso**: i layer che il programma disegna dai suoi dati - curve di livello
+  (tabella `curve`), zone, pietre, patch, aree di ritaglio e misurate, punti di misura, linee di
+  rottura, il TIN, le tracce dei legami - sono ricalcolati a ogni cambiamento, quindi non c'è
+  dove tenere una modifica fatta in QGIS: non viene ripresa, il log lo dice una volta per ogni
+  layer (*Da QGIS: il layer Pietre è disegnato dal programma dai suoi dati e si modifica nel
+  programma...*), e le righe tornano subito com'erano. Modificali qui (pietre, zone, patch hanno
+  i loro strumenti), o copiali in un tuo layer in QGIS. Anche i disegni sui prospetti e sulle
+  sezioni vanno in un solo senso (sotto), come i disegni liberi e i disegni della pianta in
+  RustGIS. Per dare a un disegno di un plugin le quote e gli strumenti dei disegni liberi, fanne
+  un disegno libero: per una conversione di PhotoCAD,
+  [*Disegni liberi...*](plugins/photocad.md#disegni-liberi) del suo pannello; per gli altri,
+  *File > Importa > Disegni 3D...* della loro esportazione.
+* **Che cosa si vede in QGIS**: i layer sono ridisegnati ogni secondo dal progetto QGIS che il
+  programma scrive (*Apri in QGIS*), anche durante una sessione di modifica; non c'è niente da
+  aggiornare a mano. Se QGIS mostra un cambiamento solo dopo *Aggiorna*, il suo progetto ha
+  perso il ridisegno automatico (sotto): di nuovo *Apri in QGIS*.
 
 Fino alla 0.4.1 i disegni erano file GeoJSON impostati per *ricaricare i dati ogni secondo*, e i
 disegni nuovi comparivano solo dopo *Aggiorna*: QGIS tiene il GeoJSON in memoria, e QGIS 3.34-3.42

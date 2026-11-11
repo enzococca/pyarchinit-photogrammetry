@@ -47,13 +47,27 @@ the edits: within a second the window has them.
   becomes a free drawing of the layer written in `layer` (made when it does not exist; *Disegni*
   when empty); a feature deleted there is removed here. **Heights**: a vertex keeps the Z it has
   in QGIS. A vertex without one - a layer edited without Z, or a vertex added in QGIS, which
-  writes it with Z 0 - takes the height of the DEM under it, or, where the DEM has none, the
+  writes it with Z 0 or with no number at all (NaN: QGIS 3.42, a vertex inserted in a line with
+  heights) - takes the height of the DEM under it, or, where the DEM has none, the
   height between its neighbours along the drawing; the log says how many heights came from the
   DEM. With a DEM to be made again and no other height to go by, the feature is not taken (a line
   in the log), and the next change made here writes the program's drawing over it: make the DEM
   again first. A feature of several parts keeps the first, a
   polygon loses its holes: the log says so. The three tables exist once the chunk has a free
   drawing (make one here, then *Apri in QGIS*).
+* **The other drawings of the plan** (*Poligoni (ppg)*, *Linee (ppg)*, *Punti (ppg)*, tables
+  `poligoni`, `linee`, `punti`): the layers that only the 2D view holds - those a plugin draws
+  (*PhotoCAD: Ortofoto 1*...), those drawn in QGIS. A feature moved, changed in its columns or
+  deleted in QGIS is moved, changed or deleted in its layer here (the column `layer` says which);
+  the columns of the plugin stay as they are. A feature drawn in QGIS goes to the layer written
+  in `layer`, made when it does not exist (*Disegni da QGIS* when empty). A feature of several
+  parts keeps the first, a polygon loses its holes, and a geometry that makes no feature of its
+  layer (a line in a layer of polygons) is not taken: the log says so. These edits are kept with
+  the chunk (`plan_edits`) and saved with the project: when the plugin draws its layer again from
+  its results - after *Salva*, a step, another raster shown - they are put on it again, so a
+  feature deleted here or in QGIS stays deleted. A new run of the plugin that makes other
+  features (a new conversion) starts from its new results. The tables are read with the plan of
+  the active chunk in the 2D view.
 
 Each save made in QGIS is one entry of *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; several features: *Da QGIS: 3 modifiche*) and a line of the log for each feature.
@@ -82,13 +96,21 @@ again (deletions made meanwhile excepted: the program writes those features agai
 * **Reference system**: a layer whose reference system is not the project's is refused (a line
   in the log), as is a single feature written in another one.
 * **QGIS holding the file** while it saves: the window reads a moment later.
-* **One way only**: contour lines, zones, stones, patches, measuring points and the drawings of
-  plugins (the tables `poligoni`, `linee`, `punti`) are computed by the program: an edit made to
-  them in QGIS is not read back, and is written over at the next change. To work in QGIS on a
-  drawing of a plugin, make it a free drawing first: for a PhotoCAD conversion,
-  [*Free drawings...*](plugins/photocad.md#free-drawings) of its pane; for any other, *File >
-  Import > 3D drawings...* of its export. The drawings on elevations and sections are one-way
-  too (below), as are the free drawings in RustGIS.
+* **One way only**: the layers the program draws from its own data - contour lines (table
+  `curve`), zones, stones, patches, crop and measured areas, measuring points, break lines, the
+  TIN, the traces of the ties - are computed again at every change, so there is nothing an edit
+  of QGIS could be kept in: it is not taken, the log says so once for each layer (*Da QGIS: il
+  layer Pietre è disegnato dal programma dai suoi dati e si modifica nel programma...*), and the
+  rows go back as they were at once. Edit them here (stones, zones, patches have their tools),
+  or copy them to a layer of yours in QGIS. The drawings on elevations and sections are one-way
+  too (below), as are the free drawings and the drawings of the plan in RustGIS. To give a
+  drawing of a plugin heights and the tools of the free drawings, make it a free drawing: for a
+  PhotoCAD conversion, [*Free drawings...*](plugins/photocad.md#free-drawings) of its pane; for
+  any other, *File > Import > 3D drawings...* of its export.
+* **What you see in QGIS**: the layers are redrawn every second by the QGIS project the program
+  writes (*Apri in QGIS*), also during an edit session; nothing has to be refreshed by hand. If
+  QGIS shows a change only after *Refresh*, its project has lost the automatic redraw (below):
+  *Apri in QGIS* again.
 
 Up to 0.4.1 the drawings were GeoJSON files set to *reload data every second*, and new
 drawings appeared only after *Refresh*: QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42
