@@ -4563,6 +4563,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def _mosaic_release(self, ids) -> None:
         """Before the folders of the merged products ``ids`` move: the 2D view no longer shows them (Windows does not
         move a file in use)."""
+        from ..engine import mosaic
+
+        for mid in ids:
+            mosaic.release_sources(mosaic.folder(self.doc, mid))
         shown = getattr(self, "_mosaic_view", None)
         if shown is not None and shown[0] in set(ids):
             self._load_raster()
@@ -15872,6 +15876,17 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self.workspace.populate(self.doc)
             self._update_title()
             self._other_chunks_changed()  # a product of another chunk gone or back: the views that show it follow
+            self._follow_stakes_dialog()  # a chunk of its combo or of its sources gone or back
+
+    def _follow_stakes_dialog(self) -> None:
+        """The window of Cerca picchetti, when open, follows the chunks of the project (a removal of a chunk that is
+        not the active one refreshes the tree only, without :attr:`refreshed`)."""
+        from .ties_dialog import alive
+
+        dlg = getattr(self, "_stakes_dialog", None)
+        if dlg is not None and alive(dlg):
+            with contextlib.suppress(RuntimeError):
+                dlg.follow()
 
     def _other_chunks_changed(self) -> None:
         """The data of other chunks changed (a product removed or put back): the 3D view drawn again when it shows

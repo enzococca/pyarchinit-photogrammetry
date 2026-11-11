@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -592,6 +593,7 @@ def remove(doc: "Document", mid: str, delete_files: bool = True) -> dict:
         doc.meta[META_KEY] = rest
     else:
         doc.meta.pop(META_KEY, None)
+    release_sources(folder(doc, mid))
     if delete_files:
         shutil.rmtree(folder(doc, mid), ignore_errors=True)
     return rec
@@ -658,21 +660,66 @@ def is_stale(doc: "Document", record: dict) -> list[str]:
     return out
 
 
+# The sources bands read by :func:`source_at`, kept in memory (no file handle: Windows moves and deletes the folder of
+# a merged product shown in the 2D view): path -> (mtime_ns, size, band, transform). A band over SOURCES_CELLS cells is
+# kept decimated (nearest), which shifts the readout by at most a decimated cell along the seams.
+SOURCES_CELLS = 64_000_000
+SOURCES_KEPT = 2
+_SOURCES: dict[str, tuple] = {}
+
+
+def release_sources(path=None) -> None:
+    """Forget the sources band of ``path`` kept by :func:`source_at` (every one when None)."""
+    if path is None:
+        _SOURCES.clear()
+    else:
+        _SOURCES.pop(str(Path(path)), None)
+        prefix = str(Path(path)) + os.sep  # a folder: every band inside it
+        for k in [k for k in _SOURCES if k.startswith(prefix)]:
+            _SOURCES.pop(k, None)
+
+
+def _sources_band(path: Path):
+    """``(band, transform)`` of the sources raster ``path``, read once per time of change and kept in memory."""
+    import rasterio
+    from affine import Affine
+    from rasterio.enums import Resampling
+
+    st = path.stat()
+    key = str(path)
+    kept = _SOURCES.get(key)
+    if kept is not None and kept[0] == st.st_mtime_ns and kept[1] == st.st_size:
+        return kept[2], kept[3]
+    with rasterio.open(path) as src:
+        h, w = src.height, src.width
+        f = max(1, math.ceil(math.sqrt(h * w / SOURCES_CELLS))) if h * w > SOURCES_CELLS else 1
+        oh, ow = max(1, h // f), max(1, w // f)
+        if (oh, ow) == (h, w):
+            band, tr = src.read(1), src.transform
+        else:
+            band = src.read(1, out_shape=(oh, ow), resampling=Resampling.nearest)
+            tr = src.transform * Affine.scale(w / ow, h / oh)
+    _SOURCES.pop(key, None)
+    while len(_SOURCES) >= SOURCES_KEPT:
+        _SOURCES.pop(next(iter(_SOURCES)))
+    _SOURCES[key] = (st.st_mtime_ns, st.st_size, band, tr)
+    return band, tr
+
+
 def source_at(doc: "Document", mid: str, x: float, y: float) -> str | None:
     """The label of the chunk the cell of the merged product ``mid`` at ``(x, y)`` (in its system) comes from; None
-    outside it or where no chunk has data."""
-    import rasterio
-    from rasterio.windows import Window
-
+    outside it or where no chunk has data. The sources band is read once and kept (:func:`_sources_band`): the 2D view
+    asks at every mouse move."""
     rec = record_of(doc, mid)
     path = path_of(doc, rec, "sources")
     if path is None or not path.exists():
         return None
-    with rasterio.open(path) as src:
-        r, c = src.index(x, y)
-        if not (0 <= r < src.height and 0 <= c < src.width):
-            return None
-        v = int(src.read(1, window=Window(c, r, 1, 1))[0, 0])
+    band, tr = _sources_band(path)
+    col, row = ~tr * (x, y)
+    r, c = math.floor(row), math.floor(col)
+    if not (0 <= r < band.shape[0] and 0 <= c < band.shape[1]):
+        return None
+    v = int(band[r, c])
     keys = rec.get("chunks") or []
     if v == 0 or v > len(keys):
         return None
@@ -751,4 +798,4 @@ def read_areas(doc: "Document", path, system: str | None) -> list[tuple[object, 
 
 
 __all__ = ["META_KEY", "MOSAIC_BLOCK", "FADE", "PRODUCTS", "BACKGROUNDS", "MosaicError", "build", "mosaics_of",
-           "record_of", "remove", "is_stale", "source_at", "folder", "path_of", "read_areas", "frame_problem"]
+           "record_of", "remove", "is_stale", "source_at", "release_sources", "folder", "path_of", "read_areas", "frame_problem"]
