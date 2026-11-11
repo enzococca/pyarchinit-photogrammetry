@@ -373,6 +373,42 @@ def test_ppk_dialog_says_in_italian_that_no_converter_is_there(qt_app, tmp_path,
     _close(qt_app, d)
 
 
+def test_the_clock_of_the_camera_is_written_as_hours_minutes_seconds(qt_app):
+    """The offset of the clock of the camera from UTC: hours:minutes:seconds from a minute on (as the messages on the
+    time zones write it), with the tenths when there are some; seconds under a minute. The same in the PPK and
+    autopilot windows, in the log of the window and in the commands."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry import cli
+    from pyarchinit_photogrammetry.gnss import shots as gshots
+    from pyarchinit_photogrammetry.gui import shots_widgets as sw
+
+    for seconds, said in ((32399.5, "+8:59:59.5"), (7199.5, "+1:59:59.5"), (7200.0, "+2:00:00"), (-3600.04, "-1:00:00"),
+                          (-12600.26, "-3:30:00.3"), (60.0, "+0:01:00"), (59.94, "+59.9 s"), (-0.5, "-0.5 s"),
+                          (0.0, "+0.0 s"), (-0.04, "+0.0 s"), (59.96, "+0:01:00"), (86400.0 + 3661.2, "+25:01:01.2")):
+        assert gshots.clock_text(seconds) == said, seconds
+    i18n.set_current("it")
+    (line,) = sw.pairing_words({"by": "time", "clock_s": 32399.5})
+    assert line.endswith(", l'orologio della camera a +8:59:59,5 dall'UTC"), line
+    (line,) = sw.pairing_words({"by": "time", "clock_s": -0.5, "confirmed": False})
+    assert ", l'orologio della camera a -0,5 s dall'UTC - i tempi non lo confermano" in line, line
+    pairing = SimpleNamespace(kept=[1, 2], files=[1, 2], by="time", clock_s=7199.5, photos_without_shot=[],
+                              extra_shots=[], invalid=[], doubles=0, confirmed=True, warnings=[])
+    assert " L'orologio della camera è a +1:59:59,5 dall'UTC. " in sw.pairing_text(pairing)
+    pairing.clock_s = 0.5
+    assert " L'orologio della camera è a +0,5 s dall'UTC. " in sw.pairing_text(pairing)
+    assert cli._pairing_words({"by": "time", "clock_s": 32399.5}) == [
+        "paired by time, the clock of the camera +8:59:59.5 from UTC"]
+    assert cli._pairing_words({"by": "time", "clock_s": 0.5}) == [
+        "paired by time, the clock of the camera +0.5 s from UTC"]
+    i18n.set_current("en")
+    try:
+        (line,) = sw.pairing_words({"by": "time", "clock_s": 32399.5})
+        assert line.endswith(", the clock of the camera +8:59:59.5 from UTC"), line
+    finally:
+        i18n.set_current("it")
+
+
 def test_engine_refusals_in_italian():
     """What the engine refuses, and what it warns of, reaches the dialogs in Italian whole: the name of the file and
     the values kept, a reason inside another message and a list of values in Italian too; nothing of the English is

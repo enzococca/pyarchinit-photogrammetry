@@ -91,7 +91,7 @@ def pairing_text(pairing) -> str:
     text = tr("{0} foto su {1} trovano il loro scatto, abbinate {2}.", len(pairing.kept), len(pairing.files),
               by_names().get(pairing.by, pairing.by))
     if pairing.clock_s is not None:
-        text += " " + tr("L'orologio della camera è a {0} s dall'UTC.", decimal_comma(f"{pairing.clock_s:+.1f}"))
+        text += " " + tr("L'orologio della camera è a {0} dall'UTC.", decimal_comma(gshots.clock_text(pairing.clock_s)))
     text += " " + tr("Foto senza scatto: {0}. Scatti senza foto: {1}.", len(pairing.photos_without_shot),
                      len(pairing.extra_shots))
     if pairing.invalid:
@@ -112,7 +112,7 @@ def pairing_words(result: dict) -> list[str]:
     if by:
         text = tr("Foto abbinate {0}", by_names().get(by, by))
         if result.get("clock_s") is not None:
-            text += tr(", l'orologio della camera a {0} s dall'UTC", decimal_comma(f"{result['clock_s']:+.1f}"))
+            text += tr(", l'orologio della camera a {0} dall'UTC", decimal_comma(gshots.clock_text(result["clock_s"])))
         if result.get("confirmed") is False:
             text += tr(" - i tempi non lo confermano: controlla le posizioni")
         lines.append(text)

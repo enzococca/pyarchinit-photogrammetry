@@ -3367,11 +3367,13 @@ def _shot_source(kind: str, path: Path, edge: str = "falling", message: str = "a
 
 def _pairing_words(result: dict) -> list[str]:
     """How the photos were paired, for the commands that apply shots."""
+    from .gnss.shots import clock_text
+
     lines = []
     by = result.get("by")
     if by:
         clock = result.get("clock_s")
-        lines.append(f"paired by {by}" + (f", the clock of the camera {clock:+.1f} s from UTC" if clock is not None
+        lines.append(f"paired by {by}" + (f", the clock of the camera {clock_text(clock)} from UTC" if clock is not None
                                           else "") + ("" if result.get("confirmed") is not False else
                                                       " - not confirmed by the times: check the positions"))
     if result.get("doubles"):

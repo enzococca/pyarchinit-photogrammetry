@@ -387,6 +387,18 @@ def _off_zone(offset):
     return float(off) if np.ndim(off) == 0 else off
 
 
+def clock_text(seconds: float) -> str:
+    """The clock of the camera less UTC as it is written for a person: ``+8:59:59.5`` (hours:minutes:seconds, with
+    the tenths when there are some) from a minute on, ``+0.5 s`` under a minute."""
+    tenths = int(round(abs(float(seconds)) * 10))
+    sign = "-" if seconds < 0 and tenths else "+"
+    if tenths < 600:
+        return f"{sign}{tenths / 10:.1f} s"
+    whole, tenth = divmod(tenths, 10)
+    hours, rest = divmod(whole, 3600)
+    return f"{sign}{hours}:{rest // 60:02d}:{rest % 60:02d}" + (f".{tenth}" if tenth else "")
+
+
 def _signed(seconds: float) -> str:
     return ("-" if seconds < 0 else "+") + str(timedelta(seconds=round(abs(seconds))))
 
