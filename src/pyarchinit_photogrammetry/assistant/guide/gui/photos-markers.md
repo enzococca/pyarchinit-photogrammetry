@@ -362,6 +362,8 @@ The events of a receiver have no position of their own: they need the PPK. An au
 be used twice: as the source of the shots of a PPK (its times, the positions from the PPK) or by itself, in
 *Autopilot log...* (its times and its positions).
 
+![The PPK corrections window for a self-built drone: the shots from the time marks of a u-blox log, their edge, the pairing of the photos, the lever arm and the latency](../img/gui/dialog-ppk-events.png)
+
 #### Raw logs of the receivers
 
 *Observations of the drone* and the files of the base take a RINEX file or the raw log of the receiver, which the
@@ -392,6 +394,8 @@ chooses between the shots the camera confirmed (`CAM` in ArduPilot, `camera_capt
 commands (`TRIG`, `camera_trigger`): the confirmed ones are more accurate, and *automatic* takes them when the
 log has them. *Camera* chooses among the cameras of an ArduPilot log (a PX4 log has one). The window says how
 many shots it found, between which times, and the kind of their heights.
+
+![The Autopilot log window on an ArduPilot log: what the log holds, the photos paired with its shots, the lever arm and the latency](../img/gui/dialog-autopilot-log.png)
 
 Every photo takes the position the autopilot logged at its shot: the navigation solution of the flight
 controller, as good as its receiver, not a PPK position. The heights are above mean sea level, and are kept as

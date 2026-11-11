@@ -368,6 +368,8 @@ Gli eventi di un ricevitore non hanno una posizione propria: serve il PPK. Un lo
 cose, quindi si usa in due modi: come sorgente degli scatti di un PPK (i suoi tempi, le posizioni dal PPK) o da
 solo, in *Log dell'autopilota...* (i suoi tempi e le sue posizioni).
 
+![La finestra Correzioni PPK per un drone costruito da sé: gli scatti dalle marche di tempo di un log u-blox, il loro fronte, l'abbinamento delle foto, il braccio di leva e la latenza](../img/gui/dialog-ppk-events.png)
+
 #### Log grezzi dei ricevitori
 
 *Osservazioni del drone* e i file della base prendono un file RINEX o il log grezzo del ricevitore, che il
@@ -398,6 +400,8 @@ degli scatti* sceglie tra gli scatti confermati dalla camera (`CAM` in ArduPilot
 comandi di scatto (`TRIG`, `camera_trigger`): i confermati sono più precisi, e *automatico* li prende quando il
 log li ha. *Camera* sceglie tra le camere di un log ArduPilot (un log PX4 ne ha una). La finestra dice quanti
 scatti ha trovato, tra quali tempi, e il tipo delle loro quote.
+
+![La finestra Log dell'autopilota su un log ArduPilot: che cosa contiene il log, le foto abbinate ai suoi scatti, il braccio di leva e la latenza](../img/gui/dialog-autopilot-log.png)
 
 Ogni foto prende la posizione che l'autopilota ha registrato al suo scatto: la soluzione di navigazione del
 controllore di volo, buona quanto il suo ricevitore, non una posizione PPK. Le quote sono sul livello medio del
