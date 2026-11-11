@@ -309,6 +309,70 @@ def test_station_and_download_notes_in_italian():
         i18n.set_current("it")
 
 
+def _converter_notes() -> tuple:
+    """What the conversion of a raw log says when it cannot be done, or warns of, as the engine writes it."""
+    from pyarchinit_photogrammetry import _native
+
+    return (
+        _native.CONVBIN_MISSING,
+        "PPG_CONVBIN names /opt/rtklib/convbin, which is not there. " + _native.CONVBIN_MISSING,
+        "PPG_CONVBIN names /opt/rtklib/convbin, which is not a program that can run. " + _native.CONVBIN_MISSING,
+        "rover.rtcm3: rtcm3 carries the time of the week only, an approximate time of the log (its day) is needed",
+        "convbin failed on rover.ubx (exit status 3)",
+        "convbin failed on rover.ubx (exit status 3): 2026/05/04 09:10:00-05/04 09:42:00: O=0",
+        "no observations decoded from rover.ubx: not a log of the ubx format, or damaged (convbin: O=0 N=0)",
+        "rover.rtcm3: no GPS ephemerides (RTCM 1019) in the log: the week of its observations comes from the "
+        "approximate time alone and is not checked",
+        "rover.rtcm3: the GPS ephemerides of the log are all at the turn of a week: the week of its observations "
+        "comes from the approximate time alone and is not checked",
+        "rover.obs: system G has 6 signals, as many as the native core keeps of a satellite (NFREQ=3): others in "
+        "the log may have been left out",
+    )
+
+
+def test_converter_notes_in_italian():
+    """Why a raw log cannot be converted - no converter among them - and what its conversion warns of are shown in
+    Italian; the names of the programs, of the packages and of the files stay as they are; in English as written."""
+    notes = _converter_notes()
+    i18n.set_current("it")
+    names = re.compile(r"pip install -U \S+|PPG_CONVBIN|/opt/\S+|convbin: [^)]*|\(exit status|: 2026.*$")
+    for message in notes:
+        shown = i18n.engine(message)
+        words = ENGLISH.findall(names.sub("", shown))
+        assert not words, (words, shown)
+    assert i18n.engine(notes[0]).startswith("I log grezzi dei ricevitori (u-blox, RTCM 3, NovAtel, ...) sono convertiti "
+                                            "in RINEX dal core nativo pyarchinit-photogrammetry-core 0.8 o successivo")
+    for name in ('pip install -U "pyarchinit-photogrammetry-core>=0.8"', "pyarchinit-photogrammetry[fast]",
+                 "RTKLIB-EX 2.5 (rtklibexplorer)", "PPG_CONVBIN"):
+        assert name in i18n.engine(notes[0]), name
+    assert i18n.engine(notes[1]).startswith("PPG_CONVBIN indica /opt/rtklib/convbin, che non c'è. I log grezzi")
+    i18n.set_current("en")
+    try:
+        assert all(i18n.engine(message) == message for message in notes)
+    finally:
+        i18n.set_current("it")
+
+
+def test_ppk_dialog_says_in_italian_that_no_converter_is_there(qt_app, tmp_path, monkeypatch):
+    """A raw log as the rover and no converter (a native core older than 0.8, no convbin): the reason is written in
+    Italian under the field and in what stops OK."""
+    from pyarchinit_photogrammetry import _native
+    from pyarchinit_photogrammetry.gnss import convert
+
+    def no_converter(path, **_options):
+        raise RuntimeError(_native.CONVBIN_MISSING)
+
+    monkeypatch.setattr(convert, "to_rinex", no_converter)
+    rover = events_test._ubx_rover(tmp_path / "rover")
+    d = _dialog(qt_app, rover)
+    assert d.kind() == "events" and d.rover.path() == rover
+    assert _wait_until(lambda: "in corso" not in d.rover_info.text(), 30), d.rover_info.text()
+    assert d.rover_info.text().startswith("I log grezzi dei ricevitori (u-blox, RTCM 3, NovAtel, ...) sono convertiti")
+    assert d.problem().startswith("Le osservazioni del drone non si possono usare: I log grezzi dei ricevitori")
+    assert "Raw receiver logs" not in d.rover_info.text() + d.problem()
+    _close(qt_app, d)
+
+
 def test_engine_refusals_in_italian():
     """What the engine refuses, and what it warns of, reaches the dialogs in Italian whole: the name of the file and
     the values kept, a reason inside another message and a list of values in Italian too; nothing of the English is
