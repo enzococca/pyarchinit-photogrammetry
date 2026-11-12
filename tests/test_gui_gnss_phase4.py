@@ -431,6 +431,64 @@ def test_engine_refusals_in_italian():
         "flight.MRK: something the catalog does not know")
 
 
+PPK_MESSAGES = {  # what the PPK and the RINEX reader write, and how the windows show it
+    "the rover flight.obs (2025-06-01 10:00:00 to 2025-06-01 10:20:00 GPS time) and the base base.25o (2025-06-02 "
+    "08:00:00 to 2025-06-02 12:00:00 GPS time) have no time in common: the base has to record while the rover does":
+        "il rover flight.obs (dal 2025-06-01 10:00:00 al 2025-06-01 10:20:00, tempo GPS) e la base base.25o (dal "
+        "2025-06-02 08:00:00 al 2025-06-02 12:00:00, tempo GPS) non hanno tempo in comune: la base deve registrare "
+        "mentre registra il rover",
+    "the phase-centre offset of the antenna TRM57971.00 NONE of the base base.25o is not applied: no antenna "
+    "calibrations were given to RTKLIB, so the heights can be a few centimetres too low, more than 10 cm with some "
+    "choke-ring antennas":
+        "lo scostamento del centro di fase dell'antenna TRM57971.00 NONE della base base.25o non viene applicato: a "
+        "RTKLIB non sono state date calibrazioni delle antenne, quindi le quote possono risultare più basse di "
+        "qualche centimetro, oltre 10 cm con alcune antenne choke ring",
+    "the navigation file brdc.25p beside your base mine.25o or the station ROMA.25o cannot be read (and 2 more): "
+    "brdc.25p is cut short or damaged (line 12): download it again. Download it again, or add another navigation "
+    "file of your base or of the station (.nav, .##n, .##g, .##p or *_MN.rnx)":
+        "il file di navigazione brdc.25p accanto alla tua base mine.25o o alla stazione ROMA.25o non si può leggere "
+        "(e altri 2): brdc.25p è troncato o danneggiato (line 12): scaricalo di nuovo. Scaricalo di nuovo, oppure "
+        "aggiungi un altro file di navigazione della tua base o della stazione (.nav, .##n, .##g, .##p o *_MN.rnx)",
+    "the typed position of the base base.25o is 153.2 km away horizontally and +12.4 m in height from the position "
+    "of its RINEX header: check that latitude and longitude are not swapped or without their sign, and that the "
+    "height is above the ellipsoid, not above the sea level":
+        "la posizione scritta della base base.25o dista 153.2 km in piano e +12.4 m in quota dalla posizione della "
+        "sua intestazione RINEX: controlla che latitudine e longitudine non siano scambiate o senza segno, e che la "
+        "quota sia ellissoidica, non sul livello del mare",
+    "the conversion of the rover a.ubx is no longer in the cache of conversions; the file of the rover b.obs is no "
+    "longer where it was: the shots of volo are compared with the marks RTKLIB wrote in sol_events.pos only":
+        "la conversione del rover a.ubx non è più nella cache delle conversioni; il file del rover b.obs non è più "
+        "dov'era: gli scatti di volo sono confrontati solo con le marche che RTKLIB ha scritto in sol_events.pos",
+    "nothing was computed: RTKLIB wrote no positions": "non è stato calcolato nulla: RTKLIB non ha scritto posizioni",
+    "RTKLIB stopped with code 1: no message": "RTKLIB si è fermato con il codice 1: nessun messaggio",
+    "no file given for your base": "nessun file indicato per la tua base",
+    "a.obs is RINEX 3.04 and b.obs is RINEX 2.11: files of another version of RINEX are not joined":
+        "a.obs è RINEX 3.04 e b.obs è RINEX 2.11: file di un'altra versione di RINEX non si uniscono",
+}
+
+
+def test_ppk_messages_in_italian(tmp_path):
+    """The messages of the PPK and of the RINEX reader reach the windows in Italian with their names, times and
+    numbers, the nouns of the receivers with their articles; in English they stay as the engine writes them. One the
+    reader itself raises, on a file that is not RINEX."""
+    from pyarchinit_photogrammetry.gnss import rinex
+
+    i18n.set_current("it")
+    for message, italian in PPK_MESSAGES.items():
+        assert i18n.engine(message) == italian
+    path = tmp_path / "notes.obs"
+    path.write_text("not a RINEX file at all\n" * 3, encoding="utf-8")
+    with pytest.raises(ValueError) as refused:
+        rinex.header(path)
+    assert i18n.engine(str(refused.value)).startswith("notes.obs: non è un file RINEX"), str(refused.value)
+    i18n.set_current("en")
+    try:
+        for message in PPK_MESSAGES:
+            assert i18n.engine(message) == message
+    finally:
+        i18n.set_current("it")
+
+
 def test_engine_messages_reach_the_log_and_the_messages(qt_app, monkeypatch):
     """The log pane and the message boxes show a message of the engine in Italian."""
     from pyarchinit_photogrammetry.gui import dialogs, panels
