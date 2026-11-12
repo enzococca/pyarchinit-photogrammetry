@@ -9566,6 +9566,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             Field("dense_quality", "Qualità nuvola densa", "medium", choices=QUALITY),
             Field("surface", "Superficie modello", "arbitrary",
                   choices=[("arbitrary", "Arbitraria (3D)"), ("height_field", "Campo di altezze (2.5D)")]),
+            Field("fill_holes", "Chiudi i buchi fino a (m, 0 = nessuno)", 0.0, minimum=0.0, maximum=1000.0,
+                  decimals=3, tip="Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati "
+                                  "fino a questa misura. La parte chiusa è interpolata, non misurata."),
             Field("texture", "Texture", True), Field("dem", "DEM", True), Field("ortho", "Ortofoto", True),
             Field("report", "Report HTML", True)])
         if not v:
@@ -9578,6 +9581,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             for c in self.chunk.cameras:
                 if c.key in bad:
                     c.enabled = False
+        fill = v.get("fill_holes") or None  # metres; 0: nothing is closed
+        if fill and v["surface"] != "height_field":
+            self.log_pane.warning("I buchi si chiudono solo nel campo di altezze: la superficie arbitraria "
+                                  "è già chiusa.")
         from ..markers import gcp
 
         def job(p):
@@ -9603,7 +9610,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             q = sp()
             ch.build_depth_maps(v["dense_quality"], progress=q.sub(0, 0.8), skip_unreadable=skip)
             ch.build_point_cloud(progress=q.sub(0.8, 0.2))
-            ch.build_model(surface=v["surface"], progress=sp())
+            ch.build_model(surface=v["surface"], fill_holes=fill, progress=sp())
             if v["texture"]:
                 ch.build_texture(progress=sp(), skip_unreadable=skip)
             if v["dem"]:
@@ -9615,7 +9622,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 ch.generate_report(self.doc.path.with_name(self.doc.path.stem + "_report.html"))
             return ch
 
-        self.run_task("Elaborazione completa", job, lambda _c: self._show_model(None))
+        self.run_task("Elaborazione completa", job, lambda _c: (self._log_interpolated(), self._show_model(None)))
 
     def _show_model(self, kind) -> None:
         self.model_view.set_chunk(self.chunk, kind)
