@@ -87,3 +87,29 @@ def test_dem_of_a_model_too_large_for_the_memory_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(satellite, "_physical_memory", lambda: 50_000.0)
     with pytest.raises(MemoryError, match="decimate the model"):
         ch.build_dem(resolution=0.05, source="model")
+
+
+def test_dem_grid_kept_within_the_memory(tmp_path, monkeypatch):
+    """The cleaning of a DEM takes about GRID_BYTES_PER_CELL bytes per cell of its grid: a model of 25 million
+    faces gave a grid of 300 million cells and a peak of 29 GB on a computer of 24. The resolution found by
+    itself is made coarser to fit half the memory, and says so; a resolution asked that does not fit is refused."""
+    from pyarchinit_photogrammetry.engine import satellite
+
+    ch = _mesh_chunk(tmp_path, side=60)
+    monkeypatch.setattr(dem_engine, "estimate_gsd", lambda chunk: 0.0)  # no photos: the spacing of the points
+    fine, _ = _read(ch.build_dem(source="model"))
+    resolution = ch.meta["dem"]["resolution"]
+    assert "memory_limited" not in ch.meta["dem"]
+    ram = 2 * dem_engine.GRID_BYTES_PER_CELL * fine.size / 4  # half of it: a quarter of the cells
+    monkeypatch.setattr(satellite, "_physical_memory", lambda: ram)
+    coarse, _ = _read(ch.build_dem(source="model"))
+    assert coarse.size <= fine.size / 4 + 2 * (coarse.shape[0] + coarse.shape[1])
+    assert ch.meta["dem"]["resolution"] == pytest.approx(2 * resolution, rel=0.05)
+    assert ch.meta["dem"]["memory_limited"] == pytest.approx(resolution)
+    with pytest.raises(MemoryError, match="coarser resolution"):
+        ch.build_dem(resolution=resolution, source="model")
+    # the dense-cloud path follows the same rule
+    pts = dem_engine.surface_points_world(ch, "model")
+    monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: pts)
+    with pytest.raises(MemoryError, match="coarser resolution"):
+        ch.build_dem(resolution=resolution, source="point_cloud")

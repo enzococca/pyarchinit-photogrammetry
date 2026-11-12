@@ -503,6 +503,38 @@ def _finish_dem(dem: np.ndarray, resolution: float, despike: bool, interpolate: 
     return dem, removed
 
 
+# peak memory of a DEM (the grid, then its cleaning: spikes, stray cells, pits, filling) per cell of its grid,
+# measured on a model of 25 million faces: 29 GB for 302 million cells, 18 GB for 126 million (143 bytes)
+GRID_BYTES_PER_CELL = 150
+
+
+def _fit_grid(bounds, resolution: float, asked: bool) -> float:
+    """``resolution``, or a coarser one when the grid over ``bounds`` would take more than half the memory of the
+    computer (:data:`GRID_BYTES_PER_CELL`): the resolution found by itself is made coarser, one ``asked`` is
+    refused with a MemoryError that names the coarsest that fits."""
+    from .satellite import _physical_memory
+
+    xmin, ymin, xmax, ymax = bounds
+    budget = 0.5 * _physical_memory() / GRID_BYTES_PER_CELL  # cells
+
+    def cells(res):
+        _, _, w, h = _grid_frame((xmin, ymin, xmax, ymax), res)
+        return w * h
+
+    n = cells(resolution)
+    if n <= budget:
+        return resolution
+    fit = resolution * float(np.sqrt(n / budget))
+    while cells(fit) > budget:
+        fit *= 1.01
+    if asked:
+        raise MemoryError(
+            f"a DEM at {resolution:.4g} m/px has {n / 1e6:.0f} million cells and needs about "
+            f"{n * GRID_BYTES_PER_CELL / 1e9:.0f} GB of memory, this computer has {_physical_memory() / 1e9:.0f} GB: "
+            f"choose a coarser resolution ({fit:.4g} m/px or more)")
+    return fit
+
+
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
               classes=None, progress: Progress | None = None, despike: bool = True) -> Path:
     """DEM of the highest surface point in each cell. ``classes`` (dense cloud): only these
@@ -512,10 +544,15 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
     classes = None if classes is None else sorted({int(c) for c in classes})
+    asked, limited = resolution is not None, None
     surface = model_surface(chunk) if source == "model" and classes is None else None
     if surface is not None:  # a large model: its points go on the grid block by block, never all in memory
         if resolution is None:
             resolution = float(max(2 * estimate_gsd(chunk), surface.spacing()))
+        fit = _fit_grid(surface.bounds, resolution, asked)
+        if fit != resolution:
+            limited, resolution = resolution, fit
+            progress(0.1, f"DEM at {resolution:.4g} m/px instead of {limited:.4g}: the grid must fit in the memory")
         progress(0.1, f"Rasterising DEM at {resolution:.4g} m/px")
         dem, origin = surface.grid(resolution, progress.sub(0.1, 0.5))
         del surface
@@ -528,6 +565,15 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
             # With classes, the spacing of the whole cloud: DEMs of other classes on the same grid
             whole = pts if classes is None else surface_points_world(chunk, source, None)
             resolution = float(max(2 * estimate_gsd(chunk), point_spacing(whole[:, :2])))
+        else:
+            whole = pts
+        # with classes, the box of the whole cloud: a DEM of other classes on the same grid
+        box = whole[:, 0].min(), whole[:, 1].min(), whole[:, 0].max(), whole[:, 1].max()
+        del whole
+        fit = _fit_grid(box, resolution, asked)
+        if fit != resolution:
+            limited, resolution = resolution, fit
+            progress(0.3, f"DEM at {resolution:.4g} m/px instead of {limited:.4g}: the grid must fit in the memory")
         progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
         dem, origin, spikes = dem_from_points(pts, resolution, reducer="max" if source != "tie_points" else "mean",
                                               despike=despike, interpolate=interpolate,
@@ -538,6 +584,8 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     chunk._set_product("dem", path)
     stamps.stamp(chunk, "dem")
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}
+    if limited is not None:  # the resolution of the points, too fine for the memory
+        chunk.meta["dem"]["memory_limited"] = limited
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path
 
