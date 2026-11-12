@@ -65,9 +65,13 @@ the edits: within a second the window has them.
   layer (a line in a layer of polygons) is not taken: the log says so. These edits are kept with
   the chunk (`plan_edits`) and saved with the project: when the plugin draws its layer again from
   its results - after *Salva*, a step, another raster shown - they are put on it again, so a
-  feature deleted here or in QGIS stays deleted. A new run of the plugin that makes other
-  features (a new conversion) starts from its new results. The tables are read with the plan of
-  the active chunk in the 2D view.
+  feature deleted here or in QGIS stays deleted. An attribute of such a feature changed here, in
+  the table of the *Layer* pane or with *Modifica etichetta...*, is kept the same way and goes
+  to QGIS in the row of the feature. A new run of the plugin that makes other features (a new
+  conversion) starts from its new results: at the next *Salva* the edits made on the features the
+  layer no longer draws leave the project (the log says how many; what was drawn in QGIS on the
+  layer stays), while a layer that is only hidden keeps them all. The tables are read with the
+  plan of the active chunk in the 2D view.
 
 Each save made in QGIS is one entry of *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; several features: *Da QGIS: 3 modifiche*) and a line of the log for each feature.
