@@ -552,7 +552,8 @@ def test_the_program_exits_with_a_hung_model(tmp_path, how):
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software")
     t0 = time.monotonic()
     r = subprocess.run([sys.executable, str(script), str(tmp_path / "settings"), how], env=env,
-                       capture_output=True, text=True, timeout=25)
+                       capture_output=True, text=True, timeout=25,
+                       close_fds=False)  # posix_spawn, never a fork of the process of the tests (see test_env)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "exiting" in r.stdout and "Destroyed while thread" not in r.stderr
     assert time.monotonic() - t0 < 20

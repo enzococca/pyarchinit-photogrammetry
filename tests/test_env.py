@@ -94,6 +94,35 @@ def test_fork_after_spatialite(tmp_path):
     assert "resource_tracker: process died" not in r.stderr
 
 
+def test_the_tests_start_their_processes_without_a_fork():
+    """A test that starts a process must not fork the one of the tests: with SpatiaLite, PROJ, rasterio and Qt loaded
+    the forked child may die before it runs the program (SIGSEGV in a handler of ``pthread_atfork``: return code -11,
+    nothing written), in some runs of the whole suite and never alone. As the program does (``_env``), the tests
+    start their processes with ``posix_spawn``: ``close_fds=False``, the program by its whole path, no ``cwd``. The
+    scripts the tests write for their children (strings) are not looked at."""
+    import ast
+
+    forbidden = {"cwd", "pass_fds", "start_new_session", "preexec_fn", "process_group", "user", "group", "umask"}
+    wrong = []
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        if path.name.startswith("probe_"):  # run by hand, in a process of their own
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
+                    and node.func.attr in ("run", "Popen", "call", "check_call", "check_output")):
+                continue
+            keywords = {k.arg: k.value for k in node.keywords}
+            spawned = isinstance(keywords.get("close_fds"), ast.Constant) and keywords["close_fds"].value is False
+            program = node.args[0].elts[0] if node.args and isinstance(node.args[0], ast.List) and node.args[0].elts \
+                else None
+            bare = isinstance(program, ast.Constant) and isinstance(program.value, str) \
+                and not os.path.isabs(program.value)
+            if not spawned or bare or forbidden & set(keywords):
+                wrong.append(f"{path.name}:{node.lineno}")
+    assert wrong == []
+
+
 def test_a_hard_exit_leaves_no_folder_of_a_document_never_saved(tmp_path):
     """A document never saved keeps its files in a temporary folder (``ppg_*``) that the end of the interpreter
     removes; a process that leaves through ``os._exit`` (the packaged application, the tests) removes it itself."""
@@ -109,7 +138,8 @@ def test_a_hard_exit_leaves_no_folder_of_a_document_never_saved(tmp_path):
             "print(folder, flush=True)\n"
             "_hard_exit(0)\n")
     env = dict(os.environ, TMPDIR=str(tmp_path), TEMP=str(tmp_path), TMP=str(tmp_path))
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300,
+                          close_fds=False)
     assert done.returncode == 0, done.stderr
     folder = done.stdout.strip().splitlines()[-1]
     assert folder and not os.path.exists(folder) and not list(tmp_path.glob("ppg_*"))
