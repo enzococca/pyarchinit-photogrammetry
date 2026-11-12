@@ -761,7 +761,7 @@ def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, m
     assert d.kind() == "events"
     d.b_lever.setChecked(True)
 
-    def settled() -> None:  # a file read in the background ends in a refresh, which takes the error away
+    def settled() -> None:  # the files read, so that the error is the one of a dialog that reads nothing more
         d.refresh()
         assert _wait_until(lambda: not (d._pending or d._aside._running or d._timer.isActive()))
         qt_app.processEvents()
@@ -796,6 +796,61 @@ def test_ppk_dialog_with_the_lever_open_fits_a_laptop_screen(qt_app, tmp_path, m
         qt_app.processEvents()
         assert d.error.text() == "Scegli le osservazioni della base."
         fits(min(room, available.height()))
+    _close(qt_app, d)
+
+
+def test_ppk_dialog_keeps_the_error_of_avvia_through_a_background_read(qt_app, tmp_path, monkeypatch):
+    """The error *Avvia* shows stays under the form when a file read in the background ends right after it: the
+    refresh of that reading looks at the error again - kept while it is still true, the new one when the reading
+    changed it, gone when nothing keeps the run from starting any more - and does not take it away. What the user
+    changes takes it away, as before; the error of *Scegli la stazione...* is not one of *Avvia* and stays as it is."""
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+    d = _dialog(qt_app, events_test.RTCM_OBS)
+    d.refresh()
+    assert _wait_until(lambda: not (d._pending or d._aside._running or d._timer.isActive()))
+    qt_app.processEvents()
+    missing = "Scegli le osservazioni della base."
+
+    d.accept()
+    assert d.error.text() == missing
+    d._aside.done.emit()  # a conversion, some shots or a pairing end now
+    assert d.error.text() == missing
+    stamp = (1.0, 1)
+    d._pending["a header"] = stamp
+    d._read_done("a header", stamp, None, ValueError("not RINEX"))  # the header of a file read in its thread
+    assert d.error.text() == missing
+
+    reading = "Il programma sta ancora leggendo rover.obs: attendi un momento."
+    monkeypatch.setattr(d, "problem", lambda: reading)
+    d.accept()
+    assert d.error.text() == reading
+    monkeypatch.setattr(d, "problem", lambda: missing)  # the file is read: what is missing now
+    d._aside.done.emit()
+    assert d.error.text() == missing
+    monkeypatch.setattr(d, "problem", lambda: None)  # nothing is missing any more
+    d._aside.done.emit()
+    assert d.error.text() == ""
+    monkeypatch.setattr(d, "problem", lambda: missing)
+    d._aside.done.emit()  # no error was shown: a background read never brings one
+    assert d.error.text() == ""
+    monkeypatch.undo()
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+
+    d.accept()
+    assert d.error.text() == missing
+    d.b_lever.setChecked(not d.b_lever.isChecked())  # the user changes something: the error goes
+    assert d.error.text() == ""
+    d.accept()
+    d.lat.setText("41,9")
+    assert d.error.text() == ""
+    d.accept()
+    d.base.edit.setText("x")  # typing a file name
+    assert d.error.text() == ""
+    d.refresh()
+
+    d._say("Il programma non sa dove è il rilievo.")  # as *Scegli la stazione...* says it
+    d._aside.done.emit()
+    assert d.error.text() == "Il programma non sa dove è il rilievo."
     _close(qt_app, d)
 
 

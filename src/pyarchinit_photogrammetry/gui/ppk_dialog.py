@@ -348,6 +348,7 @@ class PpkDialog(QDialog):
         self._progress = Progress()  # of the conversions: cancelled when the dialog closes
         self._aside = sw.Aside(self)  # conversions, shots and pairings, each in a thread of its own
         self._aside.done.connect(self._aside_done)
+        self._refused = False  # the error under the form is what *Avvia* said: kept through a background read
         opened = opening_kind(self.mrk)
         self._relay = _ReadRelay(self)
         self._relay.read.connect(self._read_done)
@@ -839,12 +840,12 @@ class PpkDialog(QDialog):
         del self._pending[key]
         self._headers[key] = (stamp, info, error)
         self._sources = None  # the navigation files listed again, with this one read
-        self._update()
+        self._update(background=True)
 
     def _aside_done(self) -> None:
         """A conversion, some shots or a pairing are there: everything the dialog says looked at again."""
         self._sources = None  # the navigation files listed again, with those of a conversion
-        self._update()
+        self._update(background=True)
 
     def _is_raw(self, path: Path) -> tuple | None:
         """The time and size of ``path`` when it is the raw log of a receiver, to convert (:func:`.sources.is_raw`,
@@ -1231,7 +1232,7 @@ class PpkDialog(QDialog):
 
     def _typing(self) -> None:
         """A file name is being typed: the files are read after a pause."""
-        self.error.setText("")
+        self._say("")
         self._timer.start()
 
     def refresh(self) -> None:
@@ -1251,7 +1252,14 @@ class PpkDialog(QDialog):
         if self._rover_beside != text:
             self.rover.edit.setText(self._rover_beside)
 
-    def _update(self) -> None:
+    def _say(self, error: str, refused: bool = False) -> None:
+        """The error under the form; ``refused`` when it is what *Avvia* said (:meth:`problem`)."""
+        self._refused = refused and bool(error)
+        self.error.setText(error)
+
+    def _update(self, background: bool = False) -> None:
+        """Everything the dialog says, looked at again; ``background`` when a file read in its thread asked for it,
+        not the user (:meth:`_update_mode`)."""
         self._follow_mrk()
         self._read_mrk()
         self._fill_cameras()
@@ -1267,7 +1275,7 @@ class PpkDialog(QDialog):
         if sources != self._sources:
             self._sources = sources
             self._fill_navs()
-        self._update_mode()
+        self._update_mode(background)
 
     # ------------------------------------------------------------ navigation files
     def _companions(self, obs: Path | None) -> list[Path]:
@@ -1411,9 +1419,9 @@ class PpkDialog(QDialog):
         """The permanent station chosen among those near the flight (:class:`.StationsDialog`)."""
         place = self._station_place()
         if place is None:
-            self.error.setText(tr("Il programma non sa dove è il rilievo: il Timestamp.MRK non ha scatti.")
-                               if self.kind() == "mrk" else
-                               tr("Il programma non sa dove è il rilievo: scegli prima le osservazioni del drone."))
+            self._say(tr("Il programma non sa dove è il rilievo: il Timestamp.MRK non ha scatti.")
+                      if self.kind() == "mrk" else
+                      tr("Il programma non sa dove è il rilievo: scegli prima le osservazioni del drone."))
             return
         when = min(self.shots, key=lambda shot: shot.gps_time).utc if self.shots else None
         timed = self._timed_shots()
@@ -1506,8 +1514,10 @@ class PpkDialog(QDialog):
             self._atx_choice = bool(on)
         self._update_mode()
 
-    def _update_mode(self) -> None:
-        """What the way the base is placed shows, asks for and warns of."""
+    def _update_mode(self, background: bool = False) -> None:
+        """What the way the base is placed shows, asks for and warns of. What the user changes takes the error under
+        the form away; a file read in the ``background`` does not: the error *Avvia* showed is looked at again - kept
+        while it is true, the new one when that reading changed it, none when the run can start -, any other stays."""
         mode = self.mode()
         typed = mode == "typed"
         for widget in (self.lat, self.lon, self.ellh, self.frame):
@@ -1546,7 +1556,10 @@ class PpkDialog(QDialog):
         self.antenna_warning.setStyleSheet(_NOTE if self._calibrated() else _WARNING)
         self.antenna_warning.setVisible(bool(antenna))
         self.downloads.setText(self._downloads_text(mode))
-        self.error.setText("")
+        if not background:
+            self._say("")
+        elif self._refused and not self._timer.isActive():  # while typing, the pause ends in a refresh of its own
+            self._say(self.problem() or "", refused=True)
         self._fit()
 
     # ------------------------------------------------------------ the answer
@@ -1697,7 +1710,7 @@ class PpkDialog(QDialog):
 
     def accept(self) -> None:
         problem = self.problem()
-        self.error.setText(problem or "")
+        self._say(problem or "", refused=True)
         if problem is None:
             super().accept()
         else:
