@@ -59,8 +59,8 @@ try:  # the native core carries RTKLIB (BSD 2-clause): its notice goes with the 
 except importlib_metadata.PackageNotFoundError:  # no core, no RTKLIB
     pass
 binaries = collect_dynamic_libs("pycolmap")
-for optional in ("open3d", "ifcopenshell", "pye57", "psycopg"):  # pye57: E57 laser scans (its xerces library);
-    try:                                                         # psycopg: PostgreSQL without psycopg2 (ARM64)
+for optional in ("open3d", "ifcopenshell", "pye57", "psycopg", "rawpy"):  # pye57: E57 laser scans (its xerces
+    try:  # library); psycopg: PostgreSQL without psycopg2 (ARM64); rawpy: camera raw files (LibRaw)
         __import__(optional)
     except Exception:
         continue
