@@ -3498,6 +3498,7 @@
   "Proiezione ortografica (parallela) al posto della prospettiva: le linee parallele restano parallele e le dimensioni non dipendono dalla distanza, per piante e viste laterali (Dall'alto, F di fronte, L da sinistra); la rotella cambia la scala (tasto O)": "Orthographic (parallel) projection instead of the perspective: parallel lines stay parallel and sizes do not depend on the distance, for plans and side views (From above, F front, L from the left); the wheel changes the scale (O key)",
   "La vista 3D in proiezione ortografica (parallela) o in prospettiva": "The 3D view in orthographic (parallel) projection or in perspective",
   "Chiudi i buchi fino a (m, 0 = nessuno)": "Close holes up to (m, 0 = none)",
+  "Chiudi i buchi fino a": "Close holes up to",
   "Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata.": "Height field only: closes the holes whose gap between measured points is up to this size. The closed part is interpolated, not measured.",
   "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed.",
   "non indicato": "not given",

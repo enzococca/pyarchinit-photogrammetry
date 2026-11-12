@@ -183,7 +183,9 @@ untouched photos by 0.3 levels in the low frequencies (25 without correction).
 ### Process everything
 
 *Workflow > Process everything...* (++ctrl+r++) runs every step in a row with the default choices; with a
-project file it also writes the HTML report.
+project file it also writes the HTML report. With the *height field* surface, **Close holes up to** (metres,
+0 = none) closes the holes of the model as in [*Build model*](#model): the closed part is interpolated, not
+measured, and the log says how much.
 
 ## Versions
 
@@ -590,6 +592,10 @@ best of the chosen photos that sees it.
 *Workflow > Batch processing...*: a list of steps - alignment, products, exports, the precision and the field
 check - each on all chunks or on the chosen ones, with its parameters (*Add* by group, *Edit* or double click,
 *Up* / *Down*, *Load* / *Save* as JSON), the attempts for a step that fails and what to do then.
+
+The *3D model* step has the same **Close holes up to** (metres, 0 = none) as [*Build model*](#model): it closes the
+holes of the *height field* only, and the log says how many holes were closed and how many square metres in plan
+are interpolated, not measured. A batch file saved before this field existed is read with 0: nothing is closed.
 
 The project is saved after every step; if the batch stops (power cut, crash, *Cancel*) the next time it offers to
 go on from where it stopped. Failed steps are listed in the log.

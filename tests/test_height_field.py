@@ -159,3 +159,164 @@ def test_model_dialog_closes_the_holes(trench, monkeypatch):
     report = w.chunk.meta["model"]
     assert report["fill_holes"] == 3.5 and report["holes_filled"] >= 1 and report["interpolated_area"] > 2.5
     assert said and "interpolati (non misurati)" in said[-1]
+
+
+def test_batch_model_step_closes_the_holes(chunk, tmp_path, caplog):
+    """A *Modello 3D* step of a batch has the gap to close (0: none), a batch file written before it existed is
+    still read, and the log says how much of the surface is interpolated."""
+    import json
+    import logging
+
+    from pyarchinit_photogrammetry import batch
+
+    doc = chunk.document
+    assert batch.step("build_model")["params"]["fill_holes"] == 0.0  # nothing is closed unless asked
+    old = tmp_path / "old.json"  # a batch saved by 1.7.8
+    old.write_text(json.dumps({"steps": [{"op": "build_model", "chunks": "all", "params": {
+        "source": "point_cloud", "surface": "height_field", "face_count": "high"}}]}))
+    steps = batch.load_steps(old)
+    assert steps[0]["params"]["fill_holes"] == 0.0
+    report = batch.run_batch(doc, steps)
+    assert report["done"] == ["0:0"] and not report["failed"]
+    model = chunk.meta["model"]
+    assert model["fill_holes"] is None and not model["holes_filled"]
+    open_area = plan_area(chunk.model)
+
+    steps = [batch.step("build_model", surface="height_field", face_count="high", fill_holes=3.5)]
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        report = batch.run_batch(doc, steps)
+    assert report["done"] == ["0:0"] and not report["failed"]
+    model = chunk.meta["model"]
+    assert model["fill_holes"] == 3.5 and model["holes_filled"] >= 1 and model["interpolated_area"] > 2.5
+    assert plan_area(chunk.model) > open_area + 2.5
+    assert "interpolated, not measured" in caplog.text
+    # the arbitrary surface has no holes to close: said, and the step still runs
+    caplog.clear()
+    seen = {}
+    chunk.build_model = lambda **kw: seen.update(kw)
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        batch.run_step(doc, chunk, "build_model", batch.step("build_model", fill_holes=2.0)["params"])
+    assert seen["fill_holes"] == 2.0 and seen["surface"] == "arbitrary" and "only in the height field" in caplog.text
+    batch.run_step(doc, chunk, "build_model", batch.step("build_model")["params"])
+    assert seen["fill_holes"] is None  # 0 in the batch: the method is told nothing
+
+
+def test_batch_stopped_before_the_new_parameter_is_resumed(chunk):
+    """A batch stopped under 1.7.8 (its model step without ``fill_holes``) is the same batch after the update: it
+    goes on from where it stopped instead of starting again."""
+    import json
+
+    from pyarchinit_photogrammetry import batch
+
+    doc = chunk.document
+    old = [{"op": "build_point_cloud", "chunks": "all", "params": {}},
+           {"op": "build_model", "chunks": "all",
+            "params": {"source": "point_cloud", "surface": "height_field", "face_count": "high"}}]
+    batch.state_path(doc).parent.mkdir(parents=True, exist_ok=True)
+    batch.state_path(doc).write_text(json.dumps({"steps": old, "done": ["0:0"], "failed": {}, "skipped": [],
+                                                 "started": "2026-11-11T08:00:00", "finished": None}))
+    state = batch.pending(doc)
+    assert state is not None and batch.pending(doc, [batch.step(s["op"], s["chunks"], **s["params"]) for s in old])
+    ran = []
+    chunk.build_point_cloud = lambda **kw: ran.append("cloud")
+    report = batch.run_batch(doc, state["steps"], resume=True)
+    assert not ran and report["done"] == ["0:0", "0:1"]  # the cloud was done: only the model is built
+    assert chunk.meta["model"]["surface_used"] == "height_field"
+    # a state that is not a list of steps is no batch to resume
+    batch.state_path(doc).write_text(json.dumps({"steps": [{"op": "nothing"}], "done": [], "finished": None}))
+    assert batch.pending(doc, [batch.step("build_model")]) is None
+
+
+def test_batch_dialog_has_the_gap_of_the_model_dialog(chunk, monkeypatch):
+    """*Elaborazione batch > Modello 3D*: the same field as *Costruisci modello* (words, default, range), kept in
+    the step and shown in its line."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry import batch
+    from pyarchinit_photogrammetry.gui import batch_dialog, i18n
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    app = QApplication.instance() or QApplication([])
+    form = {f.name: f for f in batch_dialog.fields("build_model", {})}
+    field = form["fill_holes"]
+    assert (field.default, field.minimum, field.maximum, field.decimals) == (0.0, 0.0, 1000.0, 3)
+    asked = []
+    monkeypatch.setattr(mw.ParamDialog, "ask", lambda _p, _t, fields, intro="": asked.append(fields))
+    window = type("W", (), {"_need_chunk": lambda self, **k: True, "chunk": chunk, "_class_fields": lambda self, t: [],
+                            "_version_fields": lambda self, k: [], "_class_hint": lambda self, t: ""})()
+    mw.MainWindow.build_model(window)
+    same = next(f for f in asked[0] if f.name == "fill_holes")
+    assert (field.label, field.tip, field.default, field.minimum, field.maximum, field.decimals) == \
+        (same.label, same.tip, same.default, same.minimum, same.maximum, same.decimals)
+    assert field.label in i18n.catalog() and field.tip in i18n.catalog()
+    assert batch_dialog.fields("build_model", {"fill_holes": 2.5})[-1].default == 2.5
+
+    monkeypatch.setattr(batch_dialog.ParamDialog, "ask", lambda _p, _t, fields: {
+        **{f.name: f.default for f in fields}, "surface": "height_field", "fill_holes": 2.5})
+    dlg = batch_dialog.BatchDialog(chunk.document)
+    dlg.add_step("build_model")
+    step = dlg.steps()[0]
+    assert step["params"]["fill_holes"] == 2.5 and step["params"]["surface"] == "height_field"
+    assert "Chiudi i buchi fino a: 2.5" in dlg.list.item(0).text()
+    assert "Chiudi i buchi" not in batch_dialog.describe(batch.step("build_model"))  # the default is not listed
+    assert i18n.catalog()["Chiudi i buchi fino a"] == "Close holes up to"
+    dlg.deleteLater()
+    app.processEvents()
+
+
+def test_process_all_closes_the_holes(trench, monkeypatch):
+    """*Elabora tutto*: the gap to close goes to the model of the height field, and the log says how much of the
+    surface is interpolated; on the arbitrary surface it says that nothing is closed."""
+    w, app, mw = trench
+    xyz = uneven_cloud()
+    cloud = PointCloud(xyz, np.full((len(xyz), 3), 120, np.uint8))
+    ch, asked, said, answer = w.chunk, [], [], {"surface": "height_field", "fill_holes": 3.5}
+
+    def ask(_parent, title, fields, intro=""):
+        asked.append({f.name: f for f in fields})
+        return {**{f.name: f.default for f in fields}, "markers": False, "texture": False, "dem": False,
+                "ortho": False, "report": False, **answer}
+
+    kinds = type(ch)
+    built = []
+    real = kinds.build_model
+    monkeypatch.setattr(mw.ParamDialog, "ask", ask)
+    monkeypatch.setattr(w, "_need_chunk", lambda *a, **k: True)
+    monkeypatch.setattr(w, "_photos_to_skip", lambda *a, **k: False)
+    monkeypatch.setattr(w.log_pane, "warning", lambda text, *a: said.append(text))
+    monkeypatch.setattr(mw.MainWindow, "_show_model", lambda self, kind: None)
+    monkeypatch.setattr("pyarchinit_photogrammetry.markers.gcp.preflight", lambda chunk: None)
+    for name in ("align_cameras", "build_depth_maps"):
+        monkeypatch.setattr(kinds, name, lambda self, *a, **k: None)
+    monkeypatch.setattr(kinds, "match_photos", lambda self, *a, **k: self.cameras.clear())
+    monkeypatch.setattr(kinds, "build_point_cloud", lambda self, **k: setattr(self, "point_cloud", cloud))
+    monkeypatch.setattr(kinds, "build_model", lambda self, *a, **k: (
+        built.append(k), real(self, *a, **{**k, "face_count": 10 ** 9}) if k["surface"] == "height_field" else None)[1])
+
+    def run():
+        ch.cameras.append(object())  # a photo, so that the window opens: the made-up matching takes it away
+        w.process_all()
+        w.runner.wait()
+        app.processEvents()
+
+    run()
+    field = asked[0]["fill_holes"]
+    assert (field.default, field.minimum, field.maximum, field.decimals) == (0.0, 0.0, 1000.0, 3)
+    assert list(asked[0]).index("fill_holes") == list(asked[0]).index("surface") + 1
+    assert built[0]["fill_holes"] == 3.5
+    report = ch.meta["model"]
+    assert report["fill_holes"] == 3.5 and report["holes_filled"] >= 1
+    assert said and "interpolati (non misurati)" in said[-1]
+
+    said.clear()
+    answer.update(surface="arbitrary")
+    run()
+    assert built[1]["fill_holes"] == 3.5 and any("solo nel campo di altezze" in t for t in said)
+    answer.update(fill_holes=0.0)
+    run()
+    assert built[2]["fill_holes"] is None

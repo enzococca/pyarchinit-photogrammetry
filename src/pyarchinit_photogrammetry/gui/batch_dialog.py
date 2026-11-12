@@ -68,7 +68,12 @@ def fields(op: str, params: dict) -> list[Field]:
                 Field("surface", "Superficie", p["surface"], choices=[("arbitrary", "Arbitraria (3D)"),
                                                                       ("height_field", "Campo di altezze (2,5D)")]),
                 Field("face_count", "Facce", p["face_count"], choices=[("low", "Poche"), ("medium", "Medie"),
-                                                                       ("high", "Molte")])]
+                                                                       ("high", "Molte")]),
+                # as in the model dialog (main_window.build_model): same words, 0 = nothing is closed
+                Field("fill_holes", "Chiudi i buchi fino a (m, 0 = nessuno)", float(p["fill_holes"] or 0.0),
+                      minimum=0.0, maximum=1000.0, decimals=3,
+                      tip="Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati "
+                          "fino a questa misura. La parte chiusa è interpolata, non misurata.")]
     if op == "build_texture":
         return [Field("texture_size", "Lato della texture (px)", p["texture_size"], minimum=512, maximum=32768),
                 Field("mapping", "Mappatura", p["mapping"], choices=[("auto", "Automatica"),

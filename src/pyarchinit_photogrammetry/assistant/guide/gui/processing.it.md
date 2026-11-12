@@ -188,7 +188,9 @@ delle foto intatte di 0,3 livelli nelle basse frequenze (25 senza correzione).
 ### Elabora tutto
 
 *Flusso di lavoro > Elabora tutto...* (++ctrl+r++) fa tutti i passi in fila con le scelte predefinite; con un file
-di progetto scrive anche il rapporto HTML.
+di progetto scrive anche il rapporto HTML. Con la superficie a *campo di altezze*, **Chiudi i buchi fino a**
+(metri, 0 = nessuno) chiude i buchi del modello come in [*Costruisci modello*](#modello): la parte chiusa è
+interpolata, non misurata, e il log dice quanta è.
 
 ## Versioni
 
@@ -605,6 +607,11 @@ la migliore delle foto scelte che la vede.
 precisione e il controllo sul campo - ognuno su tutti i chunk o su quelli scelti, con i suoi parametri (*Aggiungi*
 per gruppo, *Modifica* o doppio clic, *Su* / *Giù*, *Carica* / *Salva* come JSON), i tentativi per un passo che
 fallisce e cosa fare allora.
+
+Il passo *Modello 3D* ha lo stesso **Chiudi i buchi fino a** (metri, 0 = nessuno) di
+[*Costruisci modello*](#modello): chiude i buchi solo nel *campo di altezze*, e il log dice quanti buchi sono
+stati chiusi e quanti metri quadrati in pianta sono interpolati, non misurati. Un file di batch salvato prima che
+il campo esistesse si legge con 0: non si chiude niente.
 
 Il progetto viene salvato dopo ogni passo; se il batch si ferma (mancanza di corrente, arresto improvviso,
 *Annulla*) la volta dopo propone di ripartire da dove si era fermato. I passi falliti sono elencati nel log.

@@ -38,7 +38,8 @@ OPERATIONS: dict[str, dict] = {
     "field_check": {"min_photos": 3},
     "build_depth_maps": {"quality": "medium", "filter_mode": "moderate", "skip_unreadable": False},
     "build_point_cloud": {},
-    "build_model": {"source": "point_cloud", "surface": "arbitrary", "face_count": "medium"},
+    # fill_holes: the largest gap to close in the height field, in metres (0: none; the closed part is interpolated)
+    "build_model": {"source": "point_cloud", "surface": "arbitrary", "face_count": "medium", "fill_holes": 0.0},
     "build_texture": {"texture_size": 4096, "mapping": "auto", "skip_unreadable": False},
     "build_dem": {"resolution": None, "source": "point_cloud"},
     "build_orthomosaic": {"resolution": None, "blending": "mosaic", "skip_unreadable": False},
@@ -128,7 +129,24 @@ def run_step(doc, chunk, op: str, params: dict, progress: Progress | None = None
         path = Path(p.pop("path"))
         path.parent.mkdir(parents=True, exist_ok=True)
         return getattr(chunk, op)(path, **p)
+    if op == "build_model":
+        return _build_model(chunk, p, progress)
     return getattr(chunk, op)(progress=progress, **p)
+
+
+def _build_model(chunk, p: dict, progress: Progress):
+    """The model of a step: ``fill_holes`` closes the holes of the height field only (0: none), and the log says
+    how much of the surface is interpolated, as the model dialog does."""
+    fill = p.pop("fill_holes", None) or None
+    if fill and p.get("surface") != "height_field":
+        log.warning("Batch: %s: holes are closed only in the height field, the arbitrary surface is already closed",
+                    chunk.label)
+    model = chunk.build_model(fill_holes=fill, progress=progress, **p)
+    report = chunk.meta.get("model") or {}
+    if report.get("holes_filled"):
+        log.warning("Batch: %s: %d holes closed, %.2f m2 in plan are interpolated, not measured", chunk.label,
+                    report["holes_filled"], report.get("interpolated_area", 0.0))
+    return model
 
 
 def _key(chunk, index: int) -> str:
@@ -149,9 +167,18 @@ def pending(doc, steps: list[dict] | None = None) -> dict | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if state.get("finished") or (steps is not None and state.get("steps") != steps):
+    if state.get("finished") or (steps is not None and _completed(state.get("steps")) != steps):
         return None
     return state
+
+
+def _completed(steps) -> list | None:
+    """The steps of a saved state with the parameters added since it was written at their defaults, so a batch
+    stopped under an earlier version is still the same batch; None when they are not steps."""
+    try:
+        return [step(s["op"], s.get("chunks", "all"), **(s.get("params") or {})) for s in steps]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def run_batch(doc, steps: list[dict], resume: bool = True, retries: int = 1, on_error: str = "continue",

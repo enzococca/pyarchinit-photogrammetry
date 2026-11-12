@@ -1255,10 +1255,12 @@ when it has one, `action.drop()` when the entry leaves the history. A script is 
 `build_depth_maps`, `build_point_cloud`, `build_model`, `build_texture`, `build_dem`,
 `build_orthomosaic`, `calibrate_colours`, `estimate_precision`, `export_point_cloud`,
 `export_model`, `export_dem`, `export_orthomosaic`, `generate_report`. Paths may use `{project}`,
-`{name}`, `{chunk}`.
+`{name}`, `{chunk}`. `build_model` takes `fill_holes` (metres, 0 = none: the largest gap of the
+[height field](#height-field) to close; the closed part is interpolated, and the log says how much).
 
 **`batch.run_batch(...)`** saves the project after each step of each chunk with the state in
-`<project>.ppg.files/batch.json`; `resume`: an unfinished batch with the same steps goes on (done
+`<project>.ppg.files/batch.json`; `resume`: an unfinished batch with the same steps (one stopped before a
+parameter was added counts as the same) goes on (done
 steps are not run again, failed ones are tried again); a failing step is retried `retries` times,
 then the next steps of its chunk are skipped (or `BatchError` with `on_error="stop"`).
 

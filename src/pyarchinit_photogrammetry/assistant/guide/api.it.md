@@ -1290,10 +1290,13 @@ c'è, `action.drop()` quando la voce esce dalla cronologia. Uno script è un pas
 `build_depth_maps`, `build_point_cloud`, `build_model`, `build_texture`, `build_dem`,
 `build_orthomosaic`, `calibrate_colours`, `estimate_precision`, `export_point_cloud`,
 `export_model`, `export_dem`, `export_orthomosaic`, `generate_report`. I percorsi possono usare
-`{project}`, `{name}`, `{chunk}`.
+`{project}`, `{name}`, `{chunk}`. `build_model` accetta `fill_holes` (metri, 0 = nessuno: il vuoto più
+largo del [campo di altezze](#campo-di-altezze) da chiudere; la parte chiusa è interpolata, e il log dice
+quanta).
 
 **`batch.run_batch(...)`** salva il progetto dopo ogni passo di ogni chunk con lo stato in
-`<progetto>.ppg.files/batch.json`; `resume`: un batch non finito con gli stessi passi prosegue (i
+`<progetto>.ppg.files/batch.json`; `resume`: un batch non finito con gli stessi passi (uno fermato prima
+che un parametro fosse aggiunto è lo stesso) prosegue (i
 passi fatti non vengono rilanciati, quelli falliti vengono riprovati); un passo che fallisce viene
 riprovato `retries` volte, poi i passi successivi del suo chunk vengono saltati (oppure `BatchError`
 con `on_error="stop"`).
