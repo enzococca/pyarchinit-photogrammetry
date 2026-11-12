@@ -205,7 +205,8 @@ class Chunk:
             p = Path(p)
             if p.is_dir():
                 it = p.rglob("*") if recursive else p.iterdir()
-                files += sorted(f for f in it if f.suffix.lower() in IMAGE_EXTENSIONS)
+                # hidden files are not photos: macOS leaves an AppleDouble "._name.JPG" beside each photo on exFAT
+                files += sorted(f for f in it if f.suffix.lower() in IMAGE_EXTENSIONS and not f.name.startswith("."))
             else:
                 files.append(p)
         added = []

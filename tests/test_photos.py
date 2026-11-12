@@ -81,3 +81,23 @@ def test_relink_photos_to_another_folder(processed, tmp_path):
         linked = (tmp_path / folder / names[str(cam.key)]).resolve()
         assert linked == (other / Path(cam.path).name).resolve() or linked.parent == copy.resolve()
     assert ch.unreadable_photos() == []
+
+
+def test_add_photos_skips_the_hidden_files_of_a_folder(tmp_path):
+    """A folder copied from a Mac to an exFAT disk holds an AppleDouble file `._name.JPG` beside each photo:
+    it has the extension of a photo and is not one, and adding the folder stopped with UnidentifiedImageError."""
+    import numpy as np
+    from PIL import Image
+
+    import pyarchinit_photogrammetry as ppg
+
+    folder = tmp_path / "photos"
+    (folder / "sub").mkdir(parents=True)
+    for name in ("a.jpg", "sub/b.jpg"):
+        Image.fromarray(np.full((40, 60, 3), 120, np.uint8)).save(folder / name)
+        hidden = (folder / name).with_name("._" + Path(name).name)
+        hidden.write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 60)
+    doc = ppg.Document()
+    ch = doc.add_chunk("c")
+    assert [c.label for c in ch.add_photos([folder])] == ["a"]
+    assert [c.label for c in ch.add_photos([folder], recursive=True)] == ["b"]
