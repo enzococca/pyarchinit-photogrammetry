@@ -925,6 +925,134 @@ def test_metashape_internal_dem(tmp_path):
     assert after == before  # no .aux.xml or other file left in the Metashape project
 
 
+def test_metashape_geographic_raster_is_not_the_chunk_crs(tmp_path):
+    """A GeoTIFF exported in WGS 84 beside the project: its CRS in degrees does not become the
+    CRS of the chunk (the DEM and the orthophoto built at a resolution in metres came out a few
+    pixels wide); the chunk is in the UTM zone of the site and the raster is reported, not linked."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    step = 0.002 / 64
+    with rasterio.open(psx.parent / "scavo_dem.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="float32", crs="EPSG:4326", transform=from_origin(36.799, 35.801, step, step)) as dst:
+        dst.write(np.full((1, 64, 64), 300.0, "float32"))
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "EPSG:32637" and ch.meta["import"]["frame"] == "exact"
+    centres = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+    assert np.linalg.norm(centres[1] - centres[0]) == pytest.approx(20.0, abs=0.05)  # metres, not degrees
+    assert "dem" not in ch.products
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert "scavo_dem.tif è in coordinate geografiche (EPSG:4326)" in warnings
+    # a projected raster still gives its CRS to the chunk
+    psx2, _, _ = make_psx(tmp_path / "src2", n_grid=5)
+    with rasterio.open(psx2.parent / "scavo_dem.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="float32", crs="EPSG:32636", transform=from_origin(1.11e6, 3.99e6, 100.0, 100.0)) as dst:
+        dst.write(np.full((1, 64, 64), 300.0, "float32"))
+    ch2 = ms.import_psx(psx2, tmp_path / "out2" / "p.ppg", with_model=False).chunk
+    assert ch2.crs == "EPSG:32636"
+    # nor does a geocentric one (Metashape exports in the frame of a project referenced in ECEF)
+    psx3, _, _ = make_psx(tmp_path / "src3", n_grid=5)
+    with rasterio.open(psx3.parent / "scavo_ortho.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="uint8", crs="EPSG:4978", transform=from_origin(4.0e6, 3.0e6, 1.0, 1.0)) as dst:
+        dst.write(np.full((1, 64, 64), 100, "uint8"))
+    ch3 = ms.import_psx(psx3, tmp_path / "out3" / "p.ppg", with_model=False).chunk
+    assert ch3.crs == "EPSG:32637" and "orthomosaic" not in ch3.products
+    assert "scavo_ortho.tif è in coordinate geocentriche (EPSG:4978)" in " | ".join(ch3.meta["import"]["warnings"])
+
+
+def _break_georeference(psx: Path, extra: str = "") -> None:
+    """The chunk transform of a project referenced by the GPS of a phone: a scale of 1.7e5 and a
+    translation inside the Earth; ``extra``: XML put before ``<frames>``."""
+    chunk_zip = psx.with_suffix(".files") / "0" / "chunk.zip"
+    with zipfile.ZipFile(chunk_zip) as z:
+        xml = z.read("doc.xml").decode()
+    xml = re.sub(r"<translation>.*?</translation><scale>.*?</scale>",
+                 "<translation>1200000 -800000 2500000</translation><scale>170000</scale>", xml)
+    _zip(chunk_zip, {"doc.xml": xml.replace("<frames>", extra + "<frames>")})
+
+
+def test_metashape_broken_georeference_comes_in_local(tmp_path):
+    """A chunk transform that puts the cameras nowhere on the Earth (the conversion to the CRS gave
+    no finite coordinates and the import stopped with "SVD did not converge"): the chunk comes in
+    local coordinates, in Metashape's internal units, with a warning."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    _add_internal_dem(psx)
+    _break_georeference(psx)
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg").chunk
+    assert ch.crs == "LOCAL" and np.allclose(ch.transform, np.eye(4))
+    assert len(ch.aligned_cameras) == 4 and len(ch.tie_points) == 1000
+    centres = np.array([c.center for c in ch.aligned_cameras])
+    assert np.allclose(centres[:, 2], 100.0) and np.ptp(centres[:, 0]) == pytest.approx(40.0)
+    assert np.isfinite(ch.to_world(ch.tie_points.xyz)).all()
+    assert "dem" not in ch.products  # Metashape's DEM lies in the broken reference
+    from pyarchinit_photogrammetry.io.mesh_ply import PlyMesh
+
+    assert np.abs(PlyMesh(ch.product_path("model")).xyz()[:, :2]).max() == pytest.approx(50.0)  # internal units
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert "georeferenziazione non valida" in warnings and "unità interne di Metashape" in warnings
+
+
+def test_metashape_conversion_without_finite_coordinates(tmp_path, monkeypatch):
+    """The conversion to the CRS gives no finite coordinates for the camera centres: the import stopped in
+    the fit of the rotations ("SVD did not converge"). The chunk comes in local coordinates, in metres
+    with the scale of Metashape's transform, and the message is translated."""
+    from pyarchinit_photogrammetry.gui import i18n
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    with pytest.raises(np.linalg.LinAlgError):  # what the rotations do with such a conversion
+        ms.reframe_cameras([np.eye(4)], lambda pts: np.full((len(pts), 3), np.inf), 1.0)
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    monkeypatch.setattr(ms, "crs_mapper", lambda *a, **k: (lambda pts: np.full((len(pts), 3), np.inf)))
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "LOCAL" and np.allclose(ch.transform, np.diag([0.5, 0.5, 0.5, 1.0]))
+    centres = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+    assert np.allclose(centres[:, 2], 50.0) and np.ptp(centres[:, 0]) == pytest.approx(20.0)
+    warning = next(w for w in ch.meta["import"]["warnings"] if "georeferenziazione non valida" in w)
+    assert "EPSG:32637 non dà coordinate finite" in warning and "scala di Metashape" in warning
+    i18n.set_current("en")
+    try:
+        assert i18n.translate(warning).startswith("Chunk 1: georeference not valid (the conversion to EPSG:32637")
+    finally:
+        i18n.set_current("it")
+
+
+def test_metashape_broken_georeference_scaled_by_its_bars(tmp_path):
+    """The same project with a scale bar between two markers: local coordinates in metres."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    ground = {0: (-10.0, -10.0), 1: (10.0, -10.0)}  # internal, z = 0: 20 units apart
+    _break_georeference(psx, '<markers next_id="2"><marker id="0" label="A"><reference x="36.8" y="35.8" z="300" '
+                             'enabled="true"/></marker><marker id="1" label="B"/></markers>'
+                             '<scalebars next_id="1"><scalebar id="0" label="A_B"><endpoint marker_id="0"/>'
+                             '<endpoint marker_id="1"/><reference d="10" enabled="true"/></scalebar></scalebars>')
+    frame_zip = psx.with_suffix(".files") / "0" / "0" / "frame.zip"
+    with zipfile.ZipFile(frame_zip) as z:
+        frame = z.read("doc.xml").decode()
+    centres = [(-20, -20), (20, -20), (-20, 20), (20, 20)]  # cameras 100 units up, looking down, f 3000 px
+    seen = "".join(f'<marker marker_id="{i}">' + "".join(
+        f'<location camera_id="{c}" pinned="true" x="{2000 + 30 * (x - cx):.4f}" y="{1500 + 30 * (cy - y):.4f}"/>'
+        for c, (cx, cy) in enumerate(centres)) + "</marker>" for i, (x, y) in ground.items())
+    _zip(frame_zip, {"doc.xml": frame.replace("</cameras>", f"</cameras><markers>{seen}</markers>")})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "LOCAL" and ch.scale == pytest.approx(0.5, rel=1e-6)
+    assert not ch.marker("A").reference.enabled  # coordinates of the broken reference: not control in a local frame
+    # in metres of the UTM zone of the references (not in degrees): ticked, with that CRS set, they place the chunk
+    from pyproj import Transformer
+
+    expected = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True).transform(36.8, 35.8, 300.0)
+    assert ch.marker("A").reference.location == pytest.approx(list(expected), abs=1e-3)
+    assert ch.meta["import"]["references_crs"] == "EPSG:32637"
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert "georeferenziazione non valida" in warnings and "barre di scala" in warnings
+    assert "riferimenti dei marker sono in EPSG:32637" in warnings
+
+
 def test_metashape_model_reimported_with_texture(tmp_path):
     """A project imported before the texture was read (or whose model lost its colours) gets the
     model of Metashape back with colours and texture; the model in use stays as a version."""

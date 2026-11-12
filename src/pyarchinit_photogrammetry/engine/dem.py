@@ -81,6 +81,133 @@ def surface_points_world(chunk: Chunk, source: str, classes=None) -> np.ndarray:
     return chunk.to_world(pts)
 
 
+STREAM_FACES = 2_000_000  # models from this many faces on are sampled block by block (below: evenly, at once)
+FACE_BLOCK = 250_000  # faces read at a time
+SAMPLE_BLOCK = 2_000_000  # surface points made at a time
+
+
+class ModelSurface:
+    """The surface points :func:`surface_points_world` takes from a large model - eight per face,
+    spread by area, and the vertices - made a block of faces at a time and put straight on the grid
+    of the DEM, never all together: at once they took about 1.5 kB of memory per face (9 GB for a
+    model of 4.5 million faces; a model of 1.3 GB did not fit in 24 GB and the system ended the
+    program without a word). Here the memory is the vertex coordinates of the model, as the file
+    holds them (12 bytes per vertex in single precision), a few blocks of points and the grid.
+
+    The mesh is read through :class:`..io.mesh_ply.PlyMesh` (memory-mapped faces). The points of a
+    block of faces come from a random generator seeded with the block: two passes over the model
+    give the same points (the spacing first, when the resolution is not given, then the grid) and
+    the same model gives the same DEM."""
+
+    def __init__(self, chunk: Chunk, mesh, seed: int = 0):
+        from .satellite import _physical_memory
+
+        self.chunk, self.mesh, self.seed = chunk, mesh, seed
+        coord = np.result_type(*(mesh.vertex_dtype[k] for k in "xyz"))
+        need = mesh.n_vertices * 3 * coord.itemsize
+        ram = _physical_memory()
+        if need > 0.6 * ram:
+            raise MemoryError(
+                f"the model has {mesh.n_vertices / 1e6:.0f} million vertices: their coordinates take "
+                f"{need / 1e9:.1f} GB and this computer has {ram / 1e9:.0f} GB of memory; decimate the model "
+                "or build the DEM from the dense cloud")
+        self.xyz = np.empty((mesh.n_vertices, 3), coord)
+        lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+        for start in range(0, mesh.n_vertices, SAMPLE_BLOCK):
+            v = mesh.vertices[start:start + SAMPLE_BLOCK]
+            for k, name in enumerate("xyz"):
+                self.xyz[start:start + SAMPLE_BLOCK, k] = v[name]
+            world = chunk.to_world(self.xyz[start:start + SAMPLE_BLOCK])
+            lo, hi = np.minimum(lo, world.min(axis=0)), np.maximum(hi, world.max(axis=0))
+        self.bounds = (lo[0], lo[1], hi[0], hi[1])  # of all the points: the samples lie inside their faces
+        self.samples = max(200_000, mesh.n_faces * 8)
+        self.count = self.samples + mesh.n_vertices
+        self._areas = np.array([self._face_areas(self._triangles(start)).sum()
+                                for start in range(0, mesh.n_faces, FACE_BLOCK)])
+
+    def _triangles(self, start: int) -> np.ndarray:
+        faces = np.asarray(self.mesh._faces[self.mesh.index_field][start:start + FACE_BLOCK])
+        return self.xyz[faces].astype(np.float64)  # (faces, 3 corners, 3)
+
+    @staticmethod
+    def _face_areas(tri: np.ndarray) -> np.ndarray:
+        area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        return np.nan_to_num(area, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def blocks(self):
+        """The points in world coordinates, a block at a time: the vertices, then the samples of each
+        block of faces, as many as its share of the area of the model."""
+        for start in range(0, self.mesh.n_vertices, SAMPLE_BLOCK):
+            yield self.chunk.to_world(self.xyz[start:start + SAMPLE_BLOCK])
+        total = float(self._areas.sum())
+        if total <= 0:
+            return
+        upto = np.rint(self.samples * np.cumsum(self._areas) / total).astype(np.int64)
+        share = np.diff(upto, prepend=0)
+        for b, start in enumerate(range(0, self.mesh.n_faces, FACE_BLOCK)):
+            if share[b] <= 0:
+                continue
+            tri = self._triangles(start)
+            cum = np.cumsum(self._face_areas(tri))
+            rng = np.random.default_rng([self.seed, b])
+            for done in range(0, int(share[b]), SAMPLE_BLOCK):
+                k = min(SAMPLE_BLOCK, int(share[b]) - done)
+                face = np.minimum(np.searchsorted(cum, rng.random(k) * cum[-1], side="right"), len(cum) - 1)
+                u, v = rng.random(k), rng.random(k)
+                fold = u + v > 1.0  # the half of the parallelogram outside the triangle, folded back
+                u[fold], v[fold] = 1.0 - u[fold], 1.0 - v[fold]
+                t = tri[face]
+                pts = t[:, 0] + u[:, None] * (t[:, 1] - t[:, 0]) + v[:, None] * (t[:, 2] - t[:, 0])
+                yield self.chunk.to_world(pts)
+
+    def spacing(self) -> float:
+        """:func:`point_spacing` of the points, without holding them."""
+        xmin, ymin, xmax, ymax = self.bounds
+        box = float((xmax - xmin) * (ymax - ymin))
+        if box <= 0:
+            return 0.0
+        cell = 10.0 * np.sqrt(box / self.count)
+        c0, r0 = int(np.floor(xmin / cell)), int(np.floor(ymin / cell))
+        w, h = int(np.floor(xmax / cell)) - c0 + 1, int(np.floor(ymax / cell)) - r0 + 1
+        seen = np.zeros(w * h, bool)
+        for pts in self.blocks():
+            col = np.clip(np.floor(pts[:, 0] / cell).astype(np.int64) - c0, 0, w - 1)
+            row = np.clip(np.floor(pts[:, 1] / cell).astype(np.int64) - r0, 0, h - 1)
+            seen[row * w + col] = True
+        occupied = int(seen.sum()) * cell * cell
+        return float(np.sqrt(min(occupied, box) / self.count))
+
+    def grid(self, resolution: float, progress: Progress | None = None):
+        """:func:`grid_points` of the points (the highest in each cell): ``(array, (xmin, ymax))``."""
+        xmin, ymax, w, h = _grid_frame(self.bounds, resolution)
+        arr = np.full(w * h, -np.inf)
+        done = 0
+        for pts in self.blocks():
+            idx, z = _grid_cells(pts, xmin, ymax, w, h, resolution)
+            np.maximum.at(arr, idx, z)
+            done += len(pts)
+            if progress is not None:
+                progress(done / self.count, f"Model surface: {done / 1e6:.0f} of {self.count / 1e6:.0f} million points")
+        arr[~np.isfinite(arr)] = np.nan
+        return arr.reshape(h, w), (xmin, ymax)
+
+
+def model_surface(chunk: Chunk) -> ModelSurface | None:
+    """The model of the chunk as a :class:`ModelSurface` when it is large (``STREAM_FACES`` faces or
+    more) and its file can be read in blocks; None for a smaller one, sampled at once as before, and
+    for the files only trimesh reads."""
+    from ..io.mesh_ply import PlyMesh
+
+    path = chunk.product_path("model")
+    if not path or not path.exists():
+        raise RuntimeError("build the model first")
+    try:
+        mesh = PlyMesh(path)
+    except (ValueError, KeyError, OSError):
+        return None
+    return ModelSurface(chunk, mesh) if mesh.n_faces >= STREAM_FACES else None
+
+
 def point_spacing(xy: np.ndarray) -> float:
     """Mean distance between neighbouring points over the ground they cover: the occupied cells
     of a grid ten times coarser than an even spread over their box, so that the empty corners of a
@@ -135,22 +262,31 @@ def remove_spikes(dem: np.ndarray, resolution: float) -> tuple[np.ndarray, int]:
     return out, int(spikes.sum())
 
 
-def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = "max"):
-    """Rasterise points; returns ``(array, (xmin, ymax), shape)``. Empty cells = NaN."""
-    if bounds is None:
-        xmin, ymin = pts[:, 0].min(), pts[:, 1].min()
-        xmax, ymax = pts[:, 0].max(), pts[:, 1].max()
-    else:
-        xmin, ymin, xmax, ymax = bounds
+def _grid_frame(bounds, resolution: float) -> tuple[float, float, int, int]:
+    """The grid of :func:`grid_points` over ``bounds`` (xmin, ymin, xmax, ymax): its left and top
+    edges, width and height in cells."""
+    xmin, ymin, xmax, ymax = bounds
     xmin = np.floor(xmin / resolution) * resolution
     ymax = np.ceil(ymax / resolution) * resolution
     w = int(np.ceil((xmax - xmin) / resolution)) + 1
     h = int(np.ceil((ymax - ymin) / resolution)) + 1
+    return xmin, ymax, w, h
+
+
+def _grid_cells(pts: np.ndarray, xmin: float, ymax: float, w: int, h: int, resolution: float):
+    """The cell (index in the flattened grid) and the height of the points that fall on the grid."""
     col = ((pts[:, 0] - xmin) / resolution).astype(np.int64)
     row = ((ymax - pts[:, 1]) / resolution).astype(np.int64)
     ok = (col >= 0) & (col < w) & (row >= 0) & (row < h)
-    idx = row[ok] * w + col[ok]
-    z = pts[ok, 2]
+    return row[ok] * w + col[ok], pts[ok, 2]
+
+
+def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = "max"):
+    """Rasterise points; returns ``(array, (xmin, ymax), shape)``. Empty cells = NaN."""
+    if bounds is None:
+        bounds = pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max()
+    xmin, ymax, w, h = _grid_frame(bounds, resolution)
+    idx, z = _grid_cells(pts, xmin, ymax, w, h, resolution)
     if reducer == "mean":
         s = np.bincount(idx, weights=z, minlength=w * h)
         n = np.bincount(idx, minlength=w * h)
@@ -343,6 +479,12 @@ def dem_from_points(pts: np.ndarray, resolution: float, reducer: str = "max", de
     (:func:`covered_ground`) up to ``max_fill`` cells from a point (default four coarse cells).
     Returns ``(dem, origin, cells removed)``."""
     dem, origin, _ = grid_points(pts, resolution, reducer=reducer)
+    dem, removed = _finish_dem(dem, resolution, despike, interpolate, max_fill)
+    return dem, origin, removed
+
+
+def _finish_dem(dem: np.ndarray, resolution: float, despike: bool, interpolate: bool, max_fill: int | None):
+    """What :func:`dem_from_points` does to the grid of the points; returns ``(dem, cells removed)``."""
     removed = 0
     if despike:
         dem, spikes = remove_spikes(dem, resolution)
@@ -358,7 +500,39 @@ def dem_from_points(pts: np.ndarray, resolution: float, reducer: str = "max", de
                             max_search_distance=max_fill or 4 * COARSE, smoothing_iterations=0)
         dem = np.where(mask, dem, filled)
         dem[~covered_ground(mask)] = np.nan  # outside the surveyed ground the cells stay empty
-    return dem, origin, removed
+    return dem, removed
+
+
+# peak memory of a DEM (the grid, then its cleaning: spikes, stray cells, pits, filling) per cell of its grid,
+# measured on a model of 25 million faces: 29 GB for 302 million cells, 18 GB for 126 million (143 bytes)
+GRID_BYTES_PER_CELL = 150
+
+
+def _fit_grid(bounds, resolution: float, asked: bool) -> float:
+    """``resolution``, or a coarser one when the grid over ``bounds`` would take more than half the memory of the
+    computer (:data:`GRID_BYTES_PER_CELL`): the resolution found by itself is made coarser, one ``asked`` is
+    refused with a MemoryError that names the coarsest that fits."""
+    from .satellite import _physical_memory
+
+    xmin, ymin, xmax, ymax = bounds
+    budget = 0.5 * _physical_memory() / GRID_BYTES_PER_CELL  # cells
+
+    def cells(res):
+        _, _, w, h = _grid_frame((xmin, ymin, xmax, ymax), res)
+        return w * h
+
+    n = cells(resolution)
+    if n <= budget:
+        return resolution
+    fit = resolution * float(np.sqrt(n / budget))
+    while cells(fit) > budget:
+        fit *= 1.01
+    if asked:
+        raise MemoryError(
+            f"a DEM at {resolution:.4g} m/px has {n / 1e6:.0f} million cells and needs about "
+            f"{n * GRID_BYTES_PER_CELL / 1e9:.0f} GB of memory, this computer has {_physical_memory() / 1e9:.0f} GB: "
+            f"choose a coarser resolution ({fit:.4g} m/px or more)")
+    return fit
 
 
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
@@ -370,23 +544,48 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
     classes = None if classes is None else sorted({int(c) for c in classes})
-    pts = surface_points_world(chunk, source, classes)
-    if resolution is None:
-        # a cell per point, as dense as the cloud (Metashape's default too): with 1.5 points per
-        # cell the DEM of the Tell Sultan sample was 1.5 times coarser and further from Metashape's.
-        # With classes, the spacing of the whole cloud: DEMs of other classes on the same grid
-        whole = pts if classes is None else surface_points_world(chunk, source, None)
-        resolution = float(max(2 * estimate_gsd(chunk), point_spacing(whole[:, :2])))
-    progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
-    dem, origin, spikes = dem_from_points(pts, resolution, reducer="max" if source != "tie_points" else "mean",
-                                          despike=despike, interpolate=interpolate,
-                                          max_fill=None if classes is None else 100)
+    asked, limited = resolution is not None, None
+    surface = model_surface(chunk) if source == "model" and classes is None else None
+    if surface is not None:  # a large model: its points go on the grid block by block, never all in memory
+        if resolution is None:
+            resolution = float(max(2 * estimate_gsd(chunk), surface.spacing()))
+        fit = _fit_grid(surface.bounds, resolution, asked)
+        if fit != resolution:
+            limited, resolution = resolution, fit
+            progress(0.1, f"DEM at {resolution:.4g} m/px instead of {limited:.4g}: the grid must fit in the memory")
+        progress(0.1, f"Rasterising DEM at {resolution:.4g} m/px")
+        dem, origin = surface.grid(resolution, progress.sub(0.1, 0.5))
+        del surface
+        dem, spikes = _finish_dem(dem, resolution, despike, interpolate, None)
+    else:
+        pts = surface_points_world(chunk, source, classes)
+        if resolution is None:
+            # a cell per point, as dense as the cloud (Metashape's default too): with 1.5 points per
+            # cell the DEM of the Tell Sultan sample was 1.5 times coarser and further from Metashape's.
+            # With classes, the spacing of the whole cloud: DEMs of other classes on the same grid
+            whole = pts if classes is None else surface_points_world(chunk, source, None)
+            resolution = float(max(2 * estimate_gsd(chunk), point_spacing(whole[:, :2])))
+        else:
+            whole = pts
+        # with classes, the box of the whole cloud: a DEM of other classes on the same grid
+        box = whole[:, 0].min(), whole[:, 1].min(), whole[:, 0].max(), whole[:, 1].max()
+        del whole
+        fit = _fit_grid(box, resolution, asked)
+        if fit != resolution:
+            limited, resolution = resolution, fit
+            progress(0.3, f"DEM at {resolution:.4g} m/px instead of {limited:.4g}: the grid must fit in the memory")
+        progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
+        dem, origin, spikes = dem_from_points(pts, resolution, reducer="max" if source != "tie_points" else "mean",
+                                              despike=despike, interpolate=interpolate,
+                                              max_fill=None if classes is None else 100)
     out = np.where(np.isfinite(dem), dem, NODATA).astype(np.float32)
     chunk._before_product_write("dem")
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
     stamps.stamp(chunk, "dem")
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}
+    if limited is not None:  # the resolution of the points, too fine for the memory
+        chunk.meta["dem"]["memory_limited"] = limited
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path
 

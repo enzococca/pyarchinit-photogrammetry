@@ -34,7 +34,7 @@ longer explanations follow the table.
 | `build_point_cloud()` | the dense cloud from the depth maps |
 | `build_model(source, surface, face_count, voxel_size, vertex_colors, classes, fill_holes)` | the mesh from `point_cloud`, `tie_points` or `depth_maps` (*Mesh from depth maps* and *Height field*, below) |
 | `build_texture(texture_size, page_size=8192)` | the texture of the model, in pages above `page_size` (*Texture pages*, below) |
-| `build_dem(resolution, source)` | the DEM, a GeoTIFF in the chunk CRS |
+| `build_dem(resolution, source)` | the DEM, a GeoTIFF in the chunk CRS; by default a cell per point. A large model (`source="model"`, 2 million faces or more) is sampled block by block; a grid that would take more than half the memory (about 150 bytes per cell while it is cleaned) gets a coarser resolution (`meta["dem"]["memory_limited"]` keeps the one of the points), a `resolution` asked that does not fit is refused with a MemoryError |
 | `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | the orthomosaic on the DEM or on the model (*Seamless orthomosaic and colour correction*) |
 | `calibrate_colours()` | exposure and vignetting of the photos (*Seamless orthomosaic and colour correction*) |
 | `export_point_cloud(path)`, `export_model(path)`, `export_dem(path)`, `export_orthomosaic(path)` | the products in world coordinates (formats and options: *Exports for the web*, *Confidence, cleaning and cropping*) |
