@@ -329,7 +329,18 @@ e riproiettati nel CRS del chunk alla risoluzione di Metashape (`dem.tif` nel pr
 adh-Dhuhur: 8 tasselli, 10.241 x 10.545 px a 5,9 cm in 30 s, 2 cm dai punti di legame, mediana).
 Il chunk viene collocato nel CRS di quei GeoTIFF, altrimenti nel CRS proiettato del progetto, o
 nella zona UTM per i progetti geografici (similarità stimata passando per il sistema geocentrico di
-Metashape).
+Metashape). Un GeoTIFF esportato in coordinate geografiche (gradi, per esempio EPSG:4326) o geocentriche non dà il
+suo CRS al chunk e non viene collegato come DEM o ortofoto: l'importazione lo segnala, e al suo
+posto si usa il DEM conservato dentro il progetto.
+
+Una georeferenziazione inutilizzabile - camere che la trasformazione del chunk mette lontano dalla
+superficie terrestre, o una conversione nel CRS che non dà coordinate finite - non ferma
+l'importazione: il chunk arriva in coordinate locali, con un avviso che ne dice il motivo. È in
+metri quando la scala è nota (quella di Metashape, o quella delle barre di scala), altrimenti nelle
+unità interne di Metashape; i riferimenti dei marker restano, senza spunta, in metri (nel CRS
+proiettato del progetto o nella zona UTM dei riferimenti, indicati nell'avviso), e i GeoTIFF
+esportati non vengono collegati. Per collocare il chunk, impostare quel CRS (*Sistema di
+riferimento*), spuntare i riferimenti giusti e lanciare *Aggiorna georeferenziazione*.
 
 Dalle pose importate viene scritto un modello COLMAP, così *Nuvola densa*, *Modello*, *DEM* e
 *Ortofoto* girano qui senza allineare di nuovo (le foto devono stare dove dice il progetto).
