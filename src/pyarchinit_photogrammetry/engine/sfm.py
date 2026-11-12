@@ -151,6 +151,8 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
     whose parent folders match the old path best wins. The common folder of the photos
     (``meta["sfm"]["image_root"]``) follows when every photo of the model is now under one
     folder with the same relative names; otherwise :func:`photo_folder` links them."""
+    from ..core.chunk import IMAGE_EXTENSIONS
+    from ..io.raw import RAW_EXTENSIONS
     from .visibility import unreadable_photos
 
     folder = Path(folder)
@@ -160,12 +162,14 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
     for dirpath, _dirs, files in os.walk(folder):
         for f in files:
             path = Path(dirpath) / f
-            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".dng"}:
+            if path.suffix.lower() in IMAGE_EXTENSIONS or path.suffix.lower() in RAW_EXTENSIONS:
                 index.setdefault(f.lower(), []).append(path)
     cams = chunk.unreadable_photos(chunk.cameras) if only_unreadable else list(chunk.cameras)
     relinked, not_found = 0, []
+    again = []  # developed raw files: the raw is what was moved, the copy in the project is made again from it
     for cam in cams:
-        old = Path(cam.path)
+        source = cam.meta.get("raw") if isinstance(cam.meta.get("raw"), dict) else None
+        old = Path(source["path"] if source else cam.path)
         found = []
         for cand in index.get(old.name.lower(), []):
             try:
@@ -186,9 +190,17 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
             return n
 
         best = max(found, key=common_tail)
-        if not _same_file(best, old):
+        if source:
+            if not _same_file(best, old):
+                source["path"] = str(best.resolve())
+                relinked += 1
+            if not Path(cam.path).is_file():
+                again.append(cam)
+        elif not _same_file(best, old):
             cam.path = str(best.resolve())
             relinked += 1
+    if again:
+        chunk.develop_raw_photos(cameras=again)
     sfm = chunk.meta.get("sfm")
     if sfm and sfm.get("names"):
         by_key = {str(c.key): Path(c.path).resolve() for c in chunk.cameras}

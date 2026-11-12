@@ -361,6 +361,12 @@ def run_checks(gui: bool = True) -> Report:
             pass
     r.add("E57 scans (pye57)", OK if v else WARN, v or "missing (E57 import and export disabled; PTX works)",
           "" if v else "pip install \"pyarchinit-photogrammetry[scans]\"")
+    from .io import raw as rawio
+
+    v = rawio.version()
+    r.add("Camera raw files (rawpy)", OK if v else WARN,
+          v or "missing (DNG, CR2, NEF, ARW... cannot be added: export the photos to JPEG or TIFF)",
+          "" if v else "pip install \"pyarchinit-photogrammetry[raw]\"")
     from .ai import sam_env
 
     mode = sam_env.available()

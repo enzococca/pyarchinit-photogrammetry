@@ -14,6 +14,7 @@ import numpy as np
 
 from ..core.camera import Camera
 from ..core.chunk import IMAGE_EXTENSIONS, Chunk
+from ..io.raw import is_raw, shot_key
 from . import dji
 
 # what a set of shots was read from: a DJI MRK, the external events of a RINEX file, the TIM-TM2 messages of a u-blox
@@ -192,6 +193,15 @@ def _folder_of(shotset: ShotSet, photos_folder: str | Path | None) -> Path:
     return Path(files[0]).parent
 
 
+def _one_per_shot(files, cameras: dict) -> list[Path]:
+    """``files`` by name, one per shot: of a raw and an image with the same name (a camera set to raw + JPEG) the
+    one that is a photo of the chunk, else the image."""
+    shots: dict[tuple, Path] = {}
+    for f in sorted(files, key=lambda f: (f.resolve() not in cameras, is_raw(f), f.name)):
+        shots.setdefault(shot_key(f), f)
+    return sorted(shots.values(), key=lambda f: f.name)
+
+
 def pair(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None, *, by: str = "auto",
          latency_s: float = 0.0) -> Pairing:
     """The photos of ``photos_folder`` (default: the folder of the file of the shots) paired with the shots of
@@ -216,9 +226,9 @@ def pair(chunk: Chunk, shotset: ShotSet, photos_folder: str | Path | None = None
         raise ValueError(f"by must be one of {', '.join(BY)}, not {by!r}")
     name, noun = shotset.name or shotset.kind, "MRK" if shotset.kind == "mrk" else "source"
     folder = _folder_of(shotset, photos_folder)
-    files = sorted((f for f in folder.iterdir() if f.is_file() and not f.name.startswith(".")
-                    and f.suffix.lower() in IMAGE_EXTENSIONS), key=lambda f: f.name)
-    cameras = {Path(c.path).resolve(): c for c in chunk.cameras}
+    cameras = chunk.photo_sources()  # a developed raw is its camera's photo: the raw file is the one in the folder
+    files = _one_per_shot((f for f in folder.iterdir() if f.is_file() and not f.name.startswith(".")
+                           and (f.suffix.lower() in IMAGE_EXTENSIONS or is_raw(f))), cameras)
     in_chunk = [cameras.get(f.resolve()) for f in files]
     valid = [s for s in shotset.shots if s.valid]
     invalid = [s for s in shotset.shots if not s.valid]

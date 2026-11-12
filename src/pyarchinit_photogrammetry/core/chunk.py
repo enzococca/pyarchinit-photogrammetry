@@ -25,7 +25,8 @@ from .progress import ProgressCallback, as_progress
 if TYPE_CHECKING:  # pragma: no cover
     from .document import Document
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".dng"}
+# the images read as they are; the camera raw files (io.raw.RAW_EXTENSIONS, DNG among them) are developed first
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
 # Downscale factor per quality level (same scale of values a photogrammetrist expects).
 QUALITY_DOWNSCALE = {"ultra": 1, "highest": 1, "high": 2, "medium": 4, "low": 8, "lowest": 16}
@@ -191,34 +192,62 @@ class Chunk:
         return geometry.apply(np.linalg.inv(self.transform), points)
 
     # ----------------------------------------------------------------- photos
-    def add_photos(self, paths: Iterable[str | os.PathLike], *, recursive: bool = False) -> list[Camera]:
+    def add_photos(self, paths: Iterable[str | os.PathLike], *, recursive: bool = False, raw: dict | None = None,
+                   prefer: str = "jpeg", progress: ProgressCallback | None = None) -> list[Camera]:
         """Add photos (files or folders). Photos sharing camera body, lens and
         resolution share one :class:`Sensor`. EXIF GPS becomes the camera reference; its accuracy comes from
         the RTK state in the XMP of DJI photos, else it is [5, 5, 10] m. With *only the fix positions* on, the
-        references of the photos added are switched off unless they are RTK fixes."""
+        references of the photos added are switched off unless they are RTK fixes.
+
+        Camera raw files (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF...: :mod:`..io.raw`, needs rawpy) are
+        developed once into the chunk folder, all in the same way, and the camera points to the developed copy:
+        ``camera.meta["raw"]`` names the raw file, whose EXIF is the camera's. ``raw``: the development
+        (``format`` "jpg" or "tif", ``quality``, ``exposure`` in EV, ``tone`` "auto", "camera", "local" or "linear", ``half_size``; default
+        :data:`..io.raw.DEFAULTS`). A raw and an image of the same shot (same folder and name) make one photo:
+        the image by default, the raw with ``prefer="raw"``; a shot already in the chunk is not added again."""
         from ..gnss.apply import accuracy, keep_only_fix, set_camera_position
         from ..gnss.dji import SOURCE_XMP
+        from ..io import raw as rawio
         from ..io.exif import read_exif
 
-        files: list[Path] = []
-        for p in paths:
-            p = Path(p)
-            if p.is_dir():
-                it = p.rglob("*") if recursive else p.iterdir()
-                # hidden files are not photos: macOS leaves an AppleDouble "._name.JPG" beside each photo on exFAT
-                files += sorted(f for f in it if f.suffix.lower() in IMAGE_EXTENSIONS and not f.name.startswith("."))
-            else:
-                files.append(p)
-        added = []
-        existing = {Path(c.path).resolve() for c in self.cameras}
+        progress = as_progress(progress)
+        files, left = rawio.photo_files(paths, IMAGE_EXTENSIONS, recursive=recursive, prefer=prefer)
+        if left:
+            from ..gui.i18n import tr
+
+            other = "JPEG" if prefer == "jpeg" else "raw"
+            progress.message(tr("{0} file non aggiunti: dello stesso scatto c'è il file {1}", len(left), other))
+        existing = set(self.photo_sources())
+        # the kinds (raw or not) of the files of each shot: a raw and an image of one shot are one photo, two
+        # images of the same name (DJI_0002.JPG and DJI_0002.png) stay two
+        shots: dict[tuple, set[bool]] = {}
+        for p in existing:
+            shots.setdefault(rawio.shot_key(p), set()).add(rawio.is_raw(p))
+        todo = []
         for f in files:
             f = f.resolve()
-            if f in existing:
+            kinds = shots.setdefault(rawio.shot_key(f), set())
+            if f in existing or (not rawio.is_raw(f)) in kinds:
                 continue
-            info = read_exif(f)
+            existing.add(f)
+            kinds.add(rawio.is_raw(f))
+            todo.append(f)
+        raws = [f for f in todo if rawio.is_raw(f)]
+        developed = rawio.develop(self.data_dir / rawio.FOLDER, raws, raw, progress) if raws else {}
+        added = []
+        for f in todo:
+            meta_raw = None
+            if f in developed:
+                d = developed[f]
+                info = {**d["info"], "width": d["width"], "height": d["height"]}
+                path, meta_raw = d["path"], d["record"]
+            else:
+                info, path = read_exif(f), f
             sensor = self._sensor_for(info)
-            cam = Camera(key=self._next_key(self.cameras), label=f.stem, path=str(f), sensor_key=sensor.key,
+            cam = Camera(key=self._next_key(self.cameras), label=f.stem, path=str(path), sensor_key=sensor.key,
                          meta={k: v for k, v in info.items() if k not in ("gps", "rtk")})
+            if meta_raw:
+                cam.meta["raw"] = meta_raw
             if info.get("gps"):
                 rtk = info.get("rtk") or {}
                 set_camera_position(cam, info["gps"], "EPSG:4326", accuracy(rtk.get("status"), rtk.get("std")),
@@ -229,6 +258,61 @@ class Chunk:
         if added:
             keep_only_fix(self)
         return added
+
+    def photo_sources(self) -> dict[Path, Camera]:
+        """The cameras by the files they come from: the photo each one reads and, for a developed raw, the raw
+        file too (resolved paths)."""
+        out: dict[Path, Camera] = {}
+        for c in self.cameras:
+            out[Path(c.path).resolve()] = c
+            source = (c.meta.get("raw") or {}).get("path")
+            if source:
+                out[Path(source).resolve()] = c
+        return out
+
+    def develop_raw_photos(self, raw: dict | None = None, cameras: Iterable[Camera] | None = None,
+                           force: bool = False, progress: ProgressCallback | None = None) -> dict:
+        """Develop again the raw files of the cameras (all, or ``cameras``): the copies that are missing, those
+        whose raw changed and, with ``raw`` (see :meth:`add_photos`), all with other settings. The size of the
+        photos must stay the one of their sensor, so ``half_size`` stays as each photo was added. Returns
+        ``{"developed": n, "missing": [labels of the cameras whose raw file is not found]}``."""
+        from ..io import raw as rawio
+
+        chosen = [c for c in (self.cameras if cameras is None else cameras) if c.meta.get("raw")]
+        missing = [c.label for c in chosen if not Path(c.meta["raw"]["path"]).is_file()]
+        chosen = [c for c in chosen if c.label not in missing]
+        groups: dict[bool, list[Camera]] = {}
+        for c in chosen:
+            groups.setdefault(bool((c.meta["raw"].get("settings") or {}).get("half_size")), []).append(c)
+        progress = as_progress(progress)
+        count = 0
+        for i, (half, cams) in enumerate(groups.items()):
+            base = cams[0].meta["raw"].get("settings") or {}
+            opts = rawio.settings({**base, **{k: v for k, v in (raw or {}).items() if v is not None},
+                                   "half_size": half})
+            sources = {Path(c.meta["raw"]["path"]): c for c in cams}
+            suffix = "." + opts["format"]
+            names = {src: Path(c.path).with_suffix(suffix).name for src, c in sources.items()}
+            before = {src: (Path(c.path).stat().st_mtime_ns if Path(c.path).is_file() else None)
+                      for src, c in sources.items()}
+            done = rawio.develop(self.data_dir / rawio.FOLDER, list(sources), opts,
+                                 progress.sub(i / len(groups), 1 / len(groups)), force=force, names=names)
+            for src, d in done.items():
+                cam = sources[src]
+                sensor = self.sensors[cam.sensor_key]
+                if (d["width"], d["height"]) != (sensor.width, sensor.height):
+                    raise ValueError(f"{cam.label}: the developed photo is {d['width']} x {d['height']}, its "
+                                     f"sensor {sensor.width} x {sensor.height}")
+                old = Path(cam.path)
+                if old.resolve() != d["path"].resolve():
+                    old.unlink(missing_ok=True)
+                elif before[src] == d["path"].stat().st_mtime_ns:
+                    cam.meta["raw"] = d["record"]
+                    continue
+                cam.path, cam.meta["raw"] = str(d["path"]), d["record"]
+                count += 1
+        self._surface_cache.clear()
+        return {"developed": count, "missing": missing}
 
     def _sensor_for(self, info: dict) -> Sensor:
         sig = (info.get("make"), info.get("model"), info["width"], info["height"], info.get("focal_length_mm"))
@@ -1093,6 +1177,8 @@ class Chunk:
         for c in self.cameras:
             d = c.to_dict()
             d["path"] = _portable(d["path"], base)
+            if (d.get("meta") or {}).get("raw", {}).get("path"):  # the raw of a developed photo, beside the project
+                d["meta"] = {**d["meta"], "raw": {**d["meta"]["raw"], "path": _portable(d["meta"]["raw"]["path"], base)}}
             cams.append(d)
         meta = dict(self.meta)
         if "sfm" in meta and "image_root" in meta["sfm"]:
@@ -1112,6 +1198,10 @@ class Chunk:
         base = None if document is None or document.path is None else document.path.parent
         d = dict(d)
         d["cameras"] = [{**c, "path": _resolve(c["path"], base)} for c in d.get("cameras", [])]
+        for c in d["cameras"]:
+            source = (c.get("meta") or {}).get("raw")
+            if isinstance(source, dict) and source.get("path"):
+                c["meta"] = {**c["meta"], "raw": {**source, "path": _resolve(source["path"], base)}}
         meta = dict(d.get("meta", {}))
         if "sfm" in meta and "image_root" in meta["sfm"]:
             meta["sfm"] = {**meta["sfm"], "image_root": _resolve(meta["sfm"]["image_root"], base)}

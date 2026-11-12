@@ -29,7 +29,22 @@ def _dms(values, ref) -> float:
 def read_exif(path: str | Path) -> dict:
     """Return ``width``, ``height``, ``make``, ``model``, ``lens``, ``focal_length_mm``,
     ``focal_length_35mm``, ``datetime``, ``gps`` = ``(lon, lat, alt)`` and ``rtk`` (the RTK state a DJI
-    drone writes in the XMP, see :func:`~pyarchinit_photogrammetry.gnss.dji.rtk_from_xmp`) when present."""
+    drone writes in the XMP, see :func:`~pyarchinit_photogrammetry.gnss.dji.rtk_from_xmp`) when present.
+    A camera raw file is read by :func:`..raw.read_raw_exif` (PIL would open its thumbnail): its size is the
+    one of the developed photo, known when rawpy is installed."""
+    from . import raw
+
+    if raw.is_raw(path):
+        info = raw.read_raw_exif(path)
+        if raw.available():
+            try:
+                import rawpy
+
+                with rawpy.imread(str(path)) as r:
+                    info["width"], info["height"] = int(r.sizes.iwidth), int(r.sizes.iheight)
+            except Exception:
+                pass
+        return info
     with Image.open(path) as im:
         info: dict = {"width": im.width, "height": im.height}
         xmp = im.info.get("xmp")
@@ -40,30 +55,56 @@ def read_exif(path: str | Path) -> dict:
             exif = im.getexif()
         except Exception:
             return info
-        if not exif:
-            return info
-        info["make"] = (exif.get(_TAGS["Make"]) or "").strip() or None
-        info["model"] = (exif.get(_TAGS["Model"]) or "").strip() or None
-        info["datetime"] = exif.get(_TAGS["DateTime"])
-        sub = exif.get_ifd(_EXIF_IFD) if hasattr(exif, "get_ifd") else {}
-        if sub.get(_TAGS["FocalLength"]):
-            info["focal_length_mm"] = round(_ratio(sub[_TAGS["FocalLength"]]), 3)
-        if sub.get(_TAGS["FocalLengthIn35mmFilm"]):
-            info["focal_length_35mm"] = float(sub[_TAGS["FocalLengthIn35mmFilm"]])
-        if sub.get(_TAGS["DateTimeOriginal"]):
-            info["datetime"] = sub[_TAGS["DateTimeOriginal"]]
-        lens = sub.get(_TAGS["LensModel"]) if "LensModel" in _TAGS else None
-        if lens:
-            info["lens"] = str(lens).strip() or None
-        gps = exif.get_ifd(_GPS_IFD) if hasattr(exif, "get_ifd") else {}
-        if gps and 2 in gps and 4 in gps:
-            try:
-                lat = _dms(gps[2], gps.get(1, "N"))
-                lon = _dms(gps[4], gps.get(3, "E"))
-                alt = _ratio(gps[6]) if 6 in gps else 0.0
-                if gps.get(5) in (1, b"\x01"):
-                    alt = -alt
-                info["gps"] = (lon, lat, alt)
-            except Exception:
-                pass
+        for key, value in exif_fields(exif).items():
+            if key != "orientation":  # kept for the raws only: their pixels are developed unrotated
+                info.setdefault(key, value)
     return info
+
+
+def exif_fields(exif) -> dict:
+    """The fields of :func:`read_exif` an EXIF block (``PIL.Image.Exif``) holds, with ``orientation`` (the EXIF
+    value, when it is not 1) and ``rtk`` from an XMP packet kept as a TIFF tag (DNG)."""
+    info: dict = {}
+    if not exif:
+        return info
+    info["make"] = _text(exif.get(_TAGS["Make"]))
+    info["model"] = _text(exif.get(_TAGS["Model"]))
+    info["datetime"] = exif.get(_TAGS["DateTime"])
+    if exif.get(_TAGS["Orientation"]) not in (None, 1):
+        try:
+            info["orientation"] = int(exif.get(_TAGS["Orientation"]))
+        except (TypeError, ValueError):
+            pass
+    xmp = exif.get(700)
+    if isinstance(xmp, (bytes, str)) and xmp:
+        rtk = rtk_from_xmp(xmp.decode("utf-8", "ignore") if isinstance(xmp, bytes) else xmp)
+        if rtk:
+            info["rtk"] = rtk
+    sub = exif.get_ifd(_EXIF_IFD) if hasattr(exif, "get_ifd") else {}
+    if sub.get(_TAGS["FocalLength"]):
+        info["focal_length_mm"] = round(_ratio(sub[_TAGS["FocalLength"]]), 3)
+    if sub.get(_TAGS["FocalLengthIn35mmFilm"]):
+        info["focal_length_35mm"] = float(sub[_TAGS["FocalLengthIn35mmFilm"]])
+    if sub.get(_TAGS["DateTimeOriginal"]):
+        info["datetime"] = sub[_TAGS["DateTimeOriginal"]]
+    lens = sub.get(_TAGS["LensModel"]) if "LensModel" in _TAGS else None
+    if lens:
+        info["lens"] = str(lens).strip() or None
+    gps = exif.get_ifd(_GPS_IFD) if hasattr(exif, "get_ifd") else {}
+    if gps and 2 in gps and 4 in gps:
+        try:
+            lat = _dms(gps[2], gps.get(1, "N"))
+            lon = _dms(gps[4], gps.get(3, "E"))
+            alt = _ratio(gps[6]) if 6 in gps else 0.0
+            if gps.get(5) in (1, b"\x01"):
+                alt = -alt
+            info["gps"] = (lon, lat, alt)
+        except Exception:
+            pass
+    return info
+
+
+def _text(value) -> str | None:
+    if isinstance(value, bytes):
+        value = value.decode("ascii", "ignore")
+    return (str(value).strip("\x00 ").strip() if value else "") or None
