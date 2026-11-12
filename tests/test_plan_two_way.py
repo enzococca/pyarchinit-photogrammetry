@@ -249,7 +249,7 @@ def test_what_makes_no_feature_of_its_layer_is_left(trench):
     path = _live(w)
     rows = _by_n(_rows(path, "linee"))
     qgis = Qgis(path)
-    qgis.save(qgis.insert("linee", LineString([(X0, Y0), (X0 + 1, Y0)]), layer=STONES),  # a line in a layer of polygons
+    qgis.save(qgis.insert("linee", Point(X0, Y0), layer=STONES),  # a point in the table of the lines
               (f'UPDATE linee SET geom = NULL WHERE fid = {rows[1]["fid"]}', ()))
     w._poll_qgis()
     assert len(w.ortho_view.features(STONES)) == 2 and len(w.ortho_view.features(LAYER)) == 5

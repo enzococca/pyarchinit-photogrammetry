@@ -158,7 +158,8 @@ def find_qgis() -> QgisInstall | None:
 
 
 def classify_layer(name: str, kind: str, attrs: dict | None = None) -> str:
-    """Which live table a layer of the interface goes to. Polygons: the layers of stratigraphic
+    """Which live table a feature of the layer ``name`` of the interface goes to, ``kind`` the one of its geometry
+    (:func:`feature_kind`: a layer may hold lines and polygons). Polygons: the layers of stratigraphic
     units and any feature with the columns of a unit (pyunitastratigrafiche) to "unita", any other
     polygon (zones, stones, patches, the anomalies of a plugin) to "poligoni"."""
     if kind == "polygon":
@@ -171,6 +172,18 @@ def classify_layer(name: str, kind: str, attrs: dict | None = None) -> str:
     if name.startswith("Curve di livello"):
         return "curve"
     return "linee"
+
+
+_KINDS = {"Polygon": "polygon", "MultiPolygon": "polygon", "LineString": "line", "MultiLineString": "line",
+          "Point": "point"}
+
+
+def feature_kind(attrs: dict, default: str = "line") -> str:
+    """``"polygon"``, ``"line"`` or ``"point"``: the kind of the geometry of a feature of the 2D view (its ``_shape``,
+    else its ``_geom``); ``default`` (the kind of its layer) when it says none."""
+    shape = attrs.get("_shape")
+    gtype = getattr(shape, "geom_type", None) or (attrs.get("_geom") or (None,))[0]
+    return _KINDS.get(str(gtype), default)
 
 
 def _column(key: str) -> str:
@@ -268,6 +281,37 @@ def plan_identities(layers: dict[str, dict]) -> dict[str, tuple[str, str, dict]]
         for ((pid, _part), _geom, _raw, _vals), (name, attrs) in zip(list(_identified(table, feats, kept)), kept):
             out[pid] = (table, name, attrs)
     return out
+
+
+def _content_identities(layers: dict[str, dict], legacy: bool) -> dict[int, str]:
+    """``{id(attributes): identity}`` of the features of ``layers`` in the tables of the plan that carry no identity of
+    their own (theirs is from their content, and from their table)."""
+    out = {}
+    for table, feats in LiveLink._group(layers, legacy=legacy).items():
+        if table not in PLAN_TABLES:
+            continue
+        kept: list = []
+        for ((pid, _part), _geom, _raw, _vals), (_name, attrs) in zip(list(_identified(table, feats, kept)), kept):
+            if not str(attrs.get(ID_FIELD) or "").strip():
+                out[id(attrs)] = pid
+    return out
+
+
+def legacy_identities(layers: dict[str, dict]) -> dict[str, str]:
+    """``{identity up to 1.7.8: identity now}`` of the features of ``layers`` whose identity changed with their table:
+    up to 1.7.8 every feature of a layer went to the table of the kind of the layer (its first feature), so the lines
+    of a layer that begins with a polygon were rows of ``poligoni`` (and the polygons of one that begins with a line
+    rows of ``linee``), known by an identity made with that table. The edits kept under those identities
+    (``plan_edits`` of a project saved by 1.7.8) are found again with this. Empty for a layer of one kind."""
+    kinds = {name: {feature_kind(a, lay["kind"]) for a in (f[-1] if isinstance(f, (tuple, list)) else f
+                                                           for f in lay["features"]) if isinstance(a, dict)}
+             for name, lay in layers.items()}
+    mixed = {name: lay for name, lay in layers.items() if kinds[name] - {lay["kind"]}}
+    if not mixed:
+        return {}
+    now = _content_identities(mixed, legacy=False)
+    return {old: now[key] for key, old in _content_identities(mixed, legacy=True).items()
+            if key in now and now[key] != old}
 
 
 def new_id() -> str:
@@ -422,13 +466,18 @@ class LiveLink:
 
     # ------------------------------------------------------------------ writing
     @staticmethod
-    def _group(layers: dict[str, dict]) -> dict[str, list]:
+    def _group(layers: dict[str, dict], legacy: bool = False) -> dict[str, list]:
+        """``{table: [(layer, attributes)]}`` of the features of ``layers``: each goes to the table of its own
+        geometry (:func:`feature_kind`), so a layer that holds lines and polygons (PhotoCAD) fills two tables.
+        ``legacy``: as up to 1.7.8, every feature to the table of the kind of its layer - the kind of the first
+        feature drawn - whatever its geometry (:func:`legacy_identities`)."""
         out: dict[str, list] = {t: [] for t in LIVE_TABLES}
         for name, lay in layers.items():
             for feat in lay["features"]:
                 attrs = feat[-1] if isinstance(feat, (tuple, list)) else feat
                 if isinstance(attrs, dict) and attrs.get("_geom"):
-                    out[classify_layer(name, lay["kind"], attrs)].append((name, attrs))
+                    kind = lay["kind"] if legacy else feature_kind(attrs, lay["kind"])
+                    out[classify_layer(name, kind, attrs)].append((name, attrs))
         return out
 
     @staticmethod

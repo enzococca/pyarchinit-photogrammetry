@@ -28,7 +28,7 @@ from ..app import app as application
 from ..core import stamps
 from ..core.document import Document
 from ..core.progress import Cancelled
-from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
+from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, feature_kind, new_id, stable_id
 from . import i18n, theme
 from . import shots_widgets as sw
 from .autopilot_dialog import AutopilotDialog
@@ -851,6 +851,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self.ortho_view.layer_shown.connect(self._schedule_qgis)  # only the layers ticked go to QGIS
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
+        self._plan_renamed: dict[str, dict] = {}  # layer -> {identity up to 1.7.8: identity now} (_plan_rename)
         self._plan_busy = self._plan_waiting = False
         self._plan_editing: tuple | None = None  # (layer, index, field, identity) of the attribute being changed
         self._plan_said: set[str] = set()  # the layers said one-way in the log, once each
@@ -12230,7 +12231,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             for item, _label, attrs in lay["features"]:
                 if id(attrs) in skip:
                     continue
-                others.append((name, lay["kind"], dict(attrs), self._feature_style(lay["kind"], item)))
+                others.append((name, lay["kind"], dict(attrs),
+                               self._feature_style(feature_kind(attrs, lay["kind"]), item)))
         v.clear_overlays()
         for i, u in enumerate(self.shown_units):
             self._draw_unit(u, i)
@@ -13256,7 +13258,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The features of the layer ``name`` as they are drawn now, each with the identity of its row in the live
         GeoPackage, kept as the layer without the edits made by hand (once: a layer they are on already keeps the one
         taken before them)."""
-        from ..io.qgis_link import plan_identities
+        from ..io.qgis_link import legacy_identities, plan_identities
 
         v = self.ortho_view
         lay = v.layers.get(name)
@@ -13266,12 +13268,34 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         stamp = lay.get("plan_stamp")
         if stamp is not None and stamp[1] == len(lay["features"]) and name in self._plan_base:
             return self._plan_base[name]
-        ids = plan_identities({name: {"kind": lay["kind"], "features": v.features(name)}})
+        layers = {name: {"kind": lay["kind"], "features": v.features(name)}}
+        ids = plan_identities(layers)
         by = {id(attrs): pid for pid, (_table, _name, attrs) in ids.items()}
         base = self._plan_base[name] = {"kind": lay["kind"], "features": [
-            (by.get(id(attrs)), dict(attrs), self._feature_style(lay["kind"], item))
+            (by.get(id(attrs)), dict(attrs), self._feature_style(feature_kind(attrs, lay["kind"]), item))
             for item, _label, attrs in lay["features"]]}
+        self._plan_renamed[name] = legacy_identities(layers)
+        self._plan_rename(name)
         return base
+
+    def _plan_rename(self, name: str) -> None:
+        """The edits made by hand to the layer ``name`` kept under the identities its features had up to 1.7.8 (a
+        layer of lines and polygons: :func:`..io.qgis_link.legacy_identities`) put under those they have now - of a
+        project saved by 1.7.8, or brought back by a step of Modifica > Annulla. No edit of the user's: no entry of
+        the history for it."""
+        renamed = self._plan_renamed.get(name)
+        ed = self._plan_edits(name)
+        if not renamed or not ed:
+            return
+        changed, deleted = ed.get("changed") or {}, ed.get("deleted") or []
+        if not any(pid in renamed for pid in list(changed) + list(deleted)):
+            return
+        h = self.history
+        clean = h is not None and not h.applying and h.unchanged()
+        ed["changed"] = {renamed.get(pid, pid): e for pid, e in changed.items()}
+        ed["deleted"] = [renamed.get(pid, pid) for pid in deleted]
+        if clean:
+            h.rebase()
 
     def _plan_build(self, name: str) -> None:
         """The layer ``name`` drawn from its features as its maker drew them (:meth:`_plan_capture`) with the edits
@@ -13279,6 +13303,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         deleted ones left out, the added ones at the end. Its place among the layers and its visibility kept."""
         v = self.ortho_view
         base = self._plan_base.get(name) or {"kind": None, "features": []}
+        self._plan_rename(name)
         ed = self._plan_edits(name)
         changed, deleted, added = ed.get("changed") or {}, set(ed.get("deleted") or []), ed.get("added") or {}
         feats = []
@@ -13570,7 +13595,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     self.log_pane.warning(said(tr("{0} senza geometria leggibile, non ripreso", label)))
                     continue
                 lay = v.layers.get(name)
-                got = self._plan_coords(lay["kind"] if lay is not None else kind, shapely.force_2d(g))
+                # the kind of the feature is the one of its table (a layer may hold lines and polygons); a feature
+                # known here keeps the kind it has
+                got = self._plan_coords(feature_kind(hit[2], kind) if hit else kind, shapely.force_2d(g))
                 if got is None or (hit is None and classify_layer(name, kind, {}) != table):
                     self.log_pane.warning(said(tr("{0} non ripreso: la sua geometria non fa un disegno di questo "
                                                   "layer", label)))
@@ -13596,9 +13623,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 else:
                     new = f.id not in ed["added"]
                     color = (ed["added"].get(f.id) or {}).get("color") or (
-                        self._feature_style(lay["kind"], lay["features"][-1][0])[0]
+                        self._feature_style(feature_kind(lay["features"][-1][2], lay["kind"]),
+                                            lay["features"][-1][0])[0]
                         if lay is not None and lay["features"] else "#ff9800")
-                    ed["added"][f.id] = {"kind": lay["kind"] if lay is not None else kind, "geom": coords,
+                    ed["added"][f.id] = {"kind": kind, "geom": coords,
                                          "attrs": {k: val for k, val in values.items() if val not in (None, "")},
                                          "color": color}
                     line = tr("{0} aggiunto", label) if new else tr("{0} modificato", label)
