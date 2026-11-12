@@ -299,3 +299,28 @@ def test_solids_side_by_side_stay_separate(tmp_path):
     right = trimesh.Trimesh([[0, 0, 0], [1, 1, 0], [0, 1, 0]], [[0, 1, 2]], process=False)
     trimesh.Scene([left, right]).export(tmp_path / "superficie.obj")
     assert len(mesh_import.read_mesh_file(tmp_path / "superficie.obj").xyz) == 4
+
+
+def test_pages_of_unequal_size_fit_their_cells_in_the_view(tmp_path, monkeypatch):
+    """Pages of different heights reduced by a factor that leaves half a pixel: a page rounded up
+    was one pixel wider than its cell (an imported OBJ of six pages 8192 px wide did not open)."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.engine import texturing
+
+    pages = []
+    for k, height in enumerate((700, 690, 650, 640, 630)):
+        pages.append(tmp_path / f"page_{k}.jpg")
+        cv2.imwrite(str(pages[-1]), np.full((height, 1000, 3), 40 * (k + 1), np.uint8))
+    monkeypatch.setattr(texturing, "texture_pages", lambda chunk: pages)
+    uv = np.tile(np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]), (5, 1, 1)).reshape(5, 6)
+    # three columns: 1000 px * (1001 / 3000) = 333.67, a cell of 333 px and a page rounded to 334
+    path, out = display_texture(SimpleNamespace(data_dir=tmp_path), uv, np.arange(5), max_side=1001)
+    img = cv2.imread(str(path))
+    assert max(img.shape[:2]) <= 1001
+    out = np.asarray(out).reshape(5, 3, 2)
+    assert out.min() >= 0.0 and out.max() <= 1.0
+    h, w = img.shape[:2]
+    for k in range(5):  # the middle of each page, through its coordinates, has the colour of the page
+        x, y = out[k, :, 0].mean() * w, (1.0 - out[k, :, 1].mean()) * h
+        assert abs(int(img[int(y), int(x), 0]) - 40 * (k + 1)) < 6, k

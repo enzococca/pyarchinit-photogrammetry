@@ -523,7 +523,8 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
     cw, ch = max(w for w, _ in sizes), max(h for _, h in sizes)
     f = min(1.0, max_side / (cols * cw), max_side / (rows * ch))
     cell_w, cell_h = max(1, int(cw * f + 1e-9)), max(1, int(ch * f + 1e-9))
-    scaled = [(max(1, int(round(w * f))), max(1, int(round(h * f)))) for w, h in sizes]
+    # a page never wider or taller than its cell: the cell is rounded down, 8192 px / 3 is 2730 and not 2731
+    scaled = [(min(cell_w, max(1, int(round(w * f)))), min(cell_h, max(1, int(round(h * f))))) for w, h in sizes]
     out = chunk.data_dir / "model_texture_display.jpg"
     if not _display_current(out, pages, (cols * cell_w, rows * cell_h)):
         canvas = np.full((rows * cell_h, cols * cell_w, 3), 127, np.uint8)
