@@ -100,7 +100,9 @@ Una fotocamera impostata su raw + JPEG scrive due file per scatto: sono **una** 
 di nuovo. Le copie si fanno una volta: aggiungere di nuovo gli stessi raw, o aprire il progetto
 altrove, non sviluppa nulla; una copia perduta è rifatta da `develop_raw_photos` (o da *ricollega
 foto* quando i raw sono stati spostati). Dalla riga di comando: `ppg add-photos progetto.ppg raw/
---prefer-raw --raw-format tif --raw-exposure 0.5` e `ppg develop-raw progetto.ppg`.
+--prefer-raw --raw-format tif --raw-exposure 0.5 --raw-tone camera` (`--raw-half-size` per copie a
+metà dimensione) e `ppg develop-raw progetto.ppg --raw-tone local` (senza opzioni: solo ciò che manca
+o è cambiato).
 
 ### Coppie
 

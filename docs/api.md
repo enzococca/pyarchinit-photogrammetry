@@ -100,7 +100,8 @@ default) takes the JPEG, `prefer="raw"` the raw, and a shot that is already in t
 again. Copies are made once: adding the same raws again, or opening the project elsewhere, develops
 nothing; a copy that was lost is made again by `develop_raw_photos` (or by *relink photos* when the
 raws were moved). From the command line: `ppg add-photos project.ppg raw/ --prefer-raw --raw-format
-tif --raw-exposure 0.5` and `ppg develop-raw project.ppg`.
+tif --raw-exposure 0.5 --raw-tone camera` (`--raw-half-size` for copies at half size) and
+`ppg develop-raw project.ppg --raw-tone local` (without options: only what is missing or changed).
 
 ### Pairs
 
