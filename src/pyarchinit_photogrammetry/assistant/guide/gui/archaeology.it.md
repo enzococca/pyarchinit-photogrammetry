@@ -78,8 +78,8 @@ Collegamento dal vivo con QGIS (nei due sensi)* li tiene collegati nei due sensi
 
 * ciò che disegni qui arriva in QGIS entro un secondo;
 * ciò che salvi in QGIS (il salvataggio delle modifiche del layer, *Save Layer Edits*, o la fine di una sessione di
-  modifica) nei layer *Unita' stratigrafiche (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* e *Disegni 3D (ppg)* (unità,
-  quote, sezioni, disegni liberi) torna qui entro un secondo:
+  modifica) in un layer del progetto - uno per ogni layer del programma che ha disegni: *Unita' stratigrafiche*,
+  *Quote*, *Sezioni*, *Disegni 3D: ...* - torna qui entro un secondo, in quel layer:
   contorni e attributi cambiati, elementi disegnati lì (ricevono la loro identità, `ppg_id`), elementi cancellati.
 
 Ogni salvataggio è una voce di *Modifica > Annulla* e una riga del log. Le unità prendono le colonne di
@@ -89,8 +89,8 @@ una sezione la cui traccia si è spostata viene tagliata di nuovo.
 
 !!! note
     Un contorno non valido viene reso valido (o saltato), un layer in un altro sistema di riferimento viene rifiutato,
-    un file che QGIS tiene mentre salva viene letto un momento dopo. Tornano anche i layer dei plugin (*Poligoni*,
-    *Linee*, *Punti (ppg)*): un elemento spostato, cambiato, disegnato o eliminato lì resta con il chunk e rimane sul
+    un file che QGIS tiene mentre salva viene letto un momento dopo. Tornano anche i layer dei plugin (ognuno con il
+    suo layer in QGIS): un elemento spostato, cambiato, disegnato o eliminato lì resta con il chunk e rimane sul
     layer quando il plugin lo ridisegna. Curve di livello, zone, pietre e patch si calcolano qui e vanno in un solo
     senso (il log lo dice, e le righe tornano com'erano). I dettagli in [QGIS dal vivo](../integrations.md#qgis-dal-vivo).
 
