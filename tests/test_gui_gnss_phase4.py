@@ -857,6 +857,75 @@ def test_autopilot_dialog_with_room_shows_all_without_a_scrollbar(qt_app, tmp_pa
     _close(qt_app, d)
 
 
+def test_autopilot_dialog_rows_keep_their_heights_whenever_the_lever_is_set(qt_app, tmp_path, monkeypatch):
+    """The rows of the dialog are as tall as what they say, whether the lever arm and the latency are written while
+    the log is still read or after: the dialog grows with the texts of the log and of the pairing, and the form
+    kept the heights of the rows it had measured in the dialog still short - the row of the log too tall, the last
+    line of the pairing cut - until something laid it out again (a latency written after the reading)."""
+    from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QLabel, QLineEdit
+
+    from pyarchinit_photogrammetry.gui.autopilot_dialog import AutopilotDialog
+
+    class Roomy(AutopilotDialog):
+        tall = 4000
+
+        def max_height(self) -> int:
+            return self.tall
+
+    log, _expected, project, _folder = _px4_flight(tmp_path, separation=None, layout="1.7")
+    doc = ppg.Document.open(project)
+    read = sources.log_shots
+
+    def slow(*args, **kwargs):  # time to write the lever arm before the log is read
+        time.sleep(0.3)
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(sources, "log_shots", slow)
+
+    def lever(d) -> None:
+        d.lever_forward.setValue(120)
+        d.lever_right.setValue(-30)
+        d.lever_down.setValue(250)
+        d.latency.setValue(40)
+
+    def laid_out(order: str) -> dict:
+        d = Roomy(doc.chunk, log)
+        d.show()
+        qt_app.processEvents()
+        if order == "before":
+            assert "in corso" in d.summary.text()  # the log is still read
+            lever(d)
+        assert _wait_until(lambda: d.b_apply.isEnabled()), d.summary.text() + d.error.text()
+        if order == "after":
+            lever(d)
+            _wait_until(lambda: False, 0.4)  # the pause after the typing, then the photos paired again
+            assert _wait_until(lambda: d.b_apply.isEnabled())
+        _wait_until(lambda: False, 0.1)
+        body = d.scroll.widget()
+        for label in body.findChildren(QLabel):
+            if label.wordWrap() and label.text():  # all its lines, and no room left over
+                assert label.height() == label.heightForWidth(label.width()), (order, label.text()[:40])
+        for kind in (QAbstractSpinBox, QComboBox, QLineEdit):
+            for field in body.findChildren(kind):
+                if not isinstance(field.parent(), QAbstractSpinBox):  # not the line edit inside a spin box
+                    assert field.height() >= field.sizeHint().height(), (order, field)
+        fields = [d.summary, d.message, d.camera, d.by, d.photos, d.pairing, d.lever_panel, d.error]
+        tops = [f.mapTo(body, f.rect().topLeft()).y() for f in fields]
+        assert tops == sorted(tops)
+        for upper, lower, top in zip(fields, fields[1:], tops[1:]):  # no row over the next
+            assert upper.mapTo(body, upper.rect().bottomLeft()).y() < top, (order, upper, lower)
+        name = d.summary.parentWidget().childAt(d.summary.x(), d.summary.y() - 4)  # the name of the log, just above
+        assert isinstance(name, QLabel) and name.text() == log.name and name.height() == name.sizeHint().height()
+        geometry = {"dialog": d.size().toTuple(), "tops": tops, "heights": [f.height() for f in fields]}
+        _close(qt_app, d)
+        return geometry
+
+    untouched, before, after = laid_out("untouched"), laid_out("before"), laid_out("after")
+    assert before == after == untouched
+    Roomy.tall = 300  # a short screen: scrolled, its rows as tall as what they say all the same
+    assert laid_out("before") == laid_out("after")
+
+
 def test_autopilot_dialog_summary_and_pairing(qt_app, tmp_path):
     """The dialog of an autopilot log: what the log holds (its kind, the captures, the heights, the span), the pairing
     proposed with its counts, the camera and the message, the lever arm and the latency in its answer."""

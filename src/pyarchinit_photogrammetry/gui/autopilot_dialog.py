@@ -18,6 +18,19 @@ from .i18n import tr
 TYPING_PAUSE_MS = 300  # the photos are paired again this long after the last change of the latency or of the folder
 
 
+def _forget_heights(layout) -> None:
+    """Have ``layout`` and the layouts in it measure their rows again. Only the outer layout hears that a text
+    changed; the ones in it are told when it is activated, and activating it lays the rows out in the height the
+    dialog still has, too short for the new texts: the form then keeps those heights when the dialog grows, the
+    row of the log too tall and the last line of the pairing cut. Nothing is laid out here: the rows are placed
+    once, in the height the dialog ends with."""
+    for index in range(layout.count()):
+        inner = layout.itemAt(index).layout()
+        if inner is not None:
+            _forget_heights(inner)
+    layout.invalidate()
+
+
 class AutopilotDialog(QDialog):
     """The shots of the autopilot log ``path`` for the photos of ``chunk``: :attr:`summary` says what the log holds
     (its kind, its cameras, the shots and how many have a valid time, their span, the kind of their heights),
@@ -188,7 +201,7 @@ class AutopilotDialog(QDialog):
         margins = self.layout().contentsMargins()
         width = self.width() - margins.left() - margins.right()
         layout = self.scroll.widget().layout()
-        layout.activate()  # the texts just written: the heights it remembers are those of the texts before
+        _forget_heights(layout)  # the texts just written: the heights it remembers are those of the texts before
         return layout.totalHeightForWidth(width)
 
     def _chrome_height(self) -> int:
