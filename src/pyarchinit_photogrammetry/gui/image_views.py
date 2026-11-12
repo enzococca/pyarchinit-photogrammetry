@@ -500,6 +500,7 @@ class RasterView(_ZoomView):
     sam_key = Signal(str)  # "accept" (Enter) or "cancel" (Esc)
     measured = Signal(str)
     layers_changed = Signal()
+    layer_shown = Signal(str, bool)  # a layer shown or hidden (the pane, a step undone, a plugin): what QGIS gets
     labels_changed = Signal()  # user label visibility changed (save with the chunk)
     feature_clicked = Signal(str, dict)  # layer name, attributes (query in pan mode)
     selection_changed = Signal(int)  # number of selected features
@@ -1327,12 +1328,15 @@ class RasterView(_ZoomView):
         lay = self.layers.get(name)
         if lay is None:
             return
+        changed = bool(lay.get("visible", True)) != bool(visible)
         lay["visible"] = bool(visible)
         self._snap_cache = None
         for item, label_item, _ in lay["features"]:
             item.setVisible(visible)
             if label_item is not None:
                 label_item.setVisible(visible and lay["labels_visible"])
+        if changed:
+            self.layer_shown.emit(name, bool(visible))
 
     def remove_layer(self, name: str) -> None:
         lay = self.layers.pop(name, None)

@@ -849,6 +849,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._qgis_timer.timeout.connect(self._qgis_timer_fired)
         self.ortho_view.layers_changed.connect(self._sync_plan_later)  # before the file gets the layers
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
+        self.ortho_view.layer_shown.connect(self._schedule_qgis)  # only the layers ticked go to QGIS
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
         self._plan_busy = self._plan_waiting = False
         self._plan_editing: tuple | None = None  # (layer, index, field, identity) of the attribute being changed
@@ -13190,11 +13191,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 item.setPen(v._pen(color, width))
 
     def _plan_layers(self) -> dict:
-        """The layers of the 2D view that go into the live GeoPackage, as ``LiveLink.write`` takes them."""
+        """The layers of the 2D view that go into the live GeoPackage, as ``LiveLink.write`` takes them: all of them,
+        each with whether it is sent (``"sent"``: ticked in the Layers pane) - one hidden keeps its drawings and its
+        identities here and has no rows there."""
         view = self.ortho_view
         if self._plan_waiting:  # with the edits made by hand on those just drawn again
             self._sync_plan_edits()
-        return {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
+        return {name: {"kind": lay["kind"], "features": view.features(name), "sent": bool(lay.get("visible", True))}
+                for name, lay in view.layers.items()
                 if name not in ("Marker", TIN_LAYER) and not name.startswith(LAYER_PREFIX)}
 
     def _plan_one_way(self, name: str) -> bool:

@@ -432,8 +432,13 @@ class LiveLink:
         return out
 
     @staticmethod
-    def _signature(feats: list) -> int:
-        sig = []
+    def _held(layers: dict[str, dict]) -> frozenset:
+        """The layers of ``layers`` that are not sent (``"sent": False``: hidden in the Layers pane)."""
+        return frozenset(name for name, lay in layers.items() if lay.get("sent", True) is False)
+
+    @staticmethod
+    def _signature(feats: list, held=frozenset()) -> int:
+        sig = [tuple(sorted({name for name, _attrs in feats} & held))]  # another choice of layers: another content
         for name, attrs in feats:
             gtype, coords = attrs["_geom"]
             n = len(coords) if coords is not None else 0
@@ -447,7 +452,10 @@ class LiveLink:
         """Bring the GeoPackage up to date with the layers of the raster view
         (``{name: {"kind", "features"}}``, features as attribute dicts with ``_geom`` or the
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
-        exists even when empty, so QGIS sees deletions. ``force``: every table compared row by
+        exists even when empty, so QGIS sees deletions. A layer with ``"sent": False`` (hidden in the Layers pane)
+        is held: its rows leave the file and its record, so nothing of it is read back as deleted there, and come
+        back with the identities they had once it is sent again; what another program saved on them and nobody read
+        yet stays until it is read. ``force``: every table compared row by
         row, also those whose features did not change here (an edit made in QGIS to a one-way
         table is undone). Rows of the two-way tables edited or deleted in QGIS and not read back
         yet are left as they are. ``chunk``: the key of the chunk the drawings belong to, kept in
@@ -460,7 +468,7 @@ class LiveLink:
         from . import gpkg
         from .free_drawings import FREE_PREFIX
 
-        groups = self._group(layers)
+        groups, held = self._group(layers), self._held(layers)
         new = not gpkg.is_geopackage(self.path)
         if new:
             gpkg.refuse_foreign(self.path)  # never write the drawings into another file of that name
@@ -473,7 +481,7 @@ class LiveLink:
         rekey = key is not None and key != stored
         if rekey and stored is not None:  # another chunk's drawings: every table compared row by row, whatever the
             force = True  # window wrote last (rows read from another program belong to the chunk before)
-        todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
+        todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f, held)}
         free_sig = None if free is None else self._free_signature(free)
         free_todo = free is not None and (force or new or rekey or self._signatures.get(FREE_PREFIX) != free_sig)
         if todo or rekey or free_todo:
@@ -485,7 +493,8 @@ class LiveLink:
                 if rekey and stored is not None and not drop_unread and self._unread(con):
                     raise UnreadEdits(f"the file holds edits of chunk {stored} not read yet")
                 for table, feats in todo.items():
-                    known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread)
+                    known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread,
+                                                     held=held)
                     if table in _READ_BACK:
                         self._record(con, table, known[table])
                 if free_todo:
@@ -500,7 +509,7 @@ class LiveLink:
                 raise
             self._known.update(known)
             for table, feats in todo.items():
-                self._signatures[table] = self._signature(feats)
+                self._signatures[table] = self._signature(feats, held)
             if free_todo:
                 self._signatures[FREE_PREFIX] = free_sig
         return {t: self.path for t in LIVE_TABLES}
@@ -553,14 +562,16 @@ class LiveLink:
     def _free_signature(self, chunk) -> int:
         from ..core import free_drawings as fd
 
-        return hash((str(self.crs), json.dumps(fd.features(chunk), sort_keys=True, default=str)))
+        hidden = sorted(x["name"] for x in fd.layers(chunk) if not x.get("visible", True))
+        return hash((str(self.crs), json.dumps(fd.features(chunk), sort_keys=True, default=str), tuple(hidden)))
 
     def write_free(self, chunk) -> list[str]:
         """The free drawings in 3D of ``chunk`` (:mod:`..core.free_drawings`) as the three tables ``disegni_3d_*`` of the
         GeoPackage (:data:`.free_drawings.TABLES`, with Z, in the chunk's system), row by row by identity as the
         two-way tables: a row keeps its ``fid`` while its drawing lives, and a row another program edited, deleted or
         drew and nobody read yet is left as it is (:meth:`read_changes` gives it back). A chunk without free drawings
-        has none of those tables (one holding rows not read yet stays until they are). Nothing is written when the
+        has none of those tables (one holding rows not read yet stays until they are). The drawings of a layer hidden
+        in the Layers pane are held as the layers of the plan are (:meth:`write`): no rows, nothing read back. Nothing is written when the
         drawings did not change since the last write, nor before the window made the file. The drawings of another
         chunk than the one the file holds go in with :meth:`write` (``free``), which refuses to write over edits
         not read. Returns the tables written."""
@@ -597,6 +608,7 @@ class LiveLink:
 
         q = gpkg.quote
         feats = fd.features(chunk)
+        hidden = {x["name"] for x in fd.layers(chunk) if not x.get("visible", True)}  # not sent: held
         technical = {c.lower() for c in TECHNICAL_FIELDS}
         out = {}
         for kind, (table, gtype) in fio.TABLES.items():
@@ -611,7 +623,8 @@ class LiveLink:
                     gpkg.drop_table(con, table)
                     self._forget(con, table)
                 continue
-            mine = [r for r in feats if r["kind"] == kind]
+            held = {(r["id"], 1) for r in feats if r["kind"] == kind and r["layer"] in hidden}
+            mine = [r for r in feats if r["kind"] == kind and r["layer"] not in hidden]
             names = {c.lower(): c for c in have}  # a column is the same in any case
             extra = [c for c in fio.attribute_columns(mine) if c.lower() not in technical]
             columns = {c: "TEXT" for c in (*fio.BASE_COLUMNS, *(names.get(c.lower(), c) for c in extra), SIG_FIELD)}
@@ -630,7 +643,7 @@ class LiveLink:
                 values = {c: _bind(_affinity(types.get(c, "")), row.get(c)) for c in cols if c != SIG_FIELD}
                 wanted.append(_Wanted((rec["id"], 1), geom, raw, values, row_signature(raw, values)))
             known = {} if unsigned else self._known_rows(con, table)
-            out[table] = self._put_rows(con, table, cols, wanted, srs_id, not drop, known, z=True)
+            out[table] = self._put_rows(con, table, cols, wanted, srs_id, not drop, known, z=True, held=held)
             self._record(con, table, out[table])
         return out
 
@@ -657,15 +670,21 @@ class LiveLink:
                  "color": colours[kind], "label": "name"}
                 for kind, (table, gtype) in TABLES.items() if table in have]
 
-    def _wanted(self, table: str, feats: list, cols: list[str], types: dict) -> list[_Wanted]:
-        out = []
+    def _wanted(self, table: str, feats: list, cols: list[str], types: dict,
+                held=frozenset()) -> tuple[list[_Wanted], set]:
+        """The rows of ``table`` for ``feats``, and the keys of the features of the layers ``held``: identified with
+        the others (the identities are those of all the features), not written."""
+        out, kept = [], set()
         for (pid, part), geom, raw, vals in _identified(table, feats):
+            if vals["layer"] in held:
+                kept.add((pid, part))
+                continue
             vals[ID_FIELD] = pid
             if table == "unita":
                 vals[PART_FIELD] = part
             values = {c: _bind(_affinity(types.get(c, "")), _value(c, vals.get(c))) for c in cols if c != SIG_FIELD}
             out.append(_Wanted((pid, part), geom, raw, values, row_signature(raw, values)))
-        return out
+        return out, kept
 
     @staticmethod
     def _scan(con, table: str, cols: list[str], content: bool) -> list[_Stored]:
@@ -712,9 +731,11 @@ class LiveLink:
                 others.append(s)
         return primary, others
 
-    def _write_table(self, con, table: str, feats: list, srs_id: int, force: bool, drop: bool = False) -> dict:
+    def _write_table(self, con, table: str, feats: list, srs_id: int, force: bool, drop: bool = False,
+                     held=frozenset()) -> dict:
         """The rows of ``table`` brought to ``feats`` one by one; returns ``{key: fid}`` of its rows. ``drop``: rows
-        another program edited and nobody read are written over too (kept elsewhere: :meth:`write`)."""
+        another program edited and nobody read are written over too (kept elsewhere: :meth:`write`). ``held``: the
+        layers whose features have no row (:meth:`write`)."""
         from . import gpkg
 
         q = gpkg.quote
@@ -734,15 +755,18 @@ class LiveLink:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
         two_way = table in _READ_BACK and not drop  # the rows edited elsewhere kept until read
         known = {} if recreated else self._known_rows(con, table)
-        return self._put_rows(con, table, cols, self._wanted(table, feats, cols, types), srs_id, two_way, known,
-                              content=two_way or force or drop)
+        wanted, kept = self._wanted(table, feats, cols, types, held)
+        return self._put_rows(con, table, cols, wanted, srs_id, two_way, known,
+                              content=two_way or force or drop, held=kept)
 
     def _put_rows(self, con, table: str, cols: list[str], wanted: list[_Wanted], srs_id: int, two_way: bool,
-                  known: dict, content: bool = True, z: bool = False) -> dict:
+                  known: dict, content: bool = True, z: bool = False, held=frozenset()) -> dict:
         """The rows of ``table`` brought to ``wanted`` one by one, by identity; returns ``{key: fid}`` of its rows.
         ``two_way``: the rows another program edited, deleted (``known``: those the program last wrote or read) or drew
         and nobody read yet are left as they are. ``content``: the rows compared by what they hold, not only by their
-        signature. ``z``: the geometries written with their Z."""
+        signature. ``z``: the geometries written with their Z. ``held``: the keys of the features that are in the program
+        and not sent - their rows go like those of features gone here, and leave the record with them (nothing read
+        back as deleted there); one deleted there and not read yet stays in the record until the reader took it."""
         from . import gpkg
 
         q = gpkg.quote
@@ -769,7 +793,11 @@ class LiveLink:
                     con.execute(update, row + [fid])
                     touched.append(fid)
             after[w.key] = fid
-        for key, s in primary.items():  # rows of features gone here
+        if two_way:
+            for key in held:  # sent before, deleted in QGIS and not read back yet: the reader takes it first
+                if key not in primary and key in known:
+                    after[key] = known[key]
+        for key, s in primary.items():  # rows of features gone here, or held
             if two_way and s.external:
                 after[key] = s.fid  # changed in QGIS, deleted here: the reader decides
                 continue

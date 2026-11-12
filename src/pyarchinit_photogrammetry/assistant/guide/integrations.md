@@ -18,6 +18,17 @@ layer, edited attribute), in place and in one transaction, and the project asks 
 those layers every second: QGIS reads a GeoPackage again at every redraw, so what you draw here
 appears in QGIS by itself, without *Refresh*.
 
+**Only the layers ticked go to QGIS.** A layer unticked in the *Layer* pane (also with *Nessuno*, or by a step of
+*Modifica > Annulla*) is hidden in QGIS too: within the same 0.4 s its features leave the tables of the GeoPackage,
+and they come back - the same rows, with the edits made on them by hand - when the layer is ticked again. Hiding a
+layer deletes nothing: its drawings and the edits kept with the chunk stay in the project, and nothing is read back
+as deleted in QGIS. What was saved in QGIS on a layer a moment before it was hidden is still taken, and a feature
+drawn in QGIS on a hidden layer (its name in the column `layer`) joins that layer here and is hidden with it. The same
+holds for the layers of the free drawings in 3D (`disegni_3d_*`) and for RustGIS, which reads the same file. The
+tables themselves stay in the QGIS project, empty when all their layers are hidden; the drawings on elevations and
+sections (`prospetto_*`) are always written. The ticks of the layers of the plan are not saved with the project: when
+it is opened again every layer is ticked, and sent.
+
 ### Both ways
 
 With *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* on (it is turned on by *Apri in
