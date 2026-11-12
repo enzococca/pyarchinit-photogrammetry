@@ -221,6 +221,7 @@ class Document:
                 new_files = self.files_dir
                 if old_files.exists() and old_files.resolve() != new_files.resolve():
                     shutil.copytree(old_files, new_files, dirs_exist_ok=True)
+                    self._repoint(old_files.resolve(), new_files)
         if self._path is None:
             raise ValueError("save() needs a path for a new document")
         self._settle_ties()
@@ -233,6 +234,22 @@ class Document:
             r.mark_saved()
         self.saves += 1
         return self._path
+
+    def _repoint(self, old: Path, new: Path) -> None:
+        """After *save as*: the photos kept inside the project folder (developed raw files, reference bands) are
+        read from the new folder, not from the one the project had before."""
+        def moved(value):
+            try:
+                return str(new / Path(value).resolve().relative_to(old))
+            except ValueError:
+                return value
+
+        for chunk in self.chunks:
+            for cam in chunk.cameras:
+                cam.path = moved(cam.path)
+            root = (chunk.meta.get("sfm") or {}).get("image_root")
+            if root:
+                chunk.meta["sfm"]["image_root"] = moved(root)
 
     def _read(self) -> None:
         data = json.loads(self._path.read_text())
