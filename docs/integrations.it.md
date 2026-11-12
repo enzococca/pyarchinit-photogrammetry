@@ -18,6 +18,17 @@ tolto, attributo modificato), sul posto e in una transazione, e il progetto chie
 ridisegnare quei layer ogni secondo: QGIS rilegge un GeoPackage a ogni ridisegno, così quello che
 disegni qui compare in QGIS da solo, senza *Aggiorna*.
 
+**In QGIS vanno solo i layer spuntati.** Un layer a cui si toglie la spunta nel pannello *Layer* (anche con *Nessuno*,
+o con un passo di *Modifica > Annulla*) è nascosto anche in QGIS: entro gli stessi 0,4 s i suoi elementi escono dalle
+tabelle del GeoPackage, e tornano - le stesse righe, con le modifiche fatte a mano - quando il layer viene spuntato di
+nuovo. Nascondere un layer non cancella nulla: i suoi disegni e le modifiche tenute con il chunk restano nel progetto,
+e niente viene riletto come eliminato in QGIS. Ciò che è stato salvato in QGIS su un layer un attimo prima di
+nasconderlo viene comunque ripreso, e un elemento disegnato in QGIS su un layer nascosto (il suo nome nella colonna
+`layer`) entra in quel layer qui e resta nascosto con lui. Lo stesso vale per i layer dei disegni liberi in 3D
+(`disegni_3d_*`) e per RustGIS, che legge lo stesso file. Le tabelle restano nel progetto QGIS, vuote quando tutti i
+loro layer sono nascosti; i disegni su prospetti e sezioni (`prospetto_*`) vengono scritti sempre. Le spunte dei layer
+della pianta non sono salvate con il progetto: alla riapertura ogni layer è spuntato, e inviato.
+
 ### Nei due sensi
 
 Con *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* acceso (lo accende *Apri in QGIS*, e
