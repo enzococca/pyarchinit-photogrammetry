@@ -218,14 +218,19 @@ class Chunk:
             other = "JPEG" if prefer == "jpeg" else "raw"
             progress.message(tr("{0} file non aggiunti: dello stesso scatto c'è il file {1}", len(left), other))
         existing = set(self.photo_sources())
-        shots = {rawio.shot_key(p) for p in existing}
+        # the kinds (raw or not) of the files of each shot: a raw and an image of one shot are one photo, two
+        # images of the same name (DJI_0002.JPG and DJI_0002.png) stay two
+        shots: dict[tuple, set[bool]] = {}
+        for p in existing:
+            shots.setdefault(rawio.shot_key(p), set()).add(rawio.is_raw(p))
         todo = []
         for f in files:
             f = f.resolve()
-            if f in existing or rawio.shot_key(f) in shots:
+            kinds = shots.setdefault(rawio.shot_key(f), set())
+            if f in existing or (not rawio.is_raw(f)) in kinds:
                 continue
             existing.add(f)
-            shots.add(rawio.shot_key(f))
+            kinds.add(rawio.is_raw(f))
             todo.append(f)
         raws = [f for f in todo if rawio.is_raw(f)]
         developed = rawio.develop(self.data_dir / rawio.FOLDER, raws, raw, progress) if raws else {}
