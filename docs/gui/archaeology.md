@@ -77,9 +77,9 @@ stored in PyArchInit's own format so that its Harris matrix reads them.
 link with QGIS (both ways)* keeps them linked both ways:
 
 * what is drawn here reaches QGIS within a second;
-* what is saved in QGIS (*Save Layer Edits*, or the end of an edit session) in the layers *Unita' stratigrafiche
-  (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* and *Disegni 3D (ppg)* (units, spot heights, sections, free drawings) comes
-  back here within a second:
+* what is saved in QGIS (*Save Layer Edits*, or the end of an edit session) in a layer of the project - one
+  for each layer of the program that has drawings: *Unita' stratigrafiche*, *Quote*, *Sezioni*, *Disegni 3D: ...* -
+  comes back here within a second, in that layer:
   outlines and attributes changed, features drawn there (they get their identity, `ppg_id`), features deleted.
 
 Each save is one entry of *Edit > Undo* and a line of the log. The units take the columns of `pyunitastratigrafiche`
@@ -89,7 +89,7 @@ again.
 
 !!! note
     An outline that is not valid is made valid (or skipped), a layer in another reference system is refused, a file
-    QGIS holds while saving is read a moment later. The layers of the plugins (*Poligoni*, *Linee*, *Punti (ppg)*)
+    QGIS holds while saving is read a moment later. The layers of the plugins (each with its own layer in QGIS)
     come back too: a feature moved, changed, drawn or deleted there is kept with the chunk and stays on the layer when
     the plugin draws it again. Contour lines, zones, stones and patches are computed here and stay one-way (the log
     says so, and the rows go back as they were). Details in

@@ -6,7 +6,8 @@
 scrive un progetto QGIS accanto al `.ppg` (`<nome>_qgis/<nome>_ppg.qgs`) e lo apre:
 
 * raster: l'ortofoto, il DEM (ombreggiatura, all'inizio nascosta) e i valori del DEM;
-* vettori, nel gruppo *Disegni (aggiornati dal vivo)*: le tabelle di un GeoPackage,
+* vettori, nel gruppo *Disegni (aggiornati dal vivo)*: un layer per ogni layer del programma che ha disegni
+  (vedi [sotto](#un-layer-in-qgis-per-ogni-layer)), letti dalle tabelle di un GeoPackage,
   `disegni_ppg.gpkg`: `unita` (poligoni delle unità con le colonne di `pyunitastratigrafiche`,
   etichetta = `etichetta`), `poligoni` (zone, pietre, patch, i poligoni dei plugin), `sezioni`
   (tracce di sezione), `curve` (curve di livello, etichetta = quota), `linee` (altre linee), `punti`
@@ -25,16 +26,53 @@ nuovo. Nascondere un layer non cancella nulla: i suoi disegni e le modifiche ten
 e niente viene riletto come eliminato in QGIS. Ciò che è stato salvato in QGIS su un layer un attimo prima di
 nasconderlo viene comunque ripreso, e un elemento disegnato in QGIS su un layer nascosto (il suo nome nella colonna
 `layer`) entra in quel layer qui e resta nascosto con lui. Lo stesso vale per i layer dei disegni liberi in 3D
-(`disegni_3d_*`) e per RustGIS, che legge lo stesso file. Le tabelle restano nel progetto QGIS, vuote quando tutti i
-loro layer sono nascosti; i disegni su prospetti e sezioni (`prospetto_*`) vengono scritti sempre. Le spunte dei layer
-della pianta non sono salvate con il progetto: alla riapertura ogni layer è spuntato, e inviato.
+(`disegni_3d_*`) e per RustGIS, che legge lo stesso file. Il layer di QGIS resta nel progetto, vuoto finché il suo layer
+è nascosto qui; i disegni su prospetti e sezioni (`prospetto_*`) vengono scritti sempre. **Le spunte sono salvate con
+il progetto** (quelle della pianta con il chunk, in `layers_hidden`; quelle dei disegni liberi con i loro layer):
+riaperto, mostra - e invia - i layer che erano spuntati. Un layer che un plugin ridisegna, o uno nuovo con lo stesso
+nome, resta senza spunta finché non la si rimette. Le spunte dei layer di un prospetto mostrato nella vista 2D sono
+della vista, e non vengono salvate.
+
+### Un layer in QGIS per ogni layer
+
+Il progetto QGIS ha **un layer per ogni layer del programma che ha disegni**, con il nome che ha nel pannello
+*Layer* - *Unita' stratigrafiche*, *Quote*, *PhotoCAD: Ortofoto 1*, *Disegni 3D: Muri* - così ognuno si può vestire,
+nascondere, ordinare e modificare per conto suo. Ognuno è una vista della sua tabella filtrata sulla colonna `layer`
+(`"layer" = 'PhotoCAD: Ortofoto 1'`: *Proprietà layer > Sorgente > Filtro elementi del provider*), e ha il nome del
+layer come valore predefinito di quella colonna: ciò che vi si disegna in QGIS viene salvato con quel nome, e torna
+in quel layer qui.
+
+* Un elemento viene scritto nella tabella della sua geometria. Un layer che ha linee e poligoni - un disegno di
+  PhotoCAD con polilinee aperte e chiuse - fa due layer in QGIS, *PhotoCAD: Rilievo - linee* e *PhotoCAD: Rilievo -
+  poligoni* (e *- punti*): in QGIS un layer ha un solo tipo di geometria.
+* Un layer senza disegni non ne fa: un progetto senza sezioni o curve di livello non ha in QGIS un *Sezioni* o un
+  *Curve di livello* vuoto. Lo stesso vale per le tabelle dei prospetti (`prospetto_*`).
+* Le righe senza un nome in `layer` (un elemento salvato in QGIS senza, in un progetto scritto fino
+  alla 1.7.8) stanno in un layer con
+  il nome della loro tabella, *Linee (ppg)*, *Poligoni (ppg)*, *Punti (ppg)*.
+
+**Che cosa si aggiorna da solo e che cosa chiede *Apri in QGIS*.** I layer che il progetto QGIS ha si aggiornano dal
+vivo, come prima: elementi disegnati, cambiati o eliminati qui, e un layer a cui si toglie la spunta (si svuota) e la
+si rimette (si riempie di nuovo). L'elenco dei layer viene scritto con il progetto: un layer che ha avuto i suoi primi
+disegni, che è stato rinominato, o che era senza spunta quando il progetto è stato scritto non c'è. Il programma lo
+dice una volta, nel log e nella barra di stato (*QGIS: il progetto aperto non mostra ancora «...»*): scegli di nuovo
+*QGIS > Apri in QGIS*, che riscrive il progetto con i layer di adesso (uno stile cambiato
+a mano nel progetto QGIS viene sovrascritto, come è sempre stato - tienilo in un file di stile, o in un tuo progetto
+che legge lo stesso GeoPackage). La prima unità, sezione o quota di un progetto è nello stesso caso: disegnala qui,
+poi *Apri in QGIS*.
+
+Un progetto QGIS scritto dalla 1.7.8 o prima - sette layer, uno per tabella - continua a funzionare com'era, nei due
+sensi, finché *Apri in QGIS* non lo riscrive. Il GeoPackage della 1.7.8 teneva ogni elemento di un layer nella tabella
+del primo disegnato (una linea fra i poligoni, che QGIS non poteva disegnare): alla prima scrittura le righe vengono
+spostate nella tabella della loro geometria, con le modifiche fatte a mano, e niente viene riletto come eliminato o
+disegnato in QGIS. RustGIS legge lo stesso file per tabelle, come prima.
 
 ### Nei due sensi
 
 Con *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* acceso (lo accende *Apri in QGIS*, e
 resta acceso per un progetto già collegato), anche ciò che si salva in QGIS torna qui. Modifica in
-QGIS i layer *Unita' stratigrafiche (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* o i tre *Disegni 3D (ppg)* come un layer
-qualsiasi (*Attiva modifiche*, disegna, sposta i vertici, cambia gli attributi nella tabella
+QGIS i layer *Unita' stratigrafiche*, *Quote*, *Sezioni*, quelli dei disegni liberi (*Disegni 3D: ...*) o quelli dei
+plugin come un layer qualsiasi (*Attiva modifiche*, disegna, sposta i vertici, cambia gli attributi nella tabella
 attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
 
 * **Unità**: il contorno e le colonne di `pyunitastratigrafiche` - `us_s`, `area_s`,
@@ -49,7 +87,8 @@ attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
   la traccia spostata, o disegnata in QGIS, viene tagliata di nuovo in background con le opzioni
   del chunk, quando c'è il modello (o la nuvola densa); i disegni di una sezione eliminata in QGIS
   restano in `sezioni/`.
-* **Disegni liberi** (*Disegni 3D - linee / poligoni / punti (ppg)*, tabelle `disegni_3d_linee`,
+* **Disegni liberi** (un layer *Disegni 3D: <layer>* per ognuno dei loro layer, due o tre - *- linee*, *-
+  poligoni*, *- punti* - quando ha più tipi; tabelle `disegni_3d_linee`,
   `disegni_3d_poligoni`, `disegni_3d_punti`): la geometria con le sue quote, il layer (`layer`), il
   nome (`name`), il colore (`colour`, `#rrggbb`) e gli attributi, ognuno nella sua colonna. Una
   colonna aggiunta in QGIS è un attributo nuovo, una svuotata toglie l'attributo; viene letto anche
@@ -65,14 +104,15 @@ attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
   Di un elemento di più parti resta la prima, un poligono perde i fori: il log
   lo dice. Le tre tabelle esistono da quando il chunk ha un disegno libero (fanne uno qui, poi
   *Apri in QGIS*).
-* **Gli altri disegni della pianta** (*Poligoni (ppg)*, *Linee (ppg)*, *Punti (ppg)*, tabelle
+* **Gli altri disegni della pianta** (un layer per ognuno, tabelle
   `poligoni`, `linee`, `punti`): i layer che ha solo la vista 2D - quelli disegnati da un plugin
   (*PhotoCAD: Ortofoto 1*...), quelli disegnati in QGIS. Un elemento spostato, cambiato nelle sue
   colonne o eliminato in QGIS viene spostato, cambiato o eliminato nel suo layer qui (lo dice la
   colonna `layer`); le colonne del plugin restano come sono. Un elemento disegnato in QGIS va nel
   layer scritto in `layer`, creato se non esiste (*Disegni da QGIS* se è vuoto). Di un elemento di
-  più parti resta la prima, un poligono perde i fori, e una geometria che non fa un elemento del
-  suo layer (una linea in un layer di poligoni) non viene ripresa: il log lo dice. Queste
+  più parti resta la prima, un poligono perde i fori, e una geometria che non è della
+  sua tabella (un punto salvato nella tabella delle linee) non viene ripresa: il log lo dice. Una linea disegnata nel
+  layer delle linee di un layer cominciato con un poligono, o viceversa, viene ripresa come ogni altra. Queste
   modifiche restano con il chunk (`plan_edits`) e si salvano con il progetto: quando il plugin
   ridisegna il suo layer dai suoi risultati - dopo *Salva*, un passo, un altro raster mostrato -
   vi vengono rimesse, così un elemento eliminato qui o in QGIS resta eliminato. Un attributo di

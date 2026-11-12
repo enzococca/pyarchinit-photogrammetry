@@ -28,7 +28,7 @@ from ..app import app as application
 from ..core import stamps
 from ..core.document import Document
 from ..core.progress import Cancelled
-from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
+from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, feature_kind, new_id, stable_id
 from . import i18n, theme
 from . import shots_widgets as sw
 from .autopilot_dialog import AutopilotDialog
@@ -74,6 +74,7 @@ QGIS_LAYER = "Disegni da QGIS"  # what is drawn in QGIS in a table of the plan w
 # layer again each time it is drawn (:meth:`MainWindow._sync_plan_edits`); those of features the layer no longer
 # draws leave at saving (:meth:`MainWindow._prune_plan_edits`)
 PLAN_EDITS = "plan_edits"
+LAYERS_HIDDEN = "layers_hidden"  # chunk.meta: the names of the layers of the plan unticked in the Layers pane
 _PLAN_KINDS = {"poligoni": "polygon", "curve": "line", "linee": "line", "punti": "point"}
 _PLAN_GEOM = {"polygon": "Polygon", "line": "LineString", "point": "Point"}
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
@@ -850,8 +851,12 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.layers_changed.connect(self._sync_plan_later)  # before the file gets the layers
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self.ortho_view.layer_shown.connect(self._schedule_qgis)  # only the layers ticked go to QGIS
+        self.ortho_view.layer_shown.connect(self._keep_layer_shown)  # and the ticks stay with the chunk
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
+        self._plan_renamed: dict[str, dict] = {}  # layer -> {identity up to 1.7.8: identity now} (_plan_rename)
         self._plan_busy = self._plan_waiting = False
+        self._qgis_project_seen: tuple | None = None  # (stamp of the QGIS project, its layers): read once per version
+        self._qgis_missing_said: tuple = ()  # the layers said missing from the QGIS project, once each set
         self._plan_editing: tuple | None = None  # (layer, index, field, identity) of the attribute being changed
         self._plan_said: set[str] = set()  # the layers said one-way in the log, once each
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
@@ -10821,8 +10826,43 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._store_drawings()
         self.drawings_frame = frame
         self._restore_frame()
+        self._restore_hidden_layers()
         if clean:  # what reading the frame adds (identities, the default layer) is no edit: no entry for it
             h.rebase()
+
+    def _keep_layer_shown(self, name: str, visible: bool) -> None:
+        """A layer of the plan ticked or unticked (the Layers pane, *Tutti*/*Nessuno*, a plugin): kept with the chunk
+        (``chunk.meta["layers_hidden"]``, the names of those unticked), so the project reopened shows - and sends to
+        QGIS - the same layers. Not the layers of an elevation shown (they are the view's while it is shown), not
+        those of the free drawings (kept with their own layer); no step of Modifica > Annulla."""
+        ch = self.chunk
+        if ch is None or self.drawings_frame is not None or name.startswith(LAYER_PREFIX):
+            return
+        hidden = set(ch.meta.get(LAYERS_HIDDEN) or [])
+        now = (hidden - {name}) if visible else (hidden | {name})
+        if now == hidden:
+            return
+        if now:
+            ch.meta[LAYERS_HIDDEN] = sorted(now)
+        else:
+            ch.meta.pop(LAYERS_HIDDEN, None)
+        self.setWindowModified(True)
+
+    def _restore_hidden_layers(self) -> None:
+        """The layers of the plan unticked, from the chunk, for the 2D view (:meth:`_keep_layer_shown`): those drawn
+        from now on are hidden from the start, those there are hidden or shown. None while an elevation is shown."""
+        ch, view = self.chunk, self.ortho_view
+        plan = ch is not None and self.drawings_frame is None
+        view.hidden_layers = set(ch.meta.get(LAYERS_HIDDEN) or []) if plan else set()
+        if not plan:
+            return
+        blocked = view.blockSignals(True)  # nothing changed by hand: no write for QGIS, nothing to keep
+        try:
+            for name, lay in list(view.layers.items()):
+                if not name.startswith(LAYER_PREFIX) and lay["visible"] == (name in view.hidden_layers):
+                    view.set_layer_visible(name, name not in view.hidden_layers)
+        finally:
+            view.blockSignals(blocked)
 
     def _restore_frame(self) -> None:
         """The sets of the elevation shown (:attr:`drawings_frame`) from the chunk; empty on the plan."""
@@ -10934,6 +10974,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The plan's drawings, and those of the elevation shown (:attr:`drawings_frame`), from the active chunk."""
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
+        self._restore_hidden_layers()
         self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
         self.lines = self._chunk_lines(ch)
         self.stones = self._frame_stones(ch, None)
@@ -12230,7 +12271,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             for item, _label, attrs in lay["features"]:
                 if id(attrs) in skip:
                     continue
-                others.append((name, lay["kind"], dict(attrs), self._feature_style(lay["kind"], item)))
+                others.append((name, lay["kind"], dict(attrs),
+                               self._feature_style(feature_kind(attrs, lay["kind"]), item)))
         v.clear_overlays()
         for i, u in enumerate(self.shown_units):
             self._draw_unit(u, i)
@@ -12611,10 +12653,41 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if "locked" in str(exc) or "busy" in str(exc):
                 self._qgis_timer.start(3000)  # QGIS or a sync client holds the file a moment: try again
             return {}
+        self._qgis_project_check(link)
         stamp = self._live_stamp()
         if stamp != self._rustgis_stamp:  # rows written: RustGIS gets them at the next look
             self._rustgis_stamp, self._rustgis_wrote = stamp, True
         return files
+
+    def _qgis_project(self) -> Path:
+        """The QGIS project *Apri in QGIS* writes for this project."""
+        return self._qgis_dir() / f"{self.doc.path.stem if self.doc.path else 'progetto'}_ppg.qgs"
+
+    def _qgis_project_check(self, link) -> None:
+        """Say, once, which layers with drawings the QGIS project does not show: a layer of QGIS is made when the
+        project is written (*Apri in QGIS*), so one drawn, ticked or renamed afterwards is in the file and not on
+        the map until the project is written again. The rows of the layers it shows change live; one unticked or
+        emptied stays there, empty."""
+        from ..io import qgis_link
+
+        if not self.a_qgis_live.isChecked():
+            return
+        try:
+            project = self._qgis_project()
+            st = project.stat()
+            stamp = (str(project), st.st_mtime_ns, st.st_size)
+            if self._qgis_project_seen is None or self._qgis_project_seen[0] != stamp:
+                self._qgis_project_seen = (stamp, qgis_link.project_layers(project))
+            vectors = qgis_link.live_vectors(link.path) + link.free_vectors()
+            missing = tuple(qgis_link.layers_not_in_project(self._qgis_project_seen[1], vectors))
+        except Exception:  # noqa: BLE001 - no project yet, a file busy: nothing to say
+            return
+        if missing and missing != self._qgis_missing_said:
+            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso",
+                      ", ".join(f"«{n}»" for n in missing[:6]) + ("…" if len(missing) > 6 else ""))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+        self._qgis_missing_said = missing
 
     def _frame_records(self) -> dict:
         """The drawings of the elevation shown as the chunk keeps them (:meth:`_store_chunk_drawings`), without
@@ -13256,7 +13329,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The features of the layer ``name`` as they are drawn now, each with the identity of its row in the live
         GeoPackage, kept as the layer without the edits made by hand (once: a layer they are on already keeps the one
         taken before them)."""
-        from ..io.qgis_link import plan_identities
+        from ..io.qgis_link import legacy_identities, plan_identities
 
         v = self.ortho_view
         lay = v.layers.get(name)
@@ -13266,12 +13339,34 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         stamp = lay.get("plan_stamp")
         if stamp is not None and stamp[1] == len(lay["features"]) and name in self._plan_base:
             return self._plan_base[name]
-        ids = plan_identities({name: {"kind": lay["kind"], "features": v.features(name)}})
+        layers = {name: {"kind": lay["kind"], "features": v.features(name)}}
+        ids = plan_identities(layers)
         by = {id(attrs): pid for pid, (_table, _name, attrs) in ids.items()}
         base = self._plan_base[name] = {"kind": lay["kind"], "features": [
-            (by.get(id(attrs)), dict(attrs), self._feature_style(lay["kind"], item))
+            (by.get(id(attrs)), dict(attrs), self._feature_style(feature_kind(attrs, lay["kind"]), item))
             for item, _label, attrs in lay["features"]]}
+        self._plan_renamed[name] = legacy_identities(layers)
+        self._plan_rename(name)
         return base
+
+    def _plan_rename(self, name: str) -> None:
+        """The edits made by hand to the layer ``name`` kept under the identities its features had up to 1.7.8 (a
+        layer of lines and polygons: :func:`..io.qgis_link.legacy_identities`) put under those they have now - of a
+        project saved by 1.7.8, or brought back by a step of Modifica > Annulla. No edit of the user's: no entry of
+        the history for it."""
+        renamed = self._plan_renamed.get(name)
+        ed = self._plan_edits(name)
+        if not renamed or not ed:
+            return
+        changed, deleted = ed.get("changed") or {}, ed.get("deleted") or []
+        if not any(pid in renamed for pid in list(changed) + list(deleted)):
+            return
+        h = self.history
+        clean = h is not None and not h.applying and h.unchanged()
+        ed["changed"] = {renamed.get(pid, pid): e for pid, e in changed.items()}
+        ed["deleted"] = [renamed.get(pid, pid) for pid in deleted]
+        if clean:
+            h.rebase()
 
     def _plan_build(self, name: str) -> None:
         """The layer ``name`` drawn from its features as its maker drew them (:meth:`_plan_capture`) with the edits
@@ -13279,6 +13374,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         deleted ones left out, the added ones at the end. Its place among the layers and its visibility kept."""
         v = self.ortho_view
         base = self._plan_base.get(name) or {"kind": None, "features": []}
+        self._plan_rename(name)
         ed = self._plan_edits(name)
         changed, deleted, added = ed.get("changed") or {}, set(ed.get("deleted") or []), ed.get("added") or {}
         feats = []
@@ -13570,7 +13666,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     self.log_pane.warning(said(tr("{0} senza geometria leggibile, non ripreso", label)))
                     continue
                 lay = v.layers.get(name)
-                got = self._plan_coords(lay["kind"] if lay is not None else kind, shapely.force_2d(g))
+                # the kind of the feature is the one of its table (a layer may hold lines and polygons); a feature
+                # known here keeps the kind it has
+                got = self._plan_coords(feature_kind(hit[2], kind) if hit else kind, shapely.force_2d(g))
                 if got is None or (hit is None and classify_layer(name, kind, {}) != table):
                     self.log_pane.warning(said(tr("{0} non ripreso: la sua geometria non fa un disegno di questo "
                                                   "layer", label)))
@@ -13596,9 +13694,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 else:
                     new = f.id not in ed["added"]
                     color = (ed["added"].get(f.id) or {}).get("color") or (
-                        self._feature_style(lay["kind"], lay["features"][-1][0])[0]
+                        self._feature_style(feature_kind(lay["features"][-1][2], lay["kind"]),
+                                            lay["features"][-1][0])[0]
                         if lay is not None and lay["features"] else "#ff9800")
-                    ed["added"][f.id] = {"kind": lay["kind"] if lay is not None else kind, "geom": coords,
+                    ed["added"][f.id] = {"kind": kind, "geom": coords,
                                          "attrs": {k: val for k, val in values.items() if val not in (None, "")},
                                          "color": color}
                     line = tr("{0} aggiunto", label) if new else tr("{0} modificato", label)
@@ -14045,7 +14144,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._warn(tr("Non riesco a scrivere i disegni per QGIS in {0}: vedi il log.", self._qgis_dir()))
             return
         name = self.doc.path.stem if self.doc.path else "progetto"
-        project = self._qgis_dir() / f"{name}_ppg.qgs"
+        project = self._qgis_project()
         rasters, extra_vectors = self._qgis_rasters(ch)
 
         def job(p):
@@ -14057,6 +14156,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         def done(rep):
             self.a_qgis_live.setChecked(True)
+            self._qgis_missing_said = ()  # the project holds the layers of now
             bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
             self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
                                   project, len(rep['vectors']), len(rep['rasters']))
@@ -14135,7 +14235,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         names = {e["id"]: e.get("name") or e["id"] for e in ch.meta.get("elevations") or []}
         link = self._qgis_live_link()
         out = []
-        for table, _gtype in link.elevation_tables():
+        for table, _gtype in link.elevation_tables(filled=True):  # an empty table makes no layer
             eid, _, kind = table[len(ELEVATION_PREFIX):].partition("_")
             title, geometry, colour = ELEVATION_TABLES.get(kind, (kind, "POINT", "#888888"))
             out.append({"name": f"{names.get(eid, eid)} - {tr(title)} (3D)", "path": str(link.path), "table": table,

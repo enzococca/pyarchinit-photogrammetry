@@ -6,7 +6,8 @@
 writes a QGIS project next to the `.ppg` (`<name>_qgis/<name>_ppg.qgs`) and opens it:
 
 * rasters: the orthomosaic, the DEM (hillshade, hidden at first) and the DEM values;
-* vectors, in the group *Disegni (aggiornati dal vivo)*: the tables of one GeoPackage,
+* vectors, in the group *Disegni (aggiornati dal vivo)*: one layer for each layer of the program that has
+  drawings (see [below](#one-layer-in-qgis-for-each-layer)), read from the tables of one GeoPackage,
   `disegni_ppg.gpkg`: `unita` (unit polygons with the columns of `pyunitastratigrafiche`,
   label = `etichetta`), `poligoni` (zones, stones, patches, the polygons of plugins), `sezioni`
   (section traces), `curve` (contour lines, label = elevation), `linee` (other lines), `punti`
@@ -25,16 +26,51 @@ layer deletes nothing: its drawings and the edits kept with the chunk stay in th
 as deleted in QGIS. What was saved in QGIS on a layer a moment before it was hidden is still taken, and a feature
 drawn in QGIS on a hidden layer (its name in the column `layer`) joins that layer here and is hidden with it. The same
 holds for the layers of the free drawings in 3D (`disegni_3d_*`) and for RustGIS, which reads the same file. The
-tables themselves stay in the QGIS project, empty when all their layers are hidden; the drawings on elevations and
-sections (`prospetto_*`) are always written. The ticks of the layers of the plan are not saved with the project: when
-it is opened again every layer is ticked, and sent.
+layer of QGIS stays in the project, empty while its layer is hidden here; the drawings on elevations and sections
+(`prospetto_*`) are always written. **The ticks are saved with the project** (those of the plan with the chunk, in
+`layers_hidden`; those of the free drawings with their layers): opened again, it shows - and sends - the layers that
+were ticked. A layer that a plugin draws again, or a new one of the same name, stays unticked until it is ticked. The
+ticks of the layers of an elevation shown in the 2D view are the view's, and are not saved.
+
+### One layer in QGIS for each layer
+
+The QGIS project has **one layer for each layer of the program that has drawings**, with the name it has in the
+*Layer* pane - *Unita' stratigrafiche*, *Quote*, *PhotoCAD: Ortofoto 1*, *Disegni 3D: Muri* - so each can be styled,
+hidden, ordered and edited by itself. Each is a view of its table filtered on the column `layer`
+(`"layer" = 'PhotoCAD: Ortofoto 1'`: *Layer Properties > Source > Provider Feature Filter*), and has the name of the
+layer as the default value of that column: what is drawn in it in QGIS is saved with that name, and comes back in
+that layer here.
+
+* A feature is written in the table of its own geometry. A layer that holds lines and polygons - a PhotoCAD drawing
+  with open and closed polylines - makes two layers in QGIS, *PhotoCAD: Rilievo - linee* and *PhotoCAD: Rilievo -
+  poligoni* (and *- punti*): QGIS has one kind of geometry in a layer.
+* A layer without drawings makes none: a project without sections or contour lines has no empty *Sezioni* or
+  *Curve di livello* in QGIS. The same holds for the tables of the elevations (`prospetto_*`).
+* Rows without a name in `layer` (a feature saved in QGIS without one, in a project written up to
+  1.7.8) are shown in a layer with the name of
+  their table, *Linee (ppg)*, *Poligoni (ppg)*, *Punti (ppg)*.
+
+**What updates by itself and what needs *Apri in QGIS*.** The layers the QGIS project has are updated live, as
+before: features drawn, changed or deleted here, and a layer unticked (emptied) and ticked again (filled again). The
+list of the layers is written when the project is: a layer that got its first drawings, was renamed, or was unticked
+when the project was written is not in it. The program says so once, in the log and in the status bar (*QGIS: il
+progetto aperto non mostra ancora «...»*): choose *QGIS > Apri in QGIS* again, which writes the project again with
+the layers of now (a style changed by hand in the QGIS project is written over, as it always
+was - keep it in a style file, or in a project of your own that reads the same GeoPackage). The first unit, section
+or spot height of a project is in the same case: draw it here, then *Apri in QGIS*.
+
+A QGIS project written by 1.7.8 or earlier - seven layers, one for each table - keeps working as it did, both ways,
+until *Apri in QGIS* writes it again. The GeoPackage of 1.7.8 held every feature of a layer in the table of the first
+one drawn (a line among the polygons, which QGIS could not draw): at the first write the rows are moved to the table
+of their geometry, with the edits made on them by hand, and nothing is read back as deleted or drawn in QGIS.
+RustGIS reads the same file by its tables, as before.
 
 ### Both ways
 
 With *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* on (it is turned on by *Apri in
 QGIS*, and stays on for a project already linked), what is saved in QGIS comes back too. Edit
-the layers *Unita' stratigrafiche (ppg)*, *Quote (ppg)*, *Sezioni (ppg)* or the three *Disegni 3D
-(ppg)* in QGIS as any layer
+the layers *Unita' stratigrafiche*, *Quote*, *Sezioni*, those of the free drawings (*Disegni 3D: ...*) or
+those of the plugins in QGIS as any layer
 (*Toggle Editing*, draw, move vertices, change attributes in the attribute table, delete) and save
 the edits: within a second the window has them.
 
@@ -50,7 +86,8 @@ the edits: within a second the window has them.
   trace moved, or drawn in QGIS, is cut again in the background with the options of the chunk,
   when it has the model (or the dense cloud); the drawings of a section deleted in QGIS stay in
   `sezioni/`.
-* **Free drawings** (*Disegni 3D - linee / poligoni / punti (ppg)*, tables `disegni_3d_linee`,
+* **Free drawings** (a layer *Disegni 3D: <layer>* for each of their layers, two or three - *- linee*, *-
+  poligoni*, *- punti* - when it holds several kinds; tables `disegni_3d_linee`,
   `disegni_3d_poligoni`, `disegni_3d_punti`): the geometry with its heights, the layer (`layer`),
   the name (`name`), the colour (`colour`, `#rrggbb`) and the attributes, each in its column. A
   column added in QGIS is a new attribute, an emptied one takes the attribute away; the JSON of
@@ -66,14 +103,15 @@ the edits: within a second the window has them.
   again first. A feature of several parts keeps the first, a
   polygon loses its holes: the log says so. The three tables exist once the chunk has a free
   drawing (make one here, then *Apri in QGIS*).
-* **The other drawings of the plan** (*Poligoni (ppg)*, *Linee (ppg)*, *Punti (ppg)*, tables
+* **The other drawings of the plan** (a layer for each, tables
   `poligoni`, `linee`, `punti`): the layers that only the 2D view holds - those a plugin draws
   (*PhotoCAD: Ortofoto 1*...), those drawn in QGIS. A feature moved, changed in its columns or
   deleted in QGIS is moved, changed or deleted in its layer here (the column `layer` says which);
   the columns of the plugin stay as they are. A feature drawn in QGIS goes to the layer written
   in `layer`, made when it does not exist (*Disegni da QGIS* when empty). A feature of several
-  parts keeps the first, a polygon loses its holes, and a geometry that makes no feature of its
-  layer (a line in a layer of polygons) is not taken: the log says so. These edits are kept with
+  parts keeps the first, a polygon loses its holes, and a geometry that is not of its
+  table (a point saved in the table of the lines) is not taken: the log says so. A line drawn in the layer of the
+  lines of a layer that began with a polygon, or the other way round, is taken as any other. These edits are kept with
   the chunk (`plan_edits`) and saved with the project: when the plugin draws its layer again from
   its results - after *Salva*, a step, another raster shown - they are put on it again, so a
   feature deleted here or in QGIS stays deleted. An attribute of such a feature changed here, in

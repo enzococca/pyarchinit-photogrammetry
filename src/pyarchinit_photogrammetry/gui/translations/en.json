@@ -4714,7 +4714,8 @@
   "{0} (di più parti, tenuta la prima)": "{0} (of several parts, the first one kept)",
   "{0} (senza i suoi fori)": "{0} (without its holes)",
   "Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)": "Model: {0} holes closed, {1} m² in plan interpolated (not measured)",
-  "Modello: {0} buchi più larghi di {1} m lasciati aperti": "Model: {0} holes wider than {1} m left open"
+  "Modello: {0} buchi più larghi di {1} m lasciati aperti": "Model: {0} holes wider than {1} m left open",
+  "QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso": "QGIS: the open project does not show {0} yet: \"Open in QGIS\" writes it again with the layers of now"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

@@ -318,7 +318,8 @@ canvas.resize(300, 300)
 canvas.show()
 canvas.setCanvasColor(QColor("white"))
 canvas.setDestinationCrs(proj.crs())
-canvas.setLayers([l for n, l in layers.items() if n.endswith("(ppg)")])
+live = {n: l for n, l in layers.items() if l.providerType() == "ogr"}  # the drawings: a layer for each layer
+canvas.setLayers(list(live.values()))
 canvas.setExtent(QgsRectangle(x - 1, y - 1, x2 + 1, y2 + 1))
 def spin(sec):
     loop = QEventLoop()
@@ -328,7 +329,7 @@ def colour(px, py):
     pt = canvas.getCoordinateTransform().transform(QgsPointXY(px, py))
     return QColor(canvas.grab().toImage().pixel(int(pt.x()), int(pt.y()))).name()
 def state():
-    return json.dumps({"counts": {n: sum(1 for _ in l.getFeatures()) for n, l in layers.items() if n.endswith("(ppg)")},
+    return json.dumps({"counts": {n: sum(1 for _ in l.getFeatures()) for n, l in live.items()},
                        "first": colour(x + 0.25, y + 0.25), "second": colour(x2 - 0.25, y2 - 0.25)})
 spin(1.0)
 print("STATE " + state(), flush=True)
@@ -355,13 +356,18 @@ def test_qgis_project_shows_new_drawings_by_itself(processed, tmp_path):
     def square(x, y):
         return ("Polygon", [[x, y], [x + 0.5, y], [x + 0.5, y + 0.5], [x, y + 0.5]])
 
-    layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [{"etichetta": "", "_geom": square(x0, y0)}]}}
+    def section(n, y):
+        return {"etichetta": f"Sezione {n}", "_geom": ("LineString", [[x0, y], [x0 + 0.5, y]])}
+
+    layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [{"etichetta": "", "_geom": square(x0, y0)}]},
+              "Sezioni": {"kind": "line", "features": [section(1, y1)]}}  # a layer with no drawings makes none
     link = LiveLink(tmp_path, ch.crs)
     files = link.write(layers)
     rep = build_project(tmp_path / "p.qgs", ch.crs, files, [{"name": "Ortofoto", "path": str(ch.orthomosaic_path)}], qgis=q)
     assert rep["written"] and all(v["valid"] for v in rep["vectors"] + rep["rasters"])
     text = (tmp_path / "p.qgs").read_text(encoding="utf-8")
-    assert text.count('autoRefreshEnabled="1"') == len(files) and "layername=sezioni" in text
+    assert [v["name"] for v in rep["vectors"]] == ["Unita' stratigrafiche", "Sezioni"]
+    assert text.count('autoRefreshEnabled="1"') == 2 and "layername=sezioni" in text and "layername=quote" not in text
     assert 'autoRefreshMode="ReloadData"' not in text and 'autoRefreshMode="RedrawOnly"' not in text
     assert "<authid>EPSG:3004</authid>" in text  # the project has its CRS (QGIS's Python found its database)
     script = tmp_path / "live.py"
@@ -373,16 +379,15 @@ def test_qgis_project_shows_new_drawings_by_itself(processed, tmp_path):
                             text=True, env=env, close_fds=False)
     try:
         first = json.loads(next(ln for ln in proc.stdout if ln.startswith("STATE ")).split(" ", 1)[1])
-        assert first["counts"]["Unita' stratigrafiche (ppg)"] == 1
+        assert first["counts"] == {"Unita' stratigrafiche": 1, "Sezioni": 1}
         assert first["first"] != "#ffffff" and first["second"] == "#ffffff"  # one unit drawn, the other not yet
         layers["Unita' stratigrafiche"]["features"].append({"etichetta": "", "_geom": square(x1, y1)})
-        layers["Sezioni"] = {"kind": "line", "features": [{"etichetta": "Sezione 1",
-                                                           "_geom": ("LineString", [[x0, y1], [x1, y0]])}]}
+        layers["Sezioni"]["features"].append(section(2, y1 + 0.25))
         link.write(layers)  # QGIS has the project open
         proc.stdin.write("next\n")
         proc.stdin.flush()
         second = json.loads(next(ln for ln in proc.stdout if ln.startswith("STATE ")).split(" ", 1)[1])
-        assert second["counts"]["Unita' stratigrafiche (ppg)"] == 2 and second["counts"]["Sezioni (ppg)"] == 1
+        assert second["counts"] == {"Unita' stratigrafiche": 2, "Sezioni": 2}
         assert second["second"] == first["first"]  # the new unit is on the map, nobody pressed Refresh
     finally:
         proc.kill()
