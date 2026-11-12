@@ -194,10 +194,11 @@ polygon shows the same measures.
 
 **Out and back in.** *File > Export > 3D drawings...* writes them all, or one layer, as DXF 3D (a DXF layer per
 layer), GeoPackage with Z, GeoJSON or a CSV of the vertices; *File > Import > 3D drawings...* reads a GeoPackage,
-GeoJSON or DXF ([exports](exports.md#3d-drawings)). With the live link they reach QGIS and RustGIS as three layers
-*Disegni 3D - lines / polygons / points (ppg)*. With QGIS the link is two-way: a free drawing edited, deleted or drawn
+GeoJSON or DXF ([exports](exports.md#3d-drawings)). With the live link they reach QGIS as a layer for each of
+their layers (*Disegni 3D: Muri*; two or three, *- linee / poligoni / punti*, for a layer with several kinds of
+geometry) and RustGIS as three layers *Disegni 3D - linee / poligoni / punti (ppg)*. With QGIS the link is two-way: a free drawing edited, deleted or drawn
 there and saved comes back here, with its heights (a vertex without one takes the DEM's) - see
-[QGIS, live](../integrations.md#both-ways); with RustGIS it is one-way. The first free drawing made after the QGIS
+[QGIS, live](../integrations.md#both-ways); with RustGIS it is one-way. The first free drawing of a layer made after the QGIS
 project was built needs it built again (*QGIS > Open in QGIS*), as for the elevations. From the command
 line: `ppg drawings3d project.ppg list | export --out FILE | import FILE`.
 
