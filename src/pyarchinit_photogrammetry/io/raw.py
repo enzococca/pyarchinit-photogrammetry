@@ -154,7 +154,8 @@ def photo_files(paths: Iterable[str | os.PathLike], extensions, recursive: bool 
         p = Path(p)
         if p.is_dir():
             it = p.rglob("*") if recursive else p.iterdir()
-            files += sorted(f for f in it if f.suffix.lower() in extensions or is_raw(f))
+            # hidden files are not photos: macOS leaves an AppleDouble "._name.JPG" beside each photo on exFAT
+            files += sorted(f for f in it if (f.suffix.lower() in extensions or is_raw(f)) and not f.name.startswith("."))
         else:
             files.append(p)
     shots: dict[tuple, dict[bool, Path]] = {}
