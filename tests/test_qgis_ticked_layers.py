@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from shapely.geometry import LineString, box
 
 from pyarchinit_photogrammetry.core import free_drawings as fd
-from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, LIVE_DB, LiveLink, plan_identities
+from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, LiveLink, plan_identities
 from test_free_two_way import LINES, POLYGONS, POINTS, _by_id, _chunk, _three
 from test_plan_two_way import LAYER, STONES, Plugin, _by_n, _line, _live
 from test_qgis_two_way import Qgis, X0, Y0, _from_qgis, _rows, _square
