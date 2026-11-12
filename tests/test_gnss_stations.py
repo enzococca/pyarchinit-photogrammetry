@@ -2344,7 +2344,8 @@ def test_parked_92_user_agent_built_at_the_first_request():
             "download = importlib.import_module('pyarchinit_photogrammetry.gnss.download')\n"
             "ppg.__version__ = version\n"
             "print(download.user_agent(), download.USER_AGENT)\n")
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                          close_fds=False)  # posix_spawn, never a fork of the process of the tests (see test_env)
     assert done.returncode == 0, done.stderr[-2000:]
     agent = f"pyarchinit-photogrammetry/{__version__}"
     assert done.stdout.split()[-2:] == [agent, agent]

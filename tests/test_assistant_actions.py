@@ -114,7 +114,8 @@ def test_ppg_actions_is_lazy():
             "assert 'pyarchinit_photogrammetry.assistant.actions' in sys.modules\n"
             "assert 'PySide6' not in sys.modules\n")
     env = {**os.environ, "PPG_NO_PLUGINS": "1"}
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300,
+                       close_fds=False)  # posix_spawn, never a fork of the process of the tests (see test_env)
     assert r.returncode == 0, r.stderr
 
 

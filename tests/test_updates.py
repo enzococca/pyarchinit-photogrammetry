@@ -133,7 +133,8 @@ def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch):
     os.symlink("/Applications", source / "Applications")
     dmg = tmp_path / "PyArchInit-Photogrammetry-9.9.9-macos-arm64.dmg"
     r = subprocess.run(["/usr/bin/hdiutil", "create", "-volname", "PyArchInit Photogrammetry", "-srcfolder", str(source),
-                        "-ov", "-format", "UDZO", str(dmg)], capture_output=True, text=True)
+                        "-ov", "-format", "UDZO", str(dmg)], capture_output=True, text=True,
+                       close_fds=False)  # posix_spawn, never a fork of the process of the tests (see test_env)
     if r.returncode != 0:
         pytest.skip(f"hdiutil create: {r.stderr.strip()}")
     target = _fake_app(tmp_path / "Applications", "0.6.1")

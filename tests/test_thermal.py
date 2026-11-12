@@ -266,13 +266,15 @@ def test_flir_jpeg_read_by_exiftool(tmp_path):
 
     t = np.linspace(10, 40, 64 * 48, dtype=np.float32).reshape(48, 64)
     path = thermal.write_flir_jpeg(tmp_path / "t.jpg", t, dict(thermal.DEFAULTS, distance=20.0))
-    out = subprocess.run(["exiftool", "-j", "-Emissivity", "-ObjectDistance", "-ReflectedApparentTemperature",
+    exiftool = __import__("shutil").which("exiftool")  # by its whole path: posix_spawn, not a fork (see test_env)
+    out = subprocess.run([exiftool, "-j", "-Emissivity", "-ObjectDistance", "-ReflectedApparentTemperature",
                           "-AtmosphericTemperature", "-IRWindowTemperature", "-IRWindowTransmission", "-RelativeHumidity",
                           "-PlanckR1", "-PlanckB", "-PlanckF", "-PlanckO", "-PlanckR2", "-RawThermalImageType", str(path)],
-                         capture_output=True, text=True, check=True)
+                         capture_output=True, text=True, check=True, close_fds=False)
     tags = json.loads(out.stdout)[0]
     assert tags["RawThermalImageType"] == "TIFF" and tags["Emissivity"] == 0.95
-    tiff = subprocess.run(["exiftool", "-b", "-RawThermalImage", str(path)], capture_output=True, check=True).stdout
+    tiff = subprocess.run([exiftool, "-b", "-RawThermalImage", str(path)], capture_output=True, check=True,
+                          close_fds=False).stdout
     from io import BytesIO
 
     from PIL import Image
