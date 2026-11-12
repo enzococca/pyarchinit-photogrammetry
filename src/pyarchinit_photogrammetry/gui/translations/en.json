@@ -3717,6 +3717,7 @@
   "DEM modificato: {0:,} celle, variazione media {1:+.1f} cm, massima {2:.1f} cm": "DEM changed: {0:,} cells, mean change {1:+.1f} cm, maximum {2:.1f} cm",
   "DEM modificato: {0} celle, variazione media {1} cm, massima {2} cm": "DEM changed: {0} cells, mean change {1} cm, maximum {2} cm",
   "DEM pronto: {0}": "DEM ready: {0}",
+  "DEM calcolato a {0} m/pixel invece di {1}: alla risoluzione dei dati la griglia non entra nella memoria di questo computer ({2} GB). Il DEM è {3} volte più grossolano dei dati da cui è fatto; curve di livello e volumi useranno questo DEM.": "DEM computed at {0} m/pixel instead of {1}: at the resolution of the data the grid does not fit in the memory of this computer ({2} GB). The DEM is {3} times coarser than the data it is made from; contours and volumes will use this DEM.",
   "DJI Thermal SDK installato in {0}.": "DJI Thermal SDK installed in {0}.",
   "Da QGIS o RustGIS: {0}": "From QGIS or RustGIS: {0}",
   "Da QGIS: {0}": "From QGIS: {0}",
