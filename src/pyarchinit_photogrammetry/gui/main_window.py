@@ -74,6 +74,7 @@ QGIS_LAYER = "Disegni da QGIS"  # what is drawn in QGIS in a table of the plan w
 # layer again each time it is drawn (:meth:`MainWindow._sync_plan_edits`); those of features the layer no longer
 # draws leave at saving (:meth:`MainWindow._prune_plan_edits`)
 PLAN_EDITS = "plan_edits"
+LAYERS_HIDDEN = "layers_hidden"  # chunk.meta: the names of the layers of the plan unticked in the Layers pane
 _PLAN_KINDS = {"poligoni": "polygon", "curve": "line", "linee": "line", "punti": "point"}
 _PLAN_GEOM = {"polygon": "Polygon", "line": "LineString", "point": "Point"}
 TIN_MAX_EDGES = 50_000  # the plan draws at most these edges of the TIN
@@ -850,6 +851,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.layers_changed.connect(self._sync_plan_later)  # before the file gets the layers
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self.ortho_view.layer_shown.connect(self._schedule_qgis)  # only the layers ticked go to QGIS
+        self.ortho_view.layer_shown.connect(self._keep_layer_shown)  # and the ticks stay with the chunk
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
         self._plan_renamed: dict[str, dict] = {}  # layer -> {identity up to 1.7.8: identity now} (_plan_rename)
         self._plan_busy = self._plan_waiting = False
@@ -10822,8 +10824,43 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._store_drawings()
         self.drawings_frame = frame
         self._restore_frame()
+        self._restore_hidden_layers()
         if clean:  # what reading the frame adds (identities, the default layer) is no edit: no entry for it
             h.rebase()
+
+    def _keep_layer_shown(self, name: str, visible: bool) -> None:
+        """A layer of the plan ticked or unticked (the Layers pane, *Tutti*/*Nessuno*, a plugin): kept with the chunk
+        (``chunk.meta["layers_hidden"]``, the names of those unticked), so the project reopened shows - and sends to
+        QGIS - the same layers. Not the layers of an elevation shown (they are the view's while it is shown), not
+        those of the free drawings (kept with their own layer); no step of Modifica > Annulla."""
+        ch = self.chunk
+        if ch is None or self.drawings_frame is not None or name.startswith(LAYER_PREFIX):
+            return
+        hidden = set(ch.meta.get(LAYERS_HIDDEN) or [])
+        now = (hidden - {name}) if visible else (hidden | {name})
+        if now == hidden:
+            return
+        if now:
+            ch.meta[LAYERS_HIDDEN] = sorted(now)
+        else:
+            ch.meta.pop(LAYERS_HIDDEN, None)
+        self.setWindowModified(True)
+
+    def _restore_hidden_layers(self) -> None:
+        """The layers of the plan unticked, from the chunk, for the 2D view (:meth:`_keep_layer_shown`): those drawn
+        from now on are hidden from the start, those there are hidden or shown. None while an elevation is shown."""
+        ch, view = self.chunk, self.ortho_view
+        plan = ch is not None and self.drawings_frame is None
+        view.hidden_layers = set(ch.meta.get(LAYERS_HIDDEN) or []) if plan else set()
+        if not plan:
+            return
+        blocked = view.blockSignals(True)  # nothing changed by hand: no write for QGIS, nothing to keep
+        try:
+            for name, lay in list(view.layers.items()):
+                if not name.startswith(LAYER_PREFIX) and lay["visible"] == (name in view.hidden_layers):
+                    view.set_layer_visible(name, name not in view.hidden_layers)
+        finally:
+            view.blockSignals(blocked)
 
     def _restore_frame(self) -> None:
         """The sets of the elevation shown (:attr:`drawings_frame`) from the chunk; empty on the plan."""
@@ -10935,6 +10972,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         """The plan's drawings, and those of the elevation shown (:attr:`drawings_frame`), from the active chunk."""
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
+        self._restore_hidden_layers()
         self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
         self.lines = self._chunk_lines(ch)
         self.stones = self._frame_stones(ch, None)

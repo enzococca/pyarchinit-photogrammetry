@@ -522,6 +522,9 @@ class RasterView(_ZoomView):
         self.layers: dict[str, dict] = {}  # name -> {"kind", "visible", "features": [(item, label_item, attrs)]}
         self.layer_order: list[str] = []
         self.layer_settings: dict[str, dict] = {}
+        # the layers unticked in the Layers pane, by name: one drawn again, or drawn later (the project reopened), is
+        # hidden from its first feature (the window keeps them with the chunk)
+        self.hidden_layers: set[str] = set()
         self.selection: list = []  # graphics items of the selected features
         self._sel_marks: list = []  # highlight items drawn over the selection
         self._band_origin: QPointF | None = None
@@ -1059,7 +1062,7 @@ class RasterView(_ZoomView):
     def _layer(self, name: str, kind: str) -> dict:
         lay = self.layers.get(name)
         if lay is None:
-            lay = {"kind": kind, "visible": True, "features": [],
+            lay = {"kind": kind, "visible": name not in self.hidden_layers, "features": [],
                    "labels_visible": self.layer_settings.get(name, {}).get("labels_visible", True)}
             self.layers[name] = lay
             self.layer_order.append(name)
@@ -1330,6 +1333,7 @@ class RasterView(_ZoomView):
             return
         changed = bool(lay.get("visible", True)) != bool(visible)
         lay["visible"] = bool(visible)
+        (self.hidden_layers.discard if visible else self.hidden_layers.add)(name)
         self._snap_cache = None
         for item, label_item, _ in lay["features"]:
             item.setVisible(visible)

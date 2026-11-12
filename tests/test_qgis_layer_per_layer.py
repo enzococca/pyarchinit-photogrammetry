@@ -1,13 +1,14 @@
 """A feature of the plan goes to the table of its own geometry in the live GeoPackage, whatever the first feature
 of its layer was: a layer of lines and polygons (PhotoCAD) fills two tables and comes back from QGIS whole. A file
-and a project of 1.7.8, which sent them all to the table of the first, are taken without anything read as changed."""
+and a project of 1.7.8, which sent them all to the table of the first, are taken without anything read as changed. The ticks of the Layers pane
+stay with the project."""
 from __future__ import annotations
 
 import pytest
 from shapely.geometry import LineString, box
 
 from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, LiveLink, legacy_identities, plan_identities
-from test_plan_two_way import LAYER, Plugin, _by_n, _line, _live
+from test_plan_two_way import LAYER, STONES, Plugin, _by_n, _line, _live
 from test_qgis_two_way import Qgis, X0, Y0, _from_qgis, _rows
 
 CRS = "EPSG:3004"
@@ -204,3 +205,42 @@ def test_a_project_and_a_file_of_1_7_8_are_taken_as_they_are(trench):
     assert sorted(_by_n(_of(path, "linee", MIXED))) == [0, 1]  # each in the table of its geometry
     assert sorted(_by_n(_of(path, "poligoni", MIXED))) == [10, 11]
     assert _from_qgis(w) == [] and sorted(a["n"] for a in v.features(MIXED)) == [0, 1, 10, 11]
+
+
+def test_the_ticks_of_the_layers_stay_with_the_project(trench):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app, mw = trench
+    plugin = Plugin(w)
+    v = w.ortho_view
+    path = _live(w)
+    w.setWindowModified(False)
+    v.set_layer_visible(STONES, False)
+    assert w.chunk.meta[mw.LAYERS_HIDDEN] == [STONES] and w.isWindowModified()
+    v.set_layer_visible(LAYER, False)
+    v.set_layer_visible(LAYER, True)
+    assert w.chunk.meta[mw.LAYERS_HIDDEN] == [STONES]
+    drawn = plugin.drawn
+    w.refreshed.emit()  # drawn again by its plugin: still unticked
+    app.processEvents()
+    assert plugin.drawn > drawn
+    assert not v.layers[STONES]["visible"] and v.layers[LAYER]["visible"]
+    assert all(not f[0].isVisible() for f in v.layers[STONES]["features"])
+    w._export_qgis_layers()
+    assert _rows(path, "poligoni") == [] and len(_rows(path, "linee")) == 5
+
+    assert w.save_document()
+    w.set_document(ppg.Document.open(w.doc.path))  # the project opened again
+    app.processEvents()
+    assert w.chunk.meta[mw.LAYERS_HIDDEN] == [STONES]
+    assert not v.layers[STONES]["visible"] and v.layers[LAYER]["visible"]
+    assert w._plan_layers()[STONES]["sent"] is False and w._plan_layers()[LAYER]["sent"] is True
+    assert not w.isWindowModified()
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    assert _rows(path, "poligoni") == [] and len(_rows(path, "linee")) == 5
+
+    v.set_layer_visible(STONES, True)  # ticked again: no key left in the project
+    assert mw.LAYERS_HIDDEN not in w.chunk.meta
+    w._export_qgis_layers()
+    assert len(_rows(path, "poligoni")) == 2
