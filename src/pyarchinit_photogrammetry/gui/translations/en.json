@@ -3502,7 +3502,14 @@
   "Solo per il campo di altezze: chiude i buchi con un vuoto tra i punti misurati fino a questa misura. La parte chiusa è interpolata, non misurata.": "Height field only: closes the holes whose gap between measured points is up to this size. The closed part is interpolated, not measured.",
   "I buchi si chiudono solo nel campo di altezze: la superficie arbitraria è già chiusa.": "Holes are closed only in the height field: the arbitrary surface is already closed.",
   "non indicato": "not given",
-  "non indicata": "not given"
+  "non indicata": "not given",
+  "{0} file non aggiunti: dello stesso scatto c'è il file {1}": "{0} files not added: the same shot has its {1} file",
+  "File raw non leggibile: {0} ({1})": "Raw file that cannot be read: {0} ({1})",
+  "I file raw delle fotocamere (DNG, CR2, NEF, ARW...) richiedono il modulo rawpy, che non è installato: pip install \"pyarchinit-photogrammetry[raw]\". In alternativa esportare le foto in JPEG o TIFF.": "Camera raw files (DNG, CR2, NEF, ARW...) need the rawpy module, which is not installed: pip install \"pyarchinit-photogrammetry[raw]\". Otherwise export the photos to JPEG or TIFF.",
+  "Sviluppo dei file raw: {0} di {1}": "Developing the raw files: {0} of {1}",
+  "Sviluppo dei file raw: {0}": "Developing the raw files: {0}",
+  "Immagini e file raw": "Images and raw files",
+  "File raw delle fotocamere": "Camera raw files"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

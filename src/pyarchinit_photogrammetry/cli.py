@@ -79,12 +79,35 @@ def new(project: Path, chunk: str = typer.Option("Chunk 1", help="label of the f
 
 
 @app.command("add-photos")
-def add_photos(project: Path, paths: list[Path], chunk: Optional[str] = None, recursive: bool = False):
-    """Add photos or folders of photos."""
+def add_photos(project: Path, paths: list[Path], chunk: Optional[str] = None, recursive: bool = False,
+               prefer_raw: bool = typer.Option(False, help="of a raw and a JPEG of the same shot, take the raw"),
+               raw_format: str = typer.Option("jpg", help="developed copy of a raw file: jpg or tif"),
+               raw_exposure: float = typer.Option(1.0, help="exposure of the developed raw files, EV"),
+               raw_tone: str = typer.Option("auto", help="auto, camera (the contrast of a camera JPEG), local (and local "
+                                                                "contrast: flat phone raws) or linear"),
+               raw_half_size: bool = typer.Option(False, help="develop the raw files at half size (faster)")):
+    """Add photos or folders of photos. Camera raw files (DNG, CR2, NEF, ARW...) are developed into the project."""
     doc, ch = _open(project, chunk)
-    added = ch.add_photos(paths, recursive=recursive)
+    added = ch.add_photos(paths, recursive=recursive, prefer="raw" if prefer_raw else "jpeg", progress=print_progress,
+                          raw={"format": raw_format, "exposure": raw_exposure, "tone": raw_tone,
+                               "half_size": raw_half_size})
     doc.save()
     typer.echo(f"added {len(added)} photos ({len(ch.cameras)} in chunk, {len(ch.sensors)} sensors)")
+
+
+@app.command("develop-raw")
+def develop_raw(project: Path, chunk: Optional[str] = None,
+                raw_format: Optional[str] = typer.Option(None, help="jpg or tif (default: as they were added)"),
+                raw_exposure: Optional[float] = typer.Option(None, help="exposure, EV (default: as they were added)"),
+                raw_tone: Optional[str] = typer.Option(None, help="auto, camera, local or linear (default: as they were added)"),
+                force: bool = typer.Option(False, help="develop again the copies that are up to date too")):
+    """Develop again the camera raw files of the photos: missing copies, changed raws, other settings."""
+    doc, ch = _open(project, chunk)
+    r = ch.develop_raw_photos({"format": raw_format, "exposure": raw_exposure, "tone": raw_tone}, force=force,
+                              progress=print_progress)
+    doc.save()
+    typer.echo(f"developed {r['developed']} raw files"
+               + (f"; raw file not found: {', '.join(r['missing'])}" if r["missing"] else ""))
 
 
 @app.command("detect-markers")

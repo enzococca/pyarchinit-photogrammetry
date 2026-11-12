@@ -5753,9 +5753,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             d = QFileDialog.getExistingDirectory(self, tr("Cartella di foto"), self._last_dir())
             paths = [d] if d else []
         else:
-            paths, _ = QFileDialog.getOpenFileNames(self, tr("Foto"), self._last_dir(),
-                                                    tr("Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG "
-                                                       "*.TIF)"))
+            from ..io.raw import RAW_EXTENSIONS
+
+            raws = " ".join(f"*{e} *{e.upper()}" for e in sorted(RAW_EXTENSIONS))
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, tr("Foto"), self._last_dir(),
+                tr("Immagini e file raw") + f" (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF {raws});;"
+                + tr("Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF)") + ";;"
+                + tr("File raw delle fotocamere") + f" ({raws})")
         if not paths:
             return
         self._started = True
@@ -5777,7 +5782,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if r == 0:
                 self._add_captures(paths, recursive=folder)
                 return
-        self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
+        self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder, progress=p),
                       lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
 
     # ---------------------------------------------------------------- GNSS positions of the photos
