@@ -972,9 +972,10 @@ def test_autopilot_dialog_with_room_shows_all_without_a_scrollbar(qt_app, tmp_pa
 
 def test_autopilot_dialog_rows_keep_their_heights_whenever_the_lever_is_set(qt_app, tmp_path, monkeypatch):
     """The rows of the dialog are as tall as what they say, whether the lever arm and the latency are written while
-    the log is still read or after: the dialog grows with the texts of the log and of the pairing, and the form
-    kept the heights of the rows it had measured in the dialog still short - the row of the log too tall, the last
-    line of the pairing cut - until something laid it out again (a latency written after the reading)."""
+    the log is still read or after, on a tall screen and on a short one, with small and large fonts: Qt's form
+    placed the rows with the heights they have at the width of its size hint, asked by the scroll area between the
+    measuring and the placing - a row too tall and another with its last line cut, or a pixel taken from one for
+    the other; which rows, and in which order of the events, depends on how the font wraps the texts."""
     from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QLabel, QLineEdit
 
     from pyarchinit_photogrammetry.gui.autopilot_dialog import AutopilotDialog
@@ -1001,6 +1002,8 @@ def test_autopilot_dialog_rows_keep_their_heights_whenever_the_lever_is_set(qt_a
         d.lever_down.setValue(250)
         d.latency.setValue(40)
 
+    points = None
+
     def laid_out(order: str) -> dict:
         d = Roomy(doc.chunk, log)
         d.show()
@@ -1017,26 +1020,36 @@ def test_autopilot_dialog_rows_keep_their_heights_whenever_the_lever_is_set(qt_a
         body = d.scroll.widget()
         for label in body.findChildren(QLabel):
             if label.wordWrap() and label.text():  # all its lines, and no room left over
-                assert label.height() == label.heightForWidth(label.width()), (order, label.text()[:40])
+                assert label.height() == label.heightForWidth(label.width()), (points, Roomy.tall, order, label.text()[:40])
         for kind in (QAbstractSpinBox, QComboBox, QLineEdit):
             for field in body.findChildren(kind):
                 if not isinstance(field.parent(), QAbstractSpinBox):  # not the line edit inside a spin box
-                    assert field.height() >= field.sizeHint().height(), (order, field)
+                    assert field.height() >= field.sizeHint().height(), (points, Roomy.tall, order, field)
         fields = [d.summary, d.message, d.camera, d.by, d.photos, d.pairing, d.lever_panel, d.error]
         tops = [f.mapTo(body, f.rect().topLeft()).y() for f in fields]
         assert tops == sorted(tops)
         for upper, lower, top in zip(fields, fields[1:], tops[1:]):  # no row over the next
-            assert upper.mapTo(body, upper.rect().bottomLeft()).y() < top, (order, upper, lower)
+            assert upper.mapTo(body, upper.rect().bottomLeft()).y() < top, (points, Roomy.tall, order, upper, lower)
         name = d.summary.parentWidget().childAt(d.summary.x(), d.summary.y() - 4)  # the name of the log, just above
         assert isinstance(name, QLabel) and name.text() == log.name and name.height() == name.sizeHint().height()
         geometry = {"dialog": d.size().toTuple(), "tops": tops, "heights": [f.height() for f in fields]}
         _close(qt_app, d)
         return geometry
 
-    untouched, before, after = laid_out("untouched"), laid_out("before"), laid_out("after")
-    assert before == after == untouched
-    Roomy.tall = 300  # a short screen: scrolled, its rows as tall as what they say all the same
-    assert laid_out("before") == laid_out("after")
+    font = qt_app.font()
+    try:
+        for points in (None, 8, 15):  # the font of the platform, then smaller and larger ones
+            if points is not None:
+                sized = qt_app.font()
+                sized.setPointSize(points)
+                qt_app.setFont(sized)
+            Roomy.tall = 4000
+            untouched, before, after = laid_out("untouched"), laid_out("before"), laid_out("after")
+            assert before == after == untouched, points
+            Roomy.tall = 300  # a short screen: scrolled, its rows as tall as what they say all the same
+            assert laid_out("before") == laid_out("after"), points
+    finally:
+        qt_app.setFont(font)
 
 
 def test_autopilot_dialog_summary_and_pairing(qt_app, tmp_path):
