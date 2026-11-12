@@ -925,6 +925,36 @@ def test_metashape_internal_dem(tmp_path):
     assert after == before  # no .aux.xml or other file left in the Metashape project
 
 
+def test_metashape_geographic_raster_is_not_the_chunk_crs(tmp_path):
+    """A GeoTIFF exported in WGS 84 beside the project: its CRS in degrees does not become the
+    CRS of the chunk (the DEM and the orthophoto built at a resolution in metres came out a few
+    pixels wide); the chunk is in the UTM zone of the site and the raster is reported, not linked."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    step = 0.002 / 64
+    with rasterio.open(psx.parent / "scavo_dem.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="float32", crs="EPSG:4326", transform=from_origin(36.799, 35.801, step, step)) as dst:
+        dst.write(np.full((1, 64, 64), 300.0, "float32"))
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "EPSG:32637" and ch.meta["import"]["frame"] == "exact"
+    centres = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+    assert np.linalg.norm(centres[1] - centres[0]) == pytest.approx(20.0, abs=0.05)  # metres, not degrees
+    assert "dem" not in ch.products
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert "scavo_dem.tif è in coordinate geografiche (EPSG:4326)" in warnings
+    # a projected raster still gives its CRS to the chunk
+    psx2, _, _ = make_psx(tmp_path / "src2", n_grid=5)
+    with rasterio.open(psx2.parent / "scavo_dem.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="float32", crs="EPSG:32636", transform=from_origin(1.11e6, 3.99e6, 100.0, 100.0)) as dst:
+        dst.write(np.full((1, 64, 64), 300.0, "float32"))
+    ch2 = ms.import_psx(psx2, tmp_path / "out2" / "p.ppg", with_model=False).chunk
+    assert ch2.crs == "EPSG:32636"
+
+
 def test_metashape_model_reimported_with_texture(tmp_path):
     """A project imported before the texture was read (or whose model lost its colours) gets the
     model of Metashape back with colours and texture; the model in use stays as a version."""

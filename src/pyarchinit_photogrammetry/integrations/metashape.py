@@ -259,8 +259,8 @@ def sensor_params(s: MsSensor) -> tuple[str, list[float], list[str]]:
 
 
 def _target_crs(ch: MsChunk, prefer: str | None) -> str:
-    """CRS of the imported chunk: ``prefer`` (e.g. of an exported DEM), the projected CRS of
-    the project, the UTM zone for geographic ones, LOCAL for local frames."""
+    """CRS of the imported chunk: ``prefer`` (the projected CRS of an exported DEM), the projected
+    CRS of the project, the UTM zone for geographic ones, LOCAL for local frames."""
     if prefer:
         return prefer
     if not ch.crs_wkt or ch.crs_wkt.startswith("LOCAL_CS") or "LOCAL" in ch.crs_wkt[:12]:
@@ -934,14 +934,16 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
     if orthomosaic:
         exported["orthomosaic"] = Path(orthomosaic)
     raster_crs = None
+    geographic: dict[str, str] = {}  # exported rasters in degrees: never the CRS of a chunk, not linked
     for k in ("dem", "orthomosaic"):
         if k in exported:
             import rasterio
 
             with rasterio.open(exported[k]) as src:
-                if src.crs is not None and src.crs.to_epsg():
+                if src.crs is not None and src.crs.is_geographic:
+                    geographic[k] = f"EPSG:{src.crs.to_epsg()}" if src.crs.to_epsg() else src.crs.name
+                elif raster_crs is None and src.crs is not None and src.crs.to_epsg():
                     raster_crs = f"EPSG:{src.crs.to_epsg()}"
-                    break
     warnings = []
     empty = [mc for mc in chunks if not mc.cameras and "model" not in mc.frame_paths
              and "point_cloud" not in mc.frame_paths]
@@ -1099,6 +1101,12 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
         for key in ("dem", "orthomosaic"):
             if key in exported:
                 path = Path(exported[key]).resolve()
+                if key in geographic:
+                    # a chunk works in metres: at a resolution in metres the DEM and the orthophoto of a
+                    # chunk in degrees are a few pixels wide
+                    warnings.append(f"{mc.label}: {path.name} è in coordinate geografiche ({geographic[key]}), "
+                                    f"non collegato: il chunk è in {ch.crs}")
+                    continue
                 if centres is not None and not _raster_covers(path, centres, ch.crs):
                     warnings.append(f"{mc.label}: {path.name} non copre l'area del progetto, non collegato")
                     continue
