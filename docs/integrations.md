@@ -322,7 +322,7 @@ resolution (`dem.tif` in the project; Tell Abu adh-Dhuhur: 8 tiles, 10,241 x 10,
 5.9 cm in 30 s, 2 cm from the tie points, median). The chunk is placed
 in the CRS of those GeoTIFFs, otherwise in the projected CRS of the project, or in the UTM
 zone for geographic projects (similarity fitted through Metashape's geocentric frame). A GeoTIFF
-exported in geographic coordinates (degrees, e.g. EPSG:4326) does not give its CRS to the chunk
+exported in geographic coordinates (degrees, e.g. EPSG:4326) or in the geocentric frame does not give its CRS to the chunk
 and is not linked as its DEM or orthomosaic: the import says so, and the DEM kept inside the
 project takes its place.
 
@@ -330,8 +330,10 @@ A georeference that cannot be used - cameras that the transform of the chunk put
 surface of the Earth, or a conversion to the CRS that gives no finite coordinates - does not stop
 the import: the chunk comes in local coordinates, with a warning that says why. It is in metres
 when the scale is known (Metashape's, or the one of the scale bars), otherwise in Metashape's
-internal units; the references of the markers are kept, unticked, and the exported GeoTIFFs are
-not linked. Tick the references that are right and run *Aggiorna georeferenziazione* to place it.
+internal units; the references of the markers are kept, unticked, in metres (the projected CRS of
+the project, or the UTM zone of the references, named in the warning), and the exported GeoTIFFs
+are not linked. To place the chunk, set that CRS (*Sistema di riferimento*), tick the references
+that are right and run *Aggiorna georeferenziazione*.
 
 A COLMAP model is written from the imported poses, so *Nuvola densa*, *Modello*, *DEM* and
 *Ortofoto* run here without aligning again (photos must be where the project says).
