@@ -19,7 +19,8 @@ spiegazioni più lunghe seguono la tabella.
 
 | Metodo | Che cosa fa |
 | --- | --- |
-| `add_photos(paths, recursive=False)` | file o cartelle; sensori raggruppati per corpo, obiettivo e risoluzione; il GPS dell'EXIF diventa il riferimento della camera |
+| `add_photos(paths, recursive=False, raw=None, prefer="jpeg")` | file o cartelle; sensori raggruppati per corpo, obiettivo e risoluzione; il GPS dell'EXIF diventa il riferimento della camera; i file raw delle fotocamere sono sviluppati dentro il progetto (*File raw delle fotocamere*, sotto) |
+| `develop_raw_photos(raw=None, cameras=None, force=False)` | i file raw delle foto sviluppati di nuovo: copie mancanti, raw cambiati, altre impostazioni; restituisce `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
@@ -44,6 +45,62 @@ spiegazioni più lunghe seguono la tabella.
 | `export_tables(path, language=None)` | tutte le tabelle del chunk in un file Excel (*Rapporti e tabelle*) |
 
 Ogni metodo di elaborazione accetta `progress=callback(fraction, message)`.
+
+### File raw delle fotocamere
+
+Le foto possono essere i file raw della fotocamera: DNG (anche Apple ProRAW e Adobe DNG), CR2 e CR3,
+NEF, ARW, RAF, ORF, RW2, PEF, SRW, 3FR, IIQ e gli altri che LibRaw legge. Serve il modulo opzionale
+`rawpy` (`pip install "pyarchinit-photogrammetry[raw]"`, già compreso in `[all]` e nell'applicazione
+desktop); senza, un raw è rifiutato con un messaggio e la *Diagnostica* lo dice.
+
+Un raw non è un'immagine che le librerie dell'elaborazione sanno leggere (ne aprirebbero la piccola
+anteprima), quindi `add_photos` lo **sviluppa** una volta sola in un'immagine normale nella cartella
+del progetto (`<progetto>.ppg.files/chunk_N/raw/`) e la camera punta a quella copia: allineamento,
+mappe di profondità, texture, ortofoto, miniature e vista della foto funzionano come con ogni foto. Il
+file raw è soltanto letto e resta dov'è; `camera.meta["raw"]` ne conserva percorso, dimensione, data e
+le impostazioni dello sviluppo, e l'EXIF del raw (corpo, obiettivo, focale, ora, GPS, stato RTK) è
+quello della camera ed è scritto nella copia.
+
+I fotogrammi di una fotocamera sono sviluppati allo stesso modo, come vuole la fotogrammetria: bilanciamento del bianco
+della fotocamera, nessuna luminosità automatica, sRGB, 8 bit, la risoluzione piena del sensore e i
+pixel come il sensore li ha letti (un fotogramma scattato in verticale non viene girato, così tutti
+condividono un sensore; l'orientamento resta in `camera.meta["orientation"]`). `raw` lo cambia:
+
+| Chiave | Predefinito | Che cosa fa |
+| --- | --- | --- |
+| `format` | `"jpg"` | la copia: `"jpg"` o `"tif"` (8 bit, senza perdita, molto più grande) |
+| `quality` | `95` | qualità del JPEG |
+| `exposure` | `1.0` | esposizione in EV, uguale per tutti i fotogrammi: uno sviluppo lineare è circa uno stop più scuro del JPEG della fotocamera; `0` lascia i valori del sensore |
+| `tone` | `"auto"` | il contrasto della copia (sotto): `"camera"`, `"local"`, `"linear"` o `"auto"` |
+| `half_size` | `False` | metà risoluzione (senza demosaicizzazione): prove veloci |
+
+Uno sviluppo lineare è molto più piatto del JPEG che scrive una fotocamera, e l'allineamento trova i
+punti chiave dal loro contrasto: su raw di quattro fotocamere le copie lineari hanno dato da un terzo
+a un sesto dei punti chiave dei JPEG della fotocamera. Da qui il **tono**, uguale per tutti i
+fotogrammi di una fotocamera, che cambia i valori e non sposta nessun pixel:
+
+- `"camera"`: una curva di contrasto fissa, come quella di un JPEG della fotocamera;
+- `"local"`: la curva e il contrasto uniformato sul fotogramma (CLAHE sulla luminosità, i colori
+  come sono). Serve per i raw dei telefoni che non sono un mosaico del sensore (DNG lineare, Apple
+  ProRAW): il telefono li completa con una mappa di tono locale conservata nel file, che LibRaw non
+  applica. Un gruppo di fotogrammi ProRAW che si allinea dai suoi JPEG non si è allineato con la sola
+  curva e si allinea con `"local"`. Sui raw delle altre fotocamere è troppo (texture dure);
+- `"linear"`: né l'una né l'altro: i valori dello sviluppo, per misure sui colori;
+- `"auto"`: `"local"` per un raw che non è un mosaico, `"camera"` per gli altri.
+
+```python
+chunk.add_photos(["raw/"], raw={"format": "tif", "exposure": 0.5})
+chunk.develop_raw_photos({"tone": "local"})   # pochi punti di legame su fotogrammi piatti: più contrasto locale
+chunk.develop_raw_photos({"exposure": 0.0})   # tutte le copie di nuovo, più scure
+chunk.develop_raw_photos()                    # solo ciò che manca o è cambiato
+```
+
+Una fotocamera impostata su raw + JPEG scrive due file per scatto: sono **una** foto. `prefer="jpeg"`
+(il predefinito) prende il JPEG, `prefer="raw"` il raw, e uno scatto già nel chunk non viene aggiunto
+di nuovo. Le copie si fanno una volta: aggiungere di nuovo gli stessi raw, o aprire il progetto
+altrove, non sviluppa nulla; una copia perduta è rifatta da `develop_raw_photos` (o da *ricollega
+foto* quando i raw sono stati spostati). Dalla riga di comando: `ppg add-photos progetto.ppg raw/
+--prefer-raw --raw-format tif --raw-exposure 0.5` e `ppg develop-raw progetto.ppg`.
 
 ### Coppie
 

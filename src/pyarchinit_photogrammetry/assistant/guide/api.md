@@ -19,7 +19,8 @@ longer explanations follow the table.
 
 | Method | What it does |
 | --- | --- |
-| `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference |
+| `add_photos(paths, recursive=False, raw=None, prefer="jpeg")` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference; camera raw files are developed into the project (*Camera raw files*, below) |
+| `develop_raw_photos(raw=None, cameras=None, force=False)` | the raw files of the photos developed again: missing copies, raws that changed, other settings; returns `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
@@ -44,6 +45,62 @@ longer explanations follow the table.
 | `export_tables(path, language=None)` | every table of the chunk in an Excel workbook (*Reports and tables*) |
 
 Every processing method accepts `progress=callback(fraction, message)`.
+
+### Camera raw files
+
+The photos can be the raw files of the camera: DNG (Apple ProRAW and Adobe DNG among them), CR2 and
+CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW, 3FR, IIQ and the others LibRaw reads. They need the optional
+module `rawpy` (`pip install "pyarchinit-photogrammetry[raw]"`, already in `[all]` and in the desktop
+application); without it a raw is refused with a message, and *Diagnostics* says so.
+
+A raw is no image the libraries of the pipeline can read (they would open its small preview), so
+`add_photos` **develops** it once into an ordinary image in the project folder
+(`<project>.ppg.files/chunk_N/raw/`) and the camera points to that copy: alignment, depth maps,
+texture, orthomosaic, thumbnails and the photo view then work as with any photo. The raw file is only
+read and stays where it is; `camera.meta["raw"]` keeps its path, size, time and the settings of the
+development, and the EXIF of the raw (body, lens, focal length, time, GPS, RTK state) is the camera's
+and is written into the copy.
+
+The frames of a camera are developed in the same way, as photogrammetry wants: the white balance of the camera,
+no automatic brightness, sRGB, 8 bit, the full resolution of the sensor and the pixels as the sensor
+read them (a frame shot upright is not turned, so that all frames share one sensor; the orientation is
+kept in `camera.meta["orientation"]`). `raw` changes it:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `format` | `"jpg"` | the copy: `"jpg"` or `"tif"` (8 bit, lossless, much larger) |
+| `quality` | `95` | JPEG quality |
+| `exposure` | `1.0` | exposure in EV, the same for all the frames: a linear development is about a stop darker than the JPEG of the camera; `0` leaves the values of the sensor |
+| `tone` | `"auto"` | the contrast of the copy (below): `"camera"`, `"local"`, `"linear"`, or `"auto"` |
+| `half_size` | `False` | half resolution (no demosaicking): quick trials |
+
+A linear development is much flatter than the JPEG a camera writes, and the alignment finds its key
+points by their contrast: on raws of four cameras the linear copies gave from a third to a sixth of the
+key points of the camera JPEGs. Hence the **tone**, the same for all the frames of a camera, which
+changes values and moves no pixel:
+
+- `"camera"`: a fixed contrast curve, as a camera JPEG has;
+- `"local"`: the curve and the contrast evened out over the frame (CLAHE on the lightness, the
+  colours as they are). It is for the raws of phones that are no sensor mosaic (linear DNG, Apple
+  ProRAW): the phone completes them with a local tone map kept in the file, which LibRaw does not
+  apply. A set of ProRAW frames that aligns from its JPEGs did not align with the curve alone and
+  does with `"local"`. On the raws of the other cameras it is too much (harsh textures);
+- `"linear"`: neither: the values of the development, for measurements on the colours;
+- `"auto"`: `"local"` for a raw that is no mosaic, `"camera"` for the others.
+
+```python
+chunk.add_photos(["raw/"], raw={"format": "tif", "exposure": 0.5})
+chunk.develop_raw_photos({"tone": "local"})   # few tie points on flat frames: more local contrast
+chunk.develop_raw_photos({"exposure": 0.0})   # all the copies again, darker
+chunk.develop_raw_photos()                    # only what is missing or changed
+```
+
+A camera set to raw + JPEG writes two files per shot: they are **one** photo. `prefer="jpeg"` (the
+default) takes the JPEG, `prefer="raw"` the raw, and a shot that is already in the chunk is not added
+again. Copies are made once: adding the same raws again, or opening the project elsewhere, develops
+nothing; a copy that was lost is made again by `develop_raw_photos` (or by *relink photos* when the
+raws were moved). From the command line: `ppg add-photos project.ppg raw/ --prefer-raw --raw-format
+tif --raw-exposure 0.5` and `ppg develop-raw project.ppg`.
 
 ### Pairs
 

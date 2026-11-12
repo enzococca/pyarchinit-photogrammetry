@@ -52,8 +52,8 @@ python3 -m venv ~/venvs/ppg && source ~/venvs/ppg/bin/activate   # Windows: ~\ve
 pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 ```
 
-`[all]` brings the mesh (Open3D), IFC, PostgreSQL, the desktop interface, E57 scans and Munsell
-colours; `[sam]` adds Segment Anything 2.1 (PyTorch). The native core in Rust (depth maps and
+`[all]` brings the mesh (Open3D), IFC, PostgreSQL, the desktop interface, E57 scans, camera raw
+files (rawpy) and Munsell colours; `[sam]` adds Segment Anything 2.1 (PyTorch). The native core in Rust (depth maps and
 orthophotos several times faster) is built from the source (below); the desktop applications
 include it. The PPK of the GNSS positions needs the core 0.5 or later, which holds RTKLIB, and the
 RINEX files compressed with Hatanaka (`.crx`, `.##d`, as the archives of the permanent stations give them)
