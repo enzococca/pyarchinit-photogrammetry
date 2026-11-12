@@ -3324,8 +3324,9 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     # the base, how far from the flight, the solution; the warnings of the run, the antenna of the base among them
     assert any(re.fullmatch(rf"Base 0759 \(antenna TRM29659\.00\): posizione dell'intestazione RINEX, sistema "
                             rf"sconosciuto \(WGS 84\); a 3,\d km dal volo; soluzione {run}", t) for t in logged), logged
-    assert any(t.startswith("the position of the base 0759 comes from its RINEX header") for t in logged)
-    assert any(t.startswith("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied")
+    assert any(t.startswith("la posizione della base 0759 viene dalla sua intestazione RINEX") for t in logged)
+    assert any(t.startswith("lo scostamento del centro di fase dell'antenna TRM29659.00 della base 0759 non viene "
+                            "applicato")
                for t in logged)
     assert any(t.startswith(f"3 photos were taken where the solution {run} has no position") for t in logged)
     ((kind, said),) = boxes  # the base at the position of its header: also in a message
@@ -3342,7 +3343,7 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     assert "intestazione" not in pane.states["ppk"].text()
     assert chunk.camera("DJI_0002").meta["gnss"]["base"]["position"] == [139.623, 35.132, 70.25]
     assert chunk.camera("DJI_0002").meta["gnss"]["solution"] != run
-    assert any(re.match(r"the typed position of the base 0759 is 3\.\d km away horizontally", entry[2])
+    assert any(re.match(r"la posizione scritta della base 0759 dista 3\.\d km in piano", entry[2])
                for entry in w.log_pane.entries)
 
     # an error of the run: said, nothing changed
@@ -3446,7 +3447,7 @@ def test_ppk_step_says_when_no_photo_took_a_position(ppk_window, fake_rtklib, mo
     assert ppk.last_run(chunk) is None  # a run that placed nothing is not the run the next dialog starts from
     logged = [entry[2] for entry in w.log_pane.entries]
     assert any(re.match(rf"9 photos were taken where the solution {RUN_NAME}\.pos has no position", t) for t in logged)
-    assert any(t.startswith("the position of the base 0759 comes from its RINEX header") for t in logged)
+    assert any(t.startswith("la posizione della base 0759 viene dalla sua intestazione RINEX") for t in logged)
 
 
 def test_ppk_step_says_when_the_onboard_fixes_kept_their_positions(ppk_window, fake_rtklib, monkeypatch, tmp_path):
@@ -3829,7 +3830,7 @@ def test_ppk_step_downloads_the_antenna_calibrations_once(ppk_window, fake_rtkli
     w.runner.wait()
     assert downloads == [] and fake_rtklib()[-1]["antenna"] is None
     logged = [entry[2] for entry in w.log_pane.entries]
-    assert any("is not applied" in t and "ppg gnss atx --download" in t for t in logged)
+    assert any("non viene applicato" in t and "ppg gnss atx --download" in t for t in logged)
     answer["atx"] = "download"
     for _run in range(2):
         w.gnss_ppk()

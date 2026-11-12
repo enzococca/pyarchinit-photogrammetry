@@ -245,12 +245,15 @@ def _engine_it(text: str) -> str:
 
 def _engine_value(value: str) -> str:
     """A value of a message of the engine in Italian: a text or a message of the section itself (the reason inside
-    another message), or a list of them between commas; else as it is. A list is tried first when every item is of
-    the section, last when only some are: a message has commas of its own."""
-    parts = value.split(", ")
-    listed = [_engine_it(part) for part in parts]
-    if len(parts) > 1 and all(a != b for a, b in zip(listed, parts)):
-        return ", ".join(listed)
+    another message), or a list of them between commas - or between semicolons, as the notes of a warning are; else
+    as it is. A list is tried first when every item is of the section, last (between commas) when only some are: a
+    message has commas of its own."""
+    listed = []
+    for separator in ("; ", ", "):
+        parts = value.split(separator)
+        listed = [_engine_it(part) for part in parts]
+        if len(parts) > 1 and all(a != b for a, b in zip(listed, parts)):
+            return separator.join(listed)
     shown = _engine_it(value)
     return ", ".join(listed) if shown == value else shown
 
