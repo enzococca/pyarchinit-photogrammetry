@@ -953,6 +953,14 @@ def test_metashape_geographic_raster_is_not_the_chunk_crs(tmp_path):
         dst.write(np.full((1, 64, 64), 300.0, "float32"))
     ch2 = ms.import_psx(psx2, tmp_path / "out2" / "p.ppg", with_model=False).chunk
     assert ch2.crs == "EPSG:32636"
+    # nor does a geocentric one (Metashape exports in the frame of a project referenced in ECEF)
+    psx3, _, _ = make_psx(tmp_path / "src3", n_grid=5)
+    with rasterio.open(psx3.parent / "scavo_ortho.tif", "w", driver="GTiff", width=64, height=64, count=1,
+                       dtype="uint8", crs="EPSG:4978", transform=from_origin(4.0e6, 3.0e6, 1.0, 1.0)) as dst:
+        dst.write(np.full((1, 64, 64), 100, "uint8"))
+    ch3 = ms.import_psx(psx3, tmp_path / "out3" / "p.ppg", with_model=False).chunk
+    assert ch3.crs == "EPSG:32637" and "orthomosaic" not in ch3.products
+    assert "scavo_ortho.tif è in coordinate geocentriche (EPSG:4978)" in " | ".join(ch3.meta["import"]["warnings"])
 
 
 def _break_georeference(psx: Path, extra: str = "") -> None:
@@ -1033,9 +1041,16 @@ def test_metashape_broken_georeference_scaled_by_its_bars(tmp_path):
     _zip(frame_zip, {"doc.xml": frame.replace("</cameras>", f"</cameras><markers>{seen}</markers>")})
     ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
     assert ch.crs == "LOCAL" and ch.scale == pytest.approx(0.5, rel=1e-6)
-    assert not ch.marker("A").reference.enabled  # degrees of the broken reference: not control in a local frame
+    assert not ch.marker("A").reference.enabled  # coordinates of the broken reference: not control in a local frame
+    # in metres of the UTM zone of the references (not in degrees): ticked, with that CRS set, they place the chunk
+    from pyproj import Transformer
+
+    expected = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True).transform(36.8, 35.8, 300.0)
+    assert ch.marker("A").reference.location == pytest.approx(list(expected), abs=1e-3)
+    assert ch.meta["import"]["references_crs"] == "EPSG:32637"
     warnings = " | ".join(ch.meta["import"]["warnings"])
     assert "georeferenziazione non valida" in warnings and "barre di scala" in warnings
+    assert "riferimenti dei marker sono in EPSG:32637" in warnings
 
 
 def test_metashape_model_reimported_with_texture(tmp_path):

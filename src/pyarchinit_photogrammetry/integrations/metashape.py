@@ -298,6 +298,29 @@ def on_the_earth(geocentric: np.ndarray, below: float = 100e3, above: float = 20
     return bool(np.all((r > 6_356_752.0 - below) & (r < 6_378_137.0 + above)))
 
 
+def _references_crs(ch: MsChunk) -> str | None:
+    """A CRS in metres for the marker references of a chunk imported in a local frame because its
+    georeference cannot be used: the projected CRS of the project, or the UTM zone of the references
+    themselves (the transform of the chunk, which gives the zone otherwise, is the broken part). None
+    without references or without an EPSG code."""
+    if _is_local_wkt(ch.crs_wkt):
+        return None
+    from pyproj import CRS, Transformer
+
+    src = CRS.from_wkt(ch.crs_wkt)
+    if src.is_projected:
+        return f"EPSG:{src.to_epsg()}" if src.to_epsg() else None
+    refs = np.array([m.reference for m in ch.markers if m.reference is not None], float).reshape(-1, 3)
+    refs = refs[np.isfinite(refs).all(axis=1)]
+    if not len(refs):
+        return None
+    lon, lat, _ = Transformer.from_crs(src, "EPSG:4326", always_xy=True).transform(*np.median(refs, axis=0))
+    if not (np.isfinite(lon) and np.isfinite(lat) and abs(lat) <= 84):
+        return None
+    zone = int((lon + 180) // 6) % 60 + 1
+    return f"EPSG:{(32600 if lat >= 0 else 32700) + zone}"
+
+
 def crs_mapper(ch: MsChunk, crs: str, transform: np.ndarray | None = None):
     """Exact internal -> ``crs`` conversion, point by point, through the project's
     geocentric frame (a function of (n, 3) arrays); ``transform``: the frame of an
@@ -954,14 +977,20 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
     if orthomosaic:
         exported["orthomosaic"] = Path(orthomosaic)
     raster_crs = None
-    geographic: dict[str, str] = {}  # exported rasters in degrees: never the CRS of a chunk, not linked
+    # exported rasters in degrees or in the geocentric frame: never the CRS of a chunk, not linked
+    unprojected: dict[str, tuple[str, str]] = {}
     for k in ("dem", "orthomosaic"):
         if k in exported:
             import rasterio
+            from pyproj import CRS
 
             with rasterio.open(exported[k]) as src:
-                if src.crs is not None and src.crs.is_geographic:
-                    geographic[k] = f"EPSG:{src.crs.to_epsg()}" if src.crs.to_epsg() else src.crs.name
+                kind = None
+                if src.crs is not None:
+                    pc = CRS.from_wkt(src.crs.to_wkt())
+                    kind = "geografiche" if pc.is_geographic else "geocentriche" if pc.is_geocentric else None
+                if kind:
+                    unprojected[k] = (f"EPSG:{src.crs.to_epsg()}" if src.crs.to_epsg() else pc.name, kind)
                 elif raster_crs is None and src.crs is not None and src.crs.to_epsg():
                     raster_crs = f"EPSG:{src.crs.to_epsg()}"
     warnings = []
@@ -1098,15 +1127,18 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
         if tie is not None:
             ch.tie_points = tie
         by_ms_id = {}
+        # the references in the CRS of the chunk; in a CRS in metres when the georeference cannot be used,
+        # so that, ticked, they place the chunk (never degrees in a frame in metres)
+        ref_crs = _references_crs(mc) if broken else crs
         for m in mc.markers:
             mk = ch.add_marker(m.label)
             by_ms_id[m.id] = mk
             if m.reference is not None:
                 ref = np.array([m.reference])
-                if crs != "LOCAL" and mc.crs_wkt:
+                if ref_crs and ref_crs != "LOCAL" and mc.crs_wkt:
                     from pyproj import CRS, Transformer
 
-                    t = Transformer.from_crs(CRS.from_wkt(mc.crs_wkt), CRS.from_user_input(crs), always_xy=True)
+                    t = Transformer.from_crs(CRS.from_wkt(mc.crs_wkt), CRS.from_user_input(ref_crs), always_xy=True)
                     ref = np.array([t.transform(*m.reference)])
                 mk.reference.location = [float(v) for v in ref[0]]
                 mk.reference.enabled = m.enabled and not broken  # coordinates of the CRS: not control in a local frame
@@ -1118,6 +1150,10 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                     ch.add_marker_projection(mk, ch.camera(cam_id), x, y, pinned=True)
                 except KeyError:
                     pass
+        if broken and ref_crs and any(m.reference is not None for m in mc.markers):
+            warnings.append(f"{mc.label}: i riferimenti dei marker sono in {ref_crs}: per collocare il chunk impostare "
+                            "questo sistema di riferimento, spuntare i riferimenti giusti e aggiornare la "
+                            "georeferenziazione")
         warnings += _import_scalebars(mc, ch, by_ms_id)
         if aligned:
             sub(0.3, f"{mc.label}: modello COLMAP per la nuvola densa")
@@ -1161,11 +1197,16 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
         for key in ("dem", "orthomosaic"):
             if key in exported:
                 path = Path(exported[key]).resolve()
-                if key in geographic:
-                    # a chunk works in metres: at a resolution in metres the DEM and the orthophoto of a
-                    # chunk in degrees are a few pixels wide
-                    warnings.append(f"{mc.label}: {path.name} è in coordinate geografiche ({geographic[key]}), "
-                                    f"non collegato: il chunk è in {ch.crs}")
+                if key in unprojected:
+                    # a chunk works in metres on a plane: at a resolution in metres the DEM and the orthophoto
+                    # of a chunk in degrees are a few pixels wide, and geocentric X, Y are no plan
+                    name, kind = unprojected[key]
+                    if kind == "geografiche":
+                        warnings.append(f"{mc.label}: {path.name} è in coordinate geografiche ({name}), "
+                                        f"non collegato: il chunk è in {ch.crs}")
+                    else:
+                        warnings.append(f"{mc.label}: {path.name} è in coordinate geocentriche ({name}), "
+                                        f"non collegato: il chunk è in {ch.crs}")
                     continue
                 if broken or (centres is not None and not _raster_covers(path, centres, ch.crs)):
                     warnings.append(f"{mc.label}: {path.name} non copre l'area del progetto, non collegato")
@@ -1200,6 +1241,8 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                              "frame": "exact" if frame is not None else "similarity"}
         if dem_source:
             ch.meta["import"]["dem"] = dem_source
+        if broken and ref_crs:
+            ch.meta["import"]["references_crs"] = ref_crs
 
 
 __all__ = ["read_psx", "import_psx", "import_psx_into", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
