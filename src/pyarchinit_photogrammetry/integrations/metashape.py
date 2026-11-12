@@ -278,6 +278,26 @@ def _target_crs(ch: MsChunk, prefer: str | None) -> str:
     return f"EPSG:{(32600 if lat >= 0 else 32700) + zone}"
 
 
+def _is_local_wkt(wkt: str | None) -> bool:
+    return not wkt or wkt.startswith("LOCAL_CS") or "LOCAL" in wkt[:12]
+
+
+def _det_scale(m: np.ndarray) -> float:
+    return abs(float(np.linalg.det(m[:3, :3]))) ** (1.0 / 3.0)
+
+
+def on_the_earth(geocentric: np.ndarray, below: float = 100e3, above: float = 200e3) -> bool:
+    """Whether geocentric points (metres) are finite and lie near the surface of the Earth: between
+    ``below`` under the polar radius and ``above`` over the equatorial one. The chunk transform of
+    a project referenced by a few bad positions (the GPS of a phone) has a scale of 1e5 and puts
+    the cameras thousands of kilometres into the Earth or out of it."""
+    geocentric = np.asarray(geocentric, float).reshape(-1, 3)
+    if not np.isfinite(geocentric).all():
+        return False
+    r = np.linalg.norm(geocentric, axis=1)
+    return bool(np.all((r > 6_356_752.0 - below) & (r < 6_378_137.0 + above)))
+
+
 def crs_mapper(ch: MsChunk, crs: str, transform: np.ndarray | None = None):
     """Exact internal -> ``crs`` conversion, point by point, through the project's
     geocentric frame (a function of (n, 3) arrays); ``transform``: the frame of an
@@ -986,7 +1006,9 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
 
         crs = _target_crs(mc, raster_crs)
         frame = None  # Metashape chunk frame -> internal frame of the new chunk, point by point (for the model)
-        if crs != "LOCAL" and mc.crs_wkt and aligned:
+        broken = None  # a georeference that cannot be used: "transform" (cameras off the Earth) or "conversion"
+        exact = bool(crs != "LOCAL" and mc.crs_wkt and aligned)
+        if exact:
             # exact conversion, point by point: no global similarity to approximate the projection
             mappers: dict = {}
 
@@ -999,7 +1021,23 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
             by_comp: dict = {}
             for cam in aligned:
                 by_comp.setdefault(comp_of.get(cam.key), []).append(cam)
-            centres = np.vstack([world(cid, np.array([c.transform[:3, 3] for c in cams])) for cid, cams in by_comp.items()])
+            if not _is_local_wkt(mc.crs_wkt):
+                from ..core.geometry import apply
+
+                if not all(on_the_earth(apply(mc.component_transform(comp_key(cid)),
+                                              np.array([c.transform[:3, 3] for c in cams])))
+                           for cid, cams in by_comp.items()):
+                    broken = "transform"
+            if not broken:
+                centres = np.vstack([world(cid, np.array([c.transform[:3, 3] for c in cams]))
+                                     for cid, cams in by_comp.items()])
+                if not np.isfinite(centres).all():  # the fit of the rotations stopped: "SVD did not converge"
+                    broken = "conversion"
+            if broken:
+                log.warning("%s: georeference not usable (%s, scale %.4g, translation %s, CRS %s): imported in a "
+                            "local frame", mc.label, broken, _det_scale(mc.transform), mc.transform[:3, 3], crs)
+                broken_crs, crs, exact = crs, "LOCAL", False
+        if exact:
             offset = np.round(centres.mean(axis=0))
             for cid, cams in by_comp.items():
                 T = mc.component_transform(comp_key(cid))
@@ -1043,7 +1081,15 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
             if tie is not None and len(tie):
                 pick = tie.xyz[np.random.default_rng(0).choice(len(tie), min(len(tie), 2000), replace=False)]
                 samples = np.vstack([samples, pick]) if len(samples) else pick
-            if len(samples) >= 3:
+            if broken == "conversion":
+                # the transform is on the Earth, its scale is metric: local coordinates in metres
+                ch.transform = np.diag([_det_scale(mc.transform)] * 3 + [1.0])
+                warnings.append(f"{mc.label}: georeferenziazione non valida (la conversione in {broken_crs} non dà "
+                                "coordinate finite): chunk importato in coordinate locali, in metri con la scala di "
+                                "Metashape")
+            elif broken:
+                ch.transform = np.eye(4)  # Metashape's internal units, until the scale bars are read
+            elif len(samples) >= 3:
                 ch.transform, residual = internal_to_crs(mc, crs, samples)
                 if residual > 0.01:
                     warnings.append(f"{mc.label}: approssimazione della proiezione {residual * 100:.1f} cm")
@@ -1063,7 +1109,7 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                     t = Transformer.from_crs(CRS.from_wkt(mc.crs_wkt), CRS.from_user_input(crs), always_xy=True)
                     ref = np.array([t.transform(*m.reference)])
                 mk.reference.location = [float(v) for v in ref[0]]
-                mk.reference.enabled = m.enabled
+                mk.reference.enabled = m.enabled and not broken  # coordinates of the CRS: not control in a local frame
                 acc = m.accuracy or ([mc.settings["accuracy_markers"]] * 3 if "accuracy_markers" in mc.settings else None)
                 if acc:
                     mk.reference.accuracy = [float(v) for v in acc]
@@ -1085,6 +1131,20 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                 ch.triangulate_markers()
             except Exception:
                 pass
+        if broken == "transform":
+            from ..markers import gcp
+
+            try:
+                bar_scale = gcp._bar_scale(ch, gcp.control_scalebars(ch))
+            except Exception:
+                bar_scale = None
+            head = (f"{mc.label}: georeferenziazione non valida (scala {_det_scale(mc.transform):.3g}, camere lontane "
+                    "dalla superficie terrestre): chunk importato in coordinate locali, ")
+            if bar_scale and np.isfinite(bar_scale):
+                ch.transform = np.diag([float(bar_scale)] * 3 + [1.0])
+                warnings.append(head + "in metri dalle barre di scala")
+            else:
+                warnings.append(head + "nelle unità interne di Metashape (nessuna barra di scala)")
         if dense is not None and len(dense):
             sub(0.45, f"{mc.label}: nuvola densa ({len(dense)} punti)")
             ch.point_cloud = dense
@@ -1107,7 +1167,7 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                     warnings.append(f"{mc.label}: {path.name} è in coordinate geografiche ({geographic[key]}), "
                                     f"non collegato: il chunk è in {ch.crs}")
                     continue
-                if centres is not None and not _raster_covers(path, centres, ch.crs):
+                if broken or (centres is not None and not _raster_covers(path, centres, ch.crs)):
                     warnings.append(f"{mc.label}: {path.name} non copre l'area del progetto, non collegato")
                     continue
                 ch._set_product(key, path)
@@ -1116,7 +1176,7 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
                     dem_source = f"esportato da Metashape ({path.name})"
         for p in empty_exports:
             warnings.append(f"{mc.label}: {p.name} è vuoto (0 byte): esportazione da Metashape non riuscita?")
-        if "dem" not in ch.products:
+        if "dem" not in ch.products and not broken:  # Metashape's DEM lies in the reference that was not usable
             info = internal_dem(mc)
             if info is not None:
                 sub(0.9, f"{mc.label}: DEM interno di Metashape ({len(info['tiles'])} tasselli)")
