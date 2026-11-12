@@ -171,6 +171,22 @@ def log_shots(path, message: str = "auto", camera=None):
     return sources.log_shots(path, message, camera)
 
 
+class WrappingForm(QFormLayout):
+    """A form whose rows hold wrapped texts, each row as tall as its text at the width the form has. Qt's form keeps
+    one set of row heights and remembers two widths as measured: the last one asked and the one of its size hint.
+    A scroll area asks the size hint of what it scrolls, so the form measures its rows at that width - the texts on
+    other lines - and still takes the width it has as measured: the rows are then placed with heights of another
+    width, one too tall and another with its last line cut, which of them depending on the font and on the texts.
+    Here the rows are measured at the width they are placed in, every time they are placed."""
+
+    def setGeometry(self, rect) -> None:  # noqa: N802 - Qt
+        other = rect.width() + 1
+        if other == self.sizeHint().width():  # that width is remembered apart: asking it forgets nothing
+            other += 1
+        self.heightForWidth(other)  # the width remembered is now this one: the rows are measured again below
+        super().setGeometry(rect)
+
+
 class LeverPanel(QWidget):
     """The lever arm from the antenna to the camera in the body of the drone (mm forward, right, down) and the
     latency of the camera (ms): :meth:`lever` is None while the arm is all zeros."""

@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..gnss import autopilot, sources
@@ -20,10 +20,9 @@ TYPING_PAUSE_MS = 300  # the photos are paired again this long after the last ch
 
 def _forget_heights(layout) -> None:
     """Have ``layout`` and the layouts in it measure their rows again. Only the outer layout hears that a text
-    changed; the ones in it are told when it is activated, and activating it lays the rows out in the height the
-    dialog still has, too short for the new texts: the form then keeps those heights when the dialog grows, the
-    row of the log too tall and the last line of the pairing cut. Nothing is laid out here: the rows are placed
-    once, in the height the dialog ends with."""
+    changed; the ones in it are told when it is activated, which lays the rows out in the height the dialog still
+    has. Nothing is laid out here: the height asked next is the one of the new texts, and the rows are placed once,
+    in the height the dialog ends with."""
     for index in range(layout.count()):
         inner = layout.itemAt(index).layout()
         if inner is not None:
@@ -61,7 +60,7 @@ class AutopilotDialog(QDialog):
                           "centimetro serve il PPK (Calcola PPK...), che corregge quelle del ricevitore."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
-        form = QFormLayout()
+        form = sw.WrappingForm()  # the texts of the log and of the pairing are wrapped
         name = QLabel(self.path.name)
         name.setTextFormat(Qt.TextFormat.PlainText)
         name.setToolTip(str(self.path))
