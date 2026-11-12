@@ -6,6 +6,7 @@ the program draws from its own data stay one-way: said once, and put back."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import time
 
@@ -29,6 +30,7 @@ class Plugin:
 
     def __init__(self, w, n=5, batch=True):
         self.w, self.n, self.drawn, self.batch = w, n, 0, batch
+        self.run, self.shift, self.hidden = "abc", 0.0, False  # the conversion drawn: its id, where its lines are
         w.ortho_view.raster_loaded.connect(self.draw)
         w.refreshed.connect(self.draw)
         self.draw()
@@ -40,13 +42,20 @@ class Plugin:
         self.drawn += 1
         for name in (LAYER, STONES):
             v.remove_layer(name)
+        if self.hidden:
+            return
         with v.batch() if self.batch else contextlib.nullcontext():
             for i in range(self.n):
-                v.add_line(_line(i), "#ff4081", "", layer=LAYER, width=1.5,
-                           attrs={"photocad": "abc", "n": i, "photocad_layer": "muri", "entity": "LINE", "k": 0.5})
+                v.add_line([[x, y + self.shift] for x, y in _line(i)], "#ff4081", "", layer=LAYER, width=1.5,
+                           attrs={"photocad": self.run, "n": i, "photocad_layer": "muri", "entity": "LINE", "k": 0.5})
             for i in range(2):
                 ring = list(box(X0 + 1 + i, Y0 + 3, X0 + 1.5 + i, Y0 + 3.5).exterior.coords)[:-1]
-                v.add_polygon(ring, "", "#8d6e63", 60, layer=STONES, attrs={"photocad": "abc", "n": i})
+                v.add_polygon(ring, "", "#8d6e63", 60, layer=STONES, attrs={"photocad": self.run, "n": i})
+
+    def convert_again(self, run, shift=0.003):
+        """The conversion removed and made again (the same name, so the same layers): another id, other lines."""
+        self.run, self.shift = run, shift
+        self.draw()
 
 
 def _live(w):
@@ -348,4 +357,249 @@ def test_seven_thousand_lines_stay_fast(trench):
           f"idle look {idle * 1000:.2f} ms, plugin redraw with the edits {redraw:.2f} s")
     if not os.environ.get("CI"):
         assert took < 5 and write < 3 and idle < 0.05 and redraw < 5
+    qgis.close()
+
+
+# ---------------------------------------------------------------- attributes changed in the program
+def _type(w, app, name, index, key, text):
+    """``text`` typed in the attribute table of the Layers pane for the field ``key`` of a feature."""
+    pane = w.layers_pane
+    pane.show_attributes(name, {**w.ortho_view.features(name)[index], "_index": index})
+    row = next(r for r in range(pane.attrs.rowCount()) if pane.attrs.item(r, 0).text() == key)
+    pane.attrs.item(row, 1).setText(text)
+    app.processEvents()
+
+
+def _n(w, name=LAYER):
+    return {a["n"]: a for a in w.ortho_view.features(name) if a.get("n") is not None}
+
+
+def test_an_attribute_of_a_plugin_feature_changed_in_the_program_stays(trench, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    import pyarchinit_photogrammetry as ppg
+
+    w, app, mw = trench
+    plugin = Plugin(w)
+    v = w.ortho_view
+    path = _live(w)
+    rows = _by_n(_rows(path, "linee"))
+    _type(w, app, LAYER, 2, "photocad_layer", "soglie")
+    _type(w, app, LAYER, 2, "k", "0,75")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Muro est", True)))
+    w.layers_pane.edit_feature_label(LAYER, 3)
+    app.processEvents()
+    assert _n(w)[2]["photocad_layer"] == "soglie" and _n(w)[2]["k"] == 0.75 and _n(w)[3]["etichetta"] == "Muro est"
+    assert len(v.features(LAYER)) == 5 and w.isWindowModified()
+    edits = w.chunk.meta[mw.PLAN_EDITS][LAYER]
+    assert edits["changed"] == {rows[2][ID_FIELD]: {"geom": None, "attrs": {"photocad_layer": "soglie", "k": 0.75}},
+                                rows[3][ID_FIELD]: {"geom": None, "attrs": {"etichetta": "Muro est"}}}
+    assert not edits["deleted"] and not edits["added"]
+
+    # to QGIS: the rows of the features, in place
+    w._export_qgis_layers()
+    after = _by_n(_rows(path, "linee"))
+    assert len(_rows(path, "linee")) == 5 and {n: r["fid"] for n, r in after.items()} == {
+        n: r["fid"] for n, r in rows.items()}
+    assert after[2]["photocad_layer"] == "soglie" and float(after[2]["k"]) == 0.75 and after[3]["etichetta"] == "Muro est"
+    assert after[2][ID_FIELD] == rows[2][ID_FIELD] and after[2]["geom"].equals(LineString(_line(2)))
+    w._poll_qgis()
+    assert _from_qgis(w) == []
+
+    # the plugin draws its layers again from its results; the raster shown again
+    for again in (w.refreshed.emit, w._load_raster):
+        drawn = plugin.drawn
+        again()
+        app.processEvents()
+        assert plugin.drawn > drawn and len(v.features(LAYER)) == 5
+        assert _n(w)[2]["photocad_layer"] == "soglie" and _n(w)[2]["k"] == 0.75
+        assert _n(w)[3]["etichetta"] == "Muro est" and _n(w)[1]["photocad_layer"] == "muri"
+
+    # an edit of QGIS on the same feature keeps what was changed here
+    qgis = Qgis(path)
+    moved = LineString([(X0 + 1, Y0 + 1.02), (X0 + 2, Y0 + 2), (X0 + 3, Y0 + 1.02)])
+    qgis.save(qgis.move("linee", rows[2]["fid"], moved))
+    w._poll_qgis()
+    assert _n(w)[2]["_geom"][1] == [list(c) for c in moved.coords] and _n(w)[2]["photocad_layer"] == "soglie"
+    assert _n(w)[2]["k"] == 0.75
+    qgis.close()
+
+    # saved with the project and still there when it is shown again; a step of Modifica > Annulla each
+    assert w.save_document()
+    app.processEvents()
+    assert _n(w)[2]["photocad_layer"] == "soglie" and _n(w)[3]["etichetta"] == "Muro est"
+    stored = ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS]
+    assert stored == w.chunk.meta[mw.PLAN_EDITS] and len(stored[LAYER]["changed"]) == 2
+    w.undo()  # the edit of QGIS
+    app.processEvents()
+    assert _n(w)[2]["_geom"][1] == _line(2) and _n(w)[2]["photocad_layer"] == "soglie"
+    w.undo()  # the label
+    app.processEvents()
+    assert _n(w)[3]["etichetta"] == "" and _n(w)[2]["k"] == 0.75
+    w.undo()
+    w.undo()
+    app.processEvents()
+    assert _n(w)[2]["photocad_layer"] == "muri" and _n(w)[2]["k"] == 0.5 and mw.PLAN_EDITS not in w.chunk.meta
+    w._export_qgis_layers()
+    back = _by_n(_rows(path, "linee"))
+    assert back[2]["photocad_layer"] == "muri" and back[2]["fid"] == rows[2]["fid"] and len(back) == 5
+    w.redo()
+    app.processEvents()
+    assert _n(w)[2]["photocad_layer"] == "soglie"
+
+
+def test_an_attribute_put_back_as_it_was_leaves_no_edit(trench):
+    w, app, mw = trench
+    Plugin(w)
+    _type(w, app, LAYER, 1, "photocad_layer", "soglie")
+    assert LAYER in w.chunk.meta[mw.PLAN_EDITS]
+    _type(w, app, LAYER, 1, "photocad_layer", "muri")
+    assert mw.PLAN_EDITS not in w.chunk.meta and _n(w)[1]["photocad_layer"] == "muri"
+    assert ID_FIELD not in _n(w)[1]
+
+
+def test_an_attribute_changed_in_the_program_is_undone_and_done_again(trench):
+    w, app, mw = trench
+    plugin = Plugin(w)
+    w.history.reset()
+    _type(w, app, LAYER, 1, "photocad_layer", "soglie")
+    assert len(w.history.entries) == 1
+    w.history.undo()  # with no turn of the event loop in between: the layer is drawn again there and then
+    assert mw.PLAN_EDITS not in w.chunk.meta and _n(w)[1]["photocad_layer"] == "muri"
+    w._redraw_overlays()
+    w.history.redo()
+    assert _n(w)[1]["photocad_layer"] == "soglie"
+    assert list(w.chunk.meta[mw.PLAN_EDITS][LAYER]["changed"].values()) == [
+        {"geom": None, "attrs": {"photocad_layer": "soglie"}}]
+    w.history.undo()
+    w.refreshed.emit()  # the plugin draws its layer again: nothing of the edit comes back
+    app.processEvents()
+    assert plugin.drawn == 2 and _n(w)[1]["photocad_layer"] == "muri" and len(_n(w)) == 5
+
+
+def test_an_attribute_of_a_feature_drawn_in_qgis_changed_in_the_program_stays(trench):
+    w, app, mw = trench
+    plugin = Plugin(w)  # kept: a plugin nobody holds draws no more
+    v = w.ortho_view
+    path = _live(w)
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("linee", LineString([(X0 + 4, Y0 + 4), (X0 + 5, Y0 + 4)]), layer=LAYER, photocad_layer="x"),
+              qgis.insert("punti", Point(X0 + 2, Y0 + 2), layer="Chiodi", etichetta="c1"))
+    w._poll_qgis()
+    rows = {r["layer"]: r for r in _rows(path, "linee") + _rows(path, "punti") if r.get("n") is None}
+    _type(w, app, LAYER, 5, "photocad_layer", "aggiunte")
+    _type(w, app, "Chiodi", 0, "etichetta", "c2")
+    edits = w.chunk.meta[mw.PLAN_EDITS]
+    assert edits[LAYER]["added"][rows[LAYER][ID_FIELD]]["attrs"] == {"photocad_layer": "aggiunte"}
+    assert edits["Chiodi"]["added"][rows["Chiodi"][ID_FIELD]]["attrs"] == {"etichetta": "c2"}
+    assert not edits[LAYER]["changed"] and not edits["Chiodi"]["changed"]
+    assert "Chiodi" not in v.layer_settings  # the label is the feature's, not one put over it
+    w.refreshed.emit()
+    w._load_raster()
+    app.processEvents()
+    assert plugin.drawn == 3
+    assert v.features(LAYER)[5]["photocad_layer"] == "aggiunte" and len(v.features(LAYER)) == 6
+    assert [a["etichetta"] for a in v.features("Chiodi")] == ["c2"]
+    w._export_qgis_layers()
+    after = {r["layer"]: r for r in _rows(path, "linee") + _rows(path, "punti") if r.get("n") is None}
+    assert {k: r["fid"] for k, r in after.items()} == {k: r["fid"] for k, r in rows.items()}
+    assert after[LAYER]["photocad_layer"] == "aggiunte" and after["Chiodi"]["etichetta"] == "c2"
+    w._poll_qgis()
+    assert len(_from_qgis(w)) == 2
+    w.undo()
+    app.processEvents()
+    assert [a["etichetta"] for a in v.features("Chiodi")] == ["c1"]
+    qgis.close()
+
+
+def test_attributes_changed_in_qgis_alone_come_back_and_stay(trench):
+    w, app, mw = trench
+    plugin = Plugin(w)
+    path = _live(w)
+    rows = _by_n(_rows(path, "linee"))
+    qgis = Qgis(path)
+    qgis.save(qgis.move("linee", rows[1]["fid"], rows[1]["geom"], photocad_layer="soglie", etichetta="Soglia 1"))
+    w._poll_qgis()
+    assert _n(w)[1]["photocad_layer"] == "soglie" and _n(w)[1]["etichetta"] == "Soglia 1"
+    assert _n(w)[1]["_geom"][1] == _line(1)
+    _type(w, app, LAYER, 3, "photocad_layer", "aperture")  # a step here, taken back: the labels are set again
+    w.undo()
+    app.processEvents()
+    assert _n(w)[1]["etichetta"] == "Soglia 1" and _n(w)[3]["photocad_layer"] == "muri"
+    w.refreshed.emit()
+    app.processEvents()
+    assert plugin.drawn >= 2 and _n(w)[1]["photocad_layer"] == "soglie" and _n(w)[1]["etichetta"] == "Soglia 1"
+    w._export_qgis_layers()
+    after = _by_n(_rows(path, "linee"))
+    assert after[1]["fid"] == rows[1]["fid"] and after[1]["etichetta"] == "Soglia 1" and len(after) == 5
+    w._poll_qgis()
+    assert len(_from_qgis(w)) == 1
+    qgis.close()
+
+
+# ---------------------------------------------------------------- the conversion made again
+def test_the_edits_of_a_conversion_made_again_leave_the_project_at_saving(trench):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app, mw = trench
+    plugin = Plugin(w)
+    v = w.ortho_view
+    path = _live(w)
+    rows = _by_n(_rows(path, "linee"))
+    qgis = Qgis(path)
+    moved = LineString([(X0 + 1, Y0 + 1.02), (X0 + 2, Y0 + 2), (X0 + 3, Y0 + 1.02)])
+    drawn = LineString([(X0 + 4, Y0 + 4), (X0 + 5, Y0 + 4)])
+    qgis.save(qgis.move("linee", rows[2]["fid"], moved), qgis.delete("linee", rows[0]["fid"]),
+              qgis.insert("linee", drawn, layer=LAYER, photocad_layer="aggiunte"))
+    w._poll_qgis()
+    _type(w, app, LAYER, 2, "photocad_layer", "soglie")  # of line 3: the first is deleted
+    v.select_items([v.layers[STONES]["features"][0][0]])
+    assert w.delete_selected(confirm=False) == 1
+    app.processEvents()
+    before = w.chunk.meta[mw.PLAN_EDITS]
+    assert len(before[LAYER]["changed"]) == 2 and len(before[LAYER]["deleted"]) == 1 and len(before[LAYER]["added"]) == 1
+    assert len(before[STONES]["deleted"]) == 1
+
+    # the same conversion drawn again, hidden, shown again, and saved meanwhile: every edit is kept
+    kept = copy.deepcopy(before)
+    assert w.save_document()
+    app.processEvents()
+    plugin.hidden = True
+    plugin.draw()
+    app.processEvents()
+    assert STONES not in v.layers and len(v.features(LAYER)) == 1  # what was drawn in QGIS is the user's
+    assert w.save_document()
+    app.processEvents()
+    plugin.hidden = False
+    plugin.draw()
+    app.processEvents()
+    assert sorted(_n(w)) == [1, 2, 3, 4] and _n(w)[2]["_geom"][1] == [list(c) for c in moved.coords]
+    assert _n(w)[3]["photocad_layer"] == "soglie" and [a["n"] for a in v.features(STONES)] == [1]
+    edits = w.chunk.meta[mw.PLAN_EDITS]
+    assert len(edits[LAYER]["changed"]) == 2 and len(edits[LAYER]["deleted"]) == 1 and len(edits[STONES]["deleted"]) == 1
+    assert edits == kept and ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS] == kept
+
+    # another conversion under the same name: its features are others, none takes the edits of the first
+    plugin.convert_again("def")
+    app.processEvents()
+    assert sorted(_n(w)) == [0, 1, 2, 3, 4] and len(v.features(LAYER)) == 6 and len(v.features(STONES)) == 2
+    assert all(a["photocad"] == "def" and a["photocad_layer"] == "muri" and ID_FIELD not in a for a in _n(w).values())
+    assert _n(w)[2]["_geom"][1] == [[x, y + 0.003] for x, y in _line(2)]
+    assert len(w.chunk.meta[mw.PLAN_EDITS][LAYER]["changed"]) == 2  # until the project is saved (undo brings it back)
+    assert w.save_document()
+    app.processEvents()
+    edits = w.chunk.meta[mw.PLAN_EDITS]
+    assert set(edits) == {LAYER} and not edits[LAYER]["changed"] and not edits[LAYER]["deleted"]
+    assert len(edits[LAYER]["added"]) == 1  # the line drawn in QGIS stays on the layer
+    assert ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS] == edits
+    assert sorted(_n(w)) == [0, 1, 2, 3, 4] and len(v.features(LAYER)) == 6 and len(v.features(STONES)) == 2
+    said = [line for line in _log(w) if "non disegna più" in line]
+    assert len(said) == 2 and any(LAYER + ":" in line and " 3 " in line for line in said)
+    w._export_qgis_layers()
+    after = _rows(path, "linee")
+    assert len(after) == 6 and sorted(_by_n(after)) == [0, 1, 2, 3, 4]
+    w._poll_qgis()
+    w.refreshed.emit()
+    app.processEvents()
+    assert len(v.features(LAYER)) == 6 and w.chunk.meta[mw.PLAN_EDITS] == edits
     qgis.close()

@@ -64,9 +64,14 @@ attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
   suo layer (una linea in un layer di poligoni) non viene ripresa: il log lo dice. Queste
   modifiche restano con il chunk (`plan_edits`) e si salvano con il progetto: quando il plugin
   ridisegna il suo layer dai suoi risultati - dopo *Salva*, un passo, un altro raster mostrato -
-  vi vengono rimesse, così un elemento eliminato qui o in QGIS resta eliminato. Una nuova
+  vi vengono rimesse, così un elemento eliminato qui o in QGIS resta eliminato. Un attributo di
+  un elemento di questi layer cambiato qui, nella tabella del pannello *Layer* o con *Modifica
+  etichetta...*, resta allo stesso modo e va in QGIS nella riga dell'elemento. Una nuova
   esecuzione del plugin che fa altri elementi (una nuova conversione) riparte dai suoi nuovi
-  risultati. Le tabelle si leggono con la pianta del chunk attivo nella vista 2D.
+  risultati: al *Salva* successivo le modifiche fatte sugli elementi che il layer non disegna
+  più escono dal progetto (il log dice quante; ciò che è stato disegnato in QGIS sul layer
+  resta), mentre un layer soltanto nascosto le tiene tutte. Le tabelle si leggono con la pianta
+  del chunk attivo nella vista 2D.
 
 Ogni salvataggio fatto in QGIS è una voce di *Modifica > Annulla* (*Annulla: Da QGIS: US 6
 modificata*; più elementi: *Da QGIS: 3 modifiche*) e una riga del log per ogni elemento. I

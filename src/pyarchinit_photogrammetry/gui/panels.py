@@ -2211,6 +2211,7 @@ class LayersPane(QWidget):
     under the drawings (orthophoto, DEM, relief, elevation, section) shown or hidden, and its opacity."""
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
+    attribute_editing = Signal(str, int, str)  # layer, feature index, field: about to change, the feature as it was
     us_form_requested = Signal(str, int)  # layer, feature index
     visibility_changed = Signal(str, bool)  # layer, shown: by its box (the window may keep it)
     visibility_set = Signal(dict)  # by Tutti / Nessuno: {layer: (shown before, shown now)} of the layers it changed
@@ -2572,6 +2573,7 @@ class LayersPane(QWidget):
         value, ok = QInputDialog.getText(self, tr("Modifica etichetta..."), tr("Testo dell'etichetta:"),
                                         text=str(feats[index].get("etichetta") or ""))
         if ok:
+            self.attribute_editing.emit(name, index, "etichetta")
             self.view.set_feature_attribute(name, index, "etichetta", value)
             self.attribute_edited.emit(name, index, "etichetta", value)
             self.show_attributes(name, {**self.view.features(name)[index], "_index": index})
@@ -2635,6 +2637,7 @@ class LayersPane(QWidget):
         layer, idx = self._current
         old = self.view.features(layer)[idx].get(key) if idx < len(self.view.features(layer)) else None
         value = _typed(item.text(), old)
+        self.attribute_editing.emit(layer, idx, key)
         self.view.set_feature_attribute(layer, idx, key, value)
         self.attribute_edited.emit(layer, idx, key, value)
 

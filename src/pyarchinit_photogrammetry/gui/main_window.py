@@ -67,10 +67,12 @@ PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section
 LINES_LAYER = "Linee di rottura"  # break lines, soft lines and outlines of the TIN (archaeo.breaklines)
 TIN_LAYER = "TIN"  # the edges of the TIN of the chunk (engine.tin), drawn from its file
 QGIS_LAYER = "Disegni da QGIS"  # what is drawn in QGIS in a table of the plan without the name of a layer
-# chunk.meta: the edits made by hand (in QGIS, or deletions in the 2D view) to the layers the program holds no data of
-# (those of the plugins, drawn again from their own results), layer by layer: {"rev", "changed": {identity: {"geom",
-# "attrs"}}, "deleted": [identity], "added": {identity: {"kind", "geom", "attrs", "color"}}} - put on the layer again
-# each time it is drawn (:meth:`MainWindow._sync_plan_edits`)
+# chunk.meta: the edits made by hand (in QGIS; here, deletions in the 2D view and attributes changed in the Layers
+# pane) to the layers the program holds no data of (those of the plugins, drawn again from their own results), layer
+# by layer: {"rev": the revision of these edits (which of them a layer shows), "changed": {identity: {"geom" (None:
+# as drawn), "attrs"}}, "deleted": [identity], "added": {identity: {"kind", "geom", "attrs", "color"}}} - put on the
+# layer again each time it is drawn (:meth:`MainWindow._sync_plan_edits`); those of features the layer no longer
+# draws leave at saving (:meth:`MainWindow._prune_plan_edits`)
 PLAN_EDITS = "plan_edits"
 _PLAN_KINDS = {"poligoni": "polygon", "curve": "line", "linee": "line", "punti": "point"}
 _PLAN_GEOM = {"polygon": "Polygon", "line": "LineString", "point": "Point"}
@@ -740,6 +742,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.raster_loaded.connect(lambda: QTimer.singleShot(0, self, self._draw_chunk_overlays))
         self.ortho_view.raster_loaded.connect(self._sync_background_action)
         self.ortho_view.raster_visibility_changed.connect(self._sync_background_action)
+        self.layers_pane.attribute_editing.connect(self._plan_attribute_editing)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.layers_pane.visibility_changed.connect(self._layer_visibility_changed)
         self.layers_pane.visibility_set.connect(self._layers_visibility_set)
@@ -848,6 +851,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
         self._plan_busy = self._plan_waiting = False
+        self._plan_editing: tuple | None = None  # (layer, index, field, identity) of the attribute being changed
         self._plan_said: set[str] = set()  # the layers said one-way in the log, once each
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
         self._qgis_poll.setInterval(1000)
@@ -3403,12 +3407,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return False
             self._store_drawings()
             self._prune_frames()
+            self._prune_plan_edits()
             clean = self.history is not None and self.history.unchanged()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
             self._store_drawings()
             self._prune_frames()
+            self._prune_plan_edits()
             clean = self.history is not None and self.history.unchanged()
             self.doc.save()
         if clean:  # saving writes the ties back as they are read (a marker given its identity back): not an edit
@@ -11884,6 +11890,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     sdict["label"] = str(value)
             self._save_sections()
             self.sections_pane.set_sections(self.sections)
+        self._plan_attribute_edited(layer, idx, key)
         if key == "etichetta":
             self._store_drawings()
         self._dirty(True)
@@ -13277,6 +13284,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             e = changed.get(pid) if pid is not None else None
             if e:
                 attrs = {**attrs, **(e.get("attrs") or {}), ID_FIELD: pid}
+                attrs.pop("_default_label", None)  # its label is the one kept here: the view takes it as its own
                 if e.get("geom") is not None:
                     attrs["_geom"] = (attrs["_geom"][0], e["geom"])
             feats.append((attrs, style))
@@ -13295,8 +13303,10 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             v.layer_order = [n for n in order if n in v.layers] + [n for n in v.layer_order if n not in order]
         if not visible:
             v.set_layer_visible(name, False)
-        if ed:
-            v.layers[name]["plan_stamp"] = (ed.get("rev"), len(v.layers[name]["features"]))
+        # also with no edits left (undone): the layer is still the one kept in _plan_base, not one its maker drew -
+        # taken again from the view its features could be others (a coordinate given as 12 comes back as 12.0, and
+        # the identity is from the content), and the edits a redo puts back would find none of them
+        v.layers[name]["plan_stamp"] = (ed.get("rev"), len(v.layers[name]["features"]))
 
     def _sync_plan_later(self) -> None:
         """The layers of the 2D view changed: :meth:`_sync_plan_edits` once this turn of the event loop is over - a
@@ -13346,6 +13356,110 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                     self._plan_build(name)
         finally:
             self._plan_busy = False
+
+    def _plan_attribute_editing(self, layer: str, idx: int, key: str) -> None:
+        """An attribute of a feature is about to change in the Layers pane. For a feature held by the 2D view alone
+        the identity of its row is taken now, and its layer kept as its maker drew it (:meth:`_plan_capture`): such a
+        feature is known by its content, so once the attribute has changed it would be another one - the edit would
+        be kept under an identity its maker never draws again."""
+        from ..io.qgis_link import plan_identities
+
+        self._plan_editing = None
+        v = self.ortho_view
+        if self.chunk is None or self.drawings_frame is not None or v.tr is None or self._plan_busy:
+            return
+        if layer not in v.layers or self._plan_one_way(layer):
+            return
+        if self._plan_waiting:  # just drawn again by its maker: with its edits first (the features in the same order)
+            self._sync_plan_edits()
+        lay = v.layers.get(layer)
+        if lay is None or not 0 <= idx < len(lay["features"]):
+            return
+        self._plan_capture(layer)
+        attrs = lay["features"][idx][2]
+        ids = plan_identities({layer: {"kind": lay["kind"], "features": v.features(layer)}})
+        pid = next((pid for pid, (_table, _name, a) in ids.items() if a is attrs), None)
+        if pid is not None:
+            self._plan_editing = (layer, idx, key, pid)
+
+    def _plan_attribute_edited(self, layer: str, idx: int, key: str) -> None:
+        """The attribute ``key`` of a feature held by the 2D view alone changed in the Layers pane (its table, the
+        label): kept among the edits made by hand of its layer under the identity the feature had before
+        (:meth:`_plan_attribute_editing`), as the edits of QGIS are - it stays when the maker of the layer draws it
+        again, goes to QGIS in the row of the feature and is saved with the project. A value put back as its maker
+        drew it is no edit any more. The label is kept there too, not among the labels changed by hand of the view
+        (``label_overrides``): put on the feature when it is drawn, those would change the content its identity comes
+        from."""
+        pending, self._plan_editing = self._plan_editing, None
+        v = self.ortho_view
+        lay = v.layers.get(layer)
+        if pending is None or pending[:3] != (layer, idx, key) or lay is None or idx >= len(lay["features"]):
+            return
+        pid = pending[3]
+        attrs = lay["features"][idx][2]
+        value = attrs.get(key)
+        base = {p: a for p, a, _style in (self._plan_base.get(layer) or {}).get("features", [])}
+        ed = self._plan_edits(layer, create=True)
+        if pid in ed["added"]:  # drawn in QGIS: the feature is the record itself
+            kept = ed["added"][pid].setdefault("attrs", {})
+            if value in (None, ""):
+                kept.pop(key, None)
+            else:
+                kept[key] = value
+        elif pid in base:
+            was = base[pid]
+            e = ed["changed"].setdefault(pid, {"geom": None, "attrs": {}})
+            e["attrs"] = dict(e.get("attrs") or {})
+            same = (type(was[key]) is type(value) and was[key] == value) if key in was else value in (None, "")
+            if same:
+                e["attrs"].pop(key, None)
+            else:
+                e["attrs"][key] = value
+            if e.get("geom") is None and not e["attrs"]:
+                del ed["changed"][pid]
+        else:
+            self._plan_touch(layer)
+            return
+        if key == "etichetta":
+            settings = v.layer_settings.get(layer) or {}
+            overrides = settings.get("label_overrides") or {}
+            overrides.pop(v._label_key(attrs), None)
+            if not overrides and settings.pop("label_overrides", None) is not None and not settings:
+                v.layer_settings.pop(layer, None)
+        self._plan_touch(layer)
+        # the view shows the value typed, not yet the layer built from what is kept: a revision no edits have, so
+        # that it is drawn again whatever comes first (the look below, an undo that puts the edits back as before)
+        lay["plan_stamp"] = ("-", len(lay["features"]))
+        self._sync_plan_later()  # not inside the pane's own signal
+
+    def _prune_plan_edits(self) -> None:
+        """At saving: the edits made by hand (:data:`PLAN_EDITS` of the active chunk) to features the maker of their
+        layer no longer draws out of the project - the conversion they were made on was made again, or placed
+        elsewhere: its features are others (known by their content), nothing would ever take those edits. Only for a
+        layer the plan shows now, drawn by its maker, with its edits on it: one that is not drawn (hidden, removed,
+        the view on an elevation) keeps them all, and so does every redraw of the same features. What was drawn in
+        QGIS on the layer (``added``) is the user's and stays. Said in the Log pane; the steps of Modifica > Annulla
+        made before still hold them."""
+        v = self.ortho_view
+        if self.chunk is None or self.drawings_frame is not None or v.tr is None or self._plan_busy:
+            return
+        if self._plan_waiting:
+            self._sync_plan_edits()
+        edits = self._plan_edits()
+        for name in list(edits):
+            ed, lay, base = edits[name], v.layers.get(name), self._plan_base.get(name)
+            if lay is None or not base or lay.get("plan_stamp") != (ed.get("rev"), len(lay["features"])):
+                continue
+            known = {pid for pid, _attrs, _style in base["features"] if pid is not None}
+            gone = [pid for pid in list(ed.get("changed") or {}) + list(ed.get("deleted") or []) if pid not in known]
+            if not known or not gone:
+                continue
+            ed["changed"] = {pid: e for pid, e in ed["changed"].items() if pid in known}
+            ed["deleted"] = [pid for pid in ed["deleted"] if pid in known]
+            self._plan_touch(name)  # the layer shows what is left already
+            lay["plan_stamp"] = ((edits.get(name) or {}).get("rev"), len(lay["features"]))
+            self.log_pane.info(tr("{0}: {1} modifiche fatte a mano tolte dal progetto, erano su elementi che il "
+                                  "layer non disegna più (conversione rifatta o spostata)", name, len(gone)))
 
     def _plan_deleted(self, features: list) -> None:
         """Features held by the 2D view alone deleted in the program (``(layer, attributes)``): kept among the edits
@@ -13464,9 +13578,15 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 ed = self._plan_edits(name, create=True)
                 if f.id in base and f.id not in ed["added"]:
                     was = base[f.id]
-                    keys = {_column(k): k for k in was if not str(k).startswith("_")}
-                    attrs = {keys.get(c, c): val for c, val in values.items()
-                             if _value(c, was.get(keys.get(c, c))) != _value(c, val)}
+                    kept = (ed["changed"].get(f.id) or {}).get("attrs") or {}  # changed already, here or there
+                    keys = {_column(k): k for k in {**was, **kept} if not str(k).startswith("_")}
+                    attrs = {}
+                    for c, val in values.items():
+                        k = keys.get(c, c)
+                        if k in kept and _value(c, kept[k]) == _value(c, val):
+                            attrs[k] = kept[k]  # the same value: as it was kept (a number stays a number)
+                        elif _value(c, was.get(k)) != _value(c, val):
+                            attrs[k] = val
                     ed["changed"][f.id] = {"geom": coords, "attrs": attrs}
                     line = tr("{0} modificato", label)
                 else:
