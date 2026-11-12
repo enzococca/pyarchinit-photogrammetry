@@ -199,8 +199,8 @@ def test_live_link_tables(tmp_path):
     names = {r["name"] for r in fio.read(link.path)}
     assert "Nuovo nome" in names
     vectors = link.free_vectors()
-    assert [v["name"] for v in vectors] == ["Disegni 3D - linee (ppg)", "Disegni 3D - poligoni (ppg)",
-                                            "Disegni 3D - punti (ppg)"]
+    assert [v["name"] for v in vectors] == [f"Disegni 3D: {fd.DEFAULT_LAYER} - linee", "Disegni 3D: Muri",
+                                            f"Disegni 3D: {fd.DEFAULT_LAYER} - punti"]  # one for each layer
     assert all(v["path"] == str(link.path) for v in vectors)
     link.close()
 

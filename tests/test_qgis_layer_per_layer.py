@@ -1,18 +1,31 @@
-"""A feature of the plan goes to the table of its own geometry in the live GeoPackage, whatever the first feature
-of its layer was: a layer of lines and polygons (PhotoCAD) fills two tables and comes back from QGIS whole. A file
-and a project of 1.7.8, which sent them all to the table of the first, are taken without anything read as changed. The ticks of the Layers pane
-stay with the project."""
+"""One layer in QGIS for each layer of the program: the QGIS project gets a layer for every layer with drawings in
+the live GeoPackage, filtered on its name (two for a layer of lines and polygons; none for a table without rows), and
+what is drawn in it comes back in that layer. A feature goes to the table of its own geometry, whatever the first
+feature of its layer was - a file and a project of 1.7.8, which sent them all to the table of the first, are taken
+without anything read as changed. The ticks of the Layers pane stay with the project."""
 from __future__ import annotations
 
-import pytest
-from shapely.geometry import LineString, box
+import json
+import os
+import subprocess
+from pathlib import Path
 
-from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, LiveLink, legacy_identities, plan_identities
+import pytest
+from shapely.geometry import LineString, Point, box
+
+from pyarchinit_photogrammetry.core import free_drawings as fd
+from pyarchinit_photogrammetry.io import qgis_link
+from pyarchinit_photogrammetry.io.qgis_link import (ID_FIELD, LIVE_DB, LIVE_TABLES, LiveLink, QgisInstall,
+                                                    build_project, layer_subset, layers_not_in_project,
+                                                    legacy_identities, live_vectors, plan_identities, project_layers,
+                                                    subset_layer)
+from test_free_drawings_io import _chunk, _three
 from test_plan_two_way import LAYER, STONES, Plugin, _by_n, _line, _live
-from test_qgis_two_way import Qgis, X0, Y0, _from_qgis, _rows
+from test_qgis_two_way import Qgis, X0, Y0, _from_qgis, _log, _rows, _square
 
 CRS = "EPSG:3004"
 MIXED = "PhotoCAD: Rilievo"
+UNITS = "Unita' stratigrafiche"
 
 
 def _ring(i):
@@ -114,6 +127,170 @@ def test_the_identities_of_1_7_8_are_found_again():
     kept = {**layers, MIXED: {"kind": "polygon", "features": [dict(f, ppg_id=f"id{i}")
                                                               for i, f in enumerate(layers[MIXED]["features"])]}}
     assert legacy_identities(kept) == {}  # an identity of its own never changes
+
+
+# ---------------------------------------------------------------- one layer of QGIS for each layer of the program
+def _unit(us, x):
+    return {"us_s": str(us), "area_s": "1", "ppg_id": f"u{us}", "_geom": _square(x, Y0)}
+
+
+def test_every_layer_with_drawings_makes_a_layer_of_qgis(tmp_path):
+    layers = {**_mixed(), UNITS: {"kind": "polygon", "features": [_unit(6, X0)]},
+              "Muri d'ambito": {"kind": "line", "features": [{"_geom": ("LineString", _line(40))}]},
+              "Vuoto": {"kind": "line", "features": []}}
+    link = LiveLink(tmp_path, CRS)
+    files = link.write(layers)
+    vectors = live_vectors(link.path)
+    assert [(v["name"], v["table"]) for v in vectors] == [
+        (UNITS, "unita"), (f"{MIXED} - poligoni", "poligoni"), (f"{MIXED} - linee", "linee"), (LAYER, "linee"),
+        ("Muri d'ambito", "linee"), (f"{MIXED} - punti", "punti")]  # no layer for sezioni, curve, quote: no rows
+    by = {v["name"]: v for v in vectors}
+    assert by["Muri d'ambito"]["subset"] == "\"layer\" = 'Muri d''ambito'"
+    assert by["Muri d'ambito"]["defaults"] == {"layer": "Muri d'ambito"}
+    assert by[f"{MIXED} - linee"]["subset"] == by[f"{MIXED} - poligoni"]["subset"] == f"\"layer\" = '{MIXED}'"
+    assert all(v["geometry"] == LIVE_TABLES[v["table"]][1] and v["path"] == str(link.path) for v in vectors)
+    lines = [v["name"] for v in live_vectors(link.path, ["linee"])]
+    assert lines == [f"{MIXED} - linee", LAYER, "Muri d'ambito"]  # the same names, whatever tables are asked
+    assert live_vectors(tmp_path / "missing.gpkg") == []
+    for name in ("Muri d'ambito", "a 'b' c", 'with "quotes"', "x|y"):
+        assert subset_layer(layer_subset(name)) == name
+    assert subset_layer(layer_subset("")) == "" and subset_layer("") is None and subset_layer('"us_s" = 6') is None
+
+    seen = {}
+
+    def run(args, **kwargs):  # QGIS's Python: what it is given
+        seen.update(json.loads(Path(args[2]).read_text(encoding="utf-8")))
+        Path(seen["project"]).write_text("<qgis/>", encoding="utf-8")
+        report = {"written": True, "vectors": [], "rasters": []}
+        return subprocess.CompletedProcess(args, 0, "PPG_QGIS_REPORT " + json.dumps(report) + "\n", "")
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(qgis_link.subprocess, "run", run)
+        extra = [{"name": "Zone", "path": str(link.path), "table": "linee", "geometry": "LINESTRINGZ", "color": "#000"}]
+        build_project(tmp_path / "p.qgs", CRS, files, [], qgis=QgisInstall(app="qgis", python="python-of-qgis"),
+                      extra_vectors=extra)
+    assert [v["name"] for v in seen["vectors"]] == [v["name"] for v in vectors] + ["Zone"]
+    assert seen["vectors"][0]["subset"] == layer_subset(UNITS) and "subset" not in seen["vectors"][-1]
+    link.close()
+
+
+def test_rows_without_a_layer_have_the_layer_of_their_table(tmp_path):
+    link = LiveLink(tmp_path, CRS)
+    link.write(_mixed())
+    qgis = Qgis(link.path)
+    qgis.save(qgis.insert("linee", LineString([(X0, Y0), (X0 + 1, Y0)])),  # drawn in a project of 1.7.8: no layer
+              qgis.insert("punti", Point(X0, Y0), layer=""))
+    qgis.close()
+    by = {v["name"]: v for v in live_vectors(link.path)}
+    assert by[LIVE_TABLES["linee"][0]]["layer"] == "" and "defaults" not in by[LIVE_TABLES["linee"][0]]
+    assert by[LIVE_TABLES["punti"][0]]["subset"] == by[LIVE_TABLES["linee"][0]]["subset"] == layer_subset(None)
+    assert f"{MIXED} - linee" in by
+    link.close()
+
+
+def test_the_layers_of_the_free_drawings_are_one_each(tmp_path):
+    _doc, ch = _chunk(tmp_path)
+    _three(ch)  # a line and a point in the default layer, a polygon in "Muri"
+    link = LiveLink(tmp_path / "qgis", ch.crs)
+    link.write({}, chunk=ch.key, free=ch)
+    vectors = link.free_vectors()
+    assert [(v["name"], v["table"]) for v in vectors] == [
+        (f"Disegni 3D: {fd.DEFAULT_LAYER} - linee", "disegni_3d_linee"), ("Disegni 3D: Muri", "disegni_3d_poligoni"),
+        (f"Disegni 3D: {fd.DEFAULT_LAYER} - punti", "disegni_3d_punti")]
+    assert vectors[1]["subset"] == layer_subset("Muri") and vectors[1]["defaults"] == {"layer": "Muri"}
+    assert all(v["geometry"] in ("LINESTRING", "POLYGON", "POINT") for v in vectors)
+    assert link.elevation_tables(filled=True) == []
+    link.close()
+
+
+_PROJECT = """<qgis><projectlayers>
+<maplayer><datasource>./{db}|layername=linee|subset="layer" = 'Muri d''ambito'</datasource></maplayer>
+<maplayer><datasource>./{db}|layername=poligoni|subset="layer" = '{mixed}'</datasource></maplayer>
+<maplayer><datasource>./{db}|layername=quote</datasource></maplayer>
+<maplayer><datasource>./ortho.tif</datasource></maplayer>
+<maplayer><datasource>./altro.gpkg|layername=linee</datasource></maplayer>
+<maplayer><datasource></datasource></maplayer>
+</projectlayers></qgis>"""
+
+
+def test_the_layers_of_a_project_are_read_from_it(tmp_path):
+    project = tmp_path / "p.qgs"
+    project.write_text(_PROJECT.format(db=LIVE_DB, mixed=MIXED), encoding="utf-8")
+    have = project_layers(project)
+    assert have == {("linee", "Muri d'ambito"), ("poligoni", MIXED), ("quote", None)}
+    assert project_layers(tmp_path / "none.qgs") is None
+    (tmp_path / "bad.qgs").write_text("not xml", encoding="utf-8")
+    assert project_layers(tmp_path / "bad.qgs") is None
+    vectors = [{"name": "a", "table": "linee", "layer": "Muri d'ambito"}, {"name": "b", "table": "linee", "layer": "B"},
+               {"name": "c", "table": "poligoni", "layer": MIXED}, {"name": "d", "table": "quote", "layer": "Quote"},
+               {"name": "e", "table": "disegni_3d_linee", "layer": "Muri"}]
+    assert layers_not_in_project(have, vectors) == ["b", "e"]  # "quote" is there whole: every layer of it shown
+    assert layers_not_in_project(None, vectors) == []
+
+
+# ---------------------------------------------------------------- with QGIS itself
+_QGIS_EDIT = r"""
+import json, sys
+from qgis.core import QgsApplication, QgsGeometry, QgsPointXY, QgsProject, QgsVectorLayerUtils
+app = QgsApplication([], False)
+app.initQgis()
+proj = QgsProject.instance()
+proj.read(sys.argv[1])
+layers = {l.name(): l for l in proj.mapLayers().values()}
+x, y = float(sys.argv[2]), float(sys.argv[3])
+out = {"layers": {n: [sum(1 for _ in l.getFeatures()), l.subsetString(),
+                      l.defaultValueDefinition(l.fields().indexOf("layer")).expression()] for n, l in layers.items()}}
+lines = layers[sys.argv[4]]
+ok = [lines.startEditing()]
+ok.append(lines.addFeature(QgsVectorLayerUtils.createFeature(
+    lines, QgsGeometry.fromPolylineXY([QgsPointXY(x, y), QgsPointXY(x + 1, y)]))))
+ok.append(lines.commitChanges())
+other = layers[sys.argv[5]]
+old = next(other.getFeatures())
+ok += [other.startEditing(), other.changeGeometry(old.id(), QgsGeometry.fromPolylineXY(
+    [QgsPointXY(x, y + 1), QgsPointXY(x + 1, y + 1.25)])), other.commitChanges()]
+out["ok"] = ok
+out["after"] = sum(1 for _ in lines.getFeatures())
+print("STATE " + json.dumps(out), flush=True)
+app.exitQgis()
+"""
+
+
+def test_qgis_draws_in_the_layer_of_a_layer_and_it_comes_back(tmp_path):
+    """With QGIS's own Python (skipped without QGIS): the project has a valid layer for each layer of the program,
+    each shows its rows only, and a feature drawn in one - created as QGIS's digitising does, with the defaults of
+    the layer - is saved with the name of the layer and read back in it; so is a vertex moved."""
+    q = qgis_link.find_qgis()
+    if q is None or not q.python or not Path(q.python).exists():
+        pytest.skip("QGIS not installed")
+    link = LiveLink(tmp_path, CRS)
+    files = link.write({**_mixed(), "Muri d'ambito": {"kind": "line",
+                                                     "features": [{"_geom": ("LineString", _line(40)), "n": 40}]}})
+    project = tmp_path / "p.qgs"
+    rep = build_project(project, CRS, files, [], qgis=q)
+    assert rep["written"] and all(v["valid"] for v in rep["vectors"])
+    names = [f"{MIXED} - poligoni", f"{MIXED} - linee", LAYER, "Muri d'ambito", f"{MIXED} - punti"]
+    assert [v["name"] for v in rep["vectors"]] == names
+    assert project_layers(project) == {("poligoni", MIXED), ("linee", MIXED), ("linee", LAYER),
+                                       ("linee", "Muri d'ambito"), ("punti", MIXED)}
+    text = project.read_text(encoding="utf-8")
+    assert text.count('autoRefreshEnabled="1"') == len(names) and "layername=sezioni" not in text
+    script = tmp_path / "edit.py"
+    script.write_text(_QGIS_EDIT, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "PROJ_", "GDAL_", "QT_"))}
+    env.update(q.env)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    r = subprocess.run([q.python, str(script), str(project), str(X0), str(Y0 + 5), f"{MIXED} - linee",
+                        "Muri d'ambito"], capture_output=True, text=True, env=env, timeout=300, close_fds=False)
+    state = json.loads(next(ln for ln in r.stdout.splitlines() if ln.startswith("STATE ")).split(" ", 1)[1])
+    assert {n: v[0] for n, v in state["layers"].items()} == dict(zip(names, [2, 3, 2, 1, 1]))
+    assert state["layers"]["Muri d'ambito"][1:] == ["\"layer\" = 'Muri d''ambito'", "'Muri d''ambito'"]
+    assert all(state["ok"]) and state["after"] == 4
+    changes = link.read_changes()
+    assert list(changes) == ["linee"]
+    assert [(f.values["layer"], f.geometry.geom_type) for f in changes["linee"].added] == [(MIXED, "LineString")]
+    assert [f.values["layer"] for f in changes["linee"].changed] == ["Muri d'ambito"]
+    link.close()
 
 
 # ---------------------------------------------------------------- the window
@@ -243,4 +420,32 @@ def test_the_ticks_of_the_layers_stay_with_the_project(trench):
     v.set_layer_visible(STONES, True)  # ticked again: no key left in the project
     assert mw.LAYERS_HIDDEN not in w.chunk.meta
     w._export_qgis_layers()
+    assert len(_rows(path, "poligoni")) == 2
+
+
+def test_a_layer_the_qgis_project_does_not_show_is_said_once(trench):
+    w, app, mw = trench
+    plugin = Plugin(w)
+    assert plugin.drawn
+    path = _live(w)
+    said = lambda: [line for line in _log(w) if "non mostra ancora" in line]  # noqa: E731
+    assert said() == []  # no project of QGIS yet
+    project = w._qgis_project()
+    project.write_text(f"<qgis><datasource>./{LIVE_DB}|layername=linee|subset={layer_subset(LAYER)}</datasource>"
+                       "</qgis>", encoding="utf-8")
+    w._export_qgis_layers(force=True)
+    assert len(said()) == 1 and f"«{STONES}»" in said()[0] and LAYER not in said()[0].replace(STONES, "")
+    w._export_qgis_layers(force=True)
+    assert len(said()) == 1
+    w.ortho_view.add_line(_line(50), "#000000", "", layer="Nuovo", attrs={})
+    w._export_qgis_layers()
+    assert len(said()) == 2 and "«Nuovo»" in said()[1]
+    project.write_text("".join(f"<qgis><datasource>./{LIVE_DB}|layername={t}</datasource></qgis>"
+                               for t in ("poligoni",)).replace("</qgis><qgis>", ""), encoding="utf-8")
+    os.utime(project, ns=(project.stat().st_atime_ns, project.stat().st_mtime_ns + 5_000_000_000))
+    w.ortho_view.set_layer_visible(STONES, False)
+    w._export_qgis_layers()
+    w.ortho_view.set_layer_visible(STONES, True)
+    w._export_qgis_layers()
+    assert len(said()) == 3 and STONES not in said()[2]  # a project of 1.7.8 with the table whole shows them all
     assert len(_rows(path, "poligoni")) == 2

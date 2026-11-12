@@ -597,16 +597,21 @@ class LiveLink:
         self._signatures[ELEVATION_PREFIX] = sig
         return written
 
-    def elevation_tables(self) -> list[tuple[str, str]]:
-        """``(table, geometry type)`` of the elevations' tables the GeoPackage holds (:meth:`write_elevations`)."""
+    def elevation_tables(self, filled: bool = False) -> list[tuple[str, str]]:
+        """``(table, geometry type)`` of the elevations' tables the GeoPackage holds (:meth:`write_elevations`);
+        ``filled``: only those with rows (the layers of a QGIS project)."""
         from . import gpkg
 
         if not gpkg.is_geopackage(self.path):
             return []
         con = self._connection()
-        return [(r[0], r[1]) for r in con.execute(
+        tables = [(r[0], r[1]) for r in con.execute(
             "SELECT table_name, geometry_type_name FROM gpkg_geometry_columns WHERE table_name GLOB ? ORDER BY "
             "table_name", (ELEVATION_PREFIX + "*",))]
+        if filled:
+            tables = [(t, g) for t, g in tables
+                      if con.execute(f"SELECT 1 FROM {gpkg.quote(t)} LIMIT 1").fetchone() is not None]
+        return tables
 
     def _free_signature(self, chunk) -> int:
         from ..core import free_drawings as fd
@@ -709,15 +714,27 @@ class LiveLink:
             "table_name", (FREE_PREFIX + "*",))]
 
     def free_vectors(self) -> list[dict]:
-        """The layers of the free drawings for a QGIS project (``extra_vectors`` of :func:`build_project`): lines,
-        polygons, points, labelled by their name."""
+        """The layers of the free drawings for a QGIS project (``extra_vectors`` of :func:`build_project`): one for
+        each layer of free drawings with rows, as those of the plan (:func:`live_vectors`) - two or three when it
+        holds lines, polygons and points -, labelled by the name of the drawing."""
         from .free_drawings import TABLES, TITLES
 
-        have = {t for t, _g in self.free_tables()}
+        found = table_layers(self.path, [table for table, _gtype in TABLES.values()])
         colours = {"line": "#ffb000", "polygon": "#ff8c00", "point": "#ffd000"}
-        return [{"name": TITLES[kind], "path": str(self.path), "table": table, "geometry": gtype.rstrip("Z"),
-                 "color": colours[kind], "label": "name"}
-                for kind, (table, gtype) in TABLES.items() if table in have]
+        suffix = {"line": "linee", "polygon": "poligoni", "point": "punti"}
+        shared: dict[str, int] = {}
+        for rows in found.values():
+            for name in rows:
+                shared[name] = shared.get(name, 0) + 1
+        out = []
+        for kind, (table, gtype) in TABLES.items():
+            for name in found.get(table, {}):
+                shown = (TITLES[kind] if not name else
+                         f"Disegni 3D: {name}" + (f" - {suffix[kind]}" if shared[name] > 1 else ""))
+                out.append({"name": shown, "path": str(self.path), "table": table, "geometry": gtype.rstrip("Z"),
+                            "color": colours[kind], "label": "name", "layer": name, "subset": layer_subset(name),
+                            **({"defaults": {"layer": name}} if name else {})})
+        return out
 
     def _wanted(self, table: str, feats: list, cols: list[str], types: dict,
                 held=frozenset()) -> tuple[list[_Wanted], set]:
@@ -1145,7 +1162,8 @@ import json, sys
 from qgis.core import (QgsApplication, QgsCoordinateReferenceSystem, QgsPalLayerSettings, QgsProject,
                        QgsRasterLayer, QgsVectorLayer, QgsVectorLayerSimpleLabeling, QgsTextFormat,
                        QgsHillshadeRenderer, QgsMultiBandColorRenderer, QgsSingleBandPseudoColorRenderer,
-                       QgsColorRampShader, QgsRasterShader, QgsPalettedRasterRenderer, QgsContrastEnhancement)
+                       QgsColorRampShader, QgsRasterShader, QgsPalettedRasterRenderer, QgsContrastEnhancement,
+                       QgsDefaultValue)
 from qgis.PyQt.QtGui import QColor
 
 
@@ -1192,6 +1210,12 @@ group_r = root.addGroup("Prodotti fotogrammetrici")
 report = {"vectors": [], "rasters": []}
 for v in cfg["vectors"]:
     lyr = QgsVectorLayer(v["path"] + "|layername=" + v["table"], v["name"], "ogr")
+    if v.get("subset"):  # the rows of one layer of the program
+        lyr.setSubsetString(v["subset"])
+    for name, value in (v.get("defaults") or {}).items():  # what is drawn in it is of that layer
+        idx = lyr.fields().indexOf(name)
+        if idx >= 0:
+            lyr.setDefaultValueDefinition(idx, QgsDefaultValue("'" + str(value).replace("'", "''") + "'"))
     if crs.isValid():
         lyr.setCrs(crs)
     sym = lyr.renderer().symbol() if lyr.renderer() is not None else None
@@ -1220,7 +1244,8 @@ for v in cfg["vectors"]:
     lyr.setAutoRefreshEnabled(True)  # redraw: a GeoPackage is read again at every drawing
     proj.addMapLayer(lyr, False)
     group_v.addLayer(lyr)
-    report["vectors"].append({"name": v["name"], "valid": lyr.isValid(), "features": lyr.featureCount()})
+    report["vectors"].append({"name": v["name"], "valid": lyr.isValid(), "features": lyr.featureCount(),
+                              "table": v["table"], "subset": lyr.subsetString()})
 for r in cfg["rasters"]:
     lyr = QgsRasterLayer(r["path"], r["name"])
     if crs.isValid():
@@ -1281,6 +1306,114 @@ STYLES = {  # table -> (colour, label field, label colour)
 }
 
 
+# what tells apart, in QGIS, the layers of one name whose drawings are in several tables (a layer of lines and
+# polygons: two layers there)
+TABLE_SUFFIX = {"unita": "unità", "poligoni": "poligoni", "sezioni": "sezioni", "curve": "curve", "linee": "linee",
+                "punti": "punti", "quote": "quote"}
+_SUBSET = re.compile(r"""^"layer" = '((?:[^']|'')*)'$""")
+_NO_LAYER = """"layer" IS NULL OR "layer" = ''"""
+
+
+def layer_subset(layer: str | None) -> str:
+    """The filter (``setSubsetString``) of the rows of ``layer`` in a table of the live GeoPackage; of those without
+    one (drawn in another program in a layer of the whole table) for ``""``/None."""
+    return _NO_LAYER if not layer else "\"layer\" = '" + str(layer).replace("'", "''") + "'"
+
+
+def subset_layer(subset: str | None) -> str | None:
+    """The layer a filter of :func:`layer_subset` keeps (``""``: the rows without one); None for no filter - the
+    whole table, as the projects up to 1.7.8 - and for another one."""
+    subset = (subset or "").strip()
+    if subset == _NO_LAYER:
+        return ""
+    m = _SUBSET.match(subset)
+    return m.group(1).replace("''", "'") if m else None
+
+
+def table_layers(path: str | Path, tables=None) -> dict[str, dict[str, int]]:
+    """``{table: {layer: rows}}`` of the tables of the GeoPackage ``path`` that hold rows (``tables``: those looked
+    at, by default every table with a column ``layer``), read only; ``""`` the rows without a layer. {} without the
+    file."""
+    from . import gpkg
+
+    path = Path(path)
+    if not gpkg.is_geopackage(path):
+        return {}
+    out: dict[str, dict[str, int]] = {}
+    con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        names = [r[0] for r in con.execute("SELECT table_name FROM gpkg_geometry_columns ORDER BY table_name")]
+        for table in (names if tables is None else [t for t in tables if t in names]):
+            q = gpkg.quote(table)
+            if "layer" not in [r[1] for r in con.execute(f"PRAGMA table_info({q})")]:
+                continue
+            rows = {str(name or ""): n for name, n in
+                    con.execute(f"SELECT layer, COUNT(*) FROM {q} GROUP BY layer ORDER BY MIN(fid)")}
+            if "" in rows and len(rows) > 1:  # NULL and '' are one
+                rows[""] = con.execute(f"SELECT COUNT(*) FROM {q} WHERE layer IS NULL OR layer = ''").fetchone()[0]
+            if rows:
+                out[table] = rows
+    finally:
+        con.close()
+    return out
+
+
+def live_vectors(path: str | Path, tables=None) -> list[dict]:
+    """The layers of a QGIS project for the drawings of the plan in the live GeoPackage ``path`` (``tables``: those
+    of :data:`LIVE_TABLES` taken, by default all): one for each layer of the program that has rows there, named
+    after it and filtered on it (``"subset"``), with its name as the default of the column ``layer`` (``"defaults"``:
+    what is drawn in it in QGIS comes back in that layer). A layer whose drawings are in several tables - lines and
+    polygons - makes one for each, told apart by the table (``Rilievo - linee``, ``Rilievo - poligoni``). A table
+    without rows makes none; the rows without a layer one of the table's own name."""
+    found = table_layers(path, list(LIVE_TABLES))  # all of them: a name is the same whatever tables are asked
+    shared: dict[str, int] = {}
+    for rows in found.values():
+        for name in rows:
+            shared[name] = shared.get(name, 0) + 1
+    out = []
+    for table in LIVE_TABLES:
+        if tables is not None and table not in tables:
+            continue
+        title, geometry = LIVE_TABLES[table]
+        color, label, label_color = STYLES[table]
+        for name in found.get(table, {}):
+            shown = title if not name else f"{name} - {TABLE_SUFFIX[table]}" if shared[name] > 1 else name
+            out.append({"name": shown, "path": str(path), "table": table, "geometry": geometry, "color": color,
+                        "label": label, "label_color": label_color, "layer": name, "subset": layer_subset(name),
+                        **({"defaults": {"layer": name}} if name else {})})
+    return out
+
+
+def project_layers(project_path: str | Path) -> set[tuple[str, str | None]] | None:
+    """``(table, layer)`` of the layers of the QGIS project ``project_path`` that read the live GeoPackage
+    (:data:`LIVE_DB`): the layer of their filter (:func:`subset_layer`; None: the whole table, a project made up to
+    1.7.8). None when the project cannot be read (no file, a ``.qgz``, not XML)."""
+    from xml.etree import ElementTree
+
+    try:
+        root = ElementTree.parse(str(project_path)).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    out = set()
+    for node in root.iter("datasource"):
+        source, _, subset = (node.text or "").partition("|subset=")
+        file, _, table = source.partition("|layername=")
+        if Path(file.replace("\\", "/")).name == LIVE_DB and table:
+            out.add((table.partition("|")[0], subset_layer(subset)))
+    return out
+
+
+def layers_not_in_project(have: set | None, vectors: list[dict]) -> list[str]:
+    """The names of the layers ``vectors`` (:func:`live_vectors`, :meth:`LiveLink.free_vectors`) that a QGIS project
+    with the layers ``have`` (:func:`project_layers`) does not show: made, ticked or renamed after the project was
+    written - *Apri in QGIS* writes it again with them. A table the project shows whole (up to 1.7.8) misses none;
+    [] for a project that could not be read."""
+    if have is None:
+        return []
+    whole = {table for table, layer in have if layer is None}
+    return [v["name"] for v in vectors if v["table"] not in whole and (v["table"], v.get("layer")) not in have]
+
+
 def project_crs(crs: str | None) -> str:
     """The system a QGIS project and its layers get for the chunk's ``crs``: ``EPSG:<code>`` of its plan - QGIS 3 does
     not read a compound system such as ``EPSG:7792+3855`` (heights above a geoid), and the layers are 2D
@@ -1295,21 +1428,22 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
                   title: str = "pyarchinit-photogrammetry", refresh_ms: int = 1000,
                   qgis: QgisInstall | None = None, extra_vectors: list[dict] | None = None) -> dict:
     """Write a QGIS project with the live drawings (``{table: GeoPackage}`` from
-    :func:`export_layers`, redrawn every ``refresh_ms``), the rasters
+    :func:`export_layers`, redrawn every ``refresh_ms``: one QGIS layer for each layer of the program that has
+    drawings there, :func:`live_vectors` - a table without rows makes none), the rasters
     (``[{"name", "path", "hillshade"?, "opacity"?, "bands"? (three, 1-based, stretched), "ramp"?
     ("index" with "limits", or "zones" with "classes")}]``) and other GeoPackage layers
-    (``extra_vectors``: ``[{"name", "path", "table", "geometry", "color", "label"?}]``, the zones
+    (``extra_vectors``: ``[{"name", "path", "table", "geometry", "color", "label"?, "subset"?, "defaults"?}]``, the zones
     of a multispectral index for one). Needs QGIS's Python; returns the report of the layers
     QGIS loaded."""
     qgis = qgis or find_qgis()
     if qgis is None or not qgis.python:
         raise RuntimeError("QGIS non trovato: installalo (qgis.org) o indica il percorso con PPG_QGIS")
     vectors = []
+    by_file: dict[str, list] = {}
     for table, path in layer_files.items():
-        title_v, geometry = LIVE_TABLES[table]
-        color, label, label_color = STYLES[table]
-        vectors.append({"name": title_v, "path": str(path), "table": table, "geometry": geometry, "color": color,
-                        "label": label, "label_color": label_color})
+        by_file.setdefault(str(path), []).append(table)
+    for path, tables in by_file.items():  # one layer for each layer of the program with drawings (live_vectors)
+        vectors += live_vectors(path, tables)
     for v in extra_vectors or []:
         if v.get("path") and Path(v["path"]).exists():
             # the style by the 2D type: the 3D tables of the free drawings (LINESTRINGZ...) are drawn as the others
@@ -1366,4 +1500,6 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 __all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
            "INFO_TABLE", "UnreadEdits", "ELEVATION_PREFIX", "ELEVATION_TABLES",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
-           "TableChanges", "new_id", "stable_id", "row_signature", "PLAN_TABLES", "plan_identities", "two_way_tables"]
+           "TableChanges", "new_id", "stable_id", "row_signature", "PLAN_TABLES", "plan_identities", "two_way_tables",
+           "feature_kind", "legacy_identities", "live_vectors", "table_layers", "layer_subset", "subset_layer",
+           "project_layers", "layers_not_in_project", "TABLE_SUFFIX"]

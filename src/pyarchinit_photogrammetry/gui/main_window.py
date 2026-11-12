@@ -855,6 +855,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._plan_base: dict[str, dict] = {}  # layer -> its features as drawn, without the edits made by hand
         self._plan_renamed: dict[str, dict] = {}  # layer -> {identity up to 1.7.8: identity now} (_plan_rename)
         self._plan_busy = self._plan_waiting = False
+        self._qgis_project_seen: tuple | None = None  # (stamp of the QGIS project, its layers): read once per version
+        self._qgis_missing_said: tuple = ()  # the layers said missing from the QGIS project, once each set
         self._plan_editing: tuple | None = None  # (layer, index, field, identity) of the attribute being changed
         self._plan_said: set[str] = set()  # the layers said one-way in the log, once each
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
@@ -12651,10 +12653,41 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             if "locked" in str(exc) or "busy" in str(exc):
                 self._qgis_timer.start(3000)  # QGIS or a sync client holds the file a moment: try again
             return {}
+        self._qgis_project_check(link)
         stamp = self._live_stamp()
         if stamp != self._rustgis_stamp:  # rows written: RustGIS gets them at the next look
             self._rustgis_stamp, self._rustgis_wrote = stamp, True
         return files
+
+    def _qgis_project(self) -> Path:
+        """The QGIS project *Apri in QGIS* writes for this project."""
+        return self._qgis_dir() / f"{self.doc.path.stem if self.doc.path else 'progetto'}_ppg.qgs"
+
+    def _qgis_project_check(self, link) -> None:
+        """Say, once, which layers with drawings the QGIS project does not show: a layer of QGIS is made when the
+        project is written (*Apri in QGIS*), so one drawn, ticked or renamed afterwards is in the file and not on
+        the map until the project is written again. The rows of the layers it shows change live; one unticked or
+        emptied stays there, empty."""
+        from ..io import qgis_link
+
+        if not self.a_qgis_live.isChecked():
+            return
+        try:
+            project = self._qgis_project()
+            st = project.stat()
+            stamp = (str(project), st.st_mtime_ns, st.st_size)
+            if self._qgis_project_seen is None or self._qgis_project_seen[0] != stamp:
+                self._qgis_project_seen = (stamp, qgis_link.project_layers(project))
+            vectors = qgis_link.live_vectors(link.path) + link.free_vectors()
+            missing = tuple(qgis_link.layers_not_in_project(self._qgis_project_seen[1], vectors))
+        except Exception:  # noqa: BLE001 - no project yet, a file busy: nothing to say
+            return
+        if missing and missing != self._qgis_missing_said:
+            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso",
+                      ", ".join(f"«{n}»" for n in missing[:6]) + ("…" if len(missing) > 6 else ""))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+        self._qgis_missing_said = missing
 
     def _frame_records(self) -> dict:
         """The drawings of the elevation shown as the chunk keeps them (:meth:`_store_chunk_drawings`), without
@@ -14111,7 +14144,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             self._warn(tr("Non riesco a scrivere i disegni per QGIS in {0}: vedi il log.", self._qgis_dir()))
             return
         name = self.doc.path.stem if self.doc.path else "progetto"
-        project = self._qgis_dir() / f"{name}_ppg.qgs"
+        project = self._qgis_project()
         rasters, extra_vectors = self._qgis_rasters(ch)
 
         def job(p):
@@ -14123,6 +14156,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
 
         def done(rep):
             self.a_qgis_live.setChecked(True)
+            self._qgis_missing_said = ()  # the project holds the layers of now
             bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
             self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
                                   project, len(rep['vectors']), len(rep['rasters']))
@@ -14201,7 +14235,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         names = {e["id"]: e.get("name") or e["id"] for e in ch.meta.get("elevations") or []}
         link = self._qgis_live_link()
         out = []
-        for table, _gtype in link.elevation_tables():
+        for table, _gtype in link.elevation_tables(filled=True):  # an empty table makes no layer
             eid, _, kind = table[len(ELEVATION_PREFIX):].partition("_")
             title, geometry, colour = ELEVATION_TABLES.get(kind, (kind, "POINT", "#888888"))
             out.append({"name": f"{names.get(eid, eid)} - {tr(title)} (3D)", "path": str(link.path), "table": table,
