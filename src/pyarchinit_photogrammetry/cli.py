@@ -1498,9 +1498,13 @@ def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem
 def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: Optional[str] = None,
             targets: Optional[str] = "aruco_4x4_50", quality: str = "high", dense_quality: str = "medium",
             dem_resolution: Optional[float] = None, ortho_resolution: Optional[float] = None,
+            surface: str = typer.Option("arbitrary", help="surface of the model: arbitrary or height_field"),
+            fill_holes: Optional[float] = typer.Option(None, help="height field: close the holes up to this gap "
+                                                                  "between measured points, in metres (interpolated "
+                                                                  "surface; default: none)"),
             texture: bool = True):
     """Whole pipeline: photos -> alignment -> georeferencing -> cloud -> mesh -> DEM -> orthomosaic -> report."""
-    from .markers import gcp
+    from .markers import gcp as references  # not `gcp`: the option of the file
 
     doc = Document.open(project) if project.exists() else Document()
     ch = doc.chunk or doc.add_chunk("Chunk 1")
@@ -1509,7 +1513,7 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
     if targets:
         ch.detect_markers(targets, progress=print_progress)
     try:
-        gcp.preflight(ch)  # what would keep the alignment from placing the chunk: before the matching
+        references.preflight(ch)  # what would keep the alignment from placing the chunk: before the matching
     except ValueError as exc:
         _gnss_failed(exc)
     ch.match_photos(quality=quality, progress=print_progress)
@@ -1522,7 +1526,13 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
     doc.save()
     ch.build_depth_maps(quality=dense_quality, progress=print_progress)
     ch.build_point_cloud(progress=print_progress)
-    ch.build_model(progress=print_progress)
+    if fill_holes and surface != "height_field":
+        typer.echo("--fill-holes closes the holes of the height field only: add --surface height_field", err=True)
+    ch.build_model(surface=surface, fill_holes=fill_holes or None, progress=print_progress)
+    model = ch.meta.get("model") or {}
+    if model.get("holes_filled"):
+        typer.echo(f"{model['holes_filled']} holes closed: {model['interpolated_area']:.2f} m2 in plan are "
+                   "interpolated, not measured")
     if texture:
         ch.build_texture(progress=print_progress)
     ch.build_dem(resolution=dem_resolution, progress=print_progress)

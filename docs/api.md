@@ -560,7 +560,8 @@ measured, and `chunk.meta["model"]` says how much: `fill_holes`, `holes_filled`,
 the gap) and `interpolated_area` (square metres in plan). The option counts for the height field only (also
 from the depth maps and when Poisson falls back to it); the arbitrary surface is closed by Poisson already.
 With `mapping="auto"` the texture of a height field uses the orthophoto mapping when the surface mostly faces
-the sky, whatever the number of faces. CLI: `ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`.
+the sky, whatever the number of faces. CLI: `ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`;
+the same two options in `ppg process`.
 
 ## Align and merge chunks
 

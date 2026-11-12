@@ -580,7 +580,7 @@ del vuoto) e `interpolated_area` (metri quadrati in pianta). L'opzione vale solo
 dalle mappe di profondità e quando Poisson ripiega su di esso); la superficie arbitraria è già chiusa da
 Poisson. Con `mapping="auto"` la texture di un campo di altezze usa la mappatura da ortofoto quando la
 superficie guarda in gran parte il cielo, qualunque sia il numero di facce. CLI:
-`ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`.
+`ppg mesh project.ppg --surface height_field [--fill-holes 0.5]`; le stesse due opzioni in `ppg process`.
 
 ## Allineare e unire i chunk
 

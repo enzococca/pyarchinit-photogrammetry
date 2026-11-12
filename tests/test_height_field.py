@@ -320,3 +320,67 @@ def test_process_all_closes_the_holes(trench, monkeypatch):
     answer.update(fill_holes=0.0)
     run()
     assert built[2]["fill_holes"] is None
+
+
+def test_process_command_closes_the_holes(tmp_path, monkeypatch):
+    """``ppg process --surface height_field --fill-holes``: the whole pipeline builds the height field and closes
+    its holes; the gap alone, on the arbitrary surface, is said to do nothing."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry import cli
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.markers import gcp
+
+    asked = []
+    for name in ("add_photos", "match_photos", "align_cameras", "build_depth_maps", "build_point_cloud",
+                 "build_texture", "build_dem", "build_orthomosaic"):
+        monkeypatch.setattr(Chunk, name, lambda self, *a, **k: None)
+    monkeypatch.setattr(Chunk, "generate_report", lambda self, path: path)
+    monkeypatch.setattr(gcp, "preflight", lambda chunk: None)
+
+    def build_model(self, **params):
+        asked.append(params)
+        if params.get("fill_holes") and params.get("surface") == "height_field":
+            self.meta["model"] = {"holes_filled": 3, "interpolated_area": 1.25}
+
+    monkeypatch.setattr(Chunk, "build_model", build_model)
+    run = lambda *more: CliRunner().invoke(  # noqa: E731
+        cli.app, ["process", str(tmp_path / f"p{len(asked)}.ppg"), str(tmp_path), "--targets", "", *more])
+    out = run("--surface", "height_field", "--fill-holes", "0.5")
+    assert out.exit_code == 0, out.output
+    assert asked[-1]["surface"] == "height_field" and asked[-1]["fill_holes"] == 0.5
+    assert "3 holes closed: 1.25 m2" in out.output
+    out = run("--fill-holes", "0.5")
+    assert out.exit_code == 0, out.output
+    assert asked[-1]["surface"] == "arbitrary" and "--surface height_field" in out.output
+    out = run()
+    assert asked[-1]["surface"] == "arbitrary" and asked[-1]["fill_holes"] is None
+    assert "holes" not in out.output
+
+
+def test_process_command_reads_the_file_of_the_points(tmp_path, monkeypatch):
+    """``ppg process --gcp``: the file of the control points reaches ``import_reference``, and without it nothing is
+    imported (the module of the checks took the name of the option: every run stopped after the alignment)."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry import cli
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.markers import gcp
+
+    read = []
+    for name in ("add_photos", "match_photos", "align_cameras", "build_depth_maps", "build_point_cloud",
+                 "build_model", "build_texture", "build_dem", "build_orthomosaic"):
+        monkeypatch.setattr(Chunk, name, lambda self, *a, **k: None)
+    monkeypatch.setattr(Chunk, "generate_report", lambda self, path: path)
+    monkeypatch.setattr(Chunk, "import_reference", lambda self, path, crs=None: read.append((path, crs)))
+    monkeypatch.setattr(Chunk, "update_transform", lambda self: {"method": "similarity", "control_rmse": 0.001})
+    monkeypatch.setattr(gcp, "preflight", lambda chunk: None)
+    points = tmp_path / "gcp.csv"
+    points.write_text("label,x,y,z\n", encoding="utf-8")
+    base = ["process", str(tmp_path / "p.ppg"), str(tmp_path), "--targets", ""]
+    out = CliRunner().invoke(cli.app, base)
+    assert out.exit_code == 0, out.output
+    assert read == [] and "georeferencing" not in out.output
+    out = CliRunner().invoke(cli.app, [*base, "--gcp", str(points), "--crs", "EPSG:32633"])
+    assert out.exit_code == 0, out.output
+    assert read == [(points, "EPSG:32633")] and "georeferencing: similarity" in out.output
