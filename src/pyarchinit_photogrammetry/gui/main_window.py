@@ -71,7 +71,8 @@ QGIS_LAYER = "Disegni da QGIS"  # what is drawn in QGIS in a table of the plan w
 # pane) to the layers the program holds no data of (those of the plugins, drawn again from their own results), layer
 # by layer: {"rev": the revision of these edits (which of them a layer shows), "changed": {identity: {"geom" (None:
 # as drawn), "attrs"}}, "deleted": [identity], "added": {identity: {"kind", "geom", "attrs", "color"}}} - put on the
-# layer again each time it is drawn (:meth:`MainWindow._sync_plan_edits`)
+# layer again each time it is drawn (:meth:`MainWindow._sync_plan_edits`); those of features the layer no longer
+# draws leave at saving (:meth:`MainWindow._prune_plan_edits`)
 PLAN_EDITS = "plan_edits"
 _PLAN_KINDS = {"poligoni": "polygon", "curve": "line", "linee": "line", "punti": "point"}
 _PLAN_GEOM = {"polygon": "Polygon", "line": "LineString", "point": "Point"}
@@ -3406,12 +3407,14 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return False
             self._store_drawings()
             self._prune_frames()
+            self._prune_plan_edits()
             clean = self.history is not None and self.history.unchanged()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
             self._store_drawings()
             self._prune_frames()
+            self._prune_plan_edits()
             clean = self.history is not None and self.history.unchanged()
             self.doc.save()
         if clean:  # saving writes the ties back as they are read (a marker given its identity back): not an edit
@@ -13421,6 +13424,35 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         # that it is drawn again whatever comes first (the look below, an undo that puts the edits back as before)
         lay["plan_stamp"] = ("-", len(lay["features"]))
         self._sync_plan_later()  # not inside the pane's own signal
+
+    def _prune_plan_edits(self) -> None:
+        """At saving: the edits made by hand (:data:`PLAN_EDITS` of the active chunk) to features the maker of their
+        layer no longer draws out of the project - the conversion they were made on was made again, or placed
+        elsewhere: its features are others (known by their content), nothing would ever take those edits. Only for a
+        layer the plan shows now, drawn by its maker, with its edits on it: one that is not drawn (hidden, removed,
+        the view on an elevation) keeps them all, and so does every redraw of the same features. What was drawn in
+        QGIS on the layer (``added``) is the user's and stays. Said in the Log pane; the steps of Modifica > Annulla
+        made before still hold them."""
+        v = self.ortho_view
+        if self.chunk is None or self.drawings_frame is not None or v.tr is None or self._plan_busy:
+            return
+        if self._plan_waiting:
+            self._sync_plan_edits()
+        edits = self._plan_edits()
+        for name in list(edits):
+            ed, lay, base = edits[name], v.layers.get(name), self._plan_base.get(name)
+            if lay is None or not base or lay.get("plan_stamp") != (ed.get("rev"), len(lay["features"])):
+                continue
+            known = {pid for pid, _attrs, _style in base["features"] if pid is not None}
+            gone = [pid for pid in list(ed.get("changed") or {}) + list(ed.get("deleted") or []) if pid not in known]
+            if not known or not gone:
+                continue
+            ed["changed"] = {pid: e for pid, e in ed["changed"].items() if pid in known}
+            ed["deleted"] = [pid for pid in ed["deleted"] if pid in known]
+            self._plan_touch(name)  # the layer shows what is left already
+            lay["plan_stamp"] = ((edits.get(name) or {}).get("rev"), len(lay["features"]))
+            self.log_pane.info(tr("{0}: {1} modifiche fatte a mano tolte dal progetto, erano su elementi che il "
+                                  "layer non disegna più (conversione rifatta o spostata)", name, len(gone)))
 
     def _plan_deleted(self, features: list) -> None:
         """Features held by the 2D view alone deleted in the program (``(layer, attributes)``): kept among the edits

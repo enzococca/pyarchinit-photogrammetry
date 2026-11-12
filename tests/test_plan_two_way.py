@@ -6,6 +6,7 @@ the program draws from its own data stay one-way: said once, and put back."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import time
 
@@ -537,3 +538,68 @@ def test_attributes_changed_in_qgis_alone_come_back_and_stay(trench):
 
 
 # ---------------------------------------------------------------- the conversion made again
+def test_the_edits_of_a_conversion_made_again_leave_the_project_at_saving(trench):
+    import pyarchinit_photogrammetry as ppg
+
+    w, app, mw = trench
+    plugin = Plugin(w)
+    v = w.ortho_view
+    path = _live(w)
+    rows = _by_n(_rows(path, "linee"))
+    qgis = Qgis(path)
+    moved = LineString([(X0 + 1, Y0 + 1.02), (X0 + 2, Y0 + 2), (X0 + 3, Y0 + 1.02)])
+    drawn = LineString([(X0 + 4, Y0 + 4), (X0 + 5, Y0 + 4)])
+    qgis.save(qgis.move("linee", rows[2]["fid"], moved), qgis.delete("linee", rows[0]["fid"]),
+              qgis.insert("linee", drawn, layer=LAYER, photocad_layer="aggiunte"))
+    w._poll_qgis()
+    _type(w, app, LAYER, 2, "photocad_layer", "soglie")  # of line 3: the first is deleted
+    v.select_items([v.layers[STONES]["features"][0][0]])
+    assert w.delete_selected(confirm=False) == 1
+    app.processEvents()
+    before = w.chunk.meta[mw.PLAN_EDITS]
+    assert len(before[LAYER]["changed"]) == 2 and len(before[LAYER]["deleted"]) == 1 and len(before[LAYER]["added"]) == 1
+    assert len(before[STONES]["deleted"]) == 1
+
+    # the same conversion drawn again, hidden, shown again, and saved meanwhile: every edit is kept
+    kept = copy.deepcopy(before)
+    assert w.save_document()
+    app.processEvents()
+    plugin.hidden = True
+    plugin.draw()
+    app.processEvents()
+    assert STONES not in v.layers and len(v.features(LAYER)) == 1  # what was drawn in QGIS is the user's
+    assert w.save_document()
+    app.processEvents()
+    plugin.hidden = False
+    plugin.draw()
+    app.processEvents()
+    assert sorted(_n(w)) == [1, 2, 3, 4] and _n(w)[2]["_geom"][1] == [list(c) for c in moved.coords]
+    assert _n(w)[3]["photocad_layer"] == "soglie" and [a["n"] for a in v.features(STONES)] == [1]
+    edits = w.chunk.meta[mw.PLAN_EDITS]
+    assert len(edits[LAYER]["changed"]) == 2 and len(edits[LAYER]["deleted"]) == 1 and len(edits[STONES]["deleted"]) == 1
+    assert edits == kept and ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS] == kept
+
+    # another conversion under the same name: its features are others, none takes the edits of the first
+    plugin.convert_again("def")
+    app.processEvents()
+    assert sorted(_n(w)) == [0, 1, 2, 3, 4] and len(v.features(LAYER)) == 6 and len(v.features(STONES)) == 2
+    assert all(a["photocad"] == "def" and a["photocad_layer"] == "muri" and ID_FIELD not in a for a in _n(w).values())
+    assert _n(w)[2]["_geom"][1] == [[x, y + 0.003] for x, y in _line(2)]
+    assert len(w.chunk.meta[mw.PLAN_EDITS][LAYER]["changed"]) == 2  # until the project is saved (undo brings it back)
+    assert w.save_document()
+    app.processEvents()
+    edits = w.chunk.meta[mw.PLAN_EDITS]
+    assert set(edits) == {LAYER} and not edits[LAYER]["changed"] and not edits[LAYER]["deleted"]
+    assert len(edits[LAYER]["added"]) == 1  # the line drawn in QGIS stays on the layer
+    assert ppg.Document.open(w.doc.path).chunks[0].meta[mw.PLAN_EDITS] == edits
+    assert sorted(_n(w)) == [0, 1, 2, 3, 4] and len(v.features(LAYER)) == 6 and len(v.features(STONES)) == 2
+    said = [line for line in _log(w) if "non disegna più" in line]
+    assert len(said) == 2 and any(LAYER + ":" in line and " 3 " in line for line in said)
+    w._export_qgis_layers()
+    after = _rows(path, "linee")
+    assert len(after) == 6 and sorted(_by_n(after)) == [0, 1, 2, 3, 4]
+    w._poll_qgis()
+    w.refreshed.emit()
+    app.processEvents()
+    assert len(v.features(LAYER)) == 6 and w.chunk.meta[mw.PLAN_EDITS] == edits
+    qgis.close()

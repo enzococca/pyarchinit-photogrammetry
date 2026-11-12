@@ -4708,6 +4708,7 @@
   "{0} non ripreso: non ha quote, e il DEM va rifatto prima di prenderle da lì": "{0} not taken: it has no heights, and the DEM must be rebuilt before they are taken from it",
   "{0} non ripreso: non ha quote, e il DEM non ne ha sotto i suoi vertici": "{0} not taken: it has no heights, and the DEM has none under its vertices",
   "{0} non ripreso: la sua geometria non fa un disegno di questo layer": "{0} not taken: its geometry makes no drawing of this layer",
+  "{0}: {1} modifiche fatte a mano tolte dal progetto, erano su elementi che il layer non disegna più (conversione rifatta o spostata)": "{0}: {1} edits made by hand taken out of the project, they were on features the layer no longer draws (conversion made again or moved)",
   "{0} ({1} quote prese dal DEM)": "{0} ({1} heights taken from the DEM)",
   "{0} (di più parti, tenuta la prima)": "{0} (of several parts, the first one kept)",
   "{0} (senza i suoi fori)": "{0} (without its holes)",
