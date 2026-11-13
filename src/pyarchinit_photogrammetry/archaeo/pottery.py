@@ -242,6 +242,30 @@ def best_profile(mesh, axis: Axis | None = None, step: float = 5.0) -> Profile:
     return best[1]
 
 
+def rim_diameter_around(mesh, axis: Axis, step: float = 5.0, band: float = 0.003) -> float | None:
+    """Rim diameter around ``axis`` from the sections all around it: the middle value (median) of
+    the diameters at the top of the sections that reach the rim (their top within a tenth of the
+    tallest section of the highest one, so the sections across a fracture do not count).
+
+    One section alone reads the lip where it happens to cut it: on a mesh made from photos the
+    lip wanders by millimetres around the circle and the estimated axis leans by a few degrees,
+    so the single section of the drawing can be half a centimetre off; the median is not."""
+    tops, diameters, heights = [], [], []
+    for ang in np.arange(0.0, 360.0, step):
+        p = profile_at(mesh, axis, float(ang)).points
+        if len(p) < 2:
+            continue
+        h = p[:, 1]
+        tops.append(float(h.max()))
+        heights.append(float(np.ptp(h)))
+        diameters.append(2.0 * float(p[h >= h.max() - band][:, 0].max()))
+    if not tops:
+        return None
+    tops, diameters = np.array(tops), np.array(diameters)
+    reach = tops >= tops.max() - 0.1 * max(heights)
+    return float(np.median(diameters[reach]))
+
+
 def _section_polygon(profile: Profile) -> np.ndarray:
     """Closed section outline in (r, h): outer surface up, inner surface down."""
     curves = sorted([c for c in profile.curves if len(c) > 1], key=len, reverse=True)
@@ -443,8 +467,9 @@ def measure(mesh, axis: Axis | None = None, has_rim: bool = True) -> tuple[Profi
     ``rim_preserved_pct`` the arc kept. ``height_m`` is the preserved height; ``full_profile``
     when the profile reaches the centre of the base (``base_diameter_m`` and the total height are
     known only then); ``signature`` the shape for the typological search (:func:`signature`).
-    Without a reliable circle the rim diameter is measured around the axis and the arc kept is
-    computed from its chord: both depend on the axis, ``rim_reliable`` is False. ``has_rim=False``
+    Without a reliable circle the rim diameter is measured around the axis (the median of the
+    sections that reach the rim, :func:`rim_diameter_around`) and the arc kept is computed from
+    its chord: both depend on the axis, ``rim_reliable`` is False. ``has_rim=False``
     (a wall or base sherd): no rim measurements and no signature."""
     axis = axis or estimate_axis(mesh)
     ring = rim(mesh, axis) if has_rim else None
@@ -462,7 +487,7 @@ def measure(mesh, axis: Axis | None = None, has_rim: bool = True) -> tuple[Profi
     if ring is not None:
         diameter, pct = ring["rim_diameter_m"], ring["rim_preserved_pct"]
         if not ring["reliable"]:  # the circle of a short arc wanders: radius around the axis, arc from the chord
-            diameter = meas["rim_diameter_m"]
+            diameter = rim_diameter_around(mesh, axis) or meas["rim_diameter_m"]
             pct = float(np.degrees(2 * np.arcsin(min(1.0, ring["rim_chord_m"] / max(diameter, 1e-9)))) / 3.6)
         out.update({"rim_diameter_m": diameter, "rim_preserved_pct": pct, "rim_reliable": ring["reliable"],
                     "signature": signature(profile)})

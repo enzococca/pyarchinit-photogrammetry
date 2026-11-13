@@ -199,9 +199,13 @@ def process_pottery_demo(pdoc, profile_path: str | os.PathLike, progress: Progre
     pdoc.save()
     progress(0.93, "Pottery profile")
     mesh = pottery.chunk_mesh_world(pchunk)
-    prof = pottery.best_profile(mesh, pottery.estimate_axis(mesh))
+    axis = pottery.estimate_axis(mesh)
+    prof = pottery.best_profile(mesh, axis)
     out = pottery.draw(prof, profile_path, scale=1.0, title="Ciotola demo")
     meas = prof.measurements()
+    # the lip of a mesh made from photos wanders by millimetres: the rim is measured all around
+    # the axis, not on the single section of the drawing
+    meas["rim_diameter_m"] = pottery.rim_diameter_around(mesh, axis) or meas["rim_diameter_m"]
     pchunk.meta["pottery"] = {k: (None if v is None else float(v)) for k, v in meas.items()}
     pdoc.save()
     progress(1.0, "Pottery profile: " + ", ".join(f"{k} {v * 100:.1f} cm" for k, v in meas.items() if v is not None))
