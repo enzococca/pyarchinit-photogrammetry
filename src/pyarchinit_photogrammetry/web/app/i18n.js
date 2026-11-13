@@ -15,6 +15,13 @@ export const WORDS = {
     noRangesLeft: 'Troppo grandi per essere scaricati per intero, questi livelli non sono mostrati. '
       + 'Serve un server che risponda alle richieste Range:',
     made: 'Fatto con', language: 'English', fit: 'Tutto il rilievo',
+    clear: 'Cancella', plan: 'Pianta', model3d: 'Modello 3D', home: 'Vista iniziale', model: 'Modello',
+    hint3d: 'Un clic sul modello: coordinate e quota del punto. Trascinare per ruotare, tasto destro o due dita '
+      + 'per spostare, rotella per avvicinarsi.',
+    measureHint3d: 'Clic sul modello per ogni vertice, doppio clic o Fine per chiudere, Esc per annullare.',
+    length3d: 'Lunghezza 3D', planLength: 'Lunghezza in pianta', rise: 'Dislivello (ultimo − primo)',
+    area3d: 'Superficie 3D', planArea: 'Superficie in pianta',
+    failed3d: 'Il modello 3D non può essere mostrato: il browser non ha WebGL o i dati non sono leggibili.',
   },
   en: {
     layers: 'Layers', measure: 'Measure', distance: 'Distance', area: 'Area', stop: 'Done',
@@ -30,6 +37,13 @@ export const WORDS = {
     noRangesLeft: 'Too large to be downloaded whole, these layers are not shown. '
       + 'A host that answers range requests is needed:',
     made: 'Made with', language: 'Italiano', fit: 'Whole survey',
+    clear: 'Clear', plan: 'Plan', model3d: '3D model', home: 'Home view', model: 'Model',
+    hint3d: 'Click the model: coordinates and height of the point. Drag to rotate, right button or two fingers '
+      + 'to pan, wheel to zoom.',
+    measureHint3d: 'Click the model for each vertex, double click or Done to end, Esc to cancel.',
+    length3d: '3D length', planLength: 'Plan length', rise: 'Height difference (last − first)',
+    area3d: '3D area', planArea: 'Plan area',
+    failed3d: 'The 3D model cannot be shown: the browser has no WebGL or the data cannot be read.',
   },
 };
 

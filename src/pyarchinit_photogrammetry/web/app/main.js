@@ -1,6 +1,8 @@
 // The plan of a survey: orthophoto, shaded relief, stratigraphic units and drawings from site.json, on a plain
 // metric frame. A click gives the coordinates, the height of the DEM and the attributes; distances and areas
-// are measured on the plan. Every text coming from the data is written as text, never as markup.
+// are measured on the plan. The models of the chunks are in a 3D tab (view3d.js, loaded only when it is opened),
+// measured in the same frame and in the same panel. Every text coming from the data is written as text, never
+// as markup.
 
 import {open} from './cog.js';
 import {WORDS, pick} from './i18n.js';
@@ -8,7 +10,7 @@ import {WORDS, pick} from './i18n.js';
 const ol = window.ol;
 const $ = (id) => document.getElementById(id);
 const state = {site: null, language: 'it', map: null, entries: [], dems: [], hidden: new Set(), draw: null,
-  last: null, whole: false, left: []};
+  last: null, whole: false, left: [], tab: 'plan', models: [], view3d: null, opening: null, result3d: null};
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -129,9 +131,31 @@ async function vectorLayer(def, projection) {
 }
 
 // ---------------------------------------------------------------------------------------------- the side
+function modelList(box) {
+  const several = state.site.chunks.length > 1;
+  state.models.forEach((model, index) => {
+    if (several) box.append(el('h3', model.chunk.label));
+    const row = el('label', null, 'layer');
+    const check = el('input');
+    check.type = 'checkbox';
+    check.checked = model.def.visible !== false;
+    check.addEventListener('change', () => {
+      model.def.visible = check.checked;
+      if (state.view3d) state.view3d.setVisible(index, check.checked);
+    });
+    row.append(check, el('span', pick(model.def.title, state.language)));
+    if (model.def.faces) row.append(el('span', `${Math.round(model.def.faces / 1000)}k △`, 'count'));
+    box.append(row);
+  });
+}
+
 function layerList() {
   const box = $('layers');
   box.replaceChildren();
+  if (state.tab === '3d') {
+    modelList(box);
+    return;
+  }
   const several = state.site.chunks.length > 1;
   for (const chunk of state.site.chunks) {
     if (several) box.append(el('h3', chunk.label));
@@ -187,14 +211,15 @@ function showInfo() {
   const box = $('info');
   box.replaceChildren();
   const last = state.last;
-  if (!last) {
-    box.append(el('p', word('hint'), 'note'));
+  if (!last || last.tab !== state.tab) {
+    box.append(el('p', word(state.tab === '3d' ? 'hint3d' : 'hint'), 'note'));
     return;
   }
   const table = el('table');
   rows(table, [[word('x'), number(last.x)], [word('y'), number(last.y)],
     [word('height'), last.height === null ? word('noHeight') : number(last.height)]]);
   box.append(table);
+  if (last.model && state.site.chunks.length > 1) box.append(el('p', `${word('model')}: ${last.model}`, 'note'));
   for (const properties of last.features) {
     const {label, colour, kind, ...others} = properties; // colour and kind: of the drawing, not for reading
     box.append(el('h3', label || others.layer || ''));
@@ -215,16 +240,21 @@ function showWords() {
   $('distance').textContent = word('distance');
   $('area').textContent = word('area');
   $('stop').textContent = word('stop');
-  $('fit').textContent = word('fit');
+  $('clear').textContent = word('clear');
+  $('fit').textContent = word(state.tab === '3d' ? 'home' : 'fit');
+  $('tab-plan').textContent = word('plan');
+  $('tab-3d').textContent = word('model3d');
   $('language').textContent = word('language');
   const foot = $('foot');
   foot.replaceChildren(el('p', site.frame === 'local' ? word('local') : `${word('crs')}: ${site.crs || ''}`));
   const generator = site.generator || {};
-  foot.append(el('p', `${word('made')} ${generator.name || ''} ${generator.version || ''} · OpenLayers`));
+  const libraries = state.models.length ? 'OpenLayers · three.js · 3DTilesRendererJS' : 'OpenLayers';
+  foot.append(el('p', `${word('made')} ${generator.name || ''} ${generator.version || ''} · ${libraries}`));
   layerList();
   showNotice();
   showInfo();
-  if (!state.draw) $('measure-out').textContent = '';
+  if (state.tab === '3d') showMeasure3d(state.result3d);
+  else if (!state.draw) $('measure-out').textContent = '';
 }
 
 // ---------------------------------------------------------------------------------------------- reading
@@ -251,7 +281,7 @@ async function clicked(event) {
   } catch (error) {
     console.error(error);
   }
-  state.last = {x, y, height, features};
+  state.last = {x, y, height, features, tab: 'plan'};
   showInfo();
 }
 
@@ -267,6 +297,15 @@ function measured(geometry) {
 
 function measure(type) {
   endMeasure();
+  if (state.tab === '3d') {
+    if (!state.view3d) return;
+    state.view3d.measure(type === 'Polygon' ? 'area' : 'distance');
+    state.result3d = null;
+    $(type === 'Polygon' ? 'area' : 'distance').classList.add('on');
+    $('stop').hidden = false;
+    $('measure-out').textContent = word('measureHint3d');
+    return;
+  }
   state.sketch.getSource().clear();
   const draw = new ol.interaction.Draw({source: state.sketch.getSource(), type});
   draw.on('drawstart', (event) => {
@@ -288,9 +327,90 @@ function measure(type) {
 function endMeasure() {
   if (state.draw) state.map.removeInteraction(state.draw);
   state.draw = null;
+  if (state.view3d && state.view3d.mode) state.result3d = state.view3d.finish();
   $('distance').classList.remove('on');
   $('area').classList.remove('on');
   $('stop').hidden = true;
+}
+
+// Esc: the measure in progress is dropped, on the plan as on the model
+function cancelMeasure() {
+  if (state.draw) state.draw.abortDrawing();
+  if (state.view3d && state.view3d.mode) {
+    state.view3d.clear();
+    state.result3d = null;
+  }
+  endMeasure();
+  $('measure-out').textContent = '';
+}
+
+function clearMeasure() {
+  cancelMeasure();
+  state.sketch.getSource().clear();
+  if (state.view3d) state.view3d.clear();
+  state.result3d = null;
+}
+
+// ---------------------------------------------------------------------------------------------- the model
+function showMeasure3d(result) {
+  const out = $('measure-out');
+  if (!result || result.points < 2) {
+    out.textContent = state.view3d && state.view3d.mode ? word('measureHint3d') : '';
+    return;
+  }
+  const sign = (v) => (v > 0 ? '+' : '') + number(v, 3);
+  const lines = result.kind === 'area' && result.area !== undefined
+    ? [`${word('area3d')}: ${number(result.area, 2)} m²`, `${word('planArea')}: ${number(result.planArea, 2)} m²`,
+      `${word('perimeter')}: ${number(result.length, 2)} m`]
+    : [`${word('length3d')}: ${number(result.length, 3)} m`, `${word('planLength')}: ${number(result.plan, 3)} m`,
+      `${word('rise')}: ${sign(result.rise)} m`];
+  out.textContent = lines.join('\n');
+}
+
+async function openModel() {
+  if (state.view3d) return state.view3d;
+  if (!state.opening) {
+    state.opening = import('./view3d.js').then(({createView}) => createView($('view3d'), state.models));
+  }
+  const view = await state.opening;
+  view.onPick = (point) => {
+    state.last = {x: point.x, y: point.y, height: point.z, features: [], tab: '3d', model: point.chunk.label};
+    showInfo();
+  };
+  view.onMeasure = (result, ended) => {
+    state.result3d = result;
+    if (ended) endMeasure();
+    showMeasure3d(result);
+  };
+  state.view3d = view;
+  return view;
+}
+
+async function setTab(name) {
+  if (name === state.tab) return;
+  endMeasure();
+  state.tab = name;
+  $('tab-plan').classList.toggle('on', name === 'plan');
+  $('tab-3d').classList.toggle('on', name === '3d');
+  $('tab-plan').setAttribute('aria-selected', String(name === 'plan'));
+  $('tab-3d').setAttribute('aria-selected', String(name === '3d'));
+  $('map').hidden = name !== 'plan';
+  $('view3d').hidden = name !== '3d';
+  showWords();
+  if (name === 'plan') {
+    if (state.view3d) state.view3d.active = false;
+    state.map.updateSize();
+    return;
+  }
+  try {
+    const view = await openModel();
+    view.active = state.tab === '3d';
+    document.documentElement.dataset.model = 'ready';
+  } catch (error) {
+    console.error(error);
+    document.documentElement.dataset.model = 'error';
+    $('view3d').replaceChildren(el('p', `${word('failed3d')} (${error.message})`, 'failed'));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------- start
@@ -326,6 +446,10 @@ async function start() {
   const layers = [];
   for (const chunk of site.chunks) {
     for (const def of [...chunk.layers].sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9))) {
+      if (def.type === 'tiles') { // the model: in the 3D tab
+        state.models.push({chunk, def});
+        continue;
+      }
       const cog = def.type === 'vector' ? null : await raster(chunk, def);
       if (def.type !== 'vector' && !cog) continue; // left out: the notice names it
       if (def.type === 'heights') {
@@ -357,10 +481,22 @@ async function start() {
   const fit = () => state.map.getView().fit(extent, {padding: [24, 24, 24, 24]});
   fit();
   state.map.on('singleclick', clicked);
-  $('fit').addEventListener('click', fit);
+  $('fit').addEventListener('click', () => (state.tab === '3d' && state.view3d ? state.view3d.home() : fit()));
   $('distance').addEventListener('click', () => measure('LineString'));
   $('area').addEventListener('click', () => measure('Polygon'));
-  $('stop').addEventListener('click', endMeasure);
+  $('stop').addEventListener('click', () => {
+    endMeasure();
+    if (state.tab === '3d') showMeasure3d(state.result3d);
+  });
+  $('clear').addEventListener('click', clearMeasure);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') cancelMeasure();
+  });
+  if (state.models.length) {
+    $('tabs').hidden = false;
+    $('tab-plan').addEventListener('click', () => setTab('plan'));
+    $('tab-3d').addEventListener('click', () => setTab('3d'));
+  }
   const languages = (site.languages || []).filter((x) => WORDS[x]);
   if (languages.length > 1) {
     $('language').hidden = false;
@@ -373,7 +509,13 @@ async function start() {
     });
   }
   showWords();
-  window.ppgSite = {map: state.map, site, state, heightAt, measured};
+  window.ppgSite = {map: state.map, site, state, heightAt, measured, setTab, openModel};
+  const nothingOnPlan = !state.entries.length && !state.dems.length;
+  if (state.models.length && nothingOnPlan) {
+    await setTab('3d'); // a survey with a model alone opens on it
+    document.documentElement.dataset.state = 'ready';
+    return;
+  }
   state.map.once('rendercomplete', () => {
     document.documentElement.dataset.state = 'ready';
   });
