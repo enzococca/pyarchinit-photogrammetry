@@ -321,6 +321,23 @@ disegni*); non si salva con il progetto. I valori sono in metri nelle coordinate
 senza riferimenti, barre di scala né una scala applicata - si misura **in unità del modello**, e ogni risultato lo
 dice.
 
+Altre due voci dello stesso menu danno le unità a un chunk così:
+
+* **Il modello è in metri**: una spunta che dichiara in metri le coordinate del chunk (un modello già misurato in
+  metri, come lo sono un modello importato o una scansione laser): da lì le misure sono in metri. Segue il chunk
+  attivo; quando il chunk è comunque in metri - un sistema di coordinate, marker con coordinate, barre di scala, una
+  scala applicata - è spuntata e grigia, e il suggerimento dice perché. *Modifica > Annulla* la toglie.
+* **Scala da una distanza nota...**: fai clic su due punti del modello di cui conosci la distanza vera (gli estremi
+  di una stadia, due target); la scelta finisce da sola al secondo punto. Una piccola finestra mostra la distanza
+  misurata ora e chiede quella vera in metri; con OK il chunk viene scalato della distanza vera divisa per quella
+  misurata, **attorno al primo punto** (che resta dov'è). È un movimento del chunk come quello di *Orienta il sistema
+  locale*: i disegni, i riferimenti dei marker, le sezioni e la regione di ricostruzione seguono il
+  modello; il DEM, l'ortofoto, i prospetti e gli altri raster sono nelle unità di prima e risultano da rifare, con
+  *Ricostruisci i prodotti da rifare*. Poi il chunk conta come in metri, il registro dice il fattore, la distanza
+  scelta diventa l'ultima misura e *Modifica > Annulla* toglie tutta la scala in un passo. È rifiutata quando il chunk
+  ha un sistema di coordinate, marker con coordinate, barre di scala o foto con riferimenti (la scala la danno loro),
+  quando è allineato a un altro chunk (scala quello di riferimento) o quando i due punti coincidono.
+
 ## Curve di livello e volumi
 
 ![La finestra Curve di livello](../img/gui/dialog-contours.png)
