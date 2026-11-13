@@ -70,6 +70,11 @@ drawing instead of moving the centre of rotation. *Select and edit* chooses a dr
 or delete; *Drape on the model* adds vertices on the surface every 20 pixels. The drawings of the visible layers are
 drawn in their colours, the selected one thicker. See [free drawings](drawing.md#free-drawings-2d-and-3d).
 
+*Measure*, beside *Draw*, measures on the model or the cloud without an orthophoto or a DEM: a distance (3D, in plan,
+height difference, along the surface), an area (in plan, in the mean plane, surface of the model, perimeter) or the
+coordinates of a point. With this view in front, *Measure* and *Measure area and 3D surface* of the drawing bar do
+the same. See [measuring on the 3D view](drawing.md#measuring-on-the-3d-view).
+
 ## Several chunks together
 
 Application **1.7.5**. With more than one chunk in the project, every chunk of the *Workspace* has a box:

@@ -290,6 +290,30 @@ into its own layer, with the same choice.
   (white to red; a colour wheel from the north) and show them, with the degrees under the cursor. The 3D view
   colours the dense cloud by *Height above the ground* once its ground is classified.
 
+### Measuring on the 3D view
+
+The measures also work on what the 3D view shows - the model, the textured model, the dense cloud or the tie points -
+with no orthophoto and no DEM. With the 3D view in front, **Measure** and **Measure area and 3D surface** of the
+drawing bar measure on the model instead of the orthophoto (they do the same when there is nothing to measure on in
+2D); the button **Measure** in the rail of the 3D view (group *Draw*) has *Distance*, *Area and surface*, *Coordinates
+of a point* and *Clear the measure*. The vertices are picked as those of the [free drawings](#free-drawings-2d-and-3d):
+a click is a vertex on the surface under the cursor, a drag still turns the view, Backspace removes the last vertex,
+a double click or Enter ends, Esc gives up the measure in progress.
+
+* **Distance**: a polyline of any number of vertices. While you click, the status bar and the corner of the view show
+  the 3D length so far; at the end the 3D length (sum of the straight segments), the length in plan, the height
+  difference between the first and the last vertex and the **length along the surface** (the line draped on the
+  surface every 20 pixels, as *Drape on the model* does). The result goes to the status bar and the log.
+* **Area and surface**: a polygon. The area in plan, the area in the mean plane of the vertices, the **surface of the
+  model inside it** when the chunk has a model (the same computation as the measures of a free polygon, in the
+  background), the 3D perimeter and in plan, the slope of the mean plane. Without a model the message says that the
+  area is the one of the mean plane. The result goes to a message box and the log, as for the area in 2D.
+* **Coordinates of a point**: X, Y, Z of the clicked point in the chunk's system (its EPSG code, or *local system*).
+
+The measure is drawn in magenta until the next one starts or *Clear the measure* (or *Clear drawings*); it is not
+saved with the project. Values are in metres in the chunk's coordinates; a chunk only aligned - no reference, no scale
+bar, no scale applied - is measured **in model units**, and every result says so.
+
 ## Contour lines and volumes
 
 ![The Contour lines window](../img/gui/dialog-contours.png)
