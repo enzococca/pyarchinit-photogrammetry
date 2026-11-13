@@ -433,17 +433,33 @@ def render_mesh(scene: MeshScene, world_from_cam: np.ndarray, K: np.ndarray, siz
     return img.reshape(H, W, 3)
 
 
+def _jpeg_with_focal(img: np.ndarray, focal_35mm: float, quality: int = 95) -> bytes:
+    """``img`` as a JPEG whose EXIF says the focal length (35 mm equivalent), as a camera writes it."""
+    from PIL import Image
+
+    ok, data = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    exif = Image.Exif()
+    exif[0x8769] = {0xA405: int(round(focal_35mm))}  # Exif IFD: FocalLengthIn35mmFilm
+    payload = exif.tobytes()
+    data = data.tobytes()
+    return data[:2] + b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload + data[2:]
+
+
 def write_pottery_dataset(out_dir: str | Path, scene: MeshScene | None = None, size=(1200, 900), focal: float = 1100.0,
                           k1: float = -0.03) -> MeshScene:
     """Render turntable photos of a bowl to ``out_dir/photos`` and write ``out_dir/targets.csv``
-    (code, X, Y, Z in metres, local frame: origin on the rotation axis, z up)."""
+    (code, X, Y, Z in metres, local frame: origin on the rotation axis, z up). The photos carry
+    their focal length in the EXIF, as those of a camera do: the mat is flat and the alignment
+    started from a guessed focal length sometimes stops at a handful of photos."""
     out = Path(out_dir)
     (out / "photos").mkdir(parents=True, exist_ok=True)
     scene = scene or make_turntable_scene()
     K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
     for i, pose in enumerate(turntable_poses()):
         img = render_mesh(scene, pose, K, size, k1)
-        cv2.imwrite(str(out / "photos" / f"VASO_{i:04d}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        (out / "photos" / f"VASO_{i:04d}.jpg").write_bytes(_jpeg_with_focal(img, 36.0 * focal / max(size)))
         scene.cameras.append({"label": f"VASO_{i:04d}", "world_from_cam": pose.copy()})
     with open(out / "targets.csv", "w") as fh:
         fh.write("# label,X,Y,Z (LOCAL, metres)\n")
