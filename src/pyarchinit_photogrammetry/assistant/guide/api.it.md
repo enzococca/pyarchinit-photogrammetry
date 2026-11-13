@@ -1154,7 +1154,7 @@ qualche millimetro.
 | `engine.normalmap.light_model(chunk, target_faces=50000, texture_size=4096, folder=None)` | un modello leggero per il web e i motori di gioco: `light.glb`, `light.obj` + `.mtl`, `light_color.jpg`, `light_normal.png` |
 | `engine.normalmap.bake_maps(full_verts, full_faces, light_verts, light_faces, ...)` | la sola cottura delle mappe |
 | `io.flythrough.orbit_video(chunk, path, kind=None, seconds=12, fps=25, size=(1280, 720), pitch=35, zoom=1, turns=1, backend="auto")` | un MP4 di una camera che orbita attorno al modello o alla nuvola |
-| `chunk.export_3dtiles(folder, max_faces=150000)` | Cesium 3D Tiles 1.1: `tileset.json` e tasselli GLB in un quadtree in pianta |
+| `chunk.export_3dtiles(folder, max_faces=150000, origin=None, texture_size=None)` | Cesium 3D Tiles 1.1: `tileset.json` e tasselli GLB in un quadtree in pianta |
 | `io.web.export_3dtiles` | lo stesso come funzione del modulo |
 | `chunk.export_i3s(path, mode="global", max_faces=20000, texture_size=2048)` | pacchetto di scene layer I3S 1.7 Integrated Mesh (`.slpk`: ArcGIS Pro, ArcGIS Online ed Earth, CesiumJS, loaders.gl) |
 | `io.i3s.export_slpk(chunk, path, ...)` | lo stesso come funzione del modulo |
@@ -1189,7 +1189,15 @@ MPEG-4).
 
 **`chunk.export_3dtiles(...)`**: a ogni livello il modello con meno facce (colori dei vertici,
 clustering), le foglie a pieno dettaglio; la trasformazione della radice da est-nord-alto al centro
-del modello alle coordinate geocentriche (pyproj; quote così come sono).
+del modello alle coordinate geocentriche (pyproj; quote così come sono). `origin` (x, y, z nelle
+coordinate del chunk): i tasselli invece in un sistema proprio, le coordinate meno `origin`, senza
+trasformazione verso il globo e senza sistema di riferimento né origine scritti (il modello di un sito
+web). `texture_size`: le foglie tengono la texture, le sue pagine scritte in `textures/` con al massimo
+quei pixel di lato ed elencate in `extras.textures` del tileset; una foglia ha le coordinate di texture e
+la sua pagina in `extras.page` del materiale, non l'immagine, così un visualizzatore carica ogni pagina una
+volta sola per tutti i tasselli (quello del sito lo fa; un altro visualizzatore 3D Tiles mostra le foglie
+senza colore); i livelli più grossolani tengono i colori dei vertici, e questi tasselli non hanno luci
+(`KHR_materials_unlit`).
 
 **`chunk.export_i3s(...)`** costruisce un quadtree in pianta con livelli di dettaglio (foglie con al
 massimo `max_faces` facce, gli altri nodi raggruppati a quel numero, una radice senza mesh), ogni
@@ -1204,15 +1212,16 @@ geocentriche, `mode="local"` il CRS proiettato del chunk (serve un codice EPSG i
 ## Il rilievo come sito web
 
 Una cartella che qualunque server statico può pubblicare (GitHub Pages, Cloudflare Pages, una cartella
-di un server web): i prodotti dei chunk e una pagina che li mostra in pianta. Sul server non va
+di un server web): i prodotti dei chunk e una pagina che li mostra in pianta e, per i modelli 3D, in una
+vista 3D. Sul server non va
 installato nulla e la pagina non chiede niente fuori dalla propria cartella (nessun CDN).
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM o dei disegni); restituisce il percorso di `site.json` |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM, un modello o dei disegni); restituisce il percorso di `site.json` |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
-| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings]... [--quality Q]` | riga di comando: il sito scritto |
+| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | riga di comando: il sito scritto |
 | `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
 **La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,
@@ -1222,15 +1231,22 @@ con più chunk): `ortho.tif` (Cloud Optimized GeoTIFF, WebP con il suo alfa), `d
 deflate), `dem_hillshade.tif` (il rilievo ombreggiato, COG a 8 bit, trasparente dove il DEM è vuoto),
 `units.geojson` (le unità stratigrafiche della pianta con i loro attributi, una `label` e `area_m2`),
 `drawings.geojson` (quote, linee di rottura, punti di misura e i disegni liberi, ogni elemento con il suo
-`layer`). `products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`.
+`layer`), `model/` (il modello 3D in 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`).
+`products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`, `"model"`.
+`model_texture` è il lato massimo di una pagina della texture del modello (predefinito 4096: pochi MB di
+JPEG a pagina, così uno scavo normale resta entro qualche centinaio di MB; `None` o `--model-texture 0` per
+i soli colori dei vertici); `model_faces` le facce di un tassello. Un chunk senza modello non ha la vista 3D.
 
 **`frame="local"`** (predefinito) toglie a ogni coordinata un'origine al centro del rilievo (metri
 interi) e a ogni quota il metro intero sotto la cella più bassa dei DEM (letti per intero: nessuna cella
-è sotto zero; senza DEM vale la quota più bassa disegnata), e non scrive alcun sistema di
-riferimento: i raster non ne hanno, i GeoJSON non hanno `crs`, `site.json` ha `"crs": null`, e l'origine
-non è scritta da nessuna parte. Distanze, aree e dislivelli restano veri; dove si trova il sito non esce
+è sotto zero; senza DEM vale il vertice più basso dei modelli, senza né l'uno né gli altri la quota più
+bassa disegnata), e non scrive alcun sistema di riferimento: i raster non ne hanno, i GeoJSON non hanno
+`crs`, `site.json` ha `"crs": null`, i tasselli del modello sono negli stessi metri locali senza
+trasformazione verso il globo, e l'origine non è scritta da nessuna parte. Un punto misurato sul modello e
+in pianta ha le stesse coordinate e la stessa quota. Distanze, aree e dislivelli restano veri; dove si trova il sito non esce
 dal computer. **`frame="crs"`** tiene le coordinate e il sistema di riferimento dei chunk: una scelta da
-fare sapendolo. In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
+fare sapendolo (il tileset del modello è allora quello di `export_3dtiles`, sul globo, con il centro del
+modello in `origin` del suo livello). In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
 arriva al sito, e ogni testo scritto dall'utente (gli attributi e i loro nomi, i nomi di chunk, layer e disegni, titolo
 e descrizione) che contiene il percorso di un computer è ridotto al suo ultimo nome.
 I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
@@ -1242,7 +1258,14 @@ questo programma è rifiutata (`FileExistsError`) e lasciata com'è; ricostruend
 
 **La pagina**: ortofoto, rilievo ombreggiato, unità e disegni con l'elenco dei livelli; un clic dà le
 coordinate, la quota del DEM in quel punto e gli attributi di ciò che c'è sotto; distanza e area misurate
-in pianta; italiano e inglese. Legge i raster a pezzi (richieste a intervalli), che quasi ogni host statico
+in pianta; italiano e inglese. Con un modello, una scheda **3D** (three.js e 3DTilesRendererJS, caricati
+solo quando la scheda si apre): i modelli dei chunk, senza globo, Z in alto; trascinare per ruotare, tasto
+destro o due dita per spostare, rotella o pizzico per avvicinarsi, *Vista iniziale* per tornare. Un clic
+sul modello dà X, Y e quota del punto; *Distanza* misura una polilinea presa sul modello (lunghezza 3D,
+lunghezza in pianta, dislivello dal primo all'ultimo punto), *Area* un poligono (superficie 3D - l'area del
+poligono sul suo piano medio -, superficie in pianta, perimetro); un doppio clic o *Fine* chiude la misura,
+Esc la annulla, *Cancella* la toglie. I punti si prendono sui tasselli mostrati, i più fini caricati dove ci
+si è avvicinati: avvicinarsi ai punti da misurare per avere il millimetro. Legge i raster a pezzi (richieste a intervalli), che quasi ogni host statico
 serve; un file aperto dal disco (`file://`) non funziona, per questo c'è `ppg web serve`.
 Su un host che risponde invece con il file intero la pagina lo dice e scarica per intero ogni raster
 sotto i 50 MB; uno più grande non viene scaricato, e il suo livello è nominato nell'avviso e lasciato fuori. La pagina legge
