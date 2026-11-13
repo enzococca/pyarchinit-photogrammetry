@@ -1170,6 +1170,58 @@ face by face; other nodes cast onto the model), node pages, gzip geometry buffer
 table of the paths last; `mode="global"` WGS84 with boxes oriented east-north-up and earth-centred
 normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in metres).
 
+## A survey as a web site
+
+A folder any static server can publish (GitHub Pages, Cloudflare Pages, a folder of a web server): the
+products of the chunks and a page that shows them on a plan. Nothing has to be installed on the server
+and the page asks nothing outside its own folder (no CDN).
+
+| Call | Description |
+| --- | --- |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, progress=None)` | the site of the chunks (objects, keys or labels; default every chunk with an orthophoto, a DEM or drawings); returns the path of `site.json` |
+| `io.site.export_site(document, folder, ...)` | the same as a module function |
+| `io.site.server(folder, host="127.0.0.1", port=0)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address` |
+| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings]... [--quality Q]` | command line: the site written |
+| `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise |
+
+**The folder**: `index.html`, `site.json` (the manifest: format `ppg-site` version 1, title, languages,
+frame, the chunks each with its extent and its layers), `app/` (the page: plain ES modules, OpenLayers in
+`app/vendor/` with its licence and `app/THIRD_PARTY.txt`), `data/` (`data/1/`, `data/2/`... with several
+chunks): `ortho.tif` (Cloud Optimized GeoTIFF, WebP with its alpha), `dem.tif` (COG float32, deflate),
+`dem_hillshade.tif` (the shaded relief, COG 8 bit, transparent where the DEM is empty), `units.geojson`
+(the stratigraphic units of the plan with their attributes, a `label` and `area_m2`), `drawings.geojson`
+(spot heights, break lines, measuring points and the free drawings, each feature with its `layer`).
+`products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`.
+
+**`frame="local"`** (default) takes an origin at the centre of the survey (whole metres) off every
+coordinate and the whole metre under the lowest cell of the DEMs off every height, and writes no
+reference system: the rasters have none, the GeoJSON files have no `crs`, `site.json` has `"crs": null`,
+and the origin is written nowhere. Distances, areas and differences of height stay true; where the site
+is does not leave the computer. **`frame="crs"`** keeps the coordinates and the reference system of the
+chunks: a choice to make knowingly. In both frames the photos are never copied, no tag of the source
+rasters reaches the site, and an attribute that holds a path of this computer is cut to its last name.
+The chunks of one site must share one reference system, in metres (a system in degrees is refused).
+
+**The folder is never someone else's**: a folder that holds anything but a site built by this program
+is refused (`FileExistsError`) and left as it is; building again replaces `index.html`, `site.json`,
+`app/` and `data/` and keeps any other file (a `CNAME`, a `_headers`).
+
+**The page**: orthophoto, shaded relief, units and drawings with a list of layers; a click gives the
+coordinates, the height of the DEM there and the attributes of what is under it; distance and area
+measured on the plan; Italian and English. It reads the rasters by parts (range requests), which every
+static host serves; a file opened from the disk (`file://`) does not work, hence `ppg web serve`.
+The page reads the GeoTIFFs this program writes, not any GeoTIFF.
+
+```python
+path = doc.export_site("site", title="Saggio 1")           # local frame
+doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
+```
+
+```bash
+ppg web build scavo.ppg site --title "Saggio 1"
+ppg web serve site --open
+```
+
 ## Measures
 
 | Call | Description |

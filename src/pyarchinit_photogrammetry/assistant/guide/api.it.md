@@ -1201,6 +1201,59 @@ proiettano sul modello), pagine di nodi, buffer di geometria gzip, la tabella de
 percorsi per ultima; `mode="global"` WGS84 con riquadri orientati est-nord-alto e normali
 geocentriche, `mode="local"` il CRS proiettato del chunk (serve un codice EPSG in metri).
 
+## Il rilievo come sito web
+
+Una cartella che qualunque server statico può pubblicare (GitHub Pages, Cloudflare Pages, una cartella
+di un server web): i prodotti dei chunk e una pagina che li mostra in pianta. Sul server non va
+installato nulla e la pagina non chiede niente fuori dalla propria cartella (nessun CDN).
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM o dei disegni); restituisce il percorso di `site.json` |
+| `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
+| `io.site.server(folder, host="127.0.0.1", port=0)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address` |
+| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings]... [--quality Q]` | riga di comando: il sito scritto |
+| `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro |
+
+**La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,
+sistema, i chunk ciascuno con la sua estensione e i suoi livelli), `app/` (la pagina: moduli ES semplici,
+OpenLayers in `app/vendor/` con la sua licenza e `app/THIRD_PARTY.txt`), `data/` (`data/1/`, `data/2/`...
+con più chunk): `ortho.tif` (Cloud Optimized GeoTIFF, WebP con il suo alfa), `dem.tif` (COG float32,
+deflate), `dem_hillshade.tif` (il rilievo ombreggiato, COG a 8 bit, trasparente dove il DEM è vuoto),
+`units.geojson` (le unità stratigrafiche della pianta con i loro attributi, una `label` e `area_m2`),
+`drawings.geojson` (quote, linee di rottura, punti di misura e i disegni liberi, ogni elemento con il suo
+`layer`). `products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`.
+
+**`frame="local"`** (predefinito) toglie a ogni coordinata un'origine al centro del rilievo (metri
+interi) e a ogni quota il metro intero sotto la cella più bassa dei DEM, e non scrive alcun sistema di
+riferimento: i raster non ne hanno, i GeoJSON non hanno `crs`, `site.json` ha `"crs": null`, e l'origine
+non è scritta da nessuna parte. Distanze, aree e dislivelli restano veri; dove si trova il sito non esce
+dal computer. **`frame="crs"`** tiene le coordinate e il sistema di riferimento dei chunk: una scelta da
+fare sapendolo. In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
+arriva al sito, e un attributo che contiene un percorso di questo computer è ridotto al suo ultimo nome.
+I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
+rifiutato).
+
+**La cartella non è mai di qualcun altro**: una cartella che contiene altro da un sito costruito da
+questo programma è rifiutata (`FileExistsError`) e lasciata com'è; ricostruendo si sostituiscono
+`index.html`, `site.json`, `app/` e `data/` e ogni altro file resta (un `CNAME`, un `_headers`).
+
+**La pagina**: ortofoto, rilievo ombreggiato, unità e disegni con l'elenco dei livelli; un clic dà le
+coordinate, la quota del DEM in quel punto e gli attributi di ciò che c'è sotto; distanza e area misurate
+in pianta; italiano e inglese. Legge i raster a pezzi (richieste a intervalli), che ogni host statico
+serve; un file aperto dal disco (`file://`) non funziona, per questo c'è `ppg web serve`. La pagina legge
+i GeoTIFF scritti da questo programma, non un GeoTIFF qualunque.
+
+```python
+path = doc.export_site("site", title="Saggio 1")           # sistema locale
+doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
+```
+
+```bash
+ppg web build scavo.ppg site --title "Saggio 1"
+ppg web serve site --open
+```
+
 ## Misure
 
 | Chiamata | Descrizione |
