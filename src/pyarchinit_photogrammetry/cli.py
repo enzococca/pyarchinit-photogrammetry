@@ -5360,6 +5360,79 @@ def mosaic_remove(project: Path, mid: str = typer.Argument(..., help="the id of 
     typer.echo(f"removed {rec['id']} ({rec.get('name')})")
 
 
+web_app = typer.Typer(help="A survey as a web site: a folder with the orthophoto, the DEM, the units, the drawings "
+                      "and a page that shows them, for any static server")
+app.add_typer(web_app, name="web")
+
+
+@web_app.command("build")
+def web_build(project: Path,
+              folder: Path = typer.Argument(..., help="the folder of the site (new, empty, or a site built before)"),
+              chunk: Optional[list[str]] = typer.Option(None, "--chunk", help="a chunk (label or key), repeatable; "
+                                                        "default: every chunk with something to show"),
+              frame: str = typer.Option("local", "--frame", help="local: coordinates shifted to the centre of the "
+                                        "survey, no reference system written (the place of the site stays out of the "
+                                        "folder); crs: the real coordinates and their system"),
+              title: Optional[str] = typer.Option(None, "--title", help="the title of the page"),
+              description: Optional[str] = typer.Option(None, "--description", help="a line under the title"),
+              language: Optional[list[str]] = typer.Option(None, "--language", help="it or en, repeatable: the "
+                                                           "languages of the page, the first shown first "
+                                                           "(default it, en)"),
+              product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units or "
+                                                          "drawings, repeatable (default: all the chunk has)"),
+              quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto")):
+    """Write the site of a project: site.json, data/ and the page (see ppg web serve to look at it)."""
+    doc = Document.open(project)
+    try:
+        path = doc.export_site(folder, chunks=chunk or None, products=product or None, frame=frame, title=title,
+                               description=description, language=language or ("it", "en"), quality=quality,
+                               progress=print_progress)
+    except (ValueError, FileExistsError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    size = sum(f.stat().st_size for f in path.parent.rglob("*") if f.is_file())
+    typer.echo(f"{path.parent}: {size / 1e6:.1f} MB, frame {frame}")
+    if frame == "crs":
+        typer.echo("the site holds the real coordinates of the survey")
+    typer.echo(f"look at it: ppg web serve {path.parent}")
+
+
+@web_app.command("serve")
+def web_serve(folder: Path,
+              port: int = typer.Option(8765, "--port", help="0: a free port"),
+              host: str = typer.Option("127.0.0.1", "--host", help="the address listened on; the default is this "
+                                       "computer alone"),
+              open_browser: bool = typer.Option(False, "--open", help="open the page in the browser"),
+              no_ranges: bool = typer.Option(False, "--no-ranges", help="answer with whole files, as a host "
+                                             "without range requests: to see what the page does there")):
+    """Serve a site folder to look at it (HTTP range requests, which the page needs to read the rasters)."""
+    from .io import site
+
+    if not (folder / site.MANIFEST).exists():
+        typer.echo(f"{folder} is not a site: no {site.MANIFEST} (ppg web build writes one)", err=True)
+        raise typer.Exit(1)
+    try:
+        httpd = site.server(folder, host=host, port=port, ranges=not no_ranges)
+    except OSError as exc:
+        typer.echo(f"cannot listen on {host}:{port}: {exc}", err=True)
+        raise typer.Exit(1) from None
+    local = host in ("127.0.0.1", "localhost", "::1")
+    url = f"http://{'127.0.0.1' if local else host}:{httpd.server_address[1]}/"
+    typer.echo(f"{url}  (Ctrl+C to stop)")
+    if not local:
+        typer.echo(f"listening on {host}: other computers of the network can read this folder")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
 def main():  # pragma: no cover - console entry point
     app()
 

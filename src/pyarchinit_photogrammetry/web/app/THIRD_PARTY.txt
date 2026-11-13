@@ -1,0 +1,55 @@
+Third-party software in this folder
+===================================
+
+vendor/ol.js, vendor/ol.css
+---------------------------
+OpenLayers 10.11.0 - https://openlayers.org/ - BSD 2-Clause License
+Copyright 2005-present, OpenLayers Contributors. The licence is in vendor/OPENLAYERS-LICENSE.md.
+
+The two files are dist/ol.js (the full build) and ol.css of the npm package "ol", unchanged:
+  https://registry.npmjs.org/ol/-/ol-10.11.0.tgz
+  sha1    9f2505076569b438730996c1b6eedd48b0be6d88
+  sha512  OJ+lrx7kx/1O7Xx18Ff9QkVnwZIEL0OuhJQSy2sYgzzDvyZ2qHvuZEGAajbSstUyBwaS1OtQ4RWnY84tRMDdqg== (base64)
+  sha256 of vendor/ol.js   a4e607e98b56846d543e2131161720845c7a80170d5f00aa2bc8b6c4e0f9194a
+  sha256 of vendor/ol.css  abc8afd72cc10bd29cc143f443bae4a6804bd3cb3fb262e6b6a6bc6c924ea34f
+vendor/ol.js is byte for byte the file of the package: it keeps its last line
+"//# sourceMappingURL=ol.js.map", although the source map (dist/ol.js.map, 5.6 MB) is not included, so
+that the digest above can be checked against the package. A browser with its developer tools open may
+ask for app/vendor/ol.js.map and get a 404: nothing else follows. The sources are those of the package
+and of https://github.com/openlayers/openlayers (tag v10.11.0).
+
+Libraries inside vendor/ol.js
+-----------------------------
+The full build of OpenLayers includes four libraries. They are the ones its source map lists outside
+the sources of OpenLayers; the versions are those whose files are identical to the sources embedded in
+that source map. Each licence file below is the LICENSE of the npm package, unchanged.
+
+  rbush 4.0.1 - https://github.com/mourner/rbush - MIT License
+    Copyright (c) 2024 Volodymyr Agafonkin
+    licence: vendor/RBUSH-LICENSE.txt
+    https://registry.npmjs.org/rbush/-/rbush-4.0.1.tgz
+    sha256 a014b9d13d72b4cb657badb2961fc24429324b9db0dc1aa13f83d8dde81da410
+
+  quickselect 3.0.0 - https://github.com/mourner/quickselect - ISC License
+    Copyright (c) 2024, Vladimir Agafonkin
+    licence: vendor/QUICKSELECT-LICENSE.txt
+    https://registry.npmjs.org/quickselect/-/quickselect-3.0.0.tgz
+    sha256 2cf90a3c6f9eb7ccb618bc31e362a615f9f46de593b8465176d883e66b5f8c84
+
+  earcut 3.2.4 - https://github.com/mapbox/earcut - ISC License
+    Copyright (c) 2026, Mapbox
+    licence: vendor/EARCUT-LICENSE.txt
+    https://registry.npmjs.org/earcut/-/earcut-3.2.4.tgz
+    sha256 2f63624cc056e4f2f8109a84d10fff3daeea37581af14af0f612ff387cc2534a
+
+  pbf 5.1.2 - https://github.com/mapbox/pbf - BSD 3-Clause License
+    Copyright (c) 2026, Mapbox
+    licence: vendor/PBF-LICENSE.txt
+    https://registry.npmjs.org/pbf/-/pbf-5.1.2.tgz
+    sha256 3b3dc3c096a3a264ae68722d1e380893d89d56161093f8e90b1910020fbdb5d7
+
+The other dependencies of the package "ol" (geotiff, zarrita) are not in the full build and are not in
+this folder.
+
+Everything else in this folder (main.js, cog.js, i18n.js, style.css) is part of pyarchinit-photogrammetry,
+GPL-2.0-or-later.

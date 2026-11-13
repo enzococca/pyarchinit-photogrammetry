@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="{{language}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>{{title}}</title>
+<link rel="stylesheet" href="app/vendor/ol.css">
+<link rel="stylesheet" href="app/style.css">
+</head>
+<body>
+<header>
+  <h1 id="title">{{title}}</h1>
+  <p id="description"></p>
+  <button id="language" type="button" hidden></button>
+</header>
+<main>
+  <aside id="side">
+    <div id="notice" role="status" hidden></div>
+    <section>
+      <h2 id="layers-title"></h2>
+      <div id="layers"></div>
+      <button id="fit" type="button"></button>
+    </section>
+    <section>
+      <h2 id="measure-title"></h2>
+      <div class="buttons">
+        <button id="distance" type="button"></button>
+        <button id="area" type="button"></button>
+        <button id="stop" type="button" hidden></button>
+      </div>
+      <p id="measure-out" class="value"></p>
+    </section>
+    <section>
+      <h2 id="info-title"></h2>
+      <div id="info"></div>
+    </section>
+    <footer id="foot"></footer>
+  </aside>
+  <div id="map" tabindex="0"></div>
+</main>
+<script src="app/vendor/ol.js"></script>
+<script type="module" src="app/main.js"></script>
+</body>
+</html>

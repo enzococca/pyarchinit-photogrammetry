@@ -210,6 +210,20 @@ class Document:
         return duplicate_chunk(self, chunk, cameras, label=label, keep_products=keep_products)
 
     # ---------------------------------------------------------------- I/O
+    def export_site(self, folder, chunks=None, products=None, frame: str = "local", title: str | None = None,
+                    description: str | None = None, language=("it", "en"), quality: int = 85,
+                    progress=None) -> Path:
+        """The survey as a web site in ``folder``: the orthophoto, the DEM with its shaded relief, the stratigraphic
+        units and the drawings of ``chunks`` (objects, keys or labels; default: every chunk that has some), with a
+        page that shows them on a plan - a folder any static server can publish (``ppg web serve`` to look at it).
+        ``frame``: ``"local"`` (default) shifts the coordinates to the centre of the survey and writes no reference
+        system: the place of the site is not in the folder; ``"crs"`` keeps the real coordinates. Returns the path
+        of ``site.json`` (see :func:`io.site.export_site`)."""
+        from ..io.site import export_site
+
+        return export_site(self, folder, chunks=chunks, products=products, frame=frame, title=title,
+                           description=description, language=language, quality=quality, progress=progress)
+
     def save(self, path: str | Path | None = None) -> Path:
         if path is not None:
             new = Path(path).resolve()

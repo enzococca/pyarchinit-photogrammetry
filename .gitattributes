@@ -1,0 +1,2 @@
+# vendored files stay byte for byte as released (their checksums are in app/THIRD_PARTY.txt)
+src/pyarchinit_photogrammetry/web/app/vendor/** -text
