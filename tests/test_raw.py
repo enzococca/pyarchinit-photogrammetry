@@ -587,3 +587,23 @@ def test_window_adds_a_folder_of_raws_and_shows_them(tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def test_a_damaged_dng_does_not_ask_for_gigabytes(tmp_path):
+    """A SubIFD tag that claims four thousand million entries: the look is not there, nothing is allocated."""
+    import struct
+
+    from pyarchinit_photogrammetry.io import raw
+
+    path = tmp_path / "damaged.dng"
+    path.write_bytes(b"II*\x00" + struct.pack("<L", 8) + struct.pack("<H", 1)
+                     + struct.pack("<HHLL", 330, 4, 0xFFFFFFF0, 26) + struct.pack("<L", 0) + b"\x00" * 64)
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        assert raw._dng_look(path) is None
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 100e6, f"{peak / 1e9:.1f} GB asked for a file of 100 bytes"

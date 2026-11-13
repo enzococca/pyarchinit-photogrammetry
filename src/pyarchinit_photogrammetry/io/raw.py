@@ -58,6 +58,7 @@ _LOCAL = (3.0, 8)  # the local contrast: the limit of the equalisation and the t
 # the detail: a band between two Gaussian blurs (sigmas in pixels) added back times an amount; the amount of the phones
 # (tone "file") from the spectrum of ProRAW developments against the JPEGs of the same frames
 _DETAIL = (0.6, 3.0, 2.3)
+_LOOK_BYTES = 64 << 20  # the largest tag of a look read from a DNG (a gain table map is about 2.5 MB)
 _STRIP = 512  # rows at a time for the tone map and the detail: memory bound with several raws developed at once
 # the DNG tags of the look: BaselineExposure, ProfileToneCurve, ProfileGainTableMap; SubIFDs
 _BASELINE_EXPOSURE, _TONE_CURVE, _GAIN_TABLE, _SUB_IFDS = 50730, 50940, 52525, 330
@@ -198,6 +199,8 @@ def _dng_look(path) -> dict | None:
                         continue
                     code, size = _TIFF_TYPES[kind]
                     total = size * n
+                    if total > _LOOK_BYTES:  # a count no look has: a damaged file must not ask for gigabytes
+                        continue
                     if total <= 4:
                         data = value[:total]
                     else:
