@@ -1604,6 +1604,7 @@ class ModelView(QWidget, LookThrough):
     measure_drawn = Signal(str, object, object)
     measure_live = Signal(str)  # the measure being taken, in words, at each vertex and move of the rubber band
     measure_stopped = Signal()  # the measuring tool left (Esc, another tool, another chunk)
+    scale_picked = Signal(object)  # Scala da una distanza nota: the two points picked, (2, 3) internal
     free_selected = Signal(str)  # the free drawing selected (id), "": none
     free_vertex_moved = Signal(str, int, object)  # id, vertex index, new position on the surface (internal)
     # id, vertex index; -1: the whole drawing. The view does not check the minimum number of vertices: the window
@@ -1764,7 +1765,16 @@ class ModelView(QWidget, LookThrough):
         measure_menu.addAction(tr("Area e superficie"), lambda: self.start_measure("polygon"))
         measure_menu.addAction(tr("Coordinate di un punto"), lambda: self.start_measure("point"))
         measure_menu.addSeparator()
+        # the units of the chunk: the window connects these two and keeps the check of the first one
+        self.a_model_metric = measure_menu.addAction(tr("Il modello è in metri"))
+        self.a_model_metric.setCheckable(True)
+        self.a_scale_distance = measure_menu.addAction(tr("Scala da una distanza nota..."))
+        self.a_scale_distance.setToolTip(tr("Due punti sul modello e la loro distanza vera in metri: il chunk scalato "
+                                            "di conseguenza"))
+        measure_menu.addSeparator()
         measure_menu.addAction(tr("Cancella la misura"), self.clear_measure)
+        measure_menu.setToolTipsVisible(True)
+        self.measure_menu = measure_menu
         self.b_measure3d.setMenu(measure_menu)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
@@ -1918,6 +1928,7 @@ class ModelView(QWidget, LookThrough):
         self._edit_project = None  # the projection of the frozen frame of the editor
         self._draw_kind: str | None = None  # the kind being drawn, None: not drawing
         self._draw_purpose = "free"  # what the drawing is for: "free" (a free drawing) or "measure" (a measure)
+        self._scale_pick = False  # the measure is the two points of Scala da una distanza nota (start_scale_pick)
         self._measure = None  # the last measure taken: (kind, (N, 3) internal vertices), None: none shown
         self._draw_pts: list = []  # its vertices (internal)
         self._rubber = None  # the end of its rubber band (internal), None: nothing under the cursor
@@ -2755,6 +2766,16 @@ class ModelView(QWidget, LookThrough):
         self.start_drawing(kind, purpose="measure")
         return True
 
+    def start_scale_pick(self) -> bool:
+        """Two points picked on what is shown for *Scala da una distanza nota*: picked as a distance is
+        (:meth:`start_measure`), the pick ends by itself at the second point, goes to ``scale_picked`` (internal) and
+        the tool goes off; the segment stays drawn as the last measure. False when nothing here can be measured."""
+        if not self.start_measure("line"):
+            return False
+        self._scale_pick = True
+        self.canvas.set_hint(tr("Scala: clic sul primo e sul secondo punto della distanza nota - Esc annulla"))
+        return True
+
     def clear_measure(self) -> None:
         """The last measure taken on the model no longer drawn."""
         if self._measure is not None:
@@ -2778,6 +2799,7 @@ class ModelView(QWidget, LookThrough):
         self._end_overlays()
         was_measuring = self.measuring
         self._draw_purpose = purpose
+        self._scale_pick = False
         if was_measuring and purpose != "measure":
             self.measure_stopped.emit()
         self._draw_kind = kind
@@ -2805,6 +2827,7 @@ class ModelView(QWidget, LookThrough):
         measuring = self.measuring
         self._draw_kind = None
         self._draw_purpose = "free"
+        self._scale_pick = False
         self._draw_pts, self._rubber, self._press = [], None, None
         self._kept_clicks = []
         self._rubber_timer.stop()
@@ -3015,7 +3038,7 @@ class ModelView(QWidget, LookThrough):
             self._measure = None
         self._draw_pts.append(np.asarray(point, np.float64).reshape(3))
         self._rubber = None
-        if self._draw_kind == "point":
+        if self._draw_kind == "point" or (self._scale_pick and len(self._draw_pts) >= 2):
             self._finish()
         else:
             self._put_free()
@@ -3130,6 +3153,11 @@ class ModelView(QWidget, LookThrough):
             return
         xyz = self.drawing_vertices()
         self._draw_pts, self._rubber = [], None
+        if self._draw_purpose == "measure" and self._scale_pick:  # the two points of the known distance: the tool off
+            self._measure = (kind, xyz)
+            self.stop_drawing()
+            self.scale_picked.emit(xyz)
+            return
         if self._draw_purpose == "measure":
             draped = None
             if kind == "line":  # the length along the surface: the line draped as Drappeggia sul modello does

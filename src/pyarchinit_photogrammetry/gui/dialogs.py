@@ -596,6 +596,41 @@ class QuotaDialog(QDialog):
                 "keep": self.keep.isChecked()}
 
 
+class KnownDistanceDialog(QDialog):
+    """The true length of a distance picked on the model (*Scala da una distanza nota*): the distance as measured now,
+    in the units of the chunk, and a spin box for the true one in metres (more than zero). :meth:`ask` shows it and
+    returns the metres, None when cancelled."""
+
+    def __init__(self, parent=None, measured: float = 1.0, metric: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Scala da una distanza nota"))
+        form = QFormLayout(self)
+        unit = "m" if metric else tr("unità del modello")
+        form.addRow(tr("Distanza misurata"), QLabel(f"{decimal_comma(f'{measured:.4f}')} {unit}"))
+        self.distance = QDoubleSpinBox()
+        self.distance.setDecimals(4)
+        self.distance.setRange(0.0001, 100000.0)
+        self.distance.setSingleStep(0.01)
+        self.distance.setSuffix(" m")
+        self.distance.setValue(min(max(float(measured), 0.0001), 100000.0))
+        form.addRow(tr("Distanza vera"), self.distance)
+        form.addRow(QLabel(tr("Il chunk viene scalato attorno al primo punto; poi le misure sono in metri.")))
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.distance.setFocus()
+        self.distance.selectAll()
+
+    @classmethod
+    def ask(cls, parent, measured: float, metric: bool) -> float | None:
+        dlg = cls(parent, measured, metric)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        value = float(dlg.distance.value())
+        return value if value > 0 else None
+
+
 class ImageDialog(QDialog):
     """Shows an SVG/PNG result (pottery drawing, section) with its measurements."""
 

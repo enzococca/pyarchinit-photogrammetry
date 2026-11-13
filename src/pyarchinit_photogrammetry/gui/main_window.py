@@ -5011,14 +5011,18 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             for line in text.splitlines()[1:]:
                 self.log_pane.info(line)
             return
-        stale = result.get("stale") or []
+        self._said_with_rebuild(chunk, tr("Orienta il sistema locale"), text, result.get("stale") or [])
+
+    def _said_with_rebuild(self, chunk, title: str, text: str, stale: list) -> None:
+        """What a motion of ``chunk`` did, in a box (and in the log); with *Ricostruisci i prodotti da rifare* when
+        products are ``stale`` and the window can rebuild them."""
         if stale and hasattr(self, "rebuild_stale_products"):
             self.log_pane.info(text)
-            if choice(self, "info", tr("Orienta il sistema locale"), text,
-                      [tr("Ricostruisci i prodotti da rifare"), tr("Chiudi")], cancel=None) == 0:
+            if choice(self, "info", title, text, [tr("Ricostruisci i prodotti da rifare"), tr("Chiudi")],
+                      cancel=None) == 0:
                 self.rebuild_stale_products(chunk, stale)
         else:
-            self._info(tr("Orienta il sistema locale"), text)
+            self._info(title, text)
 
     @staticmethod
     def _orient_text(result: dict) -> str:
