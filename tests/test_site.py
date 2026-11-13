@@ -6,6 +6,7 @@ import contextlib
 import http.client
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -177,10 +178,14 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
         for word in (b"EPSG", b"Monte Mario", b"PROJCS", b"3004", b".vrt", b"chunk_0"):
             assert word not in data, f"{name} holds {word!r}"
     text = "".join((site / n).read_text(encoding="utf-8") for n in
-                   ("site.json", "data/units.geojson", "data/drawings.geojson", "index.html",
-                    "data/model/tileset.json"))
-    tileset = json.loads((site / "data/model/tileset.json").read_text(encoding="utf-8"))
-    assert "transform" not in json.dumps(tileset) and set(tileset.get("extras", {})) <= {"textures"}
+                   ("site.json", "data/units.geojson", "data/drawings.geojson", "index.html"))
+    tileset_text = (site / "data/model/tileset.json").read_text(encoding="utf-8")
+    tileset = json.loads(tileset_text)
+    assert "transform" not in tileset_text and set(tileset.get("extras", {})) <= {"textures"}
+    # its numbers are the boxes and errors of the tiles, long decimals in which the digits of an easting turn up
+    # by chance: they are checked as numbers (small, around the origin), its words as words
+    assert not any(w in tileset_text for w in ("EPSG", "crs", '"origin"'))
+    assert all(abs(float(n)) < 100 for n in re.findall(r"-?\d+\.\d+(?:[eE][-+]?\d+)?", tileset_text))
     for f in (site / "data/model/tiles").glob("*.glb"):
         header = _glb(f)[0]  # the text of a tile: nothing of the place of the site
         assert not any(w in json.dumps(header) for w in ("EPSG", "crs", "origin", "extras\": {\"c")), f.name
