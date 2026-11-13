@@ -90,6 +90,67 @@ def test_the_tone_follows_the_kind_of_raw_and_moves_nothing(tmp_path):
             assert abs(dx) < 0.2 and abs(dy) < 0.2, (src.name, tone, dx, dy)
 
 
+def test_a_phone_raw_is_developed_with_its_own_tone_map(tmp_path):
+    """Apple ProRAW keeps the phone's look in the file: BaselineExposure, a local tone map (ProfileGainTableMap)
+    and a ProfileToneCurve, none of which LibRaw applies. The tone "file" applies them as the DNG specification
+    says; "auto" takes it for a linear DNG that has the map. Here the map brightens the left of the frame twice as
+    much as the right, the baseline exposure is half a stop, and the curve is the identity."""
+    from pyarchinit_photogrammetry.testing.rawfile import linear
+
+    img = picture(4)
+    gains = np.empty((2, 2, 2), np.float32)
+    gains[:, 0], gains[:, 1] = 2.0, 1.0  # left column of nodes, right column; the same for every input value
+    look = {"baseline_exposure": 0.5, "tone_curve": [(0.0, 0.0), (1.0, 1.0)],
+            "gain_table": {"gains": gains, "spacing": (1.0, 1.0), "origin": (0.0, 0.0)}}
+    phone = write_dng(tmp_path / "phone.dng", img, mosaic=False, **look)
+
+    def developed(src, **opts):
+        out = tmp_path / f"{src.stem}_{len(list(tmp_path.glob('*.tif')))}.tif"
+        rawio.develop_file(src, out, {"format": "tif", **opts})
+        return cv2.cvtColor(cv2.imread(str(out)), cv2.COLOR_BGR2RGB).astype(np.float32)
+
+    h, w = img.shape[:2]
+    gain = 2.0 - (np.arange(w) + 0.5) / w  # from 2 at the left edge to 1 at the right one
+    lin = np.clip(linear(img) * 2 ** 0.5 * gain[None, :, None], 0, 1)
+    expected = 255 * np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+    out = developed(phone, tone="file", detail=0)
+    assert np.abs(out - expected).mean() < 3.0
+    assert np.array_equal(developed(phone), developed(phone, tone="file"))  # "auto" is the file's own tone
+    flat = write_dng(tmp_path / "flat.dng", img, mosaic=False)  # a linear DNG without a map: the local contrast
+    assert np.array_equal(developed(flat), developed(flat, tone="local"))
+    assert np.array_equal(developed(flat, tone="file"), developed(flat, tone="local"))
+    camera = write_dng(tmp_path / "camera.dng", img, **look)  # a mosaic: the curve of a camera JPEG as before
+    assert np.array_equal(developed(camera), developed(camera, tone="camera"))
+    with pytest.raises(ValueError):
+        rawio.settings({"detail": 9})
+
+
+def test_the_detail_of_a_phone_raw_is_brought_out_as_the_phone_does(tmp_path):
+    """The phone sharpens its JPEG at several scales; measured on real ProRAW frames the JPEG has two to three
+    times the amplitude of the development at 0.05-0.3 cycles per pixel, and the frames match and align as the
+    JPEGs only with that detail back. "auto" detail does it for the tone "file", 0 not; nothing moves."""
+    img = picture(6, (320, 240))
+    gains = np.ones((2, 2, 2), np.float32)
+    phone = write_dng(tmp_path / "phone.dng", img, mosaic=False, baseline_exposure=0.0,
+                      gain_table={"gains": gains}, tone_curve=[(0.0, 0.0), (1.0, 1.0)])
+
+    def developed(**opts):
+        out = tmp_path / f"d{len(list(tmp_path.glob('*.tif')))}.tif"
+        rawio.develop_file(phone, out, {"format": "tif", "tone": "file", **opts})
+        return cv2.imread(str(out), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+
+    plain, auto = developed(detail=0), developed()
+
+    def band(g):
+        return (cv2.GaussianBlur(g, (0, 0), 1.0) - cv2.GaussianBlur(g, (0, 0), 2.5)).std()
+
+    assert band(auto) > 2.0 * band(plain)
+    assert abs(auto.mean() - plain.mean()) < 2.0
+    (dx, dy), _response = cv2.phaseCorrelate(plain, auto)
+    assert abs(dx) < 0.1 and abs(dy) < 0.1
+    assert np.array_equal(developed(detail=0, half_size=True).shape, (120, 160))
+
+
 def test_the_libraries_of_the_pipeline_do_not_read_a_raw_but_read_its_copy(tmp_path):
     import pycolmap
     from PIL import Image
@@ -236,6 +297,26 @@ def test_half_size_stays_as_the_photos_were_added(tmp_path):
     assert cv2.imread(cams[0].path).shape == (60, 80, 3) and cams[0].meta["raw"]["settings"]["half_size"] is True
 
 
+def test_half_size_halves_every_raw(tmp_path):
+    """LibRaw's half size takes one pixel per 2x2 cell of a sensor mosaic; a linear DNG (Apple ProRAW) has no
+    mosaic and LibRaw leaves it whole. The copy is halved all the same, each pixel the mean of its 2x2 cell (the
+    pixel centres where a mosaic's half size puts them: no shift)."""
+    img = picture(5)
+    for mosaic in (True, False):
+        src = write_dng(tmp_path / f"m{int(mosaic)}.dng", img, mosaic=mosaic)
+        full, half = tmp_path / f"m{int(mosaic)}_full.tif", tmp_path / f"m{int(mosaic)}_half.tif"
+        opts = {"format": "tif", "exposure": 0.0, "tone": "linear"}
+        assert rawio.develop_file(src, full, opts) == (160, 120)
+        assert rawio.develop_file(src, half, {**opts, "half_size": True}) == (80, 60), mosaic
+        big = cv2.imread(str(full), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        small = cv2.imread(str(half), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        assert small.shape == (60, 80)
+        expected = cv2.resize(big, (80, 60), interpolation=cv2.INTER_AREA)
+        assert np.abs(small - expected).mean() < 4.0, mosaic
+        (dx, dy), _response = cv2.phaseCorrelate(expected, small)
+        assert abs(dx) < 0.2 and abs(dy) < 0.2, (mosaic, dx, dy)
+
+
 def test_cancelling_the_development(tmp_path):
     files = raws(tmp_path / "foto", 6)
     progress = Progress(lambda f, m: progress.cancel() if f > 0 else None)
@@ -345,11 +426,13 @@ def test_command_line(tmp_path):
     assert r.exit_code == 0 and "added 2 photos" in r.output, r.output
     ch = ppg.Document.open(tmp_path / "scavo.ppg").chunks[0]
     assert sorted(Path(c.path).name for c in ch.cameras) == ["IMG_0000.tif", "IMG_0001.tif"]
-    r = run.invoke(app, ["develop-raw", str(tmp_path / "scavo.ppg"), "--raw-format", "jpg", "--raw-exposure", "0"])
+    r = run.invoke(app, ["develop-raw", str(tmp_path / "scavo.ppg"), "--raw-format", "jpg", "--raw-exposure", "0",
+                         "--raw-detail", "1.5"])
     assert r.exit_code == 0 and "developed 2 raw files" in r.output, r.output
     ch = ppg.Document.open(tmp_path / "scavo.ppg").chunks[0]
     assert sorted(Path(c.path).name for c in ch.cameras) == ["IMG_0000.jpg", "IMG_0001.jpg"]
     assert ch.cameras[0].meta["raw"]["settings"]["exposure"] == 0.0
+    assert ch.cameras[0].meta["raw"]["settings"]["detail"] == 1.5
 
 
 def test_doctor_names_the_raw_decoder():
@@ -465,3 +548,62 @@ def test_window_adds_raws(tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def test_window_adds_a_folder_of_raws_and_shows_them(tmp_path, monkeypatch):
+    """*Aggiungi cartella di foto* on a folder with a raw, a raw + JPEG of one shot and a phone's linear DNG: one
+    photo per shot, thumbnails of the copies, and the photo view opens a photo backed by a raw."""
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    doc, _ch = project(tmp_path)
+    folder = tmp_path / "foto"
+    raws(folder, 2)
+    write_dng(folder / "IMG_0002.DNG", picture(2), mosaic=False)
+    cv2.imwrite(str(folder / "IMG_0001.JPG"), cv2.cvtColor(picture(1), cv2.COLOR_RGB2BGR))
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder)))
+    w.add_photos(folder=True)
+    w.runner.wait()
+    app.processEvents()
+    cams = w.chunk.cameras
+    assert [(c.label, bool(c.meta.get("raw"))) for c in cams] == [
+        ("IMG_0000", True), ("IMG_0001", False), ("IMG_0002", True)]  # the JPEG of the pair is the photo
+    assert w.photos.count() == 3
+    raw_cam = cams[2]
+    w.open_photo(raw_cam)
+    app.processEvents()
+    assert w.photo_view.camera is raw_cam
+    assert w.photo_view.pixmap_item is not None and w.photo_view.pixmap_item.pixmap().width() == 160
+    w.setWindowModified(False)
+    w.close()
+    app.processEvents()
+
+
+def test_a_damaged_dng_does_not_ask_for_gigabytes(tmp_path):
+    """A SubIFD tag that claims four thousand million entries: the look is not there, nothing is allocated."""
+    import struct
+
+    from pyarchinit_photogrammetry.io import raw
+
+    path = tmp_path / "damaged.dng"
+    path.write_bytes(b"II*\x00" + struct.pack("<L", 8) + struct.pack("<H", 1)
+                     + struct.pack("<HHLL", 330, 4, 0xFFFFFFF0, 26) + struct.pack("<L", 0) + b"\x00" * 64)
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        assert raw._dng_look(path) is None
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 100e6, f"{peak / 1e9:.1f} GB asked for a file of 100 bytes"

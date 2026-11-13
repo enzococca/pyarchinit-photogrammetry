@@ -71,8 +71,9 @@ condividono un sensore; l'orientamento resta in `camera.meta["orientation"]`). `
 | `format` | `"jpg"` | la copia: `"jpg"` o `"tif"` (8 bit, senza perdita, molto più grande) |
 | `quality` | `95` | qualità del JPEG |
 | `exposure` | `1.0` | esposizione in EV, uguale per tutti i fotogrammi: uno sviluppo lineare è circa uno stop più scuro del JPEG della fotocamera; `0` lascia i valori del sensore |
-| `tone` | `"auto"` | il contrasto della copia (sotto): `"camera"`, `"local"`, `"linear"` o `"auto"` |
-| `half_size` | `False` | metà risoluzione (senza demosaicizzazione): prove veloci |
+| `tone` | `"auto"` | il contrasto della copia (sotto): `"camera"`, `"local"`, `"linear"`, `"file"` o `"auto"` |
+| `detail` | `"auto"` | dettaglio messo in risalto come fa un telefono nel suo JPEG (una banda tra sfocature di 0,6 e 3 px aggiunta questo numero di volte, da 0 a 4); `"auto"`: 2,3 con il tono `"file"`, 0 con gli altri |
+| `half_size` | `False` | metà risoluzione, prove veloci (un mosaico: un pixel per cella 2x2, senza demosaicizzazione; un DNG lineare come ProRAW: sviluppato intero, poi media di ogni cella 2x2) |
 
 Uno sviluppo lineare è molto più piatto del JPEG che scrive una fotocamera, e l'allineamento trova i
 punti chiave dal loro contrasto: su raw di quattro fotocamere le copie lineari hanno dato da un terzo
@@ -85,8 +86,19 @@ fotogrammi di una fotocamera, che cambia i valori e non sposta nessun pixel:
   ProRAW): il telefono li completa con una mappa di tono locale conservata nel file, che LibRaw non
   applica. Un gruppo di fotogrammi ProRAW che si allinea dai suoi JPEG non si è allineato con la sola
   curva e si allinea con `"local"`. Sui raw delle altre fotocamere è troppo (texture dure);
+- `"file"`: l'aspetto che il DNG porta con sé. Apple ProRAW conserva l'aspetto del telefono in tag -
+  BaselineExposure, una mappa di tono locale (ProfileGainTableMap: un guadagno per ogni punto del
+  fotogramma e ogni luminosità) e una ProfileToneCurve - che LibRaw non applica; vengono applicati come
+  dice la specifica DNG, ed `exposure` sposta dalla luminosità del telefono (il predefinito `1.0` è
+  quella del telefono). Su fotogrammi ProRAW veri i toni sono quelli del JPEG del telefono entro tre
+  livelli di grigio. Il telefono inoltre rende più nitido il suo JPEG (`detail`): 30 fotogrammi di un
+  vaso hanno dato, dai JPEG della fotocamera, 30 allineati, circa 4.100 punti di legame e 26.000-28.000
+  punti densi a media qualità; dai raw con `"local"` 28 allineati, 3.200 punti di legame e
+  16.000-19.000 punti densi; con `"file"` e il suo dettaglio 30 allineati, circa 4.150 punti di legame e
+  21.000-25.000 punti densi. Un raw senza questi tag è sviluppato come con `"auto"`;
 - `"linear"`: né l'una né l'altro: i valori dello sviluppo, per misure sui colori;
-- `"auto"`: `"local"` per un raw che non è un mosaico, `"camera"` per gli altri.
+- `"auto"`: `"file"` per un raw che non è un mosaico e porta il suo aspetto, `"local"` per uno che non è
+  un mosaico e non lo porta, `"camera"` per gli altri.
 
 ```python
 chunk.add_photos(["raw/"], raw={"format": "tif", "exposure": 0.5})
@@ -101,7 +113,7 @@ di nuovo. Le copie si fanno una volta: aggiungere di nuovo gli stessi raw, o apr
 altrove, non sviluppa nulla; una copia perduta è rifatta da `develop_raw_photos` (o da *ricollega
 foto* quando i raw sono stati spostati). Dalla riga di comando: `ppg add-photos progetto.ppg raw/
 --prefer-raw --raw-format tif --raw-exposure 0.5 --raw-tone camera` (`--raw-half-size` per copie a
-metà dimensione) e `ppg develop-raw progetto.ppg --raw-tone local` (senza opzioni: solo ciò che manca
+metà dimensione, `--raw-detail` per il dettaglio) e `ppg develop-raw progetto.ppg --raw-tone local` (senza opzioni: solo ciò che manca
 o è cambiato).
 
 ### Coppie

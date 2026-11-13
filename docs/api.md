@@ -71,8 +71,9 @@ kept in `camera.meta["orientation"]`). `raw` changes it:
 | `format` | `"jpg"` | the copy: `"jpg"` or `"tif"` (8 bit, lossless, much larger) |
 | `quality` | `95` | JPEG quality |
 | `exposure` | `1.0` | exposure in EV, the same for all the frames: a linear development is about a stop darker than the JPEG of the camera; `0` leaves the values of the sensor |
-| `tone` | `"auto"` | the contrast of the copy (below): `"camera"`, `"local"`, `"linear"`, or `"auto"` |
-| `half_size` | `False` | half resolution (no demosaicking): quick trials |
+| `tone` | `"auto"` | the contrast of the copy (below): `"camera"`, `"local"`, `"linear"`, `"file"`, or `"auto"` |
+| `detail` | `"auto"` | detail brought out as a phone does in its JPEG (a band between blurs of 0.6 and 3 px added back this many times, 0 to 4); `"auto"`: 2.3 with the tone `"file"`, 0 with the others |
+| `half_size` | `False` | half resolution, quick trials (a mosaic: one pixel per 2x2 cell, no demosaicking; a linear DNG such as ProRAW: developed whole, then each 2x2 cell averaged) |
 
 A linear development is much flatter than the JPEG a camera writes, and the alignment finds its key
 points by their contrast: on raws of four cameras the linear copies gave from a third to a sixth of the
@@ -85,8 +86,18 @@ changes values and moves no pixel:
   ProRAW): the phone completes them with a local tone map kept in the file, which LibRaw does not
   apply. A set of ProRAW frames that aligns from its JPEGs did not align with the curve alone and
   does with `"local"`. On the raws of the other cameras it is too much (harsh textures);
+- `"file"`: the look the DNG carries. Apple ProRAW keeps the phone's look as tags - BaselineExposure, a
+  local tone map (ProfileGainTableMap: a gain for each place of the frame and each brightness) and a
+  ProfileToneCurve - which LibRaw does not apply; they are applied as the DNG specification says, and
+  `exposure` shifts from the phone's brightness (the default `1.0` is the phone's own). On real ProRAW
+  frames the tones are those of the phone's JPEG within three grey levels. The phone also sharpens its
+  JPEG (`detail`): 30 frames of a vase gave, from the camera JPEGs, 30 aligned, about 4,100 tie points
+  and 26,000-28,000 dense points at medium; from the raws with `"local"` 28 aligned, 3,200 tie points
+  and 16,000-19,000 dense points; with `"file"` and its detail 30 aligned, about 4,150 tie points and
+  21,000-25,000 dense points. A raw without these tags is developed as with `"auto"`;
 - `"linear"`: neither: the values of the development, for measurements on the colours;
-- `"auto"`: `"local"` for a raw that is no mosaic, `"camera"` for the others.
+- `"auto"`: `"file"` for a raw that is no mosaic and carries its look, `"local"` for one that is no
+  mosaic and carries none, `"camera"` for the others.
 
 ```python
 chunk.add_photos(["raw/"], raw={"format": "tif", "exposure": 0.5})
@@ -100,7 +111,8 @@ default) takes the JPEG, `prefer="raw"` the raw, and a shot that is already in t
 again. Copies are made once: adding the same raws again, or opening the project elsewhere, develops
 nothing; a copy that was lost is made again by `develop_raw_photos` (or by *relink photos* when the
 raws were moved). From the command line: `ppg add-photos project.ppg raw/ --prefer-raw --raw-format
-tif --raw-exposure 0.5 --raw-tone camera` (`--raw-half-size` for copies at half size) and
+tif --raw-exposure 0.5 --raw-tone camera` (`--raw-half-size` for copies at half size, `--raw-detail` for
+the detail) and
 `ppg develop-raw project.ppg --raw-tone local` (without options: only what is missing or changed).
 
 ### Pairs
