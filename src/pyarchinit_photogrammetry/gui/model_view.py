@@ -528,8 +528,11 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
             # being drawn and the last measure
             self._paint_free(p, w, h)
         if self.hint:
+            flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
+            box = p.boundingRect(8, 6, max(w - 16, 40), h, flags, self.hint)  # wrapped to the width of the view
+            p.fillRect(box.adjusted(-4, -2, 4, 2), QColor(20, 24, 32, 170))  # readable over the model
             p.setPen(QColor(255, 255, 255))
-            p.drawText(8, 18, self.hint)
+            p.drawText(box, flags, self.hint)
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         if self.sd.exaggeration != 1.0:
