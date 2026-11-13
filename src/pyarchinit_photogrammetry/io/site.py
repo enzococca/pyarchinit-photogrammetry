@@ -5,20 +5,26 @@
     site/
       index.html          the page
       site.json           the manifest: title, languages, frame, the chunks with their extent and layers
-      app/                the viewer: plain ES modules and OpenLayers, no CDN and no build step
+      app/                the viewer: plain ES modules, OpenLayers, three.js, 3DTilesRendererJS; no CDN, no build
       data/               (data/1/, data/2/... with several chunks)
         ortho.tif         the orthophoto, Cloud Optimized GeoTIFF, WebP with its alpha
         dem.tif           the DEM, COG float32 (deflate): the heights read on a click
         dem_hillshade.tif the shaded relief, COG 8 bit (WebP, transparent where the DEM is empty)
         units.geojson     the stratigraphic units of the plan with their attributes
         drawings.geojson  spot heights, break lines, measuring points and free drawings, each with its ``layer``
+        model/            the 3D model as 3D Tiles 1.1 (tileset.json, tiles/*.glb, textures/*.jpg): the 3D view
 
 ``frame``: ``"local"`` (default) shifts every coordinate to an origin at the centre of the survey (whole metres; the
 heights to the whole metre under the lowest cell of the DEMs, read whole, so that no cell is under zero; under the
-lowest drawn height where there is no DEM) and writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written either. ``"crs"`` keeps the coordinates and the reference
-system of the chunks: an explicit choice. In both frames the rasters go through a description of their pixels alone
-(a VRT), so no tag of the source files reaches the site, the photos and their EXIF are never copied, and every text
-typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
+lowest vertex of the models where there is no DEM, under the lowest drawn height where there is neither) and
+writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written
+either. ``"crs"`` keeps the coordinates and the reference system of the chunks: an explicit choice. The model is in
+the same frame: in the local one its tiles are in the metres of the plan, with no transform to the globe, so that a
+point measured on the model and on the plan has the same coordinates; in the ``crs`` one its tileset is the one of
+:func:`.web.export_3dtiles`, placed on the globe around the centre of the model, whose coordinates the manifest
+gives (``origin`` of the layer) for the viewer. In both frames the rasters go through a description of their pixels
+alone (a VRT), so no tag of the source files reaches the site, the photos and their EXIF are never copied, and every
+text typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
 description - that holds the path of a computer is cut to its last name.
 
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
@@ -50,7 +56,9 @@ from ..core.progress import as_progress
 FORMAT = "ppg-site"
 FORMAT_VERSION = 1
 FRAMES = ("local", "crs")
-PRODUCTS = ("orthomosaic", "dem", "units", "drawings")  # the shaded relief goes with the DEM
+PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model")  # the shaded relief goes with the DEM
+MODEL_TEXTURE = 4096  # the side of a texture page of the model on the site: a trench stays within a few hundred MB
+MODEL_FACES = 150_000  # faces of a tile of the model
 LANGUAGES = ("it", "en")
 MANIFEST = "site.json"
 OWN = ("index.html", MANIFEST, "app", "data")  # what a site folder holds: rewritten when the site is built again
@@ -63,6 +71,7 @@ TITLES = {  # the layers of the viewer, in the languages of the page
     "dem": {"it": "Quote (DEM)", "en": "Heights (DEM)"},
     "units": {"it": "Unità stratigrafiche", "en": "Stratigraphic units"},
     "drawings": {"it": "Disegni", "en": "Drawings"},
+    "model": {"it": "Modello 3D", "en": "3D model"},
 }
 GROUPS = {  # the kinds of drawings of the plan: the name of their ``layer``, its title, its colour in the program
     "quote": ("Quote", {"it": "Quote", "en": "Spot heights"}, "#f59e0b"),
@@ -96,7 +105,7 @@ def _chunks(document, chunks) -> list:
         if ch is None:
             raise ValueError(f"no chunk {c!r} in the project")
         if not _has_content(ch):
-            raise ValueError(f"chunk {ch.label!r} has nothing to publish: no orthophoto, DEM or drawings")
+            raise ValueError(f"chunk {ch.label!r} has nothing to publish: no orthophoto, DEM, model or drawings")
         out.append(ch)
     return out
 
@@ -106,9 +115,23 @@ def _raster(chunk, product: str) -> Path | None:
     return Path(path) if path is not None and Path(path).exists() else None
 
 
+def _model(chunk) -> Path | None:
+    path = chunk.product_path("model")
+    return Path(path) if path is not None and Path(path).exists() else None
+
+
+def _model_extent(chunk) -> tuple[tuple[float, float, float, float], float]:
+    """The plan box of the model in the coordinates of the chunk and its lowest height."""
+    from .web import _world_mesh
+
+    world = _world_mesh(chunk)[0]
+    lo, hi = world.min(0), world.max(0)
+    return (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])), float(lo[2])
+
+
 def _has_content(chunk) -> bool:
     d = chunk.meta.get("drawings") or {}
-    return bool(_raster(chunk, "orthomosaic") or _raster(chunk, "dem")
+    return bool(_raster(chunk, "orthomosaic") or _raster(chunk, "dem") or _model(chunk)
                 or any(d.get(k) for k in ("units", "quote", "lines", "points", "free")))
 
 
@@ -389,6 +412,37 @@ def _image_layer(kind: str, url: str, path: Path, visible: bool) -> dict:
             "resolution": round(float(info["transform"].a), 6)}
 
 
+def _tiles_box(node: dict) -> tuple[list[float], list[float]]:
+    """The box of a tile (its ``box`` bounding volume, axis aligned as :func:`.web.export_3dtiles` writes it)."""
+    b = node["boundingVolume"]["box"]
+    h = (abs(b[3]), abs(b[7]), abs(b[11]))
+    return [b[i] - h[i] for i in range(3)], [b[i] + h[i] for i in range(3)]
+
+
+def _model_faces(folder: Path, tileset: dict) -> int:
+    """The faces of the model at full detail: those of the leaves."""
+    import struct
+
+    total = 0
+
+    def walk(node):
+        nonlocal total
+        if node.get("children"):
+            for k in node["children"]:
+                walk(k)
+            return
+        data = (folder / node["content"]["uri"]).read_bytes()
+        size = struct.unpack_from("<I", data, 12)[0]
+        gltf = json.loads(data[20:20 + size])
+        for mesh in gltf["meshes"]:
+            for prim in mesh["primitives"]:
+                total += gltf["accessors"][prim["indices"]]["count"] // 3 if "indices" in prim else \
+                    gltf["accessors"][prim["attributes"]["POSITION"]]["count"] // 3
+
+    walk(tileset["root"])
+    return total
+
+
 # ------------------------------------------------------------------------------------------------ the site
 def _prepare(folder: Path) -> None:
     """``folder`` ready for a site: new, empty, or a site built here before (its own files removed). A folder with
@@ -423,7 +477,7 @@ def _copy_viewer(folder: Path, title: str, language: str) -> None:
 
 def export_site(document, folder: str | os.PathLike, chunks=None, products=None, frame: str = "local",
                 title: str | None = None, description: str | None = None, language=LANGUAGES, quality: int = 85,
-                progress=None) -> Path:
+                model_texture: int | None = MODEL_TEXTURE, model_faces: int = MODEL_FACES, progress=None) -> Path:
     """Build the web site of ``document`` in ``folder`` (see the module docstring) and return the path of its
     manifest, ``site.json``.
 
@@ -432,9 +486,11 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     ``frame``: ``"local"`` (default: shifted coordinates, no reference system written) or ``"crs"``;
     ``title`` and ``description``: of the page (default: the site of the project, else the name of its file);
     ``language``: the languages of the page among :data:`LANGUAGES`, the first shown first; ``quality``: of the
-    WebP of the orthophoto. A folder that holds anything but a site built here is refused."""
+    WebP of the orthophoto; ``model_texture``: the largest side of a texture page of the model (None or 0: the
+    vertex colours alone); ``model_faces``: the faces of a tile of the model. A folder that holds anything but a
+    site built here is refused."""
     from ..archaeo.terrain import hillshade
-    from .web import export_cog
+    from .web import export_3dtiles, export_cog
 
     progress = as_progress(progress)
     if frame not in FRAMES:
@@ -447,7 +503,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         raise ValueError(f"products: among {', '.join(PRODUCTS)}")
     chosen = _chunks(document, chunks)
     if not chosen:
-        raise ValueError("nothing to publish: no chunk has an orthophoto, a DEM or drawings")
+        raise ValueError("nothing to publish: no chunk has an orthophoto, a DEM, a model or drawings")
     systems = {None if crs_mod.is_local(c.crs) else c.crs for c in chosen}
     if len(systems) > 1:
         raise ValueError("the chunks are in different reference systems: " + ", ".join(sorted(map(str, systems))))
@@ -465,13 +521,14 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         raw = _Shift()
         units = _unit_features(ch, raw, roots) if "units" in products else []
         drawn = _drawing_features(ch, raw, roots)[0] if "drawings" in products else []
+        model = _model_extent(ch) if "model" in products and _model(ch) is not None else None
         box = _union([_raster_info(p)["bounds"] for p in (ortho, dem) if p is not None]
-                     + [_bounds(units), _bounds(drawn)])
+                     + [_bounds(units), _bounds(drawn), model[0] if model else None])
         if box is None:
             if chunks is None:
                 continue
             raise ValueError(f"chunk {ch.label!r} has none of the products asked for")
-        plan.append({"chunk": ch, "ortho": ortho, "dem": dem, "box": box,
+        plan.append({"chunk": ch, "ortho": ortho, "dem": dem, "box": box, "model": model,
                      "heights": _dem_heights(dem) if dem is not None else None,
                      "lowest": _lowest(units + drawn)})
     if not plan:
@@ -483,6 +540,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         # true heights are not told. The drawn heights decide only where there is no DEM: a drawing made
         # without heights lies at zero, and taking it as the base would publish the true heights of all the rest
         lows = [p["heights"][0] for p in plan if p["heights"]]
+        if not lows:
+            lows = [p["model"][1] for p in plan if p["model"]]
         if not lows:
             lows = [p["lowest"] for p in plan if p["lowest"] is not None]
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
@@ -530,6 +589,26 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                     layer["range"] = [round(lo - shift.dz, 3), round(hi - shift.dz, 3)]
                 layers.append(layer)
                 boxes.append(_raster_info(out)["bounds"])
+        if item["model"] is not None:
+            sub(0.7, f"{ch.label}: 3D model")
+            tiles = data / "model"
+            # local frame: the tiles in the metres of the plan, nothing that places them on the globe; crs frame:
+            # the tileset of the program, around the centre of the model, whose coordinates the viewer adds
+            tileset = export_3dtiles(ch, tiles, max_faces=int(model_faces), progress=sub.sub(0.7, 0.2),
+                                     origin=(shift.dx, shift.dy, shift.dz) if frame == "local" else None,
+                                     texture_size=int(model_texture) if model_texture else None)
+            ts = json.loads(tileset.read_text(encoding="utf-8"))
+            layer = {"id": "model", "type": "tiles", "url": f"{rel}/model/tileset.json", "title": TITLES["model"],
+                     "visible": True, "faces": _model_faces(tiles, ts),
+                     "textured": bool((ts.get("extras") or {}).get("textures"))}
+            if frame == "crs":
+                layer["origin"] = (ts.get("extras") or {}).get("origin")
+            lo, hi = _tiles_box(ts["root"])
+            o = layer.get("origin") or [0.0, 0.0, 0.0]
+            layer["box"] = [round(lo[i] + o[i], DECIMALS) for i in range(3)] + \
+                [round(hi[i] + o[i], DECIMALS) for i in range(3)]
+            layers.append(layer)
+            boxes.append((layer["box"][0], layer["box"][1], layer["box"][3], layer["box"][4]))
         sub(0.9, f"{ch.label}: drawings")
         if "units" in products:
             feats = _unit_features(ch, shift, roots)
