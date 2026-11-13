@@ -283,3 +283,29 @@ def test_flow_layout_makes_room_when_its_tab_first_appears(qapp):
     assert len(set(ys)) > 1  # wrapped
     assert below.y() >= buttons[-1].geometry().bottom()  # room made for every line, nothing cut or drawn over
     tabs.close()
+
+
+def test_a_dem_made_coarser_for_the_memory_is_said_in_a_box(window, qapp, monkeypatch):
+    """A DEM whose resolution was made coarser to fit the memory (``meta["dem"]["memory_limited"]``) is said in
+    a message box with both resolutions and the memory of the computer, not only in the progress text; a DEM
+    at the resolution of its points says nothing."""
+    from pyarchinit_photogrammetry.engine import satellite
+
+    w = window
+    said: list = []
+    monkeypatch.setattr(w, "_warn", said.append)
+    monkeypatch.setattr(w, "_show_raster", lambda kind: said.append(("shown", kind)))
+    monkeypatch.setattr(satellite, "_physical_memory", lambda: 24e9)
+    saved = dict(w.chunk.meta.get("dem") or {})
+    try:
+        w.chunk.meta["dem"] = {**saved, "resolution": 0.0062}
+        w._dem_done()
+        assert said == [("shown", "dem")]
+        w.chunk.meta["dem"] = {**saved, "resolution": 0.0062, "memory_limited": 0.0031}
+        w._dem_done()
+        text = said[-1]
+        assert isinstance(text, str) and "0,0062" in text and "0,0031" in text and "24 GB" in text
+        assert "2,0 volte" in text and "memoria" in text
+        assert w._dem_limited_text(w.chunk) == text
+    finally:
+        w.chunk.meta["dem"] = saved

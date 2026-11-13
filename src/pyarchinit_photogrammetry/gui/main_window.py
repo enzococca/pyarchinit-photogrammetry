@@ -2815,7 +2815,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
             return ch.dem_path
 
         self.run_task("Superficie per il multispettrale", job,
-                      lambda path: self._info(tr("Superficie"), tr("DEM pronto: {0}", path)))
+                      lambda path: (self._info(tr("Superficie"), tr("DEM pronto: {0}", path)),
+                                    self._warn_dem_limited(ch)))
 
     def _ms_meta(self) -> dict:
         return (self.chunk.meta.get("multispectral") if self.chunk is not None else None) or {}
@@ -8543,7 +8544,32 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 return
             self.run_task("DEM", self._versioned("dem", v, lambda p: self.chunk.build_dem(
                 v["resolution"], v["source"], v["interpolate"], classes=classes, progress=p)),
-                lambda _r: self._show_raster("dem"))
+                lambda _r: self._dem_done())
+
+    def _dem_limited_text(self, chunk) -> str | None:
+        """What to say of a DEM made coarser than its data to fit the memory (``meta["dem"]["memory_limited"]``,
+        :func:`..engine.dem._fit_grid`); None for a DEM at the resolution of its data."""
+        report = chunk.meta.get("dem") or {}
+        wanted = report.get("memory_limited")
+        if not wanted or not report.get("resolution"):
+            return None
+        from ..engine.satellite import _physical_memory
+
+        return tr("DEM calcolato a {0} m/pixel invece di {1}: alla risoluzione dei dati la griglia non entra nella "
+                  "memoria di questo computer ({2} GB). Il DEM è {3} volte più grossolano dei dati da cui è fatto; "
+                  "curve di livello e volumi useranno questo DEM.",
+                  number(report["resolution"], 4), number(wanted, 4), number(_physical_memory() / 1e9),
+                  number(report["resolution"] / wanted, 1))
+
+    def _warn_dem_limited(self, chunk=None) -> None:
+        """The message box of a DEM made coarser for the memory, after the step that made it."""
+        text = self._dem_limited_text(chunk if chunk is not None else self.chunk)
+        if text:
+            self._warn(text)
+
+    def _dem_done(self) -> None:
+        self._show_raster("dem")
+        self._warn_dem_limited()
 
     def build_ortho(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -9639,7 +9665,8 @@ class MainWindow(FreeDrawingActions, QMainWindow):
                 ch.generate_report(self.doc.path.with_name(self.doc.path.stem + "_report.html"))
             return ch
 
-        self.run_task("Elaborazione completa", job, lambda _c: (self._log_interpolated(), self._show_model(None)))
+        self.run_task("Elaborazione completa", job, lambda c: (
+            self._log_interpolated(), self._show_model(None), self._warn_dem_limited(c) if v["dem"] else None))
 
     def _show_model(self, kind) -> None:
         self.model_view.set_chunk(self.chunk, kind)
