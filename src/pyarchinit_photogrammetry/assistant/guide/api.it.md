@@ -1211,9 +1211,9 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 | --- | --- |
 | `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM o dei disegni); restituisce il percorso di `site.json` |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
-| `io.site.server(folder, host="127.0.0.1", port=0)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address` |
+| `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
 | `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings]... [--quality Q]` | riga di comando: il sito scritto |
-| `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro |
+| `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
 **La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,
 sistema, i chunk ciascuno con la sua estensione e i suoi livelli), `app/` (la pagina: moduli ES semplici,
@@ -1225,12 +1225,14 @@ deflate), `dem_hillshade.tif` (il rilievo ombreggiato, COG a 8 bit, trasparente 
 `layer`). `products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`.
 
 **`frame="local"`** (predefinito) toglie a ogni coordinata un'origine al centro del rilievo (metri
-interi) e a ogni quota il metro intero sotto la cella più bassa dei DEM, e non scrive alcun sistema di
+interi) e a ogni quota il metro intero sotto la cella più bassa dei DEM (letti per intero: nessuna cella
+è sotto zero; senza DEM vale la quota più bassa disegnata), e non scrive alcun sistema di
 riferimento: i raster non ne hanno, i GeoJSON non hanno `crs`, `site.json` ha `"crs": null`, e l'origine
 non è scritta da nessuna parte. Distanze, aree e dislivelli restano veri; dove si trova il sito non esce
 dal computer. **`frame="crs"`** tiene le coordinate e il sistema di riferimento dei chunk: una scelta da
 fare sapendolo. In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
-arriva al sito, e un attributo che contiene un percorso di questo computer è ridotto al suo ultimo nome.
+arriva al sito, e ogni testo scritto dall'utente (gli attributi e i loro nomi, i nomi di chunk, layer e disegni, titolo
+e descrizione) che contiene il percorso di un computer è ridotto al suo ultimo nome.
 I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
 rifiutato).
 
@@ -1240,8 +1242,10 @@ questo programma è rifiutata (`FileExistsError`) e lasciata com'è; ricostruend
 
 **La pagina**: ortofoto, rilievo ombreggiato, unità e disegni con l'elenco dei livelli; un clic dà le
 coordinate, la quota del DEM in quel punto e gli attributi di ciò che c'è sotto; distanza e area misurate
-in pianta; italiano e inglese. Legge i raster a pezzi (richieste a intervalli), che ogni host statico
-serve; un file aperto dal disco (`file://`) non funziona, per questo c'è `ppg web serve`. La pagina legge
+in pianta; italiano e inglese. Legge i raster a pezzi (richieste a intervalli), che quasi ogni host statico
+serve; un file aperto dal disco (`file://`) non funziona, per questo c'è `ppg web serve`.
+Su un host che risponde invece con il file intero la pagina lo dice e scarica per intero ogni raster
+sotto i 50 MB; uno più grande non viene scaricato, e il suo livello è nominato nell'avviso e lasciato fuori. La pagina legge
 i GeoTIFF scritti da questo programma, non un GeoTIFF qualunque.
 
 ```python
