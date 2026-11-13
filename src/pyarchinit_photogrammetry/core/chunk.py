@@ -1077,11 +1077,13 @@ class Chunk:
         return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
 
     def export_3dtiles(self, folder: str | os.PathLike, max_faces: int = 150_000,
-                       progress: ProgressCallback | None = None) -> Path:
+                       progress: ProgressCallback | None = None, *, origin=None,
+                       texture_size: int | None = None) -> Path:
         """The model as Cesium 3D Tiles (``folder/tileset.json``, see :func:`io.web.export_3dtiles`)."""
         from ..io.web import export_3dtiles
 
-        return export_3dtiles(self, folder, max_faces=max_faces, progress=as_progress(progress))
+        return export_3dtiles(self, folder, max_faces=max_faces, progress=as_progress(progress), origin=origin,
+                              texture_size=texture_size)
 
     def export_i3s(self, path: str | os.PathLike, mode: str = "global", max_faces: int = 20_000,
                    texture_size: int = 2048, progress: ProgressCallback | None = None) -> Path:
