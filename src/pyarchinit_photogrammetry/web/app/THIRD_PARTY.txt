@@ -1,0 +1,25 @@
+Third-party software in this folder
+===================================
+
+vendor/ol.js, vendor/ol.css
+---------------------------
+OpenLayers 10.11.0 - https://openlayers.org/ - BSD 2-Clause License
+Copyright 2005-present, OpenLayers Contributors. The licence is in vendor/OPENLAYERS-LICENSE.md.
+
+The two files are dist/ol.js (the full build) and ol.css of the npm package "ol", unchanged:
+  https://registry.npmjs.org/ol/-/ol-10.11.0.tgz
+  sha1    9f2505076569b438730996c1b6eedd48b0be6d88
+  sha512  OJ+lrx7kx/1O7Xx18Ff9QkVnwZIEL0OuhJQSy2sYgzzDvyZ2qHvuZEGAajbSstUyBwaS1OtQ4RWnY84tRMDdqg== (base64)
+  sha256 of vendor/ol.js   a4e607e98b56846d543e2131161720845c7a80170d5f00aa2bc8b6c4e0f9194a
+  sha256 of vendor/ol.css  abc8afd72cc10bd29cc143f443bae4a6804bd3cb3fb262e6b6a6bc6c924ea34f
+The source map (dist/ol.js.map) is not included; the sources are those of the package and of
+https://github.com/openlayers/openlayers (tag v10.11.0).
+
+The full build of OpenLayers includes these libraries (as listed by its source map):
+  rbush        https://github.com/mourner/rbush        MIT License
+  quickselect  https://github.com/mourner/quickselect  ISC License
+  earcut       https://github.com/mapbox/earcut        ISC License
+  pbf          https://github.com/mapbox/pbf           BSD 3-Clause License
+
+Everything else in this folder (main.js, cog.js, i18n.js, style.css) is part of pyarchinit-photogrammetry,
+GPL-2.0-or-later.
