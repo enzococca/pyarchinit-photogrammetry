@@ -38,7 +38,7 @@ from .core import (ARCHAEO_CLASSES, ASPRS_CLASSES, Camera, Chunk, Document, Mark
 from .core.progress import Cancelled, Progress, print_progress
 from . import demo  # noqa: E402  (ppg.demo.create_demo)
 
-__version__ = "1.7.9"
+__version__ = "1.8.0"
 
 from .gnss import heights as _heights  # noqa: E402
 
