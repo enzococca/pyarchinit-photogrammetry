@@ -2,6 +2,7 @@
 software point-splatting renderer (works everywhere, also headless)."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
@@ -219,6 +220,7 @@ SELECT_PX = 6  # a click this close to a line, a polygon's edge or a point of a 
 HANDLE_PX = 8  # a press this close to a vertex of the selected drawing takes that vertex
 DRAPE_PX = 20  # draping: a point picked on the surface every this many screen pixels between two vertices
 DRAWING_COLOUR = "#00e5ff"  # the feature being drawn and its rubber band
+MEASURE_COLOUR = "#ff006e"  # the last measure taken on the model (the colour of the layer Misure of the 2D view)
 CASTER_SYNC_FACES = 300_000  # a model with up to this many faces: its ray caster built at once; a bigger one in the
 # background (a click meanwhile kept and placed when it is ready)
 MODEL_KINDS = ("model", "model_textured")
@@ -281,6 +283,14 @@ def free_lines(sd) -> tuple[list, list]:
         if len(pts) >= 2:
             lines.append((pts, DRAWING_COLOUR, None))  # None: the drawing in progress
         dots += [(p, DRAWING_COLOUR, None) for p in pts]
+    measure = getattr(sd, "measure", None)
+    if measure is not None:  # the last measure on the model: thick, with its vertices
+        kind, pts = measure[0], np.asarray(measure[1], np.float64).reshape(-1, 3)
+        if kind == "polygon" and len(pts) >= 3:
+            lines.append((np.vstack([pts, pts[:1]]), MEASURE_COLOUR, True))
+        elif kind == "line" and len(pts) >= 2:
+            lines.append((pts, MEASURE_COLOUR, True))
+        dots += [(p, MEASURE_COLOUR, True) for p in pts]
     return lines, dots
 
 
@@ -514,7 +524,8 @@ class SoftwareCanvas(_TrackballCanvas, QWidget):
                 p.drawLines(edges)
         if self.sd.axes is not None:  # the axes of a new local system (Orienta il sistema locale)
             self._paint_axes(p, w, h)
-        if self.sd.free or self.sd.drawing is not None:  # the free drawings and the one being drawn
+        if self.sd.free or self.sd.drawing is not None or self.sd.measure is not None:  # the free drawings, the one
+            # being drawn and the last measure
             self._paint_free(p, w, h)
         if self.hint:
             p.setPen(QColor(255, 255, 255))
@@ -1585,6 +1596,11 @@ class ModelView(QWidget, LookThrough):
     orient_requested = Signal(str, object)
     # "axis" (2 points, internal): the axis of a cylindrical development
     free_drawn = Signal(str, object)  # a free drawing ended: kind (line, polygon, point), (N, 3) vertices (internal)
+    # a measure on the model ended: kind (line, polygon, point), (N, 3) vertices and, for a line, the same draped on the
+    # surface (None otherwise), internal
+    measure_drawn = Signal(str, object, object)
+    measure_live = Signal(str)  # the measure being taken, in words, at each vertex and move of the rubber band
+    measure_stopped = Signal()  # the measuring tool left (Esc, another tool, another chunk)
     free_selected = Signal(str)  # the free drawing selected (id), "": none
     free_vertex_moved = Signal(str, int, object)  # id, vertex index, new position on the surface (internal)
     # id, vertex index; -1: the whole drawing. The view does not check the minimum number of vertices: the window
@@ -1735,6 +1751,18 @@ class ModelView(QWidget, LookThrough):
         self.a_free_drape = draw_menu.addAction(tr("Drappeggia sul modello"), self._drape_selected)
         self.a_free_drape.setEnabled(False)
         self.b_draw3d.setMenu(draw_menu)
+        self.b_measure3d = QPushButton(_icon("measure"), tr("Misura"))
+        self.b_measure3d.setToolTip(tr("Misure sul modello o sulla nuvola, senza ortofoto né DEM: distanza (3D, in "
+                                       "pianta, dislivello, lungo la superficie), area (in pianta, nel piano medio, "
+                                       "superficie del modello, perimetro) e coordinate di un punto; Invio o doppio "
+                                       "clic finisce, Esc annulla"))
+        measure_menu = QMenu(self.b_measure3d)
+        measure_menu.addAction(tr("Distanza"), lambda: self.start_measure("line"))
+        measure_menu.addAction(tr("Area e superficie"), lambda: self.start_measure("polygon"))
+        measure_menu.addAction(tr("Coordinate di un punto"), lambda: self.start_measure("point"))
+        measure_menu.addSeparator()
+        measure_menu.addAction(tr("Cancella la misura"), self.clear_measure)
+        self.b_measure3d.setMenu(measure_menu)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -1806,7 +1834,7 @@ class ModelView(QWidget, LookThrough):
         self.rail.add_group("points", tr("Punti"), "rail_points", [self.b_marker, self.b_photos, self.b_lasso])
         self.rail.add_group("cut", tr("Taglia e prospetti"), "rail_cut",
                             [self.b_section, self.b_slice, self.b_cut, self.b_elevation])
-        self.rail.add_group("draw", tr("Disegna"), "rail_draw3d", [self.b_draw3d])
+        self.rail.add_group("draw", tr("Disegna"), "rail_draw3d", [self.b_draw3d, self.b_measure3d])
         self.canvas = None
         if _vtk_usable():
             try:
@@ -1886,6 +1914,8 @@ class ModelView(QWidget, LookThrough):
         self._selected_id: str | None = None
         self._edit_project = None  # the projection of the frozen frame of the editor
         self._draw_kind: str | None = None  # the kind being drawn, None: not drawing
+        self._draw_purpose = "free"  # what the drawing is for: "free" (a free drawing) or "measure" (a measure)
+        self._measure = None  # the last measure taken: (kind, (N, 3) internal vertices), None: none shown
         self._draw_pts: list = []  # its vertices (internal)
         self._rubber = None  # the end of its rubber band (internal), None: nothing under the cursor
         self._press = None  # (x, y, time) of a left press while drawing
@@ -2014,6 +2044,7 @@ class ModelView(QWidget, LookThrough):
         self.stop_free_select()
         if chunk is not self.chunk:  # the drawings and the model of another chunk are not this one's
             self._free, self._free_inner, self._draw_mesh = [], {}, None
+            self._measure = None
             self._selected_id = None
             self.a_free_drape.setEnabled(False)
         self._clear_version()
@@ -2092,6 +2123,7 @@ class ModelView(QWidget, LookThrough):
         self.b_elevation.setVisible(self.kind in self.PICK_KINDS and not self.paths)
         self.b_photos.setVisible(self.kind in self.PICK_KINDS)
         self.b_draw3d.setVisible(self.kind in self.PICK_KINDS)
+        self.b_measure3d.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
                                or (self.kind in ("point_cloud", "model") and mode == "confidence"))
@@ -2701,15 +2733,50 @@ class ModelView(QWidget, LookThrough):
         """The widget that gets the mouse and the keys of the view."""
         return self.canvas.plotter.interactor if isinstance(self.canvas, VtkCanvas) else self.canvas
 
-    def start_drawing(self, kind: str) -> None:
+    @property
+    def measuring(self) -> bool:
+        """True while a measure is being taken on the model (:meth:`start_measure`)."""
+        return self._draw_kind is not None and self._draw_purpose == "measure"
+
+    @property
+    def can_draw(self) -> bool:
+        """True when what is shown can be drawn or measured on (a model, a dense cloud or the tie points)."""
+        return self.kind in self.PICK_KINDS and self.chunk is not None and self.sd is not None
+
+    def start_measure(self, kind: str) -> bool:
+        """Measure on what is shown: a distance (``kind`` "line"), an area ("polygon") or the coordinates of a point
+        ("point"), picked as a free drawing is (:meth:`start_drawing`); each measure ended goes to ``measure_drawn``
+        and stays drawn until the next one starts or :meth:`clear_measure`. False when nothing here can be measured."""
+        if kind not in FREE_KINDS or not self.can_draw:
+            return False
+        self.start_drawing(kind, purpose="measure")
+        return True
+
+    def clear_measure(self) -> None:
+        """The last measure taken on the model no longer drawn."""
+        if self._measure is not None:
+            self._measure = None
+            self._put_free()
+
+    @property
+    def last_measure(self):
+        """(kind, (N, 3) internal vertices) of the measure drawn, None without one."""
+        return self._measure
+
+    def start_drawing(self, kind: str, purpose: str = "free") -> None:
         """Draw a ``kind`` (line, polygon, point) on what is shown: the view stays live, a click adds a vertex on
         the surface (or the vertex of a drawing or a marker within ``SNAP_PX``), a drag rotates; Backspace removes the
         last vertex, Enter or a double click ends, Esc gives up; a point ends at its click. Each feature ended goes
-        to ``free_drawn`` and the tool stays on for the next one until Esc."""
+        to ``free_drawn`` (``purpose`` "free") or to ``measure_drawn`` ("measure") and the tool stays on for the next
+        one until Esc."""
         if kind not in FREE_KINDS or self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
             return
         self.stop_free_select()
         self._end_overlays()
+        was_measuring = self.measuring
+        self._draw_purpose = purpose
+        if was_measuring and purpose != "measure":
+            self.measure_stopped.emit()
         self._draw_kind = kind
         self._draw_pts, self._rubber, self._press = [], None, None
         self.canvas.set_hint(tr("Clic: vertice - trascina: ruota - Backspace, Invio, Esc"))
@@ -2732,12 +2799,16 @@ class ModelView(QWidget, LookThrough):
         """The drawing given up (nothing emitted) and the tool off."""
         if getattr(self, "_draw_kind", None) is None:
             return
+        measuring = self.measuring
         self._draw_kind = None
+        self._draw_purpose = "free"
         self._draw_pts, self._rubber, self._press = [], None, None
         self._kept_clicks = []
         self._rubber_timer.stop()
         self.canvas.set_hint("")
         self._put_free()
+        if measuring:
+            self.measure_stopped.emit()
 
     def _scene_free(self, sd) -> list:
         if sd is None:
@@ -2753,18 +2824,36 @@ class ModelView(QWidget, LookThrough):
             return None
         return self.chunk.to_world(np.asarray(pts, np.float64)) - np.asarray(sd.offset, np.float64)
 
+    def _scene_measure(self, sd):
+        if sd is None or self._measure is None or self.chunk is None:
+            return None
+        kind, inner = self._measure
+        return kind, self.chunk.to_world(np.asarray(inner, np.float64)) - np.asarray(sd.offset, np.float64)
+
     def _put_free(self) -> None:
-        """The free drawings and the drawing in progress put on the scenes (true and shown) and drawn again."""
+        """The free drawings, the drawing in progress and the last measure put on the scenes (true and shown) and
+        drawn again; while measuring, the measure so far told by ``measure_live``."""
         if self.base_sd is not None:
             self.base_sd.free, self.base_sd.drawing = self._scene_free(self.base_sd), self._scene_drawing(self.base_sd)
+            self.base_sd.measure = self._scene_measure(self.base_sd)
         if self.sd is None:
             return
         sd = self.sd
         sd.free = [(fid, kind, sd.to_display(xyz), colour, sel) for fid, kind, xyz, colour, sel in self._scene_free(sd)]
         drawing = self._scene_drawing(sd)
         sd.drawing = None if drawing is None else sd.to_display(drawing)
+        measure = self._scene_measure(sd)
+        sd.measure = None if measure is None else (measure[0], sd.to_display(measure[1]))
         if self.canvas is not None:
             self.canvas.update_free()
+        if self.measuring and self._draw_pts and self.chunk is not None:
+            from .model_measure import live_text
+
+            pts = list(self._draw_pts) + ([self._rubber] if self._rubber is not None else [])
+            text = live_text(self.chunk, self._draw_kind, self.chunk.to_world(np.asarray(pts, np.float64)))
+            if text:
+                self.canvas.set_hint(text)
+                self.measure_live.emit(text)
 
     def eventFilter(self, obj, ev) -> bool:
         if getattr(self, "_look", None) is not None and ev.type() == QEvent.Type.KeyPress:
@@ -2919,6 +3008,8 @@ class ModelView(QWidget, LookThrough):
             point = surface
         if point is None:  # nothing of the model there
             return
+        if self.measuring and not self._draw_pts:  # a new measure: the last one goes
+            self._measure = None
         self._draw_pts.append(np.asarray(point, np.float64).reshape(3))
         self._rubber = None
         if self._draw_kind == "point":
@@ -3036,6 +3127,17 @@ class ModelView(QWidget, LookThrough):
             return
         xyz = self.drawing_vertices()
         self._draw_pts, self._rubber = [], None
+        if self._draw_purpose == "measure":
+            draped = None
+            if kind == "line":  # the length along the surface: the line draped as Drappeggia sul modello does
+                try:
+                    draped = self.drape(xyz, self.canvas.projector(), self.canvas.view_ray)
+                except Exception as exc:  # noqa: BLE001 - the straight measures are enough
+                    logging.getLogger(__name__).info("Misura lungo la superficie non calcolata: %s", exc)
+            self._measure = (kind, xyz)
+            self._put_free()
+            self.measure_drawn.emit(kind, xyz, draped)
+            return
         self._put_free()
         self.free_drawn.emit(kind, xyz)
 

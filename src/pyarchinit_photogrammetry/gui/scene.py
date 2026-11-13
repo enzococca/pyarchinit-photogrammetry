@@ -43,6 +43,9 @@ class SceneData:
     # colour "#rrggbb", selected); and the feature being drawn with the end of its rubber band ((N, 3) or None)
     free: list = field(default_factory=list)
     drawing: np.ndarray | None = None
+    # the last measure taken on the model (*Misura distanza / area / punto* in the 3D view): (kind, (N, 3) xyz in scene
+    # coordinates); None: no measure shown
+    measure: tuple | None = None
     # other chunks shown with this one (gui.chunk_views.OtherLayer: points or a mesh in scene coordinates, colours) and
     # their opacity (0-1)
     others: list = field(default_factory=list)

@@ -37,6 +37,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
+from .model_measure_actions import ModelMeasureActions
 from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
@@ -496,7 +497,7 @@ class _Appended:
                                                               if not any(s is x for x in self.window.sections)])
 
 
-class MainWindow(FreeDrawingActions, QMainWindow):
+class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
     UPDATE_WINDOW_POLL_MS = 400  # a window of the update flow held back looks this often for the open one to close
@@ -604,6 +605,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.model_view.free_drawn.connect(self._free_from_3d)
+        self._connect_model_measure()
         self.model_view.free_selected.connect(self._free_selected_in_3d)
         self.model_view.free_vertex_moved.connect(self._free_vertex_moved)
         self.model_view.free_delete_requested.connect(self._free_delete_requested)
@@ -10633,6 +10635,9 @@ class MainWindow(FreeDrawingActions, QMainWindow):
     def set_draw_mode(self, mode: str) -> None:
         if mode == "free":  # the button Disegno libero: the kind chosen last in its menu
             mode = "free_" + self.free_kind
+        if self._measure_on_model(mode):  # the 3D view in front (or nothing to measure on in 2D): on the model
+            return
+        self._leave_model_measure()
         if mode != "pan" and self.ortho_view.tr is None:
             self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
@@ -10709,6 +10714,7 @@ class MainWindow(FreeDrawingActions, QMainWindow):
         self._sam_cancel()
         self.line_layers = {}
         self.ortho_view.clear_overlays()
+        self.model_view.clear_measure()  # the measure on the model too
         self._draw_sections()
         self._draw_tin()  # a product, not a drawing: it stays
         self._dirty(True)

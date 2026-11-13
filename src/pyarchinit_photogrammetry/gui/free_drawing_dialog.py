@@ -103,25 +103,28 @@ class _MeasuresRelay(QObject):
 
     ready = Signal(object)
 
-    def __init__(self, parent, rec: dict, done):
+    def __init__(self, parent, rec: dict, done, words=None):
         super().__init__(parent)
-        self._rec, self._done = rec, done
+        self._rec, self._done, self._words = rec, done, words or measures_words
         self.ready.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
 
     def _deliver(self, m) -> None:
-        self._done(measures_words(self._rec, m))
+        self._done(self._words(self._rec, m))
         self.deleteLater()
 
 
-def measure_later(parent, chunk, rec: dict, toward, done) -> bool:
+def measure_later(parent, chunk, rec: dict, toward, done, words=None) -> bool:
     """The measures of ``rec`` in words given to ``done(text)`` in the interface thread. A polygon of a chunk with a
     model is measured on it in a worker thread that reads the model and lets it go (True: ``done`` comes later, never
-    if ``parent`` is closed first); otherwise at once, without the model (False)."""
+    if ``parent`` is closed first); otherwise at once, without the model (False). ``words(rec, measures)`` turns the
+    measures (the dict of :func:`..archaeo.measures.feature_measures`, None when they cannot be taken) into what
+    ``done`` gets: :func:`measures_words` by default."""
+    words = words or measures_words
     path = chunk.product_path("model") if chunk is not None and rec.get("kind") == "polygon" else None
     if path is None or not path.exists():
-        done(measures_text(rec, None, toward))
+        done(words(rec, _measures(rec, None, toward)))
         return False
-    relay = _MeasuresRelay(parent, rec, done)
+    relay = _MeasuresRelay(parent, rec, done, words)
     source = ModelSource(chunk)  # the path and the transform of now, not read from the chunk in the worker
 
     def work():

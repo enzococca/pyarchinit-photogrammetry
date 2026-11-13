@@ -3509,7 +3509,24 @@
   "Sviluppo dei file raw: {0} di {1}": "Developing the raw files: {0} of {1}",
   "Sviluppo dei file raw: {0}": "Developing the raw files: {0}",
   "Immagini e file raw": "Images and raw files",
-  "File raw delle fotocamere": "Camera raw files"
+  "File raw delle fotocamere": "Camera raw files",
+  "Misure sul modello o sulla nuvola, senza ortofoto né DEM: distanza (3D, in pianta, dislivello, lungo la superficie), area (in pianta, nel piano medio, superficie del modello, perimetro) e coordinate di un punto; Invio o doppio clic finisce, Esc annulla": "Measures on the model or the cloud, without orthophoto or DEM: distance (3D, in plan, height difference, along the surface), area (in plan, in the mean plane, surface of the model, perimeter) and coordinates of a point; Enter or a double click ends, Esc cancels",
+  "Distanza": "Distance",
+  "Area e superficie": "Area and surface",
+  "Coordinate di un punto": "Coordinates of a point",
+  "Cancella la misura": "Clear the measure",
+  " - in unità del modello, non in metri: il chunk non ha scala né riferimenti": " - in model units, not metres: the chunk has no scale and no references",
+  "u": "u",
+  "u²": "u²",
+  " (unità del modello)": " (model units)",
+  " (senza modello: area nel piano medio dei vertici)": " (no model: area in the mean plane of the vertices)",
+  "sistema locale": "local system",
+  "Misura sul modello: clic per i vertici, doppio clic o Invio per finire, Backspace toglie l'ultimo vertice, Esc annulla; trascina per ruotare la vista": "Measure on the model: click for the vertices, double click or Enter to end, Backspace removes the last vertex, Esc cancels; drag to rotate the view",
+  "Area sul modello: clic per i vertici, doppio clic o Invio per chiudere, Esc annulla; area in pianta, nel piano medio e superficie del modello": "Area on the model: click for the vertices, double click or Enter to close, Esc cancels; area in plan, in the mean plane and surface of the model",
+  "Per misurare nella vista 3D mostra il modello, la nuvola densa o i punti di legame": "To measure in the 3D view show the model, the dense cloud or the tie points",
+  "Superficie del modello in calcolo...": "Surface of the model being computed...",
+  "Misura sul modello": "Measure on the model",
+  "Misura non valida: i vertici sono troppo pochi o tutti su una linea": "Measure not valid: too few vertices or all on one line"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -4729,7 +4746,15 @@
   "{0} (senza i suoi fori)": "{0} (without its holes)",
   "Modello: {0} buchi chiusi, {1} m² in pianta interpolati (non misurati)": "Model: {0} holes closed, {1} m² in plan interpolated (not measured)",
   "Modello: {0} buchi più larghi di {1} m lasciati aperti": "Model: {0} holes wider than {1} m left open",
-  "QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso": "QGIS: the open project does not show {0} yet: \"Open in QGIS\" writes it again with the layers of now"
+  "QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso": "QGIS: the open project does not show {0} yet: \"Open in QGIS\" writes it again with the layers of now",
+  "Distanza sul modello: 3D {0} {3}, in pianta {1} {3}, dislivello {2} {3}": "Distance on the model: 3D {0} {3}, in plan {1} {3}, height difference {2} {3}",
+  "3D {0} {3}, in pianta {1} {3}, dislivello {2} {3}": "3D {0} {3}, in plan {1} {3}, height difference {2} {3}",
+  ", lungo la superficie {0} {1}": ", along the surface {0} {1}",
+  "Area sul modello: in pianta {0} {2}, nel piano medio {1} {2}": "Area on the model: in plan {0} {2}, in the mean plane {1} {2}",
+  "; perimetro 3D {0} {2}, in pianta {1} {2}; pendenza {3}°": "; 3D perimeter {0} {2}, in plan {1} {2}; slope {3}°",
+  "Punto sul modello: X {0}  Y {1}  Z {2} {3} ({4})": "Point on the model: X {0}  Y {1}  Z {2} {3} ({4})",
+  ", superficie del modello {0} {1}": ", surface of the model {0} {1}",
+  "In pianta {0} {2}, perimetro 3D {1} {3}": "In plan {0} {2}, 3D perimeter {1} {3}"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",
