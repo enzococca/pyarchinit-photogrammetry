@@ -18,6 +18,14 @@ about as many. The raws of phones that are no sensor mosaic (linear DNG: Apple P
 phone completes them with a local tone map stored in the file, which LibRaw does not apply: eight such frames
 that align from their JPEGs did not align with the curve alone, and do with the local contrast of "local". On
 the raws of the other cameras "local" is too much (harsh textures), hence "auto". No tone moves a pixel.
+
+The phone's tone map is in the file, though: Apple ProRAW stores the look of the phone as DNG tags - BaselineExposure,
+a local tone map (ProfileGainTableMap: a gain for each place of the frame and each brightness) and a
+ProfileToneCurve - and the tone "file" applies them as the DNG specification says (:func:`_file_tone`); measured on
+real ProRAW frames it gives the tones of the phone's own JPEG within three grey levels. The phone also sharpens its
+JPEG at several scales (two to three times the amplitude of the development between 0.05 and 0.3 cycles per pixel):
+thirty frames of a vase that align all from their JPEGs aligned 27 from the faithful tones alone, all 30 with that
+detail back (:data:`_DETAIL`). "auto" is "file" with that detail for a linear DNG that has the map.
 """
 from __future__ import annotations
 
@@ -41,10 +49,18 @@ FORMATS = ("jpg", "tif")
 # the tone: "camera" the contrast curve of a camera JPEG (_tone_table), "local" the curve and the contrast evened
 # out over the frame (_local_contrast), "linear" neither; "auto" is "local" for a raw that is no sensor mosaic
 # (the linear DNG of the phones), "camera" for the others
-TONES = ("auto", "camera", "local", "linear")
-DEFAULTS = {"format": "jpg", "quality": 95, "exposure": 1.0, "tone": "auto", "half_size": False}
+# "file" the look the DNG carries (a phone's ProRAW), "local" for a raw that has none
+TONES = ("auto", "camera", "local", "linear", "file")
+# detail: the amount of the band boost (_DETAIL), "auto" that of the phones for the tone "file", 0 for the others
+DEFAULTS = {"format": "jpg", "quality": 95, "exposure": 1.0, "tone": "auto", "half_size": False, "detail": "auto"}
 _CURVE = (6.0, 0.4)  # the curve of "camera": the steepness of a logistic curve and the level it turns around
 _LOCAL = (3.0, 8)  # the local contrast: the limit of the equalisation and the tiles per side
+# the detail: a band between two Gaussian blurs (sigmas in pixels) added back times an amount; the amount of the phones
+# (tone "file") from the spectrum of ProRAW developments against the JPEGs of the same frames
+_DETAIL = (0.6, 3.0, 2.3)
+_STRIP = 512  # rows at a time for the tone map and the detail: memory bound with several raws developed at once
+# the DNG tags of the look: BaselineExposure, ProfileToneCurve, ProfileGainTableMap; SubIFDs
+_BASELINE_EXPOSURE, _TONE_CURVE, _GAIN_TABLE, _SUB_IFDS = 50730, 50940, 52525, 330
 FOLDER = "raw"  # in the chunk folder
 INDEX = "index.json"
 PREFER = ("jpeg", "raw")  # which file of a raw + JPEG pair becomes the photo
@@ -112,6 +128,15 @@ def settings(overrides: dict | None = None) -> dict:
     if out["tone"] not in TONES:
         raise ValueError(f"raw development: tone must be one of {', '.join(TONES)}")
     out["half_size"] = bool(out["half_size"])
+    if str(out["detail"]).lower() == "auto":
+        out["detail"] = "auto"
+    else:
+        try:
+            out["detail"] = round(float(out["detail"]), 3)
+        except ValueError:
+            raise ValueError("raw development: detail \"auto\" or between 0 and 4") from None
+        if not 0.0 <= out["detail"] <= 4.0:
+            raise ValueError("raw development: detail \"auto\" or between 0 and 4")
     return out
 
 
@@ -140,6 +165,142 @@ def _local_contrast(rgb):
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     lab[..., 0] = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles)).apply(lab[..., 0])
     return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+
+_TIFF_TYPES = {1: ("B", 1), 3: ("H", 2), 4: ("L", 4), 5: ("L", 8), 7: ("B", 1), 8: ("h", 2), 9: ("l", 4),
+               10: ("l", 8), 11: ("f", 4), 12: ("d", 8), 13: ("L", 4)}
+
+
+def _dng_look(path) -> dict | None:
+    """The look a DNG carries (Apple ProRAW): ``{"baseline": EV, "curve": (in, out) points or None, "gains": V x H x N
+    gains, "spacing": (v, h), "origin": (v, h), "weights": 5 floats}``, from the tags BaselineExposure,
+    ProfileToneCurve and ProfileGainTableMap of the main directory and its SubIFDs; ``None`` without a gain table
+    map (or for a file that is no TIFF, or one the map does not fit)."""
+    import struct
+
+    import numpy as np
+
+    found: dict[int, object] = {}
+    try:
+        with open(path, "rb") as fp:
+            head = fp.read(8)
+            if head[:4] not in (b"II*\x00", b"MM\x00*"):
+                return None
+            bo = "<" if head[:2] == b"II" else ">"
+
+            def walk(offset: int, depth: int) -> None:
+                fp.seek(offset)
+                (count,) = struct.unpack(bo + "H", fp.read(2))
+                entries = [struct.unpack(bo + "HHL4s", fp.read(12)) for _ in range(min(count, 4096))]
+                subs: list[int] = []
+                for tag, kind, n, value in entries:
+                    if tag not in (_BASELINE_EXPOSURE, _TONE_CURVE, _GAIN_TABLE, _SUB_IFDS) or kind not in _TIFF_TYPES:
+                        continue
+                    code, size = _TIFF_TYPES[kind]
+                    total = size * n
+                    if total <= 4:
+                        data = value[:total]
+                    else:
+                        fp.seek(struct.unpack(bo + "L", value)[0])
+                        data = fp.read(total)
+                    if tag == _GAIN_TABLE:
+                        found.setdefault(tag, data)
+                        continue
+                    numbers = struct.unpack(bo + code * (n * (2 if kind in (5, 10) else 1)), data)
+                    if kind in (5, 10):
+                        numbers = tuple(a / b if b else 0.0 for a, b in zip(numbers[0::2], numbers[1::2]))
+                    if tag == _SUB_IFDS:
+                        subs = list(numbers)
+                    else:
+                        found.setdefault(tag, numbers)
+                if depth < 2:
+                    for sub in subs:
+                        walk(int(sub), depth + 1)
+
+            walk(struct.unpack(bo + "L", head[4:8])[0], 0)
+    except (OSError, struct.error):
+        return None
+    blob = found.get(_GAIN_TABLE)
+    if not blob:
+        return None
+    for order in (bo, ">" if bo == "<" else "<"):  # the phones write it big-endian; the file's order is tried first
+        try:
+            v, h, sv, sh, ov, oh, n = struct.unpack(order + "LL4dL", blob[:44])
+            weights = struct.unpack(order + "5f", blob[44:64])
+        except struct.error:
+            return None
+        if v and h and n and 64 + 4 * v * h * n == len(blob):
+            gains = np.frombuffer(blob, order + "f4", v * h * n, 64).astype(np.float32).reshape(v, h, n)
+            curve = found.get(_TONE_CURVE)
+            return {"baseline": float((found.get(_BASELINE_EXPOSURE) or (0.0,))[0]),
+                    "curve": np.asarray(curve, np.float64).reshape(-1, 2) if curve and len(curve) >= 4 else None,
+                    "gains": gains, "spacing": (sv, sh), "origin": (ov, oh), "weights": weights}
+    return None
+
+
+def _file_tone(rgb16, look: dict, shift: float):
+    """The linear development ``rgb16`` (16 bit, linear sRGB) with the look of the DNG ``look`` (:func:`_dng_look`):
+    the baseline exposure, the gain of the map for each pixel - interpolated between the nodes around it and
+    between the two entries around its input value, the weighted sum of its R, G, B, smallest and largest
+    value - then ``shift`` EV, the tone curve and the sRGB curve to 8 bits. A gain per pixel: nothing moves."""
+    import numpy as np
+
+    h, w = rgb16.shape[:2]
+    gains = look["gains"]
+    nv, nh, nn = gains.shape
+    (sv, sh), (ov, oh) = look["spacing"], look["origin"]
+    wr, wg, wb, wmin, wmax = (np.float32(x) for x in look["weights"])
+
+    def nodes(count: int, size: int, origin: float, spacing: float):
+        pos = ((np.arange(size) + 0.5) / size - origin) / (spacing or 1.0)
+        first = np.clip(np.floor(pos).astype(np.int64), 0, max(count - 2, 0))
+        frac = np.clip(pos - first, 0.0, 1.0).astype(np.float32) if count > 1 else np.zeros(size, np.float32)
+        return first, np.minimum(first + 1, count - 1), frac
+
+    x0, x1, fx = nodes(nh, w, oh, sh)
+    rows0, rows1, frows = nodes(nv, h, ov, sv)
+    v = np.arange(65536) / 65535.0
+    if look["curve"] is not None:
+        v = np.interp(v, look["curve"][:, 0], look["curve"][:, 1])
+    v = np.where(v <= 0.0031308, 12.92 * v, 1.055 * np.clip(v, 0, 1) ** (1 / 2.4) - 0.055)
+    table = np.clip(v * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    scale = np.float32(2.0 ** look["baseline"] / 65535.0)
+    after = np.float32(2.0 ** shift * 65535.0)
+    out = np.empty((h, w, 3), np.uint8)
+    for top in range(0, h, _STRIP):
+        lin = rgb16[top:top + _STRIP].astype(np.float32) * scale
+        y0, y1, fy = rows0[top:top + _STRIP, None], rows1[top:top + _STRIP, None], frows[top:top + _STRIP, None]
+        value = (lin[..., 0] * wr + lin[..., 1] * wg + lin[..., 2] * wb + lin.min(axis=2) * wmin
+                 + lin.max(axis=2) * wmax)
+        k = np.clip(value, 0.0, 1.0) * (nn - 1)
+        k0 = np.minimum(k.astype(np.int64), max(nn - 2, 0))
+        k1 = np.minimum(k0 + 1, nn - 1)
+        fk = (k - k0).astype(np.float32)
+        gain = np.zeros(value.shape, np.float32)
+        for yy, wy in ((y0, 1 - fy), (y1, fy)):
+            for xx, wx in ((x0[None, :], 1 - fx[None, :]), (x1[None, :], fx[None, :])):
+                gain += (gains[yy, xx, k0] * (1 - fk) + gains[yy, xx, k1] * fk) * (wy * wx)
+        lin *= gain[..., None] * after
+        out[top:top + _STRIP] = table[np.clip(lin + 0.5, 0, 65535).astype(np.uint16)]
+    return out
+
+
+def _detail(rgb, amount: float):
+    """``rgb`` (8 bit) with the band between two blurs (:data:`_DETAIL`) added back ``amount`` times: the detail
+    a phone brings out in its JPEG. Symmetric blurs: nothing moves."""
+    import cv2
+    import numpy as np
+
+    small, large, _phone = _DETAIL
+    margin = int(np.ceil(4 * large))
+    h = rgb.shape[0]
+    out = np.empty_like(rgb)
+    for top in range(0, h, _STRIP):
+        a, b = max(0, top - margin), min(h, top + _STRIP + margin)
+        x = rgb[a:b].astype(np.float32)
+        y = x + np.float32(amount) * (cv2.GaussianBlur(x, (0, 0), small) - cv2.GaussianBlur(x, (0, 0), large))
+        out[top:top + _STRIP] = np.clip(y[top - a:top - a + _STRIP] + 0.5, 0, 255).astype(np.uint8)
+    return out
 
 
 def _half(rgb):
@@ -306,25 +467,40 @@ def develop_file(source: str | os.PathLike, target: str | os.PathLike, options: 
     source, target = Path(source), Path(target)
     gain = 2.0 ** opts["exposure"]
     tone = opts["tone"]
+    look = None
     try:
         with rawpy.imread(str(source)) as raw:
-            if tone == "auto":  # no mosaic: a raw the phone has already developed, flat until its tone map
-                tone = "local" if raw.raw_type != rawpy.RawType.Flat else "camera"
-            curve = tone != "linear"
             mosaic = raw.raw_type == rawpy.RawType.Flat
-            rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=16 if curve else 8,
-                                  user_flip=0, output_color=rawpy.ColorSpace.sRGB, half_size=opts["half_size"],
-                                  exp_shift=gain, exp_preserve_highlights=1.0 if gain > 1.0 else 0.0)
+            if tone == "file" or (tone == "auto" and not mosaic):  # a phone's raw: its own look, if it has one
+                look = _dng_look(source)
+                tone = "file" if look is not None else ("camera" if mosaic and tone == "auto" else "local")
+            if tone == "auto":  # a mosaic: the curve of a camera JPEG
+                tone = "camera"
+            if tone == "file" and look is None:  # asked for a raw that carries no look
+                tone = "camera" if mosaic else "local"
+            curve = tone != "linear"
+            if tone == "file":  # linear: the look is applied below, the exposure shift with it
+                rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=16, gamma=(1, 1),
+                                      user_flip=0, output_color=rawpy.ColorSpace.sRGB, half_size=opts["half_size"])
+            else:
+                rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=16 if curve else 8,
+                                      user_flip=0, output_color=rawpy.ColorSpace.sRGB, half_size=opts["half_size"],
+                                      exp_shift=gain, exp_preserve_highlights=1.0 if gain > 1.0 else 0.0)
     except rawpy.LibRawError as exc:
         from ..gui.i18n import tr
 
         raise ValueError(tr("File raw non leggibile: {0} ({1})", source.name, exc)) from exc
     if opts["half_size"] and not mosaic:  # LibRaw halves a mosaic only: a linear DNG is halved here
         rgb = _half(rgb)
-    if curve:  # from the 16 bits of the development: no steps in the tones the curve spreads
+    if tone == "file":  # the shift is relative to the default: the default exposure gives the phone's own brightness
+        rgb = _file_tone(rgb, look, opts["exposure"] - DEFAULTS["exposure"])
+    elif curve:  # from the 16 bits of the development: no steps in the tones the curve spreads
         rgb = _tone_table()[rgb]
     if tone == "local":
         rgb = _local_contrast(rgb)
+    detail = opts["detail"] if opts["detail"] != "auto" else (_DETAIL[2] if tone == "file" else 0.0)
+    if detail > 0:
+        rgb = _detail(rgb, detail)
     exif = _exif_bytes(read_raw_exif(source) if info is None else info)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + ".part")

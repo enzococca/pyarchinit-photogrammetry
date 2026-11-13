@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-_BYTE, _ASCII, _SHORT, _LONG, _RATIONAL, _SRATIONAL = 1, 2, 3, 4, 5, 10
-_SIZES = {_BYTE: 1, _ASCII: 1, _SHORT: 2, _LONG: 4, _RATIONAL: 8, _SRATIONAL: 8}
+_BYTE, _ASCII, _SHORT, _LONG, _RATIONAL, _UNDEFINED, _SRATIONAL, _FLOAT = 1, 2, 3, 4, 5, 7, 10, 11
+_SIZES = {_BYTE: 1, _ASCII: 1, _SHORT: 2, _LONG: 4, _RATIONAL: 8, _UNDEFINED: 1, _SRATIONAL: 8, _FLOAT: 4}
 # XYZ (D65) -> linear sRGB: with it as the colour matrix the "camera" colours are linear sRGB
 _XYZ_TO_SRGB = (3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252)
 WHITE = 65535
@@ -19,8 +19,10 @@ WHITE = 65535
 def _pack(kind: int, values) -> bytes:
     if kind == _ASCII:
         return values.encode("ascii") + b"\x00"
-    if kind == _BYTE:
+    if kind in (_BYTE, _UNDEFINED):
         return bytes(values)
+    if kind == _FLOAT:
+        return struct.pack(f"<{len(values)}f", *values)
     if kind == _SHORT:
         return struct.pack(f"<{len(values)}H", *values)
     if kind == _LONG:
@@ -77,6 +79,16 @@ def bayer(rgb: np.ndarray) -> np.ndarray:
     return np.clip(np.round(raw * WHITE), 0, WHITE).astype("<u2")
 
 
+def gain_table_bytes(gains, spacing=(1.0, 1.0), origin=(0.0, 0.0), weights=(0.0, 0.0, 0.0, 0.0, 1.0)) -> bytes:
+    """A ProfileGainTableMap as the phones write it, big-endian: the nodes (``gains`` V x H x N: for each node of a
+    grid over the frame - at ``origin + index * spacing``, as fractions of its height and width - the gain for N
+    input values evenly from 0 to 1), the input value of a pixel being ``weights`` . (R, G, B, min, max)."""
+    g = np.asarray(gains, np.float32)
+    v, h, n = g.shape
+    return (struct.pack(">LL4dL5f", v, h, spacing[0], spacing[1], origin[0], origin[1], n, *weights)
+            + g.astype(">f4").tobytes())
+
+
 def _dms(value: float) -> list[float]:
     seconds = round(abs(value) * 3600, 4)
     d, rest = divmod(seconds, 3600)
@@ -87,10 +99,17 @@ def _dms(value: float) -> list[float]:
 def write_dng(path, rgb: np.ndarray, *, make: str = "PPG", model: str = "Synthetic", lens: str | None = None,
               focal_length_mm: float | None = None, focal_length_35mm: float | None = None,
               datetime: str | None = "2026:01:01 12:00:00", gps: tuple[float, float, float] | None = None,
-              orientation: int = 1, xmp: str | None = None, mosaic: bool = True) -> Path:
+              orientation: int = 1, xmp: str | None = None, mosaic: bool = True,
+              baseline_exposure: float | None = None, gain_table: dict | None = None,
+              tone_curve: list[tuple[float, float]] | None = None) -> Path:
     """Write ``rgb`` (H x W x 3, uint8, even sides) as a Bayer DNG at ``path``. ``gps`` is ``(lon, lat, alt)``;
     ``orientation`` the EXIF value (6 or 8: the camera was held upright; the pixels stay as the sensor read them);
-    ``mosaic`` False writes a linear DNG (three colours per pixel, as the raws of the phones)."""
+    ``mosaic`` False writes a linear DNG (three colours per pixel, as the raws of the phones).
+
+    The look a phone stores with its linear DNG (Apple ProRAW): ``baseline_exposure`` in EV (BaselineExposure),
+    ``gain_table`` the local tone map (ProfileGainTableMap: ``{"gains": V x H x N array, "spacing": (v, h),
+    "origin": (v, h), "weights": five floats}``, see :func:`gain_table_bytes`), ``tone_curve`` the (in, out) points
+    of the ProfileToneCurve."""
     rgb = np.asarray(rgb)
     if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.shape[0] % 2 or rgb.shape[1] % 2:
         raise ValueError("write_dng needs an H x W x 3 image with even sides")
@@ -140,6 +159,12 @@ def write_dng(path, rgb: np.ndarray, *, make: str = "PPG", model: str = "Synthet
         main.add(306, _ASCII, datetime)
     if xmp:
         main.add(700, _BYTE, xmp.encode("utf-8"))
+    if baseline_exposure is not None:
+        main.add(50730, _SRATIONAL, [baseline_exposure])
+    if tone_curve is not None:
+        main.add(50940, _FLOAT, [v for point in tone_curve for v in point])
+    if gain_table is not None:
+        main.add(52525, _UNDEFINED, gain_table_bytes(**gain_table))
     if mosaic:
         main.add(33421, _SHORT, [2, 2])
         main.add(33422, _BYTE, [0, 1, 1, 2])  # RGGB

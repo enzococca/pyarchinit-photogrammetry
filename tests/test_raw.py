@@ -90,6 +90,67 @@ def test_the_tone_follows_the_kind_of_raw_and_moves_nothing(tmp_path):
             assert abs(dx) < 0.2 and abs(dy) < 0.2, (src.name, tone, dx, dy)
 
 
+def test_a_phone_raw_is_developed_with_its_own_tone_map(tmp_path):
+    """Apple ProRAW keeps the phone's look in the file: BaselineExposure, a local tone map (ProfileGainTableMap)
+    and a ProfileToneCurve, none of which LibRaw applies. The tone "file" applies them as the DNG specification
+    says; "auto" takes it for a linear DNG that has the map. Here the map brightens the left of the frame twice as
+    much as the right, the baseline exposure is half a stop, and the curve is the identity."""
+    from pyarchinit_photogrammetry.testing.rawfile import linear
+
+    img = picture(4)
+    gains = np.empty((2, 2, 2), np.float32)
+    gains[:, 0], gains[:, 1] = 2.0, 1.0  # left column of nodes, right column; the same for every input value
+    look = {"baseline_exposure": 0.5, "tone_curve": [(0.0, 0.0), (1.0, 1.0)],
+            "gain_table": {"gains": gains, "spacing": (1.0, 1.0), "origin": (0.0, 0.0)}}
+    phone = write_dng(tmp_path / "phone.dng", img, mosaic=False, **look)
+
+    def developed(src, **opts):
+        out = tmp_path / f"{src.stem}_{len(list(tmp_path.glob('*.tif')))}.tif"
+        rawio.develop_file(src, out, {"format": "tif", **opts})
+        return cv2.cvtColor(cv2.imread(str(out)), cv2.COLOR_BGR2RGB).astype(np.float32)
+
+    h, w = img.shape[:2]
+    gain = 2.0 - (np.arange(w) + 0.5) / w  # from 2 at the left edge to 1 at the right one
+    lin = np.clip(linear(img) * 2 ** 0.5 * gain[None, :, None], 0, 1)
+    expected = 255 * np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+    out = developed(phone, tone="file", detail=0)
+    assert np.abs(out - expected).mean() < 3.0
+    assert np.array_equal(developed(phone), developed(phone, tone="file"))  # "auto" is the file's own tone
+    flat = write_dng(tmp_path / "flat.dng", img, mosaic=False)  # a linear DNG without a map: the local contrast
+    assert np.array_equal(developed(flat), developed(flat, tone="local"))
+    assert np.array_equal(developed(flat, tone="file"), developed(flat, tone="local"))
+    camera = write_dng(tmp_path / "camera.dng", img, **look)  # a mosaic: the curve of a camera JPEG as before
+    assert np.array_equal(developed(camera), developed(camera, tone="camera"))
+    with pytest.raises(ValueError):
+        rawio.settings({"detail": 9})
+
+
+def test_the_detail_of_a_phone_raw_is_brought_out_as_the_phone_does(tmp_path):
+    """The phone sharpens its JPEG at several scales; measured on real ProRAW frames the JPEG has two to three
+    times the amplitude of the development at 0.05-0.3 cycles per pixel, and the frames match and align as the
+    JPEGs only with that detail back. "auto" detail does it for the tone "file", 0 not; nothing moves."""
+    img = picture(6, (320, 240))
+    gains = np.ones((2, 2, 2), np.float32)
+    phone = write_dng(tmp_path / "phone.dng", img, mosaic=False, baseline_exposure=0.0,
+                      gain_table={"gains": gains}, tone_curve=[(0.0, 0.0), (1.0, 1.0)])
+
+    def developed(**opts):
+        out = tmp_path / f"d{len(list(tmp_path.glob('*.tif')))}.tif"
+        rawio.develop_file(phone, out, {"format": "tif", "tone": "file", **opts})
+        return cv2.imread(str(out), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+
+    plain, auto = developed(detail=0), developed()
+
+    def band(g):
+        return (cv2.GaussianBlur(g, (0, 0), 1.0) - cv2.GaussianBlur(g, (0, 0), 2.5)).std()
+
+    assert band(auto) > 2.0 * band(plain)
+    assert abs(auto.mean() - plain.mean()) < 2.0
+    (dx, dy), _response = cv2.phaseCorrelate(plain, auto)
+    assert abs(dx) < 0.1 and abs(dy) < 0.1
+    assert np.array_equal(developed(detail=0, half_size=True).shape, (120, 160))
+
+
 def test_the_libraries_of_the_pipeline_do_not_read_a_raw_but_read_its_copy(tmp_path):
     import pycolmap
     from PIL import Image
@@ -365,11 +426,13 @@ def test_command_line(tmp_path):
     assert r.exit_code == 0 and "added 2 photos" in r.output, r.output
     ch = ppg.Document.open(tmp_path / "scavo.ppg").chunks[0]
     assert sorted(Path(c.path).name for c in ch.cameras) == ["IMG_0000.tif", "IMG_0001.tif"]
-    r = run.invoke(app, ["develop-raw", str(tmp_path / "scavo.ppg"), "--raw-format", "jpg", "--raw-exposure", "0"])
+    r = run.invoke(app, ["develop-raw", str(tmp_path / "scavo.ppg"), "--raw-format", "jpg", "--raw-exposure", "0",
+                         "--raw-detail", "1.5"])
     assert r.exit_code == 0 and "developed 2 raw files" in r.output, r.output
     ch = ppg.Document.open(tmp_path / "scavo.ppg").chunks[0]
     assert sorted(Path(c.path).name for c in ch.cameras) == ["IMG_0000.jpg", "IMG_0001.jpg"]
     assert ch.cameras[0].meta["raw"]["settings"]["exposure"] == 0.0
+    assert ch.cameras[0].meta["raw"]["settings"]["detail"] == 1.5
 
 
 def test_doctor_names_the_raw_decoder():

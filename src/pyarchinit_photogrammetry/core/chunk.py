@@ -202,7 +202,8 @@ class Chunk:
         Camera raw files (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF...: :mod:`..io.raw`, needs rawpy) are
         developed once into the chunk folder, all in the same way, and the camera points to the developed copy:
         ``camera.meta["raw"]`` names the raw file, whose EXIF is the camera's. ``raw``: the development
-        (``format`` "jpg" or "tif", ``quality``, ``exposure`` in EV, ``tone`` "auto", "camera", "local" or "linear", ``half_size``; default
+        (``format`` "jpg" or "tif", ``quality``, ``exposure`` in EV, ``tone`` "auto", "camera", "local", "file" or "linear",
+        ``half_size``, ``detail``; default
         :data:`..io.raw.DEFAULTS`). A raw and an image of the same shot (same folder and name) make one photo:
         the image by default, the raw with ``prefer="raw"``; a shot already in the chunk is not added again."""
         from ..gnss.apply import accuracy, keep_only_fix, set_camera_position
