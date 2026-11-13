@@ -5402,7 +5402,9 @@ def web_serve(folder: Path,
               port: int = typer.Option(8765, "--port", help="0: a free port"),
               host: str = typer.Option("127.0.0.1", "--host", help="the address listened on; the default is this "
                                        "computer alone"),
-              open_browser: bool = typer.Option(False, "--open", help="open the page in the browser")):
+              open_browser: bool = typer.Option(False, "--open", help="open the page in the browser"),
+              no_ranges: bool = typer.Option(False, "--no-ranges", help="answer with whole files, as a host "
+                                             "without range requests: to see what the page does there")):
     """Serve a site folder to look at it (HTTP range requests, which the page needs to read the rasters)."""
     from .io import site
 
@@ -5410,7 +5412,7 @@ def web_serve(folder: Path,
         typer.echo(f"{folder} is not a site: no {site.MANIFEST} (ppg web build writes one)", err=True)
         raise typer.Exit(1)
     try:
-        httpd = site.server(folder, host=host, port=port)
+        httpd = site.server(folder, host=host, port=port, ranges=not no_ranges)
     except OSError as exc:
         typer.echo(f"cannot listen on {host}:{port}: {exc}", err=True)
         raise typer.Exit(1) from None

@@ -8,7 +8,7 @@ import {WORDS, pick} from './i18n.js';
 const ol = window.ol;
 const $ = (id) => document.getElementById(id);
 const state = {site: null, language: 'it', map: null, entries: [], dems: [], hidden: new Set(), draw: null,
-  last: null};
+  last: null, whole: false, left: []};
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -35,8 +35,40 @@ function faded(colour, alpha) {
 }
 
 // ---------------------------------------------------------------------------------------------- layers
-async function pictureLayer(def, projection) {
-  const cog = await open(def.url);
+// A raster of the site, or null when the host does not serve range requests and the file is too large to be
+// taken whole: the layer is left out and the page says which (see showNotice).
+async function raster(chunk, def) {
+  const limit = Number(new URLSearchParams(window.location.search).get('whole-limit')) || undefined;
+  try {
+    const cog = await open(def.url, limit);
+    if (cog.whole) state.whole = true;
+    return cog;
+  } catch (error) {
+    if (error.code !== 'no-ranges') throw error;
+    state.whole = true;
+    state.left.push({chunk, def, size: error.size});
+    return null;
+  }
+}
+
+function showNotice() {
+  const box = $('notice');
+  box.hidden = !state.whole;
+  document.documentElement.dataset.ranges = state.whole ? 'none' : 'served';
+  if (!state.whole) return;
+  box.replaceChildren(el('p', word('noRanges')));
+  if (!state.left.length) return;
+  box.append(el('p', word('noRangesLeft')));
+  const list = el('ul');
+  const several = state.site.chunks.length > 1;
+  for (const {chunk, def, size} of state.left) {
+    const name = (several ? `${chunk.label}: ` : '') + pick(def.title, state.language);
+    list.append(el('li', size ? `${name} (${Math.ceil(size / 1048576)} MB)` : name));
+  }
+  box.append(list);
+}
+
+function pictureLayer(def, projection, cog) {
   const full = cog.levels[0];
   const order = cog.levels.map((lv, i) => ({i, factor: 2 ** Math.round(Math.log2(full.width / lv.width))}))
     .sort((a, b) => b.factor - a.factor); // the coarsest first, as the map wants
@@ -190,6 +222,7 @@ function showWords() {
   const generator = site.generator || {};
   foot.append(el('p', `${word('made')} ${generator.name || ''} ${generator.version || ''} · OpenLayers`));
   layerList();
+  showNotice();
   showInfo();
   if (!state.draw) $('measure-out').textContent = '';
 }
@@ -293,11 +326,13 @@ async function start() {
   const layers = [];
   for (const chunk of site.chunks) {
     for (const def of [...chunk.layers].sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9))) {
+      const cog = def.type === 'vector' ? null : await raster(chunk, def);
+      if (def.type !== 'vector' && !cog) continue; // left out: the notice names it
       if (def.type === 'heights') {
-        state.dems.push(await open(def.url));
+        state.dems.push(cog);
         continue;
       }
-      const layer = def.type === 'image' ? await pictureLayer(def, projection) : await vectorLayer(def, projection);
+      const layer = def.type === 'image' ? pictureLayer(def, projection, cog) : await vectorLayer(def, projection);
       state.entries.push({chunk, def, layer});
       layers.push(layer);
     }

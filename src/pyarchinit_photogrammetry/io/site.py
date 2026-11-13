@@ -14,8 +14,8 @@
         drawings.geojson  spot heights, break lines, measuring points and free drawings, each with its ``layer``
 
 ``frame``: ``"local"`` (default) shifts every coordinate to an origin at the centre of the survey (whole metres; the
-heights to the whole metre under the lowest cell of the DEMs and the lowest drawn height, so that none is under zero)
-and writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written either. ``"crs"`` keeps the coordinates and the reference
+heights to the whole metre under the lowest cell of the DEMs, read whole, so that no cell is under zero; under the
+lowest drawn height where there is no DEM) and writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written either. ``"crs"`` keeps the coordinates and the reference
 system of the chunks: an explicit choice. In both frames the rasters go through a description of their pixels alone
 (a VRT), so no tag of the source files reaches the site, the photos and their EXIF are never copied, and every text
 typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
@@ -479,9 +479,12 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     shift = _Shift()
     if frame == "local":
         box = _union(p["box"] for p in plan)
-        # the heights start at the whole metre under the lowest cell of the DEMs and the lowest drawn height:
-        # nothing of the site is under zero, and the true heights are not told
-        lows = [p["heights"][0] for p in plan if p["heights"]] + [p["lowest"] for p in plan if p["lowest"] is not None]
+        # the heights start at the whole metre under the lowest cell of the DEMs: no cell is under zero and the
+        # true heights are not told. The drawn heights decide only where there is no DEM: a drawing made
+        # without heights lies at zero, and taking it as the base would publish the true heights of all the rest
+        lows = [p["heights"][0] for p in plan if p["heights"]]
+        if not lows:
+            lows = [p["lowest"] for p in plan if p["lowest"] is not None]
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
                        float(math.floor(min(lows))) if lows else 0.0)
     written_crs = crs if frame == "crs" else None
@@ -597,10 +600,12 @@ def _byte_range(header: str, size: int) -> tuple[int, int] | None:
 
 
 class _Handler(SimpleHTTPRequestHandler):
-    """Files of the folder, with ``Range`` requests of one range (206, ``Content-Range``); no list of a folder."""
+    """Files of the folder, with ``Range`` requests of one range (206, ``Content-Range``); no list of a folder.
+    ``ranges`` False: as a host that ignores ``Range`` and answers with the whole file."""
 
     protocol_version = "HTTP/1.1"
     quiet = True
+    ranges = True
 
     def guess_type(self, path):
         return _TYPES.get(Path(str(path)).suffix.lower()) or super().guess_type(path)
@@ -610,7 +615,8 @@ class _Handler(SimpleHTTPRequestHandler):
         return None
 
     def end_headers(self):
-        self.send_header("Accept-Ranges", "bytes")
+        if self.ranges:
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
@@ -618,7 +624,7 @@ class _Handler(SimpleHTTPRequestHandler):
         self._left = None
         header = self.headers.get("Range")
         path = Path(self.translate_path(self.path))
-        if not header or not path.is_file():
+        if not header or not self.ranges or not path.is_file():
             return super().send_head()
         size = path.stat().st_size
         span = _byte_range(header, size)
@@ -660,17 +666,28 @@ class _Handler(SimpleHTTPRequestHandler):
             super().log_message(format, *args)
 
 
-def server(folder: str | os.PathLike, host: str = "127.0.0.1", port: int = 0, quiet: bool = True):
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        import sys
+
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return  # the browser dropped a download it no longer wants: nothing to report
+        super().handle_error(request, client_address)
+
+
+def server(folder: str | os.PathLike, host: str = "127.0.0.1", port: int = 0, quiet: bool = True,
+           ranges: bool = True):
     """A static server of ``folder`` with range requests, bound to ``host`` (this computer alone by default) and
     ``port`` (0: a free one, read it from ``server_address``); not started: ``serve_forever()`` runs it,
-    ``shutdown()`` and ``server_close()`` end it."""
+    ``shutdown()`` and ``server_close()`` end it. ``ranges`` False: the whole file whatever is asked, to see the
+    page as on a host without range requests."""
     folder = Path(folder)
     if not folder.is_dir():
         raise FileNotFoundError(f"{folder} is not a folder")
-    handler = type("SiteHandler", (_Handler,), {"quiet": quiet})
-    httpd = ThreadingHTTPServer((host, port), partial(handler, directory=str(folder)))
-    httpd.daemon_threads = True
-    return httpd
+    handler = type("SiteHandler", (_Handler,), {"quiet": quiet, "ranges": ranges})
+    return _Server((host, port), partial(handler, directory=str(folder)))
 
 
 __all__ = ["export_site", "server", "FRAMES", "PRODUCTS", "LANGUAGES", "MANIFEST", "FORMAT", "FORMAT_VERSION"]

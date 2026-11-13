@@ -10,6 +10,10 @@ export const WORDS = {
     local: 'Coordinate locali: origine al centro del rilievo, quote relative.',
     crs: 'Sistema di riferimento', loading: 'Caricamento…',
     failed: 'La pagina non ha potuto leggere i dati del rilievo.',
+    noRanges: 'Questo server non dà i file a pezzi (richieste HTTP Range): le immagini e le quote sono '
+      + 'scaricate per intero, e la pagina è più lenta.',
+    noRangesLeft: 'Troppo grandi per essere scaricati per intero, questi livelli non sono mostrati. '
+      + 'Serve un server che risponda alle richieste Range:',
     made: 'Fatto con', language: 'English', fit: 'Tutto il rilievo',
   },
   en: {
@@ -21,6 +25,10 @@ export const WORDS = {
     local: 'Local coordinates: origin at the centre of the survey, relative heights.',
     crs: 'Reference system', loading: 'Loading…',
     failed: 'The page could not read the data of the survey.',
+    noRanges: 'This host does not serve files by parts (HTTP range requests): the pictures and the heights '
+      + 'are downloaded whole, and the page is slower.',
+    noRangesLeft: 'Too large to be downloaded whole, these layers are not shown. '
+      + 'A host that answers range requests is needed:',
     made: 'Made with', language: 'Italiano', fit: 'Whole survey',
   },
 };

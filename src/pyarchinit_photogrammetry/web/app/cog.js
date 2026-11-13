@@ -1,26 +1,77 @@
 // A small reader of the Cloud Optimized GeoTIFFs this program writes for a site: tiled, with overviews,
 // tiles in WebP (pictures) or deflate with the floating-point predictor (heights). It asks the server for the
-// parts it needs (HTTP range requests) and falls back to the whole file where ranges are not served.
+// parts it needs (HTTP range requests). Where the host does not serve ranges and answers with the whole file,
+// the file is taken whole if it is small enough (WHOLE_LIMIT) and refused otherwise (NoRanges): the page says so.
 // Not a general GeoTIFF reader: strips, JPEG, LZW and palettes are refused with a message.
 
 const HEAD = 65536; // read at once: a COG keeps its directories and tile indexes at the start
 const SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 16: 8, 17: 8, 18: 8};
 const WEBP = 50001;
 const DEFLATE = [8, 32946];
+export const WHOLE_LIMIT = 50 * 1024 * 1024; // the largest file taken whole from a host without ranges
+
+// The host answered a request of a part with the whole file, and the file is too large to take it so.
+export class NoRanges extends Error {
+  constructor(url, size) {
+    super(`${url}: the host does not serve range requests`);
+    this.code = 'no-ranges';
+    this.size = size; // bytes, null when the host does not say
+  }
+}
+
+// The body of an answer that is the whole file, read up to ``limit`` bytes and no further.
+async function wholeFile(answer, url, limit) {
+  const declared = Number(answer.headers.get('Content-Length'));
+  const stop = async (size) => {
+    try {
+      if (answer.body) await answer.body.cancel();
+    } catch (error) { /* already closed */ }
+    throw new NoRanges(url, size);
+  };
+  if (declared > limit) await stop(declared);
+  if (!answer.body) {
+    const all = await answer.arrayBuffer();
+    if (all.byteLength > limit) throw new NoRanges(url, all.byteLength);
+    return all;
+  }
+  const reader = answer.body.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      try {
+        await reader.cancel();
+      } catch (error) { /* already closed */ }
+      throw new NoRanges(url, declared > 0 ? declared : null);
+    }
+    parts.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    all.set(part, at);
+    at += part.byteLength;
+  }
+  return all.buffer;
+}
 
 class Bytes {
-  constructor(url) {
+  constructor(url, limit = WHOLE_LIMIT) {
     this.url = url;
+    this.limit = limit;
     this.head = null;
-    this.whole = null;
+    this.whole = null; // the file, when the host gave it whole instead of the part asked for
   }
 
   async read(offset, length) {
     if (this.whole) return this.whole.slice(offset, offset + length);
     if (this.head && offset + length <= this.head.byteLength) return this.head.slice(offset, offset + length);
     const answer = await fetch(this.url, {headers: {Range: `bytes=${offset}-${offset + length - 1}`}});
-    if (answer.status === 200) { // a server without ranges: the file once, whole
-      this.whole = await answer.arrayBuffer();
+    if (answer.status === 200) { // a host without ranges: the file once, whole, if it is not too large
+      this.whole = await wholeFile(answer, this.url, this.limit);
       return this.whole.slice(offset, offset + length);
     }
     if (answer.status !== 206) throw new Error(`${this.url}: HTTP ${answer.status}`);
@@ -123,6 +174,7 @@ export class Cog {
   constructor(bytes, levels) {
     this.bytes = bytes;
     this.levels = levels; // the full image first, then its overviews, smaller and smaller
+    this.whole = bytes.whole !== null; // read whole: the host does not serve range requests
     const full = levels[0];
     const scale = full.tags.get(33550);
     const tie = full.tags.get(33922);
@@ -207,8 +259,10 @@ export class Cog {
   }
 }
 
-export async function open(url) {
-  const bytes = new Bytes(url);
+// ``limit``: the largest file taken whole where the host does not serve ranges (NoRanges beyond it); the
+// ``whole`` of the reader says whether that happened.
+export async function open(url, limit = WHOLE_LIMIT) {
+  const bytes = new Bytes(url, limit);
   bytes.head = await bytes.read(0, HEAD);
   const found = await directories(bytes);
   const levels = [];
