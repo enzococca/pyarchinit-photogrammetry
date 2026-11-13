@@ -36,7 +36,8 @@ RAW_EXTENSIONS = frozenset({
     ".srw", ".3fr", ".fff", ".iiq", ".erf", ".kdc", ".dcr", ".mrw", ".mos", ".mef", ".rwl", ".x3f"})
 FORMATS = ("jpg", "tif")
 # the development of a raw: file of the copy, JPEG quality, exposure shift in EV (the same for every frame),
-# half the size (one pixel per 2x2 cell of the sensor: four times less disk and time)
+# half the size (one pixel per 2x2 cell of the sensor: four times less disk and time; a linear DNG, which has no
+# cells, is developed whole and then averaged 2x2: the same size, less time saved)
 # the tone: "camera" the contrast curve of a camera JPEG (_tone_table), "local" the curve and the contrast evened
 # out over the frame (_local_contrast), "linear" neither; "auto" is "local" for a raw that is no sensor mosaic
 # (the linear DNG of the phones), "camera" for the others
@@ -139,6 +140,17 @@ def _local_contrast(rgb):
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     lab[..., 0] = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles)).apply(lab[..., 0])
     return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+
+def _half(rgb):
+    """``rgb`` at half the size, each pixel the mean of a 2x2 cell (an odd last row or column dropped): what the
+    half size of LibRaw gives a sensor mosaic, one pixel per cell with its centre in the middle of the cell, for a
+    raw LibRaw does not halve (a linear DNG has no mosaic)."""
+    import numpy as np
+
+    h, w = rgb.shape[0] // 2, rgb.shape[1] // 2
+    cells = rgb[: 2 * h, : 2 * w].reshape(h, 2, w, 2, -1).astype(np.uint32).sum(axis=(1, 3))
+    return ((cells + 2) // 4).astype(rgb.dtype)
 
 
 # ------------------------------------------------------------------ pairs
@@ -299,6 +311,7 @@ def develop_file(source: str | os.PathLike, target: str | os.PathLike, options: 
             if tone == "auto":  # no mosaic: a raw the phone has already developed, flat until its tone map
                 tone = "local" if raw.raw_type != rawpy.RawType.Flat else "camera"
             curve = tone != "linear"
+            mosaic = raw.raw_type == rawpy.RawType.Flat
             rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=16 if curve else 8,
                                   user_flip=0, output_color=rawpy.ColorSpace.sRGB, half_size=opts["half_size"],
                                   exp_shift=gain, exp_preserve_highlights=1.0 if gain > 1.0 else 0.0)
@@ -306,6 +319,8 @@ def develop_file(source: str | os.PathLike, target: str | os.PathLike, options: 
         from ..gui.i18n import tr
 
         raise ValueError(tr("File raw non leggibile: {0} ({1})", source.name, exc)) from exc
+    if opts["half_size"] and not mosaic:  # LibRaw halves a mosaic only: a linear DNG is halved here
+        rgb = _half(rgb)
     if curve:  # from the 16 bits of the development: no steps in the tones the curve spreads
         rgb = _tone_table()[rgb]
     if tone == "local":

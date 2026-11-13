@@ -72,7 +72,7 @@ kept in `camera.meta["orientation"]`). `raw` changes it:
 | `quality` | `95` | JPEG quality |
 | `exposure` | `1.0` | exposure in EV, the same for all the frames: a linear development is about a stop darker than the JPEG of the camera; `0` leaves the values of the sensor |
 | `tone` | `"auto"` | the contrast of the copy (below): `"camera"`, `"local"`, `"linear"`, or `"auto"` |
-| `half_size` | `False` | half resolution (no demosaicking): quick trials |
+| `half_size` | `False` | half resolution, quick trials (a mosaic: one pixel per 2x2 cell, no demosaicking; a linear DNG such as ProRAW: developed whole, then each 2x2 cell averaged) |
 
 A linear development is much flatter than the JPEG a camera writes, and the alignment finds its key
 points by their contrast: on raws of four cameras the linear copies gave from a third to a sixth of the

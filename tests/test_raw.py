@@ -236,6 +236,26 @@ def test_half_size_stays_as_the_photos_were_added(tmp_path):
     assert cv2.imread(cams[0].path).shape == (60, 80, 3) and cams[0].meta["raw"]["settings"]["half_size"] is True
 
 
+def test_half_size_halves_every_raw(tmp_path):
+    """LibRaw's half size takes one pixel per 2x2 cell of a sensor mosaic; a linear DNG (Apple ProRAW) has no
+    mosaic and LibRaw leaves it whole. The copy is halved all the same, each pixel the mean of its 2x2 cell (the
+    pixel centres where a mosaic's half size puts them: no shift)."""
+    img = picture(5)
+    for mosaic in (True, False):
+        src = write_dng(tmp_path / f"m{int(mosaic)}.dng", img, mosaic=mosaic)
+        full, half = tmp_path / f"m{int(mosaic)}_full.tif", tmp_path / f"m{int(mosaic)}_half.tif"
+        opts = {"format": "tif", "exposure": 0.0, "tone": "linear"}
+        assert rawio.develop_file(src, full, opts) == (160, 120)
+        assert rawio.develop_file(src, half, {**opts, "half_size": True}) == (80, 60), mosaic
+        big = cv2.imread(str(full), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        small = cv2.imread(str(half), cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        assert small.shape == (60, 80)
+        expected = cv2.resize(big, (80, 60), interpolation=cv2.INTER_AREA)
+        assert np.abs(small - expected).mean() < 4.0, mosaic
+        (dx, dy), _response = cv2.phaseCorrelate(expected, small)
+        assert abs(dx) < 0.2 and abs(dy) < 0.2, (mosaic, dx, dy)
+
+
 def test_cancelling_the_development(tmp_path):
     files = raws(tmp_path / "foto", 6)
     progress = Progress(lambda f, m: progress.cancel() if f > 0 else None)

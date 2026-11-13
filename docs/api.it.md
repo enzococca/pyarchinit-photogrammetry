@@ -72,7 +72,7 @@ condividono un sensore; l'orientamento resta in `camera.meta["orientation"]`). `
 | `quality` | `95` | qualità del JPEG |
 | `exposure` | `1.0` | esposizione in EV, uguale per tutti i fotogrammi: uno sviluppo lineare è circa uno stop più scuro del JPEG della fotocamera; `0` lascia i valori del sensore |
 | `tone` | `"auto"` | il contrasto della copia (sotto): `"camera"`, `"local"`, `"linear"` o `"auto"` |
-| `half_size` | `False` | metà risoluzione (senza demosaicizzazione): prove veloci |
+| `half_size` | `False` | metà risoluzione, prove veloci (un mosaico: un pixel per cella 2x2, senza demosaicizzazione; un DNG lineare come ProRAW: sviluppato intero, poi media di ogni cella 2x2) |
 
 Uno sviluppo lineare è molto più piatto del JPEG che scrive una fotocamera, e l'allineamento trova i
 punti chiave dal loro contrasto: su raw di quattro fotocamere le copie lineari hanno dato da un terzo
