@@ -89,7 +89,9 @@ def test_local_site_folder_and_manifest(trench_site):
     for layer in chunk["layers"]:
         assert (site / layer["url"]).is_file() and set(layer["title"]) == {"it", "en"}
     for name in ("index.html", "app/main.js", "app/cog.js", "app/i18n.js", "app/style.css", "app/vendor/ol.js",
-                 "app/vendor/ol.css", "app/vendor/OPENLAYERS-LICENSE.md", "app/THIRD_PARTY.txt"):
+                 "app/vendor/ol.css", "app/vendor/OPENLAYERS-LICENSE.md", "app/vendor/RBUSH-LICENSE.txt",
+                 "app/vendor/QUICKSELECT-LICENSE.txt", "app/vendor/EARCUT-LICENSE.txt",
+                 "app/vendor/PBF-LICENSE.txt", "app/THIRD_PARTY.txt"):
         assert (site / name).is_file(), name
     assert "<title>Saggio di prova</title>" in (site / "index.html").read_text(encoding="utf-8")
     assert not [p.name for p in site.iterdir() if p.name.startswith(".")]  # the working folder is gone
@@ -340,6 +342,14 @@ def test_viewer_needs_nothing_from_the_network():
 
     digest = hashlib.sha256((site_mod.VIEWER / "app/vendor/ol.js").read_bytes()).hexdigest()
     assert digest in notice  # the file is the one of the release named in the notice
+    assert (site_mod.VIEWER / "app/vendor/ol.js").read_bytes().rstrip().endswith(b"sourceMappingURL=ol.js.map")
+    # the libraries inside the build: each with the licence of its package, and its copyright line in the notice
+    for name, version, licence in (("rbush", "4.0.1", "MIT License"), ("quickselect", "3.0.0", "ISC License"),
+                                   ("earcut", "3.2.4", "ISC License"), ("pbf", "5.1.2", "Redistribution")):
+        text = (site_mod.VIEWER / f"app/vendor/{name.upper()}-LICENSE.txt").read_text(encoding="utf-8")
+        owner = next(line.strip() for line in text.splitlines() if line.startswith("Copyright"))
+        assert licence in text and f"{name} {version}" in notice and owner in notice, name
+        assert f"vendor/{name.upper()}-LICENSE.txt" in notice
 
 
 # ------------------------------------------------------------------------------------------------ the browser
