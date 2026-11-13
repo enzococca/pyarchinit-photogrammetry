@@ -548,3 +548,42 @@ def test_window_adds_raws(tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def test_window_adds_a_folder_of_raws_and_shows_them(tmp_path, monkeypatch):
+    """*Aggiungi cartella di foto* on a folder with a raw, a raw + JPEG of one shot and a phone's linear DNG: one
+    photo per shot, thumbnails of the copies, and the photo view opens a photo backed by a raw."""
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    doc, _ch = project(tmp_path)
+    folder = tmp_path / "foto"
+    raws(folder, 2)
+    write_dng(folder / "IMG_0002.DNG", picture(2), mosaic=False)
+    cv2.imwrite(str(folder / "IMG_0001.JPG"), cv2.cvtColor(picture(1), cv2.COLOR_RGB2BGR))
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder)))
+    w.add_photos(folder=True)
+    w.runner.wait()
+    app.processEvents()
+    cams = w.chunk.cameras
+    assert [(c.label, bool(c.meta.get("raw"))) for c in cams] == [
+        ("IMG_0000", True), ("IMG_0001", False), ("IMG_0002", True)]  # the JPEG of the pair is the photo
+    assert w.photos.count() == 3
+    raw_cam = cams[2]
+    w.open_photo(raw_cam)
+    app.processEvents()
+    assert w.photo_view.camera is raw_cam
+    assert w.photo_view.pixmap_item is not None and w.photo_view.pixmap_item.pixmap().width() == 160
+    w.setWindowModified(False)
+    w.close()
+    app.processEvents()
