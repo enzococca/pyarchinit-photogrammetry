@@ -243,6 +243,104 @@ def test_several_chunks_share_one_frame(tmp_path):
         doc.export_site(tmp_path / "gradi", chunks=["vuoto"])
 
 
+def test_local_heights_start_under_the_true_minimum(tmp_path):
+    """A wide DEM with a pit one cell across, which a reduced reading misses: the heights of the local frame
+    start under it all the same, and under a spot height drawn lower still. Nothing is under zero."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.terrain import dem_range
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio")
+    ch.crs = "EPSG:32633"
+    doc.save(tmp_path / "fossa.ppg")
+    heights = np.full((64, 3300), 100.25, dtype="float32")
+    heights[:, :300] = -9999.0
+    heights[36, 1600] = 97.3
+    dem = ch.own_product_path("dem")
+    dem.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(dem, "w", driver="GTiff", width=3300, height=64, count=1, dtype="float32",
+                       nodata=-9999.0, crs="EPSG:32633", transform=from_origin(500000.0, 4500000.0, 0.01, 0.01),
+                       tiled=True, blockxsize=256, blockysize=256, compress="deflate") as dst:
+        dst.write(heights, 1)
+    ch._set_product("dem", dem)
+    assert dem_range(ch.dem_path)[0] > 100  # the reduced reading does not see the pit
+    assert site_mod._dem_heights(ch.dem_path) == pytest.approx((97.3, 100.25), abs=1e-4)
+
+    path = doc.export_site(tmp_path / "site", products=["dem", "drawings"])
+    layer = _layer(json.loads(path.read_text(encoding="utf-8")), "dem")
+    assert layer["range"] == pytest.approx([0.3, 3.25], abs=1e-3)
+    with rasterio.open(path.parent / "data/dem.tif") as src:
+        cells = src.read(1, masked=True)
+    assert cells.min() == pytest.approx(0.3, abs=1e-4) and cells.min() >= 0 and cells.count() == 64 * 3000
+
+    ch.meta["drawings"] = {"quote": [{"x": 500010.0, "y": 4499999.8, "quota_q": 96.4}],
+                           "points": [{"x": 500011.0, "y": 4499999.8, "z": 96.9, "label": "P1"}]}
+    path = doc.export_site(tmp_path / "site", products=["dem", "drawings"])
+    layer = _layer(json.loads(path.read_text(encoding="utf-8")), "dem")
+    assert layer["range"] == pytest.approx([1.3, 4.25], abs=1e-3)  # one metre lower: under the spot height
+    drawn = json.loads((path.parent / "data/drawings.geojson").read_text(encoding="utf-8"))["features"]
+    assert sorted(f["properties"].get("quota", f["properties"].get("z")) for f in drawn) == pytest.approx([0.4, 0.9])
+    with rasterio.open(path.parent / "data/dem.tif") as src:
+        assert src.read(1, masked=True).min() == pytest.approx(1.3, abs=1e-4)
+
+
+def test_names_typed_by_the_user_carry_no_path(tmp_path):
+    """The names the user typed - of the chunk, of a layer of free drawings, of a drawing, of an attribute, the
+    title and the description - lose the path of a computer as the values of the attributes do, also when the
+    path is of another computer or of another disk."""
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    home = str(Path.home())
+    doc = ppg.Document()
+    ch = doc.add_chunk(f"{home}/Rilievi/Saggio 3")
+    ch.crs = "EPSG:32633"
+    unit = UnitPolygon(box(1000.0, 5000.0, 1002.0, 5002.0), us="1",
+                       attributes={"/Volumes/Disco esterno/campagna/schede.xlsx": "vista",
+                                   "foto": "C:\\Users\\scavo\\Desktop\\us1.jpg",
+                                   "rete": "\\\\server\\scavi\\us1.pdf", "link": "file:///home/scavo/us1.pdf",
+                                   "nota": "taglio 1/2, quota -0.35 m; rapporto: copre/taglia"})
+    ch.meta["drawings"] = {"units": [unit.to_dict() | {"attributes": dict(unit.attributes)}]}
+    free_drawings.add(ch, "line", [[1000.0, 5000.0, 10.0], [1001.0, 5001.0, 10.0]],
+                      layer=f"{home}/Desktop/limiti di scavo", name="/Volumes/Disco esterno/campagna/limite nord")
+    free_drawings.add(ch, "point", [[1001.0, 5001.5, 10.2]], layer="~/Documents/reperti", name="chiodo")
+    doc.save(tmp_path / "nomi.ppg")
+    path = doc.export_site(tmp_path / "site", title="/Volumes/Disco esterno/campagna/Tell di prova",
+                           description=f"vedi {home}/Documents/relazione finale.pdf")
+    site = path.parent
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    assert manifest["title"] == "Tell di prova" and manifest["description"] == "relazione finale.pdf"
+    assert manifest["chunks"][0]["label"] == "Saggio 3"
+    groups = [g["name"] for g in _layer(manifest, "drawings")["groups"]]
+    assert sorted(groups) == ["limiti di scavo", "reperti"]
+    assert all(g["title"] == {"it": g["name"], "en": g["name"]} for g in _layer(manifest, "drawings")["groups"])
+    drawn = json.loads((site / "data/drawings.geojson").read_text(encoding="utf-8"))["features"]
+    assert sorted(f["properties"]["layer"] for f in drawn) == ["limiti di scavo", "reperti"]
+    assert sorted(f["properties"]["label"] for f in drawn) == ["chiodo", "limite nord"]
+    p = json.loads((site / "data/units.geojson").read_text(encoding="utf-8"))["features"][0]["properties"]
+    assert p["schede.xlsx"] == "vista" and p["foto"] == "us1.jpg" and p["rete"] == "us1.pdf"
+    assert p["link"] == "us1.pdf"
+    assert p["nota"] == "taglio 1/2, quota -0.35 m; rapporto: copre/taglia"  # words with a slash are not paths
+    for f in site.rglob("*"):
+        if f.is_file() and f.suffix in (".json", ".geojson", ".html"):
+            text = f.read_text(encoding="utf-8")
+            for word in (home, "/Volumes", "Disco esterno", "Desktop", "Documents", "C:", "server", "file:"):
+                assert word not in text, f"{f.name} holds {word}"
+    # the rule itself: what is a path and what is not
+    for text in ("/Users/x/y.txt", "in ~/scavo/a", "D:/dati/a.tif", "(\\\\nas\\a)", "x=/tmp/a", "file:/a"):
+        assert site_mod._scrub(text, []) != text, text
+    for text in ("US 12/13", "scala 1:20", "km/h", "N/A", "a: b", "http e https", "~10 cm", "1/2"):
+        assert site_mod._scrub(text, []) == text, text
+
+
 # ------------------------------------------------------------------------------------------------ the server
 @pytest.fixture()
 def served(trench_site):

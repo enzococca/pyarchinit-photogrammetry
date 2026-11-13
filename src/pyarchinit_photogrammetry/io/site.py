@@ -14,11 +14,12 @@
         drawings.geojson  spot heights, break lines, measuring points and free drawings, each with its ``layer``
 
 ``frame``: ``"local"`` (default) shifts every coordinate to an origin at the centre of the survey (whole metres; the
-heights to the whole metre under the lowest cell of the DEMs) and writes no reference system anywhere: nothing in the
-folder says where the site is. The origin is not written either. ``"crs"`` keeps the coordinates and the reference
+heights to the whole metre under the lowest cell of the DEMs and the lowest drawn height, so that none is under zero)
+and writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written either. ``"crs"`` keeps the coordinates and the reference
 system of the chunks: an explicit choice. In both frames the rasters go through a description of their pixels alone
-(a VRT), so no tag of the source files reaches the site, the photos and their EXIF are never copied, and a text
-attribute that holds a path of this computer is cut to its last name.
+(a VRT), so no tag of the source files reaches the site, the photos and their EXIF are never copied, and every text
+typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
+description - that holds the path of a computer is cut to its last name.
 
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
 parts - bound to this computer alone unless another host is asked for.
@@ -33,6 +34,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 from datetime import date
@@ -118,14 +120,20 @@ def _private_roots(document) -> list[str]:
     return sorted((r for r in roots if len(r) > 1), key=len, reverse=True)
 
 
+# a text that holds the path of a computer whatever its folder: a home, a volume, a drive, a share, a file URL
+_PATH = re.compile(r"""(?:^|[\s"'(\[=:;,])(?:~[/\\]|/(?:Users|home|Volumes|private|tmp|var|mnt|media|root|opt"""
+                   r"""|Library|Applications)/|[A-Za-z]:[/\\]|\\\\[^\\\s])|file:/""")
+
+
 def _scrub(value, roots: list[str]):
-    """``value`` (JSON-like) without paths of this computer: a text naming one of ``roots`` keeps its last name."""
+    """``value`` (JSON-like) without paths of this computer: a text that names one of ``roots``, or that holds
+    a path as computers write them, keeps its last name. The keys of a dictionary are texts as well."""
     if isinstance(value, str):
-        if any(r in value for r in roots):
+        if any(r in value for r in roots) or _PATH.search(value):
             return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
         return value
     if isinstance(value, dict):
-        return {str(k): _scrub(v, roots) for k, v in value.items()}
+        return {_scrub(str(k), roots): _scrub(v, roots) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_scrub(v, roots) for v in value]
     if isinstance(value, float) and not math.isfinite(value):
@@ -141,7 +149,7 @@ def _attributes(values: dict, roots: list[str]) -> dict:
     for k, v in (values or {}).items():
         if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
             continue
-        out[str(k)] = _scrub(v, roots)
+        out[_scrub(str(k), roots)] = _scrub(v, roots)
     return out
 
 
@@ -254,13 +262,49 @@ def _drawing_features(chunk, shift: _Shift, roots) -> tuple[list[dict], list[dic
             geometry = {"type": "Polygon", "coordinates": [xyz + [xyz[0]]]}
         else:
             geometry = {"type": "Point", "coordinates": xyz[0]}
-        layer = rec["layer"]
-        colour = colours.get(layer, free_drawings.DEFAULT_COLOUR)
+        colour = colours.get(rec["layer"], free_drawings.DEFAULT_COLOUR)
+        layer = _scrub(str(rec["layer"]), roots) or "-"  # a name typed by the user, as every other text
         props = {"label": rec.get("name") or "", "name": rec.get("name") or "", **(rec.get("attributes") or {})}
         if rec.get("colour"):
             props["colour"] = rec["colour"]
         add(layer, {"it": layer, "en": layer}, colour, geometry, props)
     return feats, list(groups.values())
+
+
+def _lowest(feats: list[dict]) -> float | None:
+    """The lowest height the features carry: in their vertices and in the heights of their attributes."""
+    found = []
+
+    def walk(c):
+        if c and isinstance(c[0], (int, float)):
+            if len(c) > 2:
+                found.append(c[2])
+        else:
+            for x in c or []:
+                walk(x)
+
+    for f in feats:
+        walk(f["geometry"]["coordinates"])
+        found.extend(f["properties"].get(k) for k in ("quota", "z", "z_min"))
+    found = [float(z) for z in found if isinstance(z, (int, float)) and not isinstance(z, bool) and math.isfinite(z)]
+    return min(found) if found else None
+
+
+def _dem_heights(path: Path) -> tuple[float, float] | None:
+    """The lowest and the highest height of a DEM, read block by block: the true ones, whatever its size (a
+    reduced reading would miss a narrow pit, and the frame of the site must lie under every cell)."""
+    import numpy as np
+    import rasterio
+
+    lo, hi = math.inf, -math.inf
+    with rasterio.open(path) as src:
+        for _, window in src.block_windows(1):
+            block = src.read(1, window=window, masked=True)
+            cells = np.asarray(block.compressed(), dtype=float)
+            cells = cells[np.isfinite(cells)]
+            if cells.size:
+                lo, hi = min(lo, float(cells.min())), max(hi, float(cells.max()))
+    return (lo, hi) if lo <= hi else None
 
 
 def _bounds(feats: list[dict]) -> tuple[float, float, float, float] | None:
@@ -389,7 +433,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     ``title`` and ``description``: of the page (default: the site of the project, else the name of its file);
     ``language``: the languages of the page among :data:`LANGUAGES`, the first shown first; ``quality``: of the
     WebP of the orthophoto. A folder that holds anything but a site built here is refused."""
-    from ..archaeo.terrain import dem_range, hillshade
+    from ..archaeo.terrain import hillshade
     from .web import export_cog
 
     progress = as_progress(progress)
@@ -428,15 +472,18 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 continue
             raise ValueError(f"chunk {ch.label!r} has none of the products asked for")
         plan.append({"chunk": ch, "ortho": ortho, "dem": dem, "box": box,
-                     "heights": dem_range(dem) if dem is not None else None})
+                     "heights": _dem_heights(dem) if dem is not None else None,
+                     "lowest": _lowest(units + drawn)})
     if not plan:
         raise ValueError("nothing to publish: no chunk has the products asked for")
     shift = _Shift()
     if frame == "local":
         box = _union(p["box"] for p in plan)
-        lows = [p["heights"][0] for p in plan if p["heights"] and math.isfinite(p["heights"][0])]
+        # the heights start at the whole metre under the lowest cell of the DEMs and the lowest drawn height:
+        # nothing of the site is under zero, and the true heights are not told
+        lows = [p["heights"][0] for p in plan if p["heights"]] + [p["lowest"] for p in plan if p["lowest"] is not None]
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
-                       math.floor(min(lows)) if lows else 0.0)
+                       float(math.floor(min(lows))) if lows else 0.0)
     written_crs = crs if frame == "crs" else None
 
     _prepare(folder)  # from here on the folder is written: everything that can be refused was, above
@@ -475,8 +522,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 relief = export_cog(vrt, data / "dem_hillshade.tif", "webp", 90)
                 layers.append(_image_layer("hillshade", f"{rel}/dem_hillshade.tif", relief, item["ortho"] is None))
                 layer = _image_layer("dem", f"{rel}/dem.tif", out, True)
-                lo, hi = item["heights"]
-                layer["range"] = [round(lo - shift.dz, 3), round(hi - shift.dz, 3)]
+                if item["heights"]:
+                    lo, hi = item["heights"]
+                    layer["range"] = [round(lo - shift.dz, 3), round(hi - shift.dz, 3)]
                 layers.append(layer)
                 boxes.append(_raster_info(out)["bounds"])
         sub(0.9, f"{ch.label}: drawings")
