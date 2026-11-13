@@ -72,6 +72,11 @@ mostra i suoi vertici da trascinare o togliere; *Drappeggia sul modello* aggiung
 pixel. I disegni dei layer visibili si vedono nei loro colori, quello scelto più spesso. Vedi
 [disegni liberi](drawing.md#disegni-liberi-2d-e-3d).
 
+*Misura*, accanto a *Disegna*, misura sul modello o sulla nuvola senza ortofoto né DEM: una distanza (3D, in pianta,
+dislivello, lungo la superficie), un'area (in pianta, nel piano medio, superficie del modello, perimetro) o le
+coordinate di un punto. Con questa vista davanti, *Misura* e *Misura area e superficie 3D* della barra di disegno fanno
+lo stesso. Vedi [misurare nella vista 3D](drawing.md#misurare-nella-vista-3d).
+
 ## Più chunk insieme
 
 Applicazione **1.7.5**. Con più di un chunk nel progetto, ogni chunk dell'*Area di lavoro* ha una casella: **spuntala per

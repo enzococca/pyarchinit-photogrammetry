@@ -295,6 +295,32 @@ orizzontale in un suo layer, con la stessa scelta.
   (dal bianco al rosso; una ruota di colori dal nord) e li mostrano, con i gradi sotto il cursore. La vista 3D
   colora la nuvola densa per *Altezza dal suolo* una volta classificato il suo terreno.
 
+### Misurare nella vista 3D
+
+Le misure funzionano anche su ciò che mostra la vista 3D - il modello, il modello con texture, la nuvola densa o i
+punti di legame - senza ortofoto né DEM. Con la vista 3D davanti, **Misura** e **Misura area e superficie 3D** della
+barra di disegno misurano sul modello invece che sull'ortofoto (lo fanno anche quando in 2D non c'è niente su cui
+misurare); il pulsante **Misura** nella barra laterale della vista 3D (gruppo *Disegna*) ha *Distanza*, *Area e
+superficie*, *Coordinate di un punto* e *Cancella la misura*. I vertici si scelgono come quelli dei
+[disegni liberi](#disegni-liberi-2d-e-3d): un clic è un vertice sulla superficie sotto il cursore, trascinare fa ancora
+ruotare la vista, Backspace toglie l'ultimo vertice, doppio clic o Invio finisce, Esc annulla la misura in corso.
+
+* **Distanza**: una polilinea con quanti vertici vuoi. Mentre fai clic, la barra di stato e l'angolo della vista
+  mostrano la lunghezza 3D fin lì; alla fine la lunghezza 3D (somma dei segmenti dritti), quella in pianta, il
+  dislivello fra il primo e l'ultimo vertice e la **lunghezza lungo la superficie** (la linea drappeggiata sulla
+  superficie ogni 20 pixel, come fa *Drappeggia sul modello*). Il risultato va nella barra di stato e nel registro.
+* **Area e superficie**: un poligono. L'area in pianta, quella nel piano medio dei vertici, la **superficie del modello
+  al suo interno** quando il chunk ha un modello (lo stesso calcolo delle misure di un poligono libero, in sottofondo),
+  il perimetro 3D e in pianta, la pendenza del piano medio. Senza modello il messaggio dice che l'area è quella del
+  piano medio. Il risultato va in una finestra di messaggio e nel registro, come per l'area in 2D.
+* **Coordinate di un punto**: X, Y, Z del punto cliccato nel sistema del chunk (il suo codice EPSG, o *sistema
+  locale*).
+
+La misura resta disegnata in magenta finché non inizia la successiva o fino a *Cancella la misura* (o *Cancella
+disegni*); non si salva con il progetto. I valori sono in metri nelle coordinate del chunk; un chunk solo allineato -
+senza riferimenti, barre di scala né una scala applicata - si misura **in unità del modello**, e ogni risultato lo
+dice.
+
 ## Curve di livello e volumi
 
 ![La finestra Curve di livello](../img/gui/dialog-contours.png)
