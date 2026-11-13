@@ -1125,7 +1125,7 @@ point (2 % tolerance).
 | `engine.normalmap.light_model(chunk, target_faces=50000, texture_size=4096, folder=None)` | a light model for the web and game engines: `light.glb`, `light.obj` + `.mtl`, `light_color.jpg`, `light_normal.png` |
 | `engine.normalmap.bake_maps(full_verts, full_faces, light_verts, light_faces, ...)` | the baking alone |
 | `io.flythrough.orbit_video(chunk, path, kind=None, seconds=12, fps=25, size=(1280, 720), pitch=35, zoom=1, turns=1, backend="auto")` | an MP4 of a camera orbiting the model or the cloud |
-| `chunk.export_3dtiles(folder, max_faces=150000)` | Cesium 3D Tiles 1.1: `tileset.json` and GLB tiles in a quadtree in plan |
+| `chunk.export_3dtiles(folder, max_faces=150000, origin=None, texture_size=None)` | Cesium 3D Tiles 1.1: `tileset.json` and GLB tiles in a quadtree in plan |
 | `io.web.export_3dtiles` | the same as a module function |
 | `chunk.export_i3s(path, mode="global", max_faces=20000, texture_size=2048)` | I3S 1.7 Integrated Mesh scene layer package (`.slpk`: ArcGIS Pro, ArcGIS Online and Earth, CesiumJS, loaders.gl) |
 | `io.i3s.export_slpk(chunk, path, ...)` | the same as a module function |
@@ -1159,7 +1159,14 @@ MPEG-4).
 
 **`chunk.export_3dtiles(...)`**: each level the model with fewer faces (vertex colours, clustering),
 the leaves at full detail; the root transform from east-north-up at the centre of the model to
-earth-centred coordinates (pyproj; heights as they are).
+earth-centred coordinates (pyproj; heights as they are). `origin` (x, y, z in the coordinates of the
+chunk): the tiles in a frame of their own instead, the coordinates less `origin`, with no transform to the
+globe and no reference system or origin written (the model of a web site). `texture_size`: the leaves keep
+the texture, its pages written in `textures/` with at most that many pixels a side and listed in
+`extras.textures` of the tileset; a leaf has the texture coordinates and its page in `extras.page` of its
+material, not the image, so that a viewer loads each page once for all the tiles (the viewer of a site does;
+another 3D Tiles viewer shows the leaves without colour); the coarser levels keep vertex colours, and such
+tiles have no lights (`KHR_materials_unlit`).
 
 **`chunk.export_i3s(...)`** builds a quadtree in plan with levels of detail (leaves with at most
 `max_faces` faces, the other nodes clustered to that many, a root without mesh), every node with a
@@ -1173,15 +1180,15 @@ normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in
 ## A survey as a web site
 
 A folder any static server can publish (GitHub Pages, Cloudflare Pages, a folder of a web server): the
-products of the chunks and a page that shows them on a plan. Nothing has to be installed on the server
+products of the chunks and a page that shows them on a plan and, for the 3D models, in a 3D view. Nothing has to be installed on the server
 and the page asks nothing outside its own folder (no CDN).
 
 | Call | Description |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, progress=None)` | the site of the chunks (objects, keys or labels; default every chunk with an orthophoto, a DEM or drawings); returns the path of `site.json` |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | the site of the chunks (objects, keys or labels; default every chunk with an orthophoto, a DEM, a model or drawings); returns the path of `site.json` |
 | `io.site.export_site(document, folder, ...)` | the same as a module function |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address`; `ranges=False` answers with whole files, as a host without range requests |
-| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings]... [--quality Q]` | command line: the site written |
+| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | command line: the site written |
 | `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise; `--no-ranges` to see the page as on a host without range requests |
 
 **The folder**: `index.html`, `site.json` (the manifest: format `ppg-site` version 1, title, languages,
@@ -1190,16 +1197,23 @@ frame, the chunks each with its extent and its layers), `app/` (the page: plain 
 chunks): `ortho.tif` (Cloud Optimized GeoTIFF, WebP with its alpha), `dem.tif` (COG float32, deflate),
 `dem_hillshade.tif` (the shaded relief, COG 8 bit, transparent where the DEM is empty), `units.geojson`
 (the stratigraphic units of the plan with their attributes, a `label` and `area_m2`), `drawings.geojson`
-(spot heights, break lines, measuring points and the free drawings, each feature with its `layer`).
-`products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`.
+(spot heights, break lines, measuring points and the free drawings, each feature with its `layer`),
+`model/` (the 3D model as 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`).
+`products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`, `"model"`.
+`model_texture` is the largest side of a texture page of the model (default 4096: a few MB of JPEG a page,
+so that a normal trench stays within a few hundred MB; `None` or `--model-texture 0` for vertex colours
+alone); `model_faces` the faces of a tile. A chunk without a model has no 3D view.
 
 **`frame="local"`** (default) takes an origin at the centre of the survey (whole metres) off every
 coordinate and the whole metre under the lowest cell of the DEMs off every height (the DEMs are read
-whole, so no cell is under zero; without a DEM, the lowest height drawn counts), and writes no
+whole, so no cell is under zero; without a DEM the lowest vertex of the models counts, without either
+the lowest height drawn), and writes no
 reference system: the rasters have none, the GeoJSON files have no `crs`, `site.json` has `"crs": null`,
-and the origin is written nowhere. Distances, areas and differences of height stay true; where the site
+the tiles of the model are in the same local metres with no transform to the globe, and the origin is
+written nowhere. A point measured on the model and on the plan has the same coordinates and height. Distances, areas and differences of height stay true; where the site
 is does not leave the computer. **`frame="crs"`** keeps the coordinates and the reference system of the
-chunks: a choice to make knowingly. In both frames the photos are never copied, no tag of the source
+chunks: a choice to make knowingly (the tileset of the model is then the one of `export_3dtiles`, on the
+globe, with the centre of the model in the `origin` of its layer). In both frames the photos are never copied, no tag of the source
 rasters reaches the site, and every text typed by the user (attributes and their names, the names of chunks, layers and drawings,
 title and description) that holds the path of a computer is cut to its last name.
 The chunks of one site must share one reference system, in metres (a system in degrees is refused).
@@ -1210,7 +1224,14 @@ is refused (`FileExistsError`) and left as it is; building again replaces `index
 
 **The page**: orthophoto, shaded relief, units and drawings with a list of layers; a click gives the
 coordinates, the height of the DEM there and the attributes of what is under it; distance and area
-measured on the plan; Italian and English. It reads the rasters by parts (range requests), which nearly every
+measured on the plan; Italian and English. With a model, a **3D** tab (three.js and 3DTilesRendererJS,
+loaded only when the tab is opened): the models of the chunks, without a globe, Z up; drag to rotate,
+right button or two fingers to pan, wheel or pinch to zoom, *Home view* to come back. A click on the
+model gives the X, Y and height of the point; *Distance* measures a polyline picked on the model (3D
+length, plan length, height difference from the first point to the last), *Area* a polygon (3D area -
+the area of the polygon on its mean plane -, plan area, perimeter); a double click or *Done* ends the
+measure, Esc drops it, *Clear* removes it. Points are picked on the tiles shown, the finest loaded where
+one has zoomed in: zoom in on the points to measure to the millimetre. It reads the rasters by parts (range requests), which nearly every
 static host serves; a file opened from the disk (`file://`) does not work, hence `ppg web serve`.
 On a host that answers with the whole file instead, the page says so and downloads each raster whole
 if it is under 50 MB; a larger one is not downloaded, and its layer is named in the notice and left out.

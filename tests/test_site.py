@@ -6,6 +6,7 @@ import contextlib
 import http.client
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,8 +66,45 @@ def trench_site(processed, tmp_path_factory):
     """``(doc, chunk, facts, folder, manifest)``: the trench with drawings and its site in the local frame."""
     base = tmp_path_factory.mktemp("sito")
     doc, ch, facts = _with_drawings(processed, base / "progetto")
-    path = doc.export_site(base / "site", title="Saggio di prova")
+    # small tiles: the model has a coarse root and finer tiles, as a real one
+    path = doc.export_site(base / "site", title="Saggio di prova", model_faces=8000)
     return doc, ch, facts, path.parent, json.loads(path.read_text(encoding="utf-8"))
+
+
+def _glb(path: Path) -> tuple[dict, bytes]:
+    """The JSON and the binary chunk of a GLB."""
+    import struct
+
+    data = path.read_bytes()
+    size = struct.unpack_from("<I", data, 12)[0]
+    return json.loads(data[20:20 + size]), data[20 + size + 8:]
+
+
+def _tile_points(path: Path) -> np.ndarray:
+    """The vertices of a GLB tile, back to Z up (x east, y north, z up)."""
+    gltf, blob = _glb(path)
+    out = []
+    for prim in gltf["meshes"][0]["primitives"]:
+        acc = gltf["accessors"][prim["attributes"]["POSITION"]]
+        view = gltf["bufferViews"][acc["bufferView"]]
+        v = np.frombuffer(blob, np.float32, acc["count"] * 3, view.get("byteOffset", 0)).reshape(-1, 3)
+        out.append(np.column_stack([v[:, 0], -v[:, 2], v[:, 1]]))
+    return np.vstack(out)
+
+
+def _leaves(node: dict) -> list[dict]:
+    return [n for k in node.get("children", []) for n in _leaves(k)] if node.get("children") else [node]
+
+
+def _frame_shift(ch, site: Path, dem: str = "data/dem.tif") -> np.ndarray:
+    """What the local frame of a site took off the coordinates of the chunk: from its DEM, as a reader would."""
+    import math
+
+    import rasterio
+
+    with rasterio.open(ch.dem_path) as a, rasterio.open(site / dem) as b:
+        return np.array([a.bounds.left - b.bounds.left, a.bounds.top - b.bounds.top,
+                         math.floor(float(a.read(1, masked=True).min()))])
 
 
 def _layer(manifest, name):
@@ -86,13 +124,16 @@ def test_local_site_folder_and_manifest(trench_site):
     assert manifest["frame"] == "local" and manifest["crs"] is None and manifest["unit"] == "m"
     chunk = manifest["chunks"][0]
     assert chunk["label"] == ch.label and [x["id"] for x in chunk["layers"]] == [
-        "ortho", "hillshade", "dem", "units", "drawings"]
+        "ortho", "hillshade", "dem", "model", "units", "drawings"]
     for layer in chunk["layers"]:
         assert (site / layer["url"]).is_file() and set(layer["title"]) == {"it", "en"}
     for name in ("index.html", "app/main.js", "app/cog.js", "app/i18n.js", "app/style.css", "app/vendor/ol.js",
                  "app/vendor/ol.css", "app/vendor/OPENLAYERS-LICENSE.md", "app/vendor/RBUSH-LICENSE.txt",
                  "app/vendor/QUICKSELECT-LICENSE.txt", "app/vendor/EARCUT-LICENSE.txt",
-                 "app/vendor/PBF-LICENSE.txt", "app/THIRD_PARTY.txt"):
+                 "app/vendor/PBF-LICENSE.txt", "app/THIRD_PARTY.txt", "app/view3d.js",
+                 "app/vendor/three/three.module.js", "app/vendor/three/addons/loaders/GLTFLoader.js",
+                 "app/vendor/3d-tiles-renderer/index.three.js", "app/vendor/THREE-LICENSE.txt",
+                 "app/vendor/3D-TILES-RENDERER-LICENSE.txt", "data/model/tileset.json"):
         assert (site / name).is_file(), name
     assert "<title>Saggio di prova</title>" in (site / "index.html").read_text(encoding="utf-8")
     assert not [p.name for p in site.iterdir() if p.name.startswith(".")]  # the working folder is gone
@@ -138,6 +179,17 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
             assert word not in data, f"{name} holds {word!r}"
     text = "".join((site / n).read_text(encoding="utf-8") for n in
                    ("site.json", "data/units.geojson", "data/drawings.geojson", "index.html"))
+    tileset_text = (site / "data/model/tileset.json").read_text(encoding="utf-8")
+    tileset = json.loads(tileset_text)
+    assert "transform" not in tileset_text and set(tileset.get("extras", {})) <= {"textures"}
+    # its numbers are the boxes and errors of the tiles, long decimals in which the digits of an easting turn up
+    # by chance: they are checked as numbers (small, around the origin), its words as words
+    assert not any(w in tileset_text for w in ("EPSG", "crs", '"origin"'))
+    assert all(abs(float(n)) < 100 for n in re.findall(r"-?\d+\.\d+(?:[eE][-+]?\d+)?", tileset_text))
+    for f in (site / "data/model/tiles").glob("*.glb"):
+        header = _glb(f)[0]  # the text of a tile: nothing of the place of the site
+        assert not any(w in json.dumps(header) for w in ("EPSG", "crs", "origin", "extras\": {\"c")), f.name
+        assert max(abs(v) for a in header["accessors"] for v in a.get("max", []) + a.get("min", [])) < 100
     for word in ("EPSG", "3004", "2480", "4500", "crs\":{", '"origin"'):
         assert word not in text, word
     extent = manifest["chunks"][0]["extent"]
@@ -161,12 +213,69 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
         lift = float(np.floor(src.read(1, masked=True).min()))
     quota = by_layer["Quote"]["properties"]
     assert quota["quota"] == pytest.approx(facts["z"] - lift, abs=1e-3) and quota["us_q"] == "12"
-    assert quota["label"] == f"{facts['z'] - lift:.3f}"
+    # three decimals of the height written, which is the height asked within a millimetre: not its own rounding,
+    # that falls on either side when the height sits half way between two millimetres
+    assert len(quota["label"].split(".")[1]) == 3 and float(quota["label"]) == pytest.approx(quota["quota"], abs=6e-4)
     line = by_layer["Linee di rottura"]
     assert line["properties"]["label"] == "ciglio" and line["geometry"]["type"] == "LineString"
     assert line["geometry"]["coordinates"][0][2] == pytest.approx(facts["z"] - lift, abs=1e-3)
     assert by_layer["Limiti"]["properties"]["fase"] == "II" and by_layer["Limiti"]["properties"]["label"] == "limite"
     assert by_layer["Punti di misura"]["properties"]["label"] == "P1"
+
+
+def test_model_in_the_frame_of_the_plan(trench_site, tmp_path):
+    """The model of the site: 3D Tiles in the metres of the plan (the same origin and the same base of the heights
+    as the DEM), no transform to the globe, the texture in pages of a capped size shared by the leaves; in the
+    ``crs`` frame the tileset of the program, on the globe, with its centre in the manifest."""
+    from PIL import Image
+
+    from pyarchinit_photogrammetry.io.web import _world_mesh
+
+    _doc, ch, _facts, site, manifest = trench_site
+    layer = _layer(manifest, "model")
+    assert layer["type"] == "tiles" and layer["url"] == "data/model/tileset.json" and "origin" not in layer
+    assert layer["title"] == {"it": "Modello 3D", "en": "3D model"} and layer["textured"] is True
+    tileset = json.loads((site / layer["url"]).read_text(encoding="utf-8"))
+    assert tileset["asset"]["version"] == "1.1" and "transform" not in tileset["root"]
+    assert tileset["extras"] == {"textures": ["textures/page_0.jpg"]}
+    leaves = _leaves(tileset["root"])
+    assert len(leaves) > 1 and tileset["root"]["children"]  # a coarse root and finer tiles
+    world = _world_mesh(ch)[0]
+    assert layer["faces"] == len(ch.model.faces)
+    points = np.vstack([_tile_points(site / "data/model" / n["content"]["uri"]) for n in leaves])
+    expected = world - _frame_shift(ch, site)
+    assert points.min(0) == pytest.approx(expected.min(0), abs=1e-4)
+    assert points.max(0) == pytest.approx(expected.max(0), abs=1e-4)
+    assert layer["box"] == pytest.approx([*expected.min(0), *expected.max(0)], abs=1e-3)
+    assert 0 <= _layer(manifest, "dem")["range"][0] < 1 and expected[:, 2].min() > -0.5  # the base of the DEM
+    leaf, _ = _glb(site / "data/model" / leaves[0]["content"]["uri"])
+    assert leaf["materials"][0]["extras"] == {"page": 0} and "images" not in leaf
+    assert "TEXCOORD_0" in leaf["meshes"][0]["primitives"][0]["attributes"]
+    root, _ = _glb(site / "data/model" / tileset["root"]["content"]["uri"])
+    assert "COLOR_0" in root["meshes"][0]["primitives"][0]["attributes"]  # coarse tiles: vertex colours
+    with Image.open(site / "data/model/textures/page_0.jpg") as im:
+        assert max(im.size) <= 4096 and not im.info.get("exif")
+
+    # a smaller texture, no texture at all
+    doc = trench_site[0]
+    small = doc.export_site(tmp_path / "piccolo", products="model", model_texture=512).parent
+    with Image.open(small / "data/model/textures/page_0.jpg") as im:
+        assert max(im.size) == 512
+    plain = json.loads(doc.export_site(tmp_path / "colori", products="model", model_texture=None)
+                       .read_text(encoding="utf-8"))
+    assert _layer(plain, "model")["textured"] is False
+    assert not (tmp_path / "colori/data/model/textures").exists()
+    assert _layer(plain, "model")["box"][2] < 1  # without a DEM the base is the lowest vertex of the model
+
+    # the crs frame: the tileset on the globe, its centre in the manifest
+    crs = json.loads(doc.export_site(tmp_path / "crs", frame="crs", products=("dem", "model"))
+                     .read_text(encoding="utf-8"))
+    layer = _layer(crs, "model")
+    centre = (world.min(0) + world.max(0)) / 2
+    assert layer["origin"] == pytest.approx(list(centre), abs=1e-6)
+    assert layer["box"] == pytest.approx([*world.min(0), *world.max(0)], abs=1e-3)
+    tiles = json.loads((tmp_path / "crs/data/model/tileset.json").read_text(encoding="utf-8"))
+    assert len(tiles["root"]["transform"]) == 16 and tiles["extras"]["crs"] == "EPSG:3004"
 
 
 def test_crs_frame_keeps_the_reference_system(trench_site, tmp_path):
@@ -453,7 +562,8 @@ def test_viewer_needs_nothing_from_the_network():
 
     page = (site_mod.VIEWER / "index.html").read_text(encoding="utf-8")
     assert "Content-Security-Policy" in page and "default-src 'self'" in page
-    for name in ("index.html", "app/main.js", "app/cog.js", "app/i18n.js", "app/style.css", "app/vendor/ol.css"):
+    for name in ("index.html", "app/main.js", "app/view3d.js", "app/cog.js", "app/i18n.js", "app/style.css",
+                 "app/vendor/ol.css"):
         text = (site_mod.VIEWER / name).read_text(encoding="utf-8")
         assert not re.search(r"https?://|//cdn|@import|innerHTML|eval\(", text), name
     notice = (site_mod.VIEWER / "app/THIRD_PARTY.txt").read_text(encoding="utf-8")
@@ -471,6 +581,40 @@ def test_viewer_needs_nothing_from_the_network():
         owner = next(line.strip() for line in text.splitlines() if line.startswith("Copyright"))
         assert licence in text and f"{name} {version}" in notice and owner in notice, name
         assert f"vendor/{name.upper()}-LICENSE.txt" in notice
+
+
+def test_vendored_3d_libraries_are_the_released_files():
+    """three.js and 3DTilesRendererJS: every file in their folders is named in the notice with the sha256 of the
+    file of the npm release, beside the licences; the import map that names them is the one the page allows."""
+    import base64
+    import hashlib
+    import re
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    app = site_mod.VIEWER / "app"
+    notice = (app / "THIRD_PARTY.txt").read_text(encoding="utf-8")
+    listed = dict((path, digest) for digest, path in re.findall(r"sha256 ([0-9a-f]{64})  (vendor/\S+)", notice))
+    files = sorted(str(f.relative_to(app)).replace(os.sep, "/") for d in ("three", "3d-tiles-renderer")
+                   for f in (app / "vendor" / d).rglob("*") if f.is_file())
+    assert len(files) == 9 and sorted(listed) == files
+    for path, digest in listed.items():
+        assert hashlib.sha256((app / path).read_bytes()).hexdigest() == digest, path
+    assert "three.js 0.187.0" in notice and "3DTilesRendererJS 0.5.4" in notice
+    assert "MIT License" in (app / "vendor/THREE-LICENSE.txt").read_text(encoding="utf-8")
+    licence = (app / "vendor/3D-TILES-RENDERER-LICENSE.txt").read_text(encoding="utf-8")
+    assert "Apache License" in licence and "Copyright 2020 California Institute of Technology" in licence
+    assert "Copyright 2020 California Institute of Technology" in notice
+    # the import map: the only inline script, allowed by its hash and by nothing else
+    page = (site_mod.VIEWER / "index.html").read_text(encoding="utf-8")
+    scripts = re.findall(r"<script([^>]*)>(.*?)</script>", page, re.S)
+    inline = [body for attrs, body in scripts if body.strip()]
+    assert len(inline) == 1 and json.loads(inline[0])["imports"]["three"] == "./app/vendor/three/three.module.js"
+    digest = base64.b64encode(hashlib.sha256(inline[0].encode()).digest()).decode()
+    policy = re.search(r'Content-Security-Policy" content="([^"]+)"', page).group(1)
+    assert f"script-src 'self' 'sha256-{digest}';" in policy and "unsafe" not in policy.split("style-src")[0]
+    for target in json.loads(inline[0])["imports"].values():
+        assert (site_mod.VIEWER / target).exists(), target
 
 
 # ------------------------------------------------------------------------------------------------ the browser
@@ -762,15 +906,161 @@ def test_page_on_a_host_without_ranges(trench_site, tmp_path):
         browser.close()
 
 
+def _targets(processed) -> dict[str, np.ndarray]:
+    """The coded targets of the synthetic trench: their true coordinates (the file the scene was made with)."""
+    rows = (Path(processed[0].path).parent / "gcp.csv").read_text(encoding="utf-8").splitlines()
+    return {r.split(",")[0]: np.array([float(v) for v in r.split(",")[1:4]]) for r in rows if r[:1].isdigit()}
+
+
+def _open_model(browser: Browser) -> None:
+    browser.js("document.getElementById('tab-3d').click()")
+    browser.wait("['ready', 'error'].includes(document.documentElement.dataset.model)", 60)
+    assert browser.js("document.documentElement.dataset.model") == "ready", browser.errors
+    browser.wait("ppgSite.state.view3d.ready()", 60)
+
+
+def _click_on_model(browser: Browser, point, close: bool = True, count: int = 1) -> None:
+    """A click on the model where ``point`` (frame of the site) is; ``close``: seen from 0.6 m first, as one
+    zooms in to pick a point, with the finest tiles loaded."""
+    x, y, z = (float(v) for v in point)
+    if close:
+        browser.js(f"(() => {{ const v = ppgSite.state.view3d, c = v.centre;"
+                   f" v.controls.target.set({x!r} - c.x, {y!r} - c.y, {z!r} - c.z);"
+                   f" v.camera.position.set({x!r} - c.x, {y!r} - c.y - 0.2, {z!r} - c.z + 0.6);"
+                   " v.controls.update(); })()")
+        time.sleep(0.3)
+        browser.wait("ppgSite.state.view3d.ready()", 30)
+        time.sleep(0.2)
+    px, py = browser.js(f"ppgSite.state.view3d.project({x!r}, {y!r}, {z!r})")
+    for kind in ("mousePressed", "mouseReleased"):
+        browser.call("Input.dispatchMouseEvent", {"type": kind, "x": px, "y": py, "button": "left",
+                                                  "clickCount": count})
+
+
+def test_model_in_a_browser(served, trench_site, processed, tmp_path):
+    """The 3D tab: the tiles load with no error and nothing asked outside the server; a click gives the point of
+    the model, at the height the DEM of the plan gives there; the distance between two targets and the area of the
+    rectangle of four are those of the true coordinates within a few millimetres; Esc and Clear drop a measure."""
+    import rasterio
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    _doc, ch, _facts, _site, manifest = trench_site
+    folder, port = served
+    shift = _frame_shift(ch, folder)
+    targets = {k: v - shift for k, v in _targets(processed).items()}  # in the frame of the site
+    origin = f"http://127.0.0.1:{port}"
+    browser = Browser(executable, tmp_path / "profilo", size=(1200, 800))
+    try:
+        browser.call("Page.navigate", {"url": origin + "/"})
+        browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+        assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+        assert browser.js("document.getElementById('tabs').hidden") is False
+        assert not any("/vendor/three/" in u for u in browser.requests)  # three.js only when the tab is opened
+        _open_model(browser)
+        assert browser.js("document.getElementById('map').hidden") is True
+        assert browser.js("ppgSite.state.view3d.models[0].tiles.stats.failed") == 0
+
+        # the model is drawn: the middle of the view is not its empty background
+        time.sleep(0.5)
+        shot = browser.screenshot()
+        box = browser.js("(() => { const r = document.getElementById('view3d').getBoundingClientRect();"
+                         " return [r.left, r.top, r.width, r.height]; })()")
+        cx, cy = int(box[0] + box[2] / 2), int(box[1] + box[3] / 2)
+        patch = shot[cy - 60:cy + 60, cx - 60:cx + 60].astype(float)
+        assert np.abs(patch - np.array([0xe6, 0xe3, 0xdf], float)).mean() > 12 and patch.std() > 5, "no model"
+
+        # a point: its coordinates in the side, its height the one of the DEM of the plan
+        _click_on_model(browser, targets["4"])
+        browser.wait("document.querySelector('#info table') !== null", 10)
+        info = browser.js("document.getElementById('info').innerText")
+        with rasterio.open(folder / "data/dem.tif") as src:
+            dem = float(next(src.sample([tuple(targets["4"][:2])]))[0])
+        assert _shown_height(info) == pytest.approx(dem, abs=3e-3)
+        assert _shown_height(info) == pytest.approx(targets["4"][2], abs=3e-3)
+        textured = browser.js("(() => { let n = 0; for (const t of ppgSite.state.view3d.models[0].tiles.visibleTiles)"
+                              " t.engineData.scene.traverse((o) => { if (o.material && o.material.map) n++; });"
+                              " return n; })()")
+        assert textured > 0  # close up, the finest tiles: they carry the texture
+
+        # a distance: two targets 3.2 m apart
+        browser.js("document.getElementById('distance').click()")
+        for name in ("0", "1"):
+            _click_on_model(browser, targets[name])
+        browser.js("document.getElementById('stop').click()")
+        result = browser.js("ppgSite.state.view3d.result()")
+        true = targets["1"] - targets["0"]
+        assert result["kind"] == "distance" and result["points"] == 2
+        assert result["length"] == pytest.approx(np.linalg.norm(true), abs=3e-3)
+        assert result["plan"] == pytest.approx(np.linalg.norm(true[:2]), abs=3e-3)
+        assert result["rise"] == pytest.approx(true[2], abs=3e-3)
+        picked = browser.js("ppgSite.state.view3d.points.map((p) => [p.x, p.y, p.z])")
+        assert np.abs(np.array(picked) - [targets["0"], targets["1"]]).max() < 3e-3
+        out = browser.js("document.getElementById('measure-out').innerText")
+        assert ("3D length" in out and "Plan length" in out) or ("Lunghezza 3D" in out and "Dislivello" in out), out
+
+        # an area: the rectangle of the four corner targets, ended by a double click
+        browser.js("document.getElementById('area').click()")
+        corners = [targets[k] for k in ("0", "1", "2", "3")]
+        for p in corners:
+            _click_on_model(browser, p)
+        _click_on_model(browser, corners[-1], close=False, count=2)
+        assert browser.js("ppgSite.state.view3d.mode") is None and browser.js("ppgSite.state.view3d.closed")
+        result = browser.js("ppgSite.state.view3d.result()")
+        ring = np.array(corners)
+        plan = 0.5 * abs(np.dot(ring[:, 0], np.roll(ring[:, 1], -1)) - np.dot(ring[:, 1], np.roll(ring[:, 0], -1)))
+        assert result["kind"] == "area" and result["points"] == 4
+        assert result["planArea"] == pytest.approx(plan, abs=0.01) and plan == pytest.approx(7.0464, abs=1e-3)
+        assert plan <= result["area"] < plan * 1.001  # gently sloping: the 3D area is a little larger
+        assert result["length"] == pytest.approx(2 * (3.2 + 2.202), abs=0.01)
+        out = browser.js("document.getElementById('measure-out').innerText")
+        assert "m²" in out and ("Plan area" in out or "Superficie in pianta" in out), out
+        assert browser.js("ppgSite.state.view3d.scene.children.at(-1).children.length") == 2  # marks and line
+
+        # Esc drops the measure in progress, Clear the one ended
+        browser.js("document.getElementById('distance').click()")
+        _click_on_model(browser, targets["5"])
+        assert browser.js("ppgSite.state.view3d.points.length") == 1
+        browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
+                                                "windowsVirtualKeyCode": 27})
+        assert browser.js("ppgSite.state.view3d.points.length") == 0 and browser.js("ppgSite.state.view3d.mode") is None
+        assert browser.js("document.getElementById('measure-out').textContent") == ""
+        browser.js("document.getElementById('area').click()")
+        for name in ("4", "5"):
+            _click_on_model(browser, targets[name])
+        browser.js("document.getElementById('clear').click()")
+        assert browser.js("ppgSite.state.view3d.points.length") == 0
+        assert browser.js("ppgSite.state.view3d.scene.children.at(-1).children.length") == 0
+
+        # the words of the tab in both languages, the plan back
+        words = set()
+        for _ in range(2):
+            words.add(browser.js("document.getElementById('fit').textContent"))
+            browser.js("document.getElementById('language').click()")
+        assert words == {"Vista iniziale", "Home view"}
+        browser.js("document.getElementById('fit').click()")
+        browser.js("document.getElementById('tab-plan').click()")
+        assert browser.js("document.getElementById('view3d').hidden") is True
+        assert browser.js("ppgSite.state.view3d.active") is False
+
+        assert not browser.errors, browser.errors
+        outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
+        assert not outside, outside
+    finally:
+        browser.close()
+
+
 def _shown_height(info: str) -> float:
     """The height in the text of the side panel (the line after the coordinates)."""
     line = next(x for x in info.splitlines() if x.startswith(("Quota (m)", "Height (m)")))
     return float(line.split("\t")[-1])
 
 
-def _two_trenches(processed, folder: Path):
+def _two_trenches(processed, folder: Path, models: bool = False):
     """A project of two chunks made of the processed trench: the second is the first moved 6 m east and lifted
-    0.5 m, each with a stratigraphic unit, the second with a free drawing too."""
+    0.5 m, each with a stratigraphic unit, the second with a free drawing too; ``models``: each with the textured
+    model of the trench, moved as its rasters."""
     import rasterio
     from shapely.geometry import box
 
@@ -801,6 +1091,14 @@ def _two_trenches(processed, folder: Path):
                         dst.write_mask(src.dataset_mask())
                     b = dst.bounds
             ch._set_product(product, out)
+        if models:
+            for name in ("model", "model_textured"):
+                out = ch.data_dir / source.product_path(name).name
+                shutil.copy2(source.product_path(name), out)
+                ch._set_product(name, out)
+            move = np.eye(4)
+            move[:3, 3] = (east, 0.0, lift)
+            ch.transform = move @ source.transform
         cx, cy = (b.left + b.right) / 2, (b.bottom + b.top) / 2
         unit = UnitPolygon(box(cx - 0.4, cy - 0.3, cx + 0.4, cy + 0.3), us=str(n + 1), sito="Sito di prova")
         ch.meta["drawings"] = {"units": [unit.to_dict()]}
@@ -810,6 +1108,52 @@ def _two_trenches(processed, folder: Path):
         centres.append((cx, cy))
     doc.save()
     return doc, centres
+
+
+def test_models_of_two_chunks(processed, tmp_path):
+    """Two chunks with a model each: two model layers in one frame, both in the 3D tab under the name of their
+    chunk; a click on each gives its own point, the second 6 m east and 0.5 m higher; a model hidden is not picked."""
+    executable = find_browser()
+    doc, _centres = _two_trenches(processed, tmp_path / "progetto", models=True)
+    path = doc.export_site(tmp_path / "site", title="Due saggi", products=("dem", "model"), model_texture=1024)
+    folder = path.parent
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    a, b = (next(x for x in c["layers"] if x["id"] == "model") for c in manifest["chunks"])
+    assert [a["url"], b["url"]] == ["data/1/model/tileset.json", "data/2/model/tileset.json"]
+    assert np.subtract(b["box"], a["box"]) == pytest.approx([6, 0, 0.5, 6, 0, 0.5], abs=2e-3)
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    shift = _frame_shift(doc.chunks[0], folder, "data/1/dem.tif")
+    target = _targets(processed)["4"] - shift
+    browser = Browser(executable, tmp_path / "profilo", size=(1200, 800))
+    try:
+        with _serving(folder) as port:
+            origin = f"http://127.0.0.1:{port}"
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            _open_model(browser)
+            rows = browser.js("[...document.getElementById('layers').children].map((n) => n.innerText)")
+            names = [r.split("\t")[0].split("\n")[0] for r in rows]
+            assert names in (["Saggio A", "3D model", "Saggio B", "3D model"],
+                             ["Saggio A", "Modello 3D", "Saggio B", "Modello 3D"]), rows
+            assert browser.js("ppgSite.state.view3d.models.map((m) => m.tiles.stats.loaded > 0)") == [True, True]
+            for n, move in enumerate(([0, 0, 0], [6, 0, 0.5])):
+                _click_on_model(browser, target + move)
+                browser.wait("document.querySelector('#info table') !== null", 10)
+                point = browser.js("ppgSite.state.last")
+                assert [point["x"], point["y"], point["height"]] == pytest.approx(list(target + move), abs=3e-3)
+                assert point["model"] == f"Saggio {'AB'[n]}"
+            # the second model hidden: the same pixel finds nothing of it
+            browser.js("document.querySelectorAll('#layers input')[1].click()")
+            x, y, z = (float(v) for v in target + [6, 0, 0.5])
+            px, py = browser.js(f"ppgSite.state.view3d.project({x!r}, {y!r}, {z!r})")
+            hit = browser.js(f"ppgSite.state.view3d.pick({px!r}, {py!r})")
+            assert hit is None or hit["chunk"]["label"] == "Saggio A"
+            assert not browser.errors, browser.errors
+            outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
+            assert not outside, outside
+    finally:
+        browser.close()
 
 
 def test_page_of_two_chunks(processed, tmp_path):
@@ -850,6 +1194,7 @@ def test_page_of_two_chunks(processed, tmp_path):
                              ["Saggio B", "ortho", True], ["Saggio B", "hillshade", False], ["Saggio B", "units", True],
                              ["Saggio B", "drawings", True]]
             assert browser.js("ppgSite.state.dems.length") == 2
+            assert browser.js("document.getElementById('tabs').hidden") is True  # no model: no 3D tab
 
             # both orthophotos are on the map: neither centre shows the empty background
             browser.wait("document.querySelector('#map canvas') !== null")

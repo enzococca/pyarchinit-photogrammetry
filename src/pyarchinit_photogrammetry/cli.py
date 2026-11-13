@@ -5378,15 +5378,18 @@ def web_build(project: Path,
               language: Optional[list[str]] = typer.Option(None, "--language", help="it or en, repeatable: the "
                                                            "languages of the page, the first shown first "
                                                            "(default it, en)"),
-              product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units or "
-                                                          "drawings, repeatable (default: all the chunk has)"),
-              quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto")):
+              product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units, "
+                                                          "drawings or model, repeatable (default: all the chunk "
+                                                          "has)"),
+              quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto"),
+              model_texture: int = typer.Option(4096, "--model-texture", help="largest side in pixels of a texture "
+                                                "page of the 3D model; 0: vertex colours alone")):
     """Write the site of a project: site.json, data/ and the page (see ppg web serve to look at it)."""
     doc = Document.open(project)
     try:
         path = doc.export_site(folder, chunks=chunk or None, products=product or None, frame=frame, title=title,
                                description=description, language=language or ("it", "en"), quality=quality,
-                               progress=print_progress)
+                               model_texture=model_texture or None, progress=print_progress)
     except (ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None

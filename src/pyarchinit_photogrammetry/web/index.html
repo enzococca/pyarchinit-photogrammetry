@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-vgQ++LFqwceqqWNKqeMktK5mWTSNt91YnhveN4twHsE='; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>{{title}}</title>
 <link rel="stylesheet" href="app/vendor/ol.css">
@@ -12,6 +12,10 @@
 <body>
 <header>
   <h1 id="title">{{title}}</h1>
+  <nav id="tabs" role="tablist" hidden>
+    <button id="tab-plan" class="tab on" type="button" role="tab" aria-selected="true"></button>
+    <button id="tab-3d" class="tab" type="button" role="tab" aria-selected="false"></button>
+  </nav>
   <p id="description"></p>
   <button id="language" type="button" hidden></button>
 </header>
@@ -29,6 +33,7 @@
         <button id="distance" type="button"></button>
         <button id="area" type="button"></button>
         <button id="stop" type="button" hidden></button>
+        <button id="clear" type="button"></button>
       </div>
       <p id="measure-out" class="value"></p>
     </section>
@@ -39,7 +44,9 @@
     <footer id="foot"></footer>
   </aside>
   <div id="map" tabindex="0"></div>
+  <div id="view3d" tabindex="0" hidden></div>
 </main>
+<script type="importmap">{"imports": {"three": "./app/vendor/three/three.module.js", "three/addons/": "./app/vendor/three/addons/"}}</script>
 <script src="app/vendor/ol.js"></script>
 <script type="module" src="app/main.js"></script>
 </body>
