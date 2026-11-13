@@ -208,7 +208,9 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
         lift = float(np.floor(src.read(1, masked=True).min()))
     quota = by_layer["Quote"]["properties"]
     assert quota["quota"] == pytest.approx(facts["z"] - lift, abs=1e-3) and quota["us_q"] == "12"
-    assert quota["label"] == f"{facts['z'] - lift:.3f}"
+    # three decimals of the height written, which is the height asked within a millimetre: not its own rounding,
+    # that falls on either side when the height sits half way between two millimetres
+    assert len(quota["label"].split(".")[1]) == 3 and float(quota["label"]) == pytest.approx(quota["quota"], abs=6e-4)
     line = by_layer["Linee di rottura"]
     assert line["properties"]["label"] == "ciglio" and line["geometry"]["type"] == "LineString"
     assert line["geometry"]["coordinates"][0][2] == pytest.approx(facts["z"] - lift, abs=1e-3)
