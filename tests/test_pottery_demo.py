@@ -25,6 +25,23 @@ def test_turntable_render_shows_targets(tmp_path):
     assert len(seen) >= 8  # most of the ring is seen from a few viewpoints
 
 
+def test_turntable_photos_carry_their_focal_length(tmp_path):
+    """Photos of a camera say their focal length: without it the alignment starts from a guess
+    (1.2 times the width, a third too long here) and, on the flat mat, sometimes stops at a
+    handful of photos."""
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.io.exif import read_exif
+    from pyarchinit_photogrammetry.testing.synthetic import write_pottery_dataset
+
+    write_pottery_dataset(tmp_path / "turntable")
+    photos = sorted((tmp_path / "turntable" / "photos").glob("*.jpg"))
+    assert len(photos) == 32 and read_exif(photos[0])["focal_length_35mm"] == 33.0
+    ch = Document().add_chunk("Ciotola")
+    ch.add_photos([tmp_path / "turntable" / "photos"])
+    (sensor,) = ch.sensors.values()
+    assert sensor.params[0] == pytest.approx(1100.0)
+
+
 @pytest.mark.slow
 def test_pottery_demo_pipeline_measures_the_bowl(tmp_path):
     """Rim 16 cm, height 12 cm: the whole chain photos -> mesh -> profile must find them

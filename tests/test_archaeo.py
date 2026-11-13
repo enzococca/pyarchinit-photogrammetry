@@ -131,3 +131,39 @@ def test_pottery_axis_from_noisy_sherd():
     assert np.degrees(np.arccos(abs(axis.direction @ t[:3, 2]))) < 3.0
     meas = pottery.best_profile(mesh, axis).measurements()
     assert abs(meas["rim_diameter_m"] - 0.16) < 0.004
+
+
+def _wavy_lip_vessel(amplitude: float = 0.004, lobes: int = 3, phase: float = 0.7):
+    """A whole bowl whose lip waves in and out around the circle, as the lip of a vessel meshed
+    from photos does: the last 5 mm are pushed radially by ``amplitude * sin(lobes * angle)``."""
+    mesh = make_vessel()
+    v = np.array(mesh.vertices)
+    ramp = np.clip((v[:, 2] - 0.115) / 0.005, 0.0, 1.0)
+    ang = np.arctan2(v[:, 1], v[:, 0])
+    r = np.hypot(v[:, 0], v[:, 1])
+    push = amplitude * np.sin(lobes * ang + phase) * ramp
+    v[:, 0] += push * v[:, 0] / np.maximum(r, 1e-9)
+    v[:, 1] += push * v[:, 1] / np.maximum(r, 1e-9)
+    return trimesh.Trimesh(v, mesh.faces, process=False)
+
+
+def test_rim_diameter_of_a_wavy_lip_is_measured_around_the_whole_circle():
+    """The lip does not follow a circle (no reliable rim circle): the diameter is the middle one
+    of the sections all around the axis, not that of the single section of the drawing."""
+    mesh = _wavy_lip_vessel()
+    axis = pottery.Axis((0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+    single = [pottery.profile_at(mesh, axis, a).measurements()["rim_diameter_m"] for a in range(0, 360, 5)]
+    assert max(single) - min(single) > 0.010  # one section alone says anything within a centimetre
+    assert abs(pottery.rim_diameter_around(mesh, axis) - 0.16) < 0.002
+    _, meas = pottery.measure(mesh, axis)
+    assert not meas["rim_reliable"]
+    assert abs(meas["rim_diameter_m"] - 0.16) < 0.002, meas
+
+
+def test_rim_diameter_around_a_sherd_uses_the_sections_that_reach_the_rim():
+    mesh = make_vessel(sherd=(10, 70))
+    axis = pottery.Axis((0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+    assert abs(pottery.rim_diameter_around(mesh, axis) - 0.16) < 0.002
+    # the sections outside the sherd are empty: nothing to measure where nothing is cut
+    away = pottery.Axis((5.0, 5.0, 0.0), (1.0, 0.0, 0.0))
+    assert pottery.rim_diameter_around(mesh.slice_plane([0, 0, 0.2], [0, 0, 1]), away) is None
