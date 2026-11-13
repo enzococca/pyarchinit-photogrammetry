@@ -9,7 +9,8 @@ from .i18n import decimal_comma, tr
 
 
 def is_metric(chunk) -> bool:
-    """True when the coordinates of ``chunk`` are metres: a projected or geographic system, markers with references,
+    """True when the coordinates of ``chunk`` are metres: a projected or geographic system, data measured in metres
+    (``meta["metric"]``: an imported model, a laser scan), markers with references,
     scale bars, or a transform that scales the model (a reference or a scale applied, a model imported in metres
     keeps its own transform). A chunk only aligned (identity transform, local frame, no references) is in model
     units."""
@@ -19,6 +20,8 @@ def is_metric(chunk) -> bool:
 
     if not crs_mod.is_local(getattr(chunk, "crs", None)):
         return True
+    if (getattr(chunk, "meta", None) or {}).get("metric"):  # measured in metres also in local coordinates: an
+        return True  # imported model, a laser scan (as *Allinea chunk* and the report take it)
     if any(getattr(sb, "enabled", True) for sb in getattr(chunk, "scalebars", []) or []):
         return True
     for m in getattr(chunk, "markers", []) or []:

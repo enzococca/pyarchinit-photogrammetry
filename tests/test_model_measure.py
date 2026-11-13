@@ -245,6 +245,9 @@ def test_a_chunk_without_scale_says_model_units(qapp):
     ch.transform = np.diag([2.0, 2.0, 2.0, 1.0])  # a scale applied: metres
     assert mm.is_metric(ch)
     assert " m," in mm.text("line", v, True)
+    imported = doc.add_chunk("modello importato")  # a model imported in metres: local frame, no references
+    imported.meta["metric"] = True
+    assert mm.is_metric(imported) and " m," in mm.text("line", v, mm.is_metric(imported))
 
 
 def test_vtk_distance_on_the_model(processed, qapp, monkeypatch, scene):
