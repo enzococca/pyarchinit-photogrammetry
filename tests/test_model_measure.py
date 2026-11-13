@@ -299,3 +299,167 @@ def test_vtk_distance_on_the_model(processed, qapp, monkeypatch, scene):
     finally:
         mv.close()
         collector.stop()
+
+
+def _local_copy(processed, tmp_path):
+    """The processed trench copied and made a chunk only aligned: local frame, identity transform (the model in the
+    units of the alignment, a wrong scale), the references of the markers off. Returns the document and the old
+    transform (internal -> EPSG:3004, metres) to find the targets in it."""
+    doc = _copy(processed, tmp_path)
+    ch = doc.chunk
+    old = np.array(ch.transform, float).copy()
+    ch.crs = None
+    ch.transform = np.eye(4)
+    for m in ch.markers:
+        m.reference.enabled = False
+    ch.meta.pop("metric", None)
+    doc.save()
+    return doc, old
+
+
+def _internal(old, target) -> np.ndarray:
+    """A target of the scene (EPSG:3004) in the internal coordinates of the trench."""
+    p = np.append(np.asarray(target, float), 1.0)
+    return (np.linalg.inv(old) @ p)[:3]
+
+
+def _measure_line(win, mv, qapp, a, b) -> dict:
+    """A distance measured with two clicks on the internal points ``a`` and ``b`` and Enter."""
+    from free3d_helpers import click_at, screen_of
+    from PySide6.QtCore import Qt
+
+    assert mv.start_measure("line")
+    for p in (a, b):
+        click_at(mv, *screen_of(mv, p))
+    _key(mv, Qt.Key.Key_Return)
+    qapp.processEvents()
+    _key(mv, Qt.Key.Key_Escape)
+    return win._model_measure
+
+
+def test_the_model_is_in_metres_entry(qapp, processed, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gui import model_measure as mm
+
+    doc, _old = _local_copy(processed, tmp_path)
+    w = _window(doc, tmp_path, monkeypatch)
+    try:
+        ch = w.chunk
+        mv = _model_view(w, qapp)
+        assert not mm.is_metric(ch)
+        w._model_measure = {"kind": "line", "xyz": np.array([[0, 0, 0], [3, 4, 0]], float),
+                            "values": mm.values("line", np.array([[0, 0, 0], [3, 4, 0]], float)), "metric": False,
+                            "text": "x"}
+        mv.measure_menu.aboutToShow.emit()
+        a = mv.a_model_metric
+        assert a.isEnabled() and not a.isChecked() and mv.a_scale_distance.isEnabled()
+        w.setWindowModified(False)
+        a.trigger()  # checked by the user
+        assert ch.meta.get("metric") is True and mm.is_metric(ch) and a.isChecked()
+        assert w.isWindowModified()
+        assert " m," in w._model_measure["text"] and "unità del modello" not in w._model_measure["text"]
+        assert w._model_measure["text"] in w.statusBar().currentMessage()
+        assert w.history.can_undo()
+        w.undo()
+        assert "metric" not in ch.meta and not mm.is_metric(ch) and not a.isChecked()
+        assert "unità del modello" in w._model_measure["text"]
+        w.redo()
+        assert ch.meta.get("metric") is True and a.isChecked()
+        a.trigger()  # unchecked
+        assert "metric" not in ch.meta and not a.isChecked()
+        # metres for another reason: checked, disabled, the reason in the tooltip
+        ch.transform = np.diag([2.0, 2.0, 2.0, 1.0])
+        mv.measure_menu.aboutToShow.emit()
+        assert a.isChecked() and not a.isEnabled() and "scala" in a.toolTip()
+    finally:
+        _close(w)
+
+
+def test_scale_from_a_known_distance(qapp, processed, tmp_path, monkeypatch, scene):
+    from free3d_helpers import click_at, screen_of
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.gui import dialogs
+    from pyarchinit_photogrammetry.gui import model_measure as mm
+
+    doc, old = _local_copy(processed, tmp_path)
+    w = _window(doc, tmp_path, monkeypatch)
+    try:
+        ch = w.chunk
+        mv = _model_view(w, qapp)
+        t0, t2, t4, t5 = (_internal(old, scene.targets[k]) for k in (0, 2, 4, 5))
+        known = float(np.linalg.norm(np.subtract(scene.targets[2], scene.targets[0])))
+        third = float(np.linalg.norm(np.subtract(scene.targets[5], scene.targets[4])))
+        before = _measure_line(w, mv, qapp, t0, t2)
+        assert not before["metric"] and "unità del modello" in before["text"]
+        wrong = before["values"]["length_3d"]
+        assert abs(wrong - known) > 0.1  # the alignment's units are not metres
+        asked = []
+
+        def ask(_parent, measured, metric):
+            asked.append((measured, metric))
+            return known
+
+        monkeypatch.setattr(dialogs.KnownDistanceDialog, "ask", staticmethod(ask))
+        saved_transform = np.array(ch.transform, float).copy()
+        w.said.clear()
+        assert w.scale_from_distance()
+        assert mv.measuring
+        pa = screen_of(mv, t0)
+        click_at(mv, *pa)
+        assert mv.measuring and not asked
+        click_at(mv, *screen_of(mv, t2))  # the second point ends the pick by itself
+        qapp.processEvents()
+        assert not mv.measuring
+        assert len(asked) == 1 and asked[0][1] is False
+        assert asked[0][0] == pytest.approx(wrong, rel=0.01)
+        assert ch.meta.get("metric") is True and mm.is_metric(ch)
+        s = ch.scale
+        assert s == pytest.approx(known / asked[0][0], rel=1e-9)
+        assert w._model_measure["values"]["length_3d"] == pytest.approx(known, abs=1e-9)  # the picked distance
+        assert any("scalato" in str(t) for _k, t in w.said) or "scalato" in w.statusBar().currentMessage()
+        assert stamps.stale_products(ch)  # the DEM and the orthophoto in the old units: to build again
+        mv.canvas.top_view()
+        qapp.processEvents()
+        again = _measure_line(w, mv, qapp, t0, t2)
+        assert again["metric"] and " m," in again["text"]
+        assert abs(again["values"]["length_3d"] - known) < 0.001, (again["values"]["length_3d"], known)
+        other = _measure_line(w, mv, qapp, t4, t5)
+        assert abs(other["values"]["length_3d"] - third) < 0.005, (other["values"]["length_3d"], third)
+        # undone in one step: the transform exactly as it was, not metres any more
+        w.undo()
+        assert np.array_equal(np.asarray(ch.transform, float), saved_transform)
+        assert "metric" not in ch.meta and not mm.is_metric(ch)
+        w.redo()
+        assert ch.scale == pytest.approx(s, rel=1e-12) and ch.meta.get("metric") is True
+    finally:
+        _close(w)
+
+
+def test_scale_refused_on_a_georeferenced_chunk(win, qapp):
+    ch = win.chunk
+    mv = _model_view(win, qapp)
+    t = np.array(ch.transform, float).copy()
+    win.said.clear()
+    assert not win.scale_from_distance()
+    assert not mv.measuring
+    assert any(kind == "warn" and "EPSG:3004" in text for kind, text in win.said), win.said
+    mv.measure_menu.aboutToShow.emit()
+    assert not mv.a_scale_distance.isEnabled()
+    assert mv.a_model_metric.isChecked() and not mv.a_model_metric.isEnabled()
+    # the engine side refuses too, and two points that coincide are refused
+    assert win.scale_chunk([0, 0, 0], [1, 0, 0], 2.0) is None
+    assert np.array_equal(np.asarray(ch.transform, float), t)
+
+
+def test_scale_refuses_two_points_that_coincide(qapp, processed, tmp_path, monkeypatch):
+    doc, _old = _local_copy(processed, tmp_path)
+    w = _window(doc, tmp_path, monkeypatch)
+    try:
+        ch = w.chunk
+        t = np.array(ch.transform, float).copy()
+        w.said.clear()
+        w._scale_picked(np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]))
+        assert any(kind == "warn" and "coincidono" in text for kind, text in w.said), w.said
+        assert np.array_equal(np.asarray(ch.transform, float), t) and "metric" not in ch.meta
+    finally:
+        _close(w)

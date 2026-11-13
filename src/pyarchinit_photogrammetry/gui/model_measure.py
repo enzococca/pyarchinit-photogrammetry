@@ -10,28 +10,40 @@ from .i18n import decimal_comma, tr
 
 def is_metric(chunk) -> bool:
     """True when the coordinates of ``chunk`` are metres: a projected or geographic system, data measured in metres
-    (``meta["metric"]``: an imported model, a laser scan), markers with references,
-    scale bars, or a transform that scales the model (a reference or a scale applied, a model imported in metres
-    keeps its own transform). A chunk only aligned (identity transform, local frame, no references) is in model
-    units."""
+    (``meta["metric"]``: an imported model, a laser scan, a chunk declared in metres or scaled from a known distance
+    on the 3D view), markers with references, scale bars, or a transform that scales the model (a reference or a
+    scale applied, a model imported in metres keeps its own transform). A chunk only aligned (identity transform,
+    local frame, no references) is in model units."""
     if chunk is None:
         return False
-    from ..core import crs as crs_mod
-
-    if not crs_mod.is_local(getattr(chunk, "crs", None)):
-        return True
     if (getattr(chunk, "meta", None) or {}).get("metric"):  # measured in metres also in local coordinates: an
         return True  # imported model, a laser scan (as *Allinea chunk* and the report take it)
+    return metric_reason(chunk) is not None
+
+
+def metric_reason(chunk) -> str | None:
+    """Why the coordinates of ``chunk`` are metres apart from ``meta["metric"]``, in words: its system, the markers
+    with references, the scale bars or the scale of its transform; None when nothing else says so (the flag alone
+    decides, as *Il modello è in metri* sets it)."""
+    if chunk is None:
+        return None
+    from ..core import crs as crs_mod
+
+    crs = getattr(chunk, "crs", None)
+    if not crs_mod.is_local(crs):
+        return tr("il chunk è nel sistema {0}", str(crs))
     if any(getattr(sb, "enabled", True) for sb in getattr(chunk, "scalebars", []) or []):
-        return True
+        return tr("il chunk ha barre di scala")
     for m in getattr(chunk, "markers", []) or []:
         ref = getattr(m, "reference", None)
         if ref is not None and ref.location is not None and ref.enabled:
-            return True
+            return tr("il chunk ha marker con coordinate")
     try:
-        return abs(float(chunk.scale) - 1.0) > 1e-9
+        if abs(float(chunk.scale) - 1.0) > 1e-9:
+            return tr("il chunk ha una scala ({0})", decimal_comma(f"{float(chunk.scale):.6g}"))
     except Exception:  # noqa: BLE001 - a transform that cannot be read: not known as metres
-        return False
+        return None
+    return None
 
 
 def _n(value: float, decimals: int = 3) -> str:

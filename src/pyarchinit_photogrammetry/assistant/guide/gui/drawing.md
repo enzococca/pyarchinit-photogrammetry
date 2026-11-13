@@ -314,6 +314,23 @@ The measure is drawn in magenta until the next one starts or *Clear the measure*
 saved with the project. Values are in metres in the chunk's coordinates; a chunk only aligned - no reference, no scale
 bar, no scale applied - is measured **in model units**, and every result says so.
 
+Two more entries of the same menu set the units of such a chunk:
+
+* **The model is in metres**: a check that declares the chunk's coordinates metres (a model already measured in
+  metres, as an imported model or a laser scan is): from then on the measures are in metres. It follows the active
+  chunk; when the chunk is in metres anyway - a coordinate system, markers with coordinates, scale bars, a scale
+  applied - it is checked and greyed out, and its tooltip says why. *Edit > Undo* takes it back.
+* **Scale from a known distance...**: click two points on the model whose true distance you know (the ends of a
+  ruler, two targets); the pick ends by itself at the second point. A small window shows the distance as measured
+  now and asks the true one in metres; on OK the chunk is scaled by the true distance over the measured one, **about
+  the first point** (it stays where it is). It is a motion of the chunk as *Orient the local system* makes one: the
+  drawings, the markers' references, the sections and the reconstruction region follow the model;
+  the DEM, the orthophoto, the elevations and the other rasters are in the old units and are listed as stale, with
+  *Rebuild the stale products*. The chunk then counts as metres, the log says the factor, the picked distance becomes
+  the last measure, and *Edit > Undo* takes the whole scale back in one step. It is refused when the chunk has a
+  coordinate system, markers with coordinates, scale bars or referenced photos (they give the scale), when it is
+  aligned to another chunk (scale the reference), or when the two points coincide.
+
 ## Contour lines and volumes
 
 ![The Contour lines window](../img/gui/dialog-contours.png)
