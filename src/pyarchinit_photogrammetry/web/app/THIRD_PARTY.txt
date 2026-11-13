@@ -51,5 +51,41 @@ that source map. Each licence file below is the LICENSE of the npm package, unch
 The other dependencies of the package "ol" (geotiff, zarrita) are not in the full build and are not in
 this folder.
 
-Everything else in this folder (main.js, cog.js, i18n.js, style.css) is part of pyarchinit-photogrammetry,
+vendor/three/ (the 3D view)
+---------------------------
+three.js 0.187.0 - https://threejs.org/ - MIT License
+Copyright © 2010-2026 three.js authors. The licence is in vendor/THREE-LICENSE.txt.
+
+Files of the npm package "three", unchanged, in the folders of the package (build/ and examples/jsm/, which the
+package exports as "three/addons/"); index.html maps the names "three" and "three/addons/" to them with an import
+map, so that the files stay as released:
+  https://registry.npmjs.org/three/-/three-0.187.0.tgz
+  sha512  Qiu7R+Cmh8CstZsY1uJOSWnVlfo7ZtNLV7mF8Jltk3LB3AtDu9cRZlcnRKkAk8Y4z6KKw35z7Y7Urd7jWY8etA== (base64)
+  sha256 104f56145899722094556490d787aae0617cc2fc3382f31df02d724ea1aee341  vendor/three/three.module.js  (package/build/three.module.js)
+  sha256 613e370f76638fdef83926642bf256dc9615684922de1ce1f63a8583e5d78578  vendor/three/three.core.js  (package/build/three.core.js)
+  sha256 e7fca2fe9e7670a828af9b28084669a5909445b7f36f1f26cee9bf8f2961c32c  vendor/three/addons/controls/OrbitControls.js  (package/examples/jsm/controls/OrbitControls.js)
+  sha256 532ac726e120039acbcd6cf54328c57acbf7b438176afaa6951257126d11bff1  vendor/three/addons/loaders/GLTFLoader.js  (package/examples/jsm/loaders/GLTFLoader.js)
+  sha256 7bda2a8ba836b2bcf67cb938d4b9e1bb5d1b1bc616817103ed858c0b58296ce7  vendor/three/addons/utils/BufferGeometryUtils.js  (package/examples/jsm/utils/BufferGeometryUtils.js)
+  sha256 b1632a703206c3d830de9fcbe515696770d04b71a15ee6b50afa6d2c3298c86f  vendor/three/addons/utils/SkeletonUtils.js  (package/examples/jsm/utils/SkeletonUtils.js)
+The sources are those of the package and of https://github.com/mrdoob/three.js (tag r187).
+
+vendor/3d-tiles-renderer/
+-------------------------
+3DTilesRendererJS 0.5.4 - https://github.com/NASA-AMMOS/3DTilesRendererJS - Apache License 2.0
+Copyright 2020 California Institute of Technology. The licence is in vendor/3D-TILES-RENDERER-LICENSE.txt; the
+package has no NOTICE file.
+
+The entry of the package for three.js ("3d-tiles-renderer/three", build/index.three.js) and the two files it
+imports, unchanged:
+  https://registry.npmjs.org/3d-tiles-renderer/-/3d-tiles-renderer-0.5.4.tgz
+  sha512  5ZBjJ9A4gKu3OX21umSI+FULDJSB8hGJbl3dwJR1RD1gXKPuGaDsjwOL7+hizhpucvJvGyEdJXnR0LO+b4jh8Q== (base64)
+  sha256 436cee9cdd46d3585c0f35147c7ddb9d7ebe19061e2e992adc59f6077613272a  vendor/3d-tiles-renderer/index.three.js  (package/build/index.three.js)
+  sha256 84e6368ce2cfad81e3a625e04111cd08e86af5062f42a66f54da3b2a26612527  vendor/3d-tiles-renderer/renderer-SRMU5zhW.js  (package/build/renderer-SRMU5zhW.js)
+  sha256 6f62b4ab643ce2029f450fae5989b3391ad5af462f6524ef327219331fbfe41d  vendor/3d-tiles-renderer/renderer-k6QvS8mu.js  (package/build/renderer-k6QvS8mu.js)
+The two renderer files keep their last line "//# sourceMappingURL=...", although their source maps are not
+included (as for ol.js above). They hold the sources of the package alone (their source maps list no other
+package); its dependencies (pbf, pmtiles, @mapbox/vector-tile) serve plugins that are not in this folder. The
+sources are those of the package and of the repository above (tag v0.5.4).
+
+Everything else in this folder (main.js, view3d.js, cog.js, i18n.js, style.css) is part of pyarchinit-photogrammetry,
 GPL-2.0-or-later.

@@ -90,10 +90,11 @@ where = ["src"]
 # files the code reads at run time (tests/test_packaging.py checks that nothing is left out)
 # assistant/guide: the Markdown of docs/ for the assistant (assistant.knowledge --sync), in its folders
 # assistant/evaluation: the evaluation set of the assistant (ppg assistant eval)
-# web: the page of a survey published as a site (io/site.py), with OpenLayers in web/app/vendor
+# web: the page of a survey published as a site (io/site.py), with OpenLayers, three.js and 3DTilesRendererJS in
+# web/app/vendor (the last two in folders of their own)
 pyarchinit_photogrammetry = ["gui/resources/*", "gui/translations/*.json", "pyarchinit/*.sql",
                              "assistant/guide/*.md", "assistant/guide/**/*.md", "assistant/evaluation/*.json",
-                             "web/*", "web/app/*", "web/app/vendor/*"]
+                             "web/*", "web/app/*", "web/app/vendor/*", "web/app/vendor/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

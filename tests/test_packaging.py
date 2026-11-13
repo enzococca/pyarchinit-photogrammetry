@@ -44,6 +44,16 @@ def test_the_translations_are_in_the_wheel(monkeypatch):
     assert "gui/translations/en.json" in found and "assistant/evaluation/cases.json" in found
 
 
+def test_the_viewer_of_a_site_is_in_the_wheel(monkeypatch):
+    """``ppg web build`` copies ``web/`` as it is: every file of it, the vendored libraries in their folders
+    included, is a data file of the wheel."""
+    files = sorted(p.relative_to(PKG).as_posix() for p in (PKG / "web").rglob("*") if p.is_file())
+    assert "web/app/vendor/three/addons/loaders/GLTFLoader.js" in files
+    found = _wheel_data_files(monkeypatch)
+    missing = [p for p in files if p not in found]
+    assert not missing, f"viewer files not in the wheel: {missing[:5]}"
+
+
 def _wheel_data_files(monkeypatch) -> set[str]:
     """The data files setuptools puts in the wheel, relative to the package (globs resolved by setuptools)."""
     import warnings
