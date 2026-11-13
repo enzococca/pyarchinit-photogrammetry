@@ -149,6 +149,18 @@ def _macho_files(root: Path) -> list[Path]:
     return out
 
 
+def _codesign(command: list[str], attempts: int = 4) -> None:
+    """One ``codesign`` call, tried again when it fails: among the hundreds of calls of a bundle the timestamp
+    server of Apple now and then does not answer. The words of codesign are printed at each failure."""
+    for attempt in range(1, attempts + 1):
+        r = subprocess.run(command, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        print(f"codesign failed ({attempt}/{attempts}) on {command[-1]}: {r.stderr.strip()}", flush=True)
+        time.sleep(5 * attempt)
+    raise SystemExit(f"codesign failed {attempts} times on {command[-1]}")
+
+
 def sign_bundle(bundle: Path, identity: str, entitlements: Path | None = None) -> None:
     """Sign every Mach-O inside out with the hardened runtime, then the bundle (macOS).
 
@@ -159,9 +171,8 @@ def sign_bundle(bundle: Path, identity: str, entitlements: Path | None = None) -
     if identity != "-":
         base.insert(2, "--timestamp")
     files = sorted(_macho_files(bundle / "Contents"), key=lambda p: -len(p.parts))  # deepest first
-    for f in files:
-        subprocess.run(base + [str(f)], check=True, capture_output=True)
-    subprocess.run(base + [str(bundle)], check=True, capture_output=True)
+    for f in files + [bundle]:
+        _codesign(base + [str(f)])
     subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(bundle)], check=True)
     print(f"signed {len(files)} binaries and the bundle with {identity!r}", flush=True)
 
