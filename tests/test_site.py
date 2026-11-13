@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import json
 import os
@@ -245,7 +246,8 @@ def test_several_chunks_share_one_frame(tmp_path):
 
 def test_local_heights_start_under_the_true_minimum(tmp_path):
     """A wide DEM with a pit one cell across, which a reduced reading misses: the heights of the local frame
-    start under it all the same, and under a spot height drawn lower still. Nothing is under zero."""
+    start under it all the same, and no cell is under zero. A drawing at height zero (made without heights) does
+    not move the base, or the true heights would be published; without a DEM the drawn heights give the base."""
     import rasterio
     from rasterio.transform import from_origin
 
@@ -277,15 +279,18 @@ def test_local_heights_start_under_the_true_minimum(tmp_path):
         cells = src.read(1, masked=True)
     assert cells.min() == pytest.approx(0.3, abs=1e-4) and cells.min() >= 0 and cells.count() == 64 * 3000
 
-    ch.meta["drawings"] = {"quote": [{"x": 500010.0, "y": 4499999.8, "quota_q": 96.4}],
-                           "points": [{"x": 500011.0, "y": 4499999.8, "z": 96.9, "label": "P1"}]}
+    ch.meta["drawings"] = {"quote": [{"x": 500010.0, "y": 4499999.8, "quota_q": 98.4}],
+                           "points": [{"x": 500011.0, "y": 4499999.8, "z": 0.0, "label": "P1"}]}
     path = doc.export_site(tmp_path / "site", products=["dem", "drawings"])
     layer = _layer(json.loads(path.read_text(encoding="utf-8")), "dem")
-    assert layer["range"] == pytest.approx([1.3, 4.25], abs=1e-3)  # one metre lower: under the spot height
+    assert layer["range"] == pytest.approx([0.3, 3.25], abs=1e-3)  # the base is still the one of the DEM
     drawn = json.loads((path.parent / "data/drawings.geojson").read_text(encoding="utf-8"))["features"]
-    assert sorted(f["properties"].get("quota", f["properties"].get("z")) for f in drawn) == pytest.approx([0.4, 0.9])
-    with rasterio.open(path.parent / "data/dem.tif") as src:
-        assert src.read(1, masked=True).min() == pytest.approx(1.3, abs=1e-4)
+    assert sorted(f["properties"].get("quota", f["properties"].get("z")) for f in drawn) == pytest.approx([-97, 1.4])
+    ch.meta["drawings"]["points"][0]["z"] = 97.9
+    path = doc.export_site(tmp_path / "site", products=["drawings"])  # no DEM: the lowest drawn height
+    drawn = json.loads((path.parent / "data/drawings.geojson").read_text(encoding="utf-8"))["features"]
+    assert sorted(f["properties"].get("quota", f["properties"].get("z")) for f in drawn) == pytest.approx([0.9, 1.4])
+    assert not (path.parent / "data/dem.tif").exists()  # the site built again without the DEM
 
 
 def test_names_typed_by_the_user_carry_no_path(tmp_path):
@@ -342,20 +347,26 @@ def test_names_typed_by_the_user_carry_no_path(tmp_path):
 
 
 # ------------------------------------------------------------------------------------------------ the server
-@pytest.fixture()
-def served(trench_site):
+@contextlib.contextmanager
+def _serving(folder, **options):
+    """The port of a local server of ``folder``, running while the block lasts."""
     from pyarchinit_photogrammetry.io import site as site_mod
 
-    folder = trench_site[3]
-    httpd = site_mod.server(folder)
+    httpd = site_mod.server(folder, **options)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
-        yield folder, httpd.server_address[1]
+        yield httpd.server_address[1]
     finally:
         httpd.shutdown()
         httpd.server_close()
         thread.join(5)
+
+
+@pytest.fixture()
+def served(trench_site):
+    with _serving(trench_site[3]) as port:
+        yield trench_site[3], port
 
 
 def _get(port, path, headers=None, method="GET"):
@@ -398,6 +409,18 @@ def test_server_answers_range_requests(served):
     assert _get(port, "/data/units.geojson")[1]["content-type"].startswith("application/geo+json")
     assert _get(port, "/data/")[0] == 404  # no list of a folder
     assert _get(port, "/../../etc/passwd")[0] == 404 and _get(port, "/nulla.tif")[0] == 404
+
+
+def test_server_without_ranges_gives_whole_files(trench_site):
+    """``ranges=False``: the server of a host that ignores ``Range``, to try the page against it."""
+    folder = trench_site[3]
+    data = (folder / "data/dem.tif").read_bytes()
+    with _serving(folder, ranges=False) as port:
+        status, head, body = _get(port, "/data/dem.tif", {"Range": "bytes=100-299"})
+        assert status == 200 and body == data and "accept-ranges" not in head and "content-range" not in head
+        assert head["content-length"] == str(len(data))
+        assert _get(port, "/data/dem.tif", {"Range": f"bytes={len(data)}-"})[0] == 200
+        assert _get(port, "/data/")[0] == 404
 
 
 def test_web_commands(trench_site, tmp_path):
@@ -621,6 +644,8 @@ def test_page_in_a_browser(served, trench_site, tmp_path):
         assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
         assert browser.js("document.title") == "Saggio di prova"
         assert browser.js("ppgSite.map.getView().getProjection().getUnits()") == "m"
+        assert browser.js("document.documentElement.dataset.ranges") == "served"
+        assert browser.js("document.getElementById('notice').hidden") is True
 
         # the heights of the DEM, read by the page through range requests
         with rasterio.open(folder / "data/dem.tif") as src:
@@ -657,7 +682,7 @@ def test_page_in_a_browser(served, trench_site, tmp_path):
         assert "US 12" in info and "Strato" in info and SECRET in info and "Sito di prova" in info
         with rasterio.open(folder / "data/dem.tif") as src:
             expected = float(next(src.sample([(ux, uy)]))[0])
-        assert f"{expected:.3f}" in info
+        assert _shown_height(info) == pytest.approx(expected, abs=2e-3)  # the pixel clicked, not the point
 
         # the words follow the language; the measure is on the plane
         first = browser.js("document.getElementById('layers-title').textContent")
@@ -675,5 +700,194 @@ def test_page_in_a_browser(served, trench_site, tmp_path):
         assert not browser.errors, browser.errors
         outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
         assert not outside, outside  # nothing asked outside the folder served
+    finally:
+        browser.close()
+
+
+
+def test_page_on_a_host_without_ranges(trench_site, tmp_path):
+    """A host that answers a request of a part with the whole file: the page says so in its two languages and
+    works on the files taken whole; a file over the limit is not downloaded, and its layer is named and left
+    out while the drawings stay."""
+    import rasterio
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    folder = trench_site[3]
+    sizes = {n: (folder / "data" / n).stat().st_size for n in ("ortho.tif", "dem.tif", "dem_hillshade.tif")}
+    browser = Browser(executable, tmp_path / "profilo")
+    try:
+        with _serving(folder, ranges=False) as port:
+            origin = f"http://127.0.0.1:{port}"
+            # no cache: a browser answers the request of a part from a whole file it already holds
+            browser.call("Network.setCacheDisabled", {"cacheDisabled": True})
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            assert browser.js("document.documentElement.dataset.ranges") == "none"
+            assert browser.js("document.getElementById('notice').hidden") is False
+            words = {browser.js("document.getElementById('notice').innerText")}
+            browser.js("document.getElementById('language').click()")
+            words.add(browser.js("document.getElementById('notice').innerText"))
+            assert any("richieste HTTP Range" in w for w in words) and any("HTTP range requests" in w for w in words)
+            assert browser.js("document.querySelector('#notice ul')") is None  # small files: nothing left out
+            assert browser.js("ppgSite.state.dems.length") == 1 and browser.js("ppgSite.state.left.length") == 0
+            with rasterio.open(folder / "data/dem.tif") as src:
+                dem = src.read(1, masked=True)
+                row, col = np.argwhere(~np.ma.getmaskarray(dem))[dem.count() // 3]
+                x, y = (float(v) for v in src.xy(int(row), int(col)))
+            assert browser.js(f"ppgSite.heightAt({x!r}, {y!r})") == pytest.approx(float(dem[row, col]), abs=1e-5)
+            assert not browser.errors, browser.errors
+
+            # the same host with files over the limit (lowered to the smallest of the three, less one byte)
+            limit = min(sizes.values()) - 1
+            browser.requests.clear()
+            browser.call("Page.navigate", {"url": f"{origin}/?whole-limit={limit}"})
+            browser.wait("document.documentElement.dataset.ranges === 'none'"
+                         " && ['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            assert browser.js("ppgSite.state.left.map((x) => x.def.id)") == ["ortho", "hillshade", "dem"]
+            assert browser.js("ppgSite.state.left.map((x) => x.size)") == [
+                sizes["ortho.tif"], sizes["dem_hillshade.tif"], sizes["dem.tif"]]
+            assert browser.js("document.querySelectorAll('#notice li').length") == 3
+            notice = browser.js("document.getElementById('notice').innerText")
+            assert ("Too large" in notice and "Orthophoto" in notice) or ("Troppo grandi" in notice
+                                                                          and "Ortofoto" in notice)
+            assert browser.js("ppgSite.state.entries.map((e) => e.def.id)") == ["units", "drawings"]
+            assert browser.js("ppgSite.state.dems.length") == 0
+            assert browser.js(f"ppgSite.heightAt({x!r}, {y!r})") is None
+            assert not browser.errors, browser.errors
+    finally:
+        browser.close()
+
+
+def _shown_height(info: str) -> float:
+    """The height in the text of the side panel (the line after the coordinates)."""
+    line = next(x for x in info.splitlines() if x.startswith(("Quota (m)", "Height (m)")))
+    return float(line.split("\t")[-1])
+
+
+def _two_trenches(processed, folder: Path):
+    """A project of two chunks made of the processed trench: the second is the first moved 6 m east and lifted
+    0.5 m, each with a stratigraphic unit, the second with a free drawing too."""
+    import rasterio
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    source = processed[1]
+    doc = ppg.Document()
+    doc.save(folder / "due_saggi.ppg")
+    centres = []
+    for n, (east, lift) in enumerate(((0.0, 0.0), (6.0, 0.5))):
+        ch = doc.add_chunk(f"Saggio {'AB'[n]}")
+        ch.crs = source.crs
+        for product, path in (("orthomosaic", source.orthomosaic_path), ("dem", source.dem_path)):
+            out = ch.own_product_path(product)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(path) as src:
+                profile = src.profile
+                profile["transform"] = src.transform.translation(east, 0.0) @ src.transform
+                with rasterio.open(out, "w", **profile) as dst:
+                    for band in range(1, src.count + 1):
+                        cells = src.read(band)
+                        if product == "dem" and lift:
+                            cells = np.where(cells == src.nodata, cells, cells + lift).astype(cells.dtype)
+                        dst.write(cells, band)
+                    if product == "orthomosaic" and src.count == 3:
+                        dst.write_mask(src.dataset_mask())
+                    b = dst.bounds
+            ch._set_product(product, out)
+        cx, cy = (b.left + b.right) / 2, (b.bottom + b.top) / 2
+        unit = UnitPolygon(box(cx - 0.4, cy - 0.3, cx + 0.4, cy + 0.3), us=str(n + 1), sito="Sito di prova")
+        ch.meta["drawings"] = {"units": [unit.to_dict()]}
+        if n:
+            free_drawings.add(ch, "line", [[cx - 0.6, cy - 0.5, 0.0], [cx + 0.6, cy - 0.5, 0.0]], layer="Limiti",
+                              name="limite")
+        centres.append((cx, cy))
+    doc.save()
+    return doc, centres
+
+
+def test_page_of_two_chunks(processed, tmp_path):
+    """Two chunks in one page: a heading and the layers of each, both orthophotos on the map, and a click that
+    reads the DEM and the unit of the chunk it falls on."""
+    import rasterio
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    doc, centres = _two_trenches(processed, tmp_path / "progetto")
+    path = doc.export_site(tmp_path / "site", title="Due saggi")
+    folder = path.parent
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    assert [c["label"] for c in manifest["chunks"]] == ["Saggio A", "Saggio B"]
+    assert [[x["id"] for x in c["layers"]] for c in manifest["chunks"]] == [
+        ["ortho", "hillshade", "dem", "units"], ["ortho", "hillshade", "dem", "units", "drawings"]]
+    a, b = (c["extent"] for c in manifest["chunks"])
+    assert b[0] - a[0] == pytest.approx(6.0, abs=1e-3) and a[0] < 0 < b[2]  # one frame for both
+    assert _layer({"chunks": manifest["chunks"][1:]}, "dem")["range"][0] == pytest.approx(
+        _layer(manifest, "dem")["range"][0] + 0.5, abs=1e-3)
+
+    browser = Browser(executable, tmp_path / "profilo")
+    try:
+        with _serving(folder) as port:
+            origin = f"http://127.0.0.1:{port}"
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+
+            # the list: a heading for each chunk, then its layers; the drawings of the second with their group
+            rows = browser.js("[...document.getElementById('layers').children].map((n) => n.tagName === 'H3'"
+                              " ? '# ' + n.textContent : (n.classList.contains('group') ? 'group' : 'layer'))")
+            assert rows == ["# Saggio A", "layer", "layer", "layer",
+                            "# Saggio B", "layer", "layer", "layer", "layer", "group"]
+            shown = browser.js("ppgSite.state.entries.map((e) => [e.chunk.label, e.def.id, e.layer.getVisible()])")
+            assert shown == [["Saggio A", "ortho", True], ["Saggio A", "hillshade", False], ["Saggio A", "units", True],
+                             ["Saggio B", "ortho", True], ["Saggio B", "hillshade", False], ["Saggio B", "units", True],
+                             ["Saggio B", "drawings", True]]
+            assert browser.js("ppgSite.state.dems.length") == 2
+
+            # both orthophotos are on the map: neither centre shows the empty background
+            browser.wait("document.querySelector('#map canvas') !== null")
+            time.sleep(0.5)
+            shot = browser.screenshot()
+            box = browser.js("(() => { const r = document.getElementById('map').getBoundingClientRect();"
+                             " return [r.left, r.top, r.width, r.height]; })()")
+            background = np.array([0xe6, 0xe3, 0xdf], float)
+            spots = []
+            for n in (1, 2):
+                unit = json.loads((folder / f"data/{n}/units.geojson").read_text(encoding="utf-8"))["features"][0]
+                ring = np.array(unit["geometry"]["coordinates"][0])[:-1]
+                ux, uy = float(ring[:, 0].mean()) + 0.25, float(ring[:, 1].mean()) + 0.2
+                px = browser.js(f"ppgSite.map.getPixelFromCoordinate([{ux!r}, {uy!r}])")
+                spots.append((ux, uy, box[0] + px[0], box[1] + px[1]))
+                # beside the unit, on the orthophoto alone
+                ox, oy = browser.js(f"ppgSite.map.getPixelFromCoordinate([{ux + 0.5!r}, {uy + 0.4!r}])")
+                ox, oy = int(box[0] + ox), int(box[1] + oy)
+                patch = shot[oy - 12:oy + 12, ox - 12:ox + 12].astype(float)
+                assert patch.size and np.abs(patch - background).mean() > 12, f"chunk {n}: the map is empty"
+
+            # a click on each chunk: its own unit and the height of its own DEM
+            heights = []
+            for n, (ux, uy, px, py) in enumerate(spots, 1):
+                with rasterio.open(folder / f"data/{n}/dem.tif") as src:
+                    expected = float(next(src.sample([(ux, uy)]))[0])
+                heights.append(expected)
+                assert browser.js(f"ppgSite.heightAt({ux!r}, {uy!r})") == pytest.approx(expected, abs=1e-5)
+                browser.click(px, py)
+                browser.wait(f"document.getElementById('info').innerText.includes('US {n}')", 10)
+                info = browser.js("document.getElementById('info').innerText")
+                assert f"US {n}" in info and f"US {3 - n}" not in info, info
+                assert _shown_height(info) == pytest.approx(expected, abs=2e-3)  # the pixel clicked, not the point
+            assert heights[1] == pytest.approx(heights[0] + 0.5, abs=1e-4)  # the second trench is the lifted one
+            assert 0 <= heights[0] < 5  # heights of the frame, not of the reference system
+
+            assert not browser.errors, browser.errors
+            outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
+            assert not outside, outside
     finally:
         browser.close()
