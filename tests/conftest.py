@@ -483,3 +483,14 @@ def pytest_unconfigure(config):
         except Exception:
             pass
     os._exit(_exit_status["code"])
+
+
+def pytest_runtest_logstart(nodeid, location):
+    """Name each test as it starts in the file PPG_TEST_TRACE names: after a native crash the CI reads
+    there which test was running (the Python stack of a crash in a teardown does not say it)."""
+    import os
+
+    trace = os.environ.get("PPG_TEST_TRACE")
+    if trace:
+        with open(trace, "a", encoding="utf-8") as f:
+            f.write(nodeid + "\n")

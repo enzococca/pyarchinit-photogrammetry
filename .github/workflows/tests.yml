@@ -56,9 +56,24 @@ jobs:
           # replaced by glog's handler: the native stack alone, no test). A test still running after
           # 20 minutes dumps the stacks of every thread and ends the run instead of hanging the job.
           export GLOG_minloglevel=2
+          # a segmentation fault in the teardown between two tests (13 November 2026, Python 3.11, twice in
+          # QApplication.topLevelWidgets of tests/conftest.py) left the Python stack and no native one: the
+          # kernel writes the core here and gdb prints the stacks of it; the last tests started are named.
+          sudo sysctl -q -w kernel.core_pattern="$RUNNER_TEMP/core.%p" || true
+          ulimit -c unlimited || true
+          export PPG_TEST_TRACE="$RUNNER_TEMP/tests-started.txt"
           python -m pytest -q --tb=line -rfE --capture=sys -o faulthandler_timeout=1200 \
             -o faulthandler_exit_on_timeout=true 2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
+          if [ "$status" -ge 128 ]; then
+            echo "--- last tests started"; tail -4 "$PPG_TEST_TRACE"
+            for core in "$RUNNER_TEMP"/core.*; do
+              [ -f "$core" ] || continue
+              sudo apt-get install -y -q gdb > /dev/null 2>&1
+              gdb -batch -ex "thread apply all bt 40" "$(command -v python)" "$core" 2>&1 | grep -v "^\[New LWP" | tail -400
+              break
+            done
+          fi
           # failures as annotations, readable on the run page
           grep -E "^(FAILED|ERROR) |^/.*:[0-9]+: " pytest.log | head -10 | while IFS= read -r line; do
             echo "::error::${line}"
