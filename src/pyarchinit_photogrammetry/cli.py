@@ -4469,7 +4469,20 @@ ties_app = typer.Typer(help="Ties between chunks: the same point in two chunks (
 app.add_typer(ties_app, name="ties")
 
 UNKNOWNS_HELP = ("unknowns of each chunk of the solve, e.g. A=plan,B=similarity,C=fixed (chunk labels or keys; "
-                 "similarity 7, rigid 6, plan 4, shift 3, height 1, fixed 0)")
+                 "similarity 7, rigid 6, plan 4, shift 3, height 1, fixed 0; group: the chunk moves with its group of "
+                 "chunks as one block; a group's name gives its first chunk the unknowns and the others group)")
+
+
+def _group_chunks(doc, name: str) -> list:
+    """The chunks of the group named ``name`` (none when no group has that name, or a chunk has that label)."""
+    from .core import groups
+
+    if any(c.label == name for c in doc.chunks):
+        return []
+    try:
+        return groups.members(doc, name)
+    except groups.GroupError:
+        return []
 
 
 def _ties_error(exc: Exception) -> NoReturn:
@@ -4584,7 +4597,7 @@ def _height_line(doc, h) -> str:
 
 def _parse_unknowns(doc, text: str) -> dict[int, str]:
     """``"A=plan,B=similarity"`` -> ``{chunk key: kind}``."""
-    from .engine.ties import KINDS
+    from .engine.ties import GROUP, KINDS
 
     out: dict[int, str] = {}
     for item in (p.strip() for p in text.split(",")):
@@ -4594,8 +4607,16 @@ def _parse_unknowns(doc, text: str) -> dict[int, str]:
         name, kind = name.strip(), kind.strip().lower()
         if not sep or not name:
             raise typer.BadParameter(f"{item!r}: write CHUNK=KIND, e.g. A=plan", param_hint="--unknowns")
-        if kind not in KINDS:
-            raise typer.BadParameter(f"{item!r}: the unknowns are one of {', '.join(KINDS)}", param_hint="--unknowns")
+        if kind not in KINDS and kind != GROUP:
+            raise typer.BadParameter(f"{item!r}: the unknowns are one of {', '.join((*KINDS, GROUP))}",
+                                     param_hint="--unknowns")
+        group_chunks = _group_chunks(doc, name)
+        if group_chunks:  # a group: its first chunk takes the unknowns, the others move with it (one block)
+            for i, ch in enumerate(group_chunks):
+                if ch.key in out:
+                    raise typer.BadParameter(f"chunk {ch.label!r} given twice", param_hint="--unknowns")
+                out[ch.key] = kind if i == 0 else GROUP
+            continue
         ch = _tie_chunk(doc, name)
         if ch.key in out:
             raise typer.BadParameter(f"chunk {ch.label!r} given twice", param_hint="--unknowns")
@@ -4935,6 +4956,82 @@ def ties_solve(project: Path,
     typer.echo(f"applied to {', '.join(moving)} (system {solution.crs or 'LOCAL'}); project saved")
     for key, stale in changed["stale_products"].items():
         typer.echo(f"  {labels.get(int(key), key)}: build again {', '.join(stale)}")
+
+
+@ties_app.command("auto")
+def ties_auto(project: Path,
+              chunks: Optional[str] = typer.Option(None, "--chunks", "-c",
+                                                   help="chunks to pair, the reference first (labels or keys, comma "
+                                                        "separated; default every chunk with a DEM)"),
+              pairs: Optional[str] = typer.Option(None, "--pairs", "-p",
+                                                  help="pairs to match instead of the candidates, e.g. A:B,A:C (the "
+                                                       "reference first)"),
+              source: str = typer.Option("ortho", help="ortho (the orthophotos) or relief (the DEMs shaded: colours "
+                                                       "that changed between the surveys)"),
+              margin: float = typer.Option(5.0, help="metres: how far off the placement of a chunk may be"),
+              whole: bool = typer.Option(False, "--whole", help="match the whole rasters, whatever the placement (two "
+                                                                "unrelated local frames, a GPS far off)"),
+              cell: Optional[float] = typer.Option(None, help="metres: the cell of the matching (default the coarser "
+                                                              "raster)"),
+              same_group: bool = typer.Option(False, "--same-group", help="pair chunks of one group too"),
+              accept: bool = typer.Option(False, "--accept", help="make the pairs proposed into ties and save"),
+              max_ties: int = typer.Option(12, "--max-ties", help="ties per pair accepted, spread over the overlap"),
+              as_json: Optional[Path] = typer.Option(None, "--json", help="write the pairs and the results (with "
+                                                                          "their points) to this JSON file")):
+    """Automatic ties between chunks: the candidate pairs (overlap where the chunks are now), the matching of their
+    orthophotos (or DEM relief), the robust estimate refined by correlation and the residual report of each pair. A
+    pair that does not show the same ground is rejected. Nothing is stored without --accept; then ppg ties check /
+    solve place the chunks."""
+    from .engine import auto_ties
+
+    doc = Document.open(project)
+    if source not in auto_ties.SOURCES:
+        raise typer.BadParameter(f"use one of {', '.join(auto_ties.SOURCES)}", param_hint="--source")
+    found = []
+    if pairs:
+        todo = []
+        for item in (p.strip() for p in pairs.split(",") if p.strip()):
+            a, sep, b = item.partition(":")
+            if not sep:
+                raise typer.BadParameter(f"{item!r}: write A:B", param_hint="--pairs")
+            todo.append((_tie_chunk(doc, a.strip()).key, _tie_chunk(doc, b.strip()).key))
+    else:
+        chosen = None if not chunks else [_tie_chunk(doc, c.strip()) for c in chunks.split(",") if c.strip()]
+        try:
+            found = auto_ties.find_pairs(doc, chosen, margin=margin, same_group=same_group)
+        except (ValueError, KeyError) as exc:
+            _ties_error(exc)
+        typer.echo("Candidate pairs:")
+        for p in found:
+            state = "candidate" if p["candidate"] else "not a candidate: " + ties_render(p["reason"])
+            typer.echo(f"  {p['b_label']} -> {p['a_label']}: overlap {p['share']:.0%} ({p['share_margin']:.0%} within "
+                       f"{margin:g} m), {state}")
+        todo = [(p["a"], p["b"]) for p in found
+                if p["candidate"] or (whole and (p["reason"] or {}).get("code") == "small_overlap")]
+        if not todo:
+            typer.echo("No pair to match (try --whole, or --pairs)")
+    results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
+                            progress=print_progress)
+    for r in results:
+        typer.echo(auto_ties.report_text(r))
+    if as_json is not None:
+        as_json.write_text(json.dumps({"pairs": found, "results": [r.to_dict() for r in results]}, indent=1))
+        typer.echo(f"written {as_json}")
+    if accept:
+        made = 0
+        for r in results:
+            if r.ok:
+                made += len(auto_ties.accept(doc, r, max_ties=max_ties))
+        if made:
+            doc.save()
+        typer.echo(f"{made} ties made from {sum(r.ok for r in results)} pairs; project saved" if made
+                   else "No pair proposed: nothing made")
+
+
+def ties_render(m: Optional[dict]) -> str:
+    from .engine.ties import render
+
+    return render(m) if m else ""
 
 
 stakes_app = typer.Typer(help="Stakes and benchmarks: dark round heads looked for on the orthophoto (and the photos) near "

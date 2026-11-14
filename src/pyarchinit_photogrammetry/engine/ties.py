@@ -754,6 +754,7 @@ def import_ties(doc: "Document", path) -> list[Tie]:
 
 # --------------------------------------------------------------------------- the joint solve
 KINDS = {"similarity": 7, "rigid": 6, "plan": 4, "shift": 3, "height": 1, "fixed": 0}
+GROUP = "group"  # unknowns of a chunk that moves with its group (:mod:`..core.groups`) as one block: no unknowns of its own
 REMEASURE_CELLS = 2.0  # R3: a height tie whose anchors moved apart in plan by more than this many DEM cells
 REMEASURE_MIN = 0.10  # ... and more than this (metres) is to be measured again
 HUBER = 2.0  # robust solve: an observation whose residual is above HUBER x its precision weighs HUBER / that ratio
@@ -916,6 +917,9 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "unknowns_shift": ("solo spostamento", "shift only"),
     "unknowns_height": ("solo quota", "height only"),
     "unknowns_fixed": ("fisso", "fixed"),
+    "unknowns_group": ("con il gruppo", "with its group"),
+    "out_same_group": ("Escluso «{0}»: i due estremi sono nello stesso gruppo ({1}), che si muove come un blocco",
+                       "Left out «{0}»: both ends are in the same group ({1}), which moves as one block"),
 }
 
 
@@ -1137,6 +1141,58 @@ def _sigma3(values, fallback: float) -> np.ndarray:
     return v
 
 
+def _blocks(doc: "Document", grouped: dict, chunks: dict, kinds: dict) -> tuple[dict, dict, dict]:
+    """The chunks that move with their group (:data:`GROUP`) and how: ``(lead, relative, names)`` - ``lead`` chunk key
+    -> the key of the chunk of its group it moves with (:func:`..core.groups.leaders`), ``relative`` chunk key -> the
+    4x4 from its internal frame to that chunk's internal frame (``inv(T_lead) T_chunk``: the relative pose kept),
+    ``names`` the key of each leading chunk -> the name of its group. :class:`TieError` for a chunk in no group, a
+    group with no chunk of its own unknowns, or a chunk in a system that is not its group chunk's."""
+    if not grouped:
+        return {}, {}, {}
+    from ..core import groups
+
+    every = {**{k: kinds[k] for k in chunks}, **{k: GROUP for k in grouped}}
+    try:
+        lead = groups.leaders(doc, every, GROUP)
+    except groups.GroupError as exc:
+        raise TieError(str(exc), _group_error_it(str(exc))) from None
+    relative, names = {}, {}
+    for key, leader in lead.items():
+        ch, lc = grouped[key], chunks[leader]
+        from ..core import crs as crs_mod
+
+        if not (ch.crs == lc.crs or (crs_mod.is_local(ch.crs) and crs_mod.is_local(lc.crs))):
+            raise TieError(f"chunk {ch.label} is in {ch.crs or 'LOCAL'} and {lc.label}, the chunk its group moves "
+                           f"with, in {lc.crs or 'LOCAL'}: a group moves as one block only in one system",
+                           f"il chunk {ch.label} è in {ch.crs or 'LOCAL'} e {lc.label}, il chunk con cui si muove "
+                           f"il suo gruppo, in {lc.crs or 'LOCAL'}: un gruppo si muove come un blocco solo in un "
+                           "sistema")
+        relative[key] = np.linalg.inv(np.asarray(lc.transform, float)) @ np.asarray(ch.transform, float)
+        names[leader] = groups.group_of(doc, leader)["name"]
+    return lead, relative, names
+
+
+def _group_error_it(english: str) -> str:
+    """The Italian of a :class:`..core.groups.GroupError` of :func:`..core.groups.leaders`."""
+    import re as _re
+
+    m = _re.match(r"chunk (.+) moves with its group, but it is in no group$", english)
+    if m:
+        return f"il chunk {m.group(1)} si muove con il suo gruppo, ma non è in un gruppo"
+    m = _re.match(r"group '(.+)': no chunk with unknowns of its own", english)
+    if m:
+        return (f"gruppo «{m.group(1)}»: nessun chunk con incognite proprie (dai a un chunk del gruppo le sue "
+                "incognite, gli altri si muovono con lui)")
+    return english
+
+
+def _in_block(key: int, p, lead: dict, relative: dict) -> tuple[int, np.ndarray]:
+    """An end ``(chunk key, internal point)``: on the chunk its group moves with when the chunk moves with its group."""
+    if key in lead:
+        return lead[key], geometry.apply(relative[key], np.asarray(p, float))
+    return key, p
+
+
 def _height_observations(doc: "Document", heights, chunks: dict) -> tuple[list[dict], list[tuple]]:
     """The height ties of a solve (``heights``: objects or ids, None = all) as observations of :func:`solve` (one per
     anchor) and the entries of ``left_out`` of those not used."""
@@ -1212,7 +1268,11 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
 
     ``unknowns``: chunk (object, key or label) -> ``"similarity"`` (rotation, shift, scale: 7), ``"rigid"`` (6),
     ``"plan"`` (rotation about the vertical of the world system, shift in x, y, z: 4; tilt and scale stay),
-    ``"shift"`` (3), ``"height"`` (1) or ``"fixed"`` (0); only these chunks take part. ``ties``: Tie objects or ids
+    ``"shift"`` (3), ``"height"`` (1) or ``"fixed"`` (0), or :data:`GROUP` (``"group"``: the chunk moves with its
+    group of chunks, :mod:`..core.groups`, as one block - its ends are carried into the first chunk of the group with
+    unknowns of its own, which moves for the whole group, and the relative poses inside the group are kept; a tie
+    between two chunks of one block moves nothing and is left out; a group whose chunk is ``"fixed"`` holds all its
+    chunks); only these chunks take part. ``ties``: Tie objects or ids
     (default every tie of the document); inactive or broken ties, ties with an end that has no position and ties to a
     chunk outside the solve are left out and listed in ``Solution.left_out``.
 
@@ -1258,18 +1318,23 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
 
     chunks: dict[int, "Chunk"] = {}
     kinds: dict[int, str] = {}
+    grouped: dict[int, "Chunk"] = {}  # chunks that move with their group (GROUP): no unknowns of their own
     for item, kind in unknowns.items():
         try:
             ch = _chunk(doc, item)
         except (KeyError, ValueError) as exc:
             raise TieError(f"unknown chunk: {exc}", f"chunk sconosciuto: {exc}") from None
+        if kind == GROUP:
+            grouped[ch.key] = ch
+            continue
         if kind not in KINDS:
-            raise TieError(f"chunk {ch.label}: unknowns {kind!r}: use one of {', '.join(KINDS)}",
-                           f"chunk {ch.label}: incognite {kind!r}: usa una di {', '.join(KINDS)}")
+            raise TieError(f"chunk {ch.label}: unknowns {kind!r}: use one of {', '.join((*KINDS, GROUP))}",
+                           f"chunk {ch.label}: incognite {kind!r}: usa una di {', '.join((*KINDS, GROUP))}")
         chunks[ch.key], kinds[ch.key] = ch, kind
     order = [c.key for c in doc.chunks if c.key in chunks]
     if not order:
         raise TieError("no chunk in the solve", "nessun chunk nella stima")
+    lead, relative, group_names = _blocks(doc, grouped, chunks, kinds)
 
     # the ties and the observations they give (internal points of their ends)
     wanted = None if ties is None else {t if isinstance(t, str) else t.id for t in ties}
@@ -1295,7 +1360,7 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                                  reason="; ".join(f"marker {m!r} of chunk {c!r} to be placed again after the new "
                                                   "alignment" for _code, m, c in t.stale_parts)))
             continue
-        outside = [doc_chunk.label for k, _ in t.ends() if k not in chunks
+        outside = [doc_chunk.label for k, _ in t.ends() if k not in chunks and k not in grouped
                    for doc_chunk in doc.chunks if doc_chunk.key == k]
         if outside:
             left_out.append(_out(t.id, t.name, ("out_outside", ", ".join(outside)),
@@ -1307,11 +1372,16 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
             p = end_internal(chunk, marker)
             if p is None:
                 missing.append((marker.label, chunk.label))
-            points.append((chunk.key, p))
+            points.append(_in_block(chunk.key, p, lead, relative))
         if missing:
             left_out.append(_out(t.id, t.name, *[("out_no_position", m, c) for m, c in missing],
                                  reason="no position for " + ", ".join(f"marker {m!r} of chunk {c!r}"
                                                                       for m, c in missing)))
+            continue
+        if t.b is not None and points[0][0] == points[1][0] and points[0][0] in lead.values():
+            name = group_names[points[0][0]]
+            left_out.append(_out(t.id, t.name, ("out_same_group", name),
+                                 reason=f"both ends in the group {name}, which moves as one block"))
             continue
         if t.b is None:
             chunk, marker = resolve_end(doc, t.a, t.a_uid)
@@ -1325,8 +1395,8 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
             observations.append(("tie", t, points[0], points[1], None, None, np.full(3, float(t.precision)),
                                  t.id in check_ties, None))
     if references:
-        for key in order:
-            ch = chunks[key]
+        for key in order + list(lead):
+            ch = chunks[key] if key in chunks else grouped[key]
             for m in ch.markers:
                 if (key, m.key) in known_ends or not (m.reference.enabled and m.reference.location):
                     continue
@@ -1335,11 +1405,19 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
                     left_out.append(_out(None, m.label, ("out_reference_no_position", ch.label),
                                          reason=f"reference of chunk {ch.label!r} without a position"))
                     continue
-                observations.append(("reference", m, (key, p), None, np.asarray(m.reference.location, float), ch.crs,
+                observations.append(("reference", m, _in_block(key, p, lead, relative), None,
+                                     np.asarray(m.reference.location, float), ch.crs,
                                      _sigma3(m.reference.accuracy, TABLE_PRECISION), bool(m.checkpoint), ch))
-    left, height_obs = _height_observations(doc, heights, chunks)
+    left, height_obs = _height_observations(doc, heights, {**chunks, **grouped})
     left_out += left
-    observations += height_obs
+    for o in height_obs:  # an anchor on a chunk of a group: on the chunk the group moves with
+        a, b = _in_block(*o[2], lead, relative), _in_block(*o[3], lead, relative)
+        if a[0] == b[0]:
+            name = group_names.get(a[0], "")
+            left_out.append(_out(o[1].id, o[1].name, ("out_same_group", name),
+                                 reason=f"both chunks in the group {name}, which moves as one block"))
+            continue
+        observations.append((o[0], o[1], a, b, *o[4:]))
 
     # the system of the solve
     fixed = [k for k in order if kinds[k] == "fixed"]
@@ -1748,8 +1826,21 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
         elif cause == "inherited":
             messages.append(message("precision_inherited", ch.label, precision, PRECISION_FACTOR, limit, own,
                                     ", ".join(chunks[k].label for k in through), chunk=key))
+    kinds = dict(kinds)
+    for key, leader in lead.items():  # a chunk of a group: where its group's chunk goes, its relative pose kept
+        ch = grouped[key]
+        transforms[key] = np.asarray(transforms[leader], float) @ relative[key]
+        previous[key] = {"transform": np.asarray(ch.transform, float).copy(), "crs": ch.crs}
+        kinds[key] = "fixed" if kinds[leader] == "fixed" else GROUP
+        per_chunk[key] = {**per_chunk[leader], "label": ch.label, "kind": kinds[key], "crs_before": ch.crs,
+                          "crs": per_chunk[leader]["crs"], "observations": 0, "group": group_names[leader],
+                          "moves_with": leader}
+        if kinds[key] != "fixed" and ch.crs == system:  # how far its own centre moves (else as its group's chunk)
+            c = _sample_points(ch).mean(0)
+            per_chunk[key]["shift"] = float(np.linalg.norm(geometry.apply(transforms[key], c)
+                                                           - geometry.apply(np.asarray(ch.transform, float), c)))
     return Solution(transforms=transforms, residuals=entries, redundancy=int(redundancy), rms=rms,
-                    per_chunk=per_chunk, crs=system, unknowns=dict(kinds), left_out=left_out,
+                    per_chunk=per_chunk, crs=system, unknowns=kinds, left_out=left_out,
                     warnings=[render(m) for m in messages], previous=previous, robust=bool(robust), sigma0=sigma0,
                     converged=bool(settled), irls_rounds=int(rounds if robust else 0), messages=messages)
 

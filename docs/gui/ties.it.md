@@ -320,6 +320,68 @@ accettarla viene rifiutato - cerca di nuovo. La finestra lo dice sotto la tabell
 spostato da una stima dopo la ricerca (accettare resta giusto, ma coordinate, spostamenti e righe rosse sono di prima)
 o rimosso.
 
+## Legami automatici
+
+Scegliere i legami a mano è lento quando i rilievi sono tanti - ogni anno di voli, i blocchi di un'immersione. La
+sezione **Legami automatici** della finestra dei legami li trova da sola, a passi il cui stato è scritto in alto (○ da
+fare, … in corso, ✓ fatto, ! da rifare):
+
+1. **Coppie** - *Trova coppie*: ogni coppia di chunk con un DEM e quanto si sovrappongono dove sono ora. *Scarto della
+   posizione* (predefinito 5 m) è quanto può essere sbagliata la posizione di un chunk (il GPS di un drone):
+   l'abbinamento cerca fin lì. Le coppie che si sovrappongono sono spuntate; due chunk di uno stesso
+   [gruppo](#gruppi-di-chunk) non fanno coppia (si muovono insieme); un sistema locale con un sistema del mondo è
+   rifiutato, come nella stima.
+2. **Abbinamento** - *Abbina*: per ogni coppia spuntata le due ortofoto (o, con *Immagini: Rilievo del DEM*, i DEM
+   ombreggiati da quattro direzioni: per rilievi con colori diversi - sabbia spostata, acqua, vegetazione, un'altra
+   luce) sono lette su una griglia nel sistema del primo chunk, solo dove si sovrappongono. I punti SIFT abbinati nei
+   due sensi danno punti 3D (il DEM sotto di loro); RANSAC tiene quelli che concordano con una similitudine; poi
+   l'immagine del secondo chunk viene portata sul primo e una griglia regolare di riquadri è abbinata per correlazione
+   (a una frazione di pixel), e la similitudine è stimata di nuovo senza i punti fuori posto - due volte. La tabella
+   mostra le corrispondenze, quelle concordi, i punti raffinati, la **rotazione**, la **scala** in ppm e lo
+   **spostamento** che porterebbero il secondo chunk sul primo, l'**RMS** dei residui e l'esito. Una coppia che non
+   mostra lo stesso terreno è **scartata**, in rosso, con il motivo (troppo pochi punti concordano, un accordo che dà
+   anche il caso, punti su una linea). Scegli una riga per leggerne il rapporto in *Rapporto*. *Su tutto il raster*
+   cerca su tutte le ortofoto, ovunque siano i chunk (due sistemi locali senza relazione, un GPS molto sbagliato): più
+   lento.
+3. **Legami** - *Accetta*: le coppie proposte e spuntate diventano legami - al più *Legami per coppia* (predefinito 12)
+   dei punti raffinati, distribuiti sulla sovrapposizione, con la precisione della stima (il suo RMS, almeno mezza
+   cella), marker **auto N** nei due chunk. Un passo di *Modifica > Annulla*. Una coppia accettata di nuovo sostituisce
+   i legami che aveva fatto.
+4. **Stima** - come per i legami fatti a mano: scegli le incognite, **Controlla**, **Applica**.
+
+Niente viene salvato prima di *Accetta*. Dopo *Applica* l'abbinamento diventa *da rifare* (i chunk si sono spostati).
+Un DEM o un'ortofoto costruiti prima di una stima che ha inclinato il loro chunk sono collocati solo in pianta (come fa
+la vista 2D): una coppia abbinata su di loro lo dice - ricostruiscili prima di fidarti.
+
+## Gruppi di chunk
+
+I chunk si possono riunire in **gruppi** (un anno di voli, i blocchi di un'immersione, i settori di uno scavo). Un
+gruppo è una cartella nell'[*Area di lavoro*](panes.md): tasto destro su un chunk (o su più chunk scelti) > *Gruppo* >
+*Nuovo gruppo...*, *Sposta in «...»*, *Togli dal gruppo*; oppure trascina i chunk su un gruppo (su un suo chunk: messi
+prima di lui) e sul nodo del progetto per toglierli. La spunta di un gruppo mostra o nasconde tutti i suoi chunk nella
+vista 3D.
+
+Tasto destro su un gruppo:
+
+| Voce | Che cosa fa |
+| --- | --- |
+| *Mostra nella vista 3D* / *Nascondi dalla vista 3D* | tutti i suoi chunk, con quello attivo |
+| *Rinomina...* | il nome del gruppo (anche F2) |
+| *Aggancia il gruppo con legami...* | la finestra dei legami con il gruppo come **un blocco**: il suo primo chunk tiene le sue incognite, gli altri *con il gruppo* |
+| *Unisci i chunk del gruppo...* | *Unisci chunk* con i chunk del gruppo proposti |
+| *DEM e ortofoto del gruppo...* / *Esporta il gruppo...* | il batch con quei passi sui chunk del gruppo (da controllare e avviare) |
+| *Sciogli il gruppo* | il gruppo sparisce; i suoi chunk restano |
+
+**Un gruppo nella stima.** Le incognite *con il gruppo* muovono un chunk insieme al primo chunk del suo gruppo che ha
+incognite proprie (il suo chunk *fisso*, se c'è): le posizioni relative dei chunk del gruppo restano come sono, e
+bastano legami su alcuni dei suoi chunk. Un legame fra due chunk dello stesso blocco non sposta niente ed è escluso
+("i due estremi sono nello stesso gruppo"). Un gruppo con un chunk fisso tiene fermi tutti i suoi chunk. I chunk di un
+blocco devono essere in un solo sistema.
+
+I gruppi sono salvati nel progetto (`meta["chunk_groups"]`): una versione precedente del programma apre il progetto con
+tutti i suoi chunk e ignora i gruppi (conserva la chiave, così tornano quando il progetto è riaperto qui). Ogni
+modifica dei gruppi è un passo di *Modifica > Annulla*.
+
 ## Riga di comando
 
 ```bash
@@ -334,6 +396,9 @@ ppg ties heights scavo.ppg [--json]                         # le quote stabili
 ppg ties remeasure scavo.ppg "quota stabile 1"              # rimisurata dove i chunk sono adesso
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
+ppg ties auto scavo.ppg [--chunks 2024,2025] [--pairs 2024:2025] [--source ortho|relief] [--margin 5] [--whole]
+ppg ties auto scavo.ppg --accept [--max-ties 12] [--json auto.json]   # le coppie proposte diventano legami
+ppg ties solve scavo.ppg --unknowns 2024=fixed,voli2025=similarity    # il nome di un gruppo: i suoi chunk come un blocco
 ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
 ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # o --agreeing: quelle confermate dalle foto
 ```
@@ -349,3 +414,8 @@ stampa cosa farebbe e senza `--yes` non cambia niente.
 `check` stampa lo stesso rapporto della finestra, senza l'asse dritto (in inglese), e non cambia niente. `solve` chiede prima di applicare (o `--yes`);
 con avanzo 0 fa una domanda a parte, e `--yes` richiede anche `--accept-no-check`. Le coordinate negative si scrivono
 come sono, o dopo `--`. Tutte le opzioni sono nell'[API Python](../api.md#allineare-e-unire-i-chunk).
+
+`ppg ties auto` stampa le coppie candidate e il rapporto di ogni coppia abbinata (proposta o scartata, rotazione, scala
+in ppm, spostamento, residui); `--json` scrive le coppie e i risultati con i loro punti. Niente cambia senza
+`--accept`. In `--unknowns` un chunk può essere `group` (si muove con il suo gruppo) e il nome di un gruppo dà le
+incognite al suo primo chunk e `group` agli altri.

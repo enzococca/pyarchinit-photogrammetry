@@ -224,24 +224,48 @@ MEASURE_COLOUR = "#ff006e"  # the last measure taken on the model (the colour of
 CASTER_SYNC_FACES = 300_000  # a model with up to this many faces: its ray caster built at once; a bigger one in the
 # background (a click meanwhile kept and placed when it is ready)
 MODEL_KINDS = ("model", "model_textured")
+CLOUD_KINDS = ("point_cloud", "tie_points")
+PICK_DENSE_POINTS = 150  # a pick refined on a quarter or half of six pixels needs this many points of the cloud there
+DRAPE_EDGE_SHARE = 0.5  # a line measured along a model: a point of the surface every half median edge of the model ...
+DRAPE_MAX_SAMPLES = 100_000  # ... at most this many per segment (the length along the surface at full resolution)
+
+
+def _model_arrays(path):
+    """(vertices float64, faces uint32) of the model file ``path``: a binary PLY read through its memory map (the
+    faces straight into 32-bit indices, the texture coordinates and the colours never read), another file whole."""
+    from ..io.mesh_ply import PlyMesh, read_mesh
+
+    try:
+        mesh = PlyMesh(path, check=0)
+    except (ValueError, KeyError, OSError):
+        mesh = None
+    if mesh is None or mesh.n_vertices >= 2 ** 32:
+        whole = read_mesh(path)
+        return np.asarray(whole.xyz, np.float64), np.asarray(whole.faces, np.int64)
+    faces = np.empty((mesh.n_faces, 3), np.uint32)
+    s = 0
+    for block in mesh.face_chunks():
+        faces[s:s + len(block)] = block
+        s += len(block)
+    return mesh.xyz(), faces
 
 
 def _caster_parts(path):
     """(centre, ray caster, median edge) of the model file ``path``: its vertices minus their centre (internal
-    coordinates); (None, None, 0.0) when it cannot be read. Run in a worker thread for a big model."""
+    coordinates); (None, None, 0.0) when it cannot be read. Run in a worker thread for a big model: the caster's
+    search trees are built here too (:class:`.pick_index.PiecewiseCaster`), not at the first click."""
     try:
-        from ..engine.visibility import Raycaster
-        from ..io.mesh_ply import read_mesh
+        from .pick_index import PiecewiseCaster
 
-        mesh = read_mesh(path)
-        xyz = np.asarray(mesh.xyz, np.float64)
-        faces = np.asarray(mesh.faces, np.int64)
-        del mesh
+        xyz, faces = _model_arrays(path)
         centre = xyz.mean(axis=0) if len(xyz) else np.zeros(3)
-        sample = faces[:: max(1, len(faces) // 200_000)]
+        sample = faces[:: max(1, len(faces) // 200_000)].astype(np.int64)
         edge = float(np.median(np.linalg.norm(xyz[sample[:, 0]] - xyz[sample[:, 1]], axis=1))) \
             if len(sample) else 0.0
-        return centre, Raycaster(xyz - centre, faces), edge
+        shifted = (xyz - centre).astype(np.float32)  # single precision about the centre: the caster's own type
+        del xyz
+        caster = PiecewiseCaster(shifted, faces)  # its trees built now, piece by piece (the interface runs between)
+        return centre, caster, edge
     except Exception:  # noqa: BLE001 - the pick on the points shown does it, less exactly
         return None, None, 0.0
 
@@ -1923,6 +1947,9 @@ class ModelView(QWidget, LookThrough):
         self._others_filling = False
         self._caster_relay = _CasterRelay(self)
         self._caster_relay.ready.connect(self._caster_built, Qt.ConnectionType.QueuedConnection)
+        self._pick_cloud = None  # (key, CloudIndex) of the whole cloud a pick is refined on (pick_index)
+        self._cloud_relay = _CasterRelay(self)
+        self._cloud_relay.ready.connect(self._cloud_index_built, Qt.ConnectionType.QueuedConnection)
         self._select_on = False  # Seleziona e modifica: a click selects a free drawing
         self._selected_id: str | None = None
         self._edit_project = None  # the projection of the frozen frame of the editor
@@ -2299,7 +2326,6 @@ class ModelView(QWidget, LookThrough):
         sight, the plane of the chunk's dense cloud (or tie points) at full resolution there.
         None when nothing is shown under the cursor."""
         from ..core import geometry
-        from ..markers import gcp
 
         sd = self.sd
         arrs = [np.asarray(a, np.float64) for a in (sd.points, sd.mesh_vertices) if a is not None and len(a)]
@@ -2321,12 +2347,15 @@ class ModelView(QWidget, LookThrough):
         dist = float(np.linalg.norm(picked - o))
         scale = float(np.linalg.norm(e - o))  # internal units per scene unit
         radius = 6 * pixel(dist / scale) * scale  # about six pixels of the screen there
-        xyz = gcp._SurfacePoints(self.chunk).xyz()
-        if xyz is None or radius <= 0:
+        index = self._cloud_index()  # the whole cloud, indexed (None while a big one is indexed in the background)
+        if index is None or radius <= 0:
             return picked
-        near = xyz[np.einsum("ij,ij->i", xyz - picked, xyz - picked) < (40 * radius) ** 2]
-        for k in (1, 2, 4):
-            hit = geometry.point_on_ray(near, o, d, k * radius) if len(near) >= 15 else None
+        # the points of the whole cloud near the line of sight, about the point picked on those shown
+        near = index.near_line(o, d, float((picked - o) @ d), 40 * radius, 4 * radius)
+        # a dense cloud first on a narrower neighbourhood (a plane fitted on less of a curved surface), with more
+        # points to fit it; then on six pixels and wider as before
+        for k, least in ((0.25, PICK_DENSE_POINTS), (0.5, PICK_DENSE_POINTS), (1, 15), (2, 15), (4, 15)):
+            hit = geometry.point_on_ray(near, o, d, k * radius, min_points=least) if len(near) >= least else None
             if hit is not None and np.linalg.norm(hit - picked) < 20 * radius:
                 return hit
         return picked
@@ -2809,6 +2838,9 @@ class ModelView(QWidget, LookThrough):
         if self.kind in MODEL_KINDS:
             self._caster()  # a big model: its ray caster started in the background now
             self._tell_preparing()
+        elif self.kind in CLOUD_KINDS:
+            self._cloud_index()  # a big cloud: its index started in the background now
+            self._tell_preparing()
         self._draw_target().setFocus()
         QTimer.singleShot(0, lambda: self._draw_kind is not None and self._draw_target().setFocus())  # after the menu
 
@@ -2940,10 +2972,11 @@ class ModelView(QWidget, LookThrough):
         """The surface under (x, y), internal: on a model view the first hit of the line of sight with the model,
         else (or when it misses) ``pick_point`` (with the ray when ``refine``). None: nothing there."""
         ray = ray or self.canvas.view_ray
-        point = self._model_hit(x, y, ray) if self.kind in ("model", "model_textured") else None
-        if point is None:
-            point = self.pick_point(x, y, project, ray if refine else None)
-        return point
+        if self.kind in MODEL_KINDS and self._caster() is not None:
+            # the model at full resolution answers, whatever level of it is shown: a miss is nothing of the model
+            # there (not the nearest vertex shown within a few pixels, and the shown vertices are never all projected)
+            return self._model_hit(x, y, ray)
+        return self.pick_point(x, y, project, ray if refine else None)
 
     def _snap(self, x: float, y: float, project, surface=None):
         """The exact position (internal) of the vertex of a drawing shown, of the drawing in progress (not its last
@@ -3010,9 +3043,10 @@ class ModelView(QWidget, LookThrough):
         (the second click of a double click) adds nothing; a polygon's first vertex clicked again ends it."""
         if self.chunk is None or self.sd is None:
             return
-        if self.kind in MODEL_KINDS:
-            self._caster()  # starts the build of a big model's ray caster
-            if self.caster_preparing:  # the click kept: placed when the model is ready
+        if self.kind in MODEL_KINDS or self.kind in CLOUD_KINDS:
+            # starts the build of a big model's ray caster or of a big cloud's index
+            self._caster() if self.kind in MODEL_KINDS else self._cloud_index()
+            if self.caster_preparing:  # the click kept: placed when the model (or the cloud) is ready
                 o, d, _pixel = self.canvas.view_ray(x, y)
                 self._kept_clicks.append((x, y, np.asarray(o, float), np.asarray(d, float)))
                 self._tell_preparing()
@@ -3054,8 +3088,14 @@ class ModelView(QWidget, LookThrough):
 
     @property
     def caster_preparing(self) -> bool:
-        """True while the ray caster of the model shown is being built in the background."""
-        key = self._caster_key()[0]
+        """True while the ray caster of the model shown, or the index of the cloud a pick on a cloud is refined on,
+        is being built in the background."""
+        if self.kind in CLOUD_KINDS:
+            from .pick_index import cloud_source
+
+            key = cloud_source(self.chunk)[0]
+        else:
+            key = self._caster_key()[0]
         return key is not None and key in self._caster_running
 
     def _caster(self):
@@ -3101,7 +3141,8 @@ class ModelView(QWidget, LookThrough):
 
     def _tell_preparing(self) -> None:
         if self.caster_preparing:
-            text = tr("Preparazione del modello per il disegno...")
+            text = (tr("Preparazione della nuvola per il disegno...") if self.kind in CLOUD_KINDS
+                    else tr("Preparazione del modello per il disegno..."))
             self.canvas.set_hint(text)
             self.busy_message.emit(text)
 
@@ -3113,6 +3154,11 @@ class ModelView(QWidget, LookThrough):
             del parts  # stale: another chunk or the model rewritten meanwhile - not kept
             return
         self._draw_mesh = (key, *parts)
+        self._place_kept()
+
+    def _place_kept(self) -> None:
+        """The model or the cloud ready: the clicks kept meanwhile placed when the view has not moved, otherwise the
+        user asked to click again."""
         kept, self._kept_clicks = self._kept_clicks, []
         if self._draw_kind is None:
             if self._select_on:
@@ -3129,10 +3175,55 @@ class ModelView(QWidget, LookThrough):
             if self._draw_kind is None:
                 break
             self._click(x, y)
+        cloud = self.kind in CLOUD_KINDS
         if moved:
-            self.busy_message.emit(tr("Modello pronto: la vista è cambiata, clicca di nuovo"))
+            self.busy_message.emit(tr("Nuvola pronta: la vista è cambiata, clicca di nuovo") if cloud
+                                   else tr("Modello pronto: la vista è cambiata, clicca di nuovo"))
         else:
-            self.busy_message.emit(tr("Modello pronto per il disegno"))
+            self.busy_message.emit(tr("Nuvola pronta per il disegno") if cloud else tr("Modello pronto per il disegno"))
+
+    def _cloud_index(self):
+        """The index of the whole cloud a pick is refined on (:mod:`.pick_index`: the dense cloud, else the tie
+        points), kept for the file until it changes; None without a cloud, or while a big one (more than
+        ``pick_index.SYNC_POINTS`` points) is indexed in the background (started here: the interface never waits)."""
+        from . import pick_index
+
+        key, path, _name = pick_index.cloud_source(self.chunk)
+        if key is None:
+            return None
+        cached = self._pick_cloud
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        if key in self._caster_running:
+            return None
+        if pick_index.big(path):
+            self._caster_running.add(key)
+            relay = self._cloud_relay
+
+            def work():
+                index = pick_index.build_index(path)
+                try:
+                    relay.ready.emit(key, index)
+                except RuntimeError:  # the view closed meanwhile
+                    pass
+
+            threading.Thread(target=work, name="ppg-cloud-index", daemon=True).start()
+            self._tell_preparing()
+            return None
+        self._pick_cloud = (key, pick_index.build_index(path))
+        return self._pick_cloud[1]
+
+    def _cloud_index_built(self, key, index) -> None:
+        """The index of a big cloud built in the background (interface thread): kept while it is still the cloud of
+        the chunk; the clicks kept meanwhile placed as for a model."""
+        from .pick_index import cloud_source
+
+        self._caster_running.discard(key)
+        if key != cloud_source(self.chunk)[0]:
+            del index  # stale: another chunk or the cloud rewritten meanwhile
+            return
+        self._pick_cloud = (key, index)
+        self._place_kept()
 
     def _model_hit(self, x: float, y: float, ray=None):
         """Where the line of sight through (x, y) first meets the model shown (internal), None when it misses it or
@@ -3162,7 +3253,7 @@ class ModelView(QWidget, LookThrough):
             draped = None
             if kind == "line":  # the length along the surface: the line draped as Drappeggia sul modello does
                 try:
-                    draped = self.drape(xyz, self.canvas.projector(), self.canvas.view_ray)
+                    draped = self.drape(xyz, self.canvas.projector(), self.canvas.view_ray, full=True)
                 except Exception as exc:  # noqa: BLE001 - the straight measures are enough
                     logging.getLogger(__name__).info("Misura lungo la superficie non calcolata: %s", exc)
             self._measure = (kind, xyz)
@@ -3187,6 +3278,8 @@ class ModelView(QWidget, LookThrough):
 
     def _rubber_tick(self) -> None:
         if self._draw_kind is None or not self._draw_pts or self._rubber_pos is None or self.sd is None:
+            return
+        if self.caster_preparing:  # the model or the cloud not ready: no rubber band (no pick over all shown)
             return
         self._rubber_last = time.monotonic()
         x, y = self._rubber_pos
@@ -3383,10 +3476,13 @@ class ModelView(QWidget, LookThrough):
         if self._selected_id is not None:
             self.free_delete_requested.emit(self._selected_id, i)
 
-    def drape(self, xyz_internal, project, ray, every_px: float = DRAPE_PX, closed: bool = False) -> np.ndarray:
+    def drape(self, xyz_internal, project, ray, every_px: float = DRAPE_PX, closed: bool = False,
+              full: bool = False) -> np.ndarray:
         """``xyz_internal`` with, between each pair of vertices (and the last and the first when ``closed``), points
-        picked on the surface every ``every_px`` screen pixels with the line of sight (``ray``); the misses dropped,
-        the original vertices kept."""
+        picked on the surface every ``every_px`` screen pixels with the line of sight (``ray``); the misses dropped, the
+        original vertices kept. ``full`` (a measure along the surface) on a model: a point every half median edge of
+        the whole model instead (:meth:`_drape_model`: the length at full resolution, whatever level of the model is
+        shown and however near the view is)."""
         pts = np.asarray(xyz_internal, np.float64).reshape(-1, 3)
         if len(pts) < 2 or self.sd is None:
             return pts.copy()
@@ -3394,6 +3490,9 @@ class ModelView(QWidget, LookThrough):
         px, py, _depth, ok = project(sd.to_display(self.chunk.to_world(pts) - sd.offset))
         n = len(pts)
         pairs = [(i, i + 1) for i in range(n - 1)] + ([(n - 1, 0)] if closed and n >= 3 else [])
+        caster = self._caster() if full and self.kind in MODEL_KINDS else None
+        if caster is not None and caster[2] > 0:
+            return self._drape_model(pts, pairs, px, py, ok, ray, caster)
         out = [pts[0]]
         for i, j in pairs:
             if ok[i] and ok[j]:
@@ -3404,6 +3503,41 @@ class ModelView(QWidget, LookThrough):
                                          refine=True, ray=ray)
                     if q is not None:
                         out.append(np.asarray(q, np.float64).reshape(3))
+            if j != 0:
+                out.append(pts[j])
+        return np.array(out)
+
+    def _drape_model(self, pts, pairs, px, py, ok, ray, caster) -> np.ndarray:
+        """:meth:`drape` on the model at full resolution: between two vertices a point of the straight segment every
+        ``DRAPE_EDGE_SHARE`` median edges of the model (at most ``DRAPE_MAX_SAMPLES``), each one carried along its own
+        line of sight (from the eye of a perspective view, parallel to the view in an orthographic one) to the first
+        hit with the model. All the rays of a segment are cast at once."""
+        centre, rays, edge = caster
+        step = DRAPE_EDGE_SHARE * edge
+        out = [pts[0]]
+        for i, j in pairs:
+            if ok[i] and ok[j]:
+                a, b = pts[i], pts[j]
+                steps = int(min(max(np.ceil(np.linalg.norm(b - a) / step), 1), DRAPE_MAX_SAMPLES))
+                if steps > 1:
+                    q = a + np.linspace(0.0, 1.0, steps + 1)[1:-1, None] * (b - a)
+                    oa, da, _ = self._sight(float(px[i]), float(py[i]), ray)
+                    ob, db, _ = self._sight(float(px[j]), float(py[j]), ray)
+                    cross = np.cross(da, db)
+                    if np.linalg.norm(cross) < 1e-9:  # parallel lines of sight: an orthographic view
+                        dirs = np.repeat(da[None], len(q), 0)
+                        origins = q - ((q - oa) @ da)[:, None] * da
+                    else:  # the eye: where the two lines of sight meet (closest points of the two lines)
+                        w = oa - ob
+                        aa, bb, cc, dd, ee = da @ da, da @ db, db @ db, da @ w, db @ w
+                        den = aa * cc - bb * bb
+                        eye = 0.5 * ((oa + (bb * ee - cc * dd) / den * da) + (ob + (aa * ee - bb * dd) / den * db))
+                        dirs = q - eye
+                        dirs /= np.maximum(np.linalg.norm(dirs, axis=1), 1e-300)[:, None]
+                        origins = np.repeat(eye[None], len(q), 0)
+                    t = rays.hit_distance(origins - centre, dirs)
+                    good = np.isfinite(t)
+                    out.extend(origins[good] + t[good, None] * dirs[good])
             if j != 0:
                 out.append(pts[j])
         return np.array(out)

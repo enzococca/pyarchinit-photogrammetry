@@ -284,6 +284,10 @@ class Document:
         self.chunks = [Chunk.from_dict(c, document=self) for c in data.get("chunks", [])]
         self._drop_missing_versions()
         self._settle_ties()
+        if self.meta.get("chunk_groups"):  # keys of chunks gone dropped (a later chunk with the key joins no group)
+            from .groups import prune
+
+            prune(self)
 
     def _settle_ties(self) -> None:
         """The ties between chunks as they are read now (labels of their markers, alignments of their ends), written

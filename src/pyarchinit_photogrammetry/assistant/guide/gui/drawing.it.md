@@ -307,14 +307,30 @@ ruotare la vista, Backspace toglie l'ultimo vertice, doppio clic o Invio finisce
 
 * **Distanza**: una polilinea con quanti vertici vuoi. Mentre fai clic, la barra di stato e l'angolo della vista
   mostrano la lunghezza 3D fin lì; alla fine la lunghezza 3D (somma dei segmenti dritti), quella in pianta, il
-  dislivello fra il primo e l'ultimo vertice e la **lunghezza lungo la superficie** (la linea drappeggiata sulla
-  superficie ogni 20 pixel, come fa *Drappeggia sul modello*). Il risultato va nella barra di stato e nel registro.
+  dislivello fra il primo e l'ultimo vertice e la **lunghezza lungo la superficie** (su un modello, la linea portata
+  lungo le linee di vista sul modello a piena risoluzione ogni mezzo lato dei suoi triangoli; su una nuvola,
+  drappeggiata ogni 20 pixel come fa *Drappeggia sul modello*). Il risultato va nella barra di stato e nel registro.
 * **Area e superficie**: un poligono. L'area in pianta, quella nel piano medio dei vertici, la **superficie del modello
   al suo interno** quando il chunk ha un modello (lo stesso calcolo delle misure di un poligono libero, in sottofondo),
   il perimetro 3D e in pianta, la pendenza del piano medio. Senza modello il messaggio dice che l'area è quella del
   piano medio. Il risultato va in una finestra di messaggio e nel registro, come per l'area in 2D.
 * **Coordinate di un punto**: X, Y, Z del punto cliccato nel sistema del chunk (il suo codice EPSG, o *sistema
   locale*).
+
+**Modelli e nuvole grandi.** La vista mostra un modello grande come una copia ridotta (oltre 600.000 facce:
+un'anteprima fatta una volta e tenuta accanto al modello; un modello con texture oltre 8 milioni di facce con VTK, 3
+milioni con la vista software, senza la texture) e una nuvola grande come un campione dei suoi punti. Le misure non
+dipendono da ciò che si vede: un clic si posa sul modello a **piena risoluzione** (un raggio su tutte le facce di
+`model.ply`), la lunghezza lungo la superficie e la superficie dentro un poligono si calcolano anch'esse sul modello
+intero (il poligono legge solo le facce intorno a sé), e un clic su una nuvola si raffina sul piano della nuvola
+**intera** lungo la linea di vista. Su un terreno sintetico di 5, 20 e 50 milioni di facce un punto cade entro 0,2 mm
+dalla superficie vera (l'errore dei triangoli stessi), la lunghezza lungo la superficie entro 0,5 mm su 84 m, la
+superficie dentro un poligono entro 2 parti per milione; sulla sola anteprima mostrata gli stessi clic sarebbero
+spostati di 3-14 cm. Ciò che serve si prepara in sottofondo quando la misura comincia (circa 2 s per 5 milioni di
+facce, 9 s per 20 milioni, 24 s per 50 milioni; un indice della nuvola oltre 2 milioni di punti): intanto la vista
+continua a ruotare, l'angolo dice *Preparazione del modello per il disegno...* e i clic sono tenuti e posati quando è
+pronto, se la vista non si è mossa. Un clic fuori dal modello non dà niente. Numeri e metodo:
+[Benchmark](../benchmark.it.md#misurare-su-modelli-e-nuvole-grandi-versione-110).
 
 La misura resta disegnata in magenta finché non inizia la successiva o fino a *Cancella la misura* (o *Cancella
 disegni*); non si salva con il progetto. I valori sono in metri nelle coordinate del chunk; un chunk solo allineato -

@@ -29,7 +29,7 @@ from ..core import stamps
 from ..core.document import Document
 from ..core.progress import Cancelled
 from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, feature_kind, new_id, stable_id
-from . import i18n, theme
+from . import chunk_groups, i18n, theme
 from . import shots_widgets as sw
 from .autopilot_dialog import AutopilotDialog
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
@@ -698,6 +698,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
         self.workspace.rename_requested.connect(self._workspace_rename)
         self.workspace.shown_in_3d.connect(self._chunk_shown_in_3d)
+        self.workspace.group_shown_3d.connect(lambda gid, shown: chunk_groups.show(self, gid, shown))
+        self.workspace.chunks_dropped.connect(lambda keys, gid, before: chunk_groups.move_chunks(self, keys, gid, before))
         self.workspace.populated.connect(self._chunk_list_seen)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
@@ -5700,15 +5702,17 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return
         self._update_stale_banner()
 
-    def merge_chunks(self) -> None:
-        """A new chunk with the photos, markers and clouds of the chosen chunks (already aligned)."""
+    def merge_chunks(self, keys=None) -> None:
+        """A new chunk with the photos, markers and clouds of the chosen chunks (already aligned); ``keys``: the chunks
+        proposed (default the enabled ones; a group of chunks gives its own)."""
         if not self._two_chunks():
             return
         doc = self.doc
         choices = [(ch.key, ch.label) for ch in doc.chunks]
+        proposed = [ch.key for ch in doc.chunks if ch.enabled] if keys is None else list(keys)
         v = ParamDialog.ask(self, "Unisci chunk", [
             Field("chunks", "Chunk da unire (il primo dà il sistema di riferimento)",
-                  [ch.key for ch in doc.chunks if ch.enabled], choices=choices, kind="checklist"),
+                  proposed, choices=choices, kind="checklist"),
             Field("label", "Nome del nuovo chunk", "Chunk unito", kind="text"),
             Field("markers", "Unisci i marker con lo stesso nome", True),
             Field("tie_points", "Unisci i punti di legame", True),
@@ -7078,9 +7082,10 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if text:
             self.statusBar().showMessage(tr("Ripetuto: {0}", text), 6000)
 
-    def batch_process(self) -> None:
+    def batch_process(self, preset=None) -> None:
         """Flusso di lavoro > Elaborazione batch: steps over several chunks, the project saved after
-        each one; an unfinished batch is offered to be resumed (``pyarchinit_photogrammetry.batch``)."""
+        each one; an unfinished batch is offered to be resumed (``pyarchinit_photogrammetry.batch``).
+        ``preset``: the steps proposed (the operations on a group of chunks), else those of the last batch."""
         import json
 
         from .. import batch
@@ -7103,6 +7108,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                 return
             steps, resume = state["steps"], r == 0
         if not resume:
+            if steps is None and preset is not None:
+                steps = list(preset)
             if steps is None:
                 try:
                     steps = json.loads(self.settings.value("batch/steps", "[]") or "[]")
@@ -16477,6 +16484,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
 
         if kind == "chunk":
             self.rename_chunk(chunk)
+        elif kind == chunk_groups.KIND:
+            chunk_groups.rename(self, payload)
         elif kind == "version":
             self.rename_version(*payload, chunk=chunk)
         elif kind == "product" and payload in versions.PRODUCTS:
@@ -16535,6 +16544,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if kind == "document":
             menu.addAction(icon("add_chunk"), tr("Aggiungi chunk"), self.add_chunk)
             menu.addAction(icon("append"), tr("Aggiungi progetti..."), self.append_projects)
+            menu.addAction(icon("folder"), tr("Nuovo gruppo..."), lambda: chunk_groups.new_group(self, []))
+        elif kind == chunk_groups.KIND:
+            chunk_groups.group_menu(self, menu, payload)
         elif kind == "mosaics":
             menu.addAction(icon("merge"), tr("Ortofoto e DEM uniti..."), self.open_mosaic)
         elif kind == "web_site":
@@ -16557,6 +16569,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             a.setEnabled(chunk is not self.chunk)
             menu.addAction(icon("rename"), tr("Rinomina..."), lambda: self.rename_chunk(chunk))
             menu.addAction(icon("add_chunk"), tr("Duplica chunk..."), lambda: self.duplicate_chunk(chunk))
+            chunk_groups.chunk_entries(self, menu, [chunk])
             if chunk.enabled:
                 menu.addAction(icon("disable"), tr("Disattiva"), lambda: self.set_chunks_enabled([chunk], False))
             else:
@@ -16650,6 +16663,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if toggles:
             menu.addAction(icon("enable"), tr("Attiva"), lambda: self._workspace_enable(True, items))
             menu.addAction(icon("disable"), tr("Disattiva"), lambda: self._workspace_enable(False, items))
+        chosen = [it[1] for it in items if it[0] == "chunk" and it[1] is not None]
+        if chosen:
+            chunk_groups.chunk_entries(self, menu, chosen)
         removable = [it for it in items if it[0] in REMOVABLE]
         if removable:
             if menu.actions():
