@@ -125,6 +125,11 @@ def install(folder: Path) -> Path:
     """The fake ``wrangler`` in ``folder/bin`` (run by this Python), its records in ``folder``: the bin folder."""
     bin_dir = folder / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":  # no shebang there: a .cmd, as the one npm installs, that runs the script with this Python
+        (bin_dir / "wrangler_fake_script.py").write_text(SCRIPT, encoding="utf-8")
+        (bin_dir / "wrangler.cmd").write_text(f'@"{sys.executable}" "%~dp0wrangler_fake_script.py" %*\r\n',
+                                              encoding="utf-8")
+        return bin_dir
     script = bin_dir / "wrangler"
     script.write_text(f"#!{sys.executable}\n" + SCRIPT, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

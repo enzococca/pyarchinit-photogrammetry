@@ -4,6 +4,8 @@ sites that fit the free plans and that exceed each limit, the privacy gate, the 
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -173,10 +175,15 @@ def test_wrangler_missing(tmp_path, monkeypatch):
 
 def test_npx_is_used_without_installing(tmp_path, monkeypatch):
     fake.no_wrangler(monkeypatch, tmp_path)
-    npx = tmp_path / "empty_bin" / "npx"
-    npx.write_text("#!/bin/sh\nexit 1\n")
-    npx.chmod(0o755)
-    assert sp.find_wrangler() == [str(npx), "--no", "wrangler"]
+    if os.name == "nt":
+        npx = tmp_path / "empty_bin" / "npx.cmd"
+        npx.write_text("@exit /b 1\r\n")
+    else:
+        npx = tmp_path / "empty_bin" / "npx"
+        npx.write_text("#!/bin/sh\nexit 1\n")
+        npx.chmod(0o755)
+    got = sp.find_wrangler()
+    assert [Path(got[0]), *got[1:]] == [npx, "--no", "wrangler"]  # as paths: Windows gives the extension in capitals
 
 
 def test_not_logged_in(tmp_path, wr, monkeypatch):
