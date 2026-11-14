@@ -1218,12 +1218,14 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM, un modello o dei disegni); restituisce il percorso di `site.json` |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | il sito dei chunk (oggetti, chiavi o etichette, o chunk di altri progetti; predefinito ogni chunk con qualcosa da pubblicare); restituisce il percorso di `site.json`. Dalla 1.10.0 la nuvola, le sezioni, le date, il limite di dimensione (sotto) |
+| `io.site.build_notes(manifest)` | dalla 1.10.0: quello che la costruzione ha ridotto o lasciato fuori (`build.notes` di `site.json`) |
+| `io.site.chunk_date(chunk)` | dalla 1.10.0: la data di un rilievo, `AAAA-MM-GG`: quella impostata sul chunk (`archaeo.timeline.set_phase_date`), altrimenti la prima delle sue foto |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
 | `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | lo stesso server in un suo thread: `.start()`, `.url`, `.port`, `.stop()` (il thread concluso, la porta liberata); l'anteprima della finestra |
 | `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | l'ultimo sito costruito tenuto in `document.meta["web_site"]` (cartella relativa al progetto quando sta lì, scelte, ora, dimensione, lo stato dei suoi prodotti da `site_sources(document, chunks, products)` preso prima della costruzione); `site_stale` elenca i prodotti ricostruiti o cambiati da allora |
-| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | riga di comando: il sito scritto |
+| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=AAAA-MM-GG]... [--label CHUNK=TESTO]... [--timeline]` | riga di comando: il sito scritto, e quello che la costruzione ha ridotto; `--chunk ALTRO.ppg:ETICHETTA` prende un chunk di un altro progetto |
 | `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
 **La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,
@@ -1233,8 +1235,11 @@ con più chunk): `ortho.tif` (Cloud Optimized GeoTIFF, WebP con il suo alfa), `d
 deflate), `dem_hillshade.tif` (il rilievo ombreggiato, COG a 8 bit, trasparente dove il DEM è vuoto),
 `units.geojson` (le unità stratigrafiche della pianta con i loro attributi, una `label` e `area_m2`),
 `drawings.geojson` (quote, linee di rottura, punti di misura e i disegni liberi, ogni elemento con il suo
-`layer`), `model/` (il modello 3D in 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`).
-`products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`, `"model"`.
+`layer`), `model/` (il modello 3D in 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`), dalla 1.10.0
+`cloud/` e `cloud.copc.laz` (la nuvola di punti), `sections/` e `sections.geojson` (le sezioni e i prospetti) e
+`plugins/<plugin>/` (quello che aggiungono i plugin).
+`products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`, `"model"`, `"cloud"`,
+`"sections"`; in partenza tutto quello che il chunk ha tranne la nuvola, che va solo se richiesta.
 `model_texture` è il lato massimo di una pagina della texture del modello (predefinito 4096: pochi MB di
 JPEG a pagina, così uno scavo normale resta entro qualche centinaio di MB; `None` o `--model-texture 0` per
 i soli colori dei vertici); `model_faces` le facce di un tassello. Un chunk senza modello non ha la vista 3D.
@@ -1273,13 +1278,65 @@ Su un host che risponde invece con il file intero la pagina lo dice e scarica pe
 sotto i 50 MB; uno più grande non viene scaricato, e il suo livello è nominato nell'avviso e lasciato fuori. La pagina legge
 i GeoTIFF scritti da questo programma, non un GeoTIFF qualunque.
 
+**La nuvola di punti** (dalla 1.10.0, `products` con `"cloud"`, `--product cloud`): la nuvola densa in 3D Tiles di
+punti in `data/cloud/` - l'octree dell'esportazione COPC (un nodo tiene un punto per ogni cella di una griglia di 128
+celle sopra di lui, i figli gli altri), ogni nodo un tassello raffinato aggiungendo i figli - letta dallo stesso
+renderer del modello: la scheda 3D elenca *Modello* e *Nuvola di punti*, ognuno con la sua spunta (la nuvola parte
+nascosta quando c'è un modello), i punti più fini si caricano avvicinandosi, e un clic o una misura prende un punto
+della nuvola come sul modello. Gli stessi punti vanno in `cloud.copc.laz` da scaricare (QGIS, CloudCompare, Potree;
+`cloud_copc=False`, `--no-copc` lo lascia fuori), nel sistema del sito. Al massimo `cloud_points` punti (3 milioni:
+quello che un browser disegna senza fatica), meno per restare nel limite di dimensione: una scelta a caso su tutta la
+nuvola. Perché non il COPC letto nella pagina: servirebbero WebAssembly permesso dalla politica della pagina, le
+richieste a intervalli dall'host, un'altra libreria con il suo decodificatore e un secondo modo di caricare e prendere
+i punti; i tasselli sono file piccoli letti interi e hanno tutto in comune con il modello.
+
+**Sezioni e prospetti** (dalla 1.10.0, `"sections"`): ogni sezione e prospetto del chunk (*Prospetti e sezioni*) in
+`data/sections/<n>/`: la sua ortofoto (COG, WebP) e il suo disegno (`drawing.geojson`: il profilo dove il piano taglia
+il modello, le unità, le pietre, le linee, i punti e le quote disegnati sopra) nei metri `(u, v)` del prospetto, e lo
+stesso disegno come `drawing.svg` a una scala di disegno con la griglia delle quote. La sua traccia in pianta (la
+linea dove il piano incontra il terreno, l'arco di un cilindro) è in `sections.geojson`. La pagina ha una scheda
+**Sezioni**: l'elenco delle sezioni, ognuna sul suo piano con spostamento e zoom, un clic che dà `u` e `v` (la quota
+quando il prospetto tiene le quote) e gli attributi, distanze e aree misurate sul piano; *Mostra in pianta* ne disegna
+la traccia sulla pianta, e un clic su una traccia in pianta apre la sua sezione. Nel sistema locale `v` e ogni quota
+di un disegno sono abbassate della base delle quote del sito, come il DEM.
+
+**Più date** (dalla 1.10.0): chunk dello stesso luogo rilevati in giorni diversi - di un progetto, o chunk di altri
+progetti passati come oggetti (`chunks=[a, altro_doc.chunks[1]]`, `--chunk altro.ppg:Rilievo 2`), tutti in uno stesso
+sistema (una georeferenziazione comune o chunk allineati) - vanno come voci di un solo sito con la loro data. `dates`
+(`{"Rilievo 1": "2025-06-02"}` per etichetta o chiave, o `[(chunk, "2025-06-02"), ...]`; `--date CHUNK=AAAA-MM-GG`)
+dà le date e accende `timeline`; `timeline=True` (`--timeline`) prende la data impostata su ogni chunk, altrimenti la
+prima delle sue foto, e rifiuta un chunk senza. `labels` (`--label CHUNK=TESTO`) dà il nome dei chunk nella pagina.
+`site.json` riceve una `timeline` (`[{"date", "label", "chunks"}]`, i chunk di una data insieme); la pagina mostra
+una data alla volta, la più recente per prima, con un cursore e un pulsante per data che cambiano pianta, vista 3D e
+sezioni, la vista ferma dov'è (una sola origine locale per tutte le date).
+
+**Il limite di dimensione** (dalla 1.10.0): `budget_mb` (500 MB, `--budget`; `None` o 0 nessun limite) è la
+dimensione del sito intero. I raster, le sezioni, i disegni e la pagina vanno come sono; il modello e la nuvola si
+dividono quello che resta in proporzione a quanto prenderebbero: prima le pagine della texture si dimezzano (fino a
+1024 pixel) finché prendono più di metà della parte del modello, poi il modello scende a meno facce (raggruppamento
+dei vertici, la texture tenuta: `export_3dtiles(..., max_total_faces=N)`), e la nuvola ha meno punti. Qualunque sia il
+limite, un modello non supera mai 4 milioni di facce al dettaglio pieno, 8192 pixel una pagina di texture o 500 000
+facce un tassello, né una nuvola `cloud_points`. Quello che è stato ridotto è in `site.json` (`build`: `budget`,
+`size`, `reduced` - chunk, prodotto, cosa, da, a, perché - e `notes`), stampato da `ppg web build` e scritto nel
+pannello Log.
+
+**Quello che aggiungono i plugin** (dalla 1.10.0): un plugin registra `context.add_site_contributions(provider)` (vedi
+[Plugin](plugins.it.md#nel-sito-web-di-un-rilievo)); i suoi livelli sono disegnati in pianta con una legenda e i loro
+attributi a un clic, le sue tabelle e pagine sono schede della pagina. I loro file sono in `data/plugins/<plugin>/`,
+elencati in `plugins` del chunk in `site.json`.
+
 ```python
 path = doc.export_site("site", title="Saggio 1")           # sistema locale
 doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
+doc.export_site("site_full", products=["orthomosaic", "dem", "model", "cloud", "sections"], budget_mb=300)
+doc.export_site("site_date", dates={"Rilievo 1": "2025-06-02", "Rilievo 2": "2025-06-09"})  # una data alla volta
 ```
 
 ```bash
 ppg web build scavo.ppg site --title "Saggio 1"
+ppg web build scavo.ppg site_full --product orthomosaic --product dem --product model --product cloud --budget 300
+ppg web build scavo.ppg site_date --chunk "Rilievo 1" --chunk "altro.ppg:Rilievo 2" \
+    --date "Rilievo 1=2025-06-02" --date "Rilievo 2=2025-06-09"
 ppg web serve site --open
 ```
 

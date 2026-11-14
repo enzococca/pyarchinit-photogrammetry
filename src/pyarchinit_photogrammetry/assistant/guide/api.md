@@ -1185,12 +1185,14 @@ and the page asks nothing outside its own folder (no CDN).
 
 | Call | Description |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | the site of the chunks (objects, keys or labels; default every chunk with an orthophoto, a DEM, a model or drawings); returns the path of `site.json` |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | the site of the chunks (objects, keys or labels, or chunk objects of other projects; default every chunk with something to publish); returns the path of `site.json`. Since 1.10.0 the cloud, the sections, the dates, the budget (below) |
+| `io.site.build_notes(manifest)` | since 1.10.0: what the build reduced or left out (`build.notes` of `site.json`) |
+| `io.site.chunk_date(chunk)` | since 1.10.0: the date of a survey, `YYYY-MM-DD`: the one set on the chunk (`archaeo.timeline.set_phase_date`), else the earliest of its photos |
 | `io.site.export_site(document, folder, ...)` | the same as a module function |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address`; `ranges=False` answers with whole files, as a host without range requests |
 | `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | the same server in a thread of its own: `.start()`, `.url`, `.port`, `.stop()` (the thread joined, the port freed); the window's preview |
 | `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | the site built last kept in `document.meta["web_site"]` (folder relative to the project when it lies there, options, time, size, the state of its products from `site_sources(document, chunks, products)` taken before the build); `site_stale` lists the products built again or changed since |
-| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | command line: the site written |
+| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=YYYY-MM-DD]... [--label CHUNK=TEXT]... [--timeline]` | command line: the site written, and what the build reduced; `--chunk OTHER.ppg:LABEL` takes a chunk of another project |
 | `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise; `--no-ranges` to see the page as on a host without range requests |
 
 **The folder**: `index.html`, `site.json` (the manifest: format `ppg-site` version 1, title, languages,
@@ -1200,8 +1202,11 @@ chunks): `ortho.tif` (Cloud Optimized GeoTIFF, WebP with its alpha), `dem.tif` (
 `dem_hillshade.tif` (the shaded relief, COG 8 bit, transparent where the DEM is empty), `units.geojson`
 (the stratigraphic units of the plan with their attributes, a `label` and `area_m2`), `drawings.geojson`
 (spot heights, break lines, measuring points and the free drawings, each feature with its `layer`),
-`model/` (the 3D model as 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`).
-`products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`, `"model"`.
+`model/` (the 3D model as 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`), since 1.10.0
+`cloud/` and `cloud.copc.laz` (the point cloud), `sections/` and `sections.geojson` (the sections and elevations)
+and `plugins/<plugin>/` (what plugins add).
+`products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`, `"model"`, `"cloud"`,
+`"sections"`; by default all the chunk has but the cloud, which goes only when asked for.
 `model_texture` is the largest side of a texture page of the model (default 4096: a few MB of JPEG a page,
 so that a normal trench stays within a few hundred MB; `None` or `--model-texture 0` for vertex colours
 alone); `model_faces` the faces of a tile. A chunk without a model has no 3D view.
@@ -1239,13 +1244,64 @@ On a host that answers with the whole file instead, the page says so and downloa
 if it is under 50 MB; a larger one is not downloaded, and its layer is named in the notice and left out.
 The page reads the GeoTIFFs this program writes, not any GeoTIFF.
 
+**The point cloud** (since 1.10.0, `products` with `"cloud"`, `--product cloud`): the dense cloud as 3D Tiles of
+points in `data/cloud/` - the octree of the COPC export (a node keeps one point for every cell of a 128-cell grid over
+it, its children the others), every node a tile refined by adding its children - read by the same renderer as the
+model: the 3D tab lists *Model* and *Point cloud*, each with its tick (the cloud is hidden at first when there is a
+model), the finer points load as one comes near, and a click or a measure picks a point of the cloud as on the
+model. The same points go as `cloud.copc.laz` to download (QGIS, CloudCompare, Potree; `cloud_copc=False`,
+`--no-copc` leaves it out), in the frame of the site. At most `cloud_points` points (3 million: what a browser
+draws smoothly), fewer to keep to the budget: a random choice over the whole cloud. Why not COPC read in the page:
+it would need WebAssembly allowed by the policy of the page, range requests from the host, another library and its
+decoder, and a second way to load and pick points; the tiles are small files read whole and share everything with
+the model.
+
+**Sections and elevations** (since 1.10.0, `"sections"`): every section and elevation of the chunk (*Prospetti e
+sezioni*) in `data/sections/<n>/`: its orthophoto (COG, WebP) and its drawing (`drawing.geojson`: the profile where
+the plane cuts the model, the units, stones, lines, points and spot heights drawn on it) in the `(u, v)` metres of
+the elevation, and the same drawing as `drawing.svg` at a drawing scale with a grid of the heights. Its trace on the
+plan (the line where the plane meets the ground, the arc of a cylinder) is in `sections.geojson`. The page has a
+**Sections** tab: the list of the sections, each on its own plane with pan and zoom, a click giving `u` and `v` (the
+height when the elevation keeps the heights) and the attributes, distances and areas measured on the plane;
+*Show on the plan* draws its trace there, and a click on a trace on the plan opens its section. In the local frame
+`v` and every height of a drawing are taken down by the base of the heights of the site, as the DEM.
+
+**Several dates** (since 1.10.0): chunks of the same place surveyed on different days - of one project, or chunks of
+other projects passed as objects (`chunks=[a, other_doc.chunks[1]]`, `--chunk other.ppg:Rilievo 2`), all in one
+frame (a common georeference or aligned chunks) - go as entries of one site with their date. `dates`
+(`{"Rilievo 1": "2025-06-02"}` by label or key, or `[(chunk, "2025-06-02"), ...]`; `--date CHUNK=YYYY-MM-DD`) gives
+the dates and turns on `timeline`; `timeline=True` (`--timeline`) takes the date set on each chunk, else the earliest
+of its photos, and refuses a chunk without one. `labels` (`--label CHUNK=TEXT`) names the chunks on the page.
+`site.json` gets a `timeline` (`[{"date", "label", "chunks"}]`, chunks of one date together); the page shows one
+date at a time, the latest first, with a slider and a button per date that switch the plan, the 3D view and the
+sections, the view kept where it is (one local origin for all the dates).
+
+**The size budget** (since 1.10.0): `budget_mb` (500 MB, `--budget`; `None` or 0 no limit) is the size of the whole
+site. The rasters, the sections, the drawings and the page go as they are; the model and the cloud share what is
+left in proportion to what they would take: the texture pages are halved first (down to 1024 pixels) while they take
+more than half of the share of the model, then the model is reduced to fewer faces (vertex clustering, its texture
+kept: `export_3dtiles(..., max_total_faces=N)`), and the cloud gets fewer points. Whatever the budget, a model is
+never above 4 million faces at full detail, 8192 pixels a texture page or 500 000 faces a tile, nor a cloud above
+`cloud_points`. What was reduced is in `site.json` (`build`: `budget`, `size`, `reduced` - chunk, product, what,
+from, to, why - and `notes`), printed by `ppg web build` and written in the Log pane.
+
+**What plugins add** (since 1.10.0): a plugin registers `context.add_site_contributions(provider)` (see
+[Plugins](plugins.md#on-the-web-site-of-a-survey)); its layers are drawn on the plan with a legend and their
+attributes on a click, its tables and pages are tabs of the page. Their files are in `data/plugins/<plugin>/`,
+listed in `plugins` of the chunk in `site.json`.
+
 ```python
 path = doc.export_site("site", title="Saggio 1")           # local frame
 doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
+doc.export_site("site_full", products=["orthomosaic", "dem", "model", "cloud", "sections"], budget_mb=300)
+doc.export_site("site_dates", dates={"Rilievo 1": "2025-06-02", "Rilievo 2": "2025-06-09"})  # one date at a time
 ```
 
 ```bash
 ppg web build scavo.ppg site --title "Saggio 1"
+ppg web build scavo.ppg site_full --product orthomosaic --product dem --product model --product cloud --budget 300
+ppg web build scavo.ppg site_dates --chunk "Rilievo 1" --chunk "altro.ppg:Rilievo 2" \
+    --date "Rilievo 1=2025-06-02" --date "Rilievo 2=2025-06-09"
 ppg web serve site --open
 ```
 
