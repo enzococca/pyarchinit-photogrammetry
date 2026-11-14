@@ -316,6 +316,44 @@ La *completezza* è la parte delle celle del lidar con una quota entro 1 m. Scri
   di quaranta); non sono misurati esattamente sulla stessa griglia e lo stesso poligono, quindi il
   confronto vale come ordine di grandezza.
 
+## Misurare su modelli e nuvole grandi (versione 1.10)
+
+Come si comportano il clic e le misure della vista 3D su dati grandi, misurato con `tools/bench_model_pick.py` (un
+terreno procedurale, due seni su un quadrato di 100 x 100 m, come griglia di triangoli o come punti a caso con 2 mm di
+rumore, in un chunk la cui trasformazione lo scala, lo ruota e lo porta in coordinate UTM, EPSG:32633). Mac mini M4
+Pro, 24 GB, macOS 27, con altri lavori in corso. Errore di un clic: la distanza fra il bersaglio e il punto scelto al
+pixel del bersaglio stesso (la linea di vista che vi passa incontra il terreno nel bersaglio), 40 bersagli a caso.
+
+| Dati | Mostrato | Pronto per misurare¹ | Memoria di picco | Clic | Errore del clic, mediana / max | Solo il mostrato² |
+| --- | --- | --- | --- | --- | --- | --- |
+| modello 5 M facce, 4 pagine di texture | intero, con texture (misura VTK) | 2,4 s | 2,9 GB | 0,3 ms | 0,04 / 0,17 mm | 27 / 44 mm |
+| modello 20 M facce | anteprima 600.000 facce | 9,3 s | 3,4 GB | 0,8 ms | 0,013 / 0,07 mm | 88 / 124 mm |
+| modello 50 M facce | anteprima 600.000 facce | 24 s | 5,2 GB | 1,8 ms | 0,010 / 0,06 mm | 78 / 143 mm |
+| nuvola 20 M punti | 3 M punti (misura VTK) | 8,2 s | 2,9 GB | 39 ms | 1,1 / 3,3 mm | 25 / 74 mm |
+| nuvola 50 M punti | 3 M punti | 23 s | 4,9 GB | 42 ms | 0,31 / 0,86 mm | 34 / 60 mm |
+
+¹ il lanciatore di raggi del modello o l'indice della nuvola, costruiti in un thread di lavoro quando comincia una
+misura; la pausa più lunga dell'interfaccia intanto è stata di 0,12-0,21 s (il lanciatore si costruisce a pezzi di
+500.000 facce: Open3D costruisce l'albero di ricerca di una mesh tenendo il lock dell'interprete, circa 1 s ogni 5
+milioni di facce in un pezzo solo). ² il punto o vertice mostrato più vicino entro 8 pixel: ciò che dava prima il clic
+su un modello grande, finché il lanciatore non era pronto.
+
+Lungo la superficie, la sezione di 84,29 m da (15, 20) a (80, 70): 84,2902 m su 5 M facce (-0,4 mm), 84,2906 m su
+20 M (0,0 mm), 84,2908 m su 50 M (+0,1 mm); prima, drappeggiata ogni 20 pixel, -124 mm su un modello di 1 M facce.
+Superficie del modello dentro un quadrilatero di 888,47 m²: entro 2 parti per milione a ogni dimensione, leggendo solo
+le facce intorno al poligono (3,6 s a 5 M, 15 s a 20 M, 41 s a 50 M, in sottofondo). Un clic fuori dal modello non dà
+niente in 0,1-1,7 ms invece di proiettare tutti i vertici mostrati (0,2-0,6 s per un modello con texture di 5 M facce).
+
+Attraverso VTK stesso (pyvista fuori schermo; la finestra Qt del programma non si può pilotare senza uno schermo): la
+scena mostrata dalla vista disegnata da VTK, la proiezione e la linea di vista della vista VTK lette da quella camera
+VTK, il nostro clic al centro di un pixel contro `vtkCellPicker` di VTK sulla geometria disegnata: 0,001 mm di scarto
+sul modello con texture mostrato intero, 0,5-0,6 mm (max 2,3 mm) sull'anteprima di 600.000 facce, dove VTK sceglie la
+copia ridotta e noi il modello intero. Il buffer di profondità riletto concorda con il nostro clic entro 0,02 mm su una
+nuvola (mediana); su una mesh è spostato di circa 1 cm, il polygon offset che VTK applica alle superfici. I picker
+hardware di VTK (`vtkWorldPointPicker`, `vtkPropPicker`) vanno in crash fuori schermo su questo Mac; il programma non
+li usa, i suoi clic si calcolano dalle matrici della camera. Tempo per mostrare una nuvola di 50 M punti: 9,7 s, la
+nuvola intera letta nel thread dell'interfaccia per campionarla (non cambiato qui).
+
 ## Cosa è cambiato in pyarchinit-photogrammetry
 
 Queste prove hanno cambiato il programma; i numeri qui sopra sono quelli della versione con le modifiche:

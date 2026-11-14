@@ -302,13 +302,28 @@ a double click or Enter ends, Esc gives up the measure in progress.
 
 * **Distance**: a polyline of any number of vertices. While you click, the status bar and the corner of the view show
   the 3D length so far; at the end the 3D length (sum of the straight segments), the length in plan, the height
-  difference between the first and the last vertex and the **length along the surface** (the line draped on the
-  surface every 20 pixels, as *Drape on the model* does). The result goes to the status bar and the log.
+  difference between the first and the last vertex and the **length along the surface** (on a model, the line carried
+  along the lines of sight onto the model at full resolution every half edge of its triangles; on a cloud, draped
+  every 20 pixels as *Drape on the model* does). The result goes to the status bar and the log.
 * **Area and surface**: a polygon. The area in plan, the area in the mean plane of the vertices, the **surface of the
   model inside it** when the chunk has a model (the same computation as the measures of a free polygon, in the
   background), the 3D perimeter and in plan, the slope of the mean plane. Without a model the message says that the
   area is the one of the mean plane. The result goes to a message box and the log, as for the area in 2D.
 * **Coordinates of a point**: X, Y, Z of the clicked point in the chunk's system (its EPSG code, or *local system*).
+
+**Large models and clouds.** The view shows a big model as a coarse copy (more than 600 000 faces: a preview made once
+and kept beside the model; a textured model above 8 million faces with VTK, 3 million with the software view, without
+its texture) and a big cloud as a sample of its points. The measures do not depend on what is shown: a click is placed
+on the model at **full resolution** (a ray cast on every face of `model.ply`), the length along the surface and the
+surface inside a polygon are computed on the full model too (the polygon reads only the faces around it), and a click
+on a cloud is refined on the plane of the **whole** cloud along the line of sight. On a synthetic terrain of 5, 20 and
+50 million faces a point lands within 0.2 mm of the true surface (the error of the triangles themselves), the length
+along the surface within 0.5 mm over 84 m, the surface inside a polygon within 2 parts per million; shown as its
+preview alone, the same clicks would be 3-14 cm off. What is needed is prepared in the background when the measure
+starts (about 2 s for 5 million faces, 9 s for 20 million, 24 s for 50 million; an index of the cloud for more than 2
+million points): meanwhile the view keeps turning, the corner says *Preparing the model for drawing...* and the clicks
+are kept and placed when it is ready, unless the view has moved. A click outside the model gives nothing. Numbers and
+method: [Benchmark](../benchmark.md#measuring-on-large-models-and-clouds-version-110).
 
 The measure is drawn in magenta until the next one starts or *Clear the measure* (or *Clear drawings*); it is not
 saved with the project. Values are in metres in the chunk's coordinates; a chunk only aligned - no reference, no scale
