@@ -279,6 +279,10 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   same_frame: bool = typer.Option(False, help="with --like and two LOCAL chunks: they are in the same "
                                                   "frame (aligned, merged, oriented on the same markers); without it "
                                                   "an elevation of another local chunk is refused"),
+                  texture: Optional[bool] = typer.Option(None, "--texture/--photos",
+                                                         help="the orthophoto from the texture of the model, or from "
+                                                              "the photos (default: the texture when the chunk has no "
+                                                              "aligned photo)"),
                   name: Optional[str] = None, chunk: Optional[str] = None):
     """Orthophoto and relief of the model on a plane - an elevation or a section: on a trace, on the
     plane of markers with the axes chosen, or on the plane of a view - or on a cylinder (--circle: a
@@ -390,7 +394,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                   numbers(up, 3, "--up"))
         depth = None
     entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
-                              progress=print_progress, scale=scale)
+                              progress=print_progress, scale=scale, texture=texture)
     doc.save()
     ortho, relief = E.elevation_paths(ch, entry)
     w, h = entry["size"]
@@ -1511,13 +1515,21 @@ def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem
           skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
           max_angle: float = typer.Option(70.0, help="cells seen only from further than this from the vertical "
                                                      "(degrees) stay transparent"),
+          texture: Optional[bool] = typer.Option(None, "--texture/--photos",
+                                                 help="from the texture of the model, or from the photos (default: "
+                                                      "the texture when the chunk has no aligned photo)"),
+          supersample: Optional[int] = typer.Option(None, help="--texture: rays per cell side (default: as many as "
+                                                               "texels in a cell, at most 4)"),
           chunk: Optional[str] = None):
-    """Orthomosaic (GeoTIFF RGBA), any size: made tile by tile."""
+    """Orthomosaic (GeoTIFF RGBA), any size: made tile by tile. A chunk without aligned photos (an imported or merged
+    model) gets it from the texture of its model."""
     doc, ch = _open(project, chunk)
+    if texture is None and not ch.aligned_cameras:
+        typer.echo("note: the chunk has no aligned photos: the orthophoto is made from the texture of the model")
     p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
                              hide_classes=_classes(hide_classes), progress=print_progress,
                              skip_unreadable=skip_unreadable, max_angle=max_angle, colour_correction=colour,
-                             ghosting=ghosting, fill_holes=fill_holes)
+                             ghosting=ghosting, fill_holes=fill_holes, texture=texture, supersample=supersample)
     doc.save()
     typer.echo(str(p))
 
@@ -1683,6 +1695,58 @@ def merge_chunks(project: Path,
         typer.echo(f"  warning: {w}")
 
 
+@app.command("merge-models")
+def merge_models_cmd(project: Path,
+                     chunks: list[str] = typer.Argument(..., help="chunks whose models are merged (labels or keys); "
+                                                                  "the first gives frame and CRS"),
+                     label: Optional[str] = typer.Option(None, help="label of the new chunk (default Modello unito)"),
+                     colour: str = typer.Option("none", help="colours of the sources matched to the reference on "
+                                                             "their overlaps: none, gain (RGB gain and offset) or lab "
+                                                             "(mean and spread in CIE Lab)"),
+                     reference: Optional[str] = typer.Option(None, help="the chunk whose colours the others take "
+                                                                        "(default the first)"),
+                     match_distance: Optional[float] = typer.Option(None, help="metres between two vertices taken "
+                                                                               "for the same place in --colour"),
+                     remove_overlaps: bool = typer.Option(False, help="faces of a source lying on the surface of a "
+                                                                      "source before it in --priority left out"),
+                     priority: Optional[str] = typer.Option(None, help="order of the sources for --remove-overlaps "
+                                                                       "(comma separated; default the order given)"),
+                     overlap_distance: Optional[float] = typer.Option(None, help="metres from a kept surface within "
+                                                                                 "which a face is an overlap"),
+                     pages: str = typer.Option("keep", help="texture pages: keep (as they are) or repack (packed "
+                                                            "together on pages of at most --page-size)"),
+                     page_size: int = typer.Option(8192, help="side of a repacked page in pixels"),
+                     max_page: Optional[int] = typer.Option(None, help="pages reduced to at most this side (pixels)"),
+                     activate: bool = typer.Option(False, help="make the new chunk the active one")):
+    """The models of several chunks as ONE textured model of a new chunk (each in its chunk's frame; open edges
+    and gaps left open), the source chunk of every face kept as its group (export-model --groups source)."""
+    from .engine.model_merge import merge_models
+
+    doc = Document.open(project)
+    order = [c.strip() for c in priority.split(",") if c.strip()] if priority else None
+    try:
+        merged, r = merge_models(doc, chunks, label=label, reference=reference, colour=colour,
+                                 match_distance=match_distance, remove_overlaps=remove_overlaps, priority=order,
+                                 overlap_distance=overlap_distance, pages=pages, page_size=page_size,
+                                 max_page=max_page, progress=print_progress)
+    except (ValueError, KeyError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    if activate:
+        doc.chunk = merged
+    doc.save()
+    typer.echo(f"[{merged.key}] {merged.label}: {r['faces']:,} faces, {r['vertices']:,} vertices, {r['pages']} "
+               f"texture pages ({r['page_layout']})")
+    for s in r["sources"]:
+        typer.echo(f"  {s['chunk']}: {s['kept']:,} of {s['faces']:,} faces kept")
+    for c in r["colours"]:
+        if c["fit"]:
+            typer.echo(f"  colours of {c['chunk']}: {c['pairs']} pairs, difference {c['fit']['before']:.1f} -> "
+                       f"{c['fit']['after']:.1f} (Lab)")
+    for w in r["warnings"]:
+        typer.echo(f"  warning: {w}")
+
+
 @app.command()
 def append(project: Path,
            sources: list[Path] = typer.Argument(..., help="projects to append: .ppg, Metashape .psx, WebODM all.zip "
@@ -1744,10 +1808,23 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
            bbox: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' (ortho, dem, model, "
                                                          "cloud)"),
            wkt: Optional[str] = typer.Option(None, help="only inside this WKT polygon"),
+           groups: str = typer.Option("none", help="--model OBJ: one group (o/g) per source chunk of a merged model "
+                                                   "or object of an imported OBJ (source), per connected piece "
+                                                   "(component), or none"),
+           labels: Optional[Path] = typer.Option(None, help="--model OBJ: a group per face label, from a .npy file or "
+                                                            "a text file with one label per line (one per face)"),
+           max_texture: Optional[int] = typer.Option(None, help="--model: texture pages reduced to at most this side "
+                                                                "(pixels) in the copies"),
            chunk: Optional[str] = None):
     """Export products in world coordinates (optionally cut by a box or a polygon: see also `ppg crop`).
     A model ending in .glb is a binary glTF, a cloud ending in .copc.laz a Cloud Optimized Point Cloud."""
     _, ch = _open(project, chunk)
+    face_labels = None
+    if labels is not None:
+        import numpy as np
+
+        face_labels = (np.load(labels, allow_pickle=False) if labels.suffix.lower() == ".npy"
+                       else np.array([ln.strip() for ln in labels.read_text(encoding="utf-8").splitlines() if ln.strip()]))
     region = _region(None, bbox, wkt, None) if (bbox or wkt) else None
     if tiles:
         typer.echo(str(ch.export_3dtiles(tiles, progress=print_progress)))
@@ -1756,7 +1833,8 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
     for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region, cog=cog)),
                       (dem, lambda path: ch.export_dem(path, region=region, cog=cog if cog not in ("jpeg", "webp")
                                                        else "zstd")),
-                      (model, lambda path: ch.export_model(path, region=region)),
+                      (model, lambda path: ch.export_model(path, region=region, groups=groups, labels=face_labels,
+                                                           max_texture=max_texture)),
                       (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes), region=region)),
                       (markers, ch.export_reference), (report, ch.generate_report)):
         if value:
@@ -4391,7 +4469,20 @@ ties_app = typer.Typer(help="Ties between chunks: the same point in two chunks (
 app.add_typer(ties_app, name="ties")
 
 UNKNOWNS_HELP = ("unknowns of each chunk of the solve, e.g. A=plan,B=similarity,C=fixed (chunk labels or keys; "
-                 "similarity 7, rigid 6, plan 4, shift 3, height 1, fixed 0)")
+                 "similarity 7, rigid 6, plan 4, shift 3, height 1, fixed 0; group: the chunk moves with its group of "
+                 "chunks as one block; a group's name gives its first chunk the unknowns and the others group)")
+
+
+def _group_chunks(doc, name: str) -> list:
+    """The chunks of the group named ``name`` (none when no group has that name, or a chunk has that label)."""
+    from .core import groups
+
+    if any(c.label == name for c in doc.chunks):
+        return []
+    try:
+        return groups.members(doc, name)
+    except groups.GroupError:
+        return []
 
 
 def _ties_error(exc: Exception) -> NoReturn:
@@ -4506,7 +4597,7 @@ def _height_line(doc, h) -> str:
 
 def _parse_unknowns(doc, text: str) -> dict[int, str]:
     """``"A=plan,B=similarity"`` -> ``{chunk key: kind}``."""
-    from .engine.ties import KINDS
+    from .engine.ties import GROUP, KINDS
 
     out: dict[int, str] = {}
     for item in (p.strip() for p in text.split(",")):
@@ -4516,8 +4607,16 @@ def _parse_unknowns(doc, text: str) -> dict[int, str]:
         name, kind = name.strip(), kind.strip().lower()
         if not sep or not name:
             raise typer.BadParameter(f"{item!r}: write CHUNK=KIND, e.g. A=plan", param_hint="--unknowns")
-        if kind not in KINDS:
-            raise typer.BadParameter(f"{item!r}: the unknowns are one of {', '.join(KINDS)}", param_hint="--unknowns")
+        if kind not in KINDS and kind != GROUP:
+            raise typer.BadParameter(f"{item!r}: the unknowns are one of {', '.join((*KINDS, GROUP))}",
+                                     param_hint="--unknowns")
+        group_chunks = _group_chunks(doc, name)
+        if group_chunks:  # a group: its first chunk takes the unknowns, the others move with it (one block)
+            for i, ch in enumerate(group_chunks):
+                if ch.key in out:
+                    raise typer.BadParameter(f"chunk {ch.label!r} given twice", param_hint="--unknowns")
+                out[ch.key] = kind if i == 0 else GROUP
+            continue
         ch = _tie_chunk(doc, name)
         if ch.key in out:
             raise typer.BadParameter(f"chunk {ch.label!r} given twice", param_hint="--unknowns")
@@ -4859,6 +4958,82 @@ def ties_solve(project: Path,
         typer.echo(f"  {labels.get(int(key), key)}: build again {', '.join(stale)}")
 
 
+@ties_app.command("auto")
+def ties_auto(project: Path,
+              chunks: Optional[str] = typer.Option(None, "--chunks", "-c",
+                                                   help="chunks to pair, the reference first (labels or keys, comma "
+                                                        "separated; default every chunk with a DEM)"),
+              pairs: Optional[str] = typer.Option(None, "--pairs", "-p",
+                                                  help="pairs to match instead of the candidates, e.g. A:B,A:C (the "
+                                                       "reference first)"),
+              source: str = typer.Option("ortho", help="ortho (the orthophotos) or relief (the DEMs shaded: colours "
+                                                       "that changed between the surveys)"),
+              margin: float = typer.Option(5.0, help="metres: how far off the placement of a chunk may be"),
+              whole: bool = typer.Option(False, "--whole", help="match the whole rasters, whatever the placement (two "
+                                                                "unrelated local frames, a GPS far off)"),
+              cell: Optional[float] = typer.Option(None, help="metres: the cell of the matching (default the coarser "
+                                                              "raster)"),
+              same_group: bool = typer.Option(False, "--same-group", help="pair chunks of one group too"),
+              accept: bool = typer.Option(False, "--accept", help="make the pairs proposed into ties and save"),
+              max_ties: int = typer.Option(12, "--max-ties", help="ties per pair accepted, spread over the overlap"),
+              as_json: Optional[Path] = typer.Option(None, "--json", help="write the pairs and the results (with "
+                                                                          "their points) to this JSON file")):
+    """Automatic ties between chunks: the candidate pairs (overlap where the chunks are now), the matching of their
+    orthophotos (or DEM relief), the robust estimate refined by correlation and the residual report of each pair. A
+    pair that does not show the same ground is rejected. Nothing is stored without --accept; then ppg ties check /
+    solve place the chunks."""
+    from .engine import auto_ties
+
+    doc = Document.open(project)
+    if source not in auto_ties.SOURCES:
+        raise typer.BadParameter(f"use one of {', '.join(auto_ties.SOURCES)}", param_hint="--source")
+    found = []
+    if pairs:
+        todo = []
+        for item in (p.strip() for p in pairs.split(",") if p.strip()):
+            a, sep, b = item.partition(":")
+            if not sep:
+                raise typer.BadParameter(f"{item!r}: write A:B", param_hint="--pairs")
+            todo.append((_tie_chunk(doc, a.strip()).key, _tie_chunk(doc, b.strip()).key))
+    else:
+        chosen = None if not chunks else [_tie_chunk(doc, c.strip()) for c in chunks.split(",") if c.strip()]
+        try:
+            found = auto_ties.find_pairs(doc, chosen, margin=margin, same_group=same_group)
+        except (ValueError, KeyError) as exc:
+            _ties_error(exc)
+        typer.echo("Candidate pairs:")
+        for p in found:
+            state = "candidate" if p["candidate"] else "not a candidate: " + ties_render(p["reason"])
+            typer.echo(f"  {p['b_label']} -> {p['a_label']}: overlap {p['share']:.0%} ({p['share_margin']:.0%} within "
+                       f"{margin:g} m), {state}")
+        todo = [(p["a"], p["b"]) for p in found
+                if p["candidate"] or (whole and (p["reason"] or {}).get("code") == "small_overlap")]
+        if not todo:
+            typer.echo("No pair to match (try --whole, or --pairs)")
+    results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
+                            progress=print_progress)
+    for r in results:
+        typer.echo(auto_ties.report_text(r))
+    if as_json is not None:
+        as_json.write_text(json.dumps({"pairs": found, "results": [r.to_dict() for r in results]}, indent=1))
+        typer.echo(f"written {as_json}")
+    if accept:
+        made = 0
+        for r in results:
+            if r.ok:
+                made += len(auto_ties.accept(doc, r, max_ties=max_ties))
+        if made:
+            doc.save()
+        typer.echo(f"{made} ties made from {sum(r.ok for r in results)} pairs; project saved" if made
+                   else "No pair proposed: nothing made")
+
+
+def ties_render(m: Optional[dict]) -> str:
+    from .engine.ties import render
+
+    return render(m) if m else ""
+
+
 stakes_app = typer.Typer(help="Stakes and benchmarks: dark round heads looked for on the orthophoto (and the photos) near "
                               "points of known coordinates, proposed as known ties; nothing is stored until accepted")
 app.add_typer(stakes_app, name="stakes")
@@ -5155,6 +5330,127 @@ def water_correct(project: Path,
         typer.echo(f"DEM built again from the corrected cloud; the DEM before kept as version {r['dem_version']}")
 
 
+@water_app.command("basin")
+def water_basin(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                name: Optional[str] = typer.Option(None, "--name", help="the name of the basin (a new one is added, "
+                                                   "one with this name replaced)"),
+                level: Optional[float] = typer.Option(None, "--level", help="its level: a world height (m)"),
+                shore: Optional[str] = typer.Option(None, "--shore", help="points of its shoreline X,Y,Z;X,Y,Z;... "
+                                                    "(three or more): a plane of the water fitted to them"),
+                polygon: Optional[str] = typer.Option(None, "--polygon", help="where it is: a WKT polygon (world)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="where it is: the polygons of a layer of "
+                                                    "free drawings"),
+                n: Optional[float] = typer.Option(None, "--n", help="its effective factor (default 1.34)"),
+                clear: bool = typer.Option(False, "--clear", help="remove every basin: back to the single level")):
+    """A basin of water with its own level (or shoreline plane), factor and polygon; several basins correct each
+    their part of the cloud (the one without polygon the rest)."""
+    from .engine import colour_mask, water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if clear:
+            water.set_basins(ch, [])
+        else:
+            if not name:
+                raise typer.BadParameter("--name is needed (or --clear)")
+            if (level is None) == (shore is None):
+                raise typer.BadParameter("give one of --level Z, --shore X,Y,Z;X,Y,Z;...")
+            pts = None
+            if shore is not None:
+                try:
+                    pts = [[float(v) for v in p.split(",")] for p in shore.split(";") if p.strip()]
+                except ValueError:
+                    raise typer.BadParameter("--shore: X,Y,Z points separated by ;") from None
+            where = polygon if polygon else (colour_mask.union(ch, layer) if layer else None)
+            new = water.basin(name, level=level, n=water.N_SEA if n is None else n, polygon=where, shore=pts)
+            kept = [b for b in (ch.meta.get("water") or {}).get("basins") or [] if b["name"] != name]
+            water.set_basins(ch, kept + [new])
+            if new.get("shore"):
+                f = new["shore"]
+                typer.echo(f"shoreline plane: tilt {f['tilt_deg']:.3f} degrees, rmse {f['rmse']:.4f} m on "
+                           f"{f['points']} points")
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    for b in water.basins_of(ch):
+        typer.echo(_basin_line(b))
+
+
+def _basin_line(b: dict) -> str:
+    plane = "" if not (b.get("a") or b.get("b")) else f", plane a {b['a']:.5f} b {b['b']:.5f}"
+    return (f"basin {b['name']}: level {b['level']:.3f} m{plane}, n {b['n']:.3f}, "
+            + ("everywhere else" if b.get("polygon") is None else "inside its polygon"))
+
+
+@water_app.command("factor")
+def water_factor(project: Path,
+                 chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                 points: Optional[Path] = typer.Option(None, "--points", help="CSV of control points: label,x,y,z "
+                                                       "(true height) and optionally apparent"),
+                 markers: Optional[str] = typer.Option(None, "--markers", help="markers with a reference under the "
+                                                       "water, triangulated through it (comma separated)"),
+                 source: str = typer.Option("dem", "--source", help="where the apparent heights of --points are "
+                                            "read: dem or cloud"),
+                 basin_name: Optional[str] = typer.Option(None, "--basin", help="only the points of this basin; "
+                                                          "--apply stores the factor on it"),
+                 fit_level: bool = typer.Option(False, "--fit-level", help="the level fitted together with n"),
+                 apply: bool = typer.Option(False, "--apply", help="store the factor (and the fitted level)")):
+    """The effective refraction factor from points of known true height under the water, by least squares on
+    L - z_true = n (L - z_apparent), with the residual of every point."""
+    import csv
+
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    rows = []
+    if points is not None:
+        for r in csv.DictReader(points.read_text(encoding="utf-8-sig").splitlines()):
+            r = {k.strip().lower(): (v or "").strip() for k, v in r.items() if k}
+            rows.append({"label": r.get("label") or f"P{len(rows) + 1}", "x": float(r["x"]), "y": float(r["y"]),
+                         "z": float(r["z"]), "apparent": float(r["apparent"]) if r.get("apparent") else None})
+    labels = [m.strip() for m in markers.split(",") if m.strip()] if markers else []
+    if not rows and not labels:
+        raise typer.BadParameter("give --points and/or --markers")
+    try:
+        fit = water.estimate_factor(ch, water.control_points(ch, markers=labels, points=rows, source=source),
+                                    fit_level=fit_level, basin_name=basin_name)
+        if apply:
+            water.apply_factor(ch, fit)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    typer.echo(f"n {fit['n']:.4f} from {fit['points']} points" + (f", level {fit['level']:.3f} m" if fit["level"]
+                                                                   is not None else "")
+               + (f", rmse {fit['rmse']:.4f} m" if fit["rmse"] is not None else ""))
+    if not fit["in_range"]:
+        typer.echo(f"warning: n outside {water.N_RANGE[0]:g}-{water.N_RANGE[1]:g}: check the points")
+    for r in fit["residuals"]:
+        res = "left out" if r["residual"] is None else f"residual {r['residual']:+.4f} m"
+        app_z = "-" if r["apparent"] is None else f"{r['apparent']:.3f}"
+        typer.echo(f"  {r['label']}: true {r['z']:.3f}, apparent {app_z}, {res}")
+    if apply:
+        doc.save()
+        typer.echo("stored")
+
+
+@water_app.command("table")
+def water_table(project: Path, table: Path = typer.Argument(..., help="CSV with chunk or date, level, n")):
+    """A level and an effective factor for several chunks at once, by chunk (label or key) or by date of the survey
+    (the chunks surveyed that day): one per year of a campaign, for instance."""
+    from .engine import water
+
+    doc = Document.open(project)
+    try:
+        done = water.apply_table(doc, water.read_table(table))
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    for d in done:
+        typer.echo(f"{d['chunk']}: level {d['level']:.3f} m, n {d['n']:.3f}" + (f" ({d['date']})" if d["date"] else ""))
+
+
 @water_app.command("show")
 def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (label or key)")):
     """The water level of a chunk in its current system, and the correction of its cloud if any."""
@@ -5167,6 +5463,8 @@ def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (
         typer.echo(f"{ch.label}: no water level")
         return
     typer.echo(f"{ch.label}: {_water_line(lv)}")
+    for b in water.basins_of(ch):
+        typer.echo("  " + _basin_line(b))
     corr = (ch.meta.get("dense") or {}).get("refraction")
     if corr:
         typer.echo(f"active dense cloud corrected for the refraction (n {corr['n']:.2f}, level {corr['level']:.3f} m, "
@@ -5365,11 +5663,48 @@ web_app = typer.Typer(help="A survey as a web site: a folder with the orthophoto
 app.add_typer(web_app, name="web")
 
 
+def _site_pairs(values, option: str) -> dict:
+    """``CHUNK=VALUE`` options of ``ppg web build`` as a dict (the chunk by label or key)."""
+    out = {}
+    for text in values or []:
+        name, sep, value = str(text).rpartition("=")
+        if not sep or not name:
+            typer.echo(f"{option} {text!r}: write it as CHUNK=VALUE", err=True)
+            raise typer.Exit(1)
+        out[name.strip()] = value.strip()
+    return out
+
+
+def _site_chunks(doc, names) -> list | None:
+    """The chunks of ``--chunk``: a label or key of the project, or ``OTHER.ppg:LABEL`` of another project."""
+    if not names:
+        return None
+    out, others = [], {}
+    for name in names:
+        head, sep, label = str(name).rpartition(".ppg:")
+        if not sep:
+            out.append(name)
+            continue
+        path = Path(head + ".ppg")
+        if path not in others:
+            if not path.exists():
+                typer.echo(f"--chunk {name!r}: no project {path}", err=True)
+                raise typer.Exit(1)
+            others[path] = Document.open(path)
+        found = next((c for c in others[path].chunks if c.label == label or str(c.key) == label), None)
+        if found is None:
+            typer.echo(f"--chunk {name!r}: no chunk {label!r} in {path.name}", err=True)
+            raise typer.Exit(1)
+        out.append(found)
+    return out
+
+
 @web_app.command("build")
 def web_build(project: Path,
               folder: Path = typer.Argument(..., help="the folder of the site (new, empty, or a site built before)"),
               chunk: Optional[list[str]] = typer.Option(None, "--chunk", help="a chunk (label or key), repeatable; "
-                                                        "default: every chunk with something to show"),
+                                                        "OTHER.ppg:LABEL takes a chunk of another project (in the "
+                                                        "same frame); default: every chunk with something to show"),
               frame: str = typer.Option("local", "--frame", help="local: coordinates shifted to the centre of the "
                                         "survey, no reference system written (the place of the site stays out of the "
                                         "folder); crs: the real coordinates and their system"),
@@ -5379,22 +5714,50 @@ def web_build(project: Path,
                                                            "languages of the page, the first shown first "
                                                            "(default it, en)"),
               product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units, "
-                                                          "drawings or model, repeatable (default: all the chunk "
-                                                          "has)"),
+                                                          "drawings, model, cloud or sections, repeatable (default: "
+                                                          "all the chunk has but the cloud)"),
               quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto"),
               model_texture: int = typer.Option(4096, "--model-texture", help="largest side in pixels of a texture "
-                                                "page of the 3D model; 0: vertex colours alone")):
+                                                "page of the 3D model; 0: vertex colours alone"),
+              budget: float = typer.Option(500.0, "--budget", help="size of the whole site in MB: the model and "
+                                           "the cloud are thinned to keep to it; 0: no limit"),
+              cloud_points: int = typer.Option(3_000_000, "--cloud-points", help="points of the cloud at most"),
+              no_copc: bool = typer.Option(False, "--no-copc", help="the cloud without its COPC to download"),
+              date: Optional[list[str]] = typer.Option(None, "--date", help="CHUNK=YYYY-MM-DD, repeatable: the "
+                                                       "date of a survey; with dates the page shows one date at a "
+                                                       "time"),
+              label: Optional[list[str]] = typer.Option(None, "--label", help="CHUNK=TEXT, repeatable: the name of "
+                                                        "a chunk on the page"),
+              timeline: bool = typer.Option(False, "--timeline", help="one date at a time, the dates of the chunks "
+                                            "(set on them or of their photos) where --date gives none")):
     """Write the site of a project: site.json, data/ and the page (see ppg web serve to look at it)."""
     doc = Document.open(project)
+    dates, labels = _site_pairs(date, "--date"), _site_pairs(label, "--label")
+    chunks = _site_chunks(doc, chunk)
+
+    def by_chunk(pairs):  # a name of --date/--label that is the label of a chunk of another project
+        out = []
+        for name, value in pairs.items():
+            found = next((c for c in chunks or [] if not isinstance(c, str) and c.label == name), None)
+            out.append((found if found is not None else name, value))
+        return out
+
     try:
-        path = doc.export_site(folder, chunks=chunk or None, products=product or None, frame=frame, title=title,
+        path = doc.export_site(folder, chunks=chunks, products=product or None, frame=frame, title=title,
                                description=description, language=language or ("it", "en"), quality=quality,
-                               model_texture=model_texture or None, progress=print_progress)
+                               model_texture=model_texture or None, progress=print_progress,
+                               budget_mb=budget or None, cloud_points=cloud_points, cloud_copc=not no_copc,
+                               labels=by_chunk(labels) or None, dates=by_chunk(dates) or None,
+                               timeline=True if timeline or dates else None)
     except (ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None
+    from .io import site
+
     size = sum(f.stat().st_size for f in path.parent.rglob("*") if f.is_file())
     typer.echo(f"{path.parent}: {size / 1e6:.1f} MB, frame {frame}")
+    for note in site.build_notes(path):
+        typer.echo(f"  {note}")
     if frame == "crs":
         typer.echo("the site holds the real coordinates of the survey")
     typer.echo(f"look at it: ppg web serve {path.parent}")

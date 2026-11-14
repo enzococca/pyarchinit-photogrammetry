@@ -2,7 +2,8 @@
 
 Works on whole vessels and on sherds. The rotation axis is estimated from the
 surface normals (on a surface of revolution every normal line meets the axis)
-or given explicitly (e.g. the turntable axis when the scan was referenced with
+and, on whole vessels and large sherds, from the centres of the sections across
+it, or given explicitly (e.g. the turntable axis when the scan was referenced with
 a turntable mat: ``axis=((0, 0, 0), (0, 0, 1))``).
 
 The drawing follows the usual convention: axis in the middle, section (profile,
@@ -81,11 +82,14 @@ def _uv(d):
     return u, np.cross(d, u)
 
 
-def _axis_point_for(d, centers, normals, min_angle: float = 0.25):
+def _axis_point_for(d, centers, normals, min_angle: float = 0.25, starts: int = 40):
     """Best axis position for a fixed direction ``d`` (robust linear fit).
 
-    Each normal line must cross the axis: the signed distance between the two
-    lines is linear in the axis position, so it is solved directly (IRLS)."""
+    Each normal line must cross the axis: the signed distance between the two lines is linear in
+    the axis position, so it is solved directly. A handle or the fracture faces of a sherd give
+    lines that miss the axis: the start is the position where the most lines pass closest (the
+    crossing of two lines, of ``starts`` pairs, with the smallest median distance), then robust
+    least squares (Huber, then Tukey's weights, which give the far lines no weight at all)."""
     m = np.cross(normals, d)
     nm = np.linalg.norm(m, axis=1)
     ok = nm > min_angle  # normals almost parallel to the axis carry no information
@@ -95,13 +99,31 @@ def _axis_point_for(d, centers, normals, min_angle: float = 0.25):
     u, v = _uv(d)
     A = np.column_stack([mh @ u, mh @ v])
     y = (centers[ok] * mh).sum(1)
-    w = np.ones(len(y))
-    scale = None
-    for _ in range(4):
-        sol, *_ = np.linalg.lstsq(A * w[:, None], y * w, rcond=None)
+    sol, *_ = np.linalg.lstsq(A, y, rcond=None)
+    best = float(np.median(np.abs(y - A @ sol)))
+    if starts and len(y) > 20:
+        rng = np.random.default_rng(len(y))
+        sub = rng.choice(len(y), min(400, len(y)), replace=False)
+        for i, j in rng.choice(len(y), (starts, 2)):
+            M = A[[i, j]]
+            if abs(np.linalg.det(M)) < 0.2:  # nearly parallel lines: no crossing
+                continue
+            cand = np.linalg.solve(M, y[[i, j]])
+            med = float(np.median(np.abs(y[sub] - A[sub] @ cand)))
+            if med < best:
+                best, sol = med, cand
+    for it in range(8):
         res = y - A @ sol
         scale = 1.4826 * np.median(np.abs(res)) + 1e-12
-        w = 1.0 / np.maximum(1.0, np.abs(res) / (2.0 * scale))  # Huber weights
+        if it < 3:
+            w = 1.0 / np.maximum(1.0, np.abs(res) / (2.0 * scale))  # Huber weights
+        else:
+            w = np.clip(1.0 - (res / (4.685 * scale)) ** 2, 0.0, None) ** 2  # Tukey's biweight
+        if w.sum() < 10:
+            break
+        sw = np.sqrt(w)
+        sol, *_ = np.linalg.lstsq(A * sw[:, None], y * sw, rcond=None)
+    res = y - A @ sol
     return sol, float(np.median(np.abs(res)))
 
 
@@ -136,14 +158,164 @@ def _fibonacci_hemisphere(n: int) -> np.ndarray:
     return np.column_stack([r * np.cos(phi), r * np.sin(phi), z])
 
 
-def estimate_axis(mesh, samples: int = 4000, seed: int = 0, directions: int = 1500) -> Axis:
-    """Rotation axis of a (possibly fragmentary) vessel from its normals.
+def _normal_candidates(centers, normals, size, directions: int, keep: int = 8, apart: float = 10.0):
+    """Axis directions where the normal lines meet a line best: the best of all ``directions`` and
+    the next best ones at least ``apart`` degrees from those kept (a handle, or a sherd almost a
+    piece of a sphere, has more than one axis that fits its normals)."""
+    cand = []
+    for d in _fibonacci_hemisphere(directions):
+        ab, cost = _axis_point_for(d, centers, normals, starts=8)
+        if ab is not None and np.hypot(*ab) < 20 * size:
+            cand.append((cost, d, ab))
+    cand.sort(key=lambda c: c[0])
+    out, cos_apart = [], np.cos(np.radians(apart))
+    for c in cand:
+        if all(abs(c[1] @ o[1]) < cos_apart for o in out):
+            out.append(c)
+            if len(out) == keep:
+                break
+    return out
 
-    On a surface of revolution every normal line meets the axis. A search over
-    all directions (axis position solved linearly for each) avoids the local
-    minima of small sherds; fracture faces and noise are down-weighted, then the
-    best candidates are refined by robust least squares."""
+
+def _refine_normals(d0, ab0, centers, normals):
+    """Robust least squares of the normal lines from a candidate axis (fracture faces drop out)."""
     from scipy.optimize import least_squares
+
+    theta = np.arccos(np.clip(d0[2], -1, 1))
+    phi = np.arctan2(d0[1], d0[0])
+    u0, v0 = _uv(d0)
+    x = np.array([theta, phi, 0.0, 0.0])
+    # the position of _normal_line_distances is in the frame of the refined direction: start from that of d0
+    pt = ab0[0] * u0 + ab0[1] * v0
+    uu, vv = _uv(_dir(x))
+    x[2], x[3] = pt @ uu, pt @ vv
+    for _ in range(3):  # refine on the inliers of the current estimate
+        r0 = _normal_line_distances(x, centers, normals)
+        m = np.linalg.norm(np.cross(normals, _dir(x)), axis=1) > 0.25
+        sigma = 1.4826 * np.median(np.abs(r0[m])) + 1e-9
+        m &= np.abs(r0) < 4 * sigma
+        if m.sum() < 20:
+            break
+        try:
+            x = least_squares(_normal_line_distances, x, args=(centers[m], normals[m]), loss="cauchy",
+                              f_scale=sigma).x
+        except Exception:
+            break
+    d = _dir(x)
+    ab, cost = _axis_point_for(d, centers, normals)
+    return (d, ab, cost) if ab is not None else None
+
+
+def _robust_circle(xy: np.ndarray):
+    """Circle through the points of a section (both faces of the wall: concentric, the centre is
+    the same), points far from it (a handle, a fracture face) left out. Returns centre, radius,
+    the arc it covers (degrees) and the spread of the points about it, or None."""
+    from scipy.optimize import least_squares
+
+    fit = _fit_circle(xy)
+    if fit is None:
+        return None
+    cx, cy, r = fit
+    keep = np.ones(len(xy), bool)
+    spread = 0.0
+    for _ in range(5):
+        res = np.hypot(xy[:, 0] - cx, xy[:, 1] - cy) - r
+        spread = 1.4826 * float(np.median(np.abs(res - np.median(res)))) + 1e-6
+        keep = np.abs(res - np.median(res)) < 3 * spread + 0.002 * max(r, 0.01) / 0.1
+        if keep.sum() < 12:
+            return None
+        k = xy[keep]
+        try:
+            cx, cy, r = least_squares(lambda c: np.hypot(k[:, 0] - c[0], k[:, 1] - c[1]) - c[2], [cx, cy, r],
+                                      loss="soft_l1", f_scale=spread + 1e-4).x
+        except Exception:
+            return None
+    ang = np.sort(np.degrees(np.arctan2(xy[keep, 1] - cy, xy[keep, 0] - cx)) % 360)
+    arc = 360.0 - float(np.diff(np.r_[ang, ang[0] + 360]).max())
+    return float(cx), float(cy), abs(float(r)), arc, spread
+
+
+def _refine_sections(mesh, axis: Axis, slices: int = 20, iterations: int = 12, min_arc: float = 150.0):
+    """The axis through the centres of the circles of the sections across it (photogrammetric
+    meshes: their positions are steadier than their normals). Sections are cut across the current
+    axis, their circles fitted, a line fitted through the centres (centres off it left out), and so
+    again. None when fewer than four sections cover ``min_arc`` degrees (a sherd: the circle of a
+    short arc is loose, the normals are better there)."""
+    import trimesh
+
+    for _ in range(iterations):
+        d = axis.direction
+        u, v = _uv(d)
+        h = (np.asarray(mesh.vertices) - axis.point) @ d
+        lo, hi = np.percentile(h, 4), np.percentile(h, 96)
+        cs, ws = [], []
+        for hh in np.linspace(lo, hi, slices):
+            o = axis.point + hh * d
+            segs = trimesh.intersections.mesh_plane(mesh, d, o)
+            if len(segs) < 8:
+                continue
+            rel = segs.reshape(-1, 3) - o
+            c = _robust_circle(np.column_stack([rel @ u, rel @ v]))
+            if c is None or c[3] < min_arc or c[2] > 10 * (hi - lo + 0.05):
+                continue
+            cs.append(o + c[0] * u + c[1] * v)
+            ws.append(c[3] / 360.0)
+        if len(cs) < 4:
+            return None
+        cs, ws = np.array(cs), np.array(ws)
+        # least median: the line through two centres that most centres are near (the sections
+        # through a badly meshed foot or a handle wander off it), then least squares on those
+        best = None
+        for i in range(len(cs)):
+            for j in range(i + 1, len(cs)):
+                e = cs[j] - cs[i]
+                if np.linalg.norm(e) < 1e-9:
+                    continue
+                e = e / np.linalg.norm(e)
+                med = float(np.median(np.linalg.norm(np.cross(cs - cs[i], e), axis=1)))
+                if best is None or med < best[0]:
+                    best = (med, cs[i], e)
+        off = np.linalg.norm(np.cross(cs - best[1], best[2]), axis=1)
+        keep = off < 3 * 1.4826 * best[0] + 1e-4
+        if keep.sum() < 4:
+            return None
+        m = (cs[keep] * ws[keep, None]).sum(0) / ws[keep].sum()
+        _, _, vt = np.linalg.svd((cs[keep] - m) * np.sqrt(ws[keep])[:, None])
+        nd = vt[0] * np.sign(vt[0] @ d)
+        # a section across a tilted axis of a flaring wall has its centre a little off the true axis,
+        # towards the tilt: each round takes off part of it, until the direction stops moving
+        moved = float(np.degrees(np.arccos(np.clip(nd @ d, -1.0, 1.0))))
+        axis = Axis(m, nd)
+        if moved < 0.005:
+            break
+    return axis
+
+
+def _spread(points: np.ndarray, axis: Axis, cell: float) -> int:
+    """How much room the points take in the (radius, height) half plane of ``axis``: the cells of
+    ``cell`` metres they fall in. Around the true axis all the turns of the surface fall on the
+    same thin profile; around any other they are smeared."""
+    rel = points - axis.point
+    h = rel @ axis.direction
+    r = np.linalg.norm(rel - h[:, None] * axis.direction, axis=1)
+    keys = np.floor(r / cell).astype(np.int64) * 1_000_003 + np.floor(h / cell).astype(np.int64)
+    return int(len(np.unique(keys)))
+
+
+def estimate_axis(mesh, samples: int = 4000, seed: int = 0, directions: int = 1500, sections: bool = True) -> Axis:
+    """Rotation axis of a (possibly fragmentary) vessel.
+
+    On a surface of revolution every normal line meets the axis: a search over all directions
+    (axis position solved linearly for each) gives the candidates - the best one and the next best
+    ones in other directions, so that a handle or a sherd shaped almost like a piece of a sphere
+    does not hide the axis of the body - each refined by robust least squares of the normal lines.
+    With ``sections`` each candidate is refined also through the centres of the circles of the
+    sections across it, where they cover a quarter of a turn or more (whole vessels, large sherds:
+    the normals of a mesh made from photos are noisy, its positions are not). The axis kept is the
+    one around which the surface is thinnest in the profile (:func:`_spread`): the turns of a
+    surface of revolution fall on one profile only around its axis. ``residual`` is the median
+    distance of the normal lines from the axis (metres)."""
+    import trimesh
 
     rng = np.random.default_rng(seed)
     area = mesh.area_faces
@@ -152,48 +324,49 @@ def estimate_axis(mesh, samples: int = 4000, seed: int = 0, directions: int = 15
     centers = mesh.triangles_center[idx] - offset
     normals = _smooth_normals(mesh, mesh.triangles_center[idx], mesh.face_normals[idx])
     size = float(np.ptp(centers, axis=0).max())
-    cand = []
-    for d in _fibonacci_hemisphere(directions):
-        ab, cost = _axis_point_for(d, centers, normals)
-        if ab is not None and np.hypot(*ab) < 20 * size:
-            cand.append((cost, d, ab))
-    cand.sort(key=lambda c: c[0])
-    best = None
-    for cost0, d0, (a0, b0) in cand[:6]:
-        theta = np.arccos(np.clip(d0[2], -1, 1))
-        phi = np.arctan2(d0[1], d0[0])
-        x = np.array([theta, phi, a0, b0])
-        for _ in range(3):  # refine on the inliers of the current estimate (fracture faces drop out)
-            r0 = _normal_line_distances(x, centers, normals)
-            m = np.linalg.norm(np.cross(normals, _dir(x)), axis=1) > 0.25
-            sigma = 1.4826 * np.median(np.abs(r0[m])) + 1e-9
-            m &= np.abs(r0) < 4 * sigma
-            if m.sum() < 20:
-                break
-            try:
-                x = least_squares(_normal_line_distances, x, args=(centers[m], normals[m]), loss="cauchy",
-                                  f_scale=sigma).x
-            except Exception:
-                break
-        d = np.array([np.sin(x[0]) * np.cos(x[1]), np.sin(x[0]) * np.sin(x[1]), np.cos(x[0])])
-        # re-solve the position in the canonical (u, v) frame of the refined direction
-        ab, cost = _axis_point_for(d, centers, normals)
-        if ab is None:
+    found = []
+    for _, d0, ab0 in _normal_candidates(centers, normals, size, directions):
+        r = _refine_normals(d0, ab0, centers, normals)
+        if r is None:
             continue
-        if best is None or cost < best[0]:
-            best = (cost, d, ab)
-    if best is None:
+        d, (a, b), cost = r
+        u, v = _uv(d)
+        found.append(Axis(offset + a * u + b * v, d, float(cost)))
+    if not found:
         raise ValueError("cannot estimate the rotation axis (surface too flat or too small)")
-    cost, d, (a, b) = best
-    u, v = _uv(d)
-    point = offset + a * u + b * v
-    # orient the axis from base to rim: the mouth is usually the wider end
+    dense, _ = trimesh.sample.sample_surface(mesh, 20000, seed=seed)
+    cell = max(size / 250.0, 1e-6)
+    scored = sorted(found, key=lambda ax: _spread(dense, ax, cell))
+    spread = {id(ax): _spread(dense, ax, cell) for ax in found}
+    best = min(found, key=lambda ax: spread[id(ax)])
+    if sections:
+        through = []
+        for ax in scored[:3]:  # the sections are slower: the most likely candidates only
+            refined = _refine_sections(mesh, ax)
+            if refined is not None:
+                _, cost = _axis_point_for(refined.direction, centers, normals)
+                refined.residual = float(cost) if np.isfinite(cost) else ax.residual
+                through.append((_spread(dense, refined, cell), refined))
+        # the centres of the sections give the direction to a tenth of a degree where the normals of
+        # a mesh from photos give half a degree: kept unless the profile around it is clearly thicker
+        ok = [(sp, ax) for sp, ax in through if sp <= 1.03 * spread[id(best)]]
+        if ok:
+            best = min(ok, key=lambda c: c[0])[1]
+    point, d = best.point, best.direction
+    # orient the axis from base to rim: the end with a floor across the axis is the base (a jar is
+    # narrower at the mouth than at the foot); without one the mouth is usually the wider end
     h = (mesh.vertices - point) @ d
     r = np.linalg.norm(np.cross(mesh.vertices - point, d), axis=1)
-    lo, hi = h < np.percentile(h, 15), h > np.percentile(h, 85)
-    if r[lo].mean() > r[hi].mean():
-        d = -d
-    return Axis(point, d, float(cost))
+    floor = r < 0.25 * r.max()
+    mid = 0.5 * (h.min() + h.max())
+    if floor.mean() > 0.01 and abs(np.median(h[floor]) - mid) > 0.25 * np.ptp(h):
+        if np.median(h[floor]) > mid:
+            d = -d
+    else:
+        lo, hi = h < np.percentile(h, 15), h > np.percentile(h, 85)
+        if r[lo].mean() > r[hi].mean():
+            d = -d
+    return Axis(point, d, best.residual)
 
 
 def _frame(axis: Axis, angle: float):
@@ -414,38 +587,159 @@ def _centre_from_normals(xy: np.ndarray, nxy: np.ndarray) -> np.ndarray | None:
     return centre
 
 
+def _angles(xy: np.ndarray, centre) -> np.ndarray:
+    return np.degrees(np.arctan2(xy[:, 1] - centre[1], xy[:, 0] - centre[0])) % 360.0
+
+
+def _bin_width(xy: np.ndarray, centre, mesh) -> float:
+    """Angular sectors for the lip (degrees): two degrees, wider when the mesh is coarser there
+    (one and a half edges of the mesh across), so that every sector of a whole lip has a vertex."""
+    edge = float(np.median(np.asarray(mesh.edges_unique_length))) if len(mesh.edges_unique) else 0.0
+    radius = float(np.median(np.hypot(xy[:, 0] - centre[0], xy[:, 1] - centre[1]))) if len(xy) else 0.0
+    if radius <= 0:
+        return 2.0
+    return float(min(30.0, max(2.0, np.degrees(1.5 * edge / radius))))
+
+
+def _lip(xy: np.ndarray, h: np.ndarray, centre, width: float, band: float):
+    """The lip of a rim: the highest point of every sector of ``width`` degrees around ``centre``,
+    and the plane of the lip through them (``h = a + b x + c y``, robust: a lip a little tilted
+    to the axis, a lip that waves up and down, a chip or a spike of the mesh). Returns the plane,
+    the sectors whose highest point is on the lip (within the tolerance) and the tolerance."""
+    nbin = max(1, int(round(360.0 / width)))
+    sector = np.minimum((_angles(xy, centre) / (360.0 / nbin)).astype(int), nbin - 1)
+    order = np.lexsort((-h, sector))
+    first = np.r_[True, sector[order][1:] != sector[order][:-1]]
+    top = order[first]  # the highest vertex of every sector with vertices
+    ts, tx, th = sector[top], xy[top], h[top]
+    occupied = np.zeros(nbin, bool)
+    occupied[ts] = True
+    level = float(np.percentile(th, 75))
+    inl = th >= level - band
+    coef = np.array([level, 0.0, 0.0])
+    tol = band
+    span = 360.0 * occupied.mean()
+    for _ in range(8):
+        if inl.sum() >= 6 and span >= 60.0:  # a plane needs the lip seen over a sixth of a turn
+            A = np.column_stack([np.ones(inl.sum()), tx[inl, 0] - centre[0], tx[inl, 1] - centre[1]])
+            coef, *_ = np.linalg.lstsq(A, th[inl], rcond=None)
+            slope = np.hypot(coef[1], coef[2])
+            if slope > np.tan(np.radians(10.0)):  # not a lip: keep it level
+                coef = np.array([float(np.median(th[inl])), 0.0, 0.0])
+        elif inl.any():
+            coef = np.array([float(np.median(th[inl])), 0.0, 0.0])
+        res = th - (coef[0] + coef[1] * (tx[:, 0] - centre[0]) + coef[2] * (tx[:, 1] - centre[1]))
+        mad = 1.4826 * float(np.median(np.abs(res[inl]))) if inl.any() else 0.0
+        tol = band + 3.0 * mad
+        new = np.abs(res) <= tol
+        if (new == inl).all():
+            break
+        inl = new
+    on_lip = np.zeros(nbin, bool)
+    on_lip[ts[inl]] = True
+    return coef, on_lip, tol
+
+
+def _coverage(xy: np.ndarray, centre, rim_mask: np.ndarray, width: float, on_lip: np.ndarray) -> float:
+    """Degrees of the rim circle kept: the runs of sectors with lip (a single empty sector between
+    two with lip is closed: a coarse mesh), each counted from its first rim point to its last."""
+    nbin = len(on_lip)
+    if not on_lip.any():
+        return 0.0
+    filled = on_lip | (np.roll(on_lip, 1) & np.roll(on_lip, -1))
+    if filled.all():
+        return 360.0
+    ang = _angles(xy[rim_mask], centre)
+    sector = np.minimum((ang / (360.0 / nbin)).astype(int), nbin - 1)
+    total = 0.0
+    start = int(np.argmin(filled))  # an empty sector: the runs do not wrap around past it
+    i = 0
+    while i < nbin:
+        k = (start + i) % nbin
+        if not filled[k]:
+            i += 1
+            continue
+        run = []
+        while i < nbin and filled[(start + i) % nbin]:
+            run.append((start + i) % nbin)
+            i += 1
+        a = ang[np.isin(sector, run)]
+        if len(a) == 0:
+            continue
+        lo = run[0] * 360.0 / nbin  # unwrap the angles of the run from its first sector
+        total += float(np.ptp((a - lo) % 360.0))
+    return min(360.0, total)
+
+
 def rim(mesh, axis: Axis | None = None, band: float = 0.003) -> dict:
-    """The rim of a vessel or of a sherd: the points of the mesh within ``band`` metres of its
-    top along the axis; their centre across the axis where their normals meet (only the direction
-    of the axis is used, so a shifted axis does not matter), the rim diameter (the outer lip) and
-    how much of the circle the sherd keeps (``rim_preserved_pct``, the arc around the centre);
+    """The rim of a vessel or of a sherd and how much of its circle is kept.
+
+    The lip is the highest point of the mesh in every small sector around the axis; the plane
+    through them (a lip a little tilted to the axis or waving up and down still lies in it; a chip
+    or a spike of the mesh stands off it) gives the rim points: the vertices within ``band`` metres
+    under it. Their centre across the axis is where their normals meet, then the circle of the
+    outer lip (only the direction of the axis is used, so a shifted axis does not matter): the rim
+    diameter. ``rim_preserved_pct`` is the share of the circle the piece keeps: the sectors around
+    the centre whose highest point is on the lip, each run of them counted from its first rim point
+    to its last (100 for a whole rim, 25 for a quarter; a chip in the lip is not counted); when the
+    circle is not reliable, the smaller of the arcs around its centre and around the axis.
     ``reliable`` when the arc is at least 40 degrees and the lip follows the circle (``rim_fit_rms_m``
     under 2% of the radius): on smaller sherds, as with a rim chart, the diameter is uncertain;
     ``centre``: the centre of the circle in 3D (a point of the axis); ``rim_chord_m`` the chord of
-    the arc. The direction found from the
-    normals is unreliable on small sherds: lay the rim flat and give ``Axis(any point, (0, 0, 1))``."""
+    the arc; ``rim_arc_deg`` the arc in degrees. The direction found from the normals is unreliable
+    on small sherds: lay the rim flat and give ``Axis(any point, (0, 0, 1))``."""
     axis = axis or estimate_axis(mesh)
-    v = np.asarray(mesh.vertices, float)
     d, u, w = _frame(axis, 0.0)
-    h = (v - axis.point) @ d
-    top = v[h >= h.max() - band]
-    xy = np.column_stack([(top - axis.point) @ u, (top - axis.point) @ w])
-    fc = np.asarray(mesh.triangles_center, float)
-    fsel = (fc - axis.point) @ d >= h.max() - 2 * band
-    fn = np.asarray(mesh.face_normals, float)[fsel]
-    fxy = np.column_stack([(fc[fsel] - axis.point) @ u, (fc[fsel] - axis.point) @ w])
-    start = _centre_from_normals(fxy, np.column_stack([fn @ u, fn @ w]))  # near, pulled towards the arc by noise
-    fit = _outer_circle(xy, start) if len(xy) >= 5 else None
-    centre = np.array(fit[:2]) if fit is not None and fit[2] < 2.0 else (start if start is not None else np.zeros(2))
+    centre = np.zeros(2)  # first around the axis, then around the centre of the circle found
+    fit = None
+    for _ in range(3):
+        lip = _rim_points(mesh, axis, band, centre)
+        xy = lip["xy"][lip["is_rim"]]
+        fc = np.asarray(mesh.triangles_center, float) - axis.point
+        fxy = np.column_stack([fc @ u, fc @ w])
+        fsel = fc @ d >= lip["plane"](fxy) - 2 * band
+        fn = np.asarray(mesh.face_normals, float)[fsel]
+        start = _centre_from_normals(fxy[fsel], np.column_stack([fn @ u, fn @ w]))  # pulled towards the arc by noise
+        fit = _outer_circle(xy, start) if len(xy) >= 5 else None
+        new = np.array(fit[:2]) if fit is not None and fit[2] < 2.0 else (start if start is not None else centre)
+        moved = float(np.hypot(*(new - centre)))
+        centre = new
+        if moved < 1e-4:
+            break
+    lip = _rim_points(mesh, axis, band, centre)
+    xy = lip["xy"][lip["is_rim"]]
     dist = np.hypot(xy[:, 0] - centre[0], xy[:, 1] - centre[1])
     radius = float(fit[2]) if fit is not None and fit[2] < 2.0 else float(np.percentile(dist, 95)) if len(dist) else 0.0
-    ang = np.sort(np.degrees(np.arctan2(xy[:, 1] - centre[1], xy[:, 0] - centre[0])) % 360) if len(xy) else []
-    extent = 360.0 - float(np.diff(np.r_[ang, ang[0] + 360]).max()) if len(ang) > 1 else 0.0
+    extent = lip["arc"]
     rms = _edge_rms(xy, centre, radius) if len(xy) else float("nan")
+    reliable = bool(extent >= 40.0 and np.isfinite(rms) and rms < 0.02 * max(radius, 1e-9))
+    if not reliable:  # the circle of a short arc collapses towards the arc, and the arc around it swells
+        extent = min(extent, _rim_points(mesh, axis, band)["arc"])
     return {"rim_diameter_m": 2 * radius, "rim_preserved_pct": max(0.0, min(100.0, extent / 3.6)),
-            "rim_points": int(len(xy)), "rim_fit_rms_m": rms, "rim_chord_m": _span(xy),
-            "reliable": bool(extent >= 40.0 and np.isfinite(rms) and rms < 0.02 * max(radius, 1e-9)),
-            "centre": axis.point + centre[0] * u + centre[1] * w}
+            "rim_arc_deg": extent, "rim_points": int(len(xy)), "rim_fit_rms_m": rms, "rim_chord_m": _span(xy),
+            "reliable": reliable, "centre": axis.point + centre[0] * u + centre[1] * w}
+
+
+def _rim_points(mesh, axis: Axis, band: float, centre=(0.0, 0.0)) -> dict:
+    """The lip around ``centre`` (across the axis, in the frame of :func:`_frame`): the coordinates
+    across the axis of every vertex (``xy``), which of them are rim points (``is_rim``), the plane
+    of the lip (``plane(xy)`` gives its height) and the arc of the circle kept (``arc``, degrees)."""
+    centre = np.asarray(centre, float)
+    v = np.asarray(mesh.vertices, float) - axis.point
+    d, u, w = _frame(axis, 0.0)
+    h = v @ d
+    xy = np.column_stack([v @ u, v @ w])
+    high = h >= np.median(h) if len(h) > 20 else np.ones(len(h), bool)  # the lip is in the upper half
+    width = _bin_width(xy[high], centre, mesh)
+    coef, on_lip, tol = _lip(xy[high], h[high], centre, width, band)
+
+    def plane(p):
+        return coef[0] + coef[1] * (p[:, 0] - centre[0]) + coef[2] * (p[:, 1] - centre[1])
+
+    top = plane(xy)
+    is_rim = (h >= top - band) & (h <= top + tol)
+    arc = _coverage(xy[high], centre, is_rim[high], width, on_lip) if is_rim[high].any() else 0.0
+    return {"xy": xy, "is_rim": is_rim, "plane": plane, "arc": arc}
 
 
 PERCENT_CLASSES = ((5.0, "<5"), (25.0, "5-25"), (50.0, "25-50"), (101.0, ">50"))  # PyArchInit thesaurus 11.2
@@ -468,7 +762,8 @@ def measure(mesh, axis: Axis | None = None, has_rim: bool = True) -> tuple[Profi
     when the profile reaches the centre of the base (``base_diameter_m`` and the total height are
     known only then); ``signature`` the shape for the typological search (:func:`signature`).
     Without a reliable circle the rim diameter is measured around the axis (the median of the
-    sections that reach the rim, :func:`rim_diameter_around`) and the arc kept is computed from
+    sections that reach the rim, :func:`rim_diameter_around`) and the arc kept is that of
+    :func:`rim` (a lip that waves around most of the circle) or, under 60 degrees, computed from
     its chord: both depend on the axis, ``rim_reliable`` is False. ``has_rim=False``
     (a wall or base sherd): no rim measurements and no signature."""
     axis = axis or estimate_axis(mesh)
@@ -486,9 +781,12 @@ def measure(mesh, axis: Axis | None = None, has_rim: bool = True) -> tuple[Profi
            "axis": {"point": [float(x) for x in axis.point], "direction": [float(x) for x in axis.direction]}}
     if ring is not None:
         diameter, pct = ring["rim_diameter_m"], ring["rim_preserved_pct"]
-        if not ring["reliable"]:  # the circle of a short arc wanders: radius around the axis, arc from the chord
+        if not ring["reliable"]:  # the circle wanders: radius around the axis
             diameter = rim_diameter_around(mesh, axis) or meas["rim_diameter_m"]
-            pct = float(np.degrees(2 * np.arcsin(min(1.0, ring["rim_chord_m"] / max(diameter, 1e-9)))) / 3.6)
+            if ring["rim_arc_deg"] >= 60.0:  # a lip that waves: the sectors with lip (see rim())
+                pct = ring["rim_preserved_pct"]
+            else:  # a short arc: from its chord, which does not depend on where the axis is
+                pct = float(np.degrees(2 * np.arcsin(min(1.0, ring["rim_chord_m"] / max(diameter, 1e-9)))) / 3.6)
         out.update({"rim_diameter_m": diameter, "rim_preserved_pct": pct, "rim_reliable": ring["reliable"],
                     "signature": signature(profile)})
     if "wall_thickness_m" in meas:

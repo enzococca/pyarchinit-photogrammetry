@@ -23,12 +23,21 @@ from .i18n import decimal_comma, tr
 log = logging.getLogger(__name__)
 
 
-def model_in_chunk(chunk):
+def model_in_chunk(chunk, around=None):
     """The model of ``chunk`` as a trimesh in the chunk's coordinates (as the free drawings are), None without one.
-    Read each time and not kept: the caller lets it go when the measures are taken."""
+    Read each time and not kept: the caller lets it go when the measures are taken. ``around`` (a polygon, world;
+    by default the ``around`` of a :class:`ModelSource`): only the faces its surface can be measured on
+    (:func:`.model_measure.model_around`), at full resolution."""
     path = chunk.product_path("model") if chunk is not None else None
     if path is None or not path.exists():
         return None
+    around = getattr(chunk, "around", None) if around is None else around
+    if around is not None:
+        from .model_measure import model_around
+
+        part = model_around(chunk, around)
+        if part is not None:
+            return part
     import trimesh
 
     from ..io.mesh_ply import read_mesh
@@ -46,6 +55,7 @@ class ModelSource:
         path = chunk.product_path("model") if chunk is not None else None
         self.path = Path(path) if path is not None else None
         self.transform = np.array(chunk.transform, float, copy=True) if chunk is not None else np.eye(4)
+        self.around = None  # a polygon (world): the model read only around it (model_in_chunk)
 
     def product_path(self, name: str):
         return self.path if name == "model" else None
@@ -126,6 +136,7 @@ def measure_later(parent, chunk, rec: dict, toward, done, words=None) -> bool:
         return False
     relay = _MeasuresRelay(parent, rec, done, words)
     source = ModelSource(chunk)  # the path and the transform of now, not read from the chunk in the worker
+    source.around = rec["xyz"]  # only the faces around the polygon are read (a big model is never read whole)
 
     def work():
         try:

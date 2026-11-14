@@ -179,6 +179,13 @@ class Document:
         return align_chunks(self, reference, chunks, method=method, fix_scale=fix_scale, initial=initial,
                             max_points=max_points, progress=progress, check=check)
 
+    def merge_models(self, chunks, label: str | None = None, **options):
+        """The models of ``chunks`` as one textured model of a new chunk (colours matched, overlaps removed, pages
+        kept or repacked): see :func:`engine.model_merge.merge_models`. Returns ``(chunk, report)``."""
+        from ..engine.model_merge import merge_models
+
+        return merge_models(self, chunks, label=label, **options)
+
     def merge_chunks(self, chunks, label: str | None = None, merge_markers: bool = True,
                      merge_tie_points: bool = True, merge_point_clouds: bool = True, merge_models: bool = False,
                      progress=None) -> Chunk:
@@ -212,19 +219,21 @@ class Document:
     # ---------------------------------------------------------------- I/O
     def export_site(self, folder, chunks=None, products=None, frame: str = "local", title: str | None = None,
                     description: str | None = None, language=("it", "en"), quality: int = 85,
-                    model_texture: int | None = 4096, model_faces: int = 150_000, progress=None) -> Path:
+                    model_texture: int | None = 4096, model_faces: int = 150_000, progress=None, **options) -> Path:
         """The survey as a web site in ``folder``: the orthophoto, the DEM with its shaded relief, the stratigraphic
-        units, the drawings and the 3D model of ``chunks`` (objects, keys or labels; default: every chunk that has
-        some), with a page that shows them on a plan and in 3D - a folder any static server can publish (``ppg web
-        serve`` to look at it). ``frame``: ``"local"`` (default) shifts the coordinates to the centre of the survey
-        and writes no reference system: the place of the site is not in the folder; ``"crs"`` keeps the real
-        coordinates. ``model_texture``: the largest side of a texture page of the model (None: vertex colours).
-        Returns the path of ``site.json`` (see :func:`io.site.export_site`)."""
+        units, the drawings, the sections and elevations, the 3D model and (when asked for) the point cloud of
+        ``chunks`` (objects, keys or labels, or chunks of other projects; default: every chunk that has some), with
+        a page that shows them on a plan, in 3D and section by section - a folder any static server can publish
+        (``ppg web serve`` to look at it). ``frame``: ``"local"`` (default) shifts the coordinates to the centre of
+        the survey and writes no reference system: the place of the site is not in the folder; ``"crs"`` keeps the
+        real coordinates. ``model_texture``: the largest side of a texture page of the model (None: vertex colours).
+        ``options``: ``budget_mb``, ``cloud_points``, ``cloud_copc``, ``labels``, ``dates``, ``timeline`` of
+        :func:`io.site.export_site`. Returns the path of ``site.json``."""
         from ..io.site import export_site
 
         return export_site(self, folder, chunks=chunks, products=products, frame=frame, title=title,
                            description=description, language=language, quality=quality,
-                           model_texture=model_texture, model_faces=model_faces, progress=progress)
+                           model_texture=model_texture, model_faces=model_faces, progress=progress, **options)
 
     def save(self, path: str | Path | None = None) -> Path:
         if path is not None:
@@ -275,6 +284,10 @@ class Document:
         self.chunks = [Chunk.from_dict(c, document=self) for c in data.get("chunks", [])]
         self._drop_missing_versions()
         self._settle_ties()
+        if self.meta.get("chunk_groups"):  # keys of chunks gone dropped (a later chunk with the key joins no group)
+            from .groups import prune
+
+            prune(self)
         self._migrate_elevation_drawings()
 
     def _migrate_elevation_drawings(self) -> None:

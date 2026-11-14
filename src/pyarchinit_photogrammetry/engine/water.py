@@ -15,12 +15,25 @@ system of the chunk, stamped with the transform of that moment like a raster, :f
 
 :func:`correct_cloud` writes the corrected cloud as a new version of the dense cloud (the one before stays among the
 versions: making it active again undoes the correction) and, only when asked, builds the DEM again from it as a new
-version of the DEM. No Qt here.
+version of the DEM.
+
+Several water levels (since 1.10.0). A survey of several years or of several basins does not have one level and one
+index: each chunk keeps its own level and effective factor ``n`` (a chunk per year: :func:`apply_table` sets them from
+a table by chunk or by date of the survey, :func:`..archaeo.timeline.phase_date`), and within a chunk the water can be
+given as **basins** (:func:`set_basins`): each a horizontal level or a plane fitted to points picked on the shoreline
+(:func:`plane_from_shore`: a water surface seen tilted by a slightly tilted frame), with its own factor, inside its
+polygons (or everywhere: the basin without polygons takes the points no other basin takes). The effective factor
+can be measured (:func:`estimate_factor`): points of known true height under the water (control points measured with
+a staff or GNSS, or markers whose reference lies below the water and whose position was triangulated through it) and
+their apparent height (the DEM or the dense cloud before the correction, or the triangulated marker) give ``n`` by
+least squares on ``L - z_true = n (L - z_apparent)`` (or ``n`` and the level together), with the residuals of every
+point. Without basins everything works as before: one level, one ``n``. No Qt here.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,12 +66,12 @@ class WaterError(ValueError):
         self.italian = italian
 
 
-def corrected(z, level: float, n: float) -> np.ndarray:
+def corrected(z, level, n) -> np.ndarray:
     """The heights ``z`` seen through water whose surface is at ``level``, put back where they are: ``L - n (L - z)``
-    below the level, unchanged above it (paraxial refraction)."""
+    below the level, unchanged above it (paraxial refraction). ``level`` and ``n``: numbers, or one per height."""
     z = np.asarray(z, dtype=np.float64)
-    L = float(level)
-    return np.where(z < L, L - float(n) * (L - z), z)
+    L = np.asarray(level, dtype=np.float64)  # a number, or one per height (basins, planes)
+    return np.where(z < L, L - np.asarray(n, dtype=np.float64) * (L - z), z)
 
 
 def _check_n(n: float) -> float:
@@ -309,6 +322,11 @@ def set_level(chunk: "Chunk", level: float, source: str = "hand", n: float = N_S
     old = chunk.meta.get("water") or {}
     if old.get("correction"):  # the correction made with the earlier level stays told
         record["correction"] = old["correction"]
+    if old.get("basins"):  # the basins are stamped one by one: they stay as they are
+        record["basins"] = old["basins"]
+    for key in ("date", "factor_fit"):
+        if old.get(key) is not None:
+            record[key] = old[key]
     chunk.meta["water"] = record
     return dict(record)
 
@@ -365,6 +383,7 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     if lv is None:
         raise WaterError(f"the chunk {chunk.label} has no water level: set it first (from the edge or by hand)",
                          f"il chunk {chunk.label} non ha un livello dell'acqua: impostalo prima (dalla riva o a mano)")
+    n_given = n
     n = _check_n(lv["n"] if n is None else n)
     src = chunk.product_path("point_cloud")
     if src is None or not src.exists():
@@ -379,7 +398,15 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     p(0.0, "Correzione della rifrazione...")
     pc = PointCloud.load(src)
     world = chunk.to_world(pc.xyz)
-    below = world[:, 2] < L
+    basins = basins_of(chunk)
+    if basins:  # a level and a factor for every point, from its basin (NaN: no water there)
+        Lp, n_p, owner = surface_at(chunk, world[:, :2], basins, owner=True)
+        if n_given is not None:
+            n_p = np.where(np.isfinite(n_p), n, n_p)
+        below = np.isfinite(Lp) & (world[:, 2] < Lp)
+    else:
+        Lp, n_p = np.full(len(world), L), np.full(len(world), n)
+        below = world[:, 2] < L
     nb = int(below.sum())
     if nb == 0:
         raise WaterError(f"no point of the dense cloud of {chunk.label} lies below the level {L:.3f}: nothing to "
@@ -387,7 +414,8 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
                          f"{L:.3f}: niente da correggere")
     p.check()
     world = world[below]
-    world[:, 2] = corrected(world[:, 2], L, n)
+    nb_n = n_p[below]
+    world[:, 2] = corrected(world[:, 2], Lp[below], nb_n)
     xyz = pc.xyz.copy()
     xyz[below] = chunk.to_internal(world)  # the points above the level keep their coordinates to the bit
     out = PointCloud(xyz, pc.rgb, pc.normals, pc.classification, pc.confidence,
@@ -396,7 +424,7 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
         m = np.asarray(chunk.transform, float)[:3, :3]
         r = m / np.cbrt(np.linalg.det(m))
         nw = out.normals[below].astype(np.float64) @ r.T
-        nw[:, 2] /= n
+        nw[:, 2] /= nb_n
         nw /= np.maximum(np.linalg.norm(nw, axis=1, keepdims=True), 1e-12)
         normals = out.normals.copy()
         normals[below] = (nw @ r).astype(np.float32)  # back: r is a rotation (r^-1 = r^T)
@@ -423,8 +451,15 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     record = {"level": L, "n": n, "source": lv.get("source"), "points": int(len(pc)), "below": nb,
               "version": kept["id"] if kept else None, "when": datetime.now().isoformat(timespec="seconds"),
               "note": NOTE}
+    if basins:
+        record["basins"] = [{"name": b["name"], "n": float(n if n_given is not None else b["n"]),
+                             "level": b.get("level"), "below": int((below & (owner == i)).sum())}
+                            for i, b in enumerate(basins)]
     chunk.meta["dense"] = {**params, "refraction": record}
-    name = versions.label("Nuvola corretta per la rifrazione (n {0})", _decimal(n))[:80]
+    many = basins and len({round(float(b["n"]), 6) for b in basins}) > 1 and n_given is None
+    name = (versions.label("Nuvola corretta per la rifrazione ({0} bacini)", len(basins)) if many else
+            versions.label("Nuvola corretta per la rifrazione (n {0})", _decimal(n if not basins or n_given is not None
+                                                                              else float(basins[0]["n"]))))[:80]
     versions.set_active_name(chunk, "point_cloud", name)
     wrec = chunk.meta.get("water")
     told = wrec.get("correction") if isinstance(wrec, dict) else None
@@ -459,5 +494,386 @@ def correct_cloud(chunk: "Chunk", n: float | None = None, rebuild_dem: bool = Fa
     return result
 
 
+# ------------------------------------------------------------------ several levels: basins, shore planes
+def plane_from_shore(points) -> dict:
+    """The water surface through points picked on the shoreline (world ``(x, y, z)``, at least 3): the plane
+    ``z = level + a (x - x0) + b (y - y0)`` by least squares around their centre ``(x0, y0)``. Returns ``{"level",
+    "a", "b", "x0", "y0", "residuals" (per point, m), "rmse", "tilt_deg", "points"}``. A plane needs three points
+    not on a line; with the points nearly on a line the slope across it is unknown and :class:`WaterError` says so."""
+    pts = np.asarray(points, np.float64).reshape(-1, 3)
+    if len(pts) < 3 or not np.isfinite(pts).all():
+        raise WaterError("a plane of the water needs at least three points of the shoreline",
+                         "un piano dell'acqua vuole almeno tre punti della riva")
+    x0, y0 = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+    A = np.column_stack([np.ones(len(pts)), pts[:, 0] - x0, pts[:, 1] - y0])
+    sv = np.linalg.svd(A[:, 1:], compute_uv=False)
+    if sv[-1] < 1e-6 * max(sv[0], 1e-12) or sv[-1] < 1e-6:
+        raise WaterError("the points of the shoreline lie on a line: the tilt of the water across it is unknown",
+                         "i punti della riva sono in linea: l'inclinazione dell'acqua di traverso non si conosce")
+    (c, a, b), *_ = np.linalg.lstsq(A, pts[:, 2], rcond=None)
+    res = pts[:, 2] - A @ np.array([c, a, b])
+    return {"level": float(c), "a": float(a), "b": float(b), "x0": x0, "y0": y0,
+            "residuals": [float(v) for v in res], "rmse": float(np.sqrt(np.mean(res ** 2))),
+            "tilt_deg": float(np.degrees(np.arctan(np.hypot(a, b)))), "points": int(len(pts))}
+
+
+def _polygon_wkt(polygon) -> str | None:
+    """A polygon given as shapely geometry, WKT, a list of (x, y) or a list of rings, as WKT (None: everywhere)."""
+    if polygon is None:
+        return None
+    import shapely
+    from shapely.geometry import MultiPolygon, Polygon
+    from shapely.geometry.base import BaseGeometry
+
+    if isinstance(polygon, str):
+        geom = shapely.from_wkt(polygon)
+    elif isinstance(polygon, BaseGeometry):
+        geom = polygon
+    else:  # a ring of (x, y), or a list of rings
+        first = np.asarray(polygon[0], dtype=float)
+        rings = [np.asarray(r, float)[:, :2] for r in polygon] if first.ndim == 2 else [np.asarray(polygon, float)[:, :2]]
+        geom = MultiPolygon([Polygon(r) for r in rings]) if len(rings) > 1 else Polygon(rings[0])
+    if geom.is_empty or geom.area <= 0:
+        raise WaterError("the polygon of a basin is empty", "il poligono di un bacino è vuoto")
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+    return geom.wkt
+
+
+def basin(name: str, level: float | None = None, n: float = N_SEA, polygon=None, shore=None,
+          source: str | None = None) -> dict:
+    """A basin of water for :func:`set_basins`: ``level`` a world height (horizontal water) or ``shore`` the points of
+    its shoreline (a plane, :func:`plane_from_shore`), ``n`` its effective factor, ``polygon`` where it is (shapely,
+    WKT, a ring of (x, y) or a list of rings; None: every point no other basin takes)."""
+    n = _check_n(n)
+    out = {"name": str(name), "n": n, "polygon": _polygon_wkt(polygon), "source": source}
+    if shore is not None:
+        fit = plane_from_shore(shore)
+        out.update(level=fit["level"], a=fit["a"], b=fit["b"], x0=fit["x0"], y0=fit["y0"], shore=fit,
+                   source=source or "shore")
+    elif level is not None and np.isfinite(float(level)):
+        out.update(level=float(level), a=0.0, b=0.0, x0=0.0, y0=0.0, source=source or "hand")
+    else:
+        raise WaterError(f"basin {name}: a level or the points of its shoreline are needed",
+                         f"bacino {name}: serve un livello o i punti della sua riva")
+    return out
+
+
+def _moved(chunk: "Chunk", entry: dict):
+    """The world of ``entry`` (stamped) to the world of ``chunk`` now: a 4x4 matrix, None when it did not move."""
+    from ..core import stamps
+
+    built_in = entry.get("built_in")
+    if built_in is None or stamps.same_transform(built_in, chunk.transform):
+        return None
+    return np.asarray(chunk.transform, float).reshape(4, 4) @ np.linalg.inv(np.asarray(built_in, float).reshape(4, 4))
+
+
+def set_basins(chunk: "Chunk", basins, n: float | None = None) -> list[dict]:
+    """The basins of the water of ``chunk`` (a list of :func:`basin` records; [] or None: none, back to the single
+    level), each stamped with the transform of now (they move with the chunk, as the level). When the chunk has no
+    level yet, the level of the first basin at its centre becomes it (with ``n`` or the first basin's). At most one
+    basin without a polygon. Returns the basins stored."""
+    from ..core import stamps
+
+    basins = [dict(b) for b in (basins or [])]
+    if sum(b.get("polygon") is None for b in basins) > 1:
+        raise WaterError("only one basin can be without a polygon (the water everywhere else)",
+                         "un solo bacino può essere senza poligono (l'acqua dappertutto altrove)")
+    names = [b["name"] for b in basins]
+    if len(set(names)) != len(names):
+        raise WaterError("two basins with the same name", "due bacini con lo stesso nome")
+    for b in basins:
+        b["n"] = _check_n(b["n"])
+        stamps.stamp_entry(chunk, b)
+    rec = chunk.meta.get("water")
+    if not isinstance(rec, dict) or rec.get("level") is None:
+        if not basins:
+            return []
+        b0 = basins[0]
+        x, y = (b0["x0"], b0["y0"]) if b0.get("a") or b0.get("b") else _centre(chunk)
+        set_level(chunk, b0["level"], source="hand", n=n if n is not None else b0["n"], x=x, y=y)
+        rec = chunk.meta["water"]
+    if basins:
+        rec["basins"] = basins
+    else:
+        rec.pop("basins", None)
+    return [dict(b) for b in basins]
+
+
+def basins_of(chunk: "Chunk") -> list[dict]:
+    """The basins of ``chunk`` in its world now (moved with the chunk when its transform changed): records with
+    ``name``, ``n``, ``level``, ``a``, ``b``, ``x0``, ``y0`` (the plane ``z = level + a (x - x0) + b (y - y0)``) and
+    ``polygon`` (WKT or None); [] without basins."""
+    import shapely
+    from shapely import affinity
+
+    rec = chunk.meta.get("water")
+    if not isinstance(rec, dict):
+        return []
+    out = []
+    for b in rec.get("basins") or []:
+        b = dict(b)
+        M = _moved(chunk, b)
+        if M is not None:  # three points of the plane and the outline moved with the chunk
+            x0, y0 = float(b.get("x0") or 0.0), float(b.get("y0") or 0.0)
+            pts = np.array([[x0, y0], [x0 + 1.0, y0], [x0, y0 + 1.0]])
+            z = b["level"] + b["a"] * (pts[:, 0] - x0) + b["b"] * (pts[:, 1] - y0)
+            w = np.column_stack([pts, z, np.ones(3)]) @ M.T
+            fit = plane_from_shore(w[:, :3])
+            b.update(level=fit["level"], a=fit["a"], b=fit["b"], x0=fit["x0"], y0=fit["y0"])
+            if b.get("polygon"):
+                g = shapely.from_wkt(b["polygon"])
+                g = affinity.affine_transform(g, [M[0, 0], M[0, 1], M[1, 0], M[1, 1], M[0, 3] + M[0, 2] * b["level"],
+                                                  M[1, 3] + M[1, 2] * b["level"]])
+                b["polygon"] = g.wkt
+        out.append(b)
+    return out
+
+
+def surface_at(chunk: "Chunk", xy, basins=None, owner: bool = False):
+    """The level ``L`` and the factor ``n`` of the water at the world points ``xy`` ((m, 2)): from the basin whose
+    polygon holds each point (the first one, in their order), else the basin without polygon, else NaN (no water
+    there); without basins the single level and ``n`` of the chunk everywhere (NaN without a level). ``owner``: also
+    the index of the basin of each point (-1)."""
+    import shapely
+
+    xy = np.asarray(xy, np.float64).reshape(-1, 2)
+    basins = basins_of(chunk) if basins is None else basins
+    L = np.full(len(xy), np.nan)
+    n = np.full(len(xy), np.nan)
+    who = np.full(len(xy), -1, np.int64)
+    if not basins:
+        lv = level_of(chunk)
+        if lv is not None:
+            L[:], n[:] = lv["level"], lv["n"]
+            who[:] = 0
+        return (L, n, who) if owner else (L, n)
+    free = None
+    for i, b in enumerate(basins):
+        if b.get("polygon") is None:
+            free = i
+            continue
+        g = shapely.from_wkt(b["polygon"])
+        inside = (who < 0) & shapely.contains_xy(g, xy[:, 0], xy[:, 1])
+        who[inside] = i
+    if free is not None:
+        who[who < 0] = free
+    for i, b in enumerate(basins):
+        sel = who == i
+        L[sel] = b["level"] + b["a"] * (xy[sel, 0] - b["x0"]) + b["b"] * (xy[sel, 1] - b["y0"])
+        n[sel] = b["n"]
+    return (L, n, who) if owner else (L, n)
+
+
+# ------------------------------------------------------------------ the factor from control points
+def _apparent_heights(chunk: "Chunk", xy: np.ndarray, source: str) -> np.ndarray:
+    """The apparent heights (seen through the water, not corrected) at ``xy``: the DEM (``dem``) or the dense cloud
+    (``cloud``: the median of the points within two point spacings)."""
+    if (chunk.meta.get("dense") or {}).get("refraction"):
+        raise WaterError("the active dense cloud is already corrected for the refraction: make the cloud before it "
+                         "active to read the apparent heights", "la nuvola densa attiva è già corretta per la "
+                         "rifrazione: rendi attiva quella di prima per leggere le quote apparenti")
+    if source == "dem":
+        return _heights_at(_dem(chunk), xy)
+    from scipy.spatial import cKDTree
+
+    pc = chunk.point_cloud
+    if pc is None:
+        raise WaterError(f"the chunk {chunk.label} has no dense cloud", f"il chunk {chunk.label} non ha una nuvola "
+                         "densa")
+    world = chunk.to_world(pc.xyz)
+    tree = cKDTree(world[:, :2])
+    d, _ = tree.query(world[np.random.default_rng(0).choice(len(world), min(len(world), 5000), replace=False), :2], k=2)
+    radius = 2.0 * float(np.median(d[:, 1]))
+    out = np.full(len(xy), np.nan)
+    for k, idx in enumerate(tree.query_ball_point(xy, radius)):
+        if idx:
+            out[k] = float(np.median(world[idx, 2]))
+    return out
+
+
+def control_points(chunk: "Chunk", markers=None, points=None, source: str = "dem") -> list[dict]:
+    """The control points for :func:`estimate_factor`: ``markers`` (labels; their reference is the true position,
+    their triangulated position - through the water - the apparent one) and ``points`` (rows ``(x, y, z_true)``
+    whose apparent height is read on the DEM or the dense cloud, ``source``, or ``(x, y, z_true, z_apparent)``, or
+    dicts with ``label``, ``x``, ``y``, ``z`` and optionally ``apparent``)."""
+    out = []
+    for label in [] if markers is None else markers:
+        m = chunk.marker(label)
+        pos = m.position
+        refxyz = m.reference.location if m.reference is not None else None
+        if refxyz is None or pos is None:
+            raise WaterError(f"marker {label}: a reference and a position are needed",
+                             f"marker {label}: servono un riferimento e una posizione")
+        app = chunk.to_world(np.asarray(pos, float)[None])[0]
+        t = np.asarray(refxyz, float).reshape(-1)[:3]
+        out.append({"label": str(label), "x": float(t[0]), "y": float(t[1]), "z": float(t[2]), "apparent": float(app[2])})
+    rows, need = [], []
+    for k, row in enumerate([] if points is None else points):
+        if isinstance(row, dict):
+            r = {"label": str(row.get("label", f"P{k + 1}")), "x": float(row["x"]), "y": float(row["y"]),
+                 "z": float(row["z"]), "apparent": row.get("apparent")}
+        else:
+            v = [float(a) for a in row]
+            r = {"label": f"P{k + 1}", "x": v[0], "y": v[1], "z": v[2], "apparent": v[3] if len(v) > 3 else None}
+        if r["apparent"] is None or not np.isfinite(float(r["apparent"])):
+            need.append(len(rows))
+        rows.append(r)
+    if need:
+        z = _apparent_heights(chunk, np.array([[rows[i]["x"], rows[i]["y"]] for i in need]), source)
+        for i, v in zip(need, z):
+            rows[i]["apparent"] = float(v)
+    return out + rows
+
+
+def estimate_factor(chunk: "Chunk", controls, fit_level: bool = False, basin_name: str | None = None) -> dict:
+    """The effective refraction factor ``n`` from ``controls`` (:func:`control_points`): least squares on
+    ``L - z_true = n (L - z_apparent)`` with the level ``L`` of the water at each point (:func:`surface_at`;
+    ``basin_name``: only the points of that basin), or - ``fit_level`` - ``n`` and a horizontal level together
+    (``z_true = L (1 - n) + n z_apparent``, at least 3 points). Points above the water or without an apparent height
+    are left out (said in ``left_out``). Returns ``{"n", "level", "rmse", "points", "residuals": [{"label", "x",
+    "y", "z", "apparent", "corrected", "residual"}], "left_out"}``: the residual is true minus corrected height."""
+    rows = [dict(r) for r in controls]
+    if not rows:
+        raise WaterError("no control point", "nessun punto di controllo")
+    xy = np.array([[r["x"], r["y"]] for r in rows], float)
+    zt = np.array([r["z"] for r in rows], float)
+    za = np.array([np.nan if r.get("apparent") is None else r["apparent"] for r in rows], float)
+    basins = basins_of(chunk)
+    L, _n, who = surface_at(chunk, xy, basins, owner=True)
+    keep = np.isfinite(za) & np.isfinite(zt)
+    if basin_name is not None:
+        idx = next((i for i, b in enumerate(basins) if b["name"] == basin_name), None)
+        if idx is None:
+            raise WaterError(f"no basin {basin_name}", f"nessun bacino {basin_name}")
+        keep &= who == idx
+    if fit_level:
+        keep_fit = keep
+        if keep_fit.sum() < 3:
+            raise WaterError("the level and the factor together need three control points under the water",
+                             "livello e fattore insieme vogliono tre punti di controllo sott'acqua")
+        A = np.column_stack([np.ones(keep_fit.sum()), za[keep_fit]])
+        (alpha, nfit), *_ = np.linalg.lstsq(A, zt[keep_fit], rcond=None)
+        if abs(1.0 - nfit) < 1e-6:
+            raise WaterError("the control points do not tell the level (factor 1)",
+                             "i punti di controllo non dicono il livello (fattore 1)")
+        level = float(alpha / (1.0 - nfit))
+        L = np.full(len(rows), level)
+        keep = keep_fit & (za < level)
+    else:
+        level = None
+        keep &= np.isfinite(L) & (za < L)
+        if keep.sum() < 1:
+            raise WaterError("no control point under the water with an apparent height",
+                             "nessun punto di controllo sott'acqua con una quota apparente")
+        da, dt = L[keep] - za[keep], L[keep] - zt[keep]
+        nfit = float(np.sum(da * dt) / np.sum(da * da))
+    nfit = float(nfit)
+    corr = np.where(np.isfinite(L) & (za < L), L - nfit * (L - za), za)
+    res = zt - corr
+    out_rows = []
+    for k, r in enumerate(rows):
+        out_rows.append({"label": r.get("label", f"P{k + 1}"), "x": float(xy[k, 0]), "y": float(xy[k, 1]),
+                         "z": float(zt[k]), "apparent": None if not np.isfinite(za[k]) else float(za[k]),
+                         "corrected": None if not np.isfinite(corr[k]) else float(corr[k]),
+                         "residual": None if not keep[k] else float(res[k]), "used": bool(keep[k])})
+    used = res[keep]
+    return {"n": nfit, "level": level, "rmse": float(np.sqrt(np.mean(used ** 2))) if len(used) else None,
+            "points": int(keep.sum()), "residuals": out_rows,
+            "left_out": [r["label"] for r, k in zip(out_rows, keep) if not k], "basin": basin_name,
+            "in_range": bool(N_RANGE[0] <= nfit <= N_RANGE[1])}
+
+
+def apply_factor(chunk: "Chunk", fit: dict) -> dict:
+    """The factor of :func:`estimate_factor` stored: on its basin, else on the level of the chunk (and the level
+    too when it was fitted). Returns the record of the water."""
+    n = _check_n(fit["n"])
+    rec = chunk.meta.get("water")
+    if fit.get("basin"):
+        basins = (rec or {}).get("basins") or []
+        for b in basins:
+            if b["name"] == fit["basin"]:
+                b["n"] = n
+                break
+        else:
+            raise WaterError(f"no basin {fit['basin']}", f"nessun bacino {fit['basin']}")
+    elif fit.get("level") is not None or not isinstance(rec, dict) or rec.get("level") is None:
+        if fit.get("level") is None:
+            raise WaterError(f"the chunk {chunk.label} has no water level", f"il chunk {chunk.label} non ha un "
+                             "livello dell'acqua")
+        set_level(chunk, fit["level"], source="hand", n=n)
+        rec = chunk.meta["water"]
+    else:
+        rec["n"] = n
+    rec["factor_fit"] = {k: fit[k] for k in ("n", "level", "rmse", "points", "basin")}
+    rec["factor_fit"]["residuals"] = [{k: r[k] for k in ("label", "residual")} for r in fit["residuals"]]
+    return dict(rec)
+
+
+# ------------------------------------------------------------------ a level and a factor per chunk or per date
+def read_table(path) -> list[dict]:
+    """Rows of a CSV of water levels (``;`` or ``,``): columns ``chunk`` or ``date`` (YYYY-MM-DD), ``level`` (may be
+    empty: the factor alone) and ``n``. Decimal commas are read with ``;`` separators."""
+    import csv
+
+    text = Path(path).read_text(encoding="utf-8-sig")
+    delim = ";" if text.count(";") > text.count(",") / 2 and ";" in text else ","
+    rows = []
+    for row in csv.DictReader(text.splitlines(), delimiter=delim):
+        r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+
+        def num(v):
+            return float(v.replace(",", ".")) if v else None
+
+        rows.append({"chunk": r.get("chunk") or None, "date": r.get("date") or r.get("data") or None,
+                     "level": num(r.get("level") or r.get("livello") or ""), "n": num(r.get("n") or "")})
+    return rows
+
+
+def apply_table(doc, rows) -> list[dict]:
+    """A level and a factor for several chunks: each row ``{"chunk"}`` (label or key) or ``{"date"}`` (the chunks
+    surveyed that day, :func:`..archaeo.timeline.phase_date`), with ``level`` (None: the level kept, only ``n``) and
+    ``n``. Returns what was set, one entry per chunk; :class:`WaterError` (nothing written) when a row matches no chunk
+    or sets ``n`` alone on a chunk without a level."""
+    from datetime import date as _date
+
+    from ..archaeo.timeline import phase_date
+
+    plan = []
+    for row in rows:
+        if row.get("chunk"):
+            found = [c for c in doc.chunks if c.label == str(row["chunk"])] or \
+                [c for c in doc.chunks if str(c.key) == str(row["chunk"])]
+        elif row.get("date"):
+            day = _date.fromisoformat(str(row["date"])[:10])
+            found = [c for c in doc.chunks if (phase_date(c) is not None and phase_date(c).date() == day)]
+        else:
+            raise WaterError("a row without chunk or date", "una riga senza chunk né data")
+        if not found:
+            what = row.get("chunk") or row.get("date")
+            raise WaterError(f"no chunk for {what}", f"nessun chunk per {what}")
+        for ch in found:
+            if row.get("level") is None and level_of(ch) is None:
+                raise WaterError(f"{ch.label}: no level to give the factor to", f"{ch.label}: nessun livello a cui "
+                                 "dare il fattore")
+            plan.append((ch, row))
+    done = []
+    for ch, row in plan:
+        n = row.get("n")
+        if row.get("level") is not None:
+            rec = set_level(ch, row["level"], source="hand", n=n if n is not None else (level_of(ch) or {}).get("n", N_SEA))
+        else:
+            ch.meta["water"]["n"] = _check_n(n)
+            rec = dict(ch.meta["water"])
+        if row.get("date"):
+            ch.meta["water"]["date"] = str(row["date"])[:10]
+        done.append({"chunk": ch.label, "level": rec["level"], "n": float(ch.meta["water"]["n"]),
+                     "date": row.get("date")})
+    return done
+
+
 __all__ = ["N_SEA", "N_FRESH", "N_RANGE", "SOURCES", "LAND_STEP", "MIN_EDGE_CELLS", "NOTE", "NOTE_EN", "WaterError", "corrected",
-           "water_polygons", "edge_samples", "edge_points", "level_from_edge", "set_level", "level_of", "correct_cloud"]
+           "water_polygons", "edge_samples", "edge_points", "level_from_edge", "set_level", "level_of", "correct_cloud",
+           "plane_from_shore", "basin", "set_basins", "basins_of", "surface_at", "control_points", "estimate_factor",
+           "apply_factor", "read_table", "apply_table"]

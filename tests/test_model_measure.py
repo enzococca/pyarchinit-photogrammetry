@@ -178,7 +178,8 @@ def test_area_of_a_flat_plate_and_its_model_surface(win, qapp, scene):
     truth = np.array([_world_of_pixel(mv, x, y, t[2]) for x, y in pixels])  # the plate under the clicked pixels
     x, y = truth[:, 0] - t[0], truth[:, 1] - t[1]  # near the target: no digits lost to the large coordinates
     known = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
-    assert known == pytest.approx(0.0144, rel=0.05)
+    # a sanity check only: the corners are clicked on whole pixels, which moves the area by some percent (6 in CI)
+    assert known == pytest.approx(0.0144, rel=0.15)
     v = m["values"]
     assert v["area_plan"] == pytest.approx(known, rel=0.02), (v["area_plan"], known)
     assert v["area_plane"] == pytest.approx(known, rel=0.02)

@@ -106,6 +106,7 @@ class Contributions:
     tree_items: list = field(default_factory=list)  # (plugin, provider) of the workspace, taken out with it
     rasters: list = field(default_factory=list)  # entries of engine.rastercalc.register, taken out with it
     rail_groups: list = field(default_factory=list)  # RailGroup of the tool rails, taken out with it
+    site: list = field(default_factory=list)  # providers of io.site_plugins (the web site), taken out with it
 
 
 class Context:
@@ -436,6 +437,21 @@ class Context:
 
         self.contributions.rasters.append(rastercalc.register(provider, owner=self.name))
 
+    def add_site_contributions(self, provider: Callable[[object], list]) -> None:
+        """Since 1.10.0: what the plugin adds to the web site of a survey (``ppg web build``, the pane *Pubblica sul
+        web*). ``provider(chunk)`` is called for every chunk that goes on a site and returns a list of dicts, each
+        one of: a layer of the plan (``{"kind": "layer", "id", "title", "features": GeoJSON in the coordinates of
+        the chunk, "colour", "legend": {"field", "items": [{"value", "title", "colour"}]}, "fields"}``), a tab of
+        cards (``{"kind": "table", "id", "title", "columns", "rows", "image"}``, a row with the path of a picture
+        under ``image``) or a tab with a page of text (``{"kind": "html", "id", "title", "html", "images"}``). The
+        site moves the coordinates into its frame, cleans every text and the HTML, writes the pictures again
+        without their metadata and puts the files in ``data/plugins/<plugin>/``; see
+        :mod:`..io.site_plugins`. A provider that fails is left out of the site and said in its notes. Taken
+        out when the plugin is disabled; also in the command line."""
+        from ..io import site_plugins
+
+        self.contributions.site.append(site_plugins.register(provider, owner=self.name))
+
     def rasters(self, chunk=None) -> list[dict]:
         """Since 1.4.0: every raster of ``chunk`` (the active one when None) the raster calculator reads,
         with its name in the formulas: dicts ``name``, ``label``, ``path``, ``source``, ``bands`` (their
@@ -476,7 +492,7 @@ class Context:
         are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into
         ``chunk.meta["drawings"]``, where the window finds them when that chunk becomes the active one
         (the command line saves the project). While the window shows an elevation or a section, the polygons are in
-        its ``(u, v)`` metres and join its drawings. Since 1.9.1, ``elevation``: the id of an elevation or a section
+        its ``(u, v)`` metres and join its drawings. Since 1.10.0, ``elevation``: the id of an elevation or a section
         of the chunk the units go to, in its ``(u, v)`` metres, whatever the window shows (:meth:`elevation_drawings`
         reads them back). Only in the interface thread (an action, ``done``), as :meth:`store_drawings`. Returns how
         many units were added."""
@@ -526,15 +542,15 @@ class Context:
         self.mark_modified()
         return len(units)
 
-    # ------------------------------------------------------------------ elevations (since 1.9.1)
+    # ------------------------------------------------------------------ elevations (since 1.10.0)
     def shown_elevation(self) -> str | None:
-        """Since 1.9.1: the id of the elevation or section the 2D view of the window shows (its drawings are in its
+        """Since 1.10.0: the id of the elevation or section the 2D view of the window shows (its drawings are in its
         ``(u, v)`` metres), None on the plan and in the command line - the stable name of the window's
         ``drawings_frame``."""
         return getattr(self.window, "drawings_frame", None) if self.window is not None else None
 
     def elevations(self, chunk=None) -> list[dict]:
-        """Since 1.9.1: the entries of the elevations and sections of ``chunk`` (the active one when None): ``id``,
+        """Since 1.10.0: the entries of the elevations and sections of ``chunk`` (the active one when None): ``id``,
         ``name``, ``kind``, ``frame``, ``bounds``, ``v_is_height``, ``crs``... - copies."""
         import copy
 
@@ -544,7 +560,7 @@ class Context:
         return copy.deepcopy(elevation_drawings.entries(chunk)) if chunk is not None else []
 
     def elevation_drawings(self, elevation: str | None = None, chunk=None, world: bool = False) -> dict:
-        """Since 1.9.1: the drawings kept with the elevation ``elevation`` (the one the window shows when None) of
+        """Since 1.10.0: the drawings kept with the elevation ``elevation`` (the one the window shows when None) of
         ``chunk`` (the active one when None), as :func:`..engine.elevation_drawings.drawings` gives them - units,
         spot heights, measuring points, lines and stones with shapely geometries in its ``(u, v)`` metres (``world``:
         each also placed in 3D, in the system of the elevation); copies, read only. In the window those being drawn
@@ -671,6 +687,12 @@ class Context:
             for entry in self.contributions.rasters:
                 rastercalc.unregister(entry)
             self.contributions.rasters.clear()
+        if self.contributions.site:
+            from ..io import site_plugins
+
+            for entry in self.contributions.site:
+                site_plugins.unregister(entry)
+            self.contributions.site.clear()
         tree = getattr(self.window, "workspace", None)
         if self.contributions.tree_items and tree is not None:
             tree.providers[:] = [p for p in tree.providers if not any(p is e for e in self.contributions.tree_items)]

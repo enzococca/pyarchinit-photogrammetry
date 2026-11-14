@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 import numpy as np
 
 from .. import _native
+from ..core.camera import SINGLE_FOCAL as SINGLE_FOCAL_MODELS
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
@@ -71,6 +72,40 @@ def sensor_model_params(model: str, params, sensor_model: str) -> tuple[str, lis
     if model == "RADIAL_FISHEYE" and sensor_model == "OPENCV_FISHEYE":
         return "OPENCV_FISHEYE", [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
     return model, p
+
+
+# photos that say no focal length start from a guess (``core.camera.FOCAL_GUESS``): when the alignment
+# with it leaves photos out, it is tried again from these other starts (times the guess) and the
+# alignment that places the most photos is kept. On the turntable demo without EXIF a start 1.4
+# times too long left 14 alignments in 36 at 2-3 photos, a start 0.8 times too short 1 in 36.
+GUESSED_FOCAL_STARTS = (0.75, 1.4)
+GUESSED_FOCAL_ENOUGH = 0.9  # the share of the photos an alignment must place to be kept as it is
+
+
+def _set_db_focals(db_path: Path, chunk: Chunk, focals: dict[int, float]) -> None:
+    """The focal length of the database cameras of the photos of the sensors ``focals`` (key: px)."""
+    import pycolmap
+
+    names = (chunk.meta.get("sfm") or {}).get("names") or {}
+    by_name = {names[str(c.key)]: c.sensor_key for c in chunk.cameras
+               if str(c.key) in names and c.sensor_key in focals}
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        ids = {}
+        for im in db.read_all_images():
+            if im.name in by_name:
+                ids[im.camera_id] = by_name[im.name]
+        for cid, skey in ids.items():
+            cam = db.read_camera(cid)
+            params = list(cam.params)
+            if cam.model.name in SINGLE_FOCAL_MODELS:
+                params[0] = focals[skey]
+            else:
+                params[0] = params[1] = focals[skey]
+            cam.params = params
+            db.update_camera(cam)
+    finally:
+        db.close()
 
 
 def _restore_sensor_models(chunk: Chunk, rec) -> None:
@@ -1410,6 +1445,57 @@ def auto_mapper(chunk: Chunk, photos: int, fixed: bool = False, rigs: bool = Fal
 def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
                   use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
                   ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
+    """Align the photos (see :func:`_align_cameras`). Photos whose sensor has a guessed focal length
+    (:attr:`Sensor.focal_guessed`: the photos say none) that the alignment leaves out are aligned
+    again from other focal lengths (:data:`GUESSED_FOCAL_STARTS`); the alignment that places the
+    most photos is kept and ``chunk.meta["sfm"]["focal_guess"]`` says what was tried."""
+    progress = as_progress(progress)
+    kwargs = dict(mapper=mapper, reset=reset, use_gps=use_gps, adaptive_fitting=adaptive_fitting,
+                  tiepoint_limit=tiepoint_limit, ba_global_ratio=ba_global_ratio,
+                  ba_global_refinements=ba_global_refinements)
+    guessed = {k: s.focal_px for k, s in chunk.sensors.items() if s.focal_guessed}
+    if not guessed or not reset:
+        n = _align_cameras(chunk, progress=progress, **kwargs)
+        chunk.meta["sfm"].pop("focal_guess", None)
+        return n
+    saved = {k: (s.model, list(s.params)) for k, s in chunk.sensors.items() if k in guessed}
+    total = len((chunk.meta.get("sfm") or {}).get("names") or {})
+    db_path = _sfm_dir(chunk) / "database.db"
+
+    def attempt(factor: float) -> int:
+        for k, (model, params) in saved.items():  # every attempt starts from the sensors as they were
+            s = chunk.sensors[k]
+            s.model, s.params, s.focal_source = model, list(params), "guess"
+        _set_db_focals(db_path, chunk, {k: f * factor for k, f in guessed.items()})
+        try:
+            return _align_cameras(chunk, progress=progress, **kwargs)
+        except RuntimeError as exc:
+            if "no reconstruction" not in str(exc):
+                raise
+            return 0
+
+    tried = [(1.0, attempt(1.0))]
+    try:
+        for factor in GUESSED_FOCAL_STARTS:
+            if max(n for _, n in tried) >= GUESSED_FOCAL_ENOUGH * total:
+                break
+            progress(0.0, f"Only {max(n for _, n in tried)} of {total} photos aligned with the guessed focal length: "
+                          f"again from {factor:g} times it")
+            tried.append((factor, attempt(factor)))
+        best = max(tried, key=lambda t: t[1])  # the first of the best: the guess when nothing places more
+        if best[0] != tried[-1][0]:
+            attempt(best[0])
+    finally:
+        _set_db_focals(db_path, chunk, guessed)  # the database keeps the guess: aligning again tries the same
+    chunk.meta["sfm"]["focal_guess"] = {"tried": [{"factor": f, "aligned": n} for f, n in tried], "kept": best[0]}
+    if best[1] == 0:
+        raise RuntimeError("alignment failed: no reconstruction could be initialised")
+    return best[1]
+
+
+def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
+                   use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
+                   ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
     photos), ``hierarchical`` (the photos in overlapping clusters of up to 500, each reconstructed
@@ -1677,6 +1763,8 @@ def import_reconstruction(chunk: Chunk, rec) -> int:
         rc = rec.cameras[image.camera_id]
         sensor.model = rc.model.name
         sensor.params = [float(p) for p in rc.params]
+        if sensor.focal_source == "guess":
+            sensor.focal_source = "aligned"  # estimated by the alignment: no longer a guess
         n += 1
     if rec.num_points3D():
         pts = rec.points3D

@@ -71,6 +71,26 @@ def trench_site(processed, tmp_path_factory):
     return doc, ch, facts, path.parent, json.loads(path.read_text(encoding="utf-8"))
 
 
+TRENCH = (2480000.0, 4500000.0)  # easting and northing of the synthetic trench (Gauss-Boaga, make_scene)
+_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w.])")
+
+
+def _coordinate_leaks(text: str, origin=TRENCH, window: float = 5000.0) -> list[str]:
+    """The numbers of ``text`` (whole tokens, never digits inside a longer number such as a size of 10204500 bytes)
+    within ``window`` metres of the easting or the northing of the trench: a true coordinate that leaked."""
+    return [t for t in _NUMBER.findall(text) if any(abs(float(t) - o) <= window for o in origin)]
+
+
+def test_coordinate_leaks_are_numbers_not_digit_runs():
+    clean = json.dumps({"build": {"size": 10204500, "bytes": 24802480}, "x": 0.124500, "id": "a4500b",
+                        "extent": [-1.2, -0.8, 1.3, 0.9]})
+    assert _coordinate_leaks(clean) == []
+    leaked = json.dumps({"extent": [2480001.25, 4500002.5, 2480004.0, 4500003.0]})
+    assert _coordinate_leaks(leaked) == ["2480001.25", "4500002.5", "2480004.0", "4500003.0"]
+    assert _coordinate_leaks('{"coordinates": [[2479998, 4499997]]}') == ["2479998", "4499997"]
+    assert _coordinate_leaks("<p>E 2480123.4 N 4500321.0</p>") == ["2480123.4", "4500321.0"]
+
+
 def _glb(path: Path) -> tuple[dict, bytes]:
     """The JSON and the binary chunk of a GLB."""
     import struct
@@ -190,8 +210,9 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
         header = _glb(f)[0]  # the text of a tile: nothing of the place of the site
         assert not any(w in json.dumps(header) for w in ("EPSG", "crs", "origin", "extras\": {\"c")), f.name
         assert max(abs(v) for a in header["accessors"] for v in a.get("max", []) + a.get("min", [])) < 100
-    for word in ("EPSG", "3004", "2480", "4500", "crs\":{", '"origin"'):
+    for word in ("EPSG", "crs\":{", '"origin"'):
         assert word not in text, word
+    assert not _coordinate_leaks(text), _coordinate_leaks(text)  # numbers, not digits inside other numbers
     extent = manifest["chunks"][0]["extent"]
     assert max(abs(v) for v in extent) < 100 and extent[0] < 0 < extent[2] and extent[1] < 0 < extent[3]
 

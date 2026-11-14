@@ -196,11 +196,12 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `add_pane(widget, title, icon=None, area="right")` | dalla 1.3.4: `widget` come pannello della finestra, un dock a sé raggruppato a schede con i pannelli di `area` (`"left"`, `"bottom"`, `"right"`): l'utente lo sposta, lo stacca, lo chiude e lo riapre da *Vista > Pannelli*, e la finestra ricorda dov'era. `icon` è una `QIcon` o il nome di un'icona del programma (`"plugin"`, `"relief"`...); restituisce il dock (nome dell'oggetto `pane_plugin_` + il nome del plugin), `None` nella riga di comando; il pannello se ne va con il plugin |
 | `show_pane(widget)` | dalla 1.3.4: un pannello del plugin in primo piano, anche se l'utente lo ha chiuso o staccato |
 | `add_rasters(provider)` | dalla 1.4.0: i raster del plugin con un nome nel calcolatore raster (*Strumenti > Calcolatore raster*, `engine.rastercalc`): `provider(chunk)` restituisce dizionari `{"name", "label", "path"}` (`name` nelle formule: lettere, cifre e `_`, reso tale se non lo è). Senza di esso il calcolatore trova comunque ogni GeoTIFF della cartella del chunk, con il nome della cartella e del file (`terrain_twi`) o del suo tag `ppg_name`; tolto con il plugin, anche dalla riga di comando |
+| `add_site_contributions(provider)` | dalla 1.10.0: quello che il plugin aggiunge al sito web di un rilievo (`ppg web build`, il pannello *Pubblica sul web*): `provider(chunk)` restituisce una lista di contributi - livelli della pianta, schede a cartoline, pagine di testo (vedi [Nel sito web di un rilievo](#nel-sito-web-di-un-rilievo)); tolto con il plugin, anche dalla riga di comando |
 | `rasters(chunk=None)` | dalla 1.4.0: tutti i raster di `chunk` (quello attivo) che il calcolatore legge, con il loro nome nelle formule: dizionari `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; una formula su di essi: `engine.rastercalc.calculate(chunk, formula, name)` |
-| `add_units(polygons, tipo="US", attributes=None, chunk=None)` | dalla 1.5.0: unità stratigrafiche fatte dal plugin, come se fossero disegnate nella finestra - nel collegamento dal vivo con QGIS, numerate da *Proponi US e rapporti*, nelle schede US di PyArchInit. `polygons`: (Multi)Polygon di shapely o liste di vertici `(N, 2)` nelle coordinate del chunk (un contorno non valido viene reso valido, uno senza area lasciato fuori); `attributes`: un dizionario per tutte o uno per poligono - `us`, `area`, `tipo`, `sito` e le colonne di `pyunitastratigrafiche`, ogni altra chiave un attributo dell'unità; il sito è quello del progetto quando non è dato. Sul chunk attivo vengono disegnate e sono una voce di *Modifica > Annulla*; su un altro chunk, e dalla riga di comando, vanno in `chunk.meta["drawings"]`. Mentre la finestra mostra un prospetto sono nei suoi `(u, v)` e si uniscono ai suoi disegni; dalla 1.9.1 `elevation=<id>` le manda a quel prospetto (nei suoi `(u, v)`) qualunque cosa sia mostrata. Solo nel thread dell'interfaccia; restituisce quante ne ha aggiunte |
-| `shown_elevation()` | dalla 1.9.1: l'id del prospetto o della sezione mostrata dalla vista 2D, None sulla pianta e dalla riga di comando (da usare al posto di `drawings_frame` della finestra) |
-| `elevations(chunk=None)` | dalla 1.9.1: le voci dei prospetti e delle sezioni del chunk (`id`, `name`, `kind`, `frame`, `bounds`, `v_is_height`, `crs`...), copie |
-| `elevation_drawings(elevation=None, chunk=None, world=False)` | dalla 1.9.1: i disegni tenuti con un prospetto (quello mostrato quando è None) come li dà `engine.elevation_drawings.drawings` - unità, quote, punti di misura, linee e pietre con geometrie shapely nei suoi metri `(u, v)`, con `world` (3D nel sistema del prospetto) se richiesto; nella finestra comprende quelli in corso di disegno; copie, in sola lettura |
+| `add_units(polygons, tipo="US", attributes=None, chunk=None)` | dalla 1.5.0: unità stratigrafiche fatte dal plugin, come se fossero disegnate nella finestra - nel collegamento dal vivo con QGIS, numerate da *Proponi US e rapporti*, nelle schede US di PyArchInit. `polygons`: (Multi)Polygon di shapely o liste di vertici `(N, 2)` nelle coordinate del chunk (un contorno non valido viene reso valido, uno senza area lasciato fuori); `attributes`: un dizionario per tutte o uno per poligono - `us`, `area`, `tipo`, `sito` e le colonne di `pyunitastratigrafiche`, ogni altra chiave un attributo dell'unità; il sito è quello del progetto quando non è dato. Sul chunk attivo vengono disegnate e sono una voce di *Modifica > Annulla*; su un altro chunk, e dalla riga di comando, vanno in `chunk.meta["drawings"]`. Mentre la finestra mostra un prospetto sono nei suoi `(u, v)` e si uniscono ai suoi disegni; dalla 1.10.0 `elevation=<id>` le manda a quel prospetto (nei suoi `(u, v)`) qualunque cosa sia mostrata. Solo nel thread dell'interfaccia; restituisce quante ne ha aggiunte |
+| `shown_elevation()` | dalla 1.10.0: l'id del prospetto o della sezione mostrata dalla vista 2D, None sulla pianta e dalla riga di comando (da usare al posto di `drawings_frame` della finestra) |
+| `elevations(chunk=None)` | dalla 1.10.0: le voci dei prospetti e delle sezioni del chunk (`id`, `name`, `kind`, `frame`, `bounds`, `v_is_height`, `crs`...), copie |
+| `elevation_drawings(elevation=None, chunk=None, world=False)` | dalla 1.10.0: i disegni tenuti con un prospetto (quello mostrato quando è None) come li dà `engine.elevation_drawings.drawings` - unità, quote, punti di misura, linee e pietre con geometrie shapely nei suoi metri `(u, v)`, con `world` (3D nel sistema del prospetto) se richiesto; nella finestra comprende quelli in corso di disegno; copie, in sola lettura |
 | `orient(chunk=None, **kw)` | dalla 1.7.2: il sistema locale di `chunk` (quello attivo) orientato come `engine.orient.orient` (`points`, `markers`, `plane_xyz`, `toward`, `x_along_ab`, `quota`, `origin_xy`, `distance`, `flip`, `M`, `move_aligned`, `dry_run`): nella finestra è un passo di *Modifica > Annulla* e le viste si aggiornano, dalla riga di comando il plugin salva; i rifiuti sollevano `engine.orient.OrientRefused` (`reason`, `names`); restituisce il risultato (`M`, `describe`, `moved`, `stale`...). `chunk.orient(M)` applica così com'è un movimento calcolato dal plugin |
 | `free_drawings(chunk=None, layer=None)` | dalla 1.7.2: i disegni liberi in 3D di `chunk` (quello attivo), solo di `layer` quando è dato: record `id`, `layer`, `kind` (line, polygon, point), `name`, `xyz` (coordinate del chunk), `attributes`, `created`, `modified`, `colour` quando ce l'ha; copie, in sola lettura (cambiarle non cambia niente nel progetto); le loro misure con `archaeo.measures.feature_measures` |
 | `on_transform_changed(callback, keys=())` | dalla 1.7.2: `callback(chunk, M)` dopo che la trasformazione di un chunk è cambiata del movimento `M` di un orientamento (o del suo annullamento e ripristino) - non dopo una georeferenziazione rifatta, un'ottimizzazione, il livellamento di un chunk locale, chunk allineati o un nuovo sistema del rilievo: i dati del plugin tenuti nelle coordinate del chunk si spostano lì di `M`; `keys`: le chiavi di `chunk.meta` che il plugin muove da sé (quelle dei plugin che non ascoltano risultano non spostate); anche dalla riga di comando, si ferma quando il plugin se ne va |
@@ -245,14 +246,56 @@ istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo a
   più dopo il suo primo passo - prima di quel passo un cambiamento è un passo "Dati dei plugin", dopo nessuno. Tieni
   questi dati (impostazioni, cache che l'utente potrebbe voler riavere) sotto un'altra chiave, o coprili con un passo.
 
+### Nel sito web di un rilievo
+
+Dalla 1.10.0 un plugin aggiunge qualcosa al sito web di un rilievo (`ppg web build`, *File > Esporta > Sito web*)
+con `context.add_site_contributions(provider)`. Quando si costruisce un sito, `provider(chunk)` viene chiamato per
+ogni chunk che ci entra e restituisce una lista di dizionari, ognuno con un `kind`:
+
+- `"layer"`: un livello della pianta - `id`, `title` (un testo o `{"it": ..., "en": ...}`), `features` (una
+  FeatureCollection GeoJSON o una lista di feature nelle coordinate del chunk, `z` compresa), `colour`, `legend`
+  (`{"field": "classe", "items": [{"value", "title", "colour"}]}`: l'attributo che dà la classe di una feature, un
+  colore e una spunta per classe nella lista dei livelli) e `fields` (`{"classe": {"it": "Classe", "en": "Class"}}`:
+  i nomi degli attributi nel pannello di un clic);
+- `"table"`: una scheda a cartoline - `id`, `title`, `columns` (`[{"key", "title"}]`), `rows` (dizionari; il percorso
+  di un'immagine sotto la chiave indicata da `image`, di norma `"image"`);
+- `"html"`: una scheda con una pagina di testo - `id`, `title`, `html`, `images` (`{"nome.jpg": percorso}`: le
+  immagini che la pagina mostra con `<img src="nome.jpg">`).
+
+Il resto lo fa il sito: le coordinate vanno nel sistema del sito (traslate nel sistema locale), ogni testo è ripulito
+come i testi del programma (nessun percorso del computer, nessuna chiave che comincia con `_`), le immagini sono
+riscritte in JPEG di al massimo 1600 pixel con nient'altro che i loro pixel (niente EXIF, niente GPS), e l'HTML tiene
+solo i tag semplici (paragrafi, titoli, elenchi, tabelle, enfasi, link a `http(s)` e `mailto`, le sue immagini):
+niente script, stili, eventi o frame; la pagina lo ripulisce di nuovo prima di mostrarlo. I file vanno in
+`data/plugins/<plugin>/`, elencati in `plugins` del chunk in `site.json`. Un provider che solleva un'eccezione, o un
+contributo che non si capisce, viene lasciato fuori e detto nelle note della costruzione; il sito si costruisce lo
+stesso. L'`id` è fatto di lettere minuscole, cifre, `-` e `_`, una volta per plugin.
+
+```python
+def activate(self, context):
+    context.add_site_contributions(self.site)
+
+def site(self, chunk):
+    reperti = chunk.meta.get("miei_reperti") or []
+    return [{"kind": "layer", "id": "reperti", "title": {"it": "Reperti", "en": "Finds"},
+             "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [r["x"], r["y"], r["z"]]},
+                           "properties": {"n": r["n"], "classe": r["classe"]}} for r in reperti],
+             "legend": {"field": "classe", "items": [{"value": "anfora", "title": "Anfore", "colour": "#d62728"}]}},
+            {"kind": "table", "id": "catalogo", "title": "Catalogo",
+             "columns": [{"key": "n", "title": "N."}, {"key": "classe", "title": "Classe"}],
+             "rows": [{"n": r["n"], "classe": r["classe"], "image": r.get("foto")} for r in reperti]}]
+```
+
+I test del programma contengono un plugin di questo tipo (`tests/test_site_more.py`, classe `Finds`).
+
 ### Compatibilità
 
 `Plugin.api` è l'API dei plugin per cui il plugin è stato scritto (`pyarchinit_photogrammetry.plugins.API_VERSION`,
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` e `add_action` dopo `activate` 1.7.4 (la 1.7.3 e le
-precedenti ignorano un'azione aggiunta dopo), `shown_elevation`, `elevations`, `elevation_drawings` e `add_units(elevation=)` 1.9.1. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` e `add_action` dopo `activate` 1.7.4, `add_site_contributions` 1.10.0 (la 1.7.3 e le
+precedenti ignorano un'azione aggiunta dopo), `shown_elevation`, `elevations`, `elevation_drawings` e `add_units(elevation=)` 1.10.0. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste

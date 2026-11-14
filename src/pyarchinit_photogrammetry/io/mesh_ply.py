@@ -254,7 +254,9 @@ class MeshData:
     structured array, the faces, the texture coordinates of the three corners of each face
     (``(F, 6)``: u0 v0 u1 v1 u2 v2, as Metashape writes them), the texture page of each face
     (``texnumber``, None with a single texture; the pages are the ``TextureFile`` comments, in
-    order, as MeshLab reads them) and the header comments.
+    order, as MeshLab reads them), the group of each face (``groups``, None without groups: the
+    source chunk of a merged model, the objects of an imported OBJ; written as the face property
+    ``facegroup``, the names in ``FaceGroup <id> <name>`` comments) and the header comments.
 
     Reading and writing through this class keeps everything: a mesh with a texture loaded by
     trimesh loses its vertex colours and gets its vertices split along the seams."""
@@ -264,6 +266,7 @@ class MeshData:
     texcoords: np.ndarray | None = None
     comments: list = field(default_factory=list)
     texnumber: np.ndarray | None = None
+    groups: np.ndarray | None = None
 
     @property
     def xyz(self) -> np.ndarray:
@@ -345,6 +348,33 @@ class MeshData:
         self.comments = [c for c in self.comments if not c.lower().startswith("texturefile")]
         self.comments += [f"TextureFile {n}" for n in names]
 
+    @property
+    def group_names(self) -> dict[int, str]:
+        """The names of the face groups (``FaceGroup <id> <name>`` comments): {id: name}."""
+        out = {}
+        for c in self.comments:
+            parts = c.split(None, 2)
+            if len(parts) >= 2 and parts[0].lower() == "facegroup":
+                try:
+                    out[int(parts[1])] = parts[2].strip() if len(parts) > 2 else ""
+                except ValueError:
+                    continue
+        return out
+
+    def set_groups(self, groups, names: dict | None = None) -> None:
+        """The group of every face (None: no groups) and their names ({id: name}; a name is one line)."""
+        self.comments = [c for c in self.comments if not c.lower().startswith("facegroup")]
+        if groups is None:
+            self.groups = None
+            return
+        groups = np.asarray(groups, np.int32).reshape(-1)
+        if len(groups) != len(self.faces):
+            raise ValueError(f"{len(groups)} groups for {len(self.faces)} faces")
+        self.groups = groups
+        for k, name in sorted((names or {}).items()):
+            text = " ".join(str(name).split())
+            self.comments.append(f"FaceGroup {int(k)} {text}".rstrip())
+
     def subset_faces(self, keep) -> "MeshData":
         """The faces of ``keep`` (mask or indices) and only the vertices they use."""
         faces = self.faces[keep]
@@ -353,12 +383,18 @@ class MeshData:
         remap = np.cumsum(used) - 1
         tex = None if self.texcoords is None else self.texcoords[keep]
         page = None if self.texnumber is None else self.texnumber[keep]
-        return MeshData(self.vertices[used], remap[faces], tex, list(self.comments), page)
+        groups = self.groups[keep] if self._has_groups else None
+        return MeshData(self.vertices[used], remap[faces], tex, list(self.comments), page, groups)
 
     def copy(self) -> "MeshData":
         return MeshData(self.vertices.copy(), self.faces.copy(),
                         None if self.texcoords is None else self.texcoords.copy(), list(self.comments),
-                        None if self.texnumber is None else self.texnumber.copy())
+                        None if self.texnumber is None else self.texnumber.copy(),
+                        self.groups.copy() if self._has_groups else None)
+
+    @property
+    def _has_groups(self) -> bool:
+        return self.groups is not None and len(self.groups) == len(self.faces)
 
 
 def _header_comments(path: Path) -> list[str]:
@@ -445,7 +481,8 @@ def read_mesh(path: str | Path) -> MeshData:
             tex = np.array(rec[name], np.float32)
             break
     page = np.array(rec["texnumber"], np.int32) if "texnumber" in rec.dtype.names else None
-    return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path), page)
+    groups = np.array(rec["facegroup"], np.int32) if "facegroup" in rec.dtype.names else None
+    return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path), page, groups)
 
 
 def write_mesh(path: str | Path, mesh: MeshData) -> Path:
@@ -470,6 +507,10 @@ def write_mesh(path: str | Path, mesh: MeshData) -> Path:
         if mesh.texnumber is not None:
             header.append("property int texnumber")
             fdescr.append(("page", "<i4"))
+    grouped = mesh._has_groups  # groups that no longer match the faces (faces changed by hand) are dropped
+    if grouped:
+        header.append("property int facegroup")
+        fdescr.append(("group", "<i4"))
     header.append("end_header")
     vout = np.empty(len(v), dtype=vdescr)
     for n in names:
@@ -482,6 +523,8 @@ def write_mesh(path: str | Path, mesh: MeshData) -> Path:
         fout["t"] = mesh.texcoords
         if mesh.texnumber is not None:
             fout["page"] = mesh.texnumber
+    if grouped:
+        fout["group"] = mesh.groups
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as out:
         out.write(("\n".join(header) + "\n").encode("utf-8"))  # comments (a texture named "metà") in UTF-8
