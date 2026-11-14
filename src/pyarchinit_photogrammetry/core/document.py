@@ -179,6 +179,13 @@ class Document:
         return align_chunks(self, reference, chunks, method=method, fix_scale=fix_scale, initial=initial,
                             max_points=max_points, progress=progress, check=check)
 
+    def merge_models(self, chunks, label: str | None = None, **options):
+        """The models of ``chunks`` as one textured model of a new chunk (colours matched, overlaps removed, pages
+        kept or repacked): see :func:`engine.model_merge.merge_models`. Returns ``(chunk, report)``."""
+        from ..engine.model_merge import merge_models
+
+        return merge_models(self, chunks, label=label, **options)
+
     def merge_chunks(self, chunks, label: str | None = None, merge_markers: bool = True,
                      merge_tie_points: bool = True, merge_point_clouds: bool = True, merge_models: bool = False,
                      progress=None) -> Chunk:
