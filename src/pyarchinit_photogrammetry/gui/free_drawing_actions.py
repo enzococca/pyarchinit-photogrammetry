@@ -299,6 +299,9 @@ class FreeDrawingActions:
         hidden = {x["name"] for x in layers if not x.get("visible", True)}
         shown = [f for f in feats if f["layer"] not in hidden]
         self.model_view.set_free(shown, {f["id"]: free_drawings.colour_of(ch, f, layers) for f in shown})
+        schedule = getattr(self, "_schedule_elevation_drawings_3d", None)
+        if schedule is not None:  # the drawings of the elevations, beside them (gui.elevation_drawing_actions)
+            schedule()
 
     def _draw_free_2d(self, read=None) -> None:
         """Per user layer a layer :data:`LAYER_PREFIX` + its name on the 2D view: on the plan the drawings by their x,

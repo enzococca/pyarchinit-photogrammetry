@@ -482,23 +482,46 @@ appears on an elevation. Opening the plan or another elevation keeps the drawing
 come back with it, also when the project is opened again. *Modifica > Annulla* takes back an edit on the elevation
 where it was made.
 
+The drawing tools are the plan's own - draw, *Modifica i vertici*, reshape, delete, layers, attributes, snapping,
+undo and redo - working on the drawings of the elevation shown. In the **workspace** each elevation lists its
+drawings under it (*Unità stratigrafiche (n)*, *Quote (n)*, *Punti di misura (n)*, *Linee (n)*, *Pietre (n)*); a
+double click shows the elevation.
+
 * A **spot height** clicked on an elevation takes the height of the surface there (the world Z of the point of the
   model, read through the relief), and its position in plan; on the elevation it shows that height. A **measuring
   point** reads the products of the chunk at that same point of the surface, and a **marker** is placed there.
 * The tools that work on the plan - section trace, crop, area measure, DEM editing, photos of an area, the
   region, the colour chart - are refused while an elevation is shown, with a message in the status bar: open the
   orthophoto or the DEM.
-* The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*). Stones drawn
-  on elevations by versions before 1.7.0 were shared by all of them: they are left out when the project opens.
+* The **stones** found with SAM on an elevation are its own (each elevation has its layer *Pietre*).
+* **Projects made before 1.7.0** kept what was drawn on an elevation among the plan's drawings, in the elevation's
+  metres, and the stones of every elevation under one name. When such a project is opened, each of those drawings
+  that lies outside the plan (its photos, markers, orthophoto and DEM) and inside the extent of exactly one
+  elevation moves to that elevation (a spot height gets its point on the surface); one that fits several elevations,
+  and everything in a local survey whose plan and elevations share the same numbers, stays where it was. Nothing is
+  deleted, and the file changes only when the project is saved.
+* **Vista > Disegni dei prospetti nella vista 3D** (on by default) shows the drawings of every elevation on its plane
+  in the 3D view, in light blue (to look at: they are edited on the elevation). They are never drawn on the plan.
+* **Disegni da un altro prospetto...** (right click on an elevation) copies, or moves, the drawings of another
+  elevation of the chunk onto this one through their points on the survey: an elevation made again on another
+  plane takes the drawings of the old one. One step of *Modifica > Annulla*.
+* **Removing** an elevation (*Rimuovi*) removes its drawings with it; *Modifica > Annulla* brings both back. An
+  elevation built again (*Ricostruisci*) keeps its drawings; scaling, orienting or changing the reference of the
+  chunk moves the elevation and its drawings together.
 * **Export** (right click on the elevation) writes, beside orthophoto, relief, plane and profile, its drawings:
   `<name>_disegni.dxf` in the metres of the elevation (layers US, USM, QUOTE, PIETRE, PUNTI and PROFILO for a
   section), `<name>_disegni.svg` at scale over the orthophoto, `<name>_disegni.png`, and two GeoPackages:
   `<name>_disegni.gpkg`, the elevation **unfolded** - the drawings in (u, v), no reference system, with the table
   `frame` (the plane) and a column `geom_world` -, which QGIS and RustGIS load over `<name>_ortofoto.tif` like a plan
   of the façade; and `<name>_disegni_mondo.gpkg`, the drawings **in 3D on the survey** (PolygonZ, PointZ,
-  LineStringZ in the reference system of the chunk), which QGIS 3D and RustGIS place where they are.
+  LineStringZ in the reference system of the chunk), which QGIS 3D and RustGIS place where they are; and
+  `<name>_disegni_3d.dxf`, the same drawings as 3D polylines and points in the coordinates of the survey.
 * **QGIS > Apri il prospetto in QGIS** (with an elevation shown) opens a QGIS project of the elevation unfolded:
-  its orthophoto and its drawings, in its metres.
+  its orthophoto and its drawings, in its metres, one layer per kind, no reference system. What is drawn, moved,
+  changed or deleted there in those layers comes back with **QGIS > Rileggi il prospetto da QGIS** (save the layers
+  in QGIS first), as one step of *Modifica > Annulla*; what was changed here meanwhile and not in QGIS stays. Opening
+  the elevation in QGIS again reads those edits first, so they are never overwritten. This is a read on request, not
+  a live link.
 * **Salva in PyArchInit** with an elevation shown writes the US forms of its units (created or updated, the fields
   only: a drawing on an elevation has no geometry in plan, and the message says so), the spot heights in
   `pyarchinit_quote` at their position in plan, and registers its drawings (DXF and SVG) as media of the site,

@@ -489,7 +489,7 @@ class Context:
             pass
 
     # ------------------------------------------------------------------ units (since 1.5.0)
-    def add_units(self, polygons, tipo: str = "US", attributes=None, chunk=None) -> int:
+    def add_units(self, polygons, tipo: str = "US", attributes=None, chunk=None, elevation: str | None = None) -> int:
         """Since 1.5.0: stratigraphic units made by the plugin, as if drawn in the window: in the live
         QGIS link, in the US proposal (*Proponi US e rapporti* numbers those without a number), in the
         US forms of PyArchInit. ``polygons``: shapely (Multi)Polygons, or vertex lists ``(N, 2)`` in the
@@ -501,8 +501,10 @@ class Context:
         are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into
         ``chunk.meta["drawings"]``, where the window finds them when that chunk becomes the active one
         (the command line saves the project). While the window shows an elevation or a section, the polygons are in
-        its ``(u, v)`` metres and join its drawings. Only in the interface thread (an action, ``done``), as
-        :meth:`store_drawings`. Returns how many units were added."""
+        its ``(u, v)`` metres and join its drawings. Since 1.10.0, ``elevation``: the id of an elevation or a section
+        of the chunk the units go to, in its ``(u, v)`` metres, whatever the window shows (:meth:`elevation_drawings`
+        reads them back). Only in the interface thread (an action, ``done``), as :meth:`store_drawings`. Returns how
+        many units were added."""
         import threading
 
         from ..archaeo.stratigraphy import units_from_polygons
@@ -520,6 +522,26 @@ class Context:
         units = units_from_polygons(polygons, tipo, attributes, sito=str(doc.meta.get("sito") or "") or None)
         if not units:
             return 0
+        if elevation is not None:
+            from ..engine import elevation_drawings
+
+            if elevation_drawings.entry_of(chunk, elevation) is None:
+                raise ValueError(f"no elevation {elevation!r} in the chunk")
+            on_window = window is not None and chunk is getattr(window, "chunk", None)
+            if on_window and getattr(window, "drawings_frame", None) == elevation and hasattr(window, "add_units"):
+                window.add_units(units, source=self.name)
+                return len(units)
+            if on_window and hasattr(window, "_store_drawings"):
+                window._store_drawings()  # the elevation the window shows, kept as it is before another one changes
+            n = elevation_drawings.add_units(chunk, elevation, units)
+            if on_window and hasattr(window, "_dirty"):
+                window._dirty(True)  # a step of Modifica > Annulla
+                schedule = getattr(window, "_schedule_elevation_drawings_3d", None)
+                if schedule is not None:
+                    schedule()
+            else:
+                self.mark_modified()
+            return n
         if window is not None and chunk is getattr(window, "chunk", None) and hasattr(window, "add_units"):
             window.add_units(units, source=self.name)
             return len(units)
@@ -528,6 +550,56 @@ class Context:
         drawings.setdefault("quote", [])
         self.mark_modified()
         return len(units)
+
+    # ------------------------------------------------------------------ elevations (since 1.10.0)
+    def shown_elevation(self) -> str | None:
+        """Since 1.10.0: the id of the elevation or section the 2D view of the window shows (its drawings are in its
+        ``(u, v)`` metres), None on the plan and in the command line - the stable name of the window's
+        ``drawings_frame``."""
+        return getattr(self.window, "drawings_frame", None) if self.window is not None else None
+
+    def elevations(self, chunk=None) -> list[dict]:
+        """Since 1.10.0: the entries of the elevations and sections of ``chunk`` (the active one when None): ``id``,
+        ``name``, ``kind``, ``frame``, ``bounds``, ``v_is_height``, ``crs``... - copies."""
+        import copy
+
+        from ..engine import elevation_drawings
+
+        chunk = self._chunk_or_active(chunk)
+        return copy.deepcopy(elevation_drawings.entries(chunk)) if chunk is not None else []
+
+    def elevation_drawings(self, elevation: str | None = None, chunk=None, world: bool = False) -> dict:
+        """Since 1.10.0: the drawings kept with the elevation ``elevation`` (the one the window shows when None) of
+        ``chunk`` (the active one when None), as :func:`..engine.elevation_drawings.drawings` gives them - units,
+        spot heights, measuring points, lines and stones with shapely geometries in its ``(u, v)`` metres (``world``:
+        each also placed in 3D, in the system of the elevation); copies, read only. In the window those being drawn
+        are included (read in the interface thread). ``KeyError`` for an elevation the chunk does not have,
+        ``ValueError`` when none is given and none is shown."""
+        from ..engine import elevation_drawings
+
+        chunk = self._chunk_or_active(chunk)
+        if elevation is None:
+            elevation = self.shown_elevation()
+            if elevation is None:
+                raise ValueError("no elevation shown: give its id")
+        window = self.window
+        if window is not None and chunk is getattr(window, "chunk", None) and \
+                getattr(window, "drawings_frame", None) == elevation and hasattr(window, "_store_drawings"):
+            import threading
+
+            if threading.current_thread() is threading.main_thread():
+                window._store_drawings()  # those being drawn on it, into the chunk first
+        if chunk is None:
+            raise KeyError(elevation)
+        return elevation_drawings.drawings(chunk, elevation, world=world)
+
+    def _chunk_or_active(self, chunk):
+        if chunk is not None:
+            return chunk
+        window = self.window
+        doc = getattr(window, "doc", None) if window is not None else None
+        doc = doc if doc is not None else self.app.document
+        return getattr(doc, "chunk", None)
 
     # ------------------------------------------------------------------ orientation (since 1.7.2)
     def orient(self, chunk=None, **kw) -> dict:

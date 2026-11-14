@@ -288,6 +288,20 @@ class Document:
             from .groups import prune
 
             prune(self)
+        self._migrate_elevation_drawings()
+
+    def _migrate_elevation_drawings(self) -> None:
+        """The drawings made on elevations before 1.7.0 (among the plan's) moved to their elevations, in memory: the
+        file is written when the project is saved (:func:`..engine.elevation_drawings.migrate_legacy`)."""
+        if not any(c.meta.get("elevations") for c in self.chunks):
+            return
+        from ..engine.elevation_drawings import migrate_legacy
+
+        for c in self.chunks:
+            try:
+                migrate_legacy(c)
+            except Exception as exc:  # noqa: BLE001 - the project opens whatever the old drawings are
+                log.warning("Disegni vecchi dei prospetti di %s non spostati: %s", c.label, exc)
 
     def _settle_ties(self) -> None:
         """The ties between chunks as they are read now (labels of their markers, alignments of their ends), written

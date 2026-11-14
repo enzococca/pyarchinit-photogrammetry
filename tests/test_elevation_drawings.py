@@ -333,7 +333,8 @@ def test_old_project_without_frames_opens_unchanged(with_elevations, tmp_path, g
     w = open_window(doc)
     assert [u.us for u in w.units] == ["3"] and "elevation.tif" not in w.stones
     w._store_drawings()
-    assert ch.meta["drawings"] == before and "stones" not in ch.meta
+    # the stones of the elevations up to 1.6 that no single elevation takes: not drawn, kept as they were
+    assert ch.meta["drawings"] == before and ch.meta["stones"] == {"elevation.tif": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}
 
 
 def test_undo_on_an_elevation(with_elevations, tmp_path, gui):
@@ -599,3 +600,163 @@ def test_a_survey_crs_change_keeps_the_elevations_system():
                             products={})
     values, _ = _drawn(chunk, None, None, "EPSG:3004")
     assert [e["crs"] for e in values["elevations"]] == ["EPSG:3004", "EPSG:32633"]
+
+
+def _unit_feature(w, ppg_id):
+    lay = w.ortho_view.layers["Unita' stratigrafiche"]
+    return next(f for f in lay["features"] if f[2].get("ppg_id") == ppg_id)
+
+
+def test_plan_editing_tools_on_an_elevation(with_elevations, tmp_path, gui):
+    """The plan's tools on an elevation: vertices moved, a unit deleted, both undone and done again - on the
+    elevation's own drawings in its (u, v), the plan untouched."""
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    w._add_unit(_unit(ORIGIN[0] + 1.5, ORIGIN[1] + 1.5, us="9"))  # the plan's
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    w._add_unit(_unit(u, v, us="5"))
+    w._add_unit(_unit(u + 0.3, v, us="6"))
+    first, second = (x.attributes["ppg_id"] for x in w.frame_units)
+    item, _label, attrs = _unit_feature(w, first)
+    moved = [(u - 0.08, v - 0.06), (u + 0.05, v - 0.04), (u + 0.05, v + 0.04), (u - 0.05, v + 0.04)]
+    w._unit_vertices_edited("Unita' stratigrafiche", attrs, np.array(moved))
+    assert w.frame_units[0].geometry.exterior.coords[0] == pytest.approx(moved[0])
+    w.ortho_view.selection = [_unit_feature(w, second)[0]]
+    assert w.delete_selected(confirm=False) == 1
+    assert [x.us for x in w.frame_units] == ["5"] and [x.us for x in w.units] == ["9"]
+    w.undo()  # the deletion
+    assert [x.us for x in w.frame_units] == ["5", "6"]
+    w.undo()  # the vertices
+    assert w.frame_units[0].geometry.bounds == pytest.approx((u - 0.05, v - 0.04, u + 0.05, v + 0.04))
+    w.redo()
+    w.redo()
+    assert [x.us for x in w.frame_units] == ["5"]
+    assert w.frame_units[0].geometry.exterior.coords[0] == pytest.approx(moved[0])
+    w._load_raster()
+    assert [x.us for x in w.units] == ["9"]
+    stored = ch.meta["drawings"]["frames"][sid]["units"]
+    assert [x["us"] for x in stored] == ["5"]
+
+
+def test_elevation_drawings_in_the_3d_view_and_the_tree(with_elevations, tmp_path, gui):
+    open_window, app, _mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    w._add_unit(_unit(u, v))
+    w._draw_elevation_drawings_3d()
+    guests = w.model_view._guests
+    assert w.model_view.chunk is ch  # the 3D view holds the chunk: the unit on the plane of the section
+    assert len(guests) == 1 and guests[0][1] == "polygon"
+    want = [E.world_of(entry, x, y, 0.0) for x, y in [(u - 0.05, v - 0.04), (u + 0.05, v + 0.04)]]
+    assert all(np.min(np.linalg.norm(guests[0][2] - p, axis=1)) < 1e-6 for p in want)
+    w.a_elevation_drawings_3d.setChecked(False)
+    assert w.model_view._guests == []
+    w.a_elevation_drawings_3d.setChecked(True)
+    assert len(w.model_view._guests) == 1
+    # the workspace: a row of the drawings under the section, none under the wall
+    w._store_drawings()
+    w.workspace.populate(doc)
+    rows = []
+
+    def walk(item):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            data = child.data(0, 0x0100)
+            if data and data[0] == "elevation_drawings":
+                rows.append((data[2]["id"], child.text(0)))
+            walk(child)
+
+    walk(w.workspace.invisibleRootItem())
+    assert [r[0] for r in rows] == [sid] and "1" in rows[0][1]
+    app.processEvents()
+
+
+def test_an_elevation_removed_takes_its_drawings_and_undo_brings_them(with_elevations, tmp_path, gui):
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    w._add_unit(_unit(*_surface_cell(ch, entry)))
+    assert w.remove_workspace_items([("elevation", ch, entry)], confirm=False)
+    w._store_drawings()
+    assert sid not in ((ch.meta.get("drawings") or {}).get("frames") or {})
+    assert w.drawings_frame is None and not w.frame_units
+    w.undo()
+    assert [x["us"] for x in ch.meta["drawings"]["frames"][sid]["units"]] == ["5"]
+    w.show_elevation(_entry(ch, sid))
+    assert [x.us for x in w.frame_units] == ["5"]
+
+
+def test_edits_in_the_elevation_qgis_project_come_back(with_elevations, tmp_path, gui):
+    """QGIS > Rileggi il prospetto da QGIS: a unit moved and one drawn in the elevation's own QGIS project (unfolded,
+    (u, v)) come back to the elevation shown, one step of Modifica > Annulla."""
+    import sqlite3
+
+    from shapely.geometry import MultiPolygon, box
+
+    from pyarchinit_photogrammetry.engine import elevation_drawings as ED
+    from pyarchinit_photogrammetry.io import gpkg
+
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    entry = _entry(ch, sid)
+    w.show_elevation(entry)
+    u, v = _surface_cell(ch, entry)
+    w._add_unit(_unit(u, v))
+    pid = w.frame_units[0].attributes["ppg_id"]
+    w._store_drawings()
+    folder, path, stem = w._elevation_qgis_paths(entry)
+    E.export_drawings(ch, entry, folder, stem=stem, dxf_3d=False)
+    ED.write_snapshot(path)
+    con = sqlite3.connect(path)
+    con.execute("UPDATE unita SET geom = ? WHERE ppg_id = ?",
+                (gpkg.blob(MultiPolygon([box(u - 0.1, v - 0.1, u + 0.1, v + 0.1)]), -1), pid))
+    con.execute("INSERT INTO unita (geom, us, tipo, sito) VALUES (?, '12', 'US', 'Saggio')",
+                (gpkg.blob(MultiPolygon([box(u + 0.3, v, u + 0.4, v + 0.1)]), -1),))
+    con.commit()
+    con.close()
+    n = len(w.history.entries)
+    w.read_elevation_from_qgis()
+    assert sorted(x.us for x in w.frame_units) == ["12", "5"]
+    assert next(x for x in w.frame_units if x.us == "5").geometry.bounds == pytest.approx(
+        (u - 0.1, v - 0.1, u + 0.1, v + 0.1))
+    assert len(w.history.entries) == n + 1
+    w.undo()
+    assert [x.us for x in w.frame_units] == ["5"]
+    assert not w.units  # nothing on the plan
+
+
+def test_drawings_from_another_elevation(with_elevations, tmp_path, gui, monkeypatch):
+    open_window, _app, mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    a = _entry(ch, wid)
+    w.show_elevation(a)
+    u, v = _surface_cell(ch, a)
+    w._add_unit(_unit(u, v))
+    w._load_raster()
+    # an elevation made again on the same wall: the same plane, the drawings carried as they are
+    b = E.build_elevation(ch, E.frame_from_dict(a["frame"]), resolution=0.01, depth=(-0.08, 0.08), max_angle=89.0,
+                          name="Parete sud (rifatta)", bounds=tuple(a["bounds"]))
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *x, **k: {"source": wid, "move": False}))
+    w.transfer_elevation_drawings(b)
+    got = ch.meta["drawings"]["frames"][b["id"]]["units"]
+    assert len(got) == 1
+    from shapely import wkt
+
+    assert wkt.loads(got[0]["wkt"]).equals_exact(_unit(u, v).geometry, 1e-9)
+    w.undo()
+    assert b["id"] not in (ch.meta["drawings"].get("frames") or {})

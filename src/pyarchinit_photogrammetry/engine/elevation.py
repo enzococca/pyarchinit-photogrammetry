@@ -1009,6 +1009,9 @@ def remove_elevation(chunk: Chunk, eid: str) -> bool:
         return False
     shutil.rmtree(chunk.data_dir / "elevations" / eid, ignore_errors=True)
     chunk.meta["elevations"] = keep
+    from .elevation_drawings import take_frame
+
+    take_frame(chunk, eid)  # its drawings go with it
     return True
 
 
@@ -1493,7 +1496,7 @@ def _write_drawings_gpkg(chunk: Chunk, items: dict, entry: dict, path: Path) -> 
 
 
 def export_drawings(chunk: Chunk, entry: dict, folder, scale: int | None = None, stem: str | None = None,
-                    raster: bool = False) -> dict:
+                    raster: bool = False, dxf_3d: bool = True) -> dict:
     """The drawings made on the elevation ``entry`` (:func:`frame_drawings`) into ``folder``:
 
     * ``<stem>_disegni.dxf`` in ``(u, v)`` metres (layers ``US``, ``USM``, ``QUOTE``, ``PIETRE``, ``PUNTI``, ``LINEE``
@@ -1502,10 +1505,12 @@ def export_drawings(chunk: Chunk, entry: dict, folder, scale: int | None = None,
       and ``<stem>_disegni.png``, the same as a picture;
     * ``<stem>_disegni.gpkg``, the elevation unfolded (:func:`_write_drawings_gpkg`, ``(u, v)``, no CRS), with the
       orthophoto beside it as ``<stem>_ortofoto.tif`` when ``raster``;
-    * ``<stem>_disegni_mondo.gpkg``, the drawings in 3D on the survey (:func:`_write_drawings_world_gpkg`).
+    * ``<stem>_disegni_mondo.gpkg``, the drawings in 3D on the survey (:func:`_write_drawings_world_gpkg`);
+    * ``<stem>_disegni_3d.dxf``, the same in 3D as a DXF, in the coordinates of the survey
+      (:func:`.elevation_drawings.write_dxf_3d`), when ``dxf_3d``.
 
     ``stem``: the name of the elevation by default. Returns ``{"dxf", "svg", "png", "gpkg", "gpkg_world"}`` (and
-    ``"ortho"`` with ``raster``)."""
+    ``"dxf_3d"``, ``"ortho"`` with ``raster``)."""
     import shutil
 
     folder = Path(folder)
@@ -1517,6 +1522,10 @@ def export_drawings(chunk: Chunk, entry: dict, folder, scale: int | None = None,
            "png": _write_drawings_png(chunk, items, entry, folder / f"{stem}_disegni.png"),
            "gpkg": _write_drawings_gpkg(chunk, items, entry, folder / f"{stem}_disegni.gpkg"),
            "gpkg_world": _write_drawings_world_gpkg(chunk, entry, folder / f"{stem}_disegni_mondo.gpkg")}
+    if dxf_3d:
+        from .elevation_drawings import write_dxf_3d
+
+        out["dxf_3d"] = write_dxf_3d(chunk, entry, folder / f"{stem}_disegni_3d.dxf")
     ortho, _relief = elevation_paths(chunk, entry)
     if raster and ortho.exists():
         out["ortho"] = folder / f"{stem}_ortofoto.tif"

@@ -17,7 +17,7 @@ system of the chunk, stamped with the transform of that moment like a raster, :f
 versions: making it active again undoes the correction) and, only when asked, builds the DEM again from it as a new
 version of the DEM.
 
-Several water levels (since 1.9.1). A survey of several years or of several basins does not have one level and one
+Several water levels (since 1.10.0). A survey of several years or of several basins does not have one level and one
 index: each chunk keeps its own level and effective factor ``n`` (a chunk per year: :func:`apply_table` sets them from
 a table by chunk or by date of the survey, :func:`..archaeo.timeline.phase_date`), and within a chunk the water can be
 given as **basins** (:func:`set_basins`): each a horizontal level or a plane fitted to points picked on the shoreline
