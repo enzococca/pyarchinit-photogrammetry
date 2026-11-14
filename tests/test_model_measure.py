@@ -184,7 +184,10 @@ def test_area_of_a_flat_plate_and_its_model_surface(win, qapp, scene):
     assert v["area_plan"] == pytest.approx(known, rel=0.02), (v["area_plan"], known)
     assert v["area_plane"] == pytest.approx(known, rel=0.02)
     assert v["model_surface"] == pytest.approx(known, rel=0.05), (v["model_surface"], known)
-    assert v["perimeter_plan"] == pytest.approx(0.48, abs=0.01)
+    # against the outline under the clicked pixels, as the areas: whole pixels move it by some percent of 0.48 m
+    around = float(np.hypot(np.roll(x, -1) - x, np.roll(y, -1) - y).sum())
+    assert around == pytest.approx(0.48, rel=0.08)
+    assert v["perimeter_plan"] == pytest.approx(around, rel=0.02), (v["perimeter_plan"], around)
     assert "superficie del modello" in m["text"]
     assert ("info", m["text"]) in win.said  # as Misura area on the 2D view: in a box
 
