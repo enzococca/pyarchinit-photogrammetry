@@ -1306,7 +1306,10 @@ from, to, why - and `notes`), printed by `ppg web build` and written in the Log 
 **What plugins add** (since 1.10.0): a plugin registers `context.add_site_contributions(provider)` (see
 [Plugins](plugins.md#on-the-web-site-of-a-survey)); its layers are drawn on the plan with a legend and their
 attributes on a click, its tables and pages are tabs of the page. Their files are in `data/plugins/<plugin>/`,
-listed in `plugins` of the chunk in `site.json`.
+listed in `plugins` of the chunk in `site.json`. Registered `with_site=True`, the provider is also told the frame of
+the site (`io.site_plugins.Site`: `frame`, `crs`, `shift`, `elevations`, `xy`/`height`/`position`/`uv`), can put a
+layer on an elevation in its `(u, v)` (in `layers` of that section in `site.json`) and give values and pages in both
+languages.
 
 ```python
 path = doc.export_site("site", title="Saggio 1")           # local frame

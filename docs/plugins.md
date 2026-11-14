@@ -283,6 +283,59 @@ def site(self, chunk):
 
 The tests of the program carry a plugin of this kind (`tests/test_site_more.py`, class `Finds`).
 
+**Told the frame of the site, on the elevations, in two languages.** Registered with
+`context.add_site_contributions(provider, with_site=True)`, the provider is called as `provider(chunk, site)`.
+`site` is read only and says what the site itself publishes, nothing more:
+
+| | |
+|---|---|
+| `site.frame`, `site.local` | `"local"` or `"crs"`; `True` in the local frame |
+| `site.crs` | the reference system the site names, only in the `crs` frame (None in the local one) |
+| `site.shift` | `(dx, dy, dz)` the site takes off x, y and the heights (zeros in the `crs` frame) |
+| `site.languages` | the languages of the page |
+| `site.elevations` | one dict per elevation or section of the chunk on the site: `elevation` (its id in the chunk), `section` (its id on the site), `name`, `kind`, `heights` (`v` is the true height) |
+| `site.xy(x, y)`, `site.height(z)`, `site.position(p)` | a point or a height of the chunk in the frame of the site |
+| `site.uv(elevation, u, v)` | a point of an elevation as the site shows it (`v` taken down as the heights when it is the true height) |
+
+Use them for the numbers a plugin writes itself in a table or a page - the heights above all - so that they agree
+with the plan, the DEM and the sections of the page and never tell the true place in a local site. Geometries are
+given in the coordinates of the chunk all the same: the site moves and checks them itself.
+
+- A `"layer"` with `"elevation": <id of an elevation or section of the chunk>` goes on that elevation in the tab
+  *Sezioni e prospetti*, its features in the `(u, v)` metres of the elevation (`v` the true height when the elevation
+  keeps them, as `chunk.meta["elevations"]` and the drawings of the elevation): a tick, its legend and its attributes
+  on a click as on the plan. The same `id` can go on several elevations, one contribution each. The site leaves out
+  a layer on an elevation it does not publish, and a layer with a feature off the elevation (world coordinates given
+  for `(u, v)` would go out as they are); both said in the notes.
+- A value - of an attribute, of a cell, a `label` - can be `{"it": ..., "en": ...}`, as a title: the page shows the
+  one of its language, the other when only one is given. A legend matches a value in two languages by either text.
+- The `html` of a page can be `{"it": ..., "en": ...}`: a page per language.
+
+A provider of the first form (one argument) works as before. A plugin that wants the second form and still runs on
+older programs looks for it:
+
+```python
+def activate(self, context):
+    hook = getattr(context, "site_hook", 1 if hasattr(context, "add_site_contributions") else 0)
+    if hook >= 2:
+        context.add_site_contributions(self.site_with_frame, with_site=True)
+    elif hook == 1:
+        context.add_site_contributions(self.site)  # the plan only, values in one language
+
+def site_with_frame(self, chunk, site):
+    out = []
+    for e in site.elevations:
+        out.append({"kind": "layer", "id": "decay", "elevation": e["elevation"], "title": {"it": "Degrado", "en": "Decay"},
+                    "features": decay_areas_in_uv(chunk, e["elevation"]),  # (u, v) of the elevation
+                    "legend": {"field": "term", "items": [{"value": "Esfoliazione", "colour": "#aa00ff",
+                                                            "title": {"it": "Esfoliazione", "en": "Exfoliation"}}]}})
+    out.append({"kind": "table", "id": "heights", "title": {"it": "Quote", "en": "Heights"},
+                "rows": [{"term": {"it": "Esfoliazione", "en": "Exfoliation"}, "top": site.height(z)} for z in tops(chunk)]})
+    return out
+```
+
+The tests carry one of this form too (`tests/test_site_more.py`, class `OnElevation`).
+
 ### Compatibility
 
 `Plugin.api` is the plugin API the plugin was written for (`pyarchinit_photogrammetry.plugins.API_VERSION`,

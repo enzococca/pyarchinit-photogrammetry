@@ -285,6 +285,61 @@ def site(self, chunk):
 
 I test del programma contengono un plugin di questo tipo (`tests/test_site_more.py`, classe `Finds`).
 
+**Il sistema del sito, i prospetti, due lingue.** Registrato con
+`context.add_site_contributions(provider, with_site=True)`, il provider viene chiamato come `provider(chunk, site)`.
+`site` è di sola lettura e dice quello che il sito stesso pubblica, niente di più:
+
+| | |
+|---|---|
+| `site.frame`, `site.local` | `"local"` o `"crs"`; `True` nel sistema locale |
+| `site.crs` | il sistema di riferimento che il sito nomina, solo nel sistema `crs` (None in quello locale) |
+| `site.shift` | `(dx, dy, dz)` che il sito toglie a x, y e alle quote (zeri nel sistema `crs`) |
+| `site.languages` | le lingue della pagina |
+| `site.elevations` | un dizionario per prospetto o sezione del chunk nel sito: `elevation` (il suo id nel chunk), `section` (il suo id nel sito), `name`, `kind`, `heights` (`v` è la quota vera) |
+| `site.xy(x, y)`, `site.height(z)`, `site.position(p)` | un punto o una quota del chunk nel sistema del sito |
+| `site.uv(elevation, u, v)` | un punto di un prospetto come lo mostra il sito (`v` abbassata come le quote quando è la quota vera) |
+
+Servono per i numeri che il plugin scrive da sé in una tabella o in una pagina - le quote prima di tutto - perché
+tornino con la pianta, il DEM e le sezioni della pagina e non dicano mai il luogo vero in un sito locale. Le geometrie
+si danno comunque nelle coordinate del chunk: il sito le sposta e le controlla da sé.
+
+- Un `"layer"` con `"elevation": <id di un prospetto o di una sezione del chunk>` va su quel prospetto nella scheda
+  *Sezioni e prospetti*, le sue feature nei metri `(u, v)` del prospetto (`v` la quota vera quando il prospetto la
+  tiene, come `chunk.meta["elevations"]` e i disegni del prospetto): una spunta, la sua legenda e i suoi attributi a un
+  clic come in pianta. Lo stesso `id` può andare su più prospetti, un contributo per ciascuno. Il sito lascia fuori un
+  livello su un prospetto che non pubblica, e un livello con una feature fuori dal prospetto (coordinate del mondo
+  date come `(u, v)` uscirebbero così come sono); tutti e due detti nelle note.
+- Un valore - di un attributo, di una cella, una `label` - può essere `{"it": ..., "en": ...}`, come un titolo: la
+  pagina mostra quello della sua lingua, l'altro quando ce n'è uno solo. Una legenda riconosce un valore in due
+  lingue da tutti e due i testi.
+- L'`html` di una pagina può essere `{"it": ..., "en": ...}`: una pagina per lingua.
+
+Un provider della prima forma (un argomento) funziona come prima. Un plugin che vuole la seconda forma e gira anche
+sui programmi più vecchi la cerca:
+
+```python
+def activate(self, context):
+    hook = getattr(context, "site_hook", 1 if hasattr(context, "add_site_contributions") else 0)
+    if hook >= 2:
+        context.add_site_contributions(self.sito_con_sistema, with_site=True)
+    elif hook == 1:
+        context.add_site_contributions(self.sito)  # solo la pianta, valori in una lingua
+
+def sito_con_sistema(self, chunk, site):
+    out = []
+    for e in site.elevations:
+        out.append({"kind": "layer", "id": "degrado", "elevation": e["elevation"], "title": {"it": "Degrado", "en": "Decay"},
+                    "features": aree_in_uv(chunk, e["elevation"]),  # (u, v) del prospetto
+                    "legend": {"field": "termine", "items": [{"value": "Esfoliazione", "colour": "#aa00ff",
+                                                               "title": {"it": "Esfoliazione", "en": "Exfoliation"}}]}})
+    out.append({"kind": "table", "id": "quote", "title": {"it": "Quote", "en": "Heights"},
+                "rows": [{"termine": {"it": "Esfoliazione", "en": "Exfoliation"}, "sommita": site.height(z)}
+                         for z in sommita(chunk)]})
+    return out
+```
+
+Anche di questa forma i test ne contengono uno (`tests/test_site_more.py`, classe `OnElevation`).
+
 ### Compatibilità
 
 `Plugin.api` è l'API dei plugin per cui il plugin è stato scritto (`pyarchinit_photogrammetry.plugins.API_VERSION`,

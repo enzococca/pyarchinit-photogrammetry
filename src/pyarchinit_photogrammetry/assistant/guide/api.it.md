@@ -1342,7 +1342,10 @@ pannello Log.
 **Quello che aggiungono i plugin** (dalla 1.10.0): un plugin registra `context.add_site_contributions(provider)` (vedi
 [Plugin](plugins.it.md#nel-sito-web-di-un-rilievo)); i suoi livelli sono disegnati in pianta con una legenda e i loro
 attributi a un clic, le sue tabelle e pagine sono schede della pagina. I loro file sono in `data/plugins/<plugin>/`,
-elencati in `plugins` del chunk in `site.json`.
+elencati in `plugins` del chunk in `site.json`. Registrato con `with_site=True`, il provider sa anche il sistema del
+sito (`io.site_plugins.Site`: `frame`, `crs`, `shift`, `elevations`, `xy`/`height`/`position`/`uv`), può mettere un
+livello su un prospetto nei suoi `(u, v)` (in `layers` di quella sezione in `site.json`) e dare valori e pagine nelle
+due lingue.
 
 ```python
 path = doc.export_site("site", title="Saggio 1")           # sistema locale
