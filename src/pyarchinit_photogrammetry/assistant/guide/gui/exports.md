@@ -67,6 +67,14 @@ workbook too.
 
 The plugins add their own formats to this menu.
 
+**OBJ with groups**: exporting the model as OBJ asks for the **groups** - none, one per source chunk of a merged model
+(or per object of an imported OBJ), or one per connected piece (`part_001` the largest) - and for the **largest side
+of the texture pages** in the copies beside the file. Every group is written as `o`/`g` with a `usemtl` for each page
+it uses; the MTL has one material per page, in the order of the pages. On the command line: `ppg export --model m.obj
+--groups source|component|none [--labels labels.npy] [--max-texture 4096]` (`--labels`: a label per face, from a `.npy`
+or a text file with one label per line). Importing an OBJ reads its groups back (`g`, else `o`) and keeps them with the
+model; its texture pages follow the order of the MTL.
+
 ### Web site (Publish on the web)
 
 *File > Export > Web site (Publish on the web)...* opens the pane **Publish on the web** (also from *View > Panes*,

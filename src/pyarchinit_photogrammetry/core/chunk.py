@@ -840,7 +840,8 @@ class Chunk:
                           skip_unreadable: bool = False, workers: int | None = None,
                           max_angle: float = 70.0, blend_sigma: float = 8.0,
                           colour_correction: bool | None = None, ghosting: bool = False,
-                          fill_holes: bool = False) -> Path:
+                          fill_holes: bool = False, texture: bool | None = None,
+                          supersample: int | None = None) -> Path:
         """Orthomosaic (GeoTIFF RGBA), made tile by tile (any size). ``hide_classes``: where the
         visible surface belongs to these classes of the dense cloud the orthomosaic is
         transparent. Photos that cannot be read stop the step unless ``skip_unreadable``.
@@ -849,14 +850,17 @@ class Chunk:
         ``mosaic`` (seamless), ``disabled`` or ``average``; ``colour_correction``: gains of the
         photos and vignetting (None = the one measured in the chunk, see :meth:`calibrate_colours`);
         ``ghosting``: people and vehicles seen by a few photos left out; ``fill_holes``: small holes
-        no photo sees filled from their edges."""
+        no photo sees filled from their edges. ``texture``: from the texture of the model instead of the photos
+        (None: when the chunk has no aligned photo - an imported or merged model; ``supersample`` rays per cell
+        side there), see :mod:`engine.texture_ortho`."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
                                        hide_classes=hide_classes, progress=as_progress(progress),
                                        skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle,
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
-                                       ghosting=ghosting, fill_holes=fill_holes)
+                                       ghosting=ghosting, fill_holes=fill_holes, texture=texture,
+                                       supersample=supersample)
 
     def provenance(self, product: str, path: str | os.PathLike | None = None, operator: str | None = None) -> dict:
         """How ``product`` was made, as W3C PROV in JSON-LD (:mod:`core.paradata`); ``path``: a copy
@@ -1071,10 +1075,14 @@ class Chunk:
                          as_version=as_version, name=name, cap=cap, progress=as_progress(progress))
 
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
-                     zmax: float | None = None) -> Path:
+                     zmax: float | None = None, groups: str = "none", labels=None,
+                     max_texture: int | None = None) -> Path:
         """The model in world coordinates (OBJ with the texture when built, PLY with colours and
         confidence, GLB with the texture around its centre, see :func:`io.web.export_glb`);
-        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB)."""
+        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB). OBJ: ``groups`` "none",
+        "source" (the groups kept with the model: source chunks of a merged model, objects of an
+        imported OBJ), "component" (connected pieces), or ``labels`` (a label per face); ``max_texture``:
+        pages reduced to this side (pixels) in the copies. See :func:`io.exports.export_mesh`."""
         if str(path).lower().endswith(".glb"):
             if region is not None or zmin is not None or zmax is not None:
                 raise ValueError("GLB: export the whole model (crop it in the project first)")
@@ -1083,7 +1091,8 @@ class Chunk:
             return export_glb(self, path)
         from ..io import exports
 
-        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
+        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax, groups=groups, labels=labels,
+                                    max_texture=max_texture)
 
     def export_3dtiles(self, folder: str | os.PathLike, max_faces: int = 150_000,
                        progress: ProgressCallback | None = None, *, origin=None,

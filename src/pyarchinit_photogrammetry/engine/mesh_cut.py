@@ -151,8 +151,14 @@ def clip(mesh, point, normal, keep: str = "above", cap: bool = False):
         if page is not None:
             page = np.asarray(page)
             out_page = np.concatenate([page[whole], page[one], page[two], page[two]]).astype(np.int32)
+    groups = getattr(mesh, "groups", None)
+    out_groups = None
+    if groups is not None and len(groups) == len(faces):
+        groups = np.asarray(groups, np.int32)
+        out_groups = np.concatenate([groups[whole], groups[one], groups[two], groups[two]]).astype(np.int32)
     all_vertices = np.concatenate([mesh.vertices, new_vertices]) if len(new_vertices) else mesh.vertices.copy()
-    out = MeshData(all_vertices, np.vstack(new_faces).astype(np.int64), out_tex, list(mesh.comments), out_page)
+    out = MeshData(all_vertices, np.vstack(new_faces).astype(np.int64), out_tex, list(mesh.comments), out_page,
+                   out_groups)
     f = out.faces
     real = (f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 2] != f[:, 0])  # a face touching the plane only
     out = out.subset_faces(real)  # unused vertices left out
@@ -226,7 +232,14 @@ def close_cut(mesh, point, inward):
             pages = np.zeros(len(xyz), np.int32)
             pages[f.ravel()] = np.repeat(np.asarray(mesh.texnumber, np.int32), 3)
             page = np.concatenate([np.asarray(mesh.texnumber, np.int32), pages[caps[:, 0]]]).astype(np.int32)
-    return MeshData(mesh.vertices, np.vstack([f, caps]), tex, list(mesh.comments), page)
+    groups = getattr(mesh, "groups", None)
+    if groups is not None and len(groups) == len(f):
+        owner = np.full(len(xyz), -1, np.int32)
+        owner[f.ravel()] = np.repeat(np.asarray(groups, np.int32), 3)
+        groups = np.concatenate([np.asarray(groups, np.int32), owner[caps[:, 0]]]).astype(np.int32)
+    else:
+        groups = None
+    return MeshData(mesh.vertices, np.vstack([f, caps]), tex, list(mesh.comments), page, groups)
 
 
 def _loops(start: np.ndarray, end: np.ndarray) -> list[np.ndarray]:
