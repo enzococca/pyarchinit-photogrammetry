@@ -243,8 +243,40 @@ def _textured(v, f, uv, page) -> list[dict]:
     return out
 
 
+def _thinned(world, faces, colors, uv, texnumber, target: int):
+    """The model reduced to about ``target`` faces (vertex clustering, :func:`.mesh_ply.cluster_decimate`), its
+    texture kept: every new face takes the page of the face of the model nearest to its centre, and every corner
+    the texture coordinates of its own point projected on that face (barycentric; outside the face where the
+    corner lies outside it: the texture goes on across the face)."""
+    from scipy.spatial import cKDTree
+
+    from .mesh_ply import cluster_decimate
+
+    v, f, c = cluster_decimate(world, lambda: iter([faces]), colors, target_faces=int(target))
+    if uv is None:
+        return v, f, c, None, None
+    uv = np.asarray(uv, np.float64).reshape(-1, 3, 2)
+    tri = world[faces]
+    near = cKDTree(tri.mean(axis=1)).query(v[f].mean(axis=1))[1]
+    a, b, cc = tri[near, 0], tri[near, 1], tri[near, 2]
+    e1, e2 = b - a, cc - a
+    d00, d01, d11 = (e1 * e1).sum(1), (e1 * e2).sum(1), (e2 * e2).sum(1)
+    den = d00 * d11 - d01 * d01
+    den = np.where(np.abs(den) < 1e-30, np.inf, den)
+    out = np.empty((len(f), 3, 2))
+    for k in range(3):
+        p = v[f[:, k]] - a
+        d20, d21 = (p * e1).sum(1), (p * e2).sum(1)
+        s = (d11 * d20 - d01 * d21) / den
+        t = (d00 * d21 - d01 * d20) / den
+        w = np.column_stack([1 - s - t, s, t])
+        out[:, k] = (w[:, :, None] * uv[near]).sum(1)
+    page = None if texnumber is None else np.asarray(texnumber)[near]
+    return v, f, c, np.clip(out, 0.0, 1.0), page
+
+
 def export_3dtiles(chunk, folder: str | os.PathLike, max_faces: int = 150_000, progress=None, *,
-                   origin=None, texture_size: int | None = None) -> Path:
+                   origin=None, texture_size: int | None = None, max_total_faces: int | None = None) -> Path:
     """The model as 3D Tiles 1.1 in ``folder`` (``tileset.json`` and ``tiles/*.glb``, see the
     module docstring): tiles of at most ``max_faces`` faces. Returns the tileset.
 
@@ -254,7 +286,9 @@ def export_3dtiles(chunk, folder: str | os.PathLike, max_faces: int = 150_000, p
     ``folder/textures`` with at most this many pixels a side and named in ``extras.textures`` of the tileset;
     each leaf has the texture coordinates and the page in ``extras.page`` of its material, not the image
     (the viewer of a site loads every page once for all the tiles); the coarser levels and a model without a
-    texture keep the vertex colours. Tiles written so have no lights (``KHR_materials_unlit``)."""
+    texture keep the vertex colours. Tiles written so have no lights (``KHR_materials_unlit``).
+    ``max_total_faces``: a model with more faces is reduced to about that many first (:func:`_thinned`, the texture
+    kept): the model of a web site that would not fit its size."""
     import trimesh
 
     from ..core.progress import as_progress
@@ -262,6 +296,12 @@ def export_3dtiles(chunk, folder: str | os.PathLike, max_faces: int = 150_000, p
 
     progress = as_progress(progress)
     world, faces, colors, uv, pages, texnumber = _world_mesh(chunk)
+    if max_total_faces and len(faces) > int(max_total_faces):
+        progress(0.02, f"3D Tiles: the model reduced to about {int(max_total_faces)} faces")
+        world, faces, colors, uv, texnumber = _thinned(world, faces, colors, uv if pages else None, texnumber,
+                                                       int(max_total_faces))
+        if uv is None:
+            pages = []
     folder = Path(folder)
     (folder / "tiles").mkdir(parents=True, exist_ok=True)
     textured = texture_size is not None and bool(pages) and uv is not None
