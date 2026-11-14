@@ -1912,6 +1912,7 @@ class ModelView(QWidget, LookThrough):
         self._filling = False
         self._free: list = []  # free drawings shown: (id, kind, (N, 3) world xyz, colour, selected)
         self._free_inner: dict = {}  # their internal coordinates by id, converted once
+        self._guests: list = []  # drawn after them, never picked: (id, kind, (N, 3) world xyz, colour, False)
         self._draw_mesh = None  # (key, centre, ray caster, median edge) of the model shown, kept between drawings
         # the keys of the models whose ray casters are being built in the background: one build per model file, also
         # across a switch of chunk and back (a big model is not read twice at once); a result no longer of the model
@@ -2058,6 +2059,7 @@ class ModelView(QWidget, LookThrough):
         self.stop_free_select()
         if chunk is not self.chunk:  # the drawings and the model of another chunk are not this one's
             self._free, self._free_inner, self._draw_mesh = [], {}, None
+            self._guests = []
             self._measure = None
             self._selected_id = None
             self.a_free_drape.setEnabled(False)
@@ -2840,7 +2842,17 @@ class ModelView(QWidget, LookThrough):
         if sd is None:
             return []
         off = np.asarray(sd.offset, np.float64)
-        return [(fid, kind, xyz - off, colour, sel) for fid, kind, xyz, colour, sel in self._free]
+        # the guests after the free drawings: what pairs the scene's drawings with self._free (zip) stops before them
+        return [(fid, kind, xyz - off, colour, sel) for fid, kind, xyz, colour, sel in self._free + self._guests]
+
+    def set_guests(self, features_world, colour: str = "#00c8ff") -> None:
+        """Drawings shown in the 3D view that are not free drawings - those kept with the elevations
+        (:func:`..engine.elevation_drawings.world_features`): records with ``id``, ``kind`` and ``xyz`` (world), in
+        ``colour`` (or their own ``colour``); drawn as the free drawings, never selected or edited here. ``[]``
+        takes them away."""
+        self._guests = [(str(rec["id"]), str(rec["kind"]), np.asarray(rec["xyz"], np.float64).reshape(-1, 3),
+                         rec.get("colour") or colour, False) for rec in features_world or []]
+        self._put_free()
 
     def _scene_drawing(self, sd):
         if sd is None or self._draw_kind is None or self.chunk is None:

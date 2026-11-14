@@ -408,6 +408,8 @@ class WorkspaceTree(QTreeWidget):
                         tip += "\n" + tr("Scala sulla parete: u = lunghezza lungo il muro")
                     it.setToolTip(0, tip)
                     el.addChild(it)
+                    for child in elevation_drawing_items(ch, e):  # the drawings kept with it, under it
+                        it.addChild(child)
                 el.setExpanded(True)
             ms = (ch.meta or {}).get("multispectral") or {}
             bands = list(ms.get("bands") or [])
@@ -3009,3 +3011,29 @@ def _label_style_dialog_class():
 
 LabelStyleDialog = _label_style_dialog_class()
 LayersPane.LabelStyleDialog = LabelStyleDialog
+
+
+# the drawings kept with an elevation, as rows under it in the workspace: (kind, label, icon)
+ELEVATION_DRAWING_ROWS = (("units", "Unità stratigrafiche ({0})", "us"), ("quote", "Quote ({0})", "point"),
+                          ("points", "Punti di misura ({0})", "probe"), ("lines", "Linee ({0})", "breakline"),
+                          ("stones", "Pietre ({0})", "sam"))
+
+
+def elevation_drawing_items(chunk, entry: dict) -> list:
+    """The rows of the drawings kept with the elevation ``entry`` (:mod:`..engine.elevation_drawings`), one per kind
+    drawn there with how many; a double click shows the elevation."""
+    from ..engine.elevation_drawings import counts
+
+    try:
+        n = counts(chunk, entry["id"])
+    except Exception:  # noqa: BLE001 - a broken record: the tree is shown all the same
+        return []
+    out = []
+    for kind, label, name in ELEVATION_DRAWING_ROWS:
+        if n.get(kind):
+            it = QTreeWidgetItem([tr(label, n[kind])])
+            it.setIcon(0, icon(name))
+            it.setData(0, Qt.ItemDataRole.UserRole, ("elevation_drawings", chunk, entry))
+            it.setToolTip(0, tr("Disegnati sul prospetto, nelle sue coordinate (u, v): doppio clic per vederlo"))
+            out.append(it)
+    return out

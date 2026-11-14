@@ -36,6 +36,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
                       ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
+from .elevation_drawing_actions import ElevationDrawingActions
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .model_measure_actions import ModelMeasureActions
 from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
@@ -497,7 +498,7 @@ class _Appended:
                                                               if not any(s is x for x in self.window.sections)])
 
 
-class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
+class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
     UPDATE_WINDOW_POLL_MS = 400  # a window of the update flow held back looks this often for the open one to close
@@ -1505,7 +1506,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self._act(m, tr("Carica poligoni US sull'ortofoto"), self.pyarchinit_load_units, icon_name="load")
         self._act(m, tr("Aggiorna pannello"), lambda: self.pa_pane.refresh(), icon_name="refresh")
         # ------------------------------------------------------------ QGIS
-        m = mb.addMenu("&QGIS")
+        m = qgis_menu = mb.addMenu("&QGIS")
         self.a_qgis_open = self._act(m, tr("Apri in QGIS (collegamento dal vivo)"), self.open_in_qgis,
                                      icon_name="view_ortho")
         self.a_qgis_live = QAction(tr("Collegamento dal vivo con QGIS (nei due sensi)"), self, checkable=True)
@@ -1558,6 +1559,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.a_show_background.toggled.connect(self._background_toggled)
         m.addAction(self.a_show_background)
         m.addAction(self.model_view.a_ortho)  # the projection of the 3D view (key O on the view)
+        self._build_elevation_drawing_actions(m, qgis_menu)
         tbmenu = m.addMenu(icon("trackball"), "Trackball")  # the sphere of rotation of the 3D view
         for a in self.model_view.trackball_actions.values():
             tbmenu.addAction(a)
@@ -9456,7 +9458,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             try:
                 export_drawings(self.chunk, entry, folder, stem=stem)
                 drawn = tr(" I disegni fatti sul prospetto in {0}_disegni: DXF, SVG in scala, PNG, GeoPackage nelle "
-                           "coordinate del prospetto e GeoPackage in 3D sul rilievo (_mondo).", stem)
+                           "coordinate del prospetto, GeoPackage in 3D sul rilievo (_mondo) e DXF in 3D nelle "
+                           "coordinate del rilievo (_3d).", stem)
             except Exception as exc:  # noqa: BLE001 - the products are written: say what failed
                 self._exc(tr("Disegni del prospetto non esportati"), exc)
         if write_profile_dxf(self.chunk, entry, Path(folder) / f"{stem}_profilo.dxf") is not None:
@@ -9786,7 +9789,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self._show_pane(self.left_tabs, self.thermal_pane)
         elif kind == "version":
             self.show_version(*payload)
-        elif kind == "elevation":
+        elif kind in ("elevation", "elevation_drawings"):
             self.show_elevation(payload)
         elif kind == "marker":
             cams = [chunk.camera(k) for k in payload.projections]
@@ -10768,6 +10771,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             ch.meta["stones"] = stones
         else:
             ch.meta.pop("stones", None)
+        if self.drawings_frame is not None and self._frame_entry() is None:
+            # the elevation shown left the chunk (removed: its drawings went with it, core.removal): nothing to keep
+            self.drawings_frame = None
+            self.frame_units, self.frame_quote, self.frame_points, self.frame_stones = [], [], [], {}
+            self.frame_lines = []
         if self.drawings_frame is not None:
             self._store_chunk_drawings(ch, self.frame_units, self.frame_quote, self.frame_points,
                                        frame=self.drawings_frame,
@@ -12318,6 +12326,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         reloading the raster; features only in the view (points) are kept unless in ``skip``.
         Layer visibility and order are preserved."""
         v = self.ortho_view
+        self._schedule_elevation_drawings_3d()  # the drawings of the elevations in the 3D view follow
         if v.tr is None:
             return
         with v.batch():
@@ -14325,6 +14334,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if q is None:
             self._warn("QGIS non trovato. Installalo da qgis.org (oppure indica il percorso con la variabile PPG_QGIS).")
             return
+        self._read_back_elevation(entry, quiet=True)  # what was changed there since the last time first: not lost
         self._store_drawings()
         ch = self.chunk
         stem = _safe_stem(entry["name"]) + "_" + entry["id"]
@@ -14332,8 +14342,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         project = folder / f"{stem}.qgs"
 
         def job(p):
+            from ..engine.elevation_drawings import write_snapshot
+
             p(0.1, "Disegni del prospetto")
-            files = export_drawings(ch, entry, folder, stem=stem, raster=True)
+            files = export_drawings(ch, entry, folder, stem=stem, raster=True, dxf_3d=False)
+            write_snapshot(files["gpkg"])  # what QGIS changes is told from it (QGIS > Rileggi il prospetto da QGIS)
             rasters = [{"name": entry["name"], "path": str(files["ortho"])}] if files.get("ortho") else []
             vectors = [{"name": tr(title), "path": str(files["gpkg"]), "table": table, "geometry": geometry,
                         "color": colour, "label": "us" if table == "unita" else ""}
@@ -16484,6 +16497,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         elif kind == "elevation":
             menu.addAction(icon("view"), tr("Mostra"), on(lambda: self.show_elevation(payload)))
             menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_elevation(payload)))
+            menu.addAction(icon("line"), tr("Disegni da un altro prospetto..."),
+                           on(lambda: self.transfer_elevation_drawings(payload, chunk)))
             remove(tr("Rimuovi"))
         if menu.actions():
             menu.exec(pos)
