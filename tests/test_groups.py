@@ -171,3 +171,18 @@ def test_group_unknowns_are_refused_without_a_group_or_a_chunk_of_its_own(scene)
     chunks["C"].crs = "LOCAL"
     with pytest.raises(ties.TieError, match="one block only in one system"):
         ties.solve(doc, {"A": "fixed", "B": "similarity", "C": ties.GROUP})
+
+
+def test_cli_takes_a_group_name_as_one_block(scene, tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, chunks, truth = _block_doc(scene)
+    doc.save(tmp_path / "p.ppg")
+    out = CliRunner().invoke(app, ["ties", "solve", str(tmp_path / "p.ppg"), "-u", "A=fixed,2025=similarity", "--yes"])
+    assert out.exit_code == 0, out.output
+    saved = ppg.Document.open(tmp_path / "p.ppg")
+    for label in "BC":
+        placed = next(c for c in saved.chunks if c.label == label).transform
+        np.testing.assert_allclose(placed, truth[label], atol=1e-6)
