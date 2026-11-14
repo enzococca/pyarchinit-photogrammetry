@@ -105,7 +105,29 @@ Un rilievo di più anni o di più bacini non ha un solo livello e un solo indice
   fattore sul chunk, o sul bacino di `--basin`.
 
 Senza bacini non cambia nulla: un livello e un n, come prima. Bacini e fattori si spostano con il chunk come il
-livello. Sono nella riga di comando e nell'API Python; la finestra sopra imposta ancora un livello per chunk.
+livello.
+
+*Strumenti > Acqua: livelli e bacini...* apre il pannello **Acqua: livelli e bacini** (resta aperto, si sposta e si
+stacca come gli altri pannelli; anche da *Vista > Pannelli*). Quattro passi, ognuno con il suo stato accanto al titolo
+(*da fare*, *fatto*, *facoltativo*, *in corso*):
+
+1. **Livelli per chunk o per data**: *Carica la tabella dei livelli...* legge il CSV (`chunk` o `date`, `level`,
+   `n`); la riga sotto dice livello e fattore del chunk attivo.
+2. **Bacini del chunk attivo**: la tabella li elenca (nome, livello - *(piano)* per un piano della riva -, n, dove).
+   *Nuovo dal livello* usa nome, livello e fattore scritti; *Nuovo dai punti della riva* chiede tre o più clic sulla
+   riva nella vista 2D (doppio clic o Invio per finire): le loro quote sul DEM danno il piano, e il pannello Log ne
+   dice l'inclinazione e lo scarto. Il bacino scelto nella tabella prende il poligono con *Disegna il poligono*, da un
+   layer di disegni liberi (*Poligono dal layer*) o nessuno (*Dappertutto*); *Imposta n e livello* e *Rimuovi il
+   bacino* lo cambiano. Un secondo bacino senza poligono chiede subito il suo poligono.
+3. **Fattore dai punti di controllo**: spunta i marker con il riferimento sott'acqua (triangolati attraverso l'acqua)
+   e/o carica un CSV di punti (`label,x,y,z` e, se c'è, `apparent`; altrimenti la quota apparente si legge sul DEM o
+   sulla nuvola, come scelto); scegli tutti i punti o quelli di un bacino, e se stimare anche il livello. *Stima il
+   fattore* riempie la tabella degli scarti (quota vera, apparente e corretta, scarto; i punti esclusi lo dicono);
+   *Applica il fattore* lo salva sul chunk o sul bacino.
+4. **Correzione della nuvola densa**: come nella finestra, in background, una nuova versione della nuvola (e del DEM
+   se chiesto).
+
+Ogni cambiamento di livelli, bacini e fattore è un passo di *Modifica > Annulla*.
 
 ## Modello unito
 
@@ -139,6 +161,9 @@ modello e prende la texture dove lo incontra; dove la texture è più fine della
 cella è, se non detta, la dimensione di un texel. Il prodotto è l'ortofoto del chunk come le altre (GeoTIFF RGBA nel
 CRS del chunk, versioni, esportazioni, misure). Anche i *prospetti* su un chunk così si colorano dalla texture.
 `ppg ortho --texture` la chiede anche su un chunk con le foto (`--photos` il contrario).
+
+Le patch scelgono le foto, quindi non valgono per un'ortofoto (o un prospetto) fatta dalla texture: la finestra lo
+dice invece di disegnarne una.
 
 L'ortofoto è fatta e scritta a tasselli (BigTIFF quando serve): la sua dimensione è limitata dal disco, non dalla
 memoria né dai 32.767 pixel di lato che fermano il `remap` di OpenCV.

@@ -101,7 +101,29 @@ A survey of several years or of several basins does not have one level and one i
   points at least). `--apply` stores the factor on the chunk, or on the basin of `--basin`.
 
 Without basins nothing changes: one level and one n, as before. Basins and factors move with the chunk like the
-level. These are on the command line and in the Python API; the window above still sets one level per chunk.
+level.
+
+*Tools > Water: levels and basins...* opens the pane **Water: levels and basins** (it stays open, movable and
+floatable like the other panes; also from *View > Panes*). Four steps, each with its state beside its title (*to do*,
+*done*, *optional*, *running*):
+
+1. **Levels per chunk or per date**: *Load the table of levels...* reads the CSV (`chunk` or `date`, `level`, `n`);
+   the line under it says the level and the factor of the active chunk.
+2. **Basins of the active chunk**: the table lists them (name, level - *(plane)* for a shoreline plane -, n, where).
+   *New from the level* uses the name, level and factor written; *New from shoreline points* asks for three or more
+   clicks on the shore in the 2D view (double click or Enter to end): their heights on the DEM give the plane, and the
+   Log pane says its tilt and residual. The basin chosen in the table gets its polygon with *Draw the polygon*, from a
+   layer of free drawings (*Polygon from the layer*) or none (*Everywhere*); *Set n and level* and *Remove the basin*
+   change it. A second basin without a polygon asks for its polygon at once.
+3. **Factor from control points**: tick the markers whose reference lies under the water (triangulated through it)
+   and/or load a CSV of points (`label,x,y,z` and optionally `apparent`; otherwise the apparent height is read on the
+   DEM or on the cloud, as chosen); choose all the points or those of one basin, and whether to estimate the level
+   too. *Estimate the factor* fills the table of residuals (true, apparent and corrected height, residual; the points
+   left out say so); *Apply the factor* stores it on the chunk or on the basin.
+4. **Correction of the dense cloud**: as in the window, in the background, a new version of the cloud (and of the DEM
+   when asked).
+
+Every change of the levels, basins and factor is one step of *Edit > Undo*.
 
 ## Merged model
 
@@ -131,6 +153,9 @@ texture where it meets it; where the texture is finer than the cell, several ray
 defaults to the size of a texel. The product is the orthophoto of the chunk like the others (GeoTIFF RGBA in the CRS of
 the chunk, versions, exports, measures). *Elevations* on such a chunk are painted from the texture too.
 `ppg ortho --texture` asks for it on a chunk that has photos as well (`--photos` the opposite).
+
+Patches choose photos, so they do not apply to an orthophoto (or an elevation) made from the texture: the window
+says so instead of drawing one.
 
 The orthophoto is made and written tile by tile (BigTIFF when needed): its size is limited by the disk, not by the
 memory nor by the 32,767 pixels of a side that stop OpenCV's `remap`.
