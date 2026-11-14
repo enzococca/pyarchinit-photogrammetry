@@ -5365,11 +5365,48 @@ web_app = typer.Typer(help="A survey as a web site: a folder with the orthophoto
 app.add_typer(web_app, name="web")
 
 
+def _site_pairs(values, option: str) -> dict:
+    """``CHUNK=VALUE`` options of ``ppg web build`` as a dict (the chunk by label or key)."""
+    out = {}
+    for text in values or []:
+        name, sep, value = str(text).rpartition("=")
+        if not sep or not name:
+            typer.echo(f"{option} {text!r}: write it as CHUNK=VALUE", err=True)
+            raise typer.Exit(1)
+        out[name.strip()] = value.strip()
+    return out
+
+
+def _site_chunks(doc, names) -> list | None:
+    """The chunks of ``--chunk``: a label or key of the project, or ``OTHER.ppg:LABEL`` of another project."""
+    if not names:
+        return None
+    out, others = [], {}
+    for name in names:
+        head, sep, label = str(name).rpartition(".ppg:")
+        if not sep:
+            out.append(name)
+            continue
+        path = Path(head + ".ppg")
+        if path not in others:
+            if not path.exists():
+                typer.echo(f"--chunk {name!r}: no project {path}", err=True)
+                raise typer.Exit(1)
+            others[path] = Document.open(path)
+        found = next((c for c in others[path].chunks if c.label == label or str(c.key) == label), None)
+        if found is None:
+            typer.echo(f"--chunk {name!r}: no chunk {label!r} in {path.name}", err=True)
+            raise typer.Exit(1)
+        out.append(found)
+    return out
+
+
 @web_app.command("build")
 def web_build(project: Path,
               folder: Path = typer.Argument(..., help="the folder of the site (new, empty, or a site built before)"),
               chunk: Optional[list[str]] = typer.Option(None, "--chunk", help="a chunk (label or key), repeatable; "
-                                                        "default: every chunk with something to show"),
+                                                        "OTHER.ppg:LABEL takes a chunk of another project (in the "
+                                                        "same frame); default: every chunk with something to show"),
               frame: str = typer.Option("local", "--frame", help="local: coordinates shifted to the centre of the "
                                         "survey, no reference system written (the place of the site stays out of the "
                                         "folder); crs: the real coordinates and their system"),
@@ -5379,22 +5416,50 @@ def web_build(project: Path,
                                                            "languages of the page, the first shown first "
                                                            "(default it, en)"),
               product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units, "
-                                                          "drawings or model, repeatable (default: all the chunk "
-                                                          "has)"),
+                                                          "drawings, model, cloud or sections, repeatable (default: "
+                                                          "all the chunk has but the cloud)"),
               quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto"),
               model_texture: int = typer.Option(4096, "--model-texture", help="largest side in pixels of a texture "
-                                                "page of the 3D model; 0: vertex colours alone")):
+                                                "page of the 3D model; 0: vertex colours alone"),
+              budget: float = typer.Option(500.0, "--budget", help="size of the whole site in MB: the model and "
+                                           "the cloud are thinned to keep to it; 0: no limit"),
+              cloud_points: int = typer.Option(3_000_000, "--cloud-points", help="points of the cloud at most"),
+              no_copc: bool = typer.Option(False, "--no-copc", help="the cloud without its COPC to download"),
+              date: Optional[list[str]] = typer.Option(None, "--date", help="CHUNK=YYYY-MM-DD, repeatable: the "
+                                                       "date of a survey; with dates the page shows one date at a "
+                                                       "time"),
+              label: Optional[list[str]] = typer.Option(None, "--label", help="CHUNK=TEXT, repeatable: the name of "
+                                                        "a chunk on the page"),
+              timeline: bool = typer.Option(False, "--timeline", help="one date at a time, the dates of the chunks "
+                                            "(set on them or of their photos) where --date gives none")):
     """Write the site of a project: site.json, data/ and the page (see ppg web serve to look at it)."""
     doc = Document.open(project)
+    dates, labels = _site_pairs(date, "--date"), _site_pairs(label, "--label")
+    chunks = _site_chunks(doc, chunk)
+
+    def by_chunk(pairs):  # a name of --date/--label that is the label of a chunk of another project
+        out = []
+        for name, value in pairs.items():
+            found = next((c for c in chunks or [] if not isinstance(c, str) and c.label == name), None)
+            out.append((found if found is not None else name, value))
+        return out
+
     try:
-        path = doc.export_site(folder, chunks=chunk or None, products=product or None, frame=frame, title=title,
+        path = doc.export_site(folder, chunks=chunks, products=product or None, frame=frame, title=title,
                                description=description, language=language or ("it", "en"), quality=quality,
-                               model_texture=model_texture or None, progress=print_progress)
+                               model_texture=model_texture or None, progress=print_progress,
+                               budget_mb=budget or None, cloud_points=cloud_points, cloud_copc=not no_copc,
+                               labels=by_chunk(labels) or None, dates=by_chunk(dates) or None,
+                               timeline=True if timeline or dates else None)
     except (ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None
+    from .io import site
+
     size = sum(f.stat().st_size for f in path.parent.rglob("*") if f.is_file())
     typer.echo(f"{path.parent}: {size / 1e6:.1f} MB, frame {frame}")
+    for note in site.build_notes(path):
+        typer.echo(f"  {note}")
     if frame == "crs":
         typer.echo("the site holds the real coordinates of the survey")
     typer.echo(f"look at it: ppg web serve {path.parent}")
