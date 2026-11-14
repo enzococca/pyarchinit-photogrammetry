@@ -27,6 +27,9 @@ face of a 360° photo names its photo.
 
 ## GNSS positions of the photos
 
+The terms (base, rover, fix, float, baseline, epoch, phase-centre offset, ellipsoidal height...) are those of the
+[GNSS glossary](../gnss-glossary.md).
+
 ![The GNSS pane: the positions of the photos, their PPK against a base, the system and the heights, the quality of the flight](../img/gui/pane-gnss.png)
 
 Every photo has a position, where it comes from and how good it is. The *GNSS* pane (*Tools > GNSS > GNSS pane*,
