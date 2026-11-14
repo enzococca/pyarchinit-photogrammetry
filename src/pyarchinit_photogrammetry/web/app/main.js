@@ -8,7 +8,7 @@
 // text coming from the data is written as text, never as markup.
 
 import {open} from './cog.js';
-import {WORDS, pick} from './i18n.js';
+import {WORDS, pick, isWords} from './i18n.js';
 
 const ol = window.ol;
 const $ = (id) => document.getElementById(id);
@@ -30,6 +30,12 @@ function word(key) {
 
 function title(text) {
   return pick(text, state.language);
+}
+
+// a value of the data as text: one given in both languages in the language of the page
+function text(value) {
+  if (isWords(value)) return title(value);
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
 function number(value, digits = 3) {
@@ -178,11 +184,14 @@ function vectorStyle(def) {
   const wide = def.id === 'sections';
   return (feature) => {
     const p = feature.getProperties();
-    const group = p[by] === undefined || p[by] === null ? undefined : String(p[by]);
+    const value = p[by];
+    // a value in two languages is in the group of either of its texts
+    const group = value === undefined || value === null ? undefined
+      : isWords(value) ? Object.values(value).map(String).find((x) => groups.has(x)) : String(value);
     if (group !== undefined && state.hidden.has(`${def.url}|${group}`)) return null;
     const known = groups.get(group);
     const colour = colourOf(p.colour, colourOf(known && known.colour, colourOf(def.colour, '#ffb000')));
-    const label = p.label === undefined || p.label === null ? '' : String(p.label);
+    const label = p.label === undefined || p.label === null ? '' : text(p.label);
     const kind = feature.getGeometry().getType();
     const key = `${colour}|${kind}|${label}`;
     if (!cache.has(key)) {
@@ -292,6 +301,20 @@ function sectionList(box) {
   const current = state.section;
   if (!current || !shown(current.chunk)) return;
   if (current.drawing) groupRows(box, current.section.drawing, current.drawing);
+  for (const extra of current.extra || []) { // the layers plugins put on this elevation
+    const row = el('label', null, 'layer');
+    row.dataset.layer = extra.def.id;
+    row.append(check(extra.def.visible !== false, (on) => {
+      extra.def.visible = on;
+      extra.layer.setVisible(on);
+    }));
+    const swatch = el('span', null, 'swatch');
+    swatch.style.background = colourOf(extra.def.colour, '#888');
+    row.append(swatch, el('span', title(extra.def.title)));
+    if (extra.def.count && !extra.def.groups) row.append(el('span', extra.def.count, 'count'));
+    box.append(row);
+    groupRows(box, extra.def, extra.layer);
+  }
   const tools = el('div', null, 'buttons');
   if (current.section.trace) {
     const toPlan = el('button', word('showOnPlan'));
@@ -379,10 +402,10 @@ function showInfo() {
   if (last.model && state.site.chunks.length > 1) box.append(el('p', `${word('model')}: ${last.model}`, 'note'));
   for (const {properties, fields} of last.features) {
     const {label, colour, kind, section, ...others} = properties; // of the drawing, not for reading
-    box.append(el('h3', label || others.layer || ''));
+    box.append(el('h3', (label ? text(label) : '') || others.layer || ''));
     const list = el('table');
     rows(list, Object.entries(others).filter(([, v]) => v !== null && v !== '')
-      .map(([k, v]) => [fieldName(k, fields), typeof v === 'object' ? JSON.stringify(v) : v]));
+      .map(([k, v]) => [fieldName(k, fields), text(v)]));
     box.append(list);
   }
 }
@@ -408,6 +431,9 @@ function showWords() {
   $('tab-sections').textContent = word('sections');
   for (const x of state.extras) {
     if (x.button) x.button.textContent = title(x.title);
+  }
+  for (const entry of state.entries) { // labels given in both languages: drawn again in this one
+    if (entry.layer instanceof ol.layer.Vector) entry.layer.changed();
   }
   $('language').textContent = word('language');
   const foot = $('foot');
@@ -438,7 +464,8 @@ function featuresAt(map, pixel, skip) {
   map.forEachFeatureAtPixel(pixel, (feature, layer) => {
     if (!layer || skip.includes(layer)) return;
     const {geometry, ...properties} = feature.getProperties();
-    const entry = state.entries.find((e) => e.layer === layer);
+    const extras = state.section && state.tab === 'sections' ? state.section.extra || [] : [];
+    const entry = state.entries.find((e) => e.layer === layer) || extras.find((e) => e.layer === layer);
     found.push({properties, fields: entry ? entry.def.fields : null, layer, def: entry ? entry.def : null});
   }, {hitTolerance: 5});
   return found;
@@ -604,6 +631,19 @@ async function openSection(item, keep = false) {
     item.drawing = await vectorLayer({url: sec.drawing.url, groups: sec.drawing.groups, id: 'section'}, projection);
     layers.push(item.drawing);
   }
+  item.extra = item.extra || [];
+  const kept = new Map(item.extra.map((x) => [x.def.id, x.def.visible]));
+  item.extra = [];
+  for (const def of sec.layers || []) { // what plugins put on it, in the same (u, v)
+    try {
+      if (kept.has(def.id)) def.visible = kept.get(def.id);
+      const layer = await vectorLayer(def, projection);
+      item.extra.push({def, layer});
+      layers.push(layer);
+    } catch (error) {
+      console.error(error);
+    }
+  }
   state.sectionSketch = sketchLayer();
   layers.push(state.sectionSketch);
   const pad = Math.max(ext[2] - ext[0], ext[3] - ext[1], 0.1);
@@ -667,8 +707,8 @@ async function showExtra(key) {
     const part = el('section', null, 'extra-part');
     part.append(el('h2', several ? `${title(entry.title)} · ${chunk.label}` : title(entry.title)));
     try {
-      if (entry.kind === 'table') await showTable(part, entry, title);
-      else await showPage(part, entry);
+      if (entry.kind === 'table') await showTable(part, entry, title, text);
+      else await showPage(part, {...entry, url: isWords(entry.url) ? title(entry.url) : entry.url});
     } catch (error) {
       console.error(error);
       part.append(el('p', `${word('failed')} (${error.message})`, 'failed'));

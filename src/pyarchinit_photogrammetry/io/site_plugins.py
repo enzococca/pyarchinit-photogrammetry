@@ -26,6 +26,22 @@ dict with a ``kind``:
     {"kind": "html", "id": "note", "title": "Note", "html": "<h3>...</h3><p>...</p>",
      "images": {"pianta.jpg": "/path/of/pianta.jpg"}}   # pictures the page shows: <img src="pianta.jpg">
 
+Since the second form of the hook (:data:`HOOK`, 2): a provider registered with ``with_site=True`` is called as
+``provider(chunk, site)``, ``site`` a :class:`Site` - the frame of the site being built (``frame``, ``crs``,
+``shift``), its languages, the elevations and sections it publishes and the helpers that put a point, a height or a
+``(u, v)`` into the frame of the site, for the numbers of a table or a page; and:
+
+* a ``"layer"`` with ``"elevation": <id of an elevation or section of the chunk>`` goes on that elevation in the tab
+  *Sezioni e prospetti*, its features in the ``(u, v)`` metres of the elevation (``v`` the true height when the
+  elevation keeps them): the site takes ``v`` down as it does with the drawings of the elevation, checks that the
+  features lie on the elevation and gives the layer a tick, its legend and its attributes on a click as on the plan;
+  the same ``id`` can go on several elevations, one contribution each;
+* a value - of an attribute, of a cell, a ``label`` - can be given in both languages, ``{"it": ..., "en": ...}`` as
+  a title: the page shows the one of its language, the other when only one is given (a legend matches either);
+* the ``html`` of a page can be ``{"it": ..., "en": ...}`` too.
+
+A provider of the first form (one argument) works as before.
+
 What goes out: ``data/plugins/<plugin>/`` (``data/<n>/plugins/<plugin>/`` with several chunks) holds ``<id>.geojson``,
 ``<id>.json`` or ``<id>.html`` and the pictures (``<id>-<n>.jpg``); ``site.json`` lists them in ``plugins`` of the
 chunk (a layer also among the ``layers`` of the chunk, drawn by the plan as the drawings of the program).
@@ -42,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -51,6 +68,9 @@ from xml.sax.saxutils import escape, quoteattr
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 KINDS = ("layer", "table", "html")
+HOOK = 2  # the form of the hook: 2 since providers can take the site (``with_site``) and put layers on elevations
+WORDS = ("it", "en")  # the languages of a value given in both
+DECIMALS = 4  # of the coordinates, as the drawings of the program
 IMAGE_SIDE = 1600
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 TAGS = {  # tag: attributes kept
@@ -67,13 +87,24 @@ DROP = {"script", "style", "iframe", "object", "embed", "template", "noscript", 
 _providers: list[tuple[str, Callable]] = []
 
 
-def register(provider: Callable, owner: str = "") -> tuple[str, Callable]:
+class _TakesSite:
+    """A provider of the second form: called with the chunk and the :class:`Site`."""
+
+    def __init__(self, provider: Callable):
+        self.provider = provider
+        self.__module__ = getattr(provider, "__module__", None) or __name__
+
+    def __call__(self, chunk, site=None):
+        return self.provider(chunk, site)
+
+
+def register(provider: Callable, owner: str = "", with_site: bool = False) -> tuple[str, Callable]:
     """``provider(chunk)`` -> a list of contributions, called for every chunk of every site built from now on;
-    ``owner``: the name of the plugin (the folder of its files on the site). Returns the entry, for
-    :func:`unregister`."""
+    ``owner``: the name of the plugin (the folder of its files on the site); ``with_site``: called as
+    ``provider(chunk, site)`` (:class:`Site`). Returns the entry, for :func:`unregister`."""
     owner = str(owner or getattr(provider, "__module__", "") or "plugin").lower()
     owner = re.sub(r"[^a-z0-9_-]+", "-", owner).strip("-") or "plugin"
-    entry = (owner, provider)
+    entry = (owner, _TakesSite(provider) if with_site else provider)
     _providers.append(entry)
     return entry
 
@@ -84,6 +115,76 @@ def unregister(entry) -> None:
 
 def providers() -> list[tuple[str, Callable]]:
     return list(_providers)
+
+
+# ------------------------------------------------------------------------------------------------ the frame
+class Site:
+    """What a provider of the second form is told of the site being built, read only: what the site itself says
+    (its frame, the reference system only in the ``crs`` frame, its languages, the elevations it publishes) and the
+    shift it takes off every coordinate, with the helpers that do it - for the numbers a plugin writes in a table or a
+    page, the heights above all, so that they agree with the plan and never tell the true place in a local frame.
+    Geometries are given in the coordinates of the chunk (or in the ``(u, v)`` of an elevation) all the same: the site
+    moves and checks them itself.
+
+    ``frame``: ``"local"`` or ``"crs"``; ``crs``: the reference system the site names (None in the local frame);
+    ``shift``: ``(dx, dy, dz)`` taken off x, y and the heights (zeros in the ``crs`` frame); ``local``: the frame is the
+    local one; ``languages``: of the page; ``elevations``: one dict per elevation or section of the chunk on the site,
+    ``{"elevation": its id in the chunk, "section": its id on the site, "name", "kind": "section"|"elevation",
+    "heights": v is the true height}``."""
+
+    __slots__ = ("_shift", "_frame", "_crs", "_languages", "_elevations")
+
+    def __init__(self, shift, frame: str = "local", crs: str | None = None, languages=WORDS, elevations=()):
+        object.__setattr__(self, "_shift", (float(shift.dx), float(shift.dy), float(shift.dz)))
+        object.__setattr__(self, "_frame", "crs" if frame == "crs" else "local")
+        object.__setattr__(self, "_crs", str(crs) if crs and frame == "crs" else None)
+        object.__setattr__(self, "_languages", tuple(languages or WORDS))
+        object.__setattr__(self, "_elevations", tuple(dict(e) for e in elevations))
+
+    def __setattr__(self, name, value):
+        raise AttributeError("the frame of a site is read only")
+
+    def __repr__(self) -> str:
+        return f"Site(frame={self._frame!r}, elevations={len(self._elevations)})"
+
+    frame = property(lambda self: self._frame)
+    crs = property(lambda self: self._crs)
+    shift = property(lambda self: self._shift)
+    local = property(lambda self: self._frame == "local")
+    languages = property(lambda self: self._languages)
+    elevations = property(lambda self: [dict(e) for e in self._elevations])
+
+    def xy(self, x, y) -> list[float]:
+        """A point of the plan (coordinates of the chunk) in the frame of the site."""
+        dx, dy, _ = self._shift
+        return [round(float(x) - dx, DECIMALS), round(float(y) - dy, DECIMALS)]
+
+    def height(self, z):
+        """A height (of the chunk) in the frame of the site: the heights of the plan and of the DEM of the page; None
+        for None or a value that is not a number."""
+        try:
+            z = float(z)
+        except (TypeError, ValueError):
+            return None
+        return round(z - self._shift[2], DECIMALS) if math.isfinite(z) else None
+
+    def position(self, p) -> list[float]:
+        """``(x, y[, z])`` in the frame of the site."""
+        z = self.height(p[2]) if len(p) > 2 else None
+        return self.xy(p[0], p[1]) + ([z] if z is not None else [])
+
+    def uv(self, elevation: str, u, v) -> list[float]:
+        """A point ``(u, v)`` of the elevation ``elevation`` (its id in the chunk) as the site shows it: ``v`` taken
+        down as the heights when it is the true height. ``KeyError`` for an elevation not on the site."""
+        e = self._elevation(elevation)
+        dv = self._shift[2] if e["heights"] else 0.0
+        return [round(float(u), DECIMALS), round(float(v) - dv, DECIMALS)]
+
+    def _elevation(self, elevation: str) -> dict:
+        for e in self._elevations:
+            if e["elevation"] == str(elevation):
+                return e
+        raise KeyError(elevation)
 
 
 # ------------------------------------------------------------------------------------------------ HTML
@@ -206,15 +307,23 @@ def _features(data) -> list[dict]:
     return list(data or [])
 
 
-def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str]) -> tuple[list[dict], list[dict], int]:
+def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], frame: str = "local", crs=None,
+          languages=WORDS, sections=()) -> tuple[list[dict], list[dict], int]:
     """The contributions of every registered plugin for ``chunk`` written under ``data/plugins``: the layers for the
     ``layers`` of the chunk in ``site.json``, the entries of its ``plugins`` (tables and pages; the layers too) and
-    the bytes written. ``notes``: where what was left out is said."""
+    the bytes written. ``notes``: where what was left out is said. ``frame``, ``crs``, ``languages``: of the site, for
+    the :class:`Site` of the providers of the second form; ``sections``: pairs ``(entry of the elevation in the chunk,
+    its record in site.json)`` of the elevations published - a layer on one of them goes among the ``layers`` of its
+    record."""
+    sections = [(e, r) for e, r in sections or ()]
+    site = Site(shift, frame, crs, languages,
+                [{"elevation": str(e.get("id")), "section": r["id"], "name": r.get("name", ""), "kind": r.get("kind"),
+                  "heights": bool(r.get("heights"))} for e, r in sections])
     layers, listed, size = [], [], 0
     seen = set()
     for owner, provider in providers():
         try:
-            given = provider(chunk) or []
+            given = (provider(chunk, site) if isinstance(provider, _TakesSite) else provider(chunk)) or []
         except Exception as exc:  # noqa: BLE001 - a plugin never stops the build
             log.exception("site: the plugin %s failed on %s", owner, chunk.label)
             notes.append(f"{chunk.label}: plugin {owner} failed ({exc}); left out")
@@ -224,23 +333,39 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str]) ->
         for item in given:
             try:
                 kind, cid = item.get("kind"), str(item.get("id") or "")
-                if kind not in KINDS or not NAME.match(cid) or (owner, cid) in seen:
+                on = item.get("elevation") if kind == "layer" else None
+                key = (owner, cid, None if on is None else str(on))
+                if kind not in KINDS or not NAME.match(cid) or key in seen:
                     raise ValueError(f"kind {kind!r}, id {cid!r}: kind one of {', '.join(KINDS)}, id lowercase "
-                                     "letters, digits, '-' and '_', once per plugin")
-                seen.add((owner, cid))
+                                     "letters, digits, '-' and '_', once per plugin (once per elevation for a "
+                                     "layer on elevations)")
+                target = None
+                if on is not None:
+                    target = next(((e, r) for e, r in sections if str(e.get("id")) == str(on)), None)
+                    if target is None:
+                        raise ValueError(f"layer {cid}: the elevation {scrub(str(on))!r} is not on the site")
+                seen.add(key)
                 folder = data / "plugins" / owner
                 folder.mkdir(parents=True, exist_ok=True)
                 url = f"{rel}/plugins/{owner}"
                 title = _title(item.get("title"), scrub, cid)
                 entry = {"plugin": owner, "kind": kind, "id": cid, "title": title}
                 if kind == "layer":
-                    entry.update(_layer(item, folder, url, shift, clean, scrub))
-                    layers.append({"id": f"plugin:{owner}:{cid}", "type": "vector", "url": entry["url"],
-                                   "title": title, "visible": bool(item.get("visible", True)),
-                                   "count": entry["count"], "colour": entry["colour"], "plugin": owner,
-                                   **({"groups": entry["groups"], "group_by": entry["group_by"]}
-                                      if entry.get("groups") else {}),
-                                   **({"fields": entry["fields"]} if entry.get("fields") else {})})
+                    if target is None:
+                        entry.update(_layer(item, folder, url, shift.position, cid, clean, scrub))
+                    else:
+                        entry.update(_elevation_layer(item, target, folder, url, shift, clean, scrub))
+                        entry["section"] = target[1]["id"]
+                    layer = {"id": f"plugin:{owner}:{cid}", "type": "vector", "url": entry["url"],
+                             "title": title, "visible": bool(item.get("visible", True)),
+                             "count": entry["count"], "colour": entry["colour"], "plugin": owner,
+                             **({"groups": entry["groups"], "group_by": entry["group_by"]}
+                                if entry.get("groups") else {}),
+                             **({"fields": entry["fields"]} if entry.get("fields") else {})}
+                    if target is None:
+                        layers.append(layer)
+                    else:
+                        target[1].setdefault("layers", []).append(layer)
                 elif kind == "table":
                     entry.update(_table(item, folder, url, clean, scrub))
                 else:
@@ -252,26 +377,48 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str]) ->
     return layers, listed, size
 
 
-def _move(c, shift):
+def _move(c, move):
     if c and isinstance(c[0], (int, float)):
-        return shift.position(c)
-    return [_move(x, shift) for x in c]
+        return move(c)
+    return [_move(x, move) for x in c]
 
 
-def _layer(item: dict, folder: Path, url: str, shift, clean, scrub) -> dict:
+def _words(value, scrub):
+    """A value given in both languages (a dict of ``it``/``en`` only) with its texts cleaned, None when it has no
+    text; any other value as it is."""
+    if isinstance(value, dict) and value and set(value) <= set(WORDS):
+        out = {k: scrub(str(v)) if isinstance(v, str) else v for k, v in value.items()
+               if isinstance(v, (str, int, float)) and not isinstance(v, bool) and v != ""}
+        return out or None
+    return value
+
+
+def _values(values: dict, clean, scrub) -> dict:
+    """The attributes of a feature or a row as the page shows them (``clean``), the values in two languages kept."""
+    out = clean(values or {})
+    return {k: w for k, v in out.items() if (w := _words(v, scrub)) is not None}
+
+
+def _texts(value) -> list[str]:
+    """The texts a legend matches a value with: both, for a value in two languages."""
+    if isinstance(value, dict):
+        return [str(v) for v in value.values()]
+    return [str(value)]
+
+
+def _layer(item: dict, folder: Path, url: str, move, name: str, clean, scrub) -> dict:
     feats = []
     for f in _features(item.get("features")):
         g = f.get("geometry") or {}
         if g.get("type") not in ("Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon"):
             continue
-        feats.append({"type": "Feature", "properties": clean(f.get("properties") or {}),
-                      "geometry": {"type": g["type"], "coordinates": _move(g["coordinates"], shift)}})
+        feats.append({"type": "Feature", "properties": _values(f.get("properties"), clean, scrub),
+                      "geometry": {"type": g["type"], "coordinates": _move(g["coordinates"], move)}})
     if not feats:
         raise ValueError(f"layer {item.get('id')}: no feature with a geometry")
-    cid = item["id"]
-    (folder / f"{cid}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
-                                                      ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    out = {"url": f"{url}/{cid}.geojson", "count": len(feats), "colour": _colour(item.get("colour"), "#7b3fa0")}
+    (folder / f"{name}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
+                                                       ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    out = {"url": f"{url}/{name}.geojson", "count": len(feats), "colour": _colour(item.get("colour"), "#7b3fa0")}
     legend = item.get("legend") or {}
     field = scrub(str(legend.get("field") or "")) if isinstance(legend, dict) else ""
     if field and legend.get("items"):
@@ -280,12 +427,33 @@ def _layer(item: dict, folder: Path, url: str, shift, clean, scrub) -> dict:
             value = scrub(str(x.get("value")))
             groups.append({"name": value, "title": _title(x.get("title"), scrub, value),
                            "colour": _colour(x.get("colour"), out["colour"]),
-                           "count": sum(str(f["properties"].get(field)) == value for f in feats)})
+                           "count": sum(value in _texts(f["properties"].get(field)) for f in feats)})
         out.update(groups=groups, group_by=field)
     fields = item.get("fields")
     if isinstance(fields, dict):
         out["fields"] = {scrub(str(k)): _title(v, scrub, str(k)) for k, v in fields.items()}
     return out
+
+
+def _elevation_layer(item: dict, target, folder: Path, url: str, shift, clean, scrub) -> dict:
+    """A layer on an elevation: its ``(u, v)`` checked against the elevation (a feature off it is a mistake - world
+    coordinates given for ``(u, v)`` would go out as they are - and leaves the whole layer out), ``v`` taken down
+    as the site does with the heights of the elevation."""
+    entry, record = target
+    dv = shift.dz if record.get("heights") else 0.0
+    u0, v0, u1, v1 = (float(b) for b in record["extent"])
+    v0, v1 = v0 + dv, v1 + dv  # the extent of the record is in the frame of the site
+    margin = max(u1 - u0, v1 - v0, 1.0)
+
+    def move(c):
+        u, v = float(c[0]), float(c[1])
+        if not (math.isfinite(u) and math.isfinite(v)) or not (u0 - margin <= u <= u1 + margin) \
+                or not (v0 - margin <= v <= v1 + margin):
+            raise ValueError(f"layer {item.get('id')}: a feature off the elevation {record.get('name')!r} "
+                             "(the coordinates of a layer on an elevation are its (u, v) metres)")
+        return [round(u, DECIMALS), round(v - dv, DECIMALS)]
+
+    return _layer(item, folder, url, move, f"{item['id']}.s{record['id']}", clean, scrub)
 
 
 def _table(item: dict, folder: Path, url: str, clean, scrub) -> dict:
@@ -300,7 +468,7 @@ def _table(item: dict, folder: Path, url: str, clean, scrub) -> dict:
         if not isinstance(row, dict):
             continue
         picture = row.get(key)
-        out = clean({k: v for k, v in row.items() if k != key})
+        out = _values({k: v for k, v in row.items() if k != key}, clean, scrub)
         if picture:
             name = f"{cid}-{n}.jpg"
             if _picture(picture, folder / name):
@@ -323,16 +491,23 @@ def _page(item: dict, folder: Path, url: str, scrub) -> dict:
         name = f"{cid}-{n}.jpg"
         if _picture(src, folder / name):
             names[str(given)] = name
-    text = clean_html(str(item.get("html") or ""), names)
 
     def to_file(m):
         return f'src="{names[m.group(1)]}"' if m.group(1) in names else m.group(0)
 
-    text = re.sub(r'src="([^"]*)"', to_file, text)
-    # a path of the computer in the text: cut as every other text
-    text = re.sub(r">([^<]+)<", lambda m: ">" + scrub(m.group(1)) + "<", f">{text}<")[1:-1]
-    (folder / f"{cid}.html").write_text(text, encoding="utf-8")
-    return {"url": f"{url}/{cid}.html", "base": url}
+    def one(html, stem):
+        text = clean_html(str(html or ""), names)
+        text = re.sub(r'src="([^"]*)"', to_file, text)
+        # a path of the computer in the text: cut as every other text
+        text = re.sub(r">([^<]+)<", lambda m: ">" + scrub(m.group(1)) + "<", f">{text}<")[1:-1]
+        (folder / f"{stem}.html").write_text(text, encoding="utf-8")
+        return f"{url}/{stem}.html"
+
+    html = item.get("html")
+    if isinstance(html, dict) and html and set(html) <= set(WORDS):  # a page in each language
+        return {"url": {k: one(v, f"{cid}.{k}") for k, v in html.items() if v}, "base": url}
+    return {"url": one(html, cid), "base": url}
 
 
-__all__ = ["register", "unregister", "providers", "clean_html", "write", "KINDS", "TAGS", "IMAGE_SIDE"]
+__all__ = ["register", "unregister", "providers", "clean_html", "write", "Site", "KINDS", "TAGS", "IMAGE_SIDE",
+           "HOOK", "WORDS"]
