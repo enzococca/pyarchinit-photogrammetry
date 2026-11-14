@@ -1941,7 +1941,7 @@ was made in, `entry["crs"]`.
 The window shows them in the 3D view (*Vista > Disegni dei prospetti nella vista 3D*, `ModelView.set_guests`, read
 only), lists them under their elevation in the workspace (rows of kind `"elevation_drawings"`), reads the QGIS project
 of the elevation back (*QGIS > Rileggi il prospetto da QGIS*) and gives the drawings of one elevation to another
-(*Disegni da un altro prospetto...*). Plugins: `Context.shown_elevation()`, `Context.elevations(chunk=None)`,
+(*Disegni da un altro prospetto...*). Plugins: `Context.shown_elevation()`, `Context.show_elevation(id)`, `Context.elevations(chunk=None)`,
 `Context.elevation_drawings(elevation=None, chunk=None, world=False)` and `Context.add_units(..., elevation=id)`
 ([Plugins](plugins.md)).
 

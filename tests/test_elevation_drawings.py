@@ -760,3 +760,27 @@ def test_drawings_from_another_elevation(with_elevations, tmp_path, gui, monkeyp
     assert wkt.loads(got[0]["wkt"]).equals_exact(_unit(u, v).geometry, 1e-9)
     w.undo()
     assert b["id"] not in (ch.meta["drawings"].get("frames") or {})
+
+
+def test_a_plugin_shows_an_elevation_with_its_own_drawings(with_elevations, tmp_path, gui):
+    """``Context.show_elevation`` shows it as the window does; the orthophoto of an elevation given to
+    ``show_raster`` as a path is shown as that elevation too, never as a raster of the plan with the drawings of the
+    plan over it; ``show_raster`` without a path goes back to the plan."""
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    open_window, _app, _mw = gui
+    doc, sid, wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    ctx = Context("prova", tmp_path / "plugin")
+    ctx.window = w
+    assert ctx.shown_elevation() is None
+    assert ctx.show_elevation(sid) is True and ctx.shown_elevation() == sid == w.drawings_frame
+    with pytest.raises(KeyError):
+        ctx.show_elevation("nope")
+    assert ctx.shown_elevation() == sid  # the view stays as it was
+    assert ctx.show_raster() is True and ctx.shown_elevation() is None
+    ortho = E.elevation_paths(ch, _entry(ch, wid))[0]
+    assert ctx.show_raster("ortho", path=ortho) is True
+    assert ctx.shown_elevation() == wid  # the elevation, not a raster of the plan
+    assert ctx.show_raster("ortho", path=ch.orthomosaic_path) is True and ctx.shown_elevation() is None

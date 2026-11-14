@@ -1997,7 +1997,7 @@ sulla superficie (i loro `x`, `y` e quota). I piani sono nel sistema in cui il p
 La finestra li mostra nella vista 3D (*Vista > Disegni dei prospetti nella vista 3D*, `ModelView.set_guests`, in sola
 lettura), li elenca sotto il loro prospetto nell'area di lavoro (righe di tipo `"elevation_drawings"`), rilegge il
 progetto QGIS del prospetto (*QGIS > Rileggi il prospetto da QGIS*) e dà i disegni di un prospetto a un altro
-(*Disegni da un altro prospetto...*). Plugin: `Context.shown_elevation()`, `Context.elevations(chunk=None)`,
+(*Disegni da un altro prospetto...*). Plugin: `Context.shown_elevation()`, `Context.show_elevation(id)`, `Context.elevations(chunk=None)`,
 `Context.elevation_drawings(elevation=None, chunk=None, world=False)` e `Context.add_units(..., elevation=id)`
 ([Plugin](plugins.it.md)).
 

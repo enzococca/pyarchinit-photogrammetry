@@ -338,9 +338,33 @@ class Context:
         if path is None:
             window._show_raster(kind)
         else:
+            entry = self._elevation_of_path(ch, path) if kind == "ortho" else None
+            if entry is not None and hasattr(window, "show_elevation"):
+                # since 1.10.0: the orthophoto of an elevation is shown as the elevation, with its own drawings -
+                # as a raster of the plan the drawings of the plan would lie over it, in another frame
+                window.show_elevation(entry)
+                return getattr(window, "drawings_frame", None) == entry["id"]
             window._load_raster(kind, path)
             window.show_view(view)
         return True
+
+    @staticmethod
+    def _elevation_of_path(chunk, path) -> dict | None:
+        """The elevation or section of ``chunk`` whose orthophoto is the file ``path``, None when it is no one's."""
+        from ..engine import elevation as E
+        from ..engine import elevation_drawings
+
+        try:
+            wanted = Path(path).resolve()
+        except OSError:
+            return None
+        for entry in elevation_drawings.entries(chunk):
+            try:
+                if E.elevation_paths(chunk, entry)[0].resolve() == wanted:
+                    return entry
+            except (OSError, KeyError, TypeError, ValueError):
+                continue
+        return None
 
     def show_model(self, kind: str | None = None, chunk=None, path=None, title: str = "") -> bool:
         """Since 1.3.4: ``kind`` of ``chunk`` in the 3D view: "model", "model_textured", "point_cloud",
@@ -526,7 +550,7 @@ class Context:
             from ..engine import elevation_drawings
 
             if elevation_drawings.entry_of(chunk, elevation) is None:
-                raise ValueError(f"no elevation {elevation!r} in the chunk")
+                raise KeyError(elevation)  # as elevation_drawings(): the chunk has no such elevation
             on_window = window is not None and chunk is getattr(window, "chunk", None)
             if on_window and getattr(window, "drawings_frame", None) == elevation and hasattr(window, "add_units"):
                 window.add_units(units, source=self.name)
@@ -557,6 +581,26 @@ class Context:
         ``(u, v)`` metres), None on the plan and in the command line - the stable name of the window's
         ``drawings_frame``."""
         return getattr(self.window, "drawings_frame", None) if self.window is not None else None
+
+    def show_elevation(self, elevation: str, chunk=None) -> bool:
+        """Since 1.10.0: the elevation or section ``elevation`` (its id) of ``chunk`` in the 2D view, with its own
+        drawings, as the window shows it from the workspace; ``chunk``: the active one when None, else it becomes
+        the active one first (:meth:`activate_chunk`). What is drawn there meanwhile is kept with the elevation.
+        :meth:`show_raster` goes back to the plan. Returns whether it is shown: False when its files are missing
+        and in the command line; ``KeyError`` for an elevation the chunk does not have."""
+        from ..engine import elevation_drawings
+
+        window = self.window
+        if window is None or not hasattr(window, "show_elevation"):
+            return False
+        if chunk is not None:
+            self.activate_chunk(chunk)
+        ch = window.chunk
+        entry = elevation_drawings.entry_of(ch, elevation) if ch is not None else None
+        if entry is None:
+            raise KeyError(elevation)
+        window.show_elevation(entry)
+        return getattr(window, "drawings_frame", None) == entry["id"]
 
     def elevations(self, chunk=None) -> list[dict]:
         """Since 1.10.0: the entries of the elevations and sections of ``chunk`` (the active one when None): ``id``,

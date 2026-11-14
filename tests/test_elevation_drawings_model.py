@@ -318,7 +318,8 @@ def test_plugin_api_reads_and_adds_elevation_drawings(project, tmp_path):
     assert unit["us"] == "7" and unit["id"]
     assert np.abs(np.asarray(unit["world"].exterior.coords)[:, 2].max() - 100.1) < 1e-9
     assert not (ch.meta["drawings"].get("units"))  # not on the plan
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyError):  # as elevation_drawings()
         ctx.add_units([box(0, 0, 1, 1)], chunk=ch, elevation="nope")
+    assert ctx.show_elevation("w1") is False  # no window: nothing to show it in
     with pytest.raises(ValueError):
         ctx.elevation_drawings(chunk=ch)  # none shown, none given
