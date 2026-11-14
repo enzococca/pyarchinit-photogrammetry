@@ -1197,6 +1197,8 @@ and the page asks nothing outside its own folder (no CDN).
 | `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | the site of the chunks (objects, keys or labels; default every chunk with an orthophoto, a DEM, a model or drawings); returns the path of `site.json` |
 | `io.site.export_site(document, folder, ...)` | the same as a module function |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address`; `ranges=False` answers with whole files, as a host without range requests |
+| `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | the same server in a thread of its own: `.start()`, `.url`, `.port`, `.stop()` (the thread joined, the port freed); the window's preview |
+| `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | the site built last kept in `document.meta["web_site"]` (folder relative to the project when it lies there, options, time, size, the state of its products from `site_sources(document, chunks, products)` taken before the build); `site_stale` lists the products built again or changed since |
 | `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | command line: the site written |
 | `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise; `--no-ranges` to see the page as on a host without range requests |
 
@@ -1255,6 +1257,9 @@ doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
 ppg web build scavo.ppg site --title "Saggio 1"
 ppg web serve site --open
 ```
+
+From the window: *File > Export > Web site (Publish on the web)...*, the pane with the same choices, the build in the
+background, the preview and the site kept with the project (see [Exports](gui/exports.md#web-site-publish-on-the-web)).
 
 ## Measures
 

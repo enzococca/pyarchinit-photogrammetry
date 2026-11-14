@@ -485,6 +485,9 @@ class WorkspaceTree(QTreeWidget):
         if merged is not None:
             root.addChild(merged)
             merged.setExpanded(True)
+        web = self._web_site_item(document)
+        if web is not None:
+            root.addChild(web)
         root.setExpanded(True)
         if opened:  # filled again (something removed, a product built): the nodes as the user left them,
             for item in self._walk():  # the active chunk open
@@ -655,6 +658,37 @@ class WorkspaceTree(QTreeWidget):
             it.setToolTip(0, tip)
             node.addChild(it)
         return node
+
+    @staticmethod
+    def _web_site_item(document):
+        """"Sito web" at the level of the document when the project has built one (:func:`..io.site.record_site`):
+        its time and size, marked "da rifare" when a product it holds was built again or changed since. Double click:
+        the pane *Pubblica sul web*."""
+        from ..io import site
+
+        record = site.site_record(document)
+        if record is None:
+            return None
+        try:
+            stale = site.site_stale(document, record)
+        except Exception:  # a broken record: said as one to build again
+            stale = ["?"]
+        size = number(int(record.get("size") or 0) / 1e6, 1)
+        text = tr("Sito web  ({0} MB; {1})", size, site.site_folder(document, record).name)
+        if stale:
+            text += tr("  -  da rifare")
+        it = QTreeWidgetItem([text])
+        it.setIcon(0, icon("warning") if stale else icon("web"))
+        it.setData(0, Qt.ItemDataRole.UserRole, ("web_site", None, None))
+        tip = tr("Costruito il {0} in {1}", str(record.get("when") or "?").replace("T", " "),
+                 site.site_folder(document, record))
+        if record.get("frame") == "crs":
+            tip += "\n" + tr("Contiene le coordinate vere del rilievo")
+        if stale:
+            it.setForeground(0, QColor(PALETTE["red"]))
+            tip = tr("Da rifare: cambiati dopo il sito {0}", ", ".join(stale)) + "\n" + tip
+        it.setToolTip(0, tip + "\n" + tr("Doppio clic: Pubblica sul web"))
+        return it
 
     @staticmethod
     def _water_item(ch):

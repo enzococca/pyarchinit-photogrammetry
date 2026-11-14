@@ -11,7 +11,7 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PPG_RENDERER", "software")
 
-RIGHT = ("pane_pyarchinit", "pane_proxies", "pane_multispectral", "pane_thermal", "pane_gnss")
+RIGHT = ("pane_pyarchinit", "pane_proxies", "pane_multispectral", "pane_thermal", "pane_gnss", "pane_web")
 
 
 @pytest.fixture(scope="module")
