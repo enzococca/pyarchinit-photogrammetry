@@ -279,6 +279,10 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   same_frame: bool = typer.Option(False, help="with --like and two LOCAL chunks: they are in the same "
                                                   "frame (aligned, merged, oriented on the same markers); without it "
                                                   "an elevation of another local chunk is refused"),
+                  texture: Optional[bool] = typer.Option(None, "--texture/--photos",
+                                                         help="the orthophoto from the texture of the model, or from "
+                                                              "the photos (default: the texture when the chunk has no "
+                                                              "aligned photo)"),
                   name: Optional[str] = None, chunk: Optional[str] = None):
     """Orthophoto and relief of the model on a plane - an elevation or a section: on a trace, on the
     plane of markers with the axes chosen, or on the plane of a view - or on a cylinder (--circle: a
@@ -390,7 +394,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                   numbers(up, 3, "--up"))
         depth = None
     entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
-                              progress=print_progress, scale=scale)
+                              progress=print_progress, scale=scale, texture=texture)
     doc.save()
     ortho, relief = E.elevation_paths(ch, entry)
     w, h = entry["size"]
@@ -1511,13 +1515,21 @@ def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem
           skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
           max_angle: float = typer.Option(70.0, help="cells seen only from further than this from the vertical "
                                                      "(degrees) stay transparent"),
+          texture: Optional[bool] = typer.Option(None, "--texture/--photos",
+                                                 help="from the texture of the model, or from the photos (default: "
+                                                      "the texture when the chunk has no aligned photo)"),
+          supersample: Optional[int] = typer.Option(None, help="--texture: rays per cell side (default: as many as "
+                                                               "texels in a cell, at most 4)"),
           chunk: Optional[str] = None):
-    """Orthomosaic (GeoTIFF RGBA), any size: made tile by tile."""
+    """Orthomosaic (GeoTIFF RGBA), any size: made tile by tile. A chunk without aligned photos (an imported or merged
+    model) gets it from the texture of its model."""
     doc, ch = _open(project, chunk)
+    if texture is None and not ch.aligned_cameras:
+        typer.echo("note: the chunk has no aligned photos: the orthophoto is made from the texture of the model")
     p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
                              hide_classes=_classes(hide_classes), progress=print_progress,
                              skip_unreadable=skip_unreadable, max_angle=max_angle, colour_correction=colour,
-                             ghosting=ghosting, fill_holes=fill_holes)
+                             ghosting=ghosting, fill_holes=fill_holes, texture=texture, supersample=supersample)
     doc.save()
     typer.echo(str(p))
 

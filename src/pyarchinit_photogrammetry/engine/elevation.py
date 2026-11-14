@@ -754,7 +754,8 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
-                    bounds=None, kind: str = "elevation", scale: str = "cylinder", u_map=None) -> dict:
+                    bounds=None, kind: str = "elevation", scale: str = "cylinder", u_map=None,
+                    texture: bool | None = None) -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
@@ -771,7 +772,10 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     measured again on the relief - the grid in ``u`` of an earlier build kept (the rebuild of a stale elevation,
     the same grid across campaigns); ``scale`` is then "wall". ``scale`` ``keep``: the frame as it is - a cylinder
     with a ``u_map`` (the frame of an elevation scaled on the wall, :func:`frame_from_dict`) keeps that map, one
-    without stays on the cylinder (:func:`build_like` builds on the frame and grid of an existing elevation)."""
+    without stays on the cylinder (:func:`build_like` builds on the frame and grid of an existing elevation).
+
+    ``texture``: the orthophoto from the texture of the model (:mod:`.texture_ortho`): None chooses it when the chunk
+    has no aligned photo (an imported or merged model), True asks for it. The relief is the same either way."""
     if scale == "keep":
         if u_map is None and frame.kind == "cylinder" and getattr(frame, "u_map", None) is not None:
             u_map = frame.u_map
@@ -798,13 +802,19 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     from .ortho import _context, _run_tiles, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
 
+    from . import texture_ortho
+
     progress = as_progress(progress)
+    if blending == "texture":  # an elevation painted from the texture, built again
+        texture, blending = (True if texture is None else texture), "mosaic"
     if chunk.product_path("model") is None:
         raise RuntimeError("build the model first: an elevation is made on the model")
+    from_texture = texture_ortho.use_texture(chunk, texture)
+    textured = texture_ortho.TexturedModel(chunk) if from_texture else None
     progress(0.0, "Checking the photos")
-    cams, _bad = readable_cameras(chunk, True)
-    resolution = float(resolution or estimate_gsd(chunk))
-    correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
+    cams, _bad = ([], []) if from_texture else readable_cameras(chunk, True)
+    resolution = float(resolution or (textured.texel() if from_texture else estimate_gsd(chunk)))
+    correction = None if from_texture else correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
@@ -820,9 +830,12 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                          u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
     tile = 512 if frame.kind == "plane" else max(32, min(512, int(0.15 * frame.radius / resolution)))
-    ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, 8, workers, None, [], tile, lock,
-                   correction=correction, ghosting=ghosting, fill_holes=fill_holes)
-    ctx.frame = frame
+    if from_texture:
+        ctx = None
+    else:
+        ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, 8, workers, None, [], tile,
+                       lock, correction=correction, ghosting=ghosting, fill_holes=fill_holes)
+        ctx.frame = frame
     h, w = surf.shape
     eid = uuid.uuid4().hex[:8]
     folder = chunk.data_dir / "elevations" / eid
@@ -835,15 +848,21 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         profile.update(tiled=True, blockxsize=256, blockysize=256)
     ortho_path = folder / "elevation.tif"
     tiles = [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)]
-    progress(0.03, f"Elevation {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos")
-    with rasterio.open(ortho_path, "w", **profile) as dst:
-        dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
-        dst.update_tags(**tags)
-        _run_tiles(ctx, tiles, ctx.workers, progress, lambda r0, c0, block: dst.write(
-            block, window=Window(c0, r0, block.shape[2], block.shape[1])), start=0.03, span=0.82)
-        factors = [f for f in (2, 4, 8, 16, 32, 64) if min(h, w) // f >= 64]
-        if factors:
-            dst.build_overviews(factors, Resampling.average)
+    progress(0.03, f"Elevation {w}x{h} px at {resolution:.4g} m/px from "
+             + ("the texture of the model" if from_texture else f"{len(cams)} photos"))
+    if from_texture:
+        k = texture_ortho.supersample_for(resolution, textured.texel())
+        texture_ortho.write_tiles(ortho_path, textured, texture_ortho.frame_rays(chunk, surf), (h, w), transform,
+                                  None, k, progress, tile=max(tile, 256), tags=tags, start=0.03, span=0.82)
+    else:
+        with rasterio.open(ortho_path, "w", **profile) as dst:
+            dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+            dst.update_tags(**tags)
+            _run_tiles(ctx, tiles, ctx.workers, progress, lambda r0, c0, block: dst.write(
+                block, window=Window(c0, r0, block.shape[2], block.shape[1])), start=0.03, span=0.82)
+            factors = [f for f in (2, 4, 8, 16, 32, 64) if min(h, w) // f >= 64]
+            if factors:
+                dst.build_overviews(factors, Resampling.average)
     progress(0.86, "Relief of the surface (DEM of the elevation)")
     dem_path = folder / "relief.tif"
     dprof = {"driver": "GTiff", "height": h, "width": w, "count": 1, "dtype": "float32", "transform": transform,
@@ -867,8 +886,10 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
              "bounds": list(surf.bounds), "v_is_height": heights,
              "orthophoto": str(ortho_path.relative_to(chunk.data_dir)), "relief": str(dem_path.relative_to(chunk.data_dir)),
              "size": [w, h], "blending": blending, "colour_correction": correction is not None,
-             "max_angle": float(max_angle), "max_cameras": 8, "blend_sigma": ctx.blend_sigma,
+             "max_angle": float(max_angle), "max_cameras": 8, "blend_sigma": ctx.blend_sigma if ctx is not None else 0.0,
              "ghosting": bool(ghosting), "fill_holes": bool(fill_holes)}
+    if from_texture:
+        entry.update(blending="texture", source="texture", colour_correction=False)
     if getattr(frame, "tilt", None):
         entry["tilt"] = dict(frame.tilt)
     if scale == "wall":
