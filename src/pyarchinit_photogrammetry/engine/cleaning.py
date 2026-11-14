@@ -398,8 +398,10 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
             ok = (f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])
             from ..io.mesh_ply import MeshData
 
+            groups = mesh.groups if mesh.groups is not None and len(mesh.groups) == len(f) else None
             mesh = MeshData(mesh.vertices[first], f[ok], None if mesh.texcoords is None else mesh.texcoords[ok],
-                            mesh.comments, None if mesh.texnumber is None else mesh.texnumber[ok])
+                            mesh.comments, None if mesh.texnumber is None else mesh.texnumber[ok],
+                            None if groups is None else groups[ok])
     if fill_holes:
         progress(0.35, "Chiusura dei buchi")
         import open3d as o3d

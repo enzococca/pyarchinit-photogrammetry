@@ -62,6 +62,8 @@ class Mesh:
     extra: dict = field(default_factory=dict)
     info: dict = field(default_factory=dict)
     groups: np.ndarray | None = None  # per vertex: its closed object, -1 (or None) for the rest
+    face_groups: np.ndarray | None = None  # per face: its group (``g``/``o`` of an OBJ, facegroup of a PLY)
+    group_names: dict = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------------------------- reading
@@ -72,7 +74,8 @@ def read_mesh_file(path, progress: Progress | None = None) -> Mesh:
     if not path.exists():
         raise FileNotFoundError(path)
     progress(0.0, f"Reading {path.name}")
-    mesh = _read_ply(path) if path.suffix.lower() == ".ply" else _read_trimesh(path)
+    suffix = path.suffix.lower()
+    mesh = _read_ply(path) if suffix == ".ply" else _read_obj(path) if suffix == ".obj" else _read_trimesh(path)
     if not len(mesh.faces):
         raise ValueError(f"{path.name}: no triangles in the file")
     progress(0.7, f"{len(mesh.faces):,} faces")
@@ -114,7 +117,196 @@ def _read_ply(path: Path) -> Mesh:
         elif page is None:
             page = np.zeros(len(m.faces), np.int32)
     info = {"format": "ply", "objects": 1, "missing_textures": [p.name for p in missing]}
-    return Mesh(m.xyz, np.asarray(m.faces, np.int64), m.colors, tex, page, pages, extra, info)
+    out = Mesh(m.xyz, np.asarray(m.faces, np.int64), m.colors, tex, page, pages, extra, info)
+    if m.groups is not None and len(m.groups) == len(m.faces):
+        out.face_groups, out.group_names = np.asarray(m.groups, np.int32), m.group_names
+        info["groups"] = len(np.unique(m.groups))
+    return out
+
+
+# ------------------------------------------------------------------------------- OBJ files
+def _mtl_materials(obj: Path, libs: list[str]) -> dict:
+    """The materials of the MTL files ``libs`` (beside ``obj``): {name: {"image": Path or None, "kd": RGB 0-255}}
+    in the order of the files."""
+    out = {}
+    for lib in libs:
+        f = obj.parent / lib
+        if not f.exists():
+            continue
+        cur = None
+        for raw in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, rest = line.partition(" ")
+            rest = rest.strip()
+            if key == "newmtl":
+                cur = out.setdefault(rest, {"image": None, "kd": None})
+            elif cur is None:
+                continue
+            elif key == "Kd":
+                try:
+                    cur["kd"] = np.clip(np.asarray(rest.split()[:3], float) * 255.0, 0, 255).astype(np.uint8)
+                except ValueError:
+                    pass
+            elif key == "map_Kd" and rest:
+                parts = rest.split()
+                name = rest  # options (-s 1 1 1, -bm 1, ...) before the file name
+                i = 0
+                while i < len(parts) and parts[i].startswith("-"):
+                    i += 1
+                    while i < len(parts) and not parts[i].startswith("-") and _is_number(parts[i]):
+                        i += 1
+                name = " ".join(parts[i:]) or parts[-1]
+                cur["image"] = obj.parent / name.replace("\\", "/")
+    return out
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _read_obj(path: Path) -> Mesh:
+    """An OBJ read line by line: positions (and vertex colours ``v x y z r g b``), texture coordinates, faces
+    (polygons fanned into triangles, negative indices), the material of every face (its page: the texture of the
+    material, pages in the order of the MTL; materials without a texture on a page of plain colours) and the
+    group of every face (``g``, else ``o``)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    v, vc, vt = [], [], []
+    tris, tuv, mats, grps = [], [], [], []
+    libs: list[str] = []
+    mat_names: list[str] = []
+    mat_index: dict[str, int] = {}
+    group_index: dict[str, int] = {}
+    objects: dict[str, int] = {}
+    mat, grp, obj_grp = -1, -1, -1
+    has_g = "\ng " in text or text.startswith("g ")  # groups when the file has them, else the objects
+
+    def gid(name: str) -> int:
+        return group_index.setdefault(name, len(group_index))
+
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        key, _, rest = line.partition(" ")
+        if key == "v":
+            p = rest.split()
+            v.append(p[:3])
+            if len(p) >= 6:
+                vc.append(p[3:6])
+        elif key == "vt":
+            vt.append(rest.split()[:2])
+        elif key == "f":
+            corners = rest.split()
+            vi, ti = [], []
+            for c in corners:
+                parts = c.split("/")
+                a = int(parts[0])
+                vi.append(a - 1 if a > 0 else len(v) + a)
+                if len(parts) > 1 and parts[1]:
+                    b = int(parts[1])
+                    ti.append(b - 1 if b > 0 else len(vt) + b)
+                else:
+                    ti.append(-1)
+            for k in range(1, len(vi) - 1):
+                tris.append((vi[0], vi[k], vi[k + 1]))
+                tuv.append((ti[0], ti[k], ti[k + 1]))
+                mats.append(mat)
+                grps.append(grp if has_g else obj_grp)
+        elif key == "usemtl":
+            name = rest.strip()
+            if name not in mat_index:
+                mat_index[name] = len(mat_names)
+                mat_names.append(name)
+            mat = mat_index[name]
+        elif key == "mtllib":
+            libs.append(rest.strip())
+        elif key == "g":
+            grp = gid(rest.strip() or "default")
+        elif key == "o":
+            name = rest.strip() or "object"
+            objects.setdefault(name, len(objects))
+            if not has_g:
+                obj_grp = gid(name)
+    if not tris:
+        raise ValueError(f"{path.name}: no triangles in the file")
+    xyz = np.asarray(v, np.float64)
+    faces = np.asarray(tris, np.int64)
+    corner_t = np.asarray(tuv, np.int64)
+    mats = np.asarray(mats, np.int64)
+    colors = None
+    if vc and len(vc) == len(v):
+        c = np.asarray(vc, np.float64)
+        colors = np.clip(c * (255.0 if c.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
+    materials = _mtl_materials(path, libs)
+    # pages: the textured materials used, in the order of the MTL (then any other order of use)
+    order = [m for m in materials if m in mat_index] + [m for m in mat_names if m not in materials]
+    pages, page_of, missing = [], {}, []
+    uv = np.asarray(vt, np.float64) if vt else np.zeros((0, 2))
+    for name in order:
+        img = (materials.get(name) or {}).get("image")
+        if img is None:
+            continue
+        if not img.exists():
+            missing.append(img.name)
+            continue
+        if img not in pages:
+            pages.append(img)
+        page_of[mat_index[name]] = pages.index(img)
+    page = np.array([page_of.get(int(m), -1) for m in mats], np.int64) if len(mats) else np.zeros(0, np.int64)
+    page[(corner_t < 0).any(axis=1)] = -1  # a face without texture coordinates: plain
+    tex = texnumber = None
+    if pages:
+        tex = np.zeros((len(faces), 3, 2), np.float64)
+        ok = page >= 0
+        tex[ok] = uv[corner_t[ok]]
+        if (page < 0).any():  # faces without a texture: blocks of plain colour on a last page
+            plain = sorted({int(m) for m in mats[page < 0]})
+            side = 8
+            cols = int(np.ceil(np.sqrt(len(plain))))
+            rows = int(np.ceil(len(plain) / cols))
+            img = np.full((rows * side, cols * side, 3), 200, np.uint8)
+            for j, m in enumerate(plain):
+                r, c = divmod(j, cols)
+                name = mat_names[m] if m >= 0 else None
+                kd = (materials.get(name) or {}).get("kd") if name else None
+                sel = (page < 0) & (mats == m)
+                if kd is None and colors is not None:
+                    kd = colors[faces[sel].ravel()].mean(axis=0).astype(np.uint8)
+                kd = np.full(3, 200, np.uint8) if kd is None else kd
+                img[r * side:(r + 1) * side, c * side:(c + 1) * side] = np.asarray(kd[::-1], np.uint8)
+                tex[sel] = ((c * side + side / 2) / img.shape[1], 1.0 - (r * side + side / 2) / img.shape[0])
+            page[page < 0] = len(pages)
+            pages = pages + [img]
+        tex = tex.reshape(-1, 6).astype(np.float32)
+        texnumber = page.astype(np.int32) if len(pages) > 1 else None
+    elif colors is None and mat_names:  # materials without textures: the colour of each material
+        kds = [(materials.get(n) or {}).get("kd") for n in mat_names]
+        if any(k is not None for k in kds):
+            colors = np.full((len(xyz), 3), 200, np.uint8)
+            for m, kd in enumerate(kds):
+                if kd is not None:
+                    colors[faces[mats == m].ravel()] = kd
+    info = {"format": "obj", "objects": max(len(objects), 1), "missing_textures": missing}
+    out = Mesh(xyz, faces, colors, tex, texnumber, pages, {}, info)
+    if group_index and (np.asarray(grps) >= 0).any():
+        g = np.asarray(grps, np.int64)
+        names = {k: n for n, k in group_index.items()}
+        if (g < 0).any():  # faces before the first group
+            k = len(group_index)
+            names[k] = "default"
+            g[g < 0] = k
+        used = np.unique(g)
+        renum = np.full(int(g.max()) + 1, -1, np.int64)
+        renum[used] = np.arange(len(used))
+        out.face_groups = renum[g].astype(np.int32)
+        out.group_names = {int(renum[k]): names[int(k)] for k in used}
+        info["groups"] = len(used)
+    return out
 
 
 def _read_trimesh(path: Path) -> Mesh:
@@ -429,7 +621,8 @@ def import_model(chunk, path, frame: str = "world", offset=None, scale: float = 
               "pages": written["pages"], "colours": mesh.colors is not None, "objects": mesh.info.get("objects", 1),
               "missing_textures": mesh.info.get("missing_textures", []), "frame": frame, "up": up,
               "scale": float(scale), "offset": [float(v) for v in offset], "distance": distance,
-              "kept": kept["id"] if kept else None, "double": written["double"], "new_frame": empty}
+              "kept": kept["id"] if kept else None, "double": written["double"], "new_frame": empty,
+              "groups": int(mesh.info.get("groups", 0))}
     progress(1.0, f"Model imported: {len(mesh.faces):,} faces, {written['pages']} texture pages")
     return report
 
@@ -504,6 +697,8 @@ def _write_model(chunk, mesh: Mesh, internal: np.ndarray, progress: Progress) ->
         data.set_texture_files(names)
     elif names:
         data.set_texture_file(names[0])
+    if mesh.face_groups is not None and len(mesh.face_groups) == len(mesh.faces):
+        data.set_groups(mesh.face_groups, mesh.group_names)
     chunk._set_product("model", write_mesh(chunk.own_product_path("model"), data))
     if names:
         chunk._set_product("model_textured", data_dir / names[0])

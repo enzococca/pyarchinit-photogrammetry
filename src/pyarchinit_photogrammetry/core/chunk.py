@@ -1062,10 +1062,14 @@ class Chunk:
                          as_version=as_version, name=name, cap=cap, progress=as_progress(progress))
 
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
-                     zmax: float | None = None) -> Path:
+                     zmax: float | None = None, groups: str = "none", labels=None,
+                     max_texture: int | None = None) -> Path:
         """The model in world coordinates (OBJ with the texture when built, PLY with colours and
         confidence, GLB with the texture around its centre, see :func:`io.web.export_glb`);
-        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB)."""
+        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB). OBJ: ``groups`` "none",
+        "source" (the groups kept with the model: source chunks of a merged model, objects of an
+        imported OBJ), "component" (connected pieces), or ``labels`` (a label per face); ``max_texture``:
+        pages reduced to this side (pixels) in the copies. See :func:`io.exports.export_mesh`."""
         if str(path).lower().endswith(".glb"):
             if region is not None or zmin is not None or zmax is not None:
                 raise ValueError("GLB: export the whole model (crop it in the project first)")
@@ -1074,7 +1078,8 @@ class Chunk:
             return export_glb(self, path)
         from ..io import exports
 
-        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
+        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax, groups=groups, labels=labels,
+                                    max_texture=max_texture)
 
     def export_3dtiles(self, folder: str | os.PathLike, max_faces: int = 150_000,
                        progress: ProgressCallback | None = None, *, origin=None,
