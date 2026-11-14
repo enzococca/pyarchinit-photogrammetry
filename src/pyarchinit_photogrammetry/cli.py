@@ -5565,7 +5565,15 @@ def web_publish_cloudflare(
         typer.echo("\n".join(w.transcript[-12:]), err=True)
         typer.echo(f"not published: {exc}", err=True)
         raise typer.Exit(1) from None
-    typer.echo(f"published: {result.address}")
+    for note in result.unread:
+        typer.echo(f"warning: not read in the answer of wrangler: {note}", err=True)
+    for text in result.unread_output:  # whole and scrubbed: to send to the developers
+        typer.echo(text, err=True)
+    if result.address:
+        typer.echo(f"published: {result.address}")
+    else:
+        typer.echo("published; the address is shown in the Cloudflare dashboard (Workers & Pages) or by "
+                   "`wrangler pages project list` (it was not found in the answer of wrangler)")
     if result.data_address:
         typer.echo(f"data: {result.data_address} (bucket {result.bucket}: {result.sent} sent, {result.unchanged} "
                    f"unchanged, {result.removed} deleted)")

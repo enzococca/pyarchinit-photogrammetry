@@ -185,6 +185,7 @@ class WebPane(QWidget):
     check_requested = Signal()  # wrangler, the login and the plan of the publication
     publish_requested = Signal()
     cancel_requested = Signal()  # the publication running
+    address_typed = Signal(str)  # the address of the site typed by the user (wrangler did not say it)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -427,6 +428,7 @@ class WebPane(QWidget):
         self.published_address = QLineEdit()
         self.published_address.setReadOnly(True)
         self.published_address.setPlaceholderText(tr("L'indirizzo del sito pubblicato"))
+        self.published_address.editingFinished.connect(self._address_edited)
         cl.addWidget(self.published_address)
         step(3, "publish", tr("Pubblica"), body)
         lay.addStretch(1)
@@ -461,13 +463,20 @@ class WebPane(QWidget):
 
     def _open_published(self) -> None:
         pub = self.published()
-        if pub:
+        if pub and pub.get("address"):
             QDesktopServices.openUrl(QUrl(pub["address"]))
 
     def _copy_published(self) -> None:
         pub = self.published()
-        if pub:
+        if pub and pub.get("address"):
             QGuiApplication.clipboard().setText(pub["address"])
+
+    def _address_edited(self) -> None:
+        """The address typed where wrangler did not say it."""
+        pub = self.published()
+        text = self.published_address.text().strip()
+        if pub and not self.published_address.isReadOnly() and text and text != (pub.get("address") or ""):
+            self.address_typed.emit(text)
 
     def cf_options(self) -> dict:
         """The choices of the publication: project, where the data go, bucket, address of the data."""
@@ -768,7 +777,12 @@ class WebPane(QWidget):
         elif pub:
             stale = site_publish.stale_publication(self.document)
             state = "stale" if stale else "done"
-            text = tr("Pubblicato il {0} su {1}", when_text(pub.get("when")), pub.get("address"))
+            if pub.get("address"):
+                text = tr("Pubblicato il {0} su {1}", when_text(pub.get("when")), pub.get("address"))
+            else:
+                text = tr("Pubblicato il {0}; l'indirizzo non si è letto nella risposta di wrangler: lo trovi nella "
+                          "dashboard di Cloudflare (Workers & Pages) o con wrangler pages project list. Scrivilo qui "
+                          "sotto.", when_text(pub.get("when")))
             if pub.get("data_address"):
                 text += " " + tr("(dati su {0})", pub["data_address"])
             if stale:
@@ -790,9 +804,15 @@ class WebPane(QWidget):
         self.b_cf_check.setEnabled(built and idle)
         self.b_publish.setEnabled(built and idle and status == "ready" and plan is not None and plan.ok)
         self.b_cf_cancel.setEnabled(self.cf_running)
-        self.b_site_open.setEnabled(bool(pub))
-        self.b_site_copy.setEnabled(bool(pub))
-        self.published_address.setText(pub["address"] if pub else "")
+        address = (pub or {}).get("address") or ""
+        self.b_site_open.setEnabled(bool(address))
+        self.b_site_copy.setEnabled(bool(address))
+        typing = bool(pub) and not address and not self.cf_running  # the user writes the address wrangler did not say
+        self.published_address.setReadOnly(not typing)
+        self.published_address.setPlaceholderText(tr("https://... l'indirizzo del sito, dalla dashboard di Cloudflare")
+                                                  if typing else tr("L'indirizzo del sito pubblicato"))
+        if not self.published_address.hasFocus() or not typing:
+            self.published_address.setText(address)
         self.b_open_folder.setEnabled(built)
 
 
@@ -814,6 +834,7 @@ class WebPublishing(QObject):
         self.pane.check_requested.connect(self.check_cloudflare)
         self.pane.publish_requested.connect(self.publish)
         self.pane.cancel_requested.connect(self.cancel_publish)
+        self.pane.address_typed.connect(self.set_address)
         self._publishing = False
 
     # --------------------------------------------------------------- build
@@ -986,7 +1007,15 @@ class WebPublishing(QObject):
             for line in result.transcript:
                 log.info("wrangler: %s", line)
             site_publish.record_published(doc, result)
-            log.info(tr("Sito pubblicato su {0}", result.address))
+            for note in result.unread:
+                log.warning(tr("Non letto nella risposta di wrangler: {0}", note))
+            for text in result.unread_output:  # whole, scrubbed: for the user to send to the developers
+                log.warning("wrangler:\n%s", text)
+            if result.address:
+                log.info(tr("Sito pubblicato su {0}", result.address))
+            else:
+                log.warning(tr("Sito pubblicato; l'indirizzo è nella dashboard di Cloudflare o in wrangler pages "
+                               "project list: scrivilo nel passo 4"))
             if doc.path:
                 try:
                     doc.save()
@@ -1011,6 +1040,26 @@ class WebPublishing(QObject):
             self._publishing = False
             pane.set_publishing(False)
             return False
+        return True
+
+    def set_address(self, text: str) -> bool:
+        """The address typed in step 4 kept with the project."""
+        doc = self.window.doc
+        try:
+            site_publish.set_address(doc, text)
+        except ValueError:
+            self.window._warn(tr("L'indirizzo del sito deve iniziare con https:// (per esempio "
+                                 "https://nome.pages.dev)"))
+            return False
+        if doc.path:
+            try:
+                doc.save()
+            except Exception as exc:  # noqa: BLE001 - said in the log
+                log.error("Salvataggio non riuscito: %s", exc)
+        else:
+            self.window._dirty(True)
+        self.pane.update_states()
+        self.window.workspace.populate(doc)
         return True
 
     def cancel_publish(self) -> None:

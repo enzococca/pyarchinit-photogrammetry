@@ -275,8 +275,8 @@ class Plan:
     @property
     def public(self) -> list[str]:
         """What becomes readable by anyone, in plain English."""
-        out = [f"every file of the page and the manifest ({len(self.pages_files)} files) at "
-               f"https://{self.project}.pages.dev (or the address Cloudflare gives the project)"]
+        out = [f"every file of the page and the manifest ({len(self.pages_files)} files) at the pages.dev address "
+               f"Cloudflare gives the project ({self.project}.pages.dev when the name is free, else with a suffix)"]
         if self.data == "r2":
             where = self.data_url or "the public r2.dev address of the bucket, turned on for it"
             out.append(f"every object of the bucket {self.bucket} (the {len(self.r2_files)} data files of the site), "
@@ -691,7 +691,7 @@ def content_type(path: str) -> str:
 # ------------------------------------------------------------------------------------------------- publishing
 @dataclass
 class Result:
-    address: str
+    address: str | None  # None: not found in what wrangler answered (shown in the dashboard), never guessed
     project: str
     data: str
     data_address: str | None = None
@@ -702,6 +702,8 @@ class Result:
     when: str = ""
     frame: str = "local"
     transcript: list[str] = field(default_factory=list)
+    unread: list[str] = field(default_factory=list)  # what could not be read in an answer of wrangler (English)
+    unread_output: list[str] = field(default_factory=list)  # those answers whole, scrubbed: for the log
 
     def record(self) -> dict:
         """What is kept with the project (``meta["web_site"]["published"]``): addresses, names, date; no secret."""
@@ -767,19 +769,50 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
     folder = p.folder
     state = read_state(folder)
 
+    unread: list[str] = []
+    unread_output: list[str] = []
+
+    def not_read(what: str, out: str) -> None:  # an answer of wrangler not as expected: said, and kept whole
+        unread.append(what)
+        unread_output.append(f"[{what}]\n{scrub(out).strip()}")
+
+    def listed(out: str):
+        """(found, entry of the project): found is False when the answer is not a list of projects."""
+        listing = _json_in(out)
+        if not isinstance(listing, (list, dict)):
+            return False, None
+        return True, _project_entry(listing, p.project)
+
     # the Pages project
     progress(0.03, f"Cloudflare Pages: project {p.project}")
     _code, out = w.run(["pages", "project", "list", "--json"], progress, check=True)
-    entry = _project_entry(_json_in(out), p.project)
+    ok, entry = listed(out)
+    if not ok:
+        not_read("the list of the Pages projects (pages project list --json)", out)
     branch = BRANCH
     if entry is None:
-        _code, out = w.run(["pages", "project", "create", p.project, "--production-branch", BRANCH], progress,
-                           check=True)
+        code, out = w.run(["pages", "project", "create", p.project, "--production-branch", BRANCH], progress)
+        if code and not (not ok and re.search(r"(?i)already (exists|taken|in use)", out)):
+            raise WranglerFailed(f"wrangler pages project create {p.project} failed (exit code {code}): "
+                                 f"{_last_lines(scrub(out))}", scrub(out))
         known = _pages_host(out, p.project)
+        if known is None:  # the project exists now: its address from the list
+            _code, again = w.run(["pages", "project", "list", "--json"], progress)
+            ok2, entry2 = listed(again)
+            known = _pages_host(json.dumps(entry2), p.project) if entry2 else None
+            if entry2:
+                branch = _production_branch(entry2)
+            if known is None:
+                not_read("the address of the new project (pages project create, pages project list --json)",
+                         out + "\n" + again)
     else:
         known = _pages_host(json.dumps(entry), p.project)
         branch = _production_branch(entry)
-    host = known or f"{p.project}.pages.dev"  # Cloudflare adds a suffix when the name is taken: read when said
+        if known is None:
+            not_read("the pages.dev address in the list of the projects (pages project list --json)", out)
+    # Cloudflare adds a suffix to the subdomain when the name is taken: an address is read, never guessed. The CORS
+    # rule of a bucket needs one before the deploy: the plain name then, said among what was not read
+    host = known or f"{p.project}.pages.dev"
 
     data_address = None
     sent = removed = 0
@@ -843,15 +876,25 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
     finally:
         shutil.rmtree(staged, ignore_errors=True)
     if known is None:
-        host = _pages_host(out, p.project) or host
-    address = f"https://{host}"
+        known = _pages_host(out, p.project)
+        if known is None:  # the deploy said no address either: the list of the projects, read once more
+            _code, again = w.run(["pages", "project", "list", "--json"], progress)
+            _ok, entry = listed(again)
+            known = _pages_host(json.dumps(entry), p.project) if entry else None
+            if known is None:
+                not_read("the address of the site (pages deploy, pages project list --json)", out + "\n" + again)
+        if known is not None and p.data == "r2" and known != host:
+            unread.append(f"the CORS rule of the bucket was written for https://{host} before the address was "
+                          f"known (https://{known}): publish again to correct it")
+    address = f"https://{known}" if known else None
     result = Result(address=address, project=p.project, data=p.data, data_address=data_address,
                     bucket=p.bucket if p.data == "r2" else None, sent=sent, unchanged=len(p.unchanged),
                     removed=removed, when=datetime.now().isoformat(timespec="seconds"), frame=p.frame,
-                    transcript=list(w.transcript))
+                    transcript=list(w.transcript), unread=unread, unread_output=unread_output)
     state["published"] = result.record()
     _write_state(folder, state)
-    progress(1.0, f"Cloudflare: published at {address}")
+    progress(1.0, f"Cloudflare: published at {address}" if address else
+             "Cloudflare: published; the address is shown in the Cloudflare dashboard or by wrangler")
     return result
 
 
@@ -873,7 +916,20 @@ def published_record(document) -> dict | None:
 
     record = document.meta.get(META_KEY)
     pub = record.get("published") if isinstance(record, dict) else None
-    return pub if isinstance(pub, dict) and pub.get("address") else None
+    return pub if isinstance(pub, dict) and pub.get("host") else None
+
+
+def set_address(document, address: str) -> dict:
+    """The address of the published site typed by the user (when wrangler did not say it): ``https://...``."""
+    address = str(address or "").strip().rstrip("/")
+    if not re.match(r"^https://[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?(?:/[^\s]*)?$", address):
+        raise ValueError("the address of the site must be https://... (for example https://name.pages.dev)")
+    pub = published_record(document)
+    if pub is None:
+        raise ValueError("the site was not published from this project")
+    pub["address"] = address
+    pub["address_typed"] = True
+    return pub
 
 
 def stale_publication(document) -> bool:
@@ -886,6 +942,6 @@ def stale_publication(document) -> bool:
 
 
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
-           "check_consent", "record_published", "published_record", "stale_publication", "site_frame",
+           "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
            "WranglerFailed", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]

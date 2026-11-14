@@ -404,3 +404,61 @@ def test_cli_without_wrangler(tmp_path, monkeypatch):
     folder = fake.make_site(tmp_path / "sito")
     r = CliRunner().invoke(app, ["web", "publish", "cloudflare", str(folder), "--yes-public"])
     assert r.exit_code == 1 and "npm install -g wrangler" in r.output
+
+
+# --------------------------------------------------------------------------------------------------- addresses
+def test_a_suffixed_subdomain_read_from_the_list_when_the_answers_say_none(tmp_path, wr, monkeypatch):
+    _mode(monkeypatch, "taken,quiet")
+    w = sp.Wrangler()
+    result = sp.publish(sp.plan(fake.make_site(tmp_path / "sito"), "scavo"), public=True, wrangler=w)
+    assert result.address == "https://scavo-7xq.pages.dev"  # read, not the plain name
+    lists = [c for c in fake.calls(wr) if c[:3] == ["pages", "project", "list"]]
+    assert len(lists) == 2  # before creating, and after it to read the address
+    assert result.unread == [] and result.unread_output == []
+
+
+def test_a_suffixed_subdomain_with_r2_corrects_nothing_silently(tmp_path, wr, monkeypatch):
+    _mode(monkeypatch, "taken,quiet")
+    folder = fake.make_site(tmp_path / "sito")
+    result = sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati", data="r2"), public=True)
+    rule = fake.cloud(wr)["buckets"]["scavo-dati"]["cors"]["rules"][0]
+    assert rule["allowed"]["origins"] == ["https://scavo-7xq.pages.dev"]  # the list read before the bucket
+    assert result.address == "https://scavo-7xq.pages.dev"
+
+
+def test_unparseable_answers_record_no_address_and_keep_the_output(tmp_path, wr, monkeypatch):
+    from pyarchinit_photogrammetry.core.document import Document
+
+    _mode(monkeypatch, "taken,garbled,quiet")
+    w = sp.Wrangler()
+    folder = fake.make_site(tmp_path / "sito")
+    result = sp.publish(sp.plan(folder, "scavo"), public=True, wrangler=w)
+    assert result.address is None  # never the guessed scavo.pages.dev
+    assert fake.cloud(wr)["projects"]["scavo"]["deployments"]  # published all the same
+    assert any("pages project list" in u for u in result.unread)
+    assert any("address of the site" in u for u in result.unread)
+    whole = "\n".join(result.unread_output)
+    assert "Projects:" in whole and "Deployment complete" in whole  # the answers whole
+    _no_secret(whole)
+    doc = Document()
+    doc.meta["web_site"] = {"folder": str(folder), "when": "2026-11-14T10:00:00"}
+    rec = sp.record_published(doc, result)
+    assert rec["address"] is None and sp.published_record(doc) is rec
+    with pytest.raises(ValueError):
+        sp.set_address(doc, "scavo-7xq.pages.dev")
+    sp.set_address(doc, "https://scavo-7xq.pages.dev/")
+    assert sp.published_record(doc)["address"] == "https://scavo-7xq.pages.dev"
+
+
+def test_cli_says_when_the_address_is_unknown(tmp_path, wr, monkeypatch):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    _mode(monkeypatch, "garbled,quiet")
+    folder = fake.make_site(tmp_path / "sito")
+    r = CliRunner().invoke(app, ["web", "publish", "cloudflare", str(folder), "--project", "scavo", "--yes-public"])
+    assert r.exit_code == 0, r.output
+    assert "published; the address is shown in the Cloudflare dashboard" in r.output
+    assert "https://scavo.pages.dev" not in r.output and "Projects:" in r.output
+    _no_secret(r.output)

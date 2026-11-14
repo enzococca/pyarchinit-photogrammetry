@@ -3707,7 +3707,12 @@
   "L'indirizzo del sito pubblicato": "The address of the published site",
   "l'indirizzo r2.dev del bucket, attivato alla pubblicazione": "the r2.dev address of the bucket, turned on when publishing",
   "R2 va attivato una volta sull'account (abbonamento R2 nella dashboard di Cloudflare)": "R2 must be turned on once for the account (R2 subscription in the Cloudflare dashboard)",
-  "wrangler non ha l'accesso a Cloudflare. In un terminale: wrangler login (si apre il browser; il programma non vede le credenziali), poi Controlla di nuovo.": "wrangler is not logged in to Cloudflare. In a terminal: wrangler login (the browser opens; the program never sees the credentials), then Check again."
+  "wrangler non ha l'accesso a Cloudflare. In un terminale: wrangler login (si apre il browser; il programma non vede le credenziali), poi Controlla di nuovo.": "wrangler is not logged in to Cloudflare. In a terminal: wrangler login (the browser opens; the program never sees the credentials), then Check again.",
+  "Pubblicato il {0}; l'indirizzo non si è letto nella risposta di wrangler: lo trovi nella dashboard di Cloudflare (Workers & Pages) o con wrangler pages project list. Scrivilo qui sotto.": "Published on {0}; the address was not found in the answer of wrangler: it is in the Cloudflare dashboard (Workers & Pages) or in wrangler pages project list. Write it below.",
+  "https://... l'indirizzo del sito, dalla dashboard di Cloudflare": "https://... the address of the site, from the Cloudflare dashboard",
+  "Non letto nella risposta di wrangler: {0}": "Not read in the answer of wrangler: {0}",
+  "Sito pubblicato; l'indirizzo è nella dashboard di Cloudflare o in wrangler pages project list: scrivilo nel passo 4": "Site published; the address is in the Cloudflare dashboard or in wrangler pages project list: write it in step 4",
+  "L'indirizzo del sito deve iniziare con https:// (per esempio https://nome.pages.dev)": "The address of the site must start with https:// (for example https://name.pages.dev)"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",

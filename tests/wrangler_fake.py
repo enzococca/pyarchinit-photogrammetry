@@ -3,7 +3,7 @@ calls and answers as the real one does (logged in or not, a failure, a file too 
 
 The behaviour comes from the environment: ``FAKE_WRANGLER_DIR`` (where it keeps its calls and its "cloud"),
 ``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``,
-``slow``)."""
+``slow``, ``quiet``: no address in the answers of create and deploy, ``garbled``: no JSON either)."""
 from __future__ import annotations
 
 import json
@@ -45,6 +45,9 @@ if args[:1] == ["whoami"]:
         out("You are not authenticated. Please run `wrangler login`.", 1)
     out(json.dumps({"loggedIn": True, "email": "%(email)s", "accounts": [{"id": "%(account)s"}]}))
 if args[:3] == ["pages", "project", "list"]:
+    if "garbled" in modes:  # not the JSON expected
+        out("Projects:\n" + "\n".join(f" - {n} ({d['domain']})" if "quiet" not in modes else f" - {n}"
+                                        for n, d in cloud["projects"].items()) + "\n%(secret)s")
     rows = [{"Project Name": n, "Project Domains": d["domain"], "Git Provider": "No",
              "Last Modified": "1 day ago"} for n, d in cloud["projects"].items()]
     out("\n" + json.dumps(rows))
@@ -54,6 +57,8 @@ if args[:3] == ["pages", "project", "create"]:
     cloud["projects"][name] = {"domain": domain, "branch": args[args.index("--production-branch") + 1],
                                "deployments": []}
     save()
+    if "quiet" in modes or "garbled" in modes:
+        out(f"Created the project '{name}'.")
     out(f"Successfully created the '{name}' project. It will be available at https://{domain}/ once you create "
         "your first deployment.")
 if args[:3] == ["r2", "bucket", "info"]:
@@ -109,6 +114,8 @@ if args[:2] == ["pages", "deploy"]:
                                                     "branch": args[args.index("--branch") + 1]})
     save()
     domain = cloud["projects"][name]["domain"]
+    if "quiet" in modes or "garbled" in modes:
+        out(f"Uploaded {len(files)} files\nDeployment complete. Token used: %(secret)s")
     out(f"Uploaded {len(files)} files\n✨ Deployment complete! Take a peek over at https://a1b2c3d4.{domain}")
 out("unknown command: " + " ".join(args), 1)
 ''' % {"email": EMAIL, "account": ACCOUNT, "secret": SECRET, "r2dev": R2_DEV}

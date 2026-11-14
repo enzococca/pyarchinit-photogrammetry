@@ -278,3 +278,26 @@ def test_cancel_a_publication(make_window, home, monkeypatch, qapp):
     assert pane.step_states["publish"] != "running" and not pane.b_cf_cancel.isEnabled()
     assert "published" not in w.doc.meta["web_site"]
     assert not [p for p in (w.doc.path.parent).iterdir() if ".publish-" in p.name]  # no staging left
+
+
+def test_an_address_not_said_by_wrangler_is_typed_by_the_user(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home)
+    w = make_window()
+    pane = _check(w, qapp)
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "taken,garbled,quiet")
+    w.answers.append(_yes())
+    pane.b_publish.click()
+    _settle(w, qapp)
+    assert pane.step_states["publish"] == "done", pane.states["publish"].text()
+    assert "dashboard di Cloudflare" in pane.states["publish"].text()
+    assert w.doc.meta["web_site"]["published"]["address"] is None
+    assert not pane.b_site_open.isEnabled() and not pane.published_address.isReadOnly()
+    assert "scavo.pages.dev" not in pane.published_address.text()
+    pane.published_address.setText("pagina")
+    pane.published_address.editingFinished.emit()
+    assert w.said and w.said[-1][0] == "warn"
+    pane.published_address.setText("https://scavo-7xq.pages.dev")
+    pane.published_address.editingFinished.emit()
+    assert w.doc.meta["web_site"]["published"]["address"] == "https://scavo-7xq.pages.dev"
+    assert pane.published_address.isReadOnly() and pane.b_site_open.isEnabled()
+    assert "scavo-7xq.pages.dev" in _site_item(w).text(0)
