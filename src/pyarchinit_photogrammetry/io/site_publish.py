@@ -243,6 +243,12 @@ class Plan:
     problems: list[str] = field(default_factory=list)  # what stops the publication
     warnings: list[str] = field(default_factory=list)
     published: dict | None = None  # the last publication of this folder (from the state file)
+    codes: list[tuple[str, str, tuple]] = field(default_factory=list)  # ("problem"|"warning", key of ISSUES, values)
+
+    def add(self, kind: str, code: str, *values) -> None:
+        text = ISSUES[code].format(*(f"{v:,}" if isinstance(v, int) else v for v in values))
+        (self.problems if kind == "problem" else self.warnings).append(text)
+        self.codes.append((kind, code, tuple(str(v) for v in values)))
 
     @property
     def ok(self) -> bool:
@@ -292,8 +298,9 @@ class Plan:
             out.append(f"R2, bucket {self.bucket}: {len(self.r2_files)} data files, {mb(self.r2_bytes)}; to send "
                        f"{len(self.upload)} ({mb(self.upload_bytes)}), unchanged {len(self.unchanged)}, to delete "
                        f"{len(self.remove)}")
-            out.append(f"data address: {self.data_url or 'r2.dev public address of the bucket (rate-limited, meant '
-                       'for development: a custom domain is better for a lasting site)'}")
+            where = self.data_url or ("r2.dev public address of the bucket (rate-limited, meant for development: a "
+                                      "custom domain is better for a lasting site)")
+            out.append(f"data address: {where}")
         for lim in self.limits:
             out.append(f"  {'ok  ' if lim.ok else 'OVER'} {limit_text(lim)}")
         out.append("public after publishing:")
@@ -322,12 +329,39 @@ def limit_text(lim: Limit) -> str:
             }.get(lim.key, f"{lim.key} {v} of {n}")
 
 
+ISSUES = {  # what a plan says, in English with its values; the window writes them in its language by their key
+    "data_mode": "data must be one of {0}",
+    "not_site": "{0} is not a site built by this program (no site.json): build it first",
+    "project_name": "the name of the Pages project: lowercase letters, digits and dashes, not at the ends (it "
+                    "becomes <name>.pages.dev)",
+    "pages_file_bytes": "{0} files are larger than the {1} MiB a file Pages takes ({2}): send the data to R2 (a "
+                        "bucket) or build a smaller site",
+    "page_file_bytes": "{0} files outside data/ are larger than the {1} MiB a file Pages takes ({2})",
+    "pages_files": "{0} files on Pages, more than the {1} of the Free plan: send the data to R2 (a bucket)",
+    "page_files": "{0} files on Pages, more than the {1} of the Free plan",
+    "no_bucket": "the data must go to R2 (files above the limits of Pages): name a bucket",
+    "bucket_name": "the name of the bucket: 3-63 lowercase letters, digits and dashes, not at the ends",
+    "data_url": "the address of the data must start with https:// (the custom domain of the bucket)",
+    "r2_put_bytes": "files larger than the {0} MB wrangler sends to R2 in one go ({1}): build a smaller site "
+                    "(budget) or send them with rclone",
+    "r2_billed": "the data are above the 10 GB-month R2 keeps for free: the rest is billed",
+    "r2_dev": "the data are served from the r2.dev address of the bucket: rate-limited and meant for development; "
+              "connect a custom domain to the bucket for a lasting site and publish with its address",
+    "r2_subscription": "R2 needs an R2 subscription on the account (checkout in the Cloudflare dashboard, once)",
+    "cors_replaced": "the CORS rule of the bucket {0} is replaced with the one of this site: use a bucket for this "
+                     "site alone",
+    "true_coordinates": "the site holds the TRUE coordinates of the survey: publishing tells anyone where it is",
+}
+
+
 def plan(folder: str | os.PathLike, project: str, bucket: str | None = None, data: str = "auto",
          data_url: str | None = None) -> Plan:
     """What publishing ``folder`` on the Pages project ``project`` would do (see the module docstring); no network,
     no wrangler. ``bucket``: the R2 bucket for the data (needed when they go to R2); ``data``: one of
     :data:`DATA_MODES`; ``data_url``: the https address under which the bucket is served (a custom domain the user
-    connected to it), else the r2.dev address is turned on at publishing."""
+    connected to it), else the r2.dev address is turned on at publishing. The problems (which stop the publication)
+    and the warnings are in :attr:`Plan.problems` and :attr:`Plan.warnings`, in English, and by key of
+    :data:`ISSUES` with their values in :attr:`Plan.codes`."""
     folder = Path(folder)
     project = str(project or "").strip()
     bucket = str(bucket or "").strip() or None
@@ -336,14 +370,13 @@ def plan(folder: str | os.PathLike, project: str, bucket: str | None = None, dat
     p = Plan(folder=folder, project=project, bucket=bucket, data="pages", data_url=data_url,
              frame=site_frame(folder), title=str(manifest.get("title") or ""))
     if data not in DATA_MODES:
-        p.problems.append(f"data must be one of {', '.join(DATA_MODES)}")
+        p.add("problem", "data_mode", ", ".join(DATA_MODES))
         data = "auto"
     if not manifest:
-        p.problems.append(f"{folder} is not a site built by this program (no site.json): build it first")
+        p.add("problem", "not_site", folder)
         return p
     if not _PROJECT.match(project):
-        p.problems.append("the name of the Pages project: lowercase letters, digits and dashes, not at the ends "
-                          "(it becomes <name>.pages.dev)")
+        p.add("problem", "project_name")
     files = site_files(folder)
     in_data = [e for e in files if e.path.startswith(DATA + "/")]
     rest = [e for e in files if not e.path.startswith(DATA + "/")]
@@ -361,28 +394,22 @@ def plan(folder: str | os.PathLike, project: str, bucket: str | None = None, dat
     over = [e for e in p.pages_files if e.size > PAGES_FILE_BYTES]
     if over:
         names = ", ".join(e.path for e in over[:5]) + (" ..." if len(over) > 5 else "")
-        if data == "pages":
-            p.problems.append(f"{len(over)} files are larger than the {PAGES_FILE_BYTES // 2**20} MiB a file Pages "
-                              f"takes ({names}): send the data to R2 (a bucket) or build a smaller site")
-        else:
-            p.problems.append(f"{len(over)} files outside data/ are larger than the {PAGES_FILE_BYTES // 2**20} MiB "
-                              f"a file Pages takes ({names})")
+        p.add("problem", "pages_file_bytes" if data == "pages" else "page_file_bytes", len(over),
+              PAGES_FILE_BYTES // 2**20, names)
     if len(p.pages_files) > PAGES_FREE_FILES:
-        p.problems.append(f"{len(p.pages_files):,} files on Pages, more than the {PAGES_FREE_FILES:,} of the Free "
-                          f"plan" + (": send the data to R2 (a bucket)" if data == "pages" else ""))
+        p.add("problem", "pages_files" if data == "pages" else "page_files", len(p.pages_files), PAGES_FREE_FILES)
     if data == "r2":
         if bucket is None:
-            p.problems.append("the data must go to R2 (files above the limits of Pages): name a bucket")
+            p.add("problem", "no_bucket")
         elif not _BUCKET.match(bucket):
-            p.problems.append("the name of the bucket: 3-63 lowercase letters, digits and dashes, not at the ends")
+            p.add("problem", "bucket_name")
         if data_url and not re.match(r"^https://[A-Za-z0-9.-]+(?::\d+)?(?:/[^\s]*)?$", data_url):
-            p.problems.append("the address of the data must start with https:// (the custom domain of the bucket)")
+            p.add("problem", "data_url")
         biggest = max((e.size for e in p.r2_files), default=0)
         p.limits.append(Limit("r2_put_bytes", biggest, R2_PUT_BYTES, biggest <= R2_PUT_BYTES))
         if biggest > R2_PUT_BYTES:
-            names = ", ".join(e.path for e in p.r2_files if e.size > R2_PUT_BYTES)
-            p.problems.append(f"files larger than the {R2_PUT_BYTES // 10**6} MB wrangler sends to R2 in one go "
-                              f"({names}): build a smaller site (budget) or send them with rclone")
+            p.add("problem", "r2_put_bytes", R2_PUT_BYTES // 10**6,
+                  ", ".join(e.path for e in p.r2_files if e.size > R2_PUT_BYTES))
         state = read_state(folder).get("cloudflare") or {}
         sent = state.get("objects") if state.get("bucket") == bucket and isinstance(state.get("objects"), dict) \
             else {}
@@ -392,20 +419,16 @@ def plan(folder: str | os.PathLike, project: str, bucket: str | None = None, dat
         keys = {e.path for e in p.r2_files}
         p.remove = sorted(k for k in sent if k not in keys)
         p.limits.append(Limit("r2_storage", p.r2_bytes, R2_FREE_STORAGE, p.r2_bytes <= R2_FREE_STORAGE))
-        writes = len(p.upload) + 3
-        p.limits.append(Limit("r2_class_a", writes, R2_FREE_CLASS_A, writes <= R2_FREE_CLASS_A))
+        p.limits.append(Limit("r2_class_a", p.class_a, R2_FREE_CLASS_A, p.class_a <= R2_FREE_CLASS_A))
         p.limits.append(Limit("r2_class_b", len(p.r2_files), R2_FREE_CLASS_B, len(p.r2_files) <= R2_FREE_CLASS_B))
         if p.r2_bytes > R2_FREE_STORAGE:
-            p.warnings.append("the data are above the 10 GB-month R2 keeps for free: the rest is billed")
+            p.add("warning", "r2_billed")
         if not data_url:
-            p.warnings.append("the data are served from the r2.dev address of the bucket: rate-limited and meant "
-                              "for development; connect a custom domain to the bucket for a lasting site and "
-                              "publish with its address")
-        p.warnings.append("R2 needs an R2 subscription on the account (checkout in the Cloudflare dashboard, once)")
-        p.warnings.append(f"the CORS rule of the bucket {bucket} is replaced with the one of this site: use a bucket "
-                          "for this site alone")
+            p.add("warning", "r2_dev")
+        p.add("warning", "r2_subscription")
+        p.add("warning", "cors_replaced", bucket)
     if p.frame == "crs":
-        p.warnings.append("the site holds the TRUE coordinates of the survey: publishing tells anyone where it is")
+        p.add("warning", "true_coordinates")
     p.published = read_state(folder).get("published")
     return p
 
@@ -776,7 +799,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
         done = 0
         for key in p.upload:
             e = sizes[key]
-            progress.sub(0.05 + 0.8 * done / total, 0.8 * e.size / total)(0.0, f"R2: {key}")
+            progress.sub(0.05 + 0.8 * done / total, 0.8 * e.size / total)(0.0, f"R2: sending {key}")
             w.run(["r2", "object", "put", f"{bucket}/{key}", "--file", str((folder / key).resolve()),
                    "--content-type", content_type(key), "--cache-control", CACHE_DATA, "--remote"], progress,
                   check=True)
@@ -828,7 +851,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
                     transcript=list(w.transcript))
     state["published"] = result.record()
     _write_state(folder, state)
-    progress(1.0, f"published: {address}")
+    progress(1.0, f"Cloudflare: published at {address}")
     return result
 
 
@@ -865,4 +888,4 @@ def stale_publication(document) -> bool:
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
-           "WranglerFailed", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "WranglerFailed", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
