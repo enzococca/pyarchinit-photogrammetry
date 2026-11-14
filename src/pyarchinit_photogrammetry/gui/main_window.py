@@ -698,7 +698,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
         self.workspace.rename_requested.connect(self._workspace_rename)
         self.workspace.shown_in_3d.connect(self._chunk_shown_in_3d)
-        self.workspace.group_shown_3d.connect(lambda gid, shown: chunk_groups.show(self, gid, shown))
+        # after the signal: showing a group fills the tree again, which deletes the item whose box Qt is still setting
+        self.workspace.group_shown_3d.connect(
+            lambda gid, shown: QTimer.singleShot(0, self, lambda: chunk_groups.show(self, gid, shown)))
         self.workspace.chunks_dropped.connect(lambda keys, gid, before: chunk_groups.move_chunks(self, keys, gid, before))
         self.workspace.populated.connect(self._chunk_list_seen)
         self.reference = ReferencePane()
