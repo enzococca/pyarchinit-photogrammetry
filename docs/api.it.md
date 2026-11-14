@@ -1221,6 +1221,8 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 | `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None)` | il sito dei chunk (oggetti, chiavi o etichette; predefinito ogni chunk con un'ortofoto, un DEM, un modello o dei disegni); restituisce il percorso di `site.json` |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
+| `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | lo stesso server in un suo thread: `.start()`, `.url`, `.port`, `.stop()` (il thread concluso, la porta liberata); l'anteprima della finestra |
+| `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | l'ultimo sito costruito tenuto in `document.meta["web_site"]` (cartella relativa al progetto quando sta lì, scelte, ora, dimensione, lo stato dei suoi prodotti da `site_sources(document, chunks, products)` preso prima della costruzione); `site_stale` elenca i prodotti ricostruiti o cambiati da allora |
 | `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model]... [--quality Q] [--model-texture 4096]` | riga di comando: il sito scritto |
 | `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
@@ -1280,6 +1282,10 @@ doc.export_site("site_crs", chunks=["Saggio 1"], frame="crs", language="en")
 ppg web build scavo.ppg site --title "Saggio 1"
 ppg web serve site --open
 ```
+
+Dalla finestra: *File > Esporta > Sito web (Pubblica sul web)...*, il pannello con le stesse scelte, la costruzione in
+background, l'anteprima e il sito tenuto con il progetto (vedi
+[Esportazioni](gui/exports.it.md#sito-web-pubblica-sul-web)).
 
 ## Misure
 
