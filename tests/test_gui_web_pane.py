@@ -284,3 +284,27 @@ def test_closing_the_window_stops_the_preview(qapp, project, tmp_path, monkeypat
     w.close()
     _settle(qapp)
     assert w.web.preview is None and not _preview_threads() and _port_free(port)
+
+
+def test_cloud_budget_and_dates_among_the_contents(win, qapp, tmp_path):
+    """The point cloud offered but not ticked by default (a site stays light), the size budget, the points of the
+    cloud and one date at a time among the advanced choices, given to the build and kept with the site."""
+    import json
+
+    w = win
+    pane = _front(w, qapp)
+    assert pane.products["cloud"].isEnabled() and not pane.products["cloud"].isChecked()
+    assert not pane.products["sections"].isEnabled()  # the trench has no section
+    o = pane.options()
+    assert (o["budget_mb"], o["cloud_points"], o["timeline"]) == (500, 3_000_000, False)
+    pane.budget.setValue(0)
+    assert pane.budget.text() == "Nessun limite" and pane.options()["budget_mb"] == 0
+    pane.budget.setValue(300)
+    pane.cloud_points.setValue(20_000)
+    _build(w, qapp, pane, tmp_path / "sito", products=("dem", "cloud"))
+    manifest = json.loads((tmp_path / "sito" / "site.json").read_text(encoding="utf-8"))
+    layer = next(x for x in manifest["chunks"][0]["layers"] if x["id"] == "cloud")
+    assert layer["points"] == 20_000 and manifest["build"]["budget"] == 300_000_000
+    assert w.doc.meta["web_site"]["options"]["cloud_points"] == 20_000
+    pane.set_document(w.doc)  # the choices of the last site come back
+    assert pane.products["cloud"].isChecked() and pane.cloud_points.value() == 20_000 and pane.budget.value() == 300

@@ -37,7 +37,8 @@ def state_names() -> dict[str, str]:
 def product_names() -> dict[str, str]:
     """The products of a site (:data:`..io.site.PRODUCTS`) as the pane names them."""
     return {"orthomosaic": tr("Ortofoto"), "dem": tr("DEM e rilievo ombreggiato"), "units": tr("Unità stratigrafiche"),
-            "drawings": tr("Disegni"), "model": tr("Modello 3D")}
+            "drawings": tr("Disegni"), "model": tr("Modello 3D"), "cloud": tr("Nuvola di punti"),
+            "sections": tr("Sezioni e prospetti")}
 
 
 def size_text(size: int) -> str:
@@ -202,6 +203,25 @@ class WebPane(QWidget):
         self.texture.setCurrentIndex(TEXTURES.index(site.MODEL_TEXTURE))
         self.texture.setToolTip(tr("Il lato più lungo di una pagina di texture del modello 3D"))
         adv.addRow(tr("Texture del modello"), self.texture)
+        self.budget = QSpinBox()
+        self.budget.setRange(0, 100_000)
+        self.budget.setSingleStep(50)
+        self.budget.setSuffix(" MB")
+        self.budget.setSpecialValueText(tr("Nessun limite"))
+        self.budget.setValue(int(site.BUDGET_MB))
+        self.budget.setToolTip(tr("La dimensione del sito intero: il modello e la nuvola vengono sfoltiti per "
+                                  "restarci, e il sito dice che cosa ha ridotto"))
+        adv.addRow(tr("Dimensione massima"), self.budget)
+        self.cloud_points = QSpinBox()
+        self.cloud_points.setRange(10_000, 20_000_000)
+        self.cloud_points.setSingleStep(500_000)
+        self.cloud_points.setValue(site.CLOUD_POINTS)
+        self.cloud_points.setToolTip(tr("I punti della nuvola al massimo"))
+        adv.addRow(tr("Punti della nuvola"), self.cloud_points)
+        self.timeline = QCheckBox(tr("Una data alla volta"))
+        self.timeline.setToolTip(tr("I chunk come rilievi di date diverse (la data del chunk o delle sue foto): la "
+                                    "pagina ne mostra una alla volta, con un selettore delle date"))
+        adv.addRow(tr("Date"), self.timeline)
         self.w_advanced.setVisible(False)
         self.b_advanced.toggled.connect(self._advanced)
         form.addWidget(self.w_advanced)
@@ -310,7 +330,8 @@ class WebPane(QWidget):
                 "frame": "crs" if self.frame_crs.isChecked() else "local",
                 "title": self.title.text().strip(), "description": self.description.text().strip(),
                 "languages": languages, "quality": int(self.quality.value()),
-                "model_texture": int(self.texture.currentData() or 0)}
+                "model_texture": int(self.texture.currentData() or 0), "budget_mb": int(self.budget.value()),
+                "cloud_points": int(self.cloud_points.value()), "timeline": bool(self.timeline.isChecked())}
 
     def folder_path(self) -> Path | None:
         text = self.folder.text().strip()
@@ -356,7 +377,7 @@ class WebPane(QWidget):
             self.chunks.addItem(item)
         self.chunks.blockSignals(False)
         for key, c in self.products.items():  # the choices of the last site, else those of ppg web build
-            c.setChecked(key in options["products"] if options else True)
+            c.setChecked(key in options["products"] if options else key in site.DEFAULT_PRODUCTS)
         (self.frame_crs if options.get("frame") == "crs" else self.frame_local).setChecked(True)
         self.title.setText(str(options.get("title") or ""))
         self.description.setText(str(options.get("description") or ""))
@@ -365,6 +386,9 @@ class WebPane(QWidget):
         self.quality.setValue(int(options.get("quality") or 85))
         k = self.texture.findData(int(options.get("model_texture", site.MODEL_TEXTURE) or 0))
         self.texture.setCurrentIndex(k if k >= 0 else TEXTURES.index(site.MODEL_TEXTURE))
+        self.budget.setValue(int(options.get("budget_mb", site.BUDGET_MB) or 0))
+        self.cloud_points.setValue(int(options.get("cloud_points") or site.CLOUD_POINTS))
+        self.timeline.setChecked(bool(options.get("timeline")))
         if record is not None:
             self.folder.setText(str(site.site_folder(document, record)))
         else:
@@ -566,7 +590,10 @@ class WebPublishing(QObject):
             path = site.export_site(doc, folder, chunks=o["chunks"], products=o["products"], frame=o["frame"],
                                     title=o["title"] or None, description=o["description"] or None,
                                     language=o["languages"], quality=o["quality"],
-                                    model_texture=o["model_texture"] or None, progress=progress)
+                                    model_texture=o["model_texture"] or None, progress=progress,
+                                    budget_mb=o.get("budget_mb") or None,
+                                    cloud_points=o.get("cloud_points") or site.CLOUD_POINTS,
+                                    timeline=bool(o.get("timeline")))
             return path, site.site_size(path.parent)
 
         def done(result):
@@ -575,6 +602,8 @@ class WebPublishing(QObject):
             site.record_site(doc, path, o, sources)
             pane.failure = ""
             log.info(tr("Sito web: {0}, {1}", path.parent, size_text(size)))
+            for note in site.build_notes(path):  # what the build reduced or left out
+                log.warning(note)
             if o["frame"] == "crs":
                 log.warning(tr("Il sito contiene le coordinate vere del rilievo"))
             if doc.path:
