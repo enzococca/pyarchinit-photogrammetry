@@ -23,6 +23,12 @@ CAMERA_MODELS = {
 }
 # fisheye lenses: a ray far from the axis still lands in the photo (no pinhole shortcut for them)
 FISHEYE_MODELS = {"SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE", "OPENCV_FISHEYE", "FOV", "THIN_PRISM_FISHEYE"}
+# the focal length (times the longer side of the photo) given to photos that say none: a 31 mm lens on a
+# 35 mm camera. COLMAP's 1.2 (43 mm) is far longer than the phones and drones (24-28 mm) whose exported
+# photos most often lose the EXIF: on the turntable demo a start 1.3-1.6 times too long left 4-17
+# alignments in 36 at 2-3 photos, a start 0.8-1.2 times the true one none (engine.sfm also tries again
+# from other starts, GUESSED_FOCAL_STARTS)
+FOCAL_GUESS = 0.85
 # models whose first parameters are f, cx, cy (one focal length); the others start fx, fy, cx, cy
 SINGLE_FOCAL = {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE"}
 
@@ -59,12 +65,17 @@ class Sensor:
     pixel_size_mm: float | None = None
     focal_length_mm: float | None = None
     fixed: bool = False
+    # where the focal length in ``params`` comes from: ``exif`` (the 35 mm equivalent of the EXIF),
+    # ``exif_mm`` (the focal length in mm over the pixel size of the EXIF), ``guess`` (no focal
+    # length in the photos: a typical field of view, see ``FOCAL_GUESS``), ``aligned`` (estimated by an
+    # alignment), None (given by hand, a calibration, or a project of an older version)
+    focal_source: str | None = None
 
     def __post_init__(self):
         if self.model not in CAMERA_MODELS:
             raise ValueError(f"unsupported camera model {self.model!r}")
         if not self.params:
-            f = 1.2 * max(self.width, self.height)
+            f = FOCAL_GUESS * max(self.width, self.height)
             cx, cy = self.width / 2.0, self.height / 2.0
             defaults = {
                 "SIMPLE_PINHOLE": [f, cx, cy],
@@ -114,6 +125,11 @@ class Sensor:
         return params
 
     @property
+    def focal_guessed(self) -> bool:
+        """The focal length is a guess (no focal length in the photos) and no alignment has estimated it."""
+        return self.focal_source == "guess"
+
+    @property
     def focal_px(self) -> float:
         k = self.K
         return float((k[0, 0] + k[1, 1]) / 2)
@@ -131,7 +147,7 @@ class Sensor:
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in ("key", "label", "width", "height", "model", "params",
-                                              "pixel_size_mm", "focal_length_mm", "fixed")}
+                                              "pixel_size_mm", "focal_length_mm", "fixed", "focal_source")}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Sensor":
