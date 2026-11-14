@@ -789,6 +789,12 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.gnss_pane.survey_crs_requested.connect(lambda: self.gnss_survey_crs())
         self.gnss_pane.geoid_requested.connect(lambda: self.gnss_download_geoid())
         self.gnss_pane.only_fix_toggled.connect(self.gnss_only_fix)
+        from .web_pane import WebPublishing
+
+        # the survey as a web site: the steps of the pane, its build in the worker and the preview server
+        self.web = WebPublishing(self)
+        self.web_pane = self.web.pane
+        add(self.web_pane, tr("Pubblica sul web"), icon("web"), name="pane_web", place="right")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -955,6 +961,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self._act(exp, tr("Rapporto PDF..."), self.generate_pdf_report, processing=True, icon_name="pdf",
                   tip=tr("Il rapporto di elaborazione da stampare: rilievo, calibrazione, accuratezza, parametri, "
                          "prodotti, multispettrale e termico quando ci sono"))
+        self._act(exp, tr("Sito web (Pubblica sul web)..."), self.show_web_pane, icon_name="web",
+                  tip=tr("Il rilievo come sito web statico: ortofoto, DEM, unità, disegni e modello 3D in una "
+                         "cartella che qualsiasi hosting pubblica, con l'anteprima su questo computer"))
         self._act(exp, tr("Pacchetto QField (tablet in trincea)..."), self.export_qfield, processing=True,
                   icon_name="export", tip=tr("Ortofoto, DEM, unità e quote del chunk in una cartella per QField: si "
                                              "disegna sul tablet, poi File > Importa > Modifiche da QField"))
@@ -1885,6 +1894,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         of ``area`` ("left", "bottom", "right"); ``icon`` a QIcon or the name of an icon of the program."""
         return self.panes.add(widget, title, icon, name=name, area=area)
 
+    def show_web_pane(self) -> None:
+        """*File > Esporta > Sito web*: the pane *Pubblica sul web* in front, its lists read again."""
+        self.web.refresh()
+        self._show_pane(self.web_pane)
+
     def show_pane(self, widget: QWidget) -> None:
         """A pane in front (``Context.show_pane``), also when it was closed or floating."""
         self.panes.show(widget)
@@ -2259,6 +2273,10 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.reference.setEnabled(not busy)
         if getattr(self, "gnss_pane", None) is not None:
             self.gnss_pane.set_busy(busy)
+        if getattr(self, "web", None) is not None:
+            self.web.pane.set_busy(busy)
+            if not busy:
+                self.web.runner_idle()
         self._update_workspace_actions()
 
     def _need_chunk(self, what: str = "", aligned: bool = False, product: str | None = None) -> bool:
@@ -2621,6 +2639,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             pane.set_state(self.chunk)
             pane.set_points(len(self.probe_points))
         self.gnss_pane.set_state(self.chunk)
+        self.web.refresh()
 
     def _capture_pane(self):
         """The tab for the captures of the chunk: Termico when they have a thermal band and no
@@ -3543,6 +3562,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self._live_previous.close()
             self._live_previous = None
         self.photos.stop()
+        self.web.close()  # the preview server stopped: its port and its thread freed
         self.assistant.shutdown()  # the question in progress stopped, its thread ended
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
@@ -9884,6 +9904,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self.show_mosaic(payload)
         elif kind == "mosaics":
             self.open_mosaic()
+        elif kind == "web_site":
+            self.show_web_pane()
         elif kind in ("scalebar", "scalebars"):
             self._show_pane(self.left_tabs, self.reference)
         elif kind == "product" and payload == "depth_maps":
@@ -16465,6 +16487,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             menu.addAction(icon("append"), tr("Aggiungi progetti..."), self.append_projects)
         elif kind == "mosaics":
             menu.addAction(icon("merge"), tr("Ortofoto e DEM uniti..."), self.open_mosaic)
+        elif kind == "web_site":
+            menu.addAction(icon("web"), tr("Pubblica sul web..."), self.show_web_pane)
+            a = menu.addAction(icon("view"), tr("Avvia l'anteprima"), self.web.start_preview)
+            a.setEnabled(self.web_pane.b_preview.isEnabled())
+            menu.addAction(icon("folder"), tr("Apri la cartella"), self.web.open_folder)
         elif kind == "mosaic":
             from ..engine import mosaic as mosaic_mod
 

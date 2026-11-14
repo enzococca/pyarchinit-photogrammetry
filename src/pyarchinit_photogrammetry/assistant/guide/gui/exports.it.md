@@ -74,6 +74,32 @@ modello unito (o per oggetto di un OBJ importato), oppure uno per parte connessa
 un'etichetta per faccia, da un `.npy` o da un file di testo con un'etichetta per riga). Importando un OBJ i gruppi si
 rileggono (`g`, altrimenti `o`) e restano con il modello; le pagine di texture seguono l'ordine dell'MTL.
 
+### Sito web (Pubblica sul web)
+
+*File > Esporta > Sito web (Pubblica sul web)...* apre il pannello **Pubblica sul web** (anche da *Vista > Pannelli*;
+si chiude, si sposta e si stacca come gli altri pannelli): il rilievo come sito web statico - ortofoto, DEM con il
+rilievo ombreggiato, unità stratigrafiche, disegni e modello 3D in una pagina che qualsiasi hosting pubblica, quello che
+scrive `ppg web build` (vedi [Il rilievo come sito web](../api.it.md#il-rilievo-come-sito-web)). Quattro passi, ognuno
+con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*, *non riuscito*):
+
+1. **Scegli i contenuti**: i chunk (in partenza ogni chunk con qualcosa da pubblicare, solo quello attivo quando sono
+   in sistemi di riferimento diversi), i prodotti (si spuntano solo quelli che un chunk spuntato ha), titolo,
+   descrizione, lingue (italiano, inglese) e le coordinate: **Sistema locale** (predefinito: spostate al centro del
+   rilievo, senza sistema di riferimento - nulla nella cartella dice dove si trova il sito) o **Coordinate vere**, che
+   il pannello segnala in rosso: le pagine scrivono allora la posizione reale del sito. *Avanzate*: la qualità del WebP
+   dell'ortofoto (85) e la texture del modello (4096 px, o solo i colori dei vertici). La cartella del sito (in
+   partenza `<progetto>_sito_web` accanto al file del progetto) dev'essere nuova, vuota o un sito costruito prima: una
+   cartella con altri file viene rifiutata e non viene mai toccata.
+2. **Costruisci**: in background, con l'avanzamento e *Annulla*; i passi nel pannello Log, la dimensione del sito alla
+   fine. Il sito resta con il progetto (la cartella, relativa al progetto quando gli sta accanto, le scelte e l'ora) e
+   compare nell'Area di lavoro come **Sito web**; quando un prodotto che contiene viene ricostruito o cambia (o il suo
+   chunk viene spostato) il passo e l'albero dicono *da rifare*.
+3. **Anteprima**: un server solo su questo computer (127.0.0.1, una porta libera) e la pagina nel browser; il pannello
+   mostra l'indirizzo con *Apri nel browser*, *Copia indirizzo* e *Ferma*. Chiudere il progetto o la finestra lo
+   ferma.
+4. **Pubblica**: dal programma non è ancora disponibile. La cartella del sito si copia così com'è su qualsiasi hosting
+   statico (*Apri la cartella*).
+
 ### Paradati
 
 Ogni esportazione di nuvola, modello, DEM o ortofoto ha accanto un `<file>.prov.jsonld`, e così la copia pubblicata nei

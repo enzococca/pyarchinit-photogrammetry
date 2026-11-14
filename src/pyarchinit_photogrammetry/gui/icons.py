@@ -113,7 +113,8 @@ ICONS = {
     "relink": ("mdi6.link-variant", "blue"),
     # the top bar and the tool rails of the views
     "workflow": ("mdi6.sitemap-outline", "teal"), "step_done": ("mdi6.check-circle", "green"),
-    "step_todo": ("mdi6.circle-outline", "grey"), "pin": ("mdi6.pin", "blue"), "pin_off": ("mdi6.pin-outline", "grey"),
+    "step_todo": ("mdi6.circle-outline", "grey"), "step_running": ("mdi6.progress-clock", "blue"),
+    "web": ("mdi6.web", "blue"), "stop": ("mdi6.stop-circle-outline", "red"), "browser": ("mdi6.open-in-new", "blue"), "pin": ("mdi6.pin", "blue"), "pin_off": ("mdi6.pin-outline", "grey"),
     "rail_navigate": ("mdi6.cursor-default-outline", "blue"), "rail_draw": ("mdi6.draw-pen", "red"),
     "rail_measure": ("mdi6.ruler-square", "teal"), "rail_analysis": ("mdi6.chart-areaspline", "brown"),
     "rail_auto": ("mdi6.auto-fix", "violet"), "rail_edit": ("mdi6.vector-square-edit", "red"),

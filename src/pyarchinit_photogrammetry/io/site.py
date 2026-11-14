@@ -28,7 +28,12 @@ text typed by the user - the attributes and their names, the names of chunks, la
 description - that holds the path of a computer is cut to its last name.
 
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
-parts - bound to this computer alone unless another host is asked for.
+parts - bound to this computer alone unless another host is asked for; :class:`Preview` runs it in a thread of its
+own and stops it (the window's pane *Pubblica sul web*).
+
+The site built last from a project is kept in ``document.meta["web_site"]`` (:func:`record_site`): its folder
+(relative to the project's when it lies there), the options, the time, the size and the state of the products it
+holds; :func:`site_stale` says which of them were built again or changed since.
 
 The viewer reads the three rasters with its own small reader (``app/cog.js``): the tiles of a WebP COG are WebP
 images the browser decodes, those of the DEM are inflated by the browser. It reads what is written here, not any
@@ -43,12 +48,15 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from datetime import date
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+import numpy as np
 
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
@@ -444,19 +452,33 @@ def _model_faces(folder: Path, tileset: dict) -> int:
 
 
 # ------------------------------------------------------------------------------------------------ the site
+def folder_kind(folder: str | os.PathLike) -> str:
+    """What ``folder`` is for a site: ``"new"`` (not there), ``"empty"``, ``"site"`` (a site built by this program,
+    which a build rewrites), ``"file"`` (not a folder) or ``"other"`` (a folder with other files: never written)."""
+    folder = Path(folder)
+    if not folder.exists():
+        return "new"
+    if not folder.is_dir():
+        return "file"
+    if not any(folder.iterdir()):
+        return "empty"
+    try:
+        ours = json.loads((folder / MANIFEST).read_text(encoding="utf-8")).get("format") == FORMAT
+    except (OSError, ValueError, AttributeError):
+        ours = False
+    return "site" if ours else "other"
+
+
 def _prepare(folder: Path) -> None:
     """``folder`` ready for a site: new, empty, or a site built here before (its own files removed). A folder with
     anything else is never touched: :class:`FileExistsError`."""
-    if folder.exists() and not folder.is_dir():
+    kind = folder_kind(folder)
+    if kind == "file":
         raise FileExistsError(f"{folder} is a file: choose a folder")
-    if folder.is_dir() and any(folder.iterdir()):
-        try:
-            ours = json.loads((folder / MANIFEST).read_text(encoding="utf-8")).get("format") == FORMAT
-        except (OSError, ValueError, AttributeError):
-            ours = False
-        if not ours:
-            raise FileExistsError(f"{folder} holds other files and is not a site built by this program: "
-                                  "it was left as it is, choose another folder")
+    if kind == "other":
+        raise FileExistsError(f"{folder} holds other files and is not a site built by this program: "
+                              "it was left as it is, choose another folder")
+    if kind == "site":
         for name in OWN:
             target = folder / name
             if target.is_dir():
@@ -769,4 +791,170 @@ def server(folder: str | os.PathLike, host: str = "127.0.0.1", port: int = 0, qu
     return _Server((host, port), partial(handler, directory=str(folder)))
 
 
-__all__ = ["export_site", "server", "FRAMES", "PRODUCTS", "LANGUAGES", "MANIFEST", "FORMAT", "FORMAT_VERSION"]
+class Preview:
+    """A :func:`server` of ``folder`` running in a thread of its own, to look at a site from a program that goes on
+    (the window's *Pubblica sul web*): :meth:`start` binds and serves, :meth:`stop` ends the thread and frees the
+    port. Bound to this computer alone unless another host is asked for."""
+
+    def __init__(self, folder: str | os.PathLike, host: str = "127.0.0.1", port: int = 0, ranges: bool = True):
+        self.folder = Path(folder)
+        self.host = host
+        self.httpd = server(self.folder, host=host, port=port, ranges=ranges)
+        self.thread: threading.Thread | None = None
+
+    @property
+    def port(self) -> int:
+        return int(self.httpd.server_address[1])
+
+    @property
+    def url(self) -> str:
+        local = self.host in ("127.0.0.1", "localhost", "::1")
+        return f"http://{'127.0.0.1' if local else self.host}:{self.port}/"
+
+    @property
+    def running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self) -> "Preview":
+        if self.thread is None:
+            self.thread = threading.Thread(target=self.httpd.serve_forever, name="ppg-site-preview", daemon=True)
+            self.thread.start()
+        return self
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """The server ended, its socket closed and its thread joined; again: nothing."""
+        if self.thread is not None:
+            self.httpd.shutdown()
+            self.thread.join(timeout)
+            self.thread = None
+        self.httpd.server_close()
+
+
+# ------------------------------------------------------------------------------------------------ the site of a project
+META_KEY = "web_site"  # ``document.meta[META_KEY]``: the site built last from the project (:func:`record_site`)
+_DRAWN = ("quote", "lines", "points", "free")  # the drawings of the plan that go in ``drawings``
+
+
+def chunk_products(chunk) -> list[str]:
+    """The products of :data:`PRODUCTS` that ``chunk`` has now, in their order."""
+    d = chunk.meta.get("drawings") or {}
+    have = {"orthomosaic": _raster(chunk, "orthomosaic") is not None, "dem": _raster(chunk, "dem") is not None,
+            "units": bool(d.get("units")), "drawings": any(d.get(k) for k in _DRAWN),
+            "model": _model(chunk) is not None}
+    return [p for p in PRODUCTS if have[p]]
+
+
+def _file_state(path: Path | None) -> list | None:
+    try:
+        return [path.name, int(path.stat().st_mtime_ns)] if path is not None else None
+    except OSError:
+        return None
+
+
+def _drawn_state(chunk, keys) -> str:
+    import hashlib
+
+    d = chunk.meta.get("drawings") or {}
+    text = json.dumps([d.get(k) for k in keys], sort_keys=True, default=str)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def product_state(chunk, product: str):
+    """What tells ``product`` of ``chunk`` from the same product built again or changed later: the name and the time
+    of change of its files (a raster; the model with its texture pages), a digest of the records (units, drawings)."""
+    if product in ("orthomosaic", "dem"):
+        return _file_state(_raster(chunk, product))
+    if product == "model":
+        from ..engine.texturing import texture_pages
+
+        model = _model(chunk)
+        return None if model is None else [_file_state(model)] + [_file_state(Path(p)) for p in texture_pages(chunk)]
+    return _drawn_state(chunk, ("units",) if product == "units" else _DRAWN)
+
+
+def site_sources(document, chunks=None, products=None) -> dict:
+    """The state of what a site of ``chunks`` with ``products`` (as :func:`export_site` takes them) is made of, chunk
+    by chunk (by key): the transform of the chunk and :func:`product_state` of each of its products that goes in."""
+    products = tuple(PRODUCTS if products is None else ([products] if isinstance(products, str) else products))
+    out = {}
+    for ch in _chunks(document, chunks):
+        had = [p for p in chunk_products(ch) if p in products]
+        if not had:
+            continue
+        out[str(ch.key)] = {"label": str(ch.label), "placed": np.asarray(ch.transform, float).tolist(),
+                            "products": {p: product_state(ch, p) for p in had}}
+    return out
+
+
+def _stored_folder(document, folder: Path) -> str:
+    """``folder`` relative to the folder of the project (posix) when it lies in it - the project and its site move
+    together -, else absolute."""
+    folder = Path(folder).resolve()
+    if document.path is not None:
+        try:
+            return folder.relative_to(Path(document.path).resolve().parent).as_posix()
+        except ValueError:
+            pass
+    return str(folder)
+
+
+def record_site(document, manifest: str | os.PathLike, options: dict, sources: dict) -> dict:
+    """The site just built (``manifest``, its ``site.json``) kept with the project in ``document.meta``: its folder
+    (:func:`_stored_folder`), the ``options`` it was built with, when, its size, the chunks and the products it holds
+    and their ``sources`` (:func:`site_sources`, taken before the build). Returned."""
+    from datetime import datetime
+
+    folder = Path(manifest).parent
+    try:
+        data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    record = {"folder": _stored_folder(document, folder), "options": dict(options),
+              "when": datetime.now().isoformat(timespec="seconds"), "size": site_size(folder),
+              "frame": data.get("frame", options.get("frame")), "sources": sources}
+    document.meta[META_KEY] = record
+    return record
+
+
+def site_size(folder: str | os.PathLike) -> int:
+    """The bytes of the files of a site folder."""
+    return sum(f.stat().st_size for f in Path(folder).rglob("*") if f.is_file())
+
+
+def site_record(document) -> dict | None:
+    """The site built last from the project (:func:`record_site`), None without one."""
+    record = document.meta.get(META_KEY)
+    return record if isinstance(record, dict) and record.get("folder") else None
+
+
+def site_folder(document, record: dict) -> Path:
+    """The folder of ``record``: a relative one is read against the folder of the project."""
+    folder = Path(str(record.get("folder")))
+    if not folder.is_absolute() and document.path is not None:
+        folder = Path(document.path).parent / folder
+    return folder
+
+
+def site_stale(document, record: dict) -> list[str]:
+    """What changed since the site of ``record`` was built, as ``"<chunk>: <product>"`` (or the chunk alone when it
+    was removed or placed elsewhere): a product built again, changed or removed. Empty: the site is current."""
+    from ..core.stamps import same_transform
+
+    chunks = {str(c.key): c for c in document.chunks}
+    out = []
+    for key, src in (record.get("sources") or {}).items():
+        ch = chunks.get(str(key))
+        label = str(ch.label if ch is not None else src.get("label", key))
+        placed = src.get("placed")
+        if ch is None or placed is None or not same_transform(placed, ch.transform):
+            out.append(label)
+            continue
+        for product, state in (src.get("products") or {}).items():
+            if json.loads(json.dumps(product_state(ch, product))) != state:
+                out.append(f"{label}: {product}")
+    return out
+
+
+__all__ = ["export_site", "server", "Preview", "folder_kind", "chunk_products", "site_sources", "record_site",
+           "site_record", "site_folder", "site_stale", "site_size", "FRAMES", "PRODUCTS", "LANGUAGES", "MANIFEST",
+           "FORMAT", "FORMAT_VERSION", "META_KEY"]
