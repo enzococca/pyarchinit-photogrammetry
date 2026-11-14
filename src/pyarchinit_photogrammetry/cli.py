@@ -1683,6 +1683,58 @@ def merge_chunks(project: Path,
         typer.echo(f"  warning: {w}")
 
 
+@app.command("merge-models")
+def merge_models_cmd(project: Path,
+                     chunks: list[str] = typer.Argument(..., help="chunks whose models are merged (labels or keys); "
+                                                                  "the first gives frame and CRS"),
+                     label: Optional[str] = typer.Option(None, help="label of the new chunk (default Modello unito)"),
+                     colour: str = typer.Option("none", help="colours of the sources matched to the reference on "
+                                                             "their overlaps: none, gain (RGB gain and offset) or lab "
+                                                             "(mean and spread in CIE Lab)"),
+                     reference: Optional[str] = typer.Option(None, help="the chunk whose colours the others take "
+                                                                        "(default the first)"),
+                     match_distance: Optional[float] = typer.Option(None, help="metres between two vertices taken "
+                                                                               "for the same place in --colour"),
+                     remove_overlaps: bool = typer.Option(False, help="faces of a source lying on the surface of a "
+                                                                      "source before it in --priority left out"),
+                     priority: Optional[str] = typer.Option(None, help="order of the sources for --remove-overlaps "
+                                                                       "(comma separated; default the order given)"),
+                     overlap_distance: Optional[float] = typer.Option(None, help="metres from a kept surface within "
+                                                                                 "which a face is an overlap"),
+                     pages: str = typer.Option("keep", help="texture pages: keep (as they are) or repack (packed "
+                                                            "together on pages of at most --page-size)"),
+                     page_size: int = typer.Option(8192, help="side of a repacked page in pixels"),
+                     max_page: Optional[int] = typer.Option(None, help="pages reduced to at most this side (pixels)"),
+                     activate: bool = typer.Option(False, help="make the new chunk the active one")):
+    """The models of several chunks as ONE textured model of a new chunk (each in its chunk's frame; open edges
+    and gaps left open), the source chunk of every face kept as its group (export-model --groups source)."""
+    from .engine.model_merge import merge_models
+
+    doc = Document.open(project)
+    order = [c.strip() for c in priority.split(",") if c.strip()] if priority else None
+    try:
+        merged, r = merge_models(doc, chunks, label=label, reference=reference, colour=colour,
+                                 match_distance=match_distance, remove_overlaps=remove_overlaps, priority=order,
+                                 overlap_distance=overlap_distance, pages=pages, page_size=page_size,
+                                 max_page=max_page, progress=print_progress)
+    except (ValueError, KeyError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    if activate:
+        doc.chunk = merged
+    doc.save()
+    typer.echo(f"[{merged.key}] {merged.label}: {r['faces']:,} faces, {r['vertices']:,} vertices, {r['pages']} "
+               f"texture pages ({r['page_layout']})")
+    for s in r["sources"]:
+        typer.echo(f"  {s['chunk']}: {s['kept']:,} of {s['faces']:,} faces kept")
+    for c in r["colours"]:
+        if c["fit"]:
+            typer.echo(f"  colours of {c['chunk']}: {c['pairs']} pairs, difference {c['fit']['before']:.1f} -> "
+                       f"{c['fit']['after']:.1f} (Lab)")
+    for w in r["warnings"]:
+        typer.echo(f"  warning: {w}")
+
+
 @app.command()
 def append(project: Path,
            sources: list[Path] = typer.Argument(..., help="projects to append: .ppg, Metashape .psx, WebODM all.zip "
@@ -1744,10 +1796,23 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
            bbox: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' (ortho, dem, model, "
                                                          "cloud)"),
            wkt: Optional[str] = typer.Option(None, help="only inside this WKT polygon"),
+           groups: str = typer.Option("none", help="--model OBJ: one group (o/g) per source chunk of a merged model "
+                                                   "or object of an imported OBJ (source), per connected piece "
+                                                   "(component), or none"),
+           labels: Optional[Path] = typer.Option(None, help="--model OBJ: a group per face label, from a .npy file or "
+                                                            "a text file with one label per line (one per face)"),
+           max_texture: Optional[int] = typer.Option(None, help="--model: texture pages reduced to at most this side "
+                                                                "(pixels) in the copies"),
            chunk: Optional[str] = None):
     """Export products in world coordinates (optionally cut by a box or a polygon: see also `ppg crop`).
     A model ending in .glb is a binary glTF, a cloud ending in .copc.laz a Cloud Optimized Point Cloud."""
     _, ch = _open(project, chunk)
+    face_labels = None
+    if labels is not None:
+        import numpy as np
+
+        face_labels = (np.load(labels, allow_pickle=False) if labels.suffix.lower() == ".npy"
+                       else np.array([ln.strip() for ln in labels.read_text(encoding="utf-8").splitlines() if ln.strip()]))
     region = _region(None, bbox, wkt, None) if (bbox or wkt) else None
     if tiles:
         typer.echo(str(ch.export_3dtiles(tiles, progress=print_progress)))
@@ -1756,7 +1821,8 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
     for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region, cog=cog)),
                       (dem, lambda path: ch.export_dem(path, region=region, cog=cog if cog not in ("jpeg", "webp")
                                                        else "zstd")),
-                      (model, lambda path: ch.export_model(path, region=region)),
+                      (model, lambda path: ch.export_model(path, region=region, groups=groups, labels=face_labels,
+                                                           max_texture=max_texture)),
                       (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes), region=region)),
                       (markers, ch.export_reference), (report, ch.generate_report)):
         if value:
