@@ -1170,8 +1170,9 @@ from qgis.core import (QgsApplication, QgsCoordinateReferenceSystem, QgsPalLayer
                        QgsRasterLayer, QgsVectorLayer, QgsVectorLayerSimpleLabeling, QgsTextFormat,
                        QgsHillshadeRenderer, QgsMultiBandColorRenderer, QgsSingleBandPseudoColorRenderer,
                        QgsColorRampShader, QgsRasterShader, QgsPalettedRasterRenderer, QgsContrastEnhancement,
-                       QgsDefaultValue, QgsProviderRegistry)
+                       QgsDefaultValue, QgsProviderRegistry, QgsSingleSymbolRenderer, QgsSymbol)
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtXml import QDomDocument
 
 
 def stretched(lyr, band):
@@ -1240,9 +1241,14 @@ def key_of(lyr):
 
 
 def load_style(lyr, path):
-    """A style kept from QGIS (.qml): True when it could be read."""
-    msg, ok = lyr.loadNamedStyle(path)
-    return bool(ok)
+    """A style kept from QGIS (.qml): True when it could be read. Imported from the document itself: loadNamedStyle
+    of a layer of a GeoPackage takes the default style of its table in layer_styles instead of the file."""
+    doc = QDomDocument()
+    with open(path, encoding="utf-8") as fh:
+        if not doc.setContent(fh.read())[0]:
+            return False
+    ok = lyr.importNamedStyle(doc)
+    return bool(ok[0] if isinstance(ok, tuple) else ok)
 
 
 def vector_style(lyr, v):
@@ -1373,7 +1379,11 @@ for v in cfg["vectors"]:
     if lyr is None:
         lyr = new_vector(v)
         report["added"].append(v["name"])
-    elif cfg.get("restyle") and v["key"] in mine:  # Ripristina gli stili predefiniti
+    elif cfg.get("restyle") and v["key"] in mine:  # Ripristina gli stili predefiniti: a new renderer, then ours
+        lyr.setRenderer(QgsSingleSymbolRenderer(QgsSymbol.defaultSymbol(lyr.geometryType())))
+        lyr.setLabeling(None)
+        lyr.setLabelsEnabled(False)
+        lyr.setOpacity(1.0)
         vector_style(lyr, v)
         report["restyled"].append(v["name"])
     report["vectors"].append({"name": v["name"], "valid": lyr.isValid(), "features": lyr.featureCount(),
@@ -1387,6 +1397,10 @@ for r in cfg["rasters"]:
         if lyr.source() != r["path"]:  # the product is another file now: the layer keeps its style
             lyr.setDataSource(r["path"], r["name"], "gdal")
         if cfg.get("restyle"):
+            fresh = QgsRasterLayer(r["path"], r["name"])  # the renderer QGIS gives the file, then ours
+            if fresh.isValid() and fresh.renderer() is not None:
+                lyr.setRenderer(fresh.renderer().clone())
+            lyr.setOpacity(1.0)
             raster_style(lyr, r)
             report["restyled"].append(r["name"])
     report["rasters"].append({"name": r["name"], "valid": lyr.isValid()})

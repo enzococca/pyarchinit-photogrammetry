@@ -233,7 +233,7 @@ def test_the_script_of_qgis_updates_in_place():
     remove a layer that is not the program's, give the kept .qml first."""
     script = qgis_link._BUILD_SCRIPT
     compile(script, "build.py", "exec")
-    assert 'proj.read(cfg["project"])' in script and "loadNamedStyle" in script
+    assert 'proj.read(cfg["project"])' in script and "importNamedStyle" in script
     assert "for k in mine:" in script and "removeMapLayer" in script
     assert 'v.get("db_default")' in script
 
