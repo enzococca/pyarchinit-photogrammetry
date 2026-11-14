@@ -301,3 +301,24 @@ def test_edits_made_in_qgis_on_the_unfolded_elevation_read_back(project, tmp_pat
     assert (q["u"], q["v"]) == (pytest.approx(1.6), pytest.approx(100.6))
     assert np.abs(np.array([q["x"], q["y"], q["quota_q"]]) - _known(1.6, 100.6, DEPTH)).max() < 1e-3
     assert ED._empty_changes(ED.read_unfolded(out["gpkg"]))  # read once
+
+
+def test_plugin_api_reads_and_adds_elevation_drawings(project, tmp_path):
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    _doc, ch, _wall = project
+    ctx = Context("prova", tmp_path / "plugin")
+    assert ctx.shown_elevation() is None
+    assert [e["id"] for e in ctx.elevations(ch)] == ["w1"]
+    assert ctx.add_units([box(0.4, 99.9, 0.6, 100.1)], attributes={"us": "7"}, chunk=ch, elevation="w1") == 1
+    got = ctx.elevation_drawings("w1", chunk=ch, world=True)
+    (unit,) = got["units"]
+    assert unit["us"] == "7" and unit["id"]
+    assert np.abs(np.asarray(unit["world"].exterior.coords)[:, 2].max() - 100.1) < 1e-9
+    assert not (ch.meta["drawings"].get("units"))  # not on the plan
+    with pytest.raises(ValueError):
+        ctx.add_units([box(0, 0, 1, 1)], chunk=ch, elevation="nope")
+    with pytest.raises(ValueError):
+        ctx.elevation_drawings(chunk=ch)  # none shown, none given
