@@ -1,4 +1,5 @@
-// The 3D view of a survey: the models of the chunks as 3D Tiles, without a globe, Z up, in the frame of the site.
+// The 3D view of a survey: the models and the point clouds of the chunks as 3D Tiles, without a globe, Z up, in the
+// frame of the site. A cloud is a tileset of points refined by adding its finer tiles as the camera comes near.
 // A click gives the coordinates of the point of the model under the pointer; distances (polyline: 3D length,
 // plan length, height difference) and areas (polygon: 3D area, plan area, perimeter) are measured on the
 // model. Points are picked by ray casting on the tiles shown (the finest loaded at that moment).
@@ -13,6 +14,8 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {TilesRenderer} from './vendor/3d-tiles-renderer/index.three.js';
 
 const MARK = 0x0b6bcb;
+const POINT_SIZE = 2; // pixels of a point of a cloud
+const PICK_PIXELS = 6; // how near to the pointer a point of a cloud is picked
 
 // The area vector of a closed polygon (Newell): its length is the area on the mean plane, its z the plan area.
 export function areaVector(points) {
@@ -90,6 +93,9 @@ export async function createView(container, models) {
     const origin = model.def.origin || [0, 0, 0];
     holder.position.set(origin[0] - centre.x, origin[1] - centre.y, origin[2] - centre.z);
     const tiles = new TilesRenderer(model.def.url);
+    // the points of a node of a cloud leave gaps of their spacing between them, seen at once at two pixels a point:
+    // its finer nodes are loaded sooner than the finer tiles of a model
+    if (model.def.type === 'points') tiles.errorTarget = 4;
     if (tileset.root && Array.isArray(tileset.root.transform)) { // a tileset on the globe: back to its own frame
       const placed = new THREE.Matrix4().fromArray(tileset.root.transform);
       tiles.group.matrixAutoUpdate = false;
@@ -112,8 +118,14 @@ export async function createView(container, models) {
       texture.minFilter = THREE.LinearFilter;
       return texture;
     });
+    const points = model.def.type === 'points';
     tiles.addEventListener('load-model', ({scene: content}) => {
       content.traverse((object) => {
+        if (points && object.isPoints && object.material) {
+          object.material.size = POINT_SIZE;
+          object.material.sizeAttenuation = false;
+          return;
+        }
         const material = object.material;
         if (!material || material.userData.page === undefined) return;
         const page = pages[material.userData.page];
@@ -124,7 +136,7 @@ export async function createView(container, models) {
       });
     });
     tiles.addEventListener('load-error', ({error, url}) => console.error(`${url}: ${error && error.message}`));
-    loaded.push({...model, tiles, holder, tileset});
+    loaded.push({...model, tiles, holder, tileset, points, shown: model.def.visible !== false});
   }
 
   // the marks of a measure: points over the model, the line between them
@@ -162,6 +174,10 @@ export async function createView(container, models) {
       -((clientY - rect.top) / rect.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, camera);
+    // a point of a cloud: within a few pixels of the ray at the distance of the centre of the view
+    const pixel = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
+      * camera.position.distanceTo(controls.target) / Math.max(1, rect.height);
+    ray.params.Points.threshold = PICK_PIXELS * pixel;
     let best = null;
     for (const m of loaded) {
       if (!m.holder.visible) continue;
@@ -217,9 +233,13 @@ export async function createView(container, models) {
   view.setVisible = (index, visible) => {
     loaded[index].holder.visible = visible;
   };
-  view.ready = () => loaded.every((m) => m.tiles.root && m.tiles.loadProgress === 1
-    && m.tiles.stats.downloading + m.tiles.stats.parsing + m.tiles.stats.queued === 0)
-    && loaded.some((m) => m.tiles.visibleTiles.size > 0);
+  // the visible models and clouds, every tile they need loaded
+  view.ready = () => {
+    const shown = loaded.filter((m) => m.holder.visible);
+    return shown.length > 0 && shown.every((m) => m.tiles.root && m.tiles.loadProgress === 1
+      && m.tiles.stats.downloading + m.tiles.stats.parsing + m.tiles.stats.queued === 0)
+      && shown.some((m) => m.tiles.visibleTiles.size > 0);
+  };
 
   // a click (not a drag) picks a point; the second click of a double click ends the measure
   let down = null;
@@ -263,7 +283,9 @@ export async function createView(container, models) {
       controls.update();
       scene.updateMatrixWorld();
       camera.updateMatrixWorld();
-      for (const m of loaded) m.tiles.update();
+      for (const m of loaded) {
+        if (m.holder.visible) m.tiles.update(); // a hidden model or cloud loads nothing
+      }
       renderer.render(scene, camera);
     }
     window.requestAnimationFrame(frame);

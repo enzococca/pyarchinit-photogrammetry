@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from test_site import SECRET, _glb, _leaves, _with_drawings
+from test_site import SECRET, Browser, _glb, _leaves, _serving, _with_drawings, find_browser
 
 GPS_PICTURE_TEXT = "Fotocamera di prova"
 
@@ -516,3 +516,139 @@ def test_web_build_options(processed, tmp_path):
     assert manifest["build"]["budget"] == 300_000_000
     result = CliRunner().invoke(app, ["web", "build", str(doc.path), str(tmp_path / "t"), "--date", "Rilievo 1=x"])
     assert result.exit_code == 1 and "YYYY-MM-DD" in result.output
+
+
+# ------------------------------------------------------------------------------------------------ the page
+def _browser(tmp_path):
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    return Browser(executable, tmp_path / "profilo", size=(1200, 760))
+
+
+def _drag_free_click(browser, x, y, count=1):
+    for kind in ("mousePressed", "mouseReleased"):
+        browser.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "button": "left",
+                                                  "clickCount": count})
+
+
+def test_cloud_sections_and_plugins_in_a_browser(full_site, tmp_path):
+    """The cloud drawn and picked in the 3D tab, the section with its orthophoto measured on its plane and linked
+    to its trace on the plan both ways, the tabs of the plugin with a clean page - no error, nothing asked outside
+    the server of the site."""
+    _doc, _ch, _facts, site, manifest, _ = full_site
+    browser = _browser(tmp_path)
+    try:
+        with _serving(site) as port:
+            origin = f"http://127.0.0.1:{port}"
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            browser.js("localStorage.setItem('ppg-site-language', 'it')")  # the words of the page in Italian
+            browser.call("Page.reload")
+            browser.wait("document.documentElement.lang === 'it' && "
+                         "['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            tabs = browser.js("[...document.querySelectorAll('#tabs button')].filter(b => !b.hidden)"
+                              ".map(b => b.textContent)")
+            assert tabs == ["Pianta", "Modello 3D", "Sezioni", "Catalogo", "Note"]
+            # the cloud alone, drawn by levels and picked on its points
+            browser.js("ppgSite.setTab('3d')")
+            browser.wait("ppgSite.state.view3d && ppgSite.state.view3d.ready()", 90)
+            browser.js("document.querySelector('label.layer[data-layer=model] input').click()")
+            browser.js("document.querySelector('label.layer[data-layer=cloud] input').click()")
+            browser.wait("ppgSite.state.view3d.ready()", 90)
+            view = "ppgSite.state.view3d"
+            assert browser.js(f"{view}.models.map(m => m.holder.visible)") == [False, True]
+            assert browser.js(f"{view}.models[1].tiles.visibleTiles.size") > 1  # finer nodes added near
+            rect = browser.js("(() => { const r = document.querySelector('#view3d canvas')"
+                              ".getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()")
+            cx, cy = rect[0] + rect[2] / 2, rect[1] + rect[3] / 2
+            point = browser.js(f"(() => {{ const p = {view}.pick({cx}, {cy}); return p && [p.x, p.y, p.z]; }})()")
+            assert point is not None and all(abs(v) < 10 for v in point)
+            for dx in (-80, 80):
+                browser.js(f"{view}.measure('distance')") if dx < 0 else None
+                _drag_free_click(browser, cx + dx, cy)
+            result = browser.js(f"{view}.result()")
+            assert result["points"] == 2 and 0.5 < result["length"] < 5
+            browser.js(f"{view}.clear()")
+            # the section: its orthophoto, a measure on its plane, its trace on the plan
+            browser.js("document.getElementById('tab-sections').click()")
+            browser.wait("document.documentElement.dataset.section === '1'", 60)
+            sec = manifest["chunks"][0]["sections"][0]
+            assert browser.js("ppgSite.state.sectionMap.getView().getProjection().getCode()") == "PPG:SEZ:1"
+            line = browser.js("ppgSite.measured(new ol.geom.LineString([[0, 0], [1.2, 0.5]]))")
+            assert line == "Lunghezza: 1.300 m"
+            u = (sec["extent"][0] + sec["extent"][2]) / 2
+            px = browser.js(f"ppgSite.state.sectionMap.getPixelFromCoordinate([{u}, {sec['extent'][1] + 0.05}])")
+            box = browser.js("(() => { const r = document.getElementById('section-map').getBoundingClientRect();"
+                             " return [r.left, r.top]; })()")
+            _drag_free_click(browser, box[0] + px[0], box[1] + px[1])
+            browser.wait("document.getElementById('info').textContent.includes('u lungo la traccia')", 10)
+            browser.js("document.getElementById('show-on-plan').click()")
+            browser.wait("document.documentElement.dataset.highlight === '1'", 10)
+            assert browser.js("ppgSite.state.tab") == "plan"
+            assert browser.js("ppgSite.state.highlight.getSource().getFeatures().length") == 1
+            browser.js("document.documentElement.dataset.section = ''")
+            browser.js("ppgSite.map.renderSync()")
+            c = sec["trace"]["coordinates"]
+            mid = [(c[0][0] + c[-1][0]) / 2, (c[0][1] + c[-1][1]) / 2]
+            px = browser.js(f"ppgSite.map.getPixelFromCoordinate({mid})")
+            box = browser.js("(() => { const r = document.getElementById('map').getBoundingClientRect();"
+                             " return [r.left, r.top]; })()")
+            _drag_free_click(browser, box[0] + px[0], box[1] + px[1])
+            browser.wait("document.documentElement.dataset.section === '1'", 20)
+            assert browser.js("ppgSite.state.tab") == "sections"
+            # the tabs of the plugin
+            browser.js("document.querySelector(\"button[data-tab='x:finds-test:catalogo']\").click()")
+            browser.wait("document.documentElement.dataset.extra === 'finds-test:catalogo'", 20)
+            browser.wait("[...document.querySelectorAll('.card img')].every(i => i.complete && i.naturalWidth)", 20)
+            assert browser.js("document.querySelectorAll('.card').length") == 2
+            browser.js("document.querySelector(\"button[data-tab='x:finds-test:note']\").click()")
+            browser.wait("document.documentElement.dataset.extra === 'finds-test:note'", 20)
+            page = browser.js("document.getElementById('extra').innerHTML")
+            assert "Note di scavo" in page and not any(w in page for w in ("script", "onerror", "javascript"))
+            assert browser.js("document.querySelector('.plugin-page a[href]').rel") == "noopener noreferrer nofollow"
+            assert not browser.errors, browser.errors
+            assert all(u.startswith(origin) or u.startswith(("data:", "blob:")) for u in browser.requests)
+    finally:
+        browser.close()
+
+
+def test_dates_in_a_browser(dated_site, tmp_path):
+    """The selector of the dates: the latest first; another date switches the plan and the 3D view, the view kept."""
+    _doc, site, _manifest = dated_site
+    browser = _browser(tmp_path)
+    try:
+        with _serving(site) as port:
+            browser.call("Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            buttons = browser.js("[...document.querySelectorAll('#dates button.date')].map(b => b.textContent)")
+            assert buttons == ["2025-06-02 · Prima", "2025-06-09 · Dopo"]
+            shown = "ppgSite.state.entries.filter(e => e.layer.getVisible()).map(e => e.chunk.id + ':' + e.def.id)"
+            assert browser.js(shown) == ["2:ortho", "2:units"]
+            import rasterio
+
+            with rasterio.open(site / "data/1/dem.tif") as src:  # the middle of the trench: dug on the second date
+                rows, cols = src.shape
+                x, y = src.xy(rows // 2, cols // 2)
+            dem = browser.js(f"ppgSite.heightAt({x}, {y})")
+            centre = browser.js("ppgSite.map.getView().getCenter()")
+            browser.js("document.querySelector('#dates button.date').click()")
+            browser.wait("document.documentElement.dataset.epoch === '0'", 10)
+            assert browser.js(shown) == ["1:ortho"]
+            assert browser.js(f"ppgSite.heightAt({x}, {y})") == pytest.approx(dem + 0.2, abs=1e-4)  # before it
+            assert browser.js("ppgSite.map.getView().getCenter()") == centre
+            browser.js("ppgSite.setTab('3d')")
+            browser.wait("ppgSite.state.view3d && ppgSite.state.view3d.ready()", 90)
+            models = "ppgSite.state.view3d.models.map(m => m.holder.visible)"
+            assert browser.js(models) == [True, False]
+            camera = browser.js("ppgSite.state.view3d.camera.position.toArray()")
+            browser.js("(() => { const s = document.getElementById('date-slider'); s.value = '1';"
+                       " s.dispatchEvent(new Event('input')); })()")
+            browser.wait("document.documentElement.dataset.epoch === '1'", 10)
+            assert browser.js(models) == [False, True]
+            assert browser.js("ppgSite.state.view3d.camera.position.toArray()") == camera
+            assert not browser.errors, browser.errors
+    finally:
+        browser.close()
