@@ -2,7 +2,8 @@
 calls and answers as the real one does (logged in or not, a failure, a file too large). No network, no account.
 
 The behaviour comes from the environment: ``FAKE_WRANGLER_DIR`` (where it keeps its calls and its "cloud"),
-``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``)."""
+``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``,
+``slow``)."""
 from __future__ import annotations
 
 import json
@@ -94,6 +95,10 @@ if args[:4] == ["r2", "bucket", "cors", "set"]:
 if args[:2] == ["pages", "deploy"]:
     folder = Path(args[2])
     name = args[args.index("--project-name") + 1]
+    if "slow" in modes:  # a long upload, to be cancelled
+        import time
+        (home / "deploying").write_text("1")
+        time.sleep(60)
     if "fail_deploy" in modes:
         out("✘ [ERROR] A request to the Cloudflare API (/accounts/%(account)s/pages/projects) failed.\n"
             "  Authentication error [code: 10000] Bearer %(secret)s", 1)

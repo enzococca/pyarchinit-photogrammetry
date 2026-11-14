@@ -684,6 +684,11 @@ class WorkspaceTree(QTreeWidget):
                  site.site_folder(document, record))
         if record.get("frame") == "crs":
             tip += "\n" + tr("Contiene le coordinate vere del rilievo")
+        published = record.get("published") if isinstance(record.get("published"), dict) else None
+        if published and published.get("address"):
+            it.setText(0, text + "  -  " + str(published["address"]).split("://", 1)[-1])
+            tip += "\n" + tr("Pubblicato il {0} su {1}", str(published.get("when") or "?").replace("T", " "),
+                             published["address"])
         if stale:
             it.setForeground(0, QColor(PALETTE["red"]))
             tip = tr("Da rifare: cambiati dopo il sito {0}", ", ".join(stale)) + "\n" + tip
