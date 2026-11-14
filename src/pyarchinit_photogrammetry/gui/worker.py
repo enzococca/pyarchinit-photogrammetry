@@ -64,6 +64,26 @@ class Eta:
         return self.estimate
 
 
+def _collect_in_the_gui_thread() -> None:
+    """Python's garbage collector in the GUI thread only from now on (``gc_guard.ensure``), before a task thread
+    starts: ``gui.main`` installs it, a window made elsewhere (a script, a plugin, the tests) had not.
+
+    A collection in the task thread could visit a freed object (segmentation fault in ``visit_decref`` called by
+    a ``tp_traverse`` of libshiboken6: the CI on Linux + Python 3.11, 13 November 2026). shiboken6 (6.12.0, and
+    its dev branch on 14 November 2026) releases, in ``Object::destroy`` -> ``clearReferences``, the objects a
+    wrapper keeps in its reference map before it empties the map, and runs the C++ destructor of a wrapper it has
+    already freed with the GIL released. A widget added to a layout that has no widget yet
+    (``grid = QGridLayout(); grid.addWidget(QLabel())``, then ``lay.addLayout(grid)``) is kept by that map alone:
+    when Qt deletes the dialog, the label's wrapper is freed and its C++ destructor runs without the GIL, and a
+    collection started meanwhile by another thread still finds the label in the layout's map
+    (tests/test_gc_guard.py reproduces it)."""
+    app = QApplication.instance()
+    if app is not None:
+        from .gc_guard import ensure
+
+        ensure(app)
+
+
 class Task(QObject):
     progress = Signal(float, str)
     finished = Signal(object)
@@ -288,6 +308,7 @@ class TaskRunner(QObject):
         self.task.failed.connect(self._on_failed)
         self.task.cancelled.connect(self._on_cancelled)
         self.busy_changed.emit(True)
+        _collect_in_the_gui_thread()
         self.thread.start()
         return True
 

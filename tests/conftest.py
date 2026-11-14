@@ -210,7 +210,12 @@ def _qt_garbage_between_tests():
     thousand widgets, and the connections of its actions keep the Python object, so every test with
     a window left one behind (some 1500 in a whole run). The process grew to 13 GB and the CI on
     Linux, with 16 GB, ended in the swap and in the 20 minute timeout of one test (10 November 2026,
-    version 1.7.7). Only closed windows go: one still shown may be shared by the tests of a module."""
+    version 1.7.7). Only closed windows go: one still shown may be shared by the tests of a module.
+
+    From the first test that made a QApplication on, the suite collects as the application does, in the
+    GUI thread only (``gc_guard.ensure``, which ``gui.main`` and the TaskRunner install too): a collection
+    in another thread can visit an object shiboken6 has freed while Qt deletes a dialog (see
+    ``gui/worker.py _collect_in_the_gui_thread``; the CI on Linux + Python 3.11, 13 November 2026)."""
     yield
     import gc
     import sys
@@ -221,9 +226,13 @@ def _qt_garbage_between_tests():
 
     _delete_main_windows()
     gc.collect()
-    if QCoreApplication.instance() is not None:
+    app = QCoreApplication.instance()
+    if app is not None:
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         gc.collect()
+        from pyarchinit_photogrammetry.gui.gc_guard import ensure
+
+        ensure(app)
 
 
 @pytest.fixture(autouse=True)
