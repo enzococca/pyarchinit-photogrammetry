@@ -309,6 +309,64 @@ is refused - search again. The window says so under the table, and also when the
 the search (accepting is still right then, but the coordinates, displacements and red rows are those of before) or
 removed.
 
+## Automatic ties
+
+Picking ties by hand is slow when there are many surveys - every year of flights, the blocks of a dive. The section
+**Automatic ties** of the ties window finds them by itself, in steps whose state is shown at its top (○ to do,
+… running, ✓ done, ! to do again):
+
+1. **Pairs** - *Find pairs*: every two chunks with a DEM and how much they overlap where they are now. *Position
+   error* (default 5 m) is how far off the placement of a chunk may be (a drone's GPS): the matching looks that far.
+   The pairs that overlap are ticked; two chunks of one [group](#groups-of-chunks) are not paired (they move
+   together); a local frame with a system of the world is refused, as in the solve.
+2. **Matching** - *Match*: for each ticked pair the two orthophotos (or, with *Images: DEM relief*, the DEMs shaded
+   from four directions: for surveys whose colours changed - sand moved, water, vegetation, another light) are read
+   on one grid in the system of the first chunk, only where they overlap. SIFT points matched both ways give 3D points
+   (the DEM under them); RANSAC keeps those that agree with one similarity; then the image of the second chunk is warped
+   onto the first and a regular grid of patches is matched by correlation (to a fraction of a pixel), and the
+   similarity is fitted again without the outliers - twice. The table shows the matches, those that agree, the
+   refined points, the **rotation**, the **scale** in ppm and the **shift** that would bring the second chunk onto the
+   first, the **RMS** of the residuals and the outcome. A pair that does not show the same ground is **rejected** in
+   red, with the reason (too few points agree, an agreement that chance gives too, points on a line). Select a row to
+   read its report under *Report*. *Over the whole raster* looks over the whole orthophotos, wherever the chunks are
+   (two unrelated local frames, a GPS far off): slower.
+3. **Ties** - *Accept*: the proposed and ticked pairs become ties - at most *Ties per pair* (default 12) of the
+   refined points, spread over the overlap, with the precision of the fit (its RMS, at least half a cell), markers
+   **auto N** in both chunks. One step of *Edit > Undo*. A pair accepted again replaces the ties it made before.
+4. **Solve** - as for the ties made by hand: choose the unknowns, **Check**, **Apply**.
+
+Nothing is stored before *Accept*. After *Apply* the matching is marked *to do again* (the chunks moved). A DEM or an
+orthophoto built before a solve that tilted its chunk is placed in plan only (as the 2D view does): a pair matched on
+it says so - build them again before trusting it.
+
+## Groups of chunks
+
+Chunks can be gathered in **groups** (a year of flights, the blocks of one dive, the sectors of an excavation). A group
+is a folder in the [*Workspace*](panes.md): right click on a chunk (or on several selected) > *Group* > *New group...*,
+*Move to «...»*, *Take out of the group*; or drag chunks onto a group (onto a chunk of it: placed before it) and onto
+the project node to take them out. The box of a group shows or hides all its chunks in the 3D view.
+
+Right click on a group:
+
+| Entry | What it does |
+| --- | --- |
+| *Show in the 3D view* / *Hide from the 3D view* | all its chunks, with the active one |
+| *Rename...* | the name of the group (also F2) |
+| *Tie the group with ties...* | the ties window with the group as **one block**: its first chunk keeps its unknowns, the others *with its group* |
+| *Merge the chunks of the group...* | *Merge chunks* with the chunks of the group proposed |
+| *DEM and orthophoto of the group...* / *Export the group...* | the batch with those steps on the chunks of the group (to check and run) |
+| *Dissolve the group* | the group goes; its chunks stay |
+
+**A group in the solve.** The unknowns *with its group* move a chunk with the first chunk of its group that has
+unknowns of its own (its *fixed* chunk when it has one): the relative poses of the chunks inside the group stay as they
+are, and the group needs ties only from some of its chunks. A tie between two chunks of the same block moves nothing
+and is left out ("both ends are in the same group"). A group with a fixed chunk holds all its chunks. The chunks of a
+block must be in one system.
+
+Groups are kept in the project (`meta["chunk_groups"]`): an older version of the program opens the project with all
+its chunks and ignores the groups (it keeps the key, so they are back when the project is opened again here). Every
+change of the groups is one step of *Edit > Undo*.
+
 ## Command line
 
 ```bash
@@ -323,6 +381,9 @@ ppg ties heights scavo.ppg [--json]                         # the stable heights
 ppg ties remeasure scavo.ppg "quota stabile 1"              # measured again where the chunks are now
 ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-references]
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
+ppg ties auto scavo.ppg [--chunks 2024,2025] [--pairs 2024:2025] [--source ortho|relief] [--margin 5] [--whole]
+ppg ties auto scavo.ppg --accept [--max-ties 12] [--json auto.json]   # the pairs proposed made into ties
+ppg ties solve scavo.ppg --unknowns 2024=fixed,voli2025=similarity    # a group's name: its chunks as one block
 ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
 ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # or --agreeing: those confirmed by the photos
 ```
@@ -338,3 +399,8 @@ and changes nothing without `--yes`.
 `check` prints the same report as the window, without the straight axis (in English), and changes nothing. `solve` asks before applying (or `--yes`); with
 redundancy 0 it asks a question of its own, and `--yes` needs `--accept-no-check` too. Negative coordinates are
 written as they are, or after `--`. All the options are in the [Python API](../api.md#align-and-merge-chunks).
+
+`ppg ties auto` prints the candidate pairs and the report of each pair matched (proposed or rejected, rotation, scale
+in ppm, shift, residuals); `--json` writes the pairs and the results with their points. Nothing changes without
+`--accept`. In `--unknowns` a chunk may be `group` (it moves with its group) and the name of a group gives its first
+chunk the unknowns and the others `group`.

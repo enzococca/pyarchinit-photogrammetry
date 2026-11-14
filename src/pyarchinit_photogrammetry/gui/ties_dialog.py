@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import crs as crs_mod
-from ..engine import stable_height
+from ..engine import auto_ties, stable_height
 from ..engine import ties as ties_mod
 from . import i18n
 from .dialogs import Field, ParamDialog, choice
@@ -33,7 +33,7 @@ from .undo import ScriptChanged
 
 log = logging.getLogger(__name__)
 
-KIND_ORDER = ("fixed", "similarity", "rigid", "plan", "shift", "height")
+KIND_ORDER = ("fixed", "similarity", "rigid", "plan", "shift", "height", ties_mod.GROUP)
 OUT = ""  # the chunk is not in the solve
 RED = "#c0392b"
 ORANGE = "#b9770e"
@@ -110,6 +110,24 @@ def default_kinds(doc, active=None) -> dict[int, str]:
             out[ch.key] = "plan"
         else:
             out[ch.key] = "similarity"
+    return _group_kinds(doc, out)
+
+
+def _group_kinds(doc, kinds: dict) -> dict:
+    """The unknowns proposed for the chunks of a group (:mod:`..core.groups`): when one of them is in the solve, the
+    group moves as one block - its fixed chunk (else its first chunk in the solve) keeps its unknowns, the others
+    *con il gruppo*, those without ties too (they move with the others)."""
+    from ..core import groups
+
+    out = dict(kinds)
+    for g in groups.groups_of(doc):
+        inside = [k for k in g["chunks"] if out.get(k, OUT) not in (OUT, ties_mod.GROUP)]
+        if len(g["chunks"]) < 2 or not inside:
+            continue
+        lead = next((k for k in inside if out[k] == "fixed"), inside[0])
+        for k in g["chunks"]:
+            if k != lead:
+                out[k] = ties_mod.GROUP
     return out
 
 
@@ -223,12 +241,13 @@ def edit_state(doc, keys=None) -> dict:
     live markers."""
     return {"ties": copy.deepcopy(doc.meta.get(ties_mod.META_KEY)),
             "heights": copy.deepcopy(doc.meta.get(stable_height.META_KEY)),
+            "auto": copy.deepcopy(doc.meta.get(auto_ties.META_KEY)),
             "markers": {ch.key: copy.deepcopy([m.to_dict() for m in ch.markers]) for ch in doc.chunks
                         if keys is None or ch.key in keys}}
 
 
 def _restrict(state: dict, keys) -> dict:
-    return {"ties": state["ties"], "heights": state.get("heights"),
+    return {"ties": state["ties"], "heights": state.get("heights"), "auto": state.get("auto"),
             "markers": {k: v for k, v in state["markers"].items() if k in keys}}
 
 
@@ -256,7 +275,8 @@ class TiesEditStep:
         doc = self.window.doc
         if edit_state(doc, set(expected["markers"])) != expected:
             raise TiesChanged("the ties or the markers changed after the edit of the ties")
-        for key, value in ((ties_mod.META_KEY, state["ties"]), (stable_height.META_KEY, state.get("heights"))):
+        for key, value in ((ties_mod.META_KEY, state["ties"]), (stable_height.META_KEY, state.get("heights")),
+                           (auto_ties.META_KEY, state.get("auto"))):
             if value:
                 doc.meta[key] = copy.deepcopy(value)
             else:
@@ -364,7 +384,7 @@ class TiesDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setModal(False)
         self.setWindowTitle(tr("Aggancia chunk con legami"))
-        self.resize(1100, 760)
+        self.resize(1150, 900)
         self.result: dict | None = None  # the last check, while nothing changed after it
         self._generation = 0  # bumped by every change: a check started before one is not taken
         self._fingerprint: str | None = None  # the project when the last check started (fingerprint)
@@ -407,6 +427,11 @@ class TiesDialog(QDialog):
         row.addStretch(1)
         tl.addLayout(row)
         split.addWidget(top)
+
+        from .auto_ties_pane import AutoTiesPanel
+
+        self.auto = AutoTiesPanel(self)  # the automatic ties: pairs, matching, accept (its steps and their states)
+        split.addWidget(self.auto)
 
         # the stable heights and the unknowns in panes of their own: the splitter lets the user give the room
         mid = QWidget()
@@ -472,9 +497,9 @@ class TiesDialog(QDialog):
         bl.addWidget(self.report, 1)
         split.addWidget(bottom)
         split.setChildrenCollapsible(False)
-        for i, stretch in enumerate((3, 1, 1, 2)):  # the ties first, the report next
+        for i, stretch in enumerate((3, 2, 1, 1, 2)):  # the ties first, the report next
             split.setStretchFactor(i, stretch)
-        split.setSizes([260, 130, 130, 220])
+        split.setSizes([220, 200, 110, 120, 200])
 
         buttons = QHBoxLayout()
         self.b_check = QPushButton(tr("Controlla"))
@@ -564,7 +589,8 @@ class TiesDialog(QDialog):
                 combo = QComboBox()
                 combo.addItem(tr("non nella stima"), OUT)
                 for kind in KIND_ORDER:
-                    combo.addItem(f"{kind_name(kind)} ({ties_mod.KINDS[kind]})", kind)
+                    combo.addItem(kind_name(kind) if kind == ties_mod.GROUP else
+                                  f"{kind_name(kind)} ({ties_mod.KINDS[kind]})", kind)
                 combo.setCurrentIndex(max(0, combo.findData(kinds.get(ch.key, OUT))))
                 combo.currentIndexChanged.connect(lambda _i: self.invalidate())
                 self.chunks.setCellWidget(i, 1, combo)
@@ -674,6 +700,7 @@ class TiesDialog(QDialog):
         new ones would be missing; the unknowns chosen are kept, a new chunk gets the proposal."""
         if not alive(self):
             return
+        self.auto.follow()  # a matching of chunks that moved since no longer holds
         seen = self._chunk_names()
         if seen == getattr(self, "_chunks_seen", seen):
             return
@@ -1221,7 +1248,11 @@ class TiesDialog(QDialog):
                          "comunque la stima a {0}?", ", ".join(moving)),
                       [tr("Applica senza controllo"), tr("Non applicare")], default=1, cancel=None) != 0:
                 return False
-        return self.window.apply_ties(solution, self.result["report"])
+        applied = self.window.apply_ties(solution, self.result["report"])
+        if applied and alive(self):
+            self.auto.set_step("solve", "done")
+            self.auto.follow()
+        return applied
 
     def _forget(self, *_args) -> None:
         """Reached from a close and from Esc / reject (``finished``); the window no longer refreshes it. Once."""
