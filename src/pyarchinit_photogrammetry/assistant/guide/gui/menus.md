@@ -404,6 +404,7 @@ The link with the database of the excavation; the forms and the relationships st
 | Item | What it is for |
 | --- | --- |
 | **Open in QGIS (live link)** | a QGIS project with orthophoto, DEM and drawings |
+| **Restore the default styles in QGIS...** | the program's layers in the QGIS project take the program's style again; the styles made by hand and kept are forgotten ([styles](../integrations.md#styles-made-by-hand-in-qgis-are-kept)) |
 | **Live link with QGIS (both ways)** | what you draw here reaches QGIS; what you save in QGIS comes back here within a second |
 | **Open the folder of the layers for QGIS** | the folder of the shared GeoPackage |
 

@@ -54,16 +54,38 @@ that layer here.
 before: features drawn, changed or deleted here, and a layer unticked (emptied) and ticked again (filled again). The
 list of the layers is written when the project is: a layer that got its first drawings, was renamed, or was unticked
 when the project was written is not in it. The program says so once, in the log and in the status bar (*QGIS: il
-progetto aperto non mostra ancora «...»*): choose *QGIS > Apri in QGIS* again, which writes the project again with
-the layers of now (a style changed by hand in the QGIS project is written over, as it always
-was - keep it in a style file, or in a project of your own that reads the same GeoPackage). The first unit, section
-or spot height of a project is in the same case: draw it here, then *Apri in QGIS*.
+progetto aperto non mostra ancora «...»*): choose *QGIS > Apri in QGIS* again, which adds the layers of now to the
+project ([styles made by hand stay](#styles-made-by-hand-in-qgis-are-kept)). The first unit, section or spot height of a
+project is in the same case: draw it here, then *Apri in QGIS*.
 
 A QGIS project written by 1.7.8 or earlier - seven layers, one for each table - keeps working as it did, both ways,
-until *Apri in QGIS* writes it again. The GeoPackage of 1.7.8 held every feature of a layer in the table of the first
+until *Apri in QGIS* updates it (its layers of whole tables are replaced by one layer for each layer). The GeoPackage of 1.7.8 held every feature of a layer in the table of the first
 one drawn (a line among the polygons, which QGIS could not draw): at the first write the rows are moved to the table
 of their geometry, with the edits made on them by hand, and nothing is read back as deleted or drawn in QGIS.
 RustGIS reads the same file by its tables, as before.
+
+### Styles made by hand in QGIS are kept
+
+The symbology, labels, opacity and the other layers of the QGIS project are the user's: *Apri in QGIS* never writes
+them over.
+
+* A project that already shows every layer is **opened as it is** - nothing is written.
+* A project that misses layers (a new layer, a renamed one, a new product), or shows layers the program no longer has,
+  is **updated in place** by QGIS's own Python: the missing layers are added, the program's layers no longer there
+  removed, the rasters pointed at their file again. The user's own layers (a basemap, a cadastre), the groups, the
+  layouts and the styles stay as they are. Save the project in QGIS before choosing *Apri in QGIS*: an update written
+  while QGIS has the project open is lost when QGIS saves it again.
+* Before the project is touched, the style of each layer of the program that was changed in QGIS since the program
+  last wrote it is kept as a `.qml` file in `<name>_qgis/<name>_ppg_stili/` (with `stili.json`). A layer written
+  again - the project deleted, or the layer removed and back - takes that style instead of the program's.
+* The live GeoPackage has in its table `layer_styles` the program's default style of each table, written once: QGIS
+  uses it for a layer of the GeoPackage added by hand. A default saved there in QGIS (*Layer Properties > Style >
+  Save as Default > Datasource Database*) is never overwritten, and new layers of that table take it.
+* *QGIS > Ripristina gli stili predefiniti in QGIS...* forgets the kept styles and gives the program's layers in the
+  project the program's style again; the other layers are left as they are.
+
+The rows of the tables are updated in place by identity: a feature keeps its `fid` while it lives, and a table is
+made again only when the reference system of the chunk changes.
 
 ### Both ways
 

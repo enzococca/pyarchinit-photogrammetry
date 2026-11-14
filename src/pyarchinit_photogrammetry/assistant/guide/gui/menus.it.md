@@ -404,6 +404,7 @@ Il collegamento con il database dello scavo; le schede e le relazioni restano in
 | Voce | A cosa serve |
 | --- | --- |
 | **Apri in QGIS (collegamento dal vivo)** | un progetto QGIS con ortofoto, DEM e disegni |
+| **Ripristina gli stili predefiniti in QGIS...** | i layer del programma nel progetto QGIS riprendono lo stile del programma; gli stili fatti a mano e conservati vengono dimenticati ([stili](../integrations.md#gli-stili-fatti-a-mano-in-qgis-restano)) |
 | **Collegamento dal vivo con QGIS (nei due sensi)** | ciò che disegni qui arriva in QGIS; ciò che salvi in QGIS torna qui entro un secondo |
 | **Apri la cartella dei layer per QGIS** | la cartella del GeoPackage condiviso |
 

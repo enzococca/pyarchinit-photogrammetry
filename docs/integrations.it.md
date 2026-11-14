@@ -56,16 +56,40 @@ vivo, come prima: elementi disegnati, cambiati o eliminati qui, e un layer a cui
 si rimette (si riempie di nuovo). L'elenco dei layer viene scritto con il progetto: un layer che ha avuto i suoi primi
 disegni, che è stato rinominato, o che era senza spunta quando il progetto è stato scritto non c'è. Il programma lo
 dice una volta, nel log e nella barra di stato (*QGIS: il progetto aperto non mostra ancora «...»*): scegli di nuovo
-*QGIS > Apri in QGIS*, che riscrive il progetto con i layer di adesso (uno stile cambiato
-a mano nel progetto QGIS viene sovrascritto, come è sempre stato - tienilo in un file di stile, o in un tuo progetto
-che legge lo stesso GeoPackage). La prima unità, sezione o quota di un progetto è nello stesso caso: disegnala qui,
-poi *Apri in QGIS*.
+*QGIS > Apri in QGIS*, che aggiunge al progetto i layer di adesso ([gli stili fatti a mano
+restano](#gli-stili-fatti-a-mano-in-qgis-restano)). La prima unità, sezione o quota di un progetto è nello stesso
+caso: disegnala qui, poi *Apri in QGIS*.
 
 Un progetto QGIS scritto dalla 1.7.8 o prima - sette layer, uno per tabella - continua a funzionare com'era, nei due
-sensi, finché *Apri in QGIS* non lo riscrive. Il GeoPackage della 1.7.8 teneva ogni elemento di un layer nella tabella
+sensi, finché *Apri in QGIS* non lo aggiorna (i suoi layer di tabelle intere sono sostituiti da un layer per layer). Il GeoPackage della 1.7.8 teneva ogni elemento di un layer nella tabella
 del primo disegnato (una linea fra i poligoni, che QGIS non poteva disegnare): alla prima scrittura le righe vengono
 spostate nella tabella della loro geometria, con le modifiche fatte a mano, e niente viene riletto come eliminato o
 disegnato in QGIS. RustGIS legge lo stesso file per tabelle, come prima.
+
+### Gli stili fatti a mano in QGIS restano
+
+Simbologia, etichette, opacità e gli altri layer del progetto QGIS sono dell'utente: *Apri in QGIS* non li riscrive
+mai.
+
+* Un progetto che mostra già tutti i layer viene **aperto com'è**: non si scrive niente.
+* Un progetto a cui mancano layer (un layer nuovo, uno rinominato, un prodotto nuovo), o che mostra layer che il
+  programma non ha più, viene **aggiornato sul posto** dal Python di QGIS: i layer mancanti aggiunti, quelli del
+  programma che non ci sono più tolti, i raster puntati di nuovo al loro file. I layer dell'utente (una mappa di base,
+  il catasto), i gruppi, i layout e gli stili restano come sono. Salva il progetto in QGIS prima di scegliere *Apri in
+  QGIS*: un aggiornamento scritto mentre QGIS ha il progetto aperto si perde quando QGIS lo salva di nuovo.
+* Prima di toccare il progetto, lo stile di ogni layer del programma cambiato in QGIS da quando il programma lo ha
+  scritto l'ultima volta viene conservato come file `.qml` in `<nome>_qgis/<nome>_ppg_stili/` (con `stili.json`). Un
+  layer scritto di nuovo - il progetto cancellato, o il layer tolto e tornato - prende quello stile invece di quello
+  del programma.
+* Il GeoPackage dal vivo ha nella tabella `layer_styles` lo stile predefinito del programma per ogni tabella, scritto
+  una volta sola: QGIS lo usa per un layer del GeoPackage aggiunto a mano. Uno stile predefinito salvato lì in QGIS
+  (*Proprietà layer > Stile > Salva come predefinito > Database della sorgente dati*) non viene mai sovrascritto, e i
+  layer nuovi di quella tabella lo prendono.
+* *QGIS > Ripristina gli stili predefiniti in QGIS...* dimentica gli stili conservati e ridà ai layer del programma
+  nel progetto lo stile del programma; gli altri layer restano come sono.
+
+Le righe delle tabelle sono aggiornate sul posto per identità: un elemento tiene il suo `fid` finché esiste, e una
+tabella viene rifatta solo quando cambia il sistema di riferimento del chunk.
 
 ### Nei due sensi
 
