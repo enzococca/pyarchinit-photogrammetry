@@ -13,6 +13,28 @@ import pytest
 pytest.importorskip("PySide6")
 
 
+@pytest.fixture(autouse=True)
+def _automatic_collection():
+    """These tests start from Python's own automatic collection: a GUI-thread collector left running by the
+    suite (tests/conftest.py) or by an earlier test (a TaskRunner, a VTK view) is paused meanwhile."""
+    from pyarchinit_photogrammetry.gui import gc_guard
+
+    running = []
+    for collector in list(gc_guard._COLLECTORS):
+        try:
+            if collector.timer.isActive():
+                collector.timer.stop()
+                running.append(collector)
+        except RuntimeError:  # its C++ object is gone
+            continue
+    gc.enable()
+    yield
+    for collector in running:
+        collector.timer.start()
+    if running:
+        gc.disable()
+
+
 def _allocate_in_a_thread(n: int = 300_000) -> None:
     """What a worker thread does while it computes: containers, kept until the end."""
     def work():
@@ -182,3 +204,76 @@ def test_ensure_gives_a_running_collector():
         for c in made:
             c.stop()
         gc.enable()
+
+
+_DIALOGS_SCENARIO = r'''
+import gc, os, sys, threading
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QLabel, QVBoxLayout
+
+app = QApplication.instance() or QApplication([])
+from pyarchinit_photogrammetry.gui.worker import TaskRunner
+
+gc.set_threshold(50)  # a collection every few allocations of the worker
+stop = []
+
+
+def work(progress=None):
+    while not stop:
+        keep = [[i] for i in range(200)]
+    return len(keep)
+
+
+if sys.argv[1] == "runner":
+    runner = TaskRunner()
+    runner.show_dialog = False
+    runner.run("work", work)
+else:  # a plain Python thread, nothing installed
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+for i in range(300):
+    dialog = QDialog()
+    lay = QVBoxLayout(dialog)
+    grid = QGridLayout()  # no widget yet: the labels are kept by its reference map alone
+    for r in range(4):
+        grid.addWidget(QLabel(f"row {r}"), r, 0)
+    lay.addLayout(grid)
+    del grid, lay
+    dialog.deleteLater()
+    del dialog
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+stop.append(True)
+if sys.argv[1] == "runner":
+    runner.wait(60)
+    assert not runner.busy
+else:
+    thread.join()
+print("SCENARIO_OK", flush=True)
+os._exit(0)
+'''
+
+
+def _dialogs_scenario(tmp_path, mode: str) -> subprocess.CompletedProcess:
+    script = tmp_path / "dialogs.py"
+    script.write_text(_DIALOGS_SCENARIO)
+    # freed memory filled with a pattern: a visit of a freed wrapper faults at once instead of now and then
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software", PYTHONMALLOC="debug")
+    return subprocess.run([sys.executable, "-X", "faulthandler", str(script), mode], env=env, capture_output=True, text=True,
+                          timeout=300, close_fds=False)
+
+
+def test_dialogs_deleted_while_a_task_runs(tmp_path):
+    """The crash of the CI on Linux + Python 3.11 (13 November 2026, test_gui_orient.py): a collection in the
+    task thread visited a label shiboken6 had freed while Qt deleted the orientation dialog (segmentation fault
+    in ``visit_decref`` called by a ``tp_traverse`` of libshiboken6). The labels of a sub-layout filled before it
+    was added (``grid = QGridLayout(); grid.addWidget(QLabel(...)); lay.addLayout(grid)``) are kept by the
+    layout's reference map alone; shiboken6 frees them before it empties the map and runs their C++ destructor
+    with the GIL released, so another thread's collection finds them there (gui/worker.py
+    ``_collect_in_the_gui_thread``). With a plain thread the scenario dies; the TaskRunner collects in the GUI
+    thread only and it runs to the end."""
+    r = _dialogs_scenario(tmp_path, "runner")
+    assert r.returncode == 0 and "SCENARIO_OK" in r.stdout, (r.returncode, (r.stdout + r.stderr)[-3000:])
+    plain = _dialogs_scenario(tmp_path, "thread")
+    if plain.returncode == 0:  # the scenario no longer reproduces the defect: a shiboken6 that empties the map first?
+        pytest.skip("a plain thread survived the dialogs: the shiboken6 defect may be fixed, see gui/worker.py")
+    assert plain.returncode != 0 and "Garbage-collecting" in plain.stderr, plain.stderr[-3000:]
