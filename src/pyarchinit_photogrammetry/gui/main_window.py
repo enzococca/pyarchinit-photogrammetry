@@ -10761,6 +10761,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
         self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points, lines=self.lines)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
+        legacy = (ch.meta.get("stones") or {}).get("elevation.tif")
+        if legacy:  # the stones of the elevations up to 1.6 that no single elevation takes: kept as they were
+            stones["elevation.tif"] = legacy
         if stones:
             ch.meta["stones"] = stones
         else:
@@ -10842,8 +10845,10 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
 
     def _frame_stones(self, ch, frame: str | None) -> dict:
         """The stones of the plan (``chunk.meta["stones"]``, by the name of the raster) or of the elevation ``frame``
-        (by its id), as polygons. The key "elevation.tif" of the projects before 1.7.0 - shared by every elevation,
-        its stones cannot be given to one - is left out, said in the log."""
+        (by its id), as polygons. The key "elevation.tif" of the projects before 1.7.0 - shared by every elevation -
+        is moved to its elevation when the project is opened (:func:`..engine.elevation_drawings.migrate_legacy`);
+        what is left of it (stones that fit several elevations) is not drawn, said in the log, and kept in the
+        project as it was."""
         from shapely import wkt
 
         if ch is None:
@@ -10853,8 +10858,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         out = {}
         for key, items in rows.items():
             if frame is None and key == "elevation.tif":
-                log.info("Pietre disegnate sui prospetti prima della 1.7.0 (%d) lasciate fuori: non si sa di quale "
-                         "prospetto fossero", len(items))
+                log.info("Pietre disegnate sui prospetti prima della 1.7.0 (%d) non mostrate: non si sa di quale "
+                         "prospetto fossero (restano nel progetto)", len(items))
                 continue
             try:
                 out[key] = [wkt.loads(r) for r in items]

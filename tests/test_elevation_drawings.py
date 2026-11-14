@@ -333,7 +333,8 @@ def test_old_project_without_frames_opens_unchanged(with_elevations, tmp_path, g
     w = open_window(doc)
     assert [u.us for u in w.units] == ["3"] and "elevation.tif" not in w.stones
     w._store_drawings()
-    assert ch.meta["drawings"] == before and "stones" not in ch.meta
+    # the stones of the elevations up to 1.6 that no single elevation takes: not drawn, kept as they were
+    assert ch.meta["drawings"] == before and ch.meta["stones"] == {"elevation.tif": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}
 
 
 def test_undo_on_an_elevation(with_elevations, tmp_path, gui):

@@ -983,6 +983,9 @@ def remove_elevation(chunk: Chunk, eid: str) -> bool:
         return False
     shutil.rmtree(chunk.data_dir / "elevations" / eid, ignore_errors=True)
     chunk.meta["elevations"] = keep
+    from .elevation_drawings import take_frame
+
+    take_frame(chunk, eid)  # its drawings go with it
     return True
 
 

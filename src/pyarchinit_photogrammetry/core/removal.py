@@ -320,6 +320,35 @@ class _ListEntry(_Part):
             entries.insert(min(state["index"], len(entries)), state["entry"])
 
 
+class _Elevation(_ListEntry):
+    """An elevation (or a section): its entry, its folder and the drawings kept with it
+    (``chunk.meta["drawings"]["frames"][<id>]``), which go and come back with it."""
+
+    def __init__(self, eid: str):
+        super().__init__(("elevations",), eid, f"elevations/{eid}")
+
+    def capture(self, chunk) -> dict | None:
+        state = super().capture(chunk)
+        if state is not None:
+            frame = ((chunk.meta.get("drawings") or {}).get("frames") or {}).get(self.eid)
+            if frame is not None:
+                state["drawings"] = copy.deepcopy(frame)
+        return state
+
+    def take(self, chunk, state: dict) -> None:
+        super().take(chunk, state)
+        from ..engine.elevation_drawings import take_frame
+
+        take_frame(chunk, self.eid)
+
+    def give(self, chunk, state: dict) -> None:
+        super().give(chunk, state)
+        if state.get("drawings") is not None:
+            from ..engine.elevation_drawings import give_frame
+
+            give_frame(chunk, self.eid, copy.deepcopy(state["drawings"]))
+
+
 class _Objects(_Part):
     """Objects of a list of the chunk (photos, markers, scale bars), by identity: they go back where
     they were, unless an object with the same key took their place meanwhile."""
@@ -469,7 +498,7 @@ def make_part(chunk, kind: str, payload) -> _Part:
         return _ListEntry(("versions", product), vid, f"versions/{product}/{vid}")
     if kind == "elevation":
         eid = payload.get("id") if isinstance(payload, dict) else payload
-        return _ListEntry(("elevations",), eid, f"elevations/{eid}")
+        return _Elevation(eid)
     if kind == "cameras":
         return _Cameras(payload)
     if kind == "markers":
