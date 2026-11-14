@@ -316,7 +316,7 @@ older programs looks for it:
 
 ```python
 def activate(self, context):
-    hook = getattr(context, "site_hook", 1 if hasattr(context, "add_site_contributions") else 0)
+    hook = getattr(context, "site_hook", 1) if hasattr(context, "add_site_contributions") else 0
     if hook >= 2:
         context.add_site_contributions(self.site_with_frame, with_site=True)
     elif hook == 1:

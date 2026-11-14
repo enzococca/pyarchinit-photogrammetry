@@ -456,7 +456,7 @@ class Context:
         the ``elevations`` it publishes and ``xy``/``height``/``position``/``uv``, which put the numbers of a table
         or a page into that frame; a layer with ``"elevation": <id>`` goes on that elevation in its ``(u, v)``, and
         values and pages can be ``{"it": ..., "en": ...}``. A plugin finds the hook with
-        ``getattr(context, "site_hook", 1 if hasattr(context, "add_site_contributions") else 0)``."""
+        ``getattr(context, "site_hook", 1) if hasattr(context, "add_site_contributions") else 0``."""
         from ..io import site_plugins
 
         self.contributions.site.append(site_plugins.register(provider, owner=self.name, with_site=with_site))
