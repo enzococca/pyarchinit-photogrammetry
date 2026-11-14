@@ -15,10 +15,12 @@
   <nav id="tabs" role="tablist" hidden>
     <button id="tab-plan" class="tab on" type="button" role="tab" aria-selected="true"></button>
     <button id="tab-3d" class="tab" type="button" role="tab" aria-selected="false"></button>
+    <button id="tab-sections" class="tab" type="button" role="tab" aria-selected="false"></button>
   </nav>
   <p id="description"></p>
   <button id="language" type="button" hidden></button>
 </header>
+<div id="dates" hidden></div>
 <main>
   <aside id="side">
     <div id="notice" role="status" hidden></div>
@@ -27,7 +29,7 @@
       <div id="layers"></div>
       <button id="fit" type="button"></button>
     </section>
-    <section>
+    <section id="measure-box">
       <h2 id="measure-title"></h2>
       <div class="buttons">
         <button id="distance" type="button"></button>
@@ -37,7 +39,7 @@
       </div>
       <p id="measure-out" class="value"></p>
     </section>
-    <section>
+    <section id="info-box">
       <h2 id="info-title"></h2>
       <div id="info"></div>
     </section>
@@ -45,6 +47,11 @@
   </aside>
   <div id="map" tabindex="0"></div>
   <div id="view3d" tabindex="0" hidden></div>
+  <div id="sections" hidden>
+    <p id="section-title"></p>
+    <div id="section-map" tabindex="0"></div>
+  </div>
+  <div id="extra" hidden></div>
 </main>
 <script type="importmap">{"imports": {"three": "./app/vendor/three/three.module.js", "three/addons/": "./app/vendor/three/addons/"}}</script>
 <script src="app/vendor/ol.js"></script>

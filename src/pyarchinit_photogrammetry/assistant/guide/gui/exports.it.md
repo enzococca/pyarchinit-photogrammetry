@@ -79,7 +79,12 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
    descrizione, lingue (italiano, inglese) e le coordinate: **Sistema locale** (predefinito: spostate al centro del
    rilievo, senza sistema di riferimento - nulla nella cartella dice dove si trova il sito) o **Coordinate vere**, che
    il pannello segnala in rosso: le pagine scrivono allora la posizione reale del sito. *Avanzate*: la qualità del WebP
-   dell'ortofoto (85) e la texture del modello (4096 px, o solo i colori dei vertici). La cartella del sito (in
+   dell'ortofoto (85), la texture del modello (4096 px, o solo i colori dei vertici), la **Dimensione massima** del sito
+   (500 MB, o *Nessun limite*: il modello e la nuvola vengono sfoltiti per restarci, il pannello Log dice che cosa è
+   stato ridotto), i **Punti della nuvola** al massimo (3 milioni) e **Una data alla volta** (i chunk come rilievi di
+   date diverse - la data del chunk o delle sue foto -, mostrati uno alla volta con un selettore delle date). La
+   **Nuvola di punti** è un prodotto da spuntare (non spuntata in partenza: pesa), **Sezioni e prospetti** vanno con le
+   loro ortofoto e i loro disegni in una scheda a sé. La cartella del sito (in
    partenza `<progetto>_sito_web` accanto al file del progetto) dev'essere nuova, vuota o un sito costruito prima: una
    cartella con altri file viene rifiutata e non viene mai toccata.
 2. **Costruisci**: in background, con l'avanzamento e *Annulla*; i passi nel pannello Log, la dimensione del sito alla
