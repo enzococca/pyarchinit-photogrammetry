@@ -181,3 +181,26 @@ def test_elevation_from_the_texture_keeps_to_its_depth_band(tmp_path):
         alpha = src.read(4)
     cols = alpha.mean(axis=0) / 255.0
     assert 0.4 < (cols > 0.5).mean() < 0.6  # half the columns seen (the front wall), the other half transparent
+
+
+def test_elevation_without_photos_and_texture_keeps_its_relief(tmp_path):
+    """A model with no texture in a chunk with no aligned photo (an imported mesh with vertex colours): the
+    elevation is built as before the texture orthophoto existed - the relief, an empty orthophoto - and only an
+    explicit ``texture=True`` is refused."""
+    doc = new_doc(tmp_path)
+    xyz, f, uv = grid_mesh(0.0, 0.0, 2.0, 1.0, 20, 10)
+    wall = np.column_stack([xyz[:, 0], np.zeros(len(xyz)), xyz[:, 1]])
+    ch = textured_chunk(doc, "Muro", wall, f, uv, [checker(256, 128, COLOUR)])
+    (ch.data_dir / "model_texture.jpg").unlink()
+    assert not texture_ortho.has_texture(ch)
+    frame = E.plane_from_view(np.array([1.0, 0.0, 0.5]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0]))
+    entry = E.build_elevation(ch, frame, resolution=0.01, depth=(-0.5, 0.5))
+    assert entry.get("source") != "texture"
+    ortho, relief = E.elevation_paths(ch, entry)
+    with rasterio.open(ortho) as src:
+        assert (src.read(4) == 0).all()
+    with rasterio.open(relief) as src:
+        d = src.read(1, masked=True)
+    assert d.count() > 0.9 * d.size and abs(float(d.mean())) < 1e-3
+    with pytest.raises(RuntimeError, match="no texture"):
+        E.build_elevation(ch, frame, resolution=0.01, depth=(-0.5, 0.5), texture=True)

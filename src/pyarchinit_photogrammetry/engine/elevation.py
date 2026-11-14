@@ -809,7 +809,12 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         texture, blending = (True if texture is None else texture), "mosaic"
     if chunk.product_path("model") is None:
         raise RuntimeError("build the model first: an elevation is made on the model")
-    from_texture = texture_ortho.use_texture(chunk, texture)
+    try:
+        from_texture = texture_ortho.use_texture(chunk, texture)
+    except RuntimeError:
+        if texture is not None:
+            raise
+        from_texture = False  # no photos and no texture: the relief alone, the orthophoto stays empty (as before)
     textured = texture_ortho.TexturedModel(chunk) if from_texture else None
     progress(0.0, "Checking the photos")
     cams, _bad = ([], []) if from_texture else readable_cameras(chunk, True)
