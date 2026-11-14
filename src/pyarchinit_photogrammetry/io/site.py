@@ -806,7 +806,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                                       "title": TITLES["drawings"], "visible": True, "count": len(feats),
                                       "groups": groups}
                 boxes.append(_bounds(feats))
-        plugin_layers, plugin_list, _ = site_plugins.write(ch, data, rel, shift, clean, scrub, notes)
+        plugin_layers, plugin_list, _ = site_plugins.write(
+            ch, data, rel, shift, clean, scrub, notes, frame=frame, crs=written_crs, languages=languages,
+            sections=list(zip(item["sections"], section_list)))  # write_sections keeps the order of the entries
         for layer in plugin_layers:
             layers[layer["id"]] = layer
             path = folder / layer["url"]

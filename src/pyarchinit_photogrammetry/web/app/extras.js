@@ -66,8 +66,9 @@ export async function showPage(box, entry) {
   box.append(page);
 }
 
-// A table of a plugin as cards (entry: {url}); ``title`` gives a title in the language of the page.
-export async function showTable(box, entry, title) {
+// A table of a plugin as cards (entry: {url}); ``title`` gives a title in the language of the page, ``text`` a value
+// (one given in both languages in the language of the page).
+export async function showTable(box, entry, title, text) {
   const answer = await fetch(entry.url);
   if (!answer.ok) throw new Error(`${entry.url}: HTTP ${answer.status}`);
   const data = await answer.json();
@@ -86,7 +87,8 @@ export async function showTable(box, entry, title) {
       const value = row[column.key];
       if (value === undefined || value === null || value === '') continue;
       const tr = el('tr');
-      tr.append(el('td', title(column.title)), el('td', typeof value === 'object' ? JSON.stringify(value) : value));
+      const shown = text ? text(value) : (typeof value === 'object' ? JSON.stringify(value) : value);
+      tr.append(el('td', title(column.title)), el('td', shown));
       table.append(tr);
     }
     card.append(table);

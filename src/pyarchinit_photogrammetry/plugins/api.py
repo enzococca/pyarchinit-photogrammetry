@@ -437,7 +437,9 @@ class Context:
 
         self.contributions.rasters.append(rastercalc.register(provider, owner=self.name))
 
-    def add_site_contributions(self, provider: Callable[[object], list]) -> None:
+    site_hook = 2  # the form of add_site_contributions: 2 adds ``with_site`` (absent before: the program has no hook)
+
+    def add_site_contributions(self, provider: Callable, with_site: bool = False) -> None:
         """Since 1.10.0: what the plugin adds to the web site of a survey (``ppg web build``, the pane *Pubblica sul
         web*). ``provider(chunk)`` is called for every chunk that goes on a site and returns a list of dicts, each
         one of: a layer of the plan (``{"kind": "layer", "id", "title", "features": GeoJSON in the coordinates of
@@ -447,10 +449,17 @@ class Context:
         site moves the coordinates into its frame, cleans every text and the HTML, writes the pictures again
         without their metadata and puts the files in ``data/plugins/<plugin>/``; see
         :mod:`..io.site_plugins`. A provider that fails is left out of the site and said in its notes. Taken
-        out when the plugin is disabled; also in the command line."""
+        out when the plugin is disabled; also in the command line.
+
+        With ``with_site`` (:attr:`site_hook` 2) it is called as ``provider(chunk, site)``, ``site`` a read-only
+        :class:`..io.site_plugins.Site`: the frame of the site (``frame``, ``crs``, ``shift``), its ``languages``,
+        the ``elevations`` it publishes and ``xy``/``height``/``position``/``uv``, which put the numbers of a table
+        or a page into that frame; a layer with ``"elevation": <id>`` goes on that elevation in its ``(u, v)``, and
+        values and pages can be ``{"it": ..., "en": ...}``. A plugin finds the hook with
+        ``getattr(context, "site_hook", 1 if hasattr(context, "add_site_contributions") else 0)``."""
         from ..io import site_plugins
 
-        self.contributions.site.append(site_plugins.register(provider, owner=self.name))
+        self.contributions.site.append(site_plugins.register(provider, owner=self.name, with_site=with_site))
 
     def rasters(self, chunk=None) -> list[dict]:
         """Since 1.4.0: every raster of ``chunk`` (the active one when None) the raster calculator reads,

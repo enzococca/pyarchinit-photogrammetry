@@ -96,6 +96,51 @@ def _broken(chunk):
     raise RuntimeError("the plugin fell")
 
 
+class OnElevation:
+    """A plugin of the second form of the hook: told the frame of the site, it puts a layer on the section in its
+    ``(u, v)``, gives values in both languages and a height through the frame; with two mistakes the site refuses."""
+
+    name = "frame-test"
+
+    def __init__(self, z):
+        self.z = z  # a true height of the trench
+        self.sites = []
+
+    def contributions(self, chunk, site):
+        from shapely.geometry import box, mapping
+
+        from pyarchinit_photogrammetry.engine import elevation as E
+
+        self.sites.append(site)
+        entry = E.elevations(chunk)[0]
+        u0, v0, u1, v1 = E.bounds_of(chunk, entry)
+        um, vm = (u0 + u1) / 2, (v0 + v1) / 2
+        decay = box(um + 0.4, vm - 0.1, um + 0.7, vm + 0.1)
+        term = {"it": "Esfoliazione", "en": "Exfoliation"}
+        return [
+            {"kind": "layer", "id": "decay", "elevation": entry["id"], "title": {"it": "Degrado", "en": "Decay"},
+             "features": [{"type": "Feature", "geometry": mapping(decay),
+                           "properties": {"term": term, "label": {"it": "esf."}, "top": site.uv(entry["id"], um, vm
+                                                                                                 + 0.1)[1]}}],
+             "legend": {"field": "term", "items": [{"value": "Esfoliazione", "colour": "#aa00ff",
+                                                    "title": term}]},
+             "fields": {"term": {"it": "Termine", "en": "Term"}, "top": {"it": "Sommità", "en": "Top"}}},
+            {"kind": "layer", "id": "decay", "elevation": "not-there", "features": [
+                {"type": "Feature", "geometry": mapping(decay), "properties": {}}]},
+            {"kind": "layer", "id": "world", "elevation": entry["id"], "features": [  # plan coordinates: refused
+                {"type": "Feature", "geometry": {"type": "Point", "coordinates": [2480002.0, 4500001.0]},
+                 "properties": {}}]},
+            {"kind": "table", "id": "terms", "title": {"it": "Termini", "en": "Terms"},
+             "columns": [{"key": "term", "title": {"it": "Termine", "en": "Term"}},
+                         {"key": "quota", "title": {"it": "Quota", "en": "Height"}},
+                         {"key": "only", "title": "Solo"}],
+             "rows": [{"term": term, "quota": site.height(self.z), "only": {"en": "English only"},
+                       "empty": {"it": ""}}]},
+            {"kind": "html", "id": "guida", "title": "Guida",
+             "html": {"it": "<p>Pagina italiana</p>", "en": "<p>English page</p><script>x</script>"}},
+        ]
+
+
 @pytest.fixture(scope="module")
 def full_site(processed, tmp_path_factory):
     """``(doc, chunk, facts, folder, manifest, plugin)``: the trench with drawings, a section, a plugin, its site in
@@ -109,8 +154,10 @@ def full_site(processed, tmp_path_factory):
     _section(ch, origin)
     doc.save()
     plugin = Finds(_picture_with_gps(base / "foto.jpg"), (facts["cx"], facts["cy"], facts["z"]))
+    framed = OnElevation(facts["z"])
     entries = [site_plugins.register(plugin.contributions, owner=plugin.name),
-               site_plugins.register(_broken, owner="rotto")]
+               site_plugins.register(_broken, owner="rotto"),
+               site_plugins.register(framed.contributions, owner=framed.name, with_site=True)]
     try:
         path = doc.export_site(base / "site", title="Saggio completo", model_faces=8000,
                                products=["orthomosaic", "dem", "units", "drawings", "model", "cloud", "sections"],
@@ -118,6 +165,7 @@ def full_site(processed, tmp_path_factory):
     finally:
         for e in entries:
             site_plugins.unregister(e)
+    plugin.framed = framed
     return doc, ch, facts, path.parent, json.loads(path.read_text(encoding="utf-8")), plugin
 
 
@@ -254,8 +302,8 @@ def test_plugin_contributions_on_the_site(full_site):
     _doc, ch, facts, site, manifest, plugin = full_site
     chunk = manifest["chunks"][0]
     assert plugin.calls == [ch.label]
-    listed = {p["id"]: p for p in chunk["plugins"]}
-    assert set(listed) == {"finds", "catalogo", "note"} and {p["plugin"] for p in listed.values()} == {"finds-test"}
+    listed = {p["id"]: p for p in chunk["plugins"] if p["plugin"] == "finds-test"}
+    assert set(listed) == {"finds", "catalogo", "note"}  # a provider of the first form, as before
     layer = _layer(chunk, "plugin:finds-test:finds")
     assert layer["url"] == "data/plugins/finds-test/finds.geojson" and layer["group_by"] == "classe"
     assert [(g["name"], g["count"]) for g in layer["groups"]] == [("anfora", 1), ("moneta", 1)]
@@ -284,6 +332,77 @@ def test_plugin_contributions_on_the_site(full_site):
     assert any("finds-test" in n and "'map'" in n for n in notes)
 
 
+def test_plugin_told_the_frame_puts_a_layer_on_the_section(full_site):
+    from pyarchinit_photogrammetry.engine import elevation as E
+
+    _doc, ch, facts, site, manifest, plugin = full_site
+    chunk = manifest["chunks"][0]
+    shift = _shift(ch, site)
+    (told,) = plugin.framed.sites
+    entry = E.elevations(ch)[0]
+    assert told.frame == "local" and told.local and told.crs is None
+    assert told.shift == pytest.approx(tuple(shift))
+    assert told.elevations == [{"elevation": entry["id"], "section": "1", "name": "Sezione A-A", "kind": "section",
+                                "heights": True}]
+    with pytest.raises(AttributeError):
+        told.shift = (0, 0, 0)  # read only
+    assert told.height(facts["z"]) == pytest.approx(facts["z"] - shift[2], abs=1e-4)
+    assert told.xy(facts["cx"], facts["cy"]) == pytest.approx([facts["cx"] - shift[0], facts["cy"] - shift[1]],
+                                                               abs=1e-4)
+    with pytest.raises(KeyError):
+        told.uv("not-there", 0, 0)
+    # the layer on the section, in its (u, v) with v taken down as the heights of the section
+    (sec,) = chunk["sections"]
+    (layer,) = sec["layers"]
+    assert layer["id"] == "plugin:frame-test:decay" and layer["group_by"] == "term"
+    assert layer["groups"] == [{"name": "Esfoliazione", "title": {"it": "Esfoliazione", "en": "Exfoliation"},
+                                "colour": "#aa00ff", "count": 1}]
+    assert not any(x["id"].startswith("plugin:frame-test") for x in chunk["layers"])  # not on the plan
+    (f,) = json.loads((site / layer["url"]).read_text(encoding="utf-8"))["features"]
+    u0, v0, u1, v1 = E.bounds_of(ch, entry)
+    um, vm = (u0 + u1) / 2, (v0 + v1) / 2
+    ring = np.asarray(f["geometry"]["coordinates"][0])
+    assert ring[:, 0].min() == pytest.approx(um + 0.4, abs=1e-4)
+    assert ring[:, 1].max() == pytest.approx(vm + 0.1 - shift[2], abs=1e-4)
+    assert f["properties"]["top"] == pytest.approx(ring[:, 1].max(), abs=1e-4)  # uv(): the same frame
+    assert sec["extent"][1] <= ring[:, 1].min() and ring[:, 1].max() <= sec["extent"][3]
+    assert f["properties"]["term"] == {"it": "Esfoliazione", "en": "Exfoliation"}
+    listed = {p["id"]: p for p in chunk["plugins"] if p["plugin"] == "frame-test"}
+    assert listed["decay"]["section"] == "1"
+    notes = manifest["build"]["notes"]
+    assert any("frame-test" in n and "not-there" in n for n in notes)
+    assert any("frame-test" in n and "off the elevation" in n for n in notes)
+    assert not (site / "data/plugins/frame-test/world.s1.geojson").exists()
+    # values in both languages, one alone kept alone, an empty one dropped; a height in the frame of the site
+    table = json.loads((site / listed["terms"]["url"]).read_text(encoding="utf-8"))
+    (row,) = table["rows"]
+    assert row == {"term": {"it": "Esfoliazione", "en": "Exfoliation"}, "quota": round(facts["z"] - shift[2], 4),
+                   "only": {"en": "English only"}}
+    # a page in each language, each cleaned
+    urls = listed["guida"]["url"]
+    assert set(urls) == {"it", "en"}
+    assert (site / urls["it"]).read_text(encoding="utf-8") == "<p>Pagina italiana</p>"
+    assert (site / urls["en"]).read_text(encoding="utf-8") == "<p>English page</p>"
+
+
+def test_site_frame_in_the_crs_frame():
+    from pyarchinit_photogrammetry.io.site import _Shift
+    from pyarchinit_photogrammetry.io.site_plugins import Site
+
+    site = Site(_Shift(), "crs", "EPSG:32633", elevations=[{"elevation": "e1", "section": "1", "name": "A",
+                                                           "kind": "elevation", "heights": True}])
+    assert site.frame == "crs" and not site.local and site.crs == "EPSG:32633" and site.shift == (0.0, 0.0, 0.0)
+    assert site.position([500000.12341, 4500000.0, 12.5]) == [500000.1234, 4500000.0, 12.5]
+    assert site.uv("e1", 1.0, 12.5) == [1.0, 12.5] and site.height("x") is None
+    local = Site(_Shift(10, 20, 5), "local", "EPSG:32633", elevations=[{"elevation": "e1", "section": "1",
+                                                                       "name": "A", "kind": "elevation",
+                                                                       "heights": True}])
+    assert local.crs is None  # a local site never names its system, nor does its frame
+    assert local.uv("e1", 1.0, 12.5) == [1.0, 7.5] and local.position([11, 22, 6]) == [1.0, 2.0, 1.0]
+    local.elevations[0]["heights"] = False  # a copy
+    assert local.uv("e1", 1.0, 12.5) == [1.0, 7.5]
+
+
 def test_html_of_a_plugin_is_cleaned():
     from pyarchinit_photogrammetry.io.site_plugins import clean_html
 
@@ -304,8 +423,42 @@ def test_plugin_hook_through_the_context(tmp_path):
     context = Context("prova-sito", tmp_path)
     context.add_site_contributions(lambda chunk: [])
     assert site_plugins.providers()[-1][0] == "prova-sito" and len(site_plugins.providers()) == before + 1
+    context.add_site_contributions(lambda chunk, site: [], with_site=True)
+    assert Context.site_hook == site_plugins.HOOK == 2
     context.release()
     assert len(site_plugins.providers()) == before
+
+
+def test_a_provider_of_the_first_form_is_called_with_the_chunk_alone(tmp_path):
+    """Backward compatible: a provider written for the first form of the hook gets one argument and works as
+    before, beside one of the second form."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.io import site_plugins
+    from pyarchinit_photogrammetry.io.site import _Shift
+
+    calls = []
+
+    def first(chunk):
+        calls.append(("first", chunk.label))
+        return {"kind": "table", "id": "t", "title": "T", "rows": [{"a": 1}]}
+
+    def second(chunk, site):
+        calls.append(("second", chunk.label, site.frame))
+        return [{"kind": "table", "id": "t", "rows": [{"a": {"it": "uno", "en": "one"}}]}]
+
+    entries = [site_plugins.register(first, owner="primo"), site_plugins.register(second, "secondo", with_site=True)]
+    try:
+        notes = []
+        layers, listed, _ = site_plugins.write(SimpleNamespace(label="c"), tmp_path, "data", _Shift(), dict,
+                                               str, notes)
+    finally:
+        for e in entries:
+            site_plugins.unregister(e)
+    assert calls == [("first", "c"), ("second", "c", "local")] and not notes and not layers
+    assert [(x["plugin"], x["id"]) for x in listed] == [("primo", "t"), ("secondo", "t")]
+    rows = json.loads((tmp_path / "plugins/secondo/t.json").read_text(encoding="utf-8"))["rows"]
+    assert rows == [{"a": {"it": "uno", "en": "one"}}]
 
 
 # ------------------------------------------------------------------------------------------------ what goes out
@@ -550,7 +703,7 @@ def test_cloud_sections_and_plugins_in_a_browser(full_site, tmp_path):
             assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
             tabs = browser.js("[...document.querySelectorAll('#tabs button')].filter(b => !b.hidden)"
                               ".map(b => b.textContent)")
-            assert tabs == ["Pianta", "Modello 3D", "Sezioni", "Catalogo", "Note"]
+            assert tabs == ["Pianta", "Modello 3D", "Sezioni", "Catalogo", "Note", "Termini", "Guida"]
             # the cloud alone, drawn by levels and picked on its points
             browser.js("ppgSite.setTab('3d')")
             browser.wait("ppgSite.state.view3d && ppgSite.state.view3d.ready()", 90)
@@ -608,10 +761,60 @@ def test_cloud_sections_and_plugins_in_a_browser(full_site, tmp_path):
             page = browser.js("document.getElementById('extra').innerHTML")
             assert "Note di scavo" in page and not any(w in page for w in ("script", "onerror", "javascript"))
             assert browser.js("document.querySelector('.plugin-page a[href]').rel") == "noopener noreferrer nofollow"
+            _elevation_layer_and_languages(browser, site, sec)
             assert not browser.errors, browser.errors
             assert all(u.startswith(origin) or u.startswith(("data:", "blob:")) for u in browser.requests)
     finally:
         browser.close()
+
+
+def _elevation_layer_and_languages(browser, site, sec):
+    """The layer a plugin put on the section: in the list with its tick and legend, its attributes on a click in the
+    language of the page; the values of a table and the page of a plugin in the other language once it is chosen."""
+    browser.js("ppgSite.setTab('sections')")
+    browser.wait("document.documentElement.dataset.section === '1'", 60)
+    row = "document.querySelector(\"#layers label.layer[data-layer='plugin:frame-test:decay']\")"
+    assert browser.js(f"{row}.textContent") == "Degrado"
+    assert browser.js("[...document.querySelectorAll('#layers label.group')].map(l => l.textContent)"
+                      ".includes('Esfoliazione1')")
+    layer = "ppgSite.state.section.extra[0].layer"
+    assert browser.js(f"{layer}.getSource().getFeatures().length") == 1
+    browser.js(f"{row}.querySelector('input').click()")
+    assert browser.js(f"{layer}.getVisible()") is False
+    browser.js(f"{row}.querySelector('input').click()")
+    assert browser.js(f"{layer}.getVisible()") is True
+    ring = np.asarray(json.loads((site / sec["layers"][0]["url"]).read_text(encoding="utf-8"))
+                      ["features"][0]["geometry"]["coordinates"][0])
+    centre = [float(ring[:, 0].mean()), float(ring[:, 1].mean())]
+
+    def click_centre():
+        browser.js("ppgSite.state.sectionMap.renderSync()")
+        px = browser.js(f"ppgSite.state.sectionMap.getPixelFromCoordinate({centre})")
+        box = browser.js("(() => { const r = document.getElementById('section-map').getBoundingClientRect();"
+                         " return [r.left, r.top]; })()")
+        _drag_free_click(browser, box[0] + px[0], box[1] + px[1])
+
+    click_centre()
+    browser.wait("document.getElementById('info').textContent.includes('Esfoliazione')", 10)
+    info = browser.js("document.getElementById('info').textContent")
+    assert "Termine" in info and "Sommità" in info and "Exfoliation" not in info
+    browser.js("document.getElementById('language').click()")
+    browser.wait("ppgSite.state.language === 'en' && document.documentElement.dataset.section === '1'", 30)
+    assert browser.js(f"{row}.textContent") == "Decay"
+    click_centre()
+    browser.wait("document.getElementById('info').textContent.includes('Exfoliation')", 10)
+    info = browser.js("document.getElementById('info').textContent")
+    assert "Term" in info and "Esfoliazione" not in info
+    browser.js("document.querySelector(\"button[data-tab='x:frame-test:terms']\").click()")
+    browser.wait("document.documentElement.dataset.extra === 'frame-test:terms'", 20)
+    cards = browser.js("document.getElementById('extra').textContent")
+    assert "Exfoliation" in cards and "English only" in cards and "Esfoliazione" not in cards
+    browser.js("document.querySelector(\"button[data-tab='x:frame-test:guida']\").click()")
+    browser.wait("document.documentElement.dataset.extra === 'frame-test:guida'", 20)
+    assert "English page" in browser.js("document.getElementById('extra').textContent")
+    browser.js("document.getElementById('language').click()")  # back to Italian: the page of that language
+    browser.wait("document.getElementById('extra').textContent.includes('Pagina italiana')", 20)
+    assert "English page" not in browser.js("document.getElementById('extra').textContent")
 
 
 def test_dates_in_a_browser(dated_site, tmp_path):

@@ -59,6 +59,13 @@ export const WORDS = {
   },
 };
 
+// Whether ``value`` is a text given in both languages: an object of ``it`` and ``en`` only.
+export function isWords(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((k) => k === 'it' || k === 'en');
+}
+
 // A title written as {it: ..., en: ...} (or as plain text) in the language asked for.
 export function pick(title, language) {
   if (title === null || title === undefined) return '';
