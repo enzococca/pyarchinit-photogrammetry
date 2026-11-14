@@ -66,6 +66,14 @@ le forme ceramiche simili, la calibrazione di un sensore. Le esportazioni che sc
 
 I plugin aggiungono a questo menu i loro formati.
 
+**OBJ a gruppi**: esportando il modello in OBJ si scelgono i **gruppi** - nessuno, uno per chunk di partenza di un
+modello unito (o per oggetto di un OBJ importato), oppure uno per parte connessa (`part_001` la più grande) - e il
+**lato massimo delle pagine di texture** nelle copie accanto al file. Ogni gruppo è scritto come `o`/`g` con un
+`usemtl` per ogni pagina che usa; l'MTL ha un materiale per pagina, nell'ordine delle pagine. Da riga di comando:
+`ppg export --model m.obj --groups source|component|none [--labels etichette.npy] [--max-texture 4096]` (`--labels`:
+un'etichetta per faccia, da un `.npy` o da un file di testo con un'etichetta per riga). Importando un OBJ i gruppi si
+rileggono (`g`, altrimenti `o`) e restano con il modello; le pagine di texture seguono l'ordine dell'MTL.
+
 ### Paradati
 
 Ogni esportazione di nuvola, modello, DEM o ortofoto ha accanto un `<file>.prov.jsonld`, e così la copia pubblicata nei

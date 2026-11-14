@@ -180,6 +180,9 @@ Every cell picks among all the photos that frame it, so no seam follows the tile
 half of the photos 30 % darker and every photo vignetted, the corrected mosaic differs from the one of the
 untouched photos by 0.3 levels in the low frequencies (25 without correction).
 
+A chunk **without aligned photos** (an imported or merged model) gets its orthophoto from the texture of the model:
+see [Orthophoto of a chunk without photos](multi-survey.md#orthophoto-of-a-chunk-without-photos).
+
 ### Process everything
 
 *Workflow > Process everything...* (++ctrl+r++) runs every step in a row with the default choices; with a

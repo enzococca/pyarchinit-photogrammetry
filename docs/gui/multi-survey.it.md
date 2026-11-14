@@ -85,6 +85,64 @@ una versione corretta).
       dispersione e l'intervallo dal 10 al 90 % dicono quanto fidarsene.
     * La nuvola viene letta tutta in memoria: una nuvola molto grande chiede tanta memoria quanto occupa sul disco.
 
+### Più livelli, piani della riva, il fattore dai punti di controllo
+
+Un rilievo di più anni o di più bacini non ha un solo livello e un solo indice.
+
+* **Un livello e un fattore per chunk** (un chunk per anno): ogni chunk tiene il suo livello e il suo *fattore
+  efficace* n. `ppg water table` li imposta per più chunk insieme da un CSV, per chunk o per data del rilievo (la data
+  della fase, come nella [sequenza nel tempo](archaeology.md)): colonne `chunk` o `date`, `level`, `n` (`;` con la
+  virgola decimale).
+* **Bacini** dentro un chunk: ogni bacino ha il suo livello, il suo fattore e i suoi poligoni (un poligono WKT o un
+  layer di disegni liberi); il bacino senza poligono prende i punti che nessun altro bacino prende, i punti fuori da
+  ogni bacino restano come sono. Un livello può essere un piano adattato a **punti presi sulla riva** (tre o più:
+  la superficie dell'acqua vista un poco inclinata perché il sistema è inclinato); il comando dice l'inclinazione e lo
+  scarto dell'adattamento.
+* **Il fattore efficace dai punti di controllo**: punti di quota vera nota sott'acqua (una stadia, il GNSS sul fondo)
+  la cui quota apparente si legge sul DEM o sulla nuvola densa prima della correzione, oppure marker con il riferimento
+  sott'acqua e la posizione triangolata attraverso l'acqua. I minimi quadrati su L - z_vera = n (L - z_apparente)
+  danno n, con lo scarto di ogni punto; `--fit-level` stima anche il livello (almeno tre punti). `--apply` salva il
+  fattore sul chunk, o sul bacino di `--basin`.
+
+Senza bacini non cambia nulla: un livello e un n, come prima. Bacini e fattori si spostano con il chunk come il
+livello. Sono nella riga di comando e nell'API Python; la finestra sopra imposta ancora un livello per chunk.
+
+## Modello unito
+
+I **modelli** di più chunk - i blocchi di un relitto rilevati in anni diversi, le parti di un edificio - diventano
+**un solo modello con texture** di un nuovo chunk: *Flusso di lavoro > Unisci i modelli in uno...* o
+`ppg merge-models`.
+
+* I chunk devono essere nello stesso sistema (allineati o georeferenziati); il primo dà il sistema del nuovo chunk. I
+  chunk di partenza non cambiano.
+* **Pagine della texture**: tenute come sono, oppure *riunite* in pagine di lato massimo (8192 px se non detto); una
+  pagina che non ci sta viene ridotta. Le coordinate di texture sono frazioni della pagina: una pagina ridotta non
+  chiede altro.
+* **Colori** (a scelta): ogni modello prende i colori del primo dove le superfici si sovrappongono - guadagno e
+  scostamento per canale RGB, oppure *trasferimento Lab* (media e dispersione di ogni canale in CIE Lab). Un modello che
+  si sovrappone solo a un altro già accordato segue la catena; uno che non si sovrappone a nessuno resta com'è e lo
+  dicono gli avvisi.
+* **Facce sovrapposte** (a scelta): dove due modelli coprono la stessa superficie, le facce del modello che viene dopo
+  nella lista si tolgono entro una distanza (automatica: due volte il lato medio), solo se guardano dalla stessa parte.
+* **Le aperture restano aperte**: niente viene cucito tra i modelli né chiuso dopo la rimozione.
+* Il chunk di partenza di ogni faccia resta con il modello (il suo gruppo): un OBJ esportato può avere un gruppo per
+  chunk.
+
+Il nuovo chunk è un chunk come gli altri: DEM dal modello, ortofoto dalla sua texture (sotto), prospetti, misure ed
+esportazioni funzionano su di esso.
+
+## Ortofoto di un chunk senza foto
+
+Un modello importato con texture o un modello unito non hanno foto allineate: *Flusso di lavoro > Costruisci
+ortofoto...* fa allora l'ortofoto **dalla texture del modello** (e lo dice). Ogni cella manda un raggio verticale al
+modello e prende la texture dove lo incontra; dove la texture è più fine della cella si fa la media di più raggi. La
+cella è, se non detta, la dimensione di un texel. Il prodotto è l'ortofoto del chunk come le altre (GeoTIFF RGBA nel
+CRS del chunk, versioni, esportazioni, misure). Anche i *prospetti* su un chunk così si colorano dalla texture.
+`ppg ortho --texture` la chiede anche su un chunk con le foto (`--photos` il contrario).
+
+L'ortofoto è fatta e scritta a tasselli (BigTIFF quando serve): la sua dimensione è limitata dal disco, non dalla
+memoria né dai 32.767 pixel di lato che fermano il `remap` di OpenCV.
+
 ## Ortofoto e DEM uniti
 
 Più chunk dello stesso sito - campagne di anni diversi, parti di un edificio, una parte asciutta e una allagata - una
@@ -148,6 +206,14 @@ ppg water level scavo.ppg 2025 --layer Acqua [--sea | --fresh | --n 1.335]   # d
 ppg water level scavo.ppg 2025 --set 0.80                                     # a mano
 ppg water correct scavo.ppg 2025 [--dem]                                      # una nuova versione della nuvola densa
 ppg water show scavo.ppg 2025
+ppg water basin scavo.ppg 2025 --name Est --shore X,Y,Z;X,Y,Z;X,Y,Z --polygon "POLYGON ((...))" --n 1.33
+ppg water basin scavo.ppg 2025 --name Resto --level 0.78 --n 1.34          # senza poligono: dappertutto altrove
+ppg water basin scavo.ppg 2025 --clear                                      # di nuovo un solo livello
+ppg water factor scavo.ppg 2025 --points controlli.csv [--source dem|cloud] [--markers T1,T2] [--fit-level] [--apply]
+ppg water table scavo.ppg livelli.csv                                       # chunk o data, livello, n
+ppg merge-models scavo.ppg 2024 2025 2026 [--colour gain|lab] [--remove-overlaps --priority 2026,2025,2024]
+    [--overlap-distance 0.02] [--pages keep|repack] [--page-size 8192] [--max-page 8192] [--label "Modello unito"]
+ppg ortho scavo.ppg --chunk "Modello unito" [--resolution 0.005] [--texture] [--supersample 2]
 ppg mosaic build scavo.ppg --chunks 2024,2025 [--dem] [--areas aree.gpkg] [--resolution 0.01] [--background none]
 ppg mosaic list scavo.ppg [--json]
 ppg mosaic remove scavo.ppg m1a2b3c4d

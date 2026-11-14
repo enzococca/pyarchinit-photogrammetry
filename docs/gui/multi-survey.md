@@ -83,6 +83,58 @@ its true depth (from version 0.5.0 the plugin asks when the active cloud of the 
       the 10-90 % range say how much to trust it.
     * The cloud is read whole in memory: a very large cloud needs as much memory as it takes on disk.
 
+### Several levels, shoreline planes, the factor from control points
+
+A survey of several years or of several basins does not have one level and one index.
+
+* **One level and one factor per chunk** (a chunk per year): each chunk keeps its own level and *effective factor*
+  n. `ppg water table` sets them for several chunks at once from a CSV, by chunk or by survey date (the date of the
+  phase, as in the [timeline](archaeology.md)): columns `chunk` or `date`, `level`, `n` (`;` with decimal commas).
+* **Basins** within a chunk: each basin has its level, its factor and its polygons (a WKT polygon or a layer of free
+  drawings); the basin without a polygon takes every point no other basin takes, the points outside every basin stay as
+  they are. A level can be a plane fitted to **points picked on the shoreline** (three or more: a water surface seen
+  slightly tilted because the frame is tilted); the command says the tilt and the residual of the fit.
+* **The effective factor from control points**: points of known true height under the water (a staff, GNSS on the
+  bottom) whose apparent height is read on the DEM or on the dense cloud before the correction, or markers whose
+  reference lies under the water and whose position was triangulated through it. The least squares on
+  L - z_true = n (L - z_apparent) give n, with the residual of every point; `--fit-level` fits the level too (three
+  points at least). `--apply` stores the factor on the chunk, or on the basin of `--basin`.
+
+Without basins nothing changes: one level and one n, as before. Basins and factors move with the chunk like the
+level. These are on the command line and in the Python API; the window above still sets one level per chunk.
+
+## Merged model
+
+The **models** of several chunks - the blocks of a wreck surveyed in different years, the pieces of a building - become
+**one textured model** of a new chunk: *Workflow > Merge models into one...* or `ppg merge-models`.
+
+* The chunks must share the system (aligned or georeferenced); the first gives the system of the new chunk. The source
+  chunks are not changed.
+* **Texture pages**: kept as they are, or *packed* together in pages of a largest side (8192 px by default); a page
+  that does not fit is reduced. Texture coordinates are fractions of a page, so a reduced page needs no other change.
+* **Colours** (optional): every model takes the colours of the first where their surfaces overlap - an RGB gain and
+  offset per channel, or a *Lab transfer* (mean and spread of each channel in CIE Lab). A model that overlaps only
+  another already matched follows the chain; one that overlaps none is left as it is and said in the warnings.
+* **Overlapped faces** (optional): where two models cover the same surface, the faces of the later one in the list
+  are removed within a distance (automatic: twice the median edge), only where they face the same way.
+* **Openings stay open**: nothing is bridged between the models nor closed after the removal.
+* The source chunk of every face is kept with the model (its group): an OBJ export can write one group per source.
+
+The new chunk is a chunk like the others: DEM from the model, orthophoto from its texture (below), elevations,
+measures and exports work on it.
+
+## Orthophoto of a chunk without photos
+
+An imported textured model or a merged model has no aligned photos: *Workflow > Build orthophoto...* then makes the
+orthophoto **from the texture of the model** (and says so). Every cell sends a vertical ray to the model and takes the
+texture where it meets it; where the texture is finer than the cell, several rays per cell are averaged. The cell
+defaults to the size of a texel. The product is the orthophoto of the chunk like the others (GeoTIFF RGBA in the CRS of
+the chunk, versions, exports, measures). *Elevations* on such a chunk are painted from the texture too.
+`ppg ortho --texture` asks for it on a chunk that has photos as well (`--photos` the opposite).
+
+The orthophoto is made and written tile by tile (BigTIFF when needed): its size is limited by the disk, not by the
+memory nor by the 32,767 pixels of a side that stop OpenCV's `remap`.
+
 ## Merged orthophoto and DEM
 
 Several chunks of the same site - campaigns of different years, pieces of a building, a dry part and a flooded one -
@@ -147,6 +199,14 @@ ppg water level scavo.ppg 2025 --layer Acqua [--sea | --fresh | --n 1.335]   # f
 ppg water level scavo.ppg 2025 --set 0.80                                     # by hand
 ppg water correct scavo.ppg 2025 [--dem]                                      # a new version of the dense cloud
 ppg water show scavo.ppg 2025
+ppg water basin scavo.ppg 2025 --name Est --shore X,Y,Z;X,Y,Z;X,Y,Z --polygon "POLYGON ((...))" --n 1.33
+ppg water basin scavo.ppg 2025 --name Resto --level 0.78 --n 1.34          # no polygon: everywhere else
+ppg water basin scavo.ppg 2025 --clear                                      # back to the single level
+ppg water factor scavo.ppg 2025 --points controlli.csv [--source dem|cloud] [--markers T1,T2] [--fit-level] [--apply]
+ppg water table scavo.ppg livelli.csv                                       # chunk or date, level, n
+ppg merge-models scavo.ppg 2024 2025 2026 [--colour gain|lab] [--remove-overlaps --priority 2026,2025,2024]
+    [--overlap-distance 0.02] [--pages keep|repack] [--page-size 8192] [--max-page 8192] [--label "Modello unito"]
+ppg ortho scavo.ppg --chunk "Modello unito" [--resolution 0.005] [--texture] [--supersample 2]
 ppg mosaic build scavo.ppg --chunks 2024,2025 [--dem] [--areas aree.gpkg] [--resolution 0.01] [--background none]
 ppg mosaic list scavo.ppg [--json]
 ppg mosaic remove scavo.ppg m1a2b3c4d
