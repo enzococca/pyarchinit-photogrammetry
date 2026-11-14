@@ -435,6 +435,7 @@ class LiveLink:
         self._ident = None  # the file the connection is open on
         self._data_version = None
         self.read_chunk: str | None = None  # the key of the chunk of the file when its changes were last read
+        self._styled = None  # the default styles of every table are in the file (qgis_styles.ensure_default_styles)
 
     # ------------------------------------------------------------------ connection
     def _file_ident(self):
@@ -454,6 +455,7 @@ class LiveLink:
             self._con = gpkg.connect(self.path)
             self._ident = self._file_ident()
             self._known, self._signatures, self._data_version = {}, {}, None
+            self._styled = None
         return self._con
 
     def close(self) -> None:
@@ -551,6 +553,11 @@ class LiveLink:
                 if rekey:
                     con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
                     con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES ('chunk', ?)", (key,))
+                if todo and not self._styled:  # the default styles QGIS finds in the file, written once
+                    from .qgis_styles import ensure_default_styles
+
+                    ensure_default_styles(con, {t: (LIVE_TABLES[t][1], STYLES[t][0], STYLES[t][1]) for t in todo})
+                    self._styled = set(LIVE_TABLES) <= set(todo) or None
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
@@ -1163,7 +1170,7 @@ from qgis.core import (QgsApplication, QgsCoordinateReferenceSystem, QgsPalLayer
                        QgsRasterLayer, QgsVectorLayer, QgsVectorLayerSimpleLabeling, QgsTextFormat,
                        QgsHillshadeRenderer, QgsMultiBandColorRenderer, QgsSingleBandPseudoColorRenderer,
                        QgsColorRampShader, QgsRasterShader, QgsPalettedRasterRenderer, QgsContrastEnhancement,
-                       QgsDefaultValue)
+                       QgsDefaultValue, QgsProviderRegistry)
 from qgis.PyQt.QtGui import QColor
 
 
@@ -1201,24 +1208,43 @@ app = QgsApplication([], False)
 app.initQgis()
 proj = QgsProject.instance()
 crs = QgsCoordinateReferenceSystem(cfg["crs"]) if cfg.get("crs") else QgsCoordinateReferenceSystem()
-if crs.isValid():
-    proj.setCrs(crs)
-proj.setTitle(cfg.get("title", "pyarchinit-photogrammetry"))
-root = proj.layerTreeRoot()
-group_v = root.addGroup("Disegni (aggiornati dal vivo)")
-group_r = root.addGroup("Prodotti fotogrammetrici")
-report = {"vectors": [], "rasters": []}
-for v in cfg["vectors"]:
-    lyr = QgsVectorLayer(v["path"] + "|layername=" + v["table"], v["name"], "ogr")
-    if v.get("subset"):  # the rows of one layer of the program
-        lyr.setSubsetString(v["subset"])
-    for name, value in (v.get("defaults") or {}).items():  # what is drawn in it is of that layer
-        idx = lyr.fields().indexOf(name)
-        if idx >= 0:
-            lyr.setDefaultValueDefinition(idx, QgsDefaultValue("'" + str(value).replace("'", "''") + "'"))
+update = cfg.get("mode") == "update"  # the project of the user updated in place, its other layers left as they are
+if update:
+    if not proj.read(cfg["project"]):
+        print("PPG_QGIS_ERROR cannot read " + cfg["project"], flush=True)
+        sys.exit(1)
+else:
     if crs.isValid():
-        lyr.setCrs(crs)
-    sym = lyr.renderer().symbol() if lyr.renderer() is not None else None
+        proj.setCrs(crs)
+    proj.setTitle(cfg.get("title", "pyarchinit-photogrammetry"))
+root = proj.layerTreeRoot()
+
+
+def group(name):
+    g = root.findGroup(name)
+    return g if g is not None else root.addGroup(name)
+
+
+def key_of(lyr):
+    """The identity the program gives its layers (io.qgis_styles.vector_key / raster_key)."""
+    if lyr.type() == lyr.RasterLayer:
+        return "raster|" + lyr.name()
+    if lyr.providerType() != "ogr":
+        return None
+    parts = QgsProviderRegistry.instance().decodeUri("ogr", lyr.source())
+    path = str(parts.get("path") or "").replace("\\", "/").split("/")[-1]
+    table = parts.get("layerName") or ""
+    return "vector|%s|%s|%s" % (path, table, lyr.subsetString() or "") if table else None
+
+
+def load_style(lyr, path):
+    """A style kept from QGIS (.qml): True when it could be read."""
+    msg, ok = lyr.loadNamedStyle(path)
+    return bool(ok)
+
+
+def vector_style(lyr, v):
+    sym = lyr.renderer().symbol() if lyr.renderer() is not None and hasattr(lyr.renderer(), "symbol") else None
     if sym is not None:
         col = QColor(v["color"])
         if v["geometry"] == "POLYGON":
@@ -1240,16 +1266,9 @@ for v in cfg["vectors"]:
         pal.setFormat(fmt)
         lyr.setLabeling(QgsVectorLayerSimpleLabeling(pal))
         lyr.setLabelsEnabled(True)
-    lyr.setAutoRefreshInterval(int(cfg.get("refresh_ms", 1000)))
-    lyr.setAutoRefreshEnabled(True)  # redraw: a GeoPackage is read again at every drawing
-    proj.addMapLayer(lyr, False)
-    group_v.addLayer(lyr)
-    report["vectors"].append({"name": v["name"], "valid": lyr.isValid(), "features": lyr.featureCount(),
-                              "table": v["table"], "subset": lyr.subsetString()})
-for r in cfg["rasters"]:
-    lyr = QgsRasterLayer(r["path"], r["name"])
-    if crs.isValid():
-        lyr.setCrs(crs)
+
+
+def raster_style(lyr, r):
     if r.get("hillshade") and lyr.isValid():
         lyr.setRenderer(QgsHillshadeRenderer(lyr.dataProvider(), 1, 315, 45))
     elif r.get("bands") and lyr.isValid():  # three bands of a multi-band raster, stretched
@@ -1284,10 +1303,90 @@ for r in cfg["rasters"]:
         lyr.setRenderer(QgsSingleBandPseudoColorRenderer(lyr.dataProvider(), int(r.get("band") or 1), shader))
     if r.get("opacity") is not None:
         lyr.setOpacity(float(r["opacity"]))
+
+
+def styled_vector(lyr, v):
+    """The style of a layer of the program: the one kept from QGIS, else the default the user saved in the
+    GeoPackage (QGIS loaded it), else the program's."""
+    if v.get("qml") and load_style(lyr, v["qml"]):
+        return
+    if not v.get("db_default"):
+        vector_style(lyr, v)
+
+
+def styled_raster(lyr, r):
+    if r.get("qml") and load_style(lyr, r["qml"]):
+        return
+    raster_style(lyr, r)
+
+
+def new_vector(v):
+    lyr = QgsVectorLayer(v["path"] + "|layername=" + v["table"], v["name"], "ogr")
+    if v.get("subset"):  # the rows of one layer of the program
+        lyr.setSubsetString(v["subset"])
+    for name, value in (v.get("defaults") or {}).items():  # what is drawn in it is of that layer
+        idx = lyr.fields().indexOf(name)
+        if idx >= 0:
+            lyr.setDefaultValueDefinition(idx, QgsDefaultValue("'" + str(value).replace("'", "''") + "'"))
+    if crs.isValid():
+        lyr.setCrs(crs)
+    styled_vector(lyr, v)
+    lyr.setAutoRefreshInterval(int(cfg.get("refresh_ms", 1000)))
+    lyr.setAutoRefreshEnabled(True)  # redraw: a GeoPackage is read again at every drawing
     proj.addMapLayer(lyr, False)
-    node = group_r.addLayer(lyr)
+    group("Disegni (aggiornati dal vivo)").addLayer(lyr)
+    return lyr
+
+
+def new_raster(r):
+    lyr = QgsRasterLayer(r["path"], r["name"])
+    if crs.isValid():
+        lyr.setCrs(crs)
+    styled_raster(lyr, r)
+    proj.addMapLayer(lyr, False)
+    node = group("Prodotti fotogrammetrici").addLayer(lyr)
     if r.get("hidden"):
         node.setItemVisibilityChecked(False)
+    return lyr
+
+
+report = {"vectors": [], "rasters": [], "added": [], "removed": [], "restyled": []}
+existing = {}
+mine = set(cfg.get("ours", []))
+if update:
+    for lyr in proj.mapLayers().values():
+        k = key_of(lyr)
+        if k is not None and k not in existing:
+            existing[k] = lyr
+    wanted = {v["key"] for v in cfg["vectors"]} | {r["key"] for r in cfg["rasters"]}
+    for k in mine:  # the program's layers no longer wanted (a layer renamed, a product deleted)
+        if k in existing and k not in wanted:
+            report["removed"].append(existing[k].name())
+            proj.removeMapLayer(existing.pop(k).id())
+if not update:  # the groups in their order: the drawings above the rasters
+    group("Disegni (aggiornati dal vivo)")
+    group("Prodotti fotogrammetrici")
+for v in cfg["vectors"]:
+    lyr = existing.get(v["key"])
+    if lyr is None:
+        lyr = new_vector(v)
+        report["added"].append(v["name"])
+    elif cfg.get("restyle") and v["key"] in mine:  # Ripristina gli stili predefiniti
+        vector_style(lyr, v)
+        report["restyled"].append(v["name"])
+    report["vectors"].append({"name": v["name"], "valid": lyr.isValid(), "features": lyr.featureCount(),
+                              "table": v["table"], "subset": lyr.subsetString()})
+for r in cfg["rasters"]:
+    lyr = existing.get(r["key"])
+    if lyr is None:
+        lyr = new_raster(r)
+        report["added"].append(r["name"])
+    elif r["key"] in mine:  # a raster of the user of the same name is left alone
+        if lyr.source() != r["path"]:  # the product is another file now: the layer keeps its style
+            lyr.setDataSource(r["path"], r["name"], "gdal")
+        if cfg.get("restyle"):
+            raster_style(lyr, r)
+            report["restyled"].append(r["name"])
     report["rasters"].append({"name": r["name"], "valid": lyr.isValid()})
 ok = proj.write(cfg["project"])
 report["written"] = bool(ok)
@@ -1426,7 +1525,8 @@ def project_crs(crs: str | None) -> str:
 
 def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Path], rasters: list[dict],
                   title: str = "pyarchinit-photogrammetry", refresh_ms: int = 1000,
-                  qgis: QgisInstall | None = None, extra_vectors: list[dict] | None = None) -> dict:
+                  qgis: QgisInstall | None = None, extra_vectors: list[dict] | None = None,
+                  restyle: bool = False) -> dict:
     """Write a QGIS project with the live drawings (``{table: GeoPackage}`` from
     :func:`export_layers`, redrawn every ``refresh_ms``: one QGIS layer for each layer of the program that has
     drawings there, :func:`live_vectors` - a table without rows makes none), the rasters
@@ -1434,10 +1534,17 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
     ("index" with "limits", or "zones" with "classes")}]``) and other GeoPackage layers
     (``extra_vectors``: ``[{"name", "path", "table", "geometry", "color", "label"?, "subset"?, "defaults"?}]``, the zones
     of a multispectral index for one). Needs QGIS's Python; returns the report of the layers
-    QGIS loaded."""
-    qgis = qgis or find_qgis()
-    if qgis is None or not qgis.python:
-        raise RuntimeError("QGIS non trovato: installalo (qgis.org) o indica il percorso con PPG_QGIS")
+    QGIS loaded.
+
+    The project of the user is kept (:mod:`.qgis_styles`): an existing project that shows every layer is not written
+    at all (``report["kept"]`` True); one that misses layers is updated in place (the missing ones added, the
+    program's layers no longer wanted removed, rasters pointed at their file), its other layers and styles left as
+    they are. The styles changed by hand in QGIS are kept first as ``.qml`` files and given to the layers written
+    again. ``restyle``: *Ripristina gli stili predefiniti* - the kept styles forgotten, the program's layers in the
+    project given the program's style again."""
+    from . import qgis_styles as styles
+
+    project_path = Path(project_path)
     vectors = []
     by_file: dict[str, list] = {}
     for table, path in layer_files.items():
@@ -1449,9 +1556,46 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
             # the style by the 2D type: the 3D tables of the free drawings (LINESTRINGZ...) are drawn as the others
             vectors.append({"label": "", "label_color": "#202020", **v,
                             "geometry": str(v.get("geometry") or "").upper().removesuffix("Z")})
-    cfg = {"project": str(project_path), "crs": project_crs(crs),
-           "vectors": vectors, "rasters": [r for r in rasters if r.get("path") and Path(r["path"]).exists()],
-           "title": title, "refresh_ms": refresh_ms}
+    rasters = [r for r in rasters if r.get("path") and Path(r["path"]).exists()]
+    if restyle:
+        styles.reset(project_path)
+    else:
+        styles.harvest(project_path)  # the styles made by hand in QGIS, before anything is written
+    # an existing project is updated in place by QGIS (also one this XML reader cannot read: QGIS may)
+    present = styles.project_layer_keys(project_path) if project_path.exists() else None
+    mine = styles.ours(project_path)
+    if not mine and present:  # a project written before 1.9.1 (no record): the layers of the program's files are its
+        names = {Path(str(v["path"]).replace(chr(92), "/")).name for v in vectors}
+        raster_keys = {styles.raster_key(r["name"]) for r in rasters}
+        mine = {k for k in present if (k.startswith("vector|") and k.split("|")[1] in names) or k in raster_keys}
+    user_defaults: dict[str, set] = {}
+    for v in vectors:
+        v["key"] = styles.vector_key(v["path"], v["table"], v.get("subset"))
+        qml = styles.qml_for(project_path, v["key"])
+        if qml is not None:
+            v["qml"] = str(qml)
+        if v["path"] not in user_defaults:
+            user_defaults[v["path"]] = styles.user_default_tables(v["path"])
+        if v["table"] in user_defaults[v["path"]]:
+            v["db_default"] = True
+    for r in rasters:
+        r["key"] = styles.raster_key(r["name"])
+        qml = styles.qml_for(project_path, r["key"])
+        if qml is not None:
+            r["qml"] = str(qml)
+    wanted = [v["key"] for v in vectors] + [r["key"] for r in rasters]
+    if present is not None and not restyle:
+        stale = (mine & set(present)) - set(wanted)
+        moved = [r for r in rasters if r["key"] in present and r["key"] in mine
+                 and not _same_file(present[r["key"]].findtext("datasource"), r["path"], project_path)]
+        if all(k in present for k in wanted) and not stale and not moved:  # nothing to do: the project as it is
+            return {"written": False, "kept": True, "added": [], "removed": [], "restyled": [],
+                    "vectors": [{"name": v["name"], "valid": True, "table": v["table"], "subset": v.get("subset", "")}
+                                for v in vectors],
+                    "rasters": [{"name": r["name"], "valid": True} for r in rasters]}
+    cfg = {"project": str(project_path), "crs": project_crs(crs), "vectors": vectors, "rasters": rasters,
+           "title": title, "refresh_ms": refresh_ms, "mode": "update" if project_path.exists() else "new",
+           "ours": sorted(mine), "restyle": bool(restyle)}
     Path(project_path).parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ppg-qgis-") as tmp:
         script, conf = Path(tmp) / "build.py", Path(tmp) / "cfg.json"
@@ -1468,7 +1612,21 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
     if not report.get("written"):
         raise RuntimeError(f"QGIS non ha potuto scrivere {project_path}")
     _legacy_auto_refresh(Path(project_path))
+    styles.record_project(project_path, wanted)  # the styles as written now: a later change is the user's
     return report
+
+
+def _same_file(datasource: str | None, path: str, project: Path) -> bool:
+    """Whether a raster's ``datasource`` in a ``.qgs`` (absolute, or relative to the project) is the file ``path``."""
+    if not datasource:
+        return False
+    src = Path(datasource.split("|")[0])
+    if not src.is_absolute():
+        src = project.parent / src
+    try:
+        return src.resolve() == Path(path).resolve()
+    except OSError:
+        return False
 
 
 def _legacy_auto_refresh(project: Path) -> None:
