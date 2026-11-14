@@ -96,6 +96,7 @@ plugins:
             Tools for archaeology: Strumenti per l'archeologia
             Multispectral and thermal: Multispettrale e termico
             Exports and reports: Esportazioni e rapporti
+            Publishing the web site: Pubblicare il sito web
             Errors and updates: Errori e aggiornamenti
             The assistant: L'assistente
             TIN and break lines: TIN e linee di rottura
@@ -186,6 +187,7 @@ nav:
           - Tools for archaeology: gui/archaeology.md
           - Multispectral and thermal: gui/multispectral.md
           - Exports and reports: gui/exports.md
+          - Publishing the web site: gui/web-publish.md
           - Errors and updates: gui/help.md
           - The assistant: gui/assistant.md
       - TIN and break lines: tin.md

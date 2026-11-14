@@ -153,9 +153,9 @@ def test_only_the_products_a_chunk_has(win, qapp):
     assert pane.options()["languages"] == ["it", "en"] and pane.options()["quality"] == 85
     assert pane.options()["model_texture"] == 4096
     assert Path(pane.folder.text()) == Path(w.doc.path).parent / "project_sito_web"  # beside the project
-    assert pane.step_states == {"contents": "done", "build": "todo", "preview": "todo", "publish": "unavailable"}
+    assert pane.step_states == {"contents": "done", "build": "todo", "preview": "todo", "publish": "todo"}
     assert not pane.b_preview.isEnabled() and not pane.b_stop.isEnabled() and not pane.b_open_folder.isEnabled()
-    assert "non ancora disponibile" in pane.titles["publish"][1].text()
+    assert "Costruisci prima il sito" in pane.states["publish"].text() and not pane.b_publish.isEnabled()
     from PySide6.QtCore import Qt
 
     pane.chunks.item(0).setCheckState(Qt.CheckState.Unchecked)

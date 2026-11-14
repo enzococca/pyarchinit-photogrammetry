@@ -5820,6 +5820,90 @@ def web_serve(folder: Path,
         httpd.server_close()
 
 
+publish_app = typer.Typer(help="Publish a site folder (ppg web build) on a hosting")
+web_app.add_typer(publish_app, name="publish")
+
+
+@publish_app.command("cloudflare")
+def web_publish_cloudflare(
+        folder: Path = typer.Argument(..., help="the site folder (ppg web build)"),
+        project: Optional[str] = typer.Option(None, "--project", help="the Cloudflare Pages project (lowercase "
+                                              "letters, digits, dashes): the site is at <project>.pages.dev; "
+                                              "default: from the name of the folder"),
+        bucket: Optional[str] = typer.Option(None, "--bucket", help="the R2 bucket for the data when they do not fit "
+                                             "Pages (a bucket for this site alone: its CORS rule is replaced)"),
+        data: str = typer.Option("auto", "--data", help="auto: Pages alone when every file fits its limits, else "
+                                 "data/ to R2; pages; r2"),
+        data_url: Optional[str] = typer.Option(None, "--data-url", help="https address of a custom domain "
+                                               "connected to the bucket; default: its r2.dev address, turned on"),
+        origin: Optional[list[str]] = typer.Option(None, "--origin", help="another address of the page (a custom "
+                                                   "domain of the Pages project) allowed to read the bucket, "
+                                                   "repeatable"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="say what would be sent where and stop (nothing is "
+                                     "run, nothing is sent)"),
+        yes_public: bool = typer.Option(False, "--yes-public", help="required: I know the site becomes public"),
+        yes_true_coordinates: bool = typer.Option(False, "--yes-true-coordinates", help="required as well for a "
+                                                  "site built with --frame crs: I know it tells where the survey "
+                                                  "is"),
+        record: Optional[Path] = typer.Option(None, "--record", help="a project (.ppg) that keeps the address of "
+                                              "the published site")):
+    """Publish a site on Cloudflare Pages (and R2 for large data) with your own wrangler: log in first with
+    `wrangler login` in a terminal. The program never reads or keeps a token."""
+    from .io import site_publish as sp
+
+    if not (folder / "site.json").exists():
+        typer.echo(f"{folder} is not a site: no site.json (ppg web build writes one)", err=True)
+        raise typer.Exit(1)
+    name = project or sp.default_project(folder.resolve().name)
+    p = sp.plan(folder, name, bucket=bucket, data=data, data_url=data_url)
+    for line in p.lines():
+        typer.echo(line)
+    typer.echo(f"(limits of the free plans as read on Cloudflare's documentation on {sp.CHECKED})")
+    found = sp.find_wrangler()
+    typer.echo(f"wrangler: {' '.join(found) if found else 'not found'}")
+    if dry_run:
+        typer.echo("dry run: nothing was sent")
+        raise typer.Exit(0 if p.ok else 1)
+    if not p.ok:
+        raise typer.Exit(1)
+    if p.frame != "local":
+        typer.echo("WARNING: this site holds the TRUE coordinates of the survey", err=True)
+    try:
+        sp.check_consent(p.frame, yes_public, yes_true_coordinates)
+    except sp.ConsentError as exc:
+        typer.echo(f"not published: {exc}", err=True)
+        raise typer.Exit(2) from None
+    if found is None:
+        typer.echo(sp.INSTALL_HINT, err=True)
+        raise typer.Exit(1)
+    w = sp.Wrangler(found)
+    try:
+        result = sp.publish(p, public=yes_public, coordinates=yes_true_coordinates, wrangler=w,
+                            origins=list(origin or []), progress=print_progress)
+    except (sp.WranglerMissing, sp.NotLoggedIn, sp.WranglerFailed, ValueError) as exc:
+        typer.echo("\n".join(w.transcript[-12:]), err=True)
+        typer.echo(f"not published: {exc}", err=True)
+        raise typer.Exit(1) from None
+    for note in result.unread:
+        typer.echo(f"warning: not read in the answer of wrangler: {note}", err=True)
+    for text in result.unread_output:  # whole and scrubbed: to send to the developers
+        typer.echo(text, err=True)
+    if result.address:
+        typer.echo(f"published: {result.address}")
+    else:
+        typer.echo("published; the address is shown in the Cloudflare dashboard (Workers & Pages) or by "
+                   "`wrangler pages project list` (it was not found in the answer of wrangler)")
+    if result.data_address:
+        typer.echo(f"data: {result.data_address} (bucket {result.bucket}: {result.sent} sent, {result.unchanged} "
+                   f"unchanged, {result.removed} deleted)")
+    typer.echo("to restrict who can open it: Cloudflare Access (Zero Trust) in the dashboard; see the guide")
+    if record is not None:
+        doc = Document.open(record)
+        sp.record_published(doc, result)
+        doc.save()
+        typer.echo(f"recorded in {record}")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 

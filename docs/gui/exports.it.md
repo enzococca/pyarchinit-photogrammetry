@@ -102,8 +102,13 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
 3. **Anteprima**: un server solo su questo computer (127.0.0.1, una porta libera) e la pagina nel browser; il pannello
    mostra l'indirizzo con *Apri nel browser*, *Copia indirizzo* e *Ferma*. Chiudere il progetto o la finestra lo
    ferma.
-4. **Pubblica**: dal programma non è ancora disponibile. La cartella del sito si copia così com'è su qualsiasi hosting
-   statico (*Apri la cartella*).
+4. **Pubblica**: su Cloudflare Pages (gratuito; un bucket R2 per i dati quando i file superano i limiti di Pages) con
+   il tuo `wrangler`, dopo `wrangler login` in un terminale. **Controlla** mostra il piano - cosa va dove, i limiti
+   gratuiti rispettati o superati, che cosa diventa pubblico - senza inviare nulla; **Pubblica...** chiede di
+   confermare che il sito diventa pubblico (una seconda volta, in rosso, con le coordinate vere). L'indirizzo compare
+   nel pannello e nell'Area di lavoro con *Apri nel browser* e *Copia l'indirizzo*. Passo per passo, i limiti,
+   Cloudflare Access e gli altri hosting: [Pubblicare il sito web](web-publish.it.md). La cartella si può sempre
+   copiare così com'è su qualsiasi hosting statico (*Apri la cartella*).
 
 ### Paradati
 

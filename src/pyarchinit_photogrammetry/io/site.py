@@ -1250,6 +1250,9 @@ def record_site(document, manifest: str | os.PathLike, options: dict, sources: d
     record = {"folder": _stored_folder(document, folder), "options": dict(options),
               "when": datetime.now().isoformat(timespec="seconds"), "size": site_size(folder),
               "frame": data.get("frame", options.get("frame")), "sources": sources}
+    prior = document.meta.get(META_KEY)
+    if isinstance(prior, dict) and isinstance(prior.get("published"), dict):
+        record["published"] = prior["published"]  # where it was published (:mod:`.site_publish`): kept
     document.meta[META_KEY] = record
     return record
 

@@ -16648,6 +16648,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             a = menu.addAction(icon("view"), tr("Avvia l'anteprima"), self.web.start_preview)
             a.setEnabled(self.web_pane.b_preview.isEnabled())
             menu.addAction(icon("folder"), tr("Apri la cartella"), self.web.open_folder)
+            if self.web_pane.published():  # the address of the site published (Cloudflare)
+                menu.addAction(icon("browser"), tr("Apri nel browser"), self.web_pane._open_published)
+                menu.addAction(icon("copy"), tr("Copia l'indirizzo"), self.web_pane._copy_published)
         elif kind == "mosaic":
             from ..engine import mosaic as mosaic_mod
 

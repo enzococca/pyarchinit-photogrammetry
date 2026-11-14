@@ -1,21 +1,25 @@
 """*Pubblica sul web* as a pane that stays open: the survey as a static web site (:mod:`..io.site`) in four steps,
 each with its state - the contents (chunks, products, title, languages, the frame of the coordinates, the folder),
-the build in the worker, the preview on a local server of this computer, the publication (not yet: the folder goes as
-it is to any static hosting). The site built last is kept with the project (``meta["web_site"]``), shown in the
-Area di lavoro and marked *da rifare* when a product it holds is built again."""
+the build in the worker, the preview on a local server of this computer, the publication on Cloudflare Pages (and R2
+for large data) through the user's own wrangler (:mod:`..io.site_publish`: the plan shown first, an explicit consent,
+a second one for true coordinates). The site built last is kept with the project (``meta["web_site"]``, its address
+once published in ``["published"]``), shown in the Area di lavoro and marked *da rifare* when a product it holds is
+built again."""
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QRadioButton, QSpinBox,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ..io import site
+from ..io import site_publish
+from .dialogs import message
 from .flow_layout import FlowLayout
 from .i18n import number, tr
 from .icons import PALETTE, icon
@@ -26,6 +30,93 @@ STEPS = ("contents", "build", "preview", "publish")
 STATE_ICONS = {"todo": "step_todo", "done": "step_done", "stale": "warning", "running": "step_running",
                "failed": "error", "unavailable": "step_todo"}
 TEXTURES = (0, 1024, 2048, 4096, 8192)  # the largest side of a texture page of the model (0: vertex colours)
+
+
+def data_modes() -> dict[str, str]:
+    """Where the data of a published site go (:data:`..io.site_publish.DATA_MODES`)."""
+    return {"auto": tr("Automatico: Pages, R2 se serve"), "pages": tr("Tutto su Pages"),
+            "r2": tr("Dati su R2 (bucket)")}
+
+
+def issue_texts() -> dict[str, str]:
+    """The problems and warnings of a publication plan (:data:`..io.site_publish.ISSUES`) in the words of the pane."""
+    return {
+        "data_mode": tr("Dove vanno i dati: una tra {0}"),
+        "not_site": tr("{0} non è un sito costruito dal programma: costruiscilo prima"),
+        "project_name": tr("Il nome del progetto Pages: lettere minuscole, cifre e trattini, non agli estremi "
+                           "(diventa <nome>.pages.dev)"),
+        "pages_file_bytes": tr("{0} file superano i {1} MiB per file di Pages ({2}): manda i dati su R2 (un bucket) "
+                               "o costruisci un sito più leggero"),
+        "page_file_bytes": tr("{0} file fuori da data/ superano i {1} MiB per file di Pages ({2})"),
+        "pages_files": tr("{0} file su Pages, più dei {1} del piano gratuito: manda i dati su R2 (un bucket)"),
+        "page_files": tr("{0} file su Pages, più dei {1} del piano gratuito"),
+        "no_bucket": tr("I dati devono andare su R2 (file oltre i limiti di Pages): scrivi il nome di un bucket"),
+        "bucket_name": tr("Il nome del bucket: 3-63 lettere minuscole, cifre e trattini, non agli estremi"),
+        "data_url": tr("L'indirizzo dei dati deve iniziare con https:// (il dominio collegato al bucket)"),
+        "r2_put_bytes": tr("File più grandi dei {0} MB che wrangler manda su R2 in una volta ({1}): costruisci un "
+                           "sito più leggero (budget) o mandali con rclone"),
+        "r2_billed": tr("I dati superano i 10 GB-mese gratuiti di R2: il resto si paga"),
+        "r2_dev": tr("I dati sono serviti dall'indirizzo r2.dev del bucket: limitato e pensato per le prove; per un "
+                     "sito che dura collega un dominio al bucket e scrivi qui il suo indirizzo"),
+        "r2_subscription": tr("R2 va attivato una volta sull'account (abbonamento R2 nella dashboard di Cloudflare)"),
+        "cors_replaced": tr("La regola CORS del bucket {0} viene sostituita con quella di questo sito: usa un bucket "
+                            "solo per questo sito"),
+        "true_coordinates": tr("Il sito contiene le coordinate VERE del rilievo: pubblicandolo chiunque saprà dove "
+                               "si trova"),
+    }
+
+
+def limit_texts(lim) -> str:
+    """A limit of the free plans met or exceeded (:class:`..io.site_publish.Limit`) in the words of the pane."""
+    v, n = lim.value, lim.limit
+    text = {"pages_files": lambda: tr("file su Pages {0} di {1} (piano gratuito)", number(v), number(n)),
+            "pages_file_bytes": lambda: tr("file più grande su Pages {0} MiB di {1}", number(v / 2**20, 1),
+                                           number(n / 2**20)),
+            "r2_put_bytes": lambda: tr("file più grande verso R2 {0} MB di {1}", number(v / 1e6, 1), number(n / 1e6)),
+            "r2_storage": lambda: tr("spazio su R2 {0} GB di {1} GB-mese gratuiti", number(v / 1e9, 2),
+                                     number(n / 1e9)),
+            "r2_class_a": lambda: tr("scritture R2 di questa pubblicazione {0} di {1} gratuite al mese", number(v),
+                                     number(n)),
+            "r2_class_b": lambda: tr("letture R2 di una visita che apre tutto circa {0} di {1} gratuite al mese",
+                                     number(v), number(n))}.get(lim.key)
+    return text() if text else f"{lim.key} {v} / {n}"
+
+
+def plan_text(plan) -> str:
+    """The plan of a publication (:func:`..io.site_publish.plan`) as the pane shows it before the consent (rich
+    text): where the files go, the limits, what becomes public, the warnings and the problems."""
+    import html
+
+    esc = html.escape
+    rows = [tr("Pagina su Cloudflare Pages, progetto <b>{0}</b>: {1} file, {2}.", esc(plan.project),
+               number(len(plan.pages_files)), size_text(plan.pages_bytes))]
+    if plan.data == "r2":
+        rows.append(tr("Dati nel bucket R2 <b>{0}</b>: {1} file, {2}; da inviare {3} ({4}), invariati {5}, da "
+                       "cancellare {6}.", esc(plan.bucket or "?"), number(len(plan.r2_files)),
+                       size_text(plan.r2_bytes), number(len(plan.upload)), size_text(plan.upload_bytes),
+                       number(len(plan.unchanged)), number(len(plan.remove))))
+        rows.append(tr("Indirizzo dei dati: {0}", esc(plan.data_url) if plan.data_url else
+                       tr("l'indirizzo r2.dev del bucket, attivato alla pubblicazione")))
+    limits = []
+    for lim in plan.limits:
+        word = tr("entro") if lim.ok else f"<span style='color:{PALETTE['red']}'>{tr('oltre')}</span>"
+        limits.append(f"{word}: {esc(limit_texts(lim))}")
+    rows.append(tr("Limiti gratuiti (letti il {0}):", site_publish.CHECKED) + "<br>&nbsp;&nbsp;" +
+                "<br>&nbsp;&nbsp;".join(limits))
+    public = tr("Diventa pubblico: tutti i file del sito, per chiunque abbia l'indirizzo.")
+    if plan.frame == "crs":
+        public += f" <span style='color:{PALETTE['red']}'><b>{tr('Con le coordinate VERE del rilievo.')}</b></span>"
+    else:
+        public += " " + tr("Coordinate nel sistema locale: il luogo del rilievo non è scritto.")
+    rows.append(public)
+    texts = issue_texts()
+    for kind, code, values in plan.codes:
+        line = esc(texts[code].format(*values)) if code in texts else esc(code)
+        if kind == "problem":
+            rows.append(f"<span style='color:{PALETTE['red']}'>{tr('Non si può pubblicare:')} {line}</span>")
+        elif code != "true_coordinates":
+            rows.append(f"<span style='color:{PALETTE['amber']}'>{line}</span>")
+    return "<br>".join(rows)
 
 
 def state_names() -> dict[str, str]:
@@ -91,6 +182,10 @@ class WebPane(QWidget):
     stop_requested = Signal()
     open_requested = Signal()  # the preview in the browser
     folder_requested = Signal()  # the folder of the site in the file manager
+    check_requested = Signal()  # wrangler, the login and the plan of the publication
+    publish_requested = Signal()
+    cancel_requested = Signal()  # the publication running
+    address_typed = Signal(str)  # the address of the site typed by the user (wrangler did not say it)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -273,15 +368,75 @@ class WebPane(QWidget):
         pl.addWidget(self.address)
         step(2, "preview", tr("Anteprima"), body)
 
-        # 4. the publication (phase 5: not yet)
+        # 4. the publication on Cloudflare (the user's wrangler)
         body = QWidget()
-        bar = FlowLayout(body)
+        cl = QVBoxLayout(body)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cf = QFormLayout()
+        self.cf_project = QLineEdit()
+        self.cf_project.setToolTip(tr("Il nome del progetto Cloudflare Pages: il sito sarà su <nome>.pages.dev"))
+        cf.addRow(tr("Progetto Pages"), self.cf_project)
+        self.cf_data = QComboBox()
+        for key, name in data_modes().items():
+            self.cf_data.addItem(name, key)
+        self.cf_data.setToolTip(tr("Pages tiene file fino a 25 MiB e 20.000 file; oltre, i dati vanno in un bucket "
+                                   "R2"))
+        cf.addRow(tr("Dati"), self.cf_data)
+        self.cf_bucket = QLineEdit()
+        self.cf_bucket.setPlaceholderText(tr("solo se i dati vanno su R2"))
+        cf.addRow(tr("Bucket R2"), self.cf_bucket)
+        self.cf_data_url = QLineEdit()
+        self.cf_data_url.setPlaceholderText(tr("facoltativo: https://dominio collegato al bucket"))
+        cf.addRow(tr("Indirizzo dei dati"), self.cf_data_url)
+        for widget in (self.cf_project, self.cf_bucket, self.cf_data_url):
+            widget.textEdited.connect(lambda _t: self._cf_changed())
+        self.cf_data.currentIndexChanged.connect(lambda _i: self._cf_changed())
+        cl.addLayout(cf)
+        self.cf_warning = QLabel(tr("Questo sito contiene le coordinate VERE del rilievo: pubblicandolo chiunque "
+                                    "saprà dove si trova. Per pubblicarlo senza, costruiscilo di nuovo nel sistema "
+                                    "locale."))
+        self.cf_warning.setWordWrap(True)
+        self.cf_warning.setStyleSheet(f"color: {PALETTE['red']}; font-weight: bold;")
+        self.cf_warning.setVisible(False)
+        cl.addWidget(self.cf_warning)
+        self.cf_plan = QLabel("")
+        self.cf_plan.setWordWrap(True)
+        self.cf_plan.setTextFormat(Qt.TextFormat.RichText)
+        self.cf_plan.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        cl.addWidget(self.cf_plan)
+        holder = QWidget()
+        bar = FlowLayout(holder)
+        self.b_cf_check = QPushButton(icon("search"), tr("Controlla"))
+        self.b_cf_check.setToolTip(tr("Cerca wrangler, guarda se hai fatto l'accesso a Cloudflare e prepara il "
+                                      "piano: cosa va dove, i limiti gratuiti, cosa diventa pubblico. Non invia "
+                                      "nulla."))
+        self.b_cf_check.clicked.connect(self.check_requested)
+        self.b_publish = QPushButton(icon("publish"), tr("Pubblica..."))
+        self.b_publish.clicked.connect(self.publish_requested)
+        self.b_cf_cancel = QPushButton(icon("cancel"), tr("Annulla"))
+        self.b_cf_cancel.clicked.connect(self.cancel_requested)
+        self.b_site_open = QPushButton(icon("browser"), tr("Apri nel browser"))
+        self.b_site_open.clicked.connect(self._open_published)
+        self.b_site_copy = QPushButton(icon("copy"), tr("Copia l'indirizzo"))
+        self.b_site_copy.clicked.connect(self._copy_published)
         self.b_open_folder = QPushButton(icon("folder"), tr("Apri la cartella"))
         self.b_open_folder.clicked.connect(self.folder_requested)
-        bar.addWidget(self.b_open_folder)
+        for b in (self.b_cf_check, self.b_publish, self.b_cf_cancel, self.b_site_open, self.b_site_copy,
+                  self.b_open_folder):
+            bar.addWidget(b)
+        cl.addWidget(holder)
+        self.published_address = QLineEdit()
+        self.published_address.setReadOnly(True)
+        self.published_address.setPlaceholderText(tr("L'indirizzo del sito pubblicato"))
+        self.published_address.editingFinished.connect(self._address_edited)
+        cl.addWidget(self.published_address)
         step(3, "publish", tr("Pubblica"), body)
         lay.addStretch(1)
         self.preview_url = ""
+        self.cf_status: site_publish.Status | None = None  # wrangler and the login, from the last check
+        self.cf_plan_obj: site_publish.Plan | None = None
+        self.cf_running = False
+        self.cf_failure = ""
         self.record: dict | None = None
         self.stale: list[str] = []
         self.failure = ""
@@ -301,6 +456,50 @@ class WebPane(QWidget):
     def _copy_address(self) -> None:
         if self.preview_url:
             QGuiApplication.clipboard().setText(self.preview_url)
+
+    def published(self) -> dict | None:
+        """Where the site was published (``meta["web_site"]["published"]``), None before."""
+        return site_publish.published_record(self.document) if self.document is not None else None
+
+    def _open_published(self) -> None:
+        pub = self.published()
+        if pub and pub.get("address"):
+            QDesktopServices.openUrl(QUrl(pub["address"]))
+
+    def _copy_published(self) -> None:
+        pub = self.published()
+        if pub and pub.get("address"):
+            QGuiApplication.clipboard().setText(pub["address"])
+
+    def _address_edited(self) -> None:
+        """The address typed where wrangler did not say it."""
+        pub = self.published()
+        text = self.published_address.text().strip()
+        if pub and not self.published_address.isReadOnly() and text and text != (pub.get("address") or ""):
+            self.address_typed.emit(text)
+
+    def cf_options(self) -> dict:
+        """The choices of the publication: project, where the data go, bucket, address of the data."""
+        return {"project": self.cf_project.text().strip(), "data": self.cf_data.currentData() or "auto",
+                "bucket": self.cf_bucket.text().strip() or None, "data_url": self.cf_data_url.text().strip() or None}
+
+    def _cf_changed(self) -> None:
+        """A choice of the publication changed: the plan shown no longer holds, check again."""
+        self.cf_plan_obj = None
+        self.update_states()
+
+    def set_cloudflare(self, status, plan) -> None:
+        """The result of a check: the state of wrangler and the plan."""
+        self.cf_status, self.cf_plan_obj = status, plan
+        self.cf_failure = ""
+        self.update_states()
+
+    def set_publishing(self, running: bool, failure: str = "") -> None:
+        self.cf_running = running
+        self.cf_failure = failure
+        if not running:
+            self.cf_plan_obj = None  # the next publication is planned again (what was sent changed)
+        self.update_states()
 
     def _chunks_changed(self) -> None:
         self.update_states()
@@ -397,6 +596,21 @@ class WebPane(QWidget):
         name = (document.meta or {}).get("sito") if document is not None else None
         self.title.setPlaceholderText(str(name or (Path(document.path).stem if document is not None and document.path
                                                    else tr("Rilievo"))))
+        pub = site_publish.published_record(document) if document is not None else None
+        if pub:
+            self.cf_project.setText(str(pub.get("project") or ""))
+            self.cf_bucket.setText(str(pub.get("bucket") or ""))
+            k = self.cf_data.findData("r2" if pub.get("data") == "r2" else "auto")
+            self.cf_data.setCurrentIndex(max(k, 0))
+            address = pub.get("data_address") or ""
+            self.cf_data_url.setText("" if ".r2.dev" in address else address)
+        else:
+            stem = Path(document.path).stem if document is not None and document.path else ""
+            self.cf_project.setText(site_publish.default_project(stem) if stem else "")
+            self.cf_bucket.setText("")
+            self.cf_data.setCurrentIndex(0)
+            self.cf_data_url.setText("")
+        self.cf_status, self.cf_plan_obj, self.cf_failure = None, None, ""
         self.read_record()
 
     def _chunk_item(self, item: QListWidgetItem, on: bool) -> None:
@@ -535,11 +749,71 @@ class WebPane(QWidget):
             if serving else tr("Costruisci prima il sito.") if not built else
             tr("Un server su questo computer mostra il sito nel browser, come lo vedrà chi lo apre."))
 
-        self.step_states["publish"] = "unavailable"
-        self._title("publish", "unavailable")
+        self._update_publish(built, build)
+
+    def _update_publish(self, built: bool, build: str) -> None:
+        """Step 4: not built / wrangler missing / not logged in / ready / publishing / published / failed."""
+        pub = self.published()
+        folder = site.site_folder(self.document, self.record) if built else None
+        crs = built and site_publish.site_frame(folder) != "local"
+        self.cf_warning.setVisible(bool(crs))
+        status = self.cf_status.state if self.cf_status is not None else None
+        plan = self.cf_plan_obj
+        if self.cf_running:
+            state, text = "running", tr("Pubblicazione in corso: i passi nel log. Annulla per fermarla (i file "
+                                        "già inviati restano e non si inviano di nuovo).")
+        elif self.cf_failure:
+            state, text = "failed", tr("Non riuscito: {0}", self.cf_failure)
+        elif not built:
+            state, text = "todo", tr("Costruisci prima il sito.")
+        elif status == "missing":
+            state, text = "unavailable", tr("wrangler, il programma di Cloudflare, non è installato. Installa Node.js "
+                                            "(nodejs.org), poi in un terminale: npm install -g wrangler e wrangler "
+                                            "login. Il programma non lo installa da solo.")
+        elif status == "logged_out":
+            state, text = "unavailable", tr("wrangler non ha l'accesso a Cloudflare. In un terminale: wrangler login "
+                                            "(si apre il browser; il programma non vede le credenziali), poi "
+                                            "Controlla di nuovo.")
+        elif pub:
+            stale = site_publish.stale_publication(self.document)
+            state = "stale" if stale else "done"
+            if pub.get("address"):
+                text = tr("Pubblicato il {0} su {1}", when_text(pub.get("when")), pub.get("address"))
+            else:
+                text = tr("Pubblicato il {0}; l'indirizzo non si è letto nella risposta di wrangler: lo trovi nella "
+                          "dashboard di Cloudflare (Workers & Pages) o con wrangler pages project list. Scrivilo qui "
+                          "sotto.", when_text(pub.get("when")))
+            if pub.get("data_address"):
+                text += " " + tr("(dati su {0})", pub["data_address"])
+            if stale:
+                text = tr("Il sito è stato costruito di nuovo dopo la pubblicazione: pubblicalo di nuovo.") + " " + text
+        elif status == "ready":
+            state, text = "todo", tr("Pronto: {0}. Controlla il piano qui sopra, poi Pubblica.", self.cf_status.text)
+        else:
+            state, text = "todo", tr("Su Cloudflare Pages (gratuito; R2 per i dati grandi) con il tuo wrangler, dopo "
+                                     "wrangler login in un terminale. Premi Controlla: non invia nulla.")
+        self.step_states["publish"] = state
+        self._title("publish", state)
+        self.states["publish"].setText(text)
+        self.states["publish"].setStyleSheet(f"color: {PALETTE['red']};" if state == "failed" else "")
+        self.cf_plan.setText(plan_text(plan) if plan is not None and not self.cf_running else "")
+        self.cf_plan.setVisible(plan is not None and not self.cf_running)
+        idle = not self._busy and not self.cf_running and build != "running"
+        for w in (self.cf_project, self.cf_data, self.cf_bucket, self.cf_data_url):
+            w.setEnabled(not self.cf_running)
+        self.b_cf_check.setEnabled(built and idle)
+        self.b_publish.setEnabled(built and idle and status == "ready" and plan is not None and plan.ok)
+        self.b_cf_cancel.setEnabled(self.cf_running)
+        address = (pub or {}).get("address") or ""
+        self.b_site_open.setEnabled(bool(address))
+        self.b_site_copy.setEnabled(bool(address))
+        typing = bool(pub) and not address and not self.cf_running  # the user writes the address wrangler did not say
+        self.published_address.setReadOnly(not typing)
+        self.published_address.setPlaceholderText(tr("https://... l'indirizzo del sito, dalla dashboard di Cloudflare")
+                                                  if typing else tr("L'indirizzo del sito pubblicato"))
+        if not self.published_address.hasFocus() or not typing:
+            self.published_address.setText(address)
         self.b_open_folder.setEnabled(built)
-        self.states["publish"].setText(tr("La pubblicazione dal programma non è ancora disponibile. La cartella del "
-                                          "sito si copia così com'è su qualsiasi hosting statico."))
 
 
 class WebPublishing(QObject):
@@ -557,6 +831,11 @@ class WebPublishing(QObject):
         self.pane.stop_requested.connect(self.stop_preview)
         self.pane.open_requested.connect(self.open_browser)
         self.pane.folder_requested.connect(self.open_folder)
+        self.pane.check_requested.connect(self.check_cloudflare)
+        self.pane.publish_requested.connect(self.publish)
+        self.pane.cancel_requested.connect(self.cancel_publish)
+        self.pane.address_typed.connect(self.set_address)
+        self._publishing = False
 
     # --------------------------------------------------------------- build
     def build(self) -> bool:
@@ -631,10 +910,161 @@ class WebPublishing(QObject):
         return True
 
     def runner_idle(self) -> None:
-        """The worker stopped: a build cancelled ends here (neither done nor failed)."""
+        """The worker stopped: a build or a publication cancelled ends here (neither done nor failed)."""
         if self._building:
             self._building = False
             self.pane.set_running(False)
+        if self._publishing:  # the worker says it stopped before it calls done or failed: look after them
+            QTimer.singleShot(0, self._publish_ended)
+
+    def _publish_ended(self) -> None:
+        if self._publishing:  # neither done nor failed: cancelled
+            self._publishing = False
+            log.warning(tr("Pubblicazione annullata"))
+            self.pane.set_publishing(False)
+
+    # --------------------------------------------------------------- publication (Cloudflare)
+    def _site_folder(self) -> Path | None:
+        record = self.pane.record
+        if record is None:
+            return None
+        folder = site.site_folder(self.window.doc, record)
+        return folder if (folder / site.MANIFEST).exists() else None
+
+    def check_cloudflare(self) -> bool:
+        """wrangler, the login and the plan, in the worker (wrangler takes seconds; the plan reads the data files
+        to tell what changed). Nothing is sent."""
+        folder = self._site_folder()
+        if folder is None:
+            self.window._warn(tr("Costruisci prima il sito."))
+            return False
+        o = self.pane.cf_options()
+
+        def job(progress):
+            plan = site_publish.plan(folder, o["project"], bucket=o["bucket"], data=o["data"], data_url=o["data_url"])
+            status = site_publish.Wrangler().status(progress)
+            return status, plan
+
+        def done(result):
+            status, plan = result
+            for line in plan.lines():
+                log.info("Cloudflare: %s", line)
+            self.pane.set_cloudflare(status, plan)
+
+        def failed(summary, details=""):
+            self.pane.set_cloudflare(None, None)
+            self.window._error(summary, details)
+
+        return bool(self.window.runner.run(tr("Controllo di Cloudflare"), job, done, failed, quiet=True))
+
+    def _consent(self, plan) -> tuple[bool, bool]:
+        """The explicit consent: the site becomes public; a second, red, one for true coordinates."""
+        from PySide6.QtWidgets import QMessageBox
+
+        yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
+        where = tr("su Cloudflare Pages, progetto {0}", plan.project)
+        if plan.data == "r2":
+            where += " " + tr("e nel bucket R2 {0} (indirizzo pubblico)", plan.bucket)
+        text = tr("Il sito diventa PUBBLICO: chiunque abbia l'indirizzo può aprirlo e scaricarne i file ({0}). Per "
+                  "limitare l'accesso dopo, usa Cloudflare Access dalla dashboard (vedi la guida).\n\nPubblicare?",
+                  where)
+        if message(self.window, "question", tr("Pubblica sul web"), text, buttons=yes | no, default=no) != yes:
+            return False, False
+        if plan.frame == "local":
+            return True, False
+        text = (f"<p style='color:{PALETTE['red']}'><b>" + tr("Questo sito contiene le coordinate VERE del rilievo.") +
+                "</b></p><p>" + tr("Chiunque lo apra saprà dove si trova il sito archeologico. Confermi di volerle "
+                                   "pubblicare?") + "</p>")
+        ok = message(self.window, "warning", tr("Coordinate vere"), text, buttons=yes | no, default=no) == yes
+        return True, ok
+
+    def publish(self) -> bool:
+        pane = self.pane
+        plan = pane.cf_plan_obj
+        status = pane.cf_status
+        folder = self._site_folder()
+        if folder is None or plan is None or status is None or status.state != "ready" or not plan.ok:
+            self.window._warn(tr("Premi prima Controlla: il piano va visto prima di pubblicare."))
+            return False
+        public, coordinates = self._consent(plan)
+        if not public or (plan.frame != "local" and not coordinates):
+            log.info(tr("Pubblicazione non confermata: nulla è stato inviato"))
+            return False
+        o = pane.cf_options()
+        doc = self.window.doc
+        wrangler = site_publish.Wrangler(status.command or None)
+
+        def job(progress):
+            fresh = site_publish.plan(folder, o["project"], bucket=o["bucket"], data=o["data"],
+                                      data_url=o["data_url"])  # what is on the disk now
+            if fresh.frame != plan.frame:
+                raise site_publish.ConsentError("the site changed since it was checked: check it again")
+            return site_publish.publish(fresh, public=public, coordinates=coordinates, wrangler=wrangler,
+                                        progress=progress)
+
+        def done(result):
+            self._publishing = False
+            for line in result.transcript:
+                log.info("wrangler: %s", line)
+            site_publish.record_published(doc, result)
+            for note in result.unread:
+                log.warning(tr("Non letto nella risposta di wrangler: {0}", note))
+            for text in result.unread_output:  # whole, scrubbed: for the user to send to the developers
+                log.warning("wrangler:\n%s", text)
+            if result.address:
+                log.info(tr("Sito pubblicato su {0}", result.address))
+            else:
+                log.warning(tr("Sito pubblicato; l'indirizzo è nella dashboard di Cloudflare o in wrangler pages "
+                               "project list: scrivilo nel passo 4"))
+            if doc.path:
+                try:
+                    doc.save()
+                except Exception as exc:  # noqa: BLE001 - said in the log, the site is published anyway
+                    log.error("Salvataggio non riuscito: %s", exc)
+            else:
+                self.window._dirty(True)
+            pane.set_publishing(False)
+            self.window.workspace.populate(doc)
+
+        def failed(summary, details=""):
+            self._publishing = False
+            for line in wrangler.transcript:
+                log.info("wrangler: %s", line)
+            text = site_publish.scrub(summary.split(": ", 1)[-1] if summary else tr("errore"))
+            pane.set_publishing(False, text)
+            self.window._error(site_publish.scrub(summary), site_publish.scrub(details))
+
+        self._publishing = True
+        pane.set_publishing(True)
+        if not self.window.runner.run(tr("Pubblicazione su Cloudflare"), job, done, failed):
+            self._publishing = False
+            pane.set_publishing(False)
+            return False
+        return True
+
+    def set_address(self, text: str) -> bool:
+        """The address typed in step 4 kept with the project."""
+        doc = self.window.doc
+        try:
+            site_publish.set_address(doc, text)
+        except ValueError:
+            self.window._warn(tr("L'indirizzo del sito deve iniziare con https:// (per esempio "
+                                 "https://nome.pages.dev)"))
+            return False
+        if doc.path:
+            try:
+                doc.save()
+            except Exception as exc:  # noqa: BLE001 - said in the log
+                log.error("Salvataggio non riuscito: %s", exc)
+        else:
+            self.window._dirty(True)
+        self.pane.update_states()
+        self.window.workspace.populate(doc)
+        return True
+
+    def cancel_publish(self) -> None:
+        if self._publishing:
+            self.window.runner.cancel()
 
     # --------------------------------------------------------------- preview
     def start_preview(self) -> str | None:
@@ -696,4 +1126,5 @@ class WebPublishing(QObject):
         self.stop_preview()
 
 
-__all__ = ["WebPane", "WebPublishing", "state_names", "product_names", "default_folder", "folder_problem"]
+__all__ = ["WebPane", "WebPublishing", "state_names", "product_names", "default_folder", "folder_problem",
+           "plan_text", "issue_texts", "data_modes"]
