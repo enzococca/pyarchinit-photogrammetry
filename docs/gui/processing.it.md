@@ -161,8 +161,9 @@ faccia; la vista *Modello con texture* mostra tutto il modello.
 
 ![La finestra Costruisci DEM](../img/gui/dialog-dem.png)
 
-*Flusso di lavoro > Costruisci DEM...*: i dati sorgente, la risoluzione (automatica di base) e *Interpola i
-vuoti*. Quando la nuvola densa è classificata la finestra elenca le sue classi con i loro punti: spuntare solo
+*Flusso di lavoro > Costruisci DEM...*: i dati sorgente, la risoluzione (automatica di base), *Riempi le celle
+senza punti tra i punti vicini* e *Interpola i vuoti* fino a una larghezza e un'area ([vuoti del
+DEM](#vuoti-del-dem)). Quando la nuvola densa è classificata la finestra elenca le sue classi con i loro punti: spuntare solo
 *Terreno* dà un modello del terreno (DTM), con i vuoti sotto ciò che resta fuori interpolati; curve di livello e
 volumi poi lo usano. Il rumore (classi 7 e 18) non fa mai un DEM né una mesh.
 
@@ -546,6 +547,25 @@ piano che lo adatta, un'interpolazione lineare, IDW o una quota costante - e le 
 linee di discontinuità (il bordo di un muro o di un gradino tiene le sue quote). Alberi, tende, mezzi, cumuli di
 terra o buchi della ricostruzione lasciano segni in curve di livello e volumi; il DEM com'era resta tra le versioni
 (confrontalo, rendilo di nuovo attivo).
+
+## Vuoti del DEM
+
+*Strumenti > Interpola i vuoti del DEM...* (o i due campi *Interpola i vuoti* di *Costruisci DEM*): i buchi senza
+quote circondati da quote - una pozzanghera, un'ombra, un vuoto della ricostruzione - ricevono quote dai loro
+bordi, la superficie liscia che raccorda il bordo (interpolazione armonica: un piano resta un piano, nessuna quota
+sale sopra o scende sotto quelle del bordo). Si riempiono solo i buchi fino alla **larghezza** (m, la parte più
+larga) e all'**area** (m2) scelte; i vuoti più grandi, il terreno vuoto attorno al rilievo e le insenature aperte
+verso di esso restano vuoti: niente viene estrapolato fuori dai dati. Il DEM è letto e scritto a finestre, così un
+DEM grande resta nella memoria.
+
+Le celle interpolate restano segnate in una maschera tenuta col DEM (`dem_interpolated_<id>.tif` nella cartella del
+chunk, 1 = riempita tra i punti alla costruzione del DEM, 2 = vuoto riempito): la quota sotto il cursore e quella di
+un punto di misura dicono *(interpolata)* (i punti di misura hanno il campo `z_interp`), una quota letta lì lo dice
+nella barra di stato, *Esporta DEM* scrive `<nome>_interpolata.tif` accanto al DEM e il report dà la quota di
+celle interpolate. *Modifica > Annulla* e le versioni riportano il DEM com'era, con la sua maschera. Non è il
+riempimento dei buchi del modello (*Campo di altezze* con i buchi chiusi, `ppg process --fill-holes`) né i piccoli
+buchi dell'ortofoto. Da riga di comando: `ppg dem-fill-voids scavo.ppg --max-width 1`,
+`ppg dem scavo.ppg --fill-voids 1`.
 
 ## Coregistrazione dei DEM
 

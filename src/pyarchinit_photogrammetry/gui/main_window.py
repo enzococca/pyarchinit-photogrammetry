@@ -1343,6 +1343,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                   tip=tr("Sposta il DEM del chunk sul DEM di un altro rilievo (un altro chunk o una versione) sul "
                          "terreno che non è cambiato: spostamento orizzontale, verticale e inclinazione, così "
                          "volumi e differenze non hanno falso scavo sui pendii"))
+        self._act(m, tr("Interpola i vuoti del DEM..."), self.fill_dem_voids, processing=True, icon_name="dem",
+                  tip=tr("I buchi senza quote dentro il rilievo riempiti dai bordi fino a una dimensione scelta; le "
+                         "celle interpolate restano segnate"))
         self._act(m, tr("Pendenza del DEM"), lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
                   tip=tr("Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)"))
         self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
@@ -1527,6 +1530,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.a_qgis_live.setChecked(False)
         self.a_qgis_live.toggled.connect(self._qgis_live_toggled)
         m.addAction(self.a_qgis_live)
+        self._act(m, tr("Ripristina gli stili predefiniti in QGIS..."), self.restore_qgis_styles, icon_name="refresh",
+                  tip=tr("I layer del programma nel progetto QGIS riprendono i colori del programma; gli stili fatti "
+                         "a mano in QGIS, conservati finora, vengono dimenticati"))
         self._act(m, tr("Apri il prospetto in QGIS"), self.open_elevation_in_qgis, icon_name="view_ortho")
         self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
@@ -7056,6 +7062,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
+        self._probe_reset()  # a step that brings files back: Windows does not replace a DEM the readout holds open
         try:
             text = self.history.undo() if self.history is not None else None
         except ScriptChanged as exc:
@@ -7071,6 +7078,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
+        self._probe_reset()  # a step that brings files back: Windows does not replace a DEM the readout holds open
         try:
             text = self.history.redo() if self.history is not None else None
         except ScriptChanged as exc:
@@ -8659,7 +8667,13 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             Field("source", "Dati sorgente", "point_cloud" if self.chunk.product_path("point_cloud") else "model",
                   choices=[("point_cloud", "Nuvola densa"), ("model", "Modello"), ("tie_points", "Punti di legame")]),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
-            Field("interpolate", "Interpola i vuoti", True)] + self._class_fields("Classi (solo dalla nuvola densa)")
+            Field("interpolate", "Riempi le celle senza punti tra i punti vicini", True,
+                  tip="Le celle senza punti dentro il terreno rilevato, fino a 64 celle da un punto"),
+            Field("fill_voids", "Interpola i vuoti: larghezza massima (m, vuoto: no)", None, kind="optional_float",
+                  tip="I buchi senza quote circondati da quote, riempiti dai bordi; i più larghi e il terreno "
+                      "fuori dal rilievo restano vuoti"),
+            Field("fill_voids_area", "Interpola i vuoti: area massima (m2, vuoto: nessun limite)", None,
+                  kind="optional_float")] + self._class_fields("Classi (solo dalla nuvola densa)")
             + self._version_fields("dem"),
             intro=self._class_hint("Con la nuvola densa scegli le classi: solo Terreno dà il modello del terreno (DTM), "
                                    "senza vegetazione, persone o attrezzi; i vuoti che lasciano vengono interpolati. "
@@ -8670,8 +8684,45 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                 self._warn("Scegli almeno una classe.")
                 return
             self.run_task("DEM", self._versioned("dem", v, lambda p: self.chunk.build_dem(
-                v["resolution"], v["source"], v["interpolate"], classes=classes, progress=p)),
+                v["resolution"], v["source"], v["interpolate"], classes=classes, progress=p,
+                fill_voids=v.get("fill_voids"), fill_voids_area=v.get("fill_voids_area"))),
                 lambda _r: self._dem_done())
+
+    def fill_dem_voids(self) -> None:
+        """Interpolate the voids of the DEM in use (:meth:`..core.chunk.Chunk.fill_dem_voids`); Modifica > Annulla
+        and the versions bring it back."""
+        if not self._need_chunk(product="dem"):
+            return
+        v = ParamDialog.ask(self, "Interpola i vuoti del DEM", [
+            Field("max_width", "Larghezza massima dei vuoti (m, vuoto: nessun limite)", 1.0, kind="optional_float"),
+            Field("max_area", "Area massima dei vuoti (m2, vuoto: nessun limite)", None, kind="optional_float"),
+            Field("keep_copy", "Conserva il DEM com'è tra le versioni", True),
+            Field("version_name", "Nome del DEM interpolato (facoltativo)", "", kind="text")],
+            intro=tr("I buchi senza quote circondati da quote ricevono quote dai loro bordi (una superficie liscia "
+                     "che li raccorda). I vuoti più grandi dei limiti e il terreno fuori dal rilievo restano vuoti. "
+                     "Le celle interpolate restano segnate: la quota letta col cursore lo dice e l'esportazione "
+                     "del DEM le scrive accanto. Non è il riempimento dei buchi del modello."))
+        if not v:
+            return
+        for k in ("max_width", "max_area"):
+            if v.get(k) is not None and v[k] <= 0:
+                v[k] = None
+        chunk = self.chunk
+        if self.history is not None:  # Modifica > Annulla puts the DEM back (its mask follows it)
+            self.history.backup(["dem"])
+
+        def job(p):
+            return chunk.fill_dem_voids(v.get("max_width"), v.get("max_area"), keep_version=bool(v.get("keep_copy")),
+                                        version_name=(v.get("version_name") or "").strip() or None, progress=p)
+
+        def done(info):
+            text = tr("Vuoti del DEM: {0} interpolati ({1} m2), {2} lasciati vuoti ({3} m2)", _it(info["holes"]),
+                      _it(info["area"], 2), _it(info["skipped"]), _it(info["skipped_area"], 2))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            self._show_raster("dem")
+
+        self.run_task("Interpolazione dei vuoti del DEM", job, done)
 
     def _dem_limited_text(self, chunk) -> str | None:
         """What to say of a DEM made coarser than its data to fit the memory (``meta["dem"]["memory_limited"]``,
@@ -10153,7 +10204,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
             return
         if kind == "dem" and z is not None and self.chunk is not None and self.chunk.dem_path is not None:
-            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  Z {z:.3f}{self._terrain_at(x, y, z)}   [{self.chunk.crs}]")
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  Z {z:.3f}{self._interpolated_note(x, y)}"
+                                     f"{self._terrain_at(x, y, z)}   [{self.chunk.crs}]")
             return
         if getattr(self.ortho_view, "kind", None) == "coverage":
             zt = tr("  {0} foto", int(z)) if z is not None and np.isfinite(z) else ""
@@ -10165,6 +10217,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return
         label = "dZ" if getattr(self.ortho_view, "kind", None) == "diff" else "Z"
         zt = f"  {label} {z:+.3f}" if z is not None and label == "dZ" else (f"  Z {z:.3f}" if z is not None else "")
+        if z is not None and kind == "ortho" and self.chunk is not None and self.chunk.dem_path is not None:
+            zt += self._interpolated_note(x, y)
         self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
 
     def _after_console(self) -> None:
@@ -11473,6 +11527,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                 x, y, z = float(p[0]), float(p[1]), float(p[2])
         else:
             z = self._dem_value(x, y)
+            if z is not None and self._interpolated_note(x, y):
+                self.statusBar().showMessage(tr("Quota letta su una cella interpolata del DEM, non misurata"), 15000)
         if entry is not None and z is None:
             self.statusBar().showMessage(tr("Fuori dal rilievo del prospetto: quota non letta"), 8000)
             return
@@ -11736,6 +11792,15 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                            + (f" ±{q['precisione_q'] * 1000:.1f} mm" if q.get("precisione_q") else "")
                            + tr(" - US {0} (area {1}) in X {2:.3f} Y {3:.3f}",
                                 q.get('us_q') or '?', q.get('area_q') or '?', q['x'], q['y']))
+
+    def _interpolated_note(self, x: float, y: float) -> str:
+        """`` (interpolata)`` where the height of the DEM at ``x``, ``y`` is interpolated, not measured (the mask of
+        the DEM, :mod:`..engine.dem_voids`); empty elsewhere."""
+        try:
+            interp = self._probe().at(x, y, ["z"]).get("z_interp")
+        except Exception:  # noqa: BLE001 - a DEM being rewritten: no note this time
+            return ""
+        return tr(" (interpolata)") if interp else ""
 
     def _dem_value(self, x: float, y: float) -> float | None:
         """Elevation of the DEM at full resolution (the view keeps a reduced copy)."""
@@ -12888,7 +12953,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         except Exception:  # noqa: BLE001 - no project yet, a file busy: nothing to say
             return
         if missing and missing != self._qgis_missing_said:
-            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso",
+            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo aggiorna con i layer di adesso "
+                      "(gli stili restano)",
                       ", ".join(f"«{n}»" for n in missing[:6]) + ("…" if len(missing) > 6 else ""))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
@@ -14332,9 +14398,28 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if not self.run_task("Sezione", job, done, refresh=False, save=False):
             self._qgis_waiting["sections"] += sdicts
 
-    def open_in_qgis(self) -> None:
+    def restore_qgis_styles(self) -> None:
+        """*Ripristina gli stili predefiniti*: the styles made by hand in QGIS for the layers of the program forgotten,
+        those layers given the program's style in the QGIS project (the user's other layers left as they are)."""
+        from ..io import qgis_styles
+
+        kept = qgis_styles.kept_styles(self._qgis_project())
+        text = tr("I layer del programma nel progetto QGIS riprendono gli stili del programma. Gli altri layer del "
+                  "progetto restano come sono. Salva prima il progetto in QGIS e chiudilo.")
+        if kept:
+            text += "\n\n" + tr("Stili fatti a mano che verranno dimenticati: {0}", ", ".join(kept[:12])
+                                 + ("…" if len(kept) > 12 else ""))
+        r = message(self, "question", tr("Ripristina gli stili predefiniti"), text,
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.No)
+        if r == QMessageBox.StandardButton.Yes:
+            self.open_in_qgis(restyle=True)
+
+    def open_in_qgis(self, restyle: bool = False) -> None:
         """QGIS project with orthomosaic, DEM and the drawn layers, which QGIS reloads every
-        second while the drawings change here."""
+        second while the drawings change here. The project of the user is kept: opened as it is when it shows every
+        layer, updated in place otherwise, the styles made by hand in QGIS kept (:mod:`..io.qgis_styles`);
+        ``restyle``: the program's layers given the program's style again."""
         from ..io import qgis_link
 
         q = qgis_link.find_qgis()
@@ -14355,7 +14440,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         def job(p):
             p(0.2, "Creazione del progetto QGIS")
             rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q,
-                                          extra_vectors=extra_vectors)
+                                          extra_vectors=extra_vectors, restyle=restyle)
             qgis_link.open_in_qgis(project, q)
             return rep
 
@@ -14366,6 +14451,13 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
                                   project, len(rep['vectors']), len(rep['rasters']))
                                + (tr("; non validi: {0}", ', '.join(bad)) if bad else ""))
+            if rep.get("kept"):
+                self.log_pane.info(tr("Progetto QGIS aperto com'è: mostra già tutti i layer, stili compresi"))
+            elif rep.get("added") or rep.get("removed") or rep.get("restyled"):
+                self.log_pane.info(tr("Progetto QGIS aggiornato: aggiunti {0}, tolti {1}, stili ripristinati {2}; gli "
+                                      "altri layer e i loro stili restano come sono",
+                                      len(rep.get("added") or []), len(rep.get("removed") or []),
+                                      len(rep.get("restyled") or [])))
             self.statusBar().showMessage(tr("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo"),
                                          15000)
 

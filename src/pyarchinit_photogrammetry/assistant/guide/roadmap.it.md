@@ -229,7 +229,7 @@ dataset pubblici WorldView-3.
   RINEX del drone e da quello di una base - propria o una stazione permanente - con RTKLIB-EX 2.5.1 dentro il
   nucleo nativo 0.5 (senza, l'`rnx2rtkp` di `PPG_RNX2RTKP`): la base nella sua posizione misurata o in quella
   della sua intestazione RINEX, con l'avviso che può essere sbagliata di metri, la sua altezza dell'antenna
-  aggiunta (non ancora lo scostamento del centro di fase della sua antenna, che ogni calcolo dice); la camera
+  aggiunta (non ancora l'offset del centro di fase della sua antenna, che ogni calcolo dice); la camera
   sotto l'antenna con il braccio di leva dello scatto, lo stato e l'accuratezza della soluzione, niente inventato
   attraverso i suoi buchi; i fix RTK di bordo tenuti se non si sostituiscono, un file di soluzione per calcolo, la
   finestra che riparte dall'ultimo calcolo; *Calcola PPK...* nel pannello *GNSS*, `ppg gnss ppk`.

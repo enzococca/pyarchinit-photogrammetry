@@ -472,19 +472,21 @@ def remove_pits(dem: np.ndarray, resolution: float, depth: float = 2.0, scale: f
 
 
 def dem_from_points(pts: np.ndarray, resolution: float, reducer: str = "max", despike: bool = True,
-                    interpolate: bool = True, max_fill: int | None = None):
+                    interpolate: bool = True, max_fill: int | None = None, measured: list | None = None):
     """Grid of the points (``reducer`` per cell), spikes, stray cells and the pits of the thinly
     covered parts removed (:func:`remove_spikes`, :func:`remove_stray_cells`, :func:`remove_pits`),
     the cells without points interpolated across the ground the survey covers
     (:func:`covered_ground`) up to ``max_fill`` cells from a point (default four coarse cells).
     Returns ``(dem, origin, cells removed)``."""
     dem, origin, _ = grid_points(pts, resolution, reducer=reducer)
-    dem, removed = _finish_dem(dem, resolution, despike, interpolate, max_fill)
+    dem, removed = _finish_dem(dem, resolution, despike, interpolate, max_fill, measured)
     return dem, origin, removed
 
 
-def _finish_dem(dem: np.ndarray, resolution: float, despike: bool, interpolate: bool, max_fill: int | None):
-    """What :func:`dem_from_points` does to the grid of the points; returns ``(dem, cells removed)``."""
+def _finish_dem(dem: np.ndarray, resolution: float, despike: bool, interpolate: bool, max_fill: int | None,
+                measured: list | None = None):
+    """What :func:`dem_from_points` does to the grid of the points; returns ``(dem, cells removed)``. ``measured``: a
+    list that gets the mask of the cells with a height before the interpolation (the others are interpolated)."""
     removed = 0
     if despike:
         dem, spikes = remove_spikes(dem, resolution)
@@ -495,6 +497,8 @@ def _finish_dem(dem: np.ndarray, resolution: float, despike: bool, interpolate: 
         from rasterio.fill import fillnodata
 
         mask = np.isfinite(dem)
+        if measured is not None:
+            measured.append(mask)
         # cells the search does not reach keep their NaN (with zeros they came out at height 0)
         filled = fillnodata(dem.astype(np.float32), mask=mask.astype(np.uint8),
                             max_search_distance=max_fill or 4 * COARSE, smoothing_iterations=0)
@@ -536,15 +540,19 @@ def _fit_grid(bounds, resolution: float, asked: bool) -> float:
 
 
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
-              classes=None, progress: Progress | None = None, despike: bool = True) -> Path:
+              classes=None, progress: Progress | None = None, despike: bool = True,
+              fill_voids: float | None = None, fill_voids_area: float | None = None) -> Path:
     """DEM of the highest surface point in each cell. ``classes`` (dense cloud): only these
     classes, e.g. the ground for a terrain model (DTM); the gaps they leave (under a removed
-    tool or bush) are interpolated from around."""
+    tool or bush) are interpolated from around. ``fill_voids`` / ``fill_voids_area``: the voids inside the data
+    up to this width (m) / area (m2) interpolated too (:mod:`.dem_voids`; both None: not). The cells interpolated
+    are kept in the mask of the DEM (:func:`.dem_voids.mask_path`)."""
     progress = as_progress(progress)
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
     classes = None if classes is None else sorted({int(c) for c in classes})
     asked, limited = resolution is not None, None
+    measured: list = []  # the cells with a height before the interpolation
     surface = model_surface(chunk) if source == "model" and classes is None else None
     if surface is not None:  # a large model: its points go on the grid block by block, never all in memory
         if resolution is None:
@@ -556,7 +564,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         progress(0.1, f"Rasterising DEM at {resolution:.4g} m/px")
         dem, origin = surface.grid(resolution, progress.sub(0.1, 0.5))
         del surface
-        dem, spikes = _finish_dem(dem, resolution, despike, interpolate, None)
+        dem, spikes = _finish_dem(dem, resolution, despike, interpolate, None, measured)
     else:
         pts = surface_points_world(chunk, source, classes)
         if resolution is None:
@@ -577,13 +585,34 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
         dem, origin, spikes = dem_from_points(pts, resolution, reducer="max" if source != "tie_points" else "mean",
                                               despike=despike, interpolate=interpolate,
-                                              max_fill=None if classes is None else 100)
+                                              max_fill=None if classes is None else 100, measured=measured)
+    interp = np.zeros(dem.shape, np.uint8) if measured else None
+    if measured:
+        interp[np.isfinite(dem) & ~measured[0]] = 1  # dem_voids.GAP
+    measured.clear()
+    voids = None
+    if fill_voids is not None or fill_voids_area is not None:
+        from . import dem_voids
+
+        progress(0.9, "Interpolating the voids")
+        dem, filled, voids = dem_voids.fill_voids_array(dem, resolution, fill_voids, fill_voids_area,
+                                                             copy=False)
+        if interp is None:
+            interp = np.zeros(dem.shape, np.uint8)
+        interp[filled] = dem_voids.VOID
+        del filled
     out = np.where(np.isfinite(dem), dem, NODATA).astype(np.float32)
     chunk._before_product_write("dem")
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
+    from .dem_voids import write_mask
+
+    write_mask(chunk, path, interp)
+    del interp
     stamps.stamp(chunk, "dem")
     chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes, "spikes_removed": spikes}
+    if voids is not None:
+        chunk.meta["dem"]["voids_filled"] = voids
     if limited is not None:  # the resolution of the points, too fine for the memory
         chunk.meta["dem"]["memory_limited"] = limited
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")

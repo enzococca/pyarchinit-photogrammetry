@@ -827,13 +827,27 @@ class Chunk:
                                        page_size=page_size or texturing.PAGE_SIZE)
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
-                  classes=None, progress: ProgressCallback | None = None) -> Path:
+                  classes=None, progress: ProgressCallback | None = None, fill_voids: float | None = None,
+                  fill_voids_area: float | None = None) -> Path:
         """DEM (GeoTIFF). ``classes``: only the dense points of these classes, e.g. ``[2]`` for a
-        terrain model (DTM) without vegetation, people or tools; noise never counts."""
+        terrain model (DTM) without vegetation, people or tools; noise never counts. ``fill_voids`` /
+        ``fill_voids_area``: also the voids inside the data up to this width (m) / area (m2) interpolated
+        (see :meth:`fill_dem_voids`)."""
         from ..engine import dem
 
         return dem.build_dem(self, resolution=resolution, source=source, interpolate=interpolate, classes=classes,
-                             progress=as_progress(progress))
+                             progress=as_progress(progress), fill_voids=fill_voids, fill_voids_area=fill_voids_area)
+
+    def fill_dem_voids(self, max_width: float | None = 1.0, max_area: float | None = None, keep_version: bool = True,
+                       version_name: str | None = None, progress: ProgressCallback | None = None) -> dict:
+        """Interpolate the voids of the DEM: the holes enclosed by heights up to ``max_width`` (m) and ``max_area``
+        (m2; None = no limit), by a smooth surface from their edges; the ground outside the data
+        and larger holes stay empty, the cells filled are marked in the DEM's mask. Not the ``fill_holes`` of the
+        mesh. The DEM as it was is kept as a version first (:mod:`engine.dem_voids`)."""
+        from ..engine import dem_voids
+
+        return dem_voids.fill_voids(self, max_width, max_area, keep_version, version_name,
+                                    progress=as_progress(progress))
 
     def build_orthomosaic(self, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                           hide_classes=None, progress: ProgressCallback | None = None,
@@ -1120,7 +1134,16 @@ class Chunk:
 
     def export_dem(self, path: str | os.PathLike, region=None, cog: str | None = None) -> Path:
         """The DEM (GeoTIFF); ``region``: only the window of the polygon, no data outside it;
-        ``cog``: a Cloud Optimized GeoTIFF with this compression (zstd, deflate, lzw)."""
+        ``cog``: a Cloud Optimized GeoTIFF with this compression (zstd, deflate, lzw). A DEM with interpolated
+        heights gets its mask beside it, ``<name>_interpolata.tif`` (1 between points, 2 voids filled)."""
+        out = self._export_dem_file(path, region, cog)
+        if Path(out).suffix.lower() in (".tif", ".tiff"):
+            from ..engine.dem_voids import export_mask
+
+            export_mask(self, out, region)
+        return out
+
+    def _export_dem_file(self, path, region, cog) -> Path:
         if cog:
             return self._export_cog("dem", path, region, cog)
         if region is not None:

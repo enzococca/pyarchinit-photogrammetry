@@ -1199,7 +1199,7 @@ class PpkDialog(QDialog):
             lines.append(tr("Il file della base dà un'altezza dell'antenna nulla: la posizione della base dev'essere "
                             "quella dell'antenna, non del punto a terra."))
         elif delta[1] or delta[2]:
-            lines.append(tr("La posizione della base è quella del punto a terra: il programma aggiunge lo scostamento "
+            lines.append(tr("La posizione della base è quella del punto a terra: il programma aggiunge l'offset "
                             "dell'antenna del file della base, {0} m in alto, {1} m a est e {2} m a nord.",
                             number(delta[0], 3), number(delta[1], 3), number(delta[2], 3)))
         else:
@@ -1218,15 +1218,15 @@ class PpkDialog(QDialog):
             return ""
         kind = ppk.antenna_type(info)
         if not kind:
-            return tr("L'intestazione della base non dice il tipo della sua antenna: lo scostamento del suo centro di "
-                      "fase non viene applicato, e le quote possono risultare più basse di qualche centimetro, oltre "
+            return tr("L'intestazione della base non dice il tipo della sua antenna: l'offset del suo centro di "
+                      "fase (PCO) non viene applicato, e le quote possono risultare più basse di qualche centimetro, oltre "
                       "10 cm con alcune antenne choke ring.")
         if self._calibrated():
-            return tr("Lo scostamento del centro di fase dell'antenna {0} della base viene applicato con le "
+            return tr("L'offset del centro di fase dell'antenna {0} della base viene applicato con le "
                       "calibrazioni dell'IGS (igs20.atx), se l'antenna vi è: il registro del calcolo avvisa quando "
                       "non vi è o quando RTKLIB usa la voce di un altro radome, e il rapporto PDF dice la voce usata.",
                       kind)
-        return tr("Lo scostamento del centro di fase dell'antenna {0} della base non viene applicato: le quote possono "
+        return tr("L'offset del centro di fase dell'antenna {0} della base non viene applicato: le quote possono "
                   "risultare più basse di qualche centimetro, oltre 10 cm con alcune antenne choke ring. Spunta la "
                   "calibrazione dell'antenna della base per applicarlo.", kind)
 
@@ -1549,7 +1549,7 @@ class PpkDialog(QDialog):
             tr("Il programma ha già igs20.atx: le calibrazioni vengono applicate.") if kept is not None else
             tr("Per la stazione, la linea di base e il PPP il programma scarica comunque igs20.atx, per correggere "
                "tutte le antenne.") if computed else
-            tr("Senza, lo scostamento del centro di fase dell'antenna della base non viene applicato."))
+            tr("Senza, l'offset del centro di fase dell'antenna della base non viene applicato."))
         infos = [] if mode == "station" else self._base_headers()
         antenna = self._antenna_text(infos[0]) if infos else ""
         self.antenna_warning.setText(antenna)

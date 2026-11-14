@@ -1495,12 +1495,32 @@ def mesh(project: Path,
 @app.command()
 def dem(project: Path, resolution: Optional[float] = None, source: str = "point_cloud",
         classes: Optional[str] = typer.Option(None, help="only these " + CLASSES_HELP + "; 2 alone: terrain model"),
+        fill_voids: Optional[float] = typer.Option(None, help="interpolate the voids inside the data up to this "
+                                                              "width (m); not the --fill-holes of the mesh"),
+        fill_voids_area: Optional[float] = typer.Option(None, help="... and up to this area (m2)"),
         chunk: Optional[str] = None):
     """Digital elevation model (GeoTIFF)."""
     doc, ch = _open(project, chunk)
-    p = ch.build_dem(resolution=resolution, source=source, classes=_classes(classes), progress=print_progress)
+    p = ch.build_dem(resolution=resolution, source=source, classes=_classes(classes), progress=print_progress,
+                     fill_voids=fill_voids, fill_voids_area=fill_voids_area)
     doc.save()
     typer.echo(str(p))
+
+
+@app.command("dem-fill-voids")
+def dem_fill_voids(project: Path,
+                   max_width: Optional[float] = typer.Option(1.0, help="widest void filled (m); 0: no limit"),
+                   max_area: Optional[float] = typer.Option(None, help="largest void filled (m2)"),
+                   keep_version: bool = typer.Option(True, help="keep the DEM as it was among the versions"),
+                   chunk: Optional[str] = None):
+    """Interpolate the voids of the DEM (holes enclosed by heights) from their edges; the ground outside the data
+    and larger voids stay empty, the cells filled are marked in the DEM's mask."""
+    doc, ch = _open(project, chunk)
+    info = ch.fill_dem_voids(max_width=max_width or None, max_area=max_area, keep_version=keep_version,
+                             progress=print_progress)
+    doc.save()
+    typer.echo(f"{info['holes']} voids filled ({info['cells']} cells, {info['area']:.3f} m2), "
+               f"{info['skipped']} left empty ({info['skipped_area']:.3f} m2)")
 
 
 @app.command()
@@ -1539,9 +1559,10 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
             targets: Optional[str] = "aruco_4x4_50", quality: str = "high", dense_quality: str = "medium",
             dem_resolution: Optional[float] = None, ortho_resolution: Optional[float] = None,
             surface: str = typer.Option("arbitrary", help="surface of the model: arbitrary or height_field"),
-            fill_holes: Optional[float] = typer.Option(None, help="height field: close the holes up to this gap "
-                                                                  "between measured points, in metres (interpolated "
-                                                                  "surface; default: none)"),
+            fill_holes: Optional[float] = typer.Option(None, help="height field: close the holes of the MODEL up to "
+                                                                  "this gap between measured points, in metres "
+                                                                  "(interpolated surface; default: none); the voids "
+                                                                  "of the DEM: ppg dem --fill-voids"),
             texture: bool = True):
     """Whole pipeline: photos -> alignment -> georeferencing -> cloud -> mesh -> DEM -> orthomosaic -> report."""
     from .markers import gcp as references  # not `gcp`: the option of the file

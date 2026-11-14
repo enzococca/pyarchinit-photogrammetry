@@ -211,6 +211,7 @@ thermal and satellite captures, plugins.
 | **TIN and break lines** | the TIN again, *Contour lines from the TIN...*, *Volume from the TIN...*, *DEM from the TIN*, *Export TIN...*, *Draw break lines*, *Export the break lines...* |
 | **Propose US and relationships (Extended Matrix)...** | number, type and stratigraphic relationships for the units with no number ([US proposal](archaeology.md#us-proposal)) |
 | **Excavation phases (volumes and relationships)...** | a survey per phase: volumes between phases and relationships suggested ([phases](archaeology.md#excavation-phases)) |
+| **Interpolate the voids of the DEM...** | the holes without heights inside the survey filled from their edges up to a width and an area; the cells stay marked ([voids](processing.md#voids-of-the-dem)) |
 | **Coregister DEM...** | moves the DEM onto the DEM of another survey where the ground did not change ([coregistration](processing.md#dem-coregistration)) |
 | **Slope of the DEM** · **Aspect of the DEM** | the rasters of slope and aspect, with the degrees under the cursor |
 | **Calibrate the colour with the colour chart...** | a ColorChecker photographed in the trench makes the Munsell colours comparable |
@@ -403,6 +404,7 @@ The link with the database of the excavation; the forms and the relationships st
 | Item | What it is for |
 | --- | --- |
 | **Open in QGIS (live link)** | a QGIS project with orthophoto, DEM and drawings |
+| **Restore the default styles in QGIS...** | the program's layers in the QGIS project take the program's style again; the styles made by hand and kept are forgotten ([styles](../integrations.md#styles-made-by-hand-in-qgis-are-kept)) |
 | **Live link with QGIS (both ways)** | what you draw here reaches QGIS; what you save in QGIS comes back here within a second |
 | **Open the folder of the layers for QGIS** | the folder of the shared GeoPackage |
 

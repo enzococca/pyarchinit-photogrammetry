@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-DECIMALS = {"x": 3, "y": 3, "z": 3, "temp_c": 2, "anomaly_c": 2}  # the others (reflectance, indices): 4
+DECIMALS = {"x": 3, "y": 3, "z": 3, "z_interp": 0, "temp_c": 2, "anomaly_c": 2}  # the others (reflectance, indices): 4
 
 
 def _field(name: str) -> str:
@@ -49,6 +49,11 @@ class Probe:
 
         if chunk.dem_path is not None and Path(chunk.dem_path).exists():
             add(Path(chunk.dem_path), ["z"], ["Z"])
+            from .dem_voids import mask_path
+
+            interp = mask_path(chunk)
+            if interp is not None:  # the cells of the DEM with an interpolated height (1 between points, 2 voids)
+                add(interp, ["z_interp"], ["interpolata"])
         th = chunk.meta.get("thermal") or {}
         if th.get("file") and (data / th["file"]).exists():
             add(data / th["file"], ["temp_c"], ["T"])
@@ -107,6 +112,8 @@ class Probe:
 
         out: dict[str, float] = {}
         wanted = set(fields) if fields is not None else None
+        if wanted is not None and "z" in wanted:  # a height says whether it is interpolated
+            wanted.add("z_interp")
         for path, names in self.sources:
             if wanted is not None and not wanted & set(names):
                 continue
@@ -134,8 +141,15 @@ class Probe:
             if f not in values:
                 continue
             v, name = values[f], self.labels.get(f, f)
+            if f == "z_interp":
+                continue
             if f == "z":
-                parts.append(f"Z {v:.3f}")
+                if values.get("z_interp"):
+                    from ..core.versions import label
+
+                    parts.append(f"Z {v:.3f} ({label('interpolata')})")
+                else:
+                    parts.append(f"Z {v:.3f}")
             elif f in ("temp_c", "anomaly_c"):
                 parts.append(f"{name} {v:+.2f} °C" if f == "anomaly_c" else f"{name} {v:.2f} °C")
             else:

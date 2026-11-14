@@ -27,6 +27,9 @@ Il suggerimento di una faccia di una foto 360° dice da quale foto viene.
 
 ## Posizioni GNSS delle foto
 
+I termini (base, rover, fix, float, linea di base, epoca, offset del centro di fase, quota ellissoidica...)
+sono quelli del [glossario GNSS](../gnss-glossary.md).
+
 ![Il pannello GNSS: le posizioni delle foto, il loro PPK rispetto a una base, il sistema e le quote, la qualità del volo](../img/gui/pane-gnss.png)
 
 Ogni foto ha una posizione, sa da dove viene e quanto è buona. Il pannello *GNSS* (*Strumenti > GNSS > Pannello
@@ -81,7 +84,7 @@ in uso, accurate in quota (sotto il metro), hanno quote di tipo diverso - quelle
 dell'EXIF di altre foto, che possono distare decine di metri - il pannello lo dice sotto le posizioni (e `ppg gnss
 status` stampa un avviso): controllale prima di usarle insieme.
 
-**Solo le posizioni fix** disattiva i riferimenti delle foto la cui posizione non è un RTK fissato: restano nel
+**Solo le posizioni fix** disattiva i riferimenti delle foto la cui posizione non è un fix RTK: restano nel
 chunk e si allineano, ma non tirano più le camere. Una posizione senza stato RTK (il GPS dell'EXIF, un file di
 posizioni senza la colonna `status`) conta come non fix. Le foto disattivate si ricordano: togliendo la spunta si
 riattivano proprio quelle, un riferimento disattivato a mano resta disattivato, e riapplicando le posizioni la
@@ -142,7 +145,7 @@ apre una finestra:
   sono scritte, con *Scegli la stazione...* per una stazione permanente;
 - *Osservazioni della base*: un file o più (*Aggiungi...*; il campo dice allora quanti sono), con quello che dice
   l'intestazione - il punto, il ricevitore, l'antenna, le ore delle osservazioni di tutti i file, la posizione
-  nell'intestazione e l'altezza dell'antenna - e, in vista, se lo scostamento del centro di fase di quell'antenna
+  nell'intestazione e l'altezza dell'antenna - e, in vista, se l'offset del centro di fase (PCO) di quell'antenna
   verrà applicato; una stazione permanente come base non ne vuole;
 - *File di navigazione*: quelli accanto alle osservazioni del drone, poi quelli accanto a quelle della base;
   *Togli* ne toglie uno, *Aggiungi...* ne aggiunge un altro;
@@ -181,7 +184,7 @@ e in `ppg gnss ppk`:
 | *Dal file della base (intestazione RINEX)* | la posizione scritta nell'intestazione del suo file RINEX | per una stazione permanente di solito la sua posizione pubblicata; per la tua base spesso la posizione che il ricevitore ha trovato da solo, che **può essere sbagliata di metri, e tutto il rilievo si sposta con lei** |
 | *Scritta* | la posizione misurata del punto su cui sta la base, nel sistema delle sue coordinate | buona quanto il rilievo del punto |
 | *Una stazione permanente vicina come base* | una stazione dell'EPN, dell'IGS o di RING: si scaricano le sue osservazioni per le ore del volo e le sue coordinate in ITRF2020 a metà del volo | coordinate buone al centimetro o meglio; le foto buone quanto un PPK a quella distanza - entro 20 km, più vicina è meglio è |
-| *Calcolata con una linea di base da una stazione vicina* | la tua base su un punto che nessuno ha misurato, posta con una linea di base statica da una stazione | fissata e buona al centimetro con un'ora o più di osservazioni comuni e una stazione entro 20 km; una stazione più lontana vuole una sessione più lunga |
+| *Calcolata con una linea di base da una stazione vicina* | la tua base su un punto che nessuno ha misurato, posta con una linea di base statica da una stazione | fix e buona al centimetro con un'ora o più di osservazioni comuni e una stazione entro 20 km; una stazione più lontana vuole una sessione più lunga |
 | *Calcolata con il PPP statico* | la tua base posta da sola, sulle orbite e sugli orologi precisi dell'IGS e dei suoi centri di analisi | 10-20 cm con meno di 2 ore di osservazioni, qualche centimetro con 4 ore o più, 1-2 cm in pianta e 2-4 cm in quota dopo un giorno: sotto le 4 ore è meglio una linea di base da una stazione vicina |
 
 - **Dal file della base**: il programma dice che la posizione può essere sbagliata di metri nella finestra, in un
@@ -237,21 +240,21 @@ la intende il RINEX, e la finestra dice quanto ("il programma aggiunge l'altezza
 dell'antenna stessa.
 
 **Il centro di fase.** L'altezza dell'antenna porta la base al punto di riferimento della sua antenna (di solito la
-base del suo attacco); i satelliti però si misurano nel suo centro di fase, che sta più in alto di uno scostamento
-proprio di ogni modello di antenna, radome e frequenza: qualche centimetro per le antenne topografiche, oltre 10 cm
+base del suo attacco); i satelliti però si misurano nel suo centro di fase, che sta più in alto di un offset
+(PCO) proprio di ogni modello di antenna, radome e frequenza: qualche centimetro per le antenne topografiche, oltre 10 cm
 per alcune choke ring. RTKLIB lo corregge con le calibrazioni delle antenne dell'IGS, **igs20.atx**, dove il programma
 cerca l'antenna scritta nell'intestazione RINEX della base (tipo e radome) come fa RTKLIB. *Calibrazione dell'antenna
 della base: scarica igs20.atx (62 MB), una volta* nella finestra (spuntata; `--atx download` da riga di comando, o
 `ppg gnss atx --download`) lo scarica nella cartella GNSS del programma quando non ce l'ha; una volta lì ogni calcolo
 lo applica, anche senza la spunta. Una stazione, una linea di base e un PPP lo scaricano comunque, perché tutte le
 antenne siano calibrate, e rinnovano una copia più vecchia di 30 giorni, come fa `ppg gnss atx --download`;
-`--atx off` non dà calibrazioni. Nella finestra, sotto la base, il programma dice se lo scostamento verrà applicato; dopo il
+`--atx off` non dà calibrazioni. Nella finestra, sotto la base, il programma dice se l'offset verrà applicato; dopo il
 calcolo avvisa quando non lo è stato - nessuna calibrazione data (`--atx off`), l'antenna che non è in igs20.atx,
 un'intestazione che non dice l'antenna - e quando RTKLIB ha preso la stessa antenna con un altro radome, o il nome più
 vicino che ha trovato (qualche millimetro, di più se è un'altra antenna). Senza calibrazione ogni quota PPK risulta
-più bassa di quello scostamento - lo stesso per tutte le foto di un calcolo, ma diverso da un'antenna di base
+più bassa di quell'offset - lo stesso per tutte le foto di un calcolo, ma diverso da un'antenna di base
 all'altra, così anche i rilievi calcolati con basi diverse differiscono di tanto (differenze di DEM, volumi):
-controlla le quote su un punto a terra misurato, o scrivi la quota della base con lo scostamento verticale della sua
+controlla le quote su un punto a terra misurato, o scrivi la quota della base con l'offset verticale della sua
 antenna già aggiunto. Il [rapporto PDF](exports.md#rapporto-pdf) dice, per ogni calcolo, la voce usata ("calibrata con
 TRM57971.00 NONE di igs20.atx") o perché non ce n'era una.
 
@@ -326,8 +329,8 @@ ppg gnss atx --download                          # igs20.atx (62 MB): dov'è, o 
 
 `ppg gnss ppk` stampa le foto per stato, quante hanno tenuto il loro fix di bordo, la base usata (latitudine,
 longitudine e quota, come è stata posta, il suo sistema e la sua epoca), l'altezza della sua antenna e quanto è
-lontana dal volo, i file di navigazione scaricati per il volo, il file della soluzione del calcolo, gli avvisi (lo
-scostamento del centro di fase dell'antenna della base quando non viene applicato; una base nella posizione della sua
+lontana dal volo, i file di navigazione scaricati per il volo, il file della soluzione del calcolo, gli avvisi (l'offset
+del centro di fase dell'antenna della base quando non viene applicato; una base nella posizione della sua
 intestazione, una posizione scritta lontana da lei o da quella di altre foto; quelli di una linea di base o di un PPP)
 e le foto e gli scatti rimasti senza posizione PPK; salva il progetto, e si ferma con un errore, senza cambiare nulla,
 quando i file non si possono usare (un file indicato che non c'è la ferma prima che si legga qualsiasi cosa). Un volo
@@ -405,7 +408,7 @@ scatti ha trovato, tra quali tempi, e il tipo delle loro quote.
 
 Ogni foto prende la posizione che l'autopilota ha registrato al suo scatto: la soluzione di navigazione del
 controllore di volo, buona quanto il suo ricevitore, non una posizione PPK. Le quote sono sul livello medio del
-mare, e restano tali, mai prese per ellissoidiche, a meno che il log dia anche la separazione del geoide (alcuni
+mare, e restano tali, mai prese per ellissoidiche, a meno che il log dia anche l'ondulazione del geoide (alcuni
 log PX4 la danno): vedi [Quote sul geoide e sistema del rilievo](#quote-sul-geoide-e-sistema-del-rilievo).
 Per i centimetri, usa lo stesso log come sorgente degli *Scatti* di un PPK con il log grezzo del ricevitore.
 
@@ -561,7 +564,7 @@ quote di Genova 1942, EPSG:5214) - si copia nella cartella delle griglie del pro
 ![La finestra Sistema del rilievo: il sistema proposto dove si trova il rilievo](../img/gui/dialog-survey-crs.png)
 
 **Il sistema del rilievo.** *Sistema del rilievo...* propone il sistema di coordinate del rilievo dove si trova. In
-Europa (dove il datum è ETRS89) un sistema di ETRF2000: RDN2008 / UTM in Italia (EPSG:7791, 7792, 7793, il datum
+Europa (dove il sistema di riferimento è ETRS89) un sistema di ETRF2000: RDN2008 / UTM in Italia (EPSG:7791, 7792, 7793, il datum
 nazionale) ed ETRS89 / UTM altrove, dove le posizioni in ITRF2020 (una stazione permanente, una linea di base, un PPP)
 arrivano esatte alla loro epoca, come quelle nei sistemi europei (una base scritta in RDN2008, i marker di una rete
 RTK), e niente si sposta con la placca fra voli di anni diversi; fuori dall'Europa la zona UTM su WGS 84. Si può

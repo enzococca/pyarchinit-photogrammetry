@@ -211,6 +211,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **TIN e linee di rottura** | di nuovo il TIN, *Curve di livello dal TIN...*, *Volume dal TIN...*, *DEM dal TIN*, *Esporta TIN...*, *Disegna linee di rottura*, *Esporta le linee di rottura...* |
 | **Proponi US e rapporti (Extended Matrix)...** | numero, tipo e rapporti stratigrafici per le unità senza numero ([proposta US](archaeology.md#proposta-di-us-e-rapporti)) |
 | **Fasi dello scavo (volumi e rapporti)...** | un rilievo per fase: volumi tra le fasi e rapporti suggeriti ([fasi](archaeology.md#fasi-dello-scavo)) |
+| **Interpola i vuoti del DEM...** | i buchi senza quote dentro il rilievo riempiti dai bordi fino a una larghezza e un'area; le celle restano segnate ([vuoti](processing.md#vuoti-del-dem)) |
 | **Coregistra DEM...** | sposta il DEM sul DEM di un altro rilievo dove il terreno non è cambiato ([coregistrazione](processing.md#coregistrazione-dei-dem)) |
 | **Pendenza del DEM** · **Esposizione del DEM** | i raster della pendenza e dell'esposizione, con i gradi sotto il cursore |
 | **Calibra il colore con la tabella colori...** | una ColorChecker fotografata nello scavo rende confrontabili i colori Munsell |
@@ -403,6 +404,7 @@ Il collegamento con il database dello scavo; le schede e le relazioni restano in
 | Voce | A cosa serve |
 | --- | --- |
 | **Apri in QGIS (collegamento dal vivo)** | un progetto QGIS con ortofoto, DEM e disegni |
+| **Ripristina gli stili predefiniti in QGIS...** | i layer del programma nel progetto QGIS riprendono lo stile del programma; gli stili fatti a mano e conservati vengono dimenticati ([stili](../integrations.md#gli-stili-fatti-a-mano-in-qgis-restano)) |
 | **Collegamento dal vivo con QGIS (nei due sensi)** | ciò che disegni qui arriva in QGIS; ciò che salvi in QGIS torna qui entro un secondo |
 | **Apri la cartella dei layer per QGIS** | la cartella del GeoPackage condiviso |
 
