@@ -1308,6 +1308,21 @@ ppg web serve site --open
 From the window: *File > Export > Web site (Publish on the web)...*, the pane with the same choices, the build in the
 background, the preview and the site kept with the project (see [Exports](gui/exports.md#web-site-publish-on-the-web)).
 
+**Publishing on Cloudflare** (`pyarchinit_photogrammetry.io.site_publish`, with the user's own `wrangler`; the
+program never handles a token - see [Publishing the web site](gui/web-publish.md)):
+
+| Call | What it does |
+|---|---|
+| `site_publish.plan(folder, project, bucket=None, data="auto", data_url=None)` | what would go where (Pages, R2), files and bytes, the free limits met or exceeded (`limits`), what becomes public (`public`), `problems` and `warnings`; nothing run or sent (`lines()` as text) |
+| `site_publish.publish(plan, public=False, coordinates=False, origins=None, progress=None)` | runs wrangler; refuses (`ConsentError`) without `public=True`, and without `coordinates=True` for a site built with `frame="crs"`; returns a `Result` with `address` and `data_address` |
+| `site_publish.Wrangler().status()` | `missing`, `logged_out` or `ready` (`wrangler --version`, `wrangler whoami --json`) |
+| `site_publish.record_published(document, result)` | the address, the project, the bucket and the date in `document.meta["web_site"]["published"]` |
+
+```bash
+ppg web publish cloudflare site --project scavo-2026 --dry-run
+ppg web publish cloudflare site --project scavo-2026 --yes-public --record scavo.ppg
+```
+
 ## Measures
 
 | Call | Description |

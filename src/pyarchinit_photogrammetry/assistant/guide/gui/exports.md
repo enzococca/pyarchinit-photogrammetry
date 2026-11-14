@@ -94,8 +94,13 @@ shaded relief, stratigraphic units, drawings and 3D model on a page any hosting 
    changed (or its chunk is moved) the step and the tree say *to redo*.
 3. **Preview**: a server on this computer alone (127.0.0.1, a free port) and the page in the browser; the pane shows
    the address with *Open in the browser*, *Copy address* and *Stop*. Closing the project or the window stops it.
-4. **Publish**: not available from the program yet. The folder of the site is copied as it is to any static hosting
-   (*Open the folder*).
+4. **Publish**: on Cloudflare Pages (free; an R2 bucket for the data when files are above the limits of Pages) with
+   your own `wrangler`, after `wrangler login` in a terminal. **Check** shows the plan - what goes where, the free
+   limits met or exceeded, what becomes public - without sending anything; **Publish...** asks to confirm that the
+   site becomes public (a second time, in red, for real coordinates). The address appears in the pane and in the
+   Workspace with *Open in the browser* and *Copy the address*. Step by step, the limits, Cloudflare Access and the
+   other hostings: [Publishing the web site](web-publish.md). The folder can still be copied as it is to any static
+   hosting (*Open the folder*).
 
 ### Paradata
 

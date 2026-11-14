@@ -1344,6 +1344,21 @@ Dalla finestra: *File > Esporta > Sito web (Pubblica sul web)...*, il pannello c
 background, l'anteprima e il sito tenuto con il progetto (vedi
 [Esportazioni](gui/exports.it.md#sito-web-pubblica-sul-web)).
 
+**Pubblicare su Cloudflare** (`pyarchinit_photogrammetry.io.site_publish`, con il `wrangler` dell'utente; il programma
+non tocca mai un token - vedi [Pubblicare il sito web](gui/web-publish.it.md)):
+
+| Chiamata | Che cosa fa |
+|---|---|
+| `site_publish.plan(folder, project, bucket=None, data="auto", data_url=None)` | che cosa andrebbe dove (Pages, R2), file e byte, i limiti gratuiti rispettati o superati (`limits`), che cosa diventa pubblico (`public`), `problems` e `warnings`; nulla eseguito né inviato (`lines()` come testo) |
+| `site_publish.publish(plan, public=False, coordinates=False, origins=None, progress=None)` | esegue wrangler; rifiuta (`ConsentError`) senza `public=True`, e senza `coordinates=True` per un sito costruito con `frame="crs"`; restituisce un `Result` con `address` e `data_address` |
+| `site_publish.Wrangler().status()` | `missing`, `logged_out` o `ready` (`wrangler --version`, `wrangler whoami --json`) |
+| `site_publish.record_published(document, result)` | l'indirizzo, il progetto, il bucket e la data in `document.meta["web_site"]["published"]` |
+
+```bash
+ppg web publish cloudflare site --project scavo-2026 --dry-run
+ppg web publish cloudflare site --project scavo-2026 --yes-public --record scavo.ppg
+```
+
 ## Misure
 
 | Chiamata | Descrizione |
