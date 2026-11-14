@@ -74,6 +74,18 @@ def test_merge_models_then_orthophoto_and_obj_with_groups(window, monkeypatch, t
     w.build_ortho()
     w.runner.wait()
     assert merged.orthomosaic_path is not None and merged.meta["orthomosaic"]["source"] == "texture"
+    # patches choose photos: on an orthophoto from the texture they are refused in the window's words
+    said = []
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(text))
+    mode = w.ortho_view.mode if hasattr(w.ortho_view, "mode") else None
+    w.start_patch()
+    w.update_ortho_patches()
+    assert len(said) == 2 and all("texture del modello" in t for t in said)
+    assert (w.ortho_view.mode if hasattr(w.ortho_view, "mode") else None) == mode
+    from pyarchinit_photogrammetry.engine import patches as P
+
+    with pytest.raises(P.TexturePainted, match="texture of the model"):
+        P.add_patch(merged, [[0, 0], [0.5, 0], [0.5, 0.5]], ["x"])
     out = tmp_path / "unito.obj"
     _answers(monkeypatch, {"groups": "source", "max_texture": 256})
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))

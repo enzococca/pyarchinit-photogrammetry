@@ -795,6 +795,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.web = WebPublishing(self)
         self.web_pane = self.web.pane
         add(self.web_pane, tr("Pubblica sul web"), icon("web"), name="pane_web", place="right")
+        from .water_pane import WaterPane
+
+        # the water of several levels: the table per chunk or date, the basins, the factor, the correction
+        self.water_pane = WaterPane(self)
+        add(self.water_pane, tr("Acqua: livelli e bacini"), icon("water"), name="pane_water", place="right")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -1358,6 +1363,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self._act(m, tr("Livello dell'acqua e rifrazione..."), self.open_water, processing=True, icon_name="water",
                   tip=tr("Il livello dell'acqua di uno scavo allagato o di un relitto, dal suo bordo o a mano, e la "
                          "nuvola densa corretta per la rifrazione sotto di esso"))
+        self._act(m, tr("Acqua: livelli e bacini..."), self.show_water_pane, processing=True, icon_name="water",
+                  tip=tr("Più livelli dell'acqua: un livello e un fattore per chunk o per data, i bacini, il fattore "
+                         "dai punti di controllo"))
         self._act(m, tr("Ortofoto e DEM uniti..."), self.open_mosaic, processing=True, icon_name="merge",
                   tip=tr("Le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, per priorità o per "
                          "aree, con il chunk da cui viene ogni cella"))
@@ -4474,10 +4482,20 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.close()
 
+    def show_water_pane(self) -> None:
+        """*Strumenti > Acqua: livelli e bacini*: the pane in front, read again from the active chunk."""
+        self.water_pane.refresh()
+        self._show_pane(self.water_pane)
+
     def _refresh_water_dialog(self) -> None:
-        """The window of the water shown again as the chunk is (after Annulla, a build, a version made active)."""
+        """The window of the water shown again as the chunk is (after Annulla, a build, a version made active), and
+        the pane of the water levels."""
         from .ties_dialog import alive
 
+        pane = getattr(self, "water_pane", None)
+        if pane is not None:
+            with contextlib.suppress(RuntimeError):
+                pane.refresh()
         dlg = getattr(self, "_water_dialog", None)
         if dlg is not None and alive(dlg):
             with contextlib.suppress(RuntimeError):
@@ -15918,15 +15936,29 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return None
         return tex
 
+    def _texture_painted(self, frame: str | None = None) -> bool:
+        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model:
+        said in the window's words (patches choose photos, there are none). True when it was."""
+        from ..engine import patches as P
+
+        if self.chunk is not None and P.texture_painted(self.chunk, frame):
+            self._warn(tr("Patch: {0}.", tr(P.TEXTURE_IT)))
+            return True
+        return False
+
     def start_patch(self) -> None:
         if not self._need_chunk():
             return
         if self.drawings_frame is None and self.chunk.orthomosaic_path is None:  # an elevation is its own image
             self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
             return
+        if self._texture_painted(self.drawings_frame):
+            return
         self.set_draw_mode("patch")
 
     def patch_with_selection(self) -> None:
+        if self._texture_painted(self.drawings_frame):
+            return
         geom = self._plan_selection() if self.drawings_frame is None else self._selected_polygon()
         if geom is None:
             self._warn("Seleziona un poligono (strumento Seleziona) oppure disegna l'area con lo strumento Patch.")
@@ -15955,6 +15987,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return
         if frame is None and ch.orthomosaic_path is None:
             self._warn("Costruisci prima l'ortofoto.")
+            return
+        if self._texture_painted(frame):
             return
         if geom.geom_type != "Polygon":  # several polygons selected: the largest one
             geom = max(getattr(geom, "geoms", [geom]), key=lambda g: g.area)
@@ -16078,6 +16112,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if ch.orthomosaic_path is None:
             self._warn("Costruisci prima l'ortofoto.")
             return
+        if self._texture_painted():
+            return
         if not P.changed_patches(ch):
             self.statusBar().showMessage(tr("L'ortofoto è già aggiornata con le patch"), 8000)
             return
@@ -16099,6 +16135,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         entry = self._frame_entry(frame) if frame is not None else None
         if entry is None:
             self._warn("Mostra prima un prospetto o una sezione.")
+            return
+        if self._texture_painted(frame):
             return
         from ..engine import elevation as E
 
