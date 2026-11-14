@@ -5233,6 +5233,127 @@ def water_correct(project: Path,
         typer.echo(f"DEM built again from the corrected cloud; the DEM before kept as version {r['dem_version']}")
 
 
+@water_app.command("basin")
+def water_basin(project: Path,
+                chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                name: Optional[str] = typer.Option(None, "--name", help="the name of the basin (a new one is added, "
+                                                   "one with this name replaced)"),
+                level: Optional[float] = typer.Option(None, "--level", help="its level: a world height (m)"),
+                shore: Optional[str] = typer.Option(None, "--shore", help="points of its shoreline X,Y,Z;X,Y,Z;... "
+                                                    "(three or more): a plane of the water fitted to them"),
+                polygon: Optional[str] = typer.Option(None, "--polygon", help="where it is: a WKT polygon (world)"),
+                layer: Optional[str] = typer.Option(None, "--layer", help="where it is: the polygons of a layer of "
+                                                    "free drawings"),
+                n: Optional[float] = typer.Option(None, "--n", help="its effective factor (default 1.34)"),
+                clear: bool = typer.Option(False, "--clear", help="remove every basin: back to the single level")):
+    """A basin of water with its own level (or shoreline plane), factor and polygon; several basins correct each
+    their part of the cloud (the one without polygon the rest)."""
+    from .engine import colour_mask, water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    try:
+        if clear:
+            water.set_basins(ch, [])
+        else:
+            if not name:
+                raise typer.BadParameter("--name is needed (or --clear)")
+            if (level is None) == (shore is None):
+                raise typer.BadParameter("give one of --level Z, --shore X,Y,Z;X,Y,Z;...")
+            pts = None
+            if shore is not None:
+                try:
+                    pts = [[float(v) for v in p.split(",")] for p in shore.split(";") if p.strip()]
+                except ValueError:
+                    raise typer.BadParameter("--shore: X,Y,Z points separated by ;") from None
+            where = polygon if polygon else (colour_mask.union(ch, layer) if layer else None)
+            new = water.basin(name, level=level, n=water.N_SEA if n is None else n, polygon=where, shore=pts)
+            kept = [b for b in (ch.meta.get("water") or {}).get("basins") or [] if b["name"] != name]
+            water.set_basins(ch, kept + [new])
+            if new.get("shore"):
+                f = new["shore"]
+                typer.echo(f"shoreline plane: tilt {f['tilt_deg']:.3f} degrees, rmse {f['rmse']:.4f} m on "
+                           f"{f['points']} points")
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    for b in water.basins_of(ch):
+        typer.echo(_basin_line(b))
+
+
+def _basin_line(b: dict) -> str:
+    plane = "" if not (b.get("a") or b.get("b")) else f", plane a {b['a']:.5f} b {b['b']:.5f}"
+    return (f"basin {b['name']}: level {b['level']:.3f} m{plane}, n {b['n']:.3f}, "
+            + ("everywhere else" if b.get("polygon") is None else "inside its polygon"))
+
+
+@water_app.command("factor")
+def water_factor(project: Path,
+                 chunk: str = typer.Argument(..., help="the chunk (label or key)"),
+                 points: Optional[Path] = typer.Option(None, "--points", help="CSV of control points: label,x,y,z "
+                                                       "(true height) and optionally apparent"),
+                 markers: Optional[str] = typer.Option(None, "--markers", help="markers with a reference under the "
+                                                       "water, triangulated through it (comma separated)"),
+                 source: str = typer.Option("dem", "--source", help="where the apparent heights of --points are "
+                                            "read: dem or cloud"),
+                 basin_name: Optional[str] = typer.Option(None, "--basin", help="only the points of this basin; "
+                                                          "--apply stores the factor on it"),
+                 fit_level: bool = typer.Option(False, "--fit-level", help="the level fitted together with n"),
+                 apply: bool = typer.Option(False, "--apply", help="store the factor (and the fitted level)")):
+    """The effective refraction factor from points of known true height under the water, by least squares on
+    L - z_true = n (L - z_apparent), with the residual of every point."""
+    import csv
+
+    from .engine import water
+
+    doc = Document.open(project)
+    ch = _tie_chunk(doc, chunk)
+    rows = []
+    if points is not None:
+        for r in csv.DictReader(points.read_text(encoding="utf-8-sig").splitlines()):
+            r = {k.strip().lower(): (v or "").strip() for k, v in r.items() if k}
+            rows.append({"label": r.get("label") or f"P{len(rows) + 1}", "x": float(r["x"]), "y": float(r["y"]),
+                         "z": float(r["z"]), "apparent": float(r["apparent"]) if r.get("apparent") else None})
+    labels = [m.strip() for m in markers.split(",") if m.strip()] if markers else []
+    if not rows and not labels:
+        raise typer.BadParameter("give --points and/or --markers")
+    try:
+        fit = water.estimate_factor(ch, water.control_points(ch, markers=labels, points=rows, source=source),
+                                    fit_level=fit_level, basin_name=basin_name)
+        if apply:
+            water.apply_factor(ch, fit)
+    except (ValueError, KeyError) as exc:
+        _ties_error(exc)
+    typer.echo(f"n {fit['n']:.4f} from {fit['points']} points" + (f", level {fit['level']:.3f} m" if fit["level"]
+                                                                   is not None else "")
+               + (f", rmse {fit['rmse']:.4f} m" if fit["rmse"] is not None else ""))
+    if not fit["in_range"]:
+        typer.echo(f"warning: n outside {water.N_RANGE[0]:g}-{water.N_RANGE[1]:g}: check the points")
+    for r in fit["residuals"]:
+        res = "left out" if r["residual"] is None else f"residual {r['residual']:+.4f} m"
+        app_z = "-" if r["apparent"] is None else f"{r['apparent']:.3f}"
+        typer.echo(f"  {r['label']}: true {r['z']:.3f}, apparent {app_z}, {res}")
+    if apply:
+        doc.save()
+        typer.echo("stored")
+
+
+@water_app.command("table")
+def water_table(project: Path, table: Path = typer.Argument(..., help="CSV with chunk or date, level, n")):
+    """A level and an effective factor for several chunks at once, by chunk (label or key) or by date of the survey
+    (the chunks surveyed that day): one per year of a campaign, for instance."""
+    from .engine import water
+
+    doc = Document.open(project)
+    try:
+        done = water.apply_table(doc, water.read_table(table))
+    except ValueError as exc:
+        _ties_error(exc)
+    doc.save()
+    for d in done:
+        typer.echo(f"{d['chunk']}: level {d['level']:.3f} m, n {d['n']:.3f}" + (f" ({d['date']})" if d["date"] else ""))
+
+
 @water_app.command("show")
 def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (label or key)")):
     """The water level of a chunk in its current system, and the correction of its cloud if any."""
@@ -5245,6 +5366,8 @@ def water_show(project: Path, chunk: str = typer.Argument(..., help="the chunk (
         typer.echo(f"{ch.label}: no water level")
         return
     typer.echo(f"{ch.label}: {_water_line(lv)}")
+    for b in water.basins_of(ch):
+        typer.echo("  " + _basin_line(b))
     corr = (ch.meta.get("dense") or {}).get("refraction")
     if corr:
         typer.echo(f"active dense cloud corrected for the refraction (n {corr['n']:.2f}, level {corr['level']:.3f} m, "
