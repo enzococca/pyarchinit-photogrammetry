@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
                                QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..core.camera import Sensor
 from .i18n import decimal_comma, tr
 
 MODELS = [("OPENCV", "Normale (Brown: k1, k2, p1, p2)"), ("OPENCV_FISHEYE", "Fisheye (Kannala-Brandt: k1-k4)"),
@@ -234,6 +235,8 @@ class CalibrationDialog(QDialog):
             return False
         s = self.sensor
         if (model, [float(v) for v in s.params], bool(s.fixed)) != (s.model, params, fixed):
+            if s.focal_px != Sensor(s.key, s.label, s.width, s.height, model, params).focal_px:
+                s.focal_source = None  # written by hand: no longer a guess
             s.model, s.params, s.fixed = model, params, fixed
             self.changed = True
         self.plot.set_sensor(s)

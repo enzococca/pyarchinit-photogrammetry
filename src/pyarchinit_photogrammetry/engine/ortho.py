@@ -1125,7 +1125,8 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
                       skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8,
                       max_angle: float = 70.0, patches=None, blend_sigma: float = BLEND_SIGMA,
                       colour_correction: bool | None = None, ghosting: bool = False,
-                      fill_holes: bool = False, source=None, out_path: Path | None = None) -> Path:
+                      fill_holes: bool = False, source=None, out_path: Path | None = None,
+                      texture: bool | None = None, supersample: int | None = None) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
     where they are the visible surface: excavation tools, people, vegetation). Photos that
     cannot be read (e.g. kept online only by Dropbox) stop the step
@@ -1141,12 +1142,28 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     vignetting (:mod:`.colour`): None = the one measured in the chunk if any, True = measured now
     when missing, False = none. ``ghosting``: where three or more photos see a cell, the best one
     that agrees with the others (people and vehicles seen by a few photos left out).
-    ``fill_holes``: holes of at most ``HOLE_CELLS`` cells no photo sees filled from their edges."""
+    ``fill_holes``: holes of at most ``HOLE_CELLS`` cells no photo sees filled from their edges.
+
+    ``texture``: the orthophoto from the texture of the model instead of the photos (:mod:`.texture_ortho`,
+    ``supersample`` rays per cell side there): None (the default) chooses it when the chunk has no aligned photo
+    (an imported or merged model; the log says so), True asks for it, False never; ``blending`` "texture" (an
+    orthophoto made so, built again) is the same as True. The photo options do not apply to it."""
     from rasterio.transform import from_origin
 
     from ..core import crs as crs_mod
+    from . import texture_ortho
 
     progress = as_progress(progress)
+    if blending == "texture":
+        texture = True if texture is None else texture
+    if source is None and texture_ortho.use_texture(chunk, texture):
+        if texture is None:
+            import logging
+
+            logging.getLogger("pyarchinit_photogrammetry").info("%s", texture_ortho.MESSAGE_IT)
+            progress(0.0, texture_ortho.MESSAGE_EN)
+        return texture_ortho.build_orthomosaic(chunk, resolution, progress=progress, supersample=supersample,
+                                               out_path=out_path)
     progress(0.0, "Checking the photos")
     cams, bad = readable_cameras(chunk, skip_unreadable)
     ensure_level(chunk)

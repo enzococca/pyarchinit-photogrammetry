@@ -795,6 +795,11 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.web = WebPublishing(self)
         self.web_pane = self.web.pane
         add(self.web_pane, tr("Pubblica sul web"), icon("web"), name="pane_web", place="right")
+        from .water_pane import WaterPane
+
+        # the water of several levels: the table per chunk or date, the basins, the factor, the correction
+        self.water_pane = WaterPane(self)
+        add(self.water_pane, tr("Acqua: livelli e bacini"), icon("water"), name="pane_water", place="right")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -1063,6 +1068,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             lambda on: self.settings.setValue("rebuild_keep_versions", "true" if on else "false"))
         m.addAction(self.a_rebuild_keep)
         self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
+        self._act(m, tr("Unisci i modelli in uno..."), self.merge_models, processing=True, icon_name="merge",
+                  tip=tr("I modelli con texture di più chunk come un solo modello di un nuovo chunk (colori "
+                         "accordati, sovrapposizioni tolte, aperture lasciate aperte)"))
         self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
                   tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
                          "chunk"))
@@ -1355,6 +1363,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self._act(m, tr("Livello dell'acqua e rifrazione..."), self.open_water, processing=True, icon_name="water",
                   tip=tr("Il livello dell'acqua di uno scavo allagato o di un relitto, dal suo bordo o a mano, e la "
                          "nuvola densa corretta per la rifrazione sotto di esso"))
+        self._act(m, tr("Acqua: livelli e bacini..."), self.show_water_pane, processing=True, icon_name="water",
+                  tip=tr("Più livelli dell'acqua: un livello e un fattore per chunk o per data, i bacini, il fattore "
+                         "dai punti di controllo"))
         self._act(m, tr("Ortofoto e DEM uniti..."), self.open_mosaic, processing=True, icon_name="merge",
                   tip=tr("Le ortofoto o i DEM di più chunk agganciati uniti in un raster solo, per priorità o per "
                          "aree, con il chunk da cui viene ogni cella"))
@@ -3621,6 +3632,19 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if "copc" in flt.lower() and not path.lower().endswith(".copc.laz"):
             path = str(Path(path).with_suffix("")) + ".copc.laz"
         cog = next((c for c in ("jpeg", "webp", "zstd") if c in flt.lower()), None) if "COG" in flt else None
+        obj = {}
+        if what == "model" and path.lower().endswith(".obj"):
+            o = ParamDialog.ask(self, "Esporta modello OBJ", [
+                Field("groups", "Gruppi dell'OBJ", "none",
+                      choices=[("none", "Nessuno (un solo oggetto)"),
+                               ("source", "Per chunk di partenza (modello unito) o oggetto importato"),
+                               ("component", "Per parte connessa")],
+                      tip="Ogni gruppo è un oggetto (o/g) del file, con un materiale per pagina di texture"),
+                Field("max_texture", "Lato massimo delle pagine di texture (pixel, 0 = come sono)", 0, minimum=0,
+                      maximum=65536, decimals=0)])
+            if not o:
+                return
+            obj = {"groups": o["groups"], "max_texture": int(o["max_texture"]) or None}
         product = {"cloud": "point_cloud", "model": "model", "dem": "dem", "ortho": "orthomosaic"}.get(what)
         operator = str(self.settings.value("pa/disegnatore", "") or "") or None  # read here, not in the worker
         if cog or path.lower().endswith((".copc.laz", ".glb")):  # can take a while: in the background
@@ -3643,7 +3667,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             if what == "cloud":
                 ch.export_point_cloud(path, classes=classes)
             elif what == "model":
-                ch.export_model(path)
+                ch.export_model(path, **obj)
             elif what == "dem":
                 ch.export_dem(path)
             elif what == "ortho":
@@ -4458,10 +4482,20 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             with contextlib.suppress(RuntimeError):  # already deleted
                 dlg.close()
 
+    def show_water_pane(self) -> None:
+        """*Strumenti > Acqua: livelli e bacini*: the pane in front, read again from the active chunk."""
+        self.water_pane.refresh()
+        self._show_pane(self.water_pane)
+
     def _refresh_water_dialog(self) -> None:
-        """The window of the water shown again as the chunk is (after Annulla, a build, a version made active)."""
+        """The window of the water shown again as the chunk is (after Annulla, a build, a version made active), and
+        the pane of the water levels."""
         from .ties_dialog import alive
 
+        pane = getattr(self, "water_pane", None)
+        if pane is not None:
+            with contextlib.suppress(RuntimeError):
+                pane.refresh()
         dlg = getattr(self, "_water_dialog", None)
         if dlg is not None and alive(dlg):
             with contextlib.suppress(RuntimeError):
@@ -5707,6 +5741,54 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                                                  merge_tie_points=v["tie_points"], merge_point_clouds=v["clouds"],
                                                  merge_models=v["models"], progress=p), done)
 
+    def merge_models(self) -> None:
+        """*Unisci i modelli in uno...*: the models of the chosen chunks as one textured model of a new chunk
+        (:func:`..engine.model_merge.merge_models`); the source chunks stay as they are."""
+        doc = self.doc
+        with_model = [ch for ch in doc.chunks if ch.product_path("model") is not None]
+        if len(with_model) < 2:
+            self._warn("Servono almeno due chunk con un modello, nello stesso sistema (allineati o georeferenziati).")
+            return
+        choices = [(ch.key, ch.label) for ch in with_model]
+        v = ParamDialog.ask(self, "Unisci i modelli in uno", [
+            Field("chunks", "Modelli da unire (il primo dà il sistema; in caso di sovrapposizione vale l'ordine)",
+                  [ch.key for ch in with_model if ch.enabled], choices=choices, kind="checklist"),
+            Field("label", "Nome del nuovo chunk", "Modello unito", kind="text"),
+            Field("colour", "Colori", "none",
+                  choices=[("none", "Come sono"), ("gain", "Accordati al primo (guadagno RGB)"),
+                           ("lab", "Accordati al primo (trasferimento Lab)")],
+                  tip="Ogni modello prende i colori del primo dove le superfici si sovrappongono"),
+            Field("remove", "Togli le facce sovrapposte (vale il primo della lista)", False),
+            Field("overlap", "Distanza di sovrapposizione (m, vuoto = automatica)", None, kind="optional_float"),
+            Field("pages", "Pagine della texture", "keep",
+                  choices=[("keep", "Tenute come sono"), ("repack", "Riunite in pagine di lato massimo")]),
+            Field("page_size", "Lato massimo di una pagina (pixel)", 8192, minimum=512, maximum=32768, decimals=0),
+            Field("activate", "Rendi attivo il nuovo chunk", True)],
+            intro="I chunk devono essere nello stesso sistema. Il nuovo chunk ha un solo modello con texture e il "
+                  "chunk di partenza di ogni faccia (per esportare un OBJ a gruppi); le aperture tra i modelli "
+                  "restano aperte. DEM, ortofoto (dalla texture), misure ed esportazioni funzionano come per ogni "
+                  "modello.")
+        if not v:
+            return
+        order = [k for k in [ch.key for ch in with_model] if k in v["chunks"]]
+        sources = [next(ch for ch in with_model if ch.key == k) for k in order]
+        if len(sources) < 2:
+            self._warn("Scegli almeno due modelli da unire.")
+            return
+
+        def done(result):
+            merged, report = result
+            if v["activate"]:
+                self._activate_chunk(merged)
+            for w in report.get("warnings", []):
+                self.log_pane.warning(w)
+            self._info("Unisci i modelli in uno", tr("Creato «{0}»: {1} facce, {2} pagine di texture", merged.label,
+                                                     _it(report["faces"]), report["pages"]))
+
+        self.run_task("Unione dei modelli", lambda p: doc.merge_models(
+            sources, label=v["label"].strip() or None, colour=v["colour"], remove_overlaps=bool(v["remove"]),
+            overlap_distance=v.get("overlap"), pages=v["pages"], page_size=int(v["page_size"]), progress=p), done)
+
     def duplicate_chunk(self, chunk=None) -> None:
         """*Duplica chunk...* (menu of a chunk in the Area di lavoro): a new chunk with all the photos of
         ``chunk`` (default the active one), the photos selected in the Photos pane or those framing the
@@ -5810,7 +5892,19 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                 self._add_captures(paths, recursive=folder)
                 return
         self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder, progress=p),
-                      lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
+                      self._photos_added)
+
+    def _photos_added(self, cams) -> None:
+        """The status bar says how many photos were added; the log warns about the cameras whose photos
+        say no focal length (it is guessed and the alignment estimates it)."""
+        self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000)
+        keys = {c.sensor_key for c in cams}
+        for s in self.chunk.sensors.values():
+            if s.key in keys and s.focal_guessed:
+                self.log_pane.warning(tr(
+                    "{0}: le foto non dicono la focale; parte da {1} px (un {2} mm su una camera 35 mm) e "
+                    "l'allineamento la stima. Se la si conosce, scriverla nella calibrazione della camera.",
+                    s.label, f"{s.focal_px:.0f}", f"{36.0 * s.focal_px / max(s.width, s.height):.0f}"))
 
     # ---------------------------------------------------------------- GNSS positions of the photos
     def _gnss_changed(self) -> None:
@@ -8598,6 +8692,10 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self._warn_dem_limited()
 
     def build_ortho(self) -> None:
+        ch = self.chunk
+        if ch is not None and not ch.aligned_cameras and ch.product_path("model") is not None:
+            self._build_ortho_from_texture()
+            return
         if not self._need_chunk(aligned=True):
             return
         if not (self.chunk.dem_path or self.chunk.product_path("model")):
@@ -8635,6 +8733,32 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p, skip_unreadable=skip,
             max_angle=v.get("max_angle", 70.0), colour_correction=bool(v.get("colour", True)),
             ghosting=bool(v.get("ghosting")), fill_holes=bool(v.get("fill_holes", True)))),
+            lambda _r: self._show_raster("ortho"))
+
+    def _build_ortho_from_texture(self) -> None:
+        """*Ortofoto* on a chunk without aligned photos (an imported or merged model): from the texture of the model
+        (:mod:`..engine.texture_ortho`), at the cell asked (default the texel of the texture)."""
+        from ..engine import texture_ortho
+
+        ch = self.chunk
+        if not texture_ortho.has_texture(ch):
+            self._warn("Il chunk non ha foto allineate e il modello non ha texture: importa un modello con texture "
+                       "o allinea le foto.")
+            return
+        v = ParamDialog.ask(self, "Ortofoto dalla texture", [
+            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float",
+                  tip="Vuoto: la dimensione di un texel della texture"),
+            Field("supersample", "Raggi per lato di cella (0 = automatico)", 0, minimum=0, maximum=4,
+                  tip="Dove la texture è più fine della cella, la media di più raggi evita l'effetto a scalini")]
+            + self._version_fields("orthomosaic"),
+            intro=texture_ortho.MESSAGE_IT + " (vista dall'alto, ogni cella dal primo punto del modello che "
+                                             "incontra). L'ortofoto è un prodotto come le altre: si esporta e si "
+                                             "misura allo stesso modo.")
+        if not v:
+            return
+        self.log_pane.info(tr(texture_ortho.MESSAGE_IT))
+        self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: ch.build_orthomosaic(
+            v["resolution"], texture=True, supersample=int(v.get("supersample") or 0) or None, progress=p)),
             lambda _r: self._show_raster("ortho"))
 
     # ---------------------------------------------------------------- reconstruction region
@@ -9224,12 +9348,22 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         section (what stands in front of the plane taken away, the profile of the cut drawn). A cylinder
         takes its axis from the dialog; with "two points" the dialog's answers wait for two clicks in the 3D
         view, which come back here as ``axis_points`` (internal frame)."""
-        if not self._need_chunk(aligned=True, product="model"):
+        from ..engine import texture_ortho
+
+        textured = self.chunk is not None and not self.chunk.aligned_cameras and \
+            self.chunk.product_path("model") is not None and texture_ortho.has_texture(self.chunk)
+        if not self._need_chunk(aligned=not textured, product="model"):  # no photos: from the texture of the model
             return
         from ..engine import elevation as E
 
         ch = self.chunk
-        cams = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+        cams = (ch.to_world(np.array([c.center for c in ch.aligned_cameras])) if ch.aligned_cameras
+                else None)
+        if cams is None:  # the viewer side of a plane of markers: above the model
+            from ..io.mesh_ply import read_mesh
+
+            xyz = ch.to_world(read_mesh(ch.product_path("model")).xyz)
+            cams = (xyz.mean(axis=0) + [0.0, 0.0, float(np.ptp(xyz[:, 2])) + 10.0])[None]
         pending, self._axis_pending = getattr(self, "_axis_pending", None), None
         if axis_points is not None:
             if pending is None or pending.get("chunk") != ch.key:  # given up, or picked on another chunk
@@ -15814,15 +15948,29 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return None
         return tex
 
+    def _texture_painted(self, frame: str | None = None) -> bool:
+        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model:
+        said in the window's words (patches choose photos, there are none). True when it was."""
+        from ..engine import patches as P
+
+        if self.chunk is not None and P.texture_painted(self.chunk, frame):
+            self._warn(tr("Patch: {0}.", tr(P.TEXTURE_IT)))
+            return True
+        return False
+
     def start_patch(self) -> None:
         if not self._need_chunk():
             return
         if self.drawings_frame is None and self.chunk.orthomosaic_path is None:  # an elevation is its own image
             self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
             return
+        if self._texture_painted(self.drawings_frame):
+            return
         self.set_draw_mode("patch")
 
     def patch_with_selection(self) -> None:
+        if self._texture_painted(self.drawings_frame):
+            return
         geom = self._plan_selection() if self.drawings_frame is None else self._selected_polygon()
         if geom is None:
             self._warn("Seleziona un poligono (strumento Seleziona) oppure disegna l'area con lo strumento Patch.")
@@ -15851,6 +15999,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             return
         if frame is None and ch.orthomosaic_path is None:
             self._warn("Costruisci prima l'ortofoto.")
+            return
+        if self._texture_painted(frame):
             return
         if geom.geom_type != "Polygon":  # several polygons selected: the largest one
             geom = max(getattr(geom, "geoms", [geom]), key=lambda g: g.area)
@@ -15974,6 +16124,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if ch.orthomosaic_path is None:
             self._warn("Costruisci prima l'ortofoto.")
             return
+        if self._texture_painted():
+            return
         if not P.changed_patches(ch):
             self.statusBar().showMessage(tr("L'ortofoto è già aggiornata con le patch"), 8000)
             return
@@ -15995,6 +16147,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         entry = self._frame_entry(frame) if frame is not None else None
         if entry is None:
             self._warn("Mostra prima un prospetto o una sezione.")
+            return
+        if self._texture_painted(frame):
             return
         from ..engine import elevation as E
 
