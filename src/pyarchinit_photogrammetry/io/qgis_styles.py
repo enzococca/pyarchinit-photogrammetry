@@ -95,12 +95,30 @@ def _style_parts(maplayer) -> tuple[dict, list]:
 
 
 def style_hash(maplayer) -> str:
-    """A digest of how a ``<maplayer>`` looks (:data:`NOT_STYLE` left out)."""
+    """A digest of how a ``<maplayer>`` looks (:data:`NOT_STYLE` left out), in canonical XML: QGIS writes the
+    attributes of an element in a different order at every save (Qt's hashes are seeded per process), so the same
+    style saved twice differs as text."""
     attrs, children = _style_parts(maplayer)
     h = hashlib.sha1(json.dumps(sorted(attrs.items())).encode())
     for c in children:
-        h.update(ElementTree.tostring(c, encoding="utf-8"))
+        h.update(_canonical(c).encode())
     return h.hexdigest()
+
+
+def _canonical(elem) -> str:
+    """``elem`` as canonical XML (attributes sorted, blanks between elements dropped), with the XML documents QGIS
+    keeps inside attribute values (the symbol of a callout, ``<Option value="&lt;symbol ...">``) made canonical too."""
+    import copy
+
+    elem = copy.deepcopy(elem)
+    for node in elem.iter():
+        for key, value in node.attrib.items():
+            if value.lstrip().startswith("<"):
+                try:
+                    node.set(key, _canonical(ElementTree.fromstring(value)))
+                except ElementTree.ParseError:
+                    pass
+    return ElementTree.canonicalize(ElementTree.tostring(elem, encoding="unicode"), strip_text=True)
 
 
 def style_qml(maplayer, version: str = "") -> str:
