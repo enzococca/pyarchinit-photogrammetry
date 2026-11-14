@@ -63,7 +63,9 @@ viewer takes each raster whole (up to 50 MB a file, the viewer's own limit): it 
    it tells anyone where the site is. Without both answers nothing is sent.
 8. The publication runs in the background with *Cancel*; the commands of wrangler and their answers go to the Log pane.
    At the end the pane and the Workspace (**Web site**) show the address, with **Open in the browser** and **Copy the
-   address**; the address is kept with the project.
+   address**; the address is kept with the project. The address is read from wrangler's answers, never guessed: when
+   they do not say it, the pane says so, the answers go whole (cleaned) to the Log pane - send them to us - and you
+   write the address (from the dashboard, *Workers & Pages*, or `wrangler pages project list`) in the field below.
 
 Publishing again sends only what changed: Pages skips the files it already has, and the program remembers the files
 sent to R2 (`.ppg-publish.json` in the site folder, never published) so that it sends only new or changed ones and

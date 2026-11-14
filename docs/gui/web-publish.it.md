@@ -65,7 +65,10 @@ più lentamente.
    rosso: dice a chiunque dove si trova il sito. Senza entrambe le risposte non parte nulla.
 8. La pubblicazione va in background con *Annulla*; i comandi di wrangler e le sue risposte vanno nel pannello Log. Alla
    fine il pannello e l'Area di lavoro (**Sito web**) mostrano l'indirizzo, con **Apri nel browser** e **Copia
-   l'indirizzo**; l'indirizzo resta con il progetto.
+   l'indirizzo**; l'indirizzo resta con il progetto. L'indirizzo si legge nelle risposte di wrangler, non si
+   indovina mai: quando non lo dicono, il pannello lo segnala, le risposte vanno intere (ripulite) nel pannello Log -
+   mandacele - e scrivi tu l'indirizzo (dalla dashboard, *Workers & Pages*, o da `wrangler pages project list`) nel
+   campo sotto.
 
 Pubblicare di nuovo invia solo ciò che è cambiato: Pages salta i file che ha già, e il programma ricorda i file inviati
 a R2 (`.ppg-publish.json` nella cartella del sito, mai pubblicato), così invia solo quelli nuovi o cambiati e cancella
