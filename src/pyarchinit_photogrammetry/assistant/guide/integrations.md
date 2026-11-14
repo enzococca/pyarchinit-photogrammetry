@@ -187,7 +187,16 @@ The live GeoPackage also holds the drawings made on elevations and sections, pla
 `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; PolygonZ, PointZ, LineStringZ in the system of the
 chunk), refreshed with the plan's and one-way. QGIS shows them in its 3D view, RustGIS in the group
 "<chunk> - prospetti". *QGIS > Apri il prospetto in QGIS*, with an elevation shown, opens a project of the elevation
-unfolded: its orthophoto and its drawings in its own metres (u, v), like a plan of the façade.
+unfolded: its orthophoto and its drawings in its own metres (u, v), like a plan of the façade, one layer per kind
+(`unita`, `quote`, `punti`, `pietre`, `linee` of `<name>_<id>_disegni.gpkg`, no reference system).
+
+That project goes both ways **on request**: what is drawn, moved, changed or deleted in its layers (saved in QGIS)
+comes back with *QGIS > Rileggi il prospetto da QGIS*, one step of *Modifica > Annulla*. The program keeps beside the
+GeoPackage what it wrote there (`<name>_<id>_disegni.gpkg.ppg.json`) and takes only what QGIS changed since: units,
+spot heights and lines by their `ppg_id`, measuring points by their `label`, stones by their outline; a new feature
+gets an identity of its own, a spot height moved gets its height from the surface again. Opening the elevation in
+QGIS again first reads what was changed there. The live link itself stays one-way for the elevations: its tables
+are in 3D in the system of the survey, where a drawing of the façade cannot be edited as such.
 
 ## RustGIS
 

@@ -490,24 +490,46 @@ sull'ortofoto non compare mai su un prospetto. Aprendo la pianta o un altro pros
 restano con lui e tornano con lui, anche quando il progetto viene riaperto. *Modifica > Annulla* riporta indietro
 una modifica sul prospetto in cui è stata fatta.
 
+Gli strumenti di disegno sono quelli della pianta - disegno, *Modifica i vertici*, rimodella, elimina, layer,
+attributi, snap, annulla e ripeti - e lavorano sui disegni del prospetto mostrato. Nell'**area di lavoro** ogni
+prospetto elenca sotto di sé i suoi disegni (*Unità stratigrafiche (n)*, *Quote (n)*, *Punti di misura (n)*, *Linee
+(n)*, *Pietre (n)*); un doppio clic mostra il prospetto.
+
 * Una **quota** cliccata su un prospetto prende la quota della superficie in quel punto (la Z del punto del
   modello, letta attraverso il rilievo) e la sua posizione in pianta; sul prospetto mostra quella quota. Un **punto
   di misura** legge i prodotti del chunk in quello stesso punto della superficie, e un **marker** vi viene messo.
 * Gli strumenti che lavorano sulla pianta - traccia di sezione, ritaglio, misura area, modifica del DEM, foto
   di un'area, regione, tavola dei colori - sono rifiutati mentre è mostrato un prospetto, con un messaggio nella
   barra di stato: apri l'ortofoto o il DEM.
-* Le **pietre** trovate con SAM su un prospetto sono sue (ogni prospetto ha il suo layer *Pietre*). Le pietre
-  disegnate sui prospetti dalle versioni precedenti alla 1.7.0 erano condivise da tutti: all'apertura del progetto
-  vengono lasciate fuori.
+* Le **pietre** trovate con SAM su un prospetto sono sue (ogni prospetto ha il suo layer *Pietre*).
+* I **progetti fatti prima della 1.7.0** tenevano ciò che era disegnato su un prospetto tra i disegni della pianta,
+  nei metri del prospetto, e le pietre di tutti i prospetti sotto un solo nome. Quando un progetto così viene aperto,
+  ognuno di quei disegni che sta fuori dalla pianta (le sue foto, i marker, l'ortofoto e il DEM) e dentro
+  l'estensione di un solo prospetto passa a quel prospetto (una quota prende il suo punto sulla superficie); quello
+  che sta su più prospetti, e tutto in un rilievo locale in cui pianta e prospetti hanno gli stessi numeri, resta
+  dov'era. Non si cancella niente, e il file cambia solo quando il progetto viene salvato.
+* **Vista > Disegni dei prospetti nella vista 3D** (attivo all'inizio) mostra i disegni di ogni prospetto sul suo
+  piano nella vista 3D, in azzurro (da guardare: si modificano sul prospetto). Sulla pianta non compaiono mai.
+* **Disegni da un altro prospetto...** (clic destro su un prospetto) copia, o sposta, i disegni di un altro prospetto
+  del chunk su questo attraverso i loro punti sul rilievo: un prospetto rifatto su un altro piano prende i disegni
+  di quello vecchio. Un passo di *Modifica > Annulla*.
+* **Rimuovendo** un prospetto (*Rimuovi*) se ne vanno anche i suoi disegni; *Modifica > Annulla* li riporta insieme.
+  Un prospetto ricostruito (*Ricostruisci*) tiene i suoi disegni; scalando, orientando o cambiando il riferimento del
+  chunk il prospetto e i suoi disegni si spostano insieme.
 * **Esporta** (clic destro sul prospetto) scrive, oltre a ortofoto, rilievo, piano e profilo, i suoi disegni:
   `<nome>_disegni.dxf` nei metri del prospetto (layer US, USM, QUOTE, PIETRE, PUNTI e PROFILO per una sezione),
   `<nome>_disegni.svg` in scala sopra l'ortofoto, `<nome>_disegni.png`, e due GeoPackage: `<nome>_disegni.gpkg`, il
   prospetto **sviluppato** - i disegni in (u, v), senza sistema di riferimento, con la tabella `frame` (il piano) e
   una colonna `geom_world` -, che QGIS e RustGIS caricano sopra `<nome>_ortofoto.tif` come una pianta della
   facciata; e `<nome>_disegni_mondo.gpkg`, i disegni **in 3D sul rilievo** (PolygonZ, PointZ, LineStringZ nel
-  sistema di riferimento del chunk), che QGIS 3D e RustGIS collocano dove sono.
+  sistema di riferimento del chunk), che QGIS 3D e RustGIS collocano dove sono; e `<nome>_disegni_3d.dxf`, gli
+  stessi disegni come polilinee e punti 3D nelle coordinate del rilievo.
 * **QGIS > Apri il prospetto in QGIS** (con un prospetto mostrato) apre un progetto QGIS del prospetto sviluppato:
-  la sua ortofoto e i suoi disegni, nei suoi metri.
+  la sua ortofoto e i suoi disegni, nei suoi metri, un layer per tipo, senza sistema di riferimento. Ciò che lì si
+  disegna, sposta, cambia o cancella in quei layer torna con **QGIS > Rileggi il prospetto da QGIS** (prima salva i
+  layer in QGIS), come un passo di *Modifica > Annulla*; ciò che nel frattempo è stato cambiato qui e non in QGIS
+  resta. Riaprendo il prospetto in QGIS quelle modifiche vengono lette prima, così non vengono mai sovrascritte. È
+  una lettura a richiesta, non un collegamento dal vivo.
 * **Salva in PyArchInit** con un prospetto mostrato scrive le schede US delle sue unità (create o aggiornate, solo
   i campi: un disegno su un prospetto non ha geometria in pianta, e il messaggio lo dice), le quote in
   `pyarchinit_quote` nella loro posizione in pianta, e registra i suoi disegni (DXF e SVG) come media del sito,

@@ -191,7 +191,18 @@ Il GeoPackage dal vivo contiene anche i disegni fatti sui prospetti e sulle sezi
 (tabelle `prospetto_<id>_unita`, `_quote`, `_punti`, `_pietre`, `_profilo`; PolygonZ, PointZ, LineStringZ nel sistema
 del chunk), aggiornati con quelli della pianta e in un solo senso. QGIS li mostra nella sua vista 3D, RustGIS nel
 gruppo "<chunk> - prospetti". *QGIS > Apri il prospetto in QGIS*, con un prospetto mostrato, apre un progetto del
-prospetto sviluppato: la sua ortofoto e i suoi disegni nei suoi metri (u, v), come una pianta della facciata.
+prospetto sviluppato: la sua ortofoto e i suoi disegni nei suoi metri (u, v), come una pianta della facciata, un
+layer per tipo (`unita`, `quote`, `punti`, `pietre`, `linee` di `<nome>_<id>_disegni.gpkg`, senza sistema di
+riferimento).
+
+Quel progetto va nei due sensi **a richiesta**: ciò che si disegna, sposta, cambia o cancella nei suoi layer
+(salvati in QGIS) torna con *QGIS > Rileggi il prospetto da QGIS*, un passo di *Modifica > Annulla*. Il programma
+tiene accanto al GeoPackage ciò che vi ha scritto (`<nome>_<id>_disegni.gpkg.ppg.json`) e prende solo ciò che QGIS ha
+cambiato da allora: unità, quote e linee per il loro `ppg_id`, punti di misura per la loro `label`, pietre per il loro
+contorno; un elemento nuovo riceve un'identità sua, una quota spostata riprende la quota dalla superficie. Riaprendo
+il prospetto in QGIS si legge prima ciò che vi è stato cambiato. Il collegamento dal vivo resta in un solo senso per
+i prospetti: le sue tabelle sono in 3D nel sistema del rilievo, dove un disegno della facciata non si modifica come
+tale.
 
 ## RustGIS
 

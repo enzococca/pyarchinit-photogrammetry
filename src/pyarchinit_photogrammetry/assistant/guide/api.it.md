@@ -1861,7 +1861,7 @@ prospetto tiene `u`, `v` e ha `x`, `y`, `quota_q` = il suo punto nel mondo sulla
 | `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | il punto nel mondo (CRS del chunk) di `(u, v)` alla profondità `d`; `d` None: sulla superficie, dal rilievo (serve `chunk`; None dove il rilievo non ha valore) |
 | `relief_at(chunk, entry, u, v)` | la profondità della superficie in `(u, v)` |
 | `frame_drawings(chunk, id)` | i disegni tenuti con il prospetto `id` |
-| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"ortho"` con `raster`): DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, PNG, il GeoPackage sviluppato (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, senza CRS, con una colonna `geom_world` in WKT) e il GeoPackage in 3D sul rilievo |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False, dxf_3d=True)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"dxf_3d"`, `<stem>_disegni_3d.dxf` nelle coordinate del rilievo, con `dxf_3d`; + `"ortho"` con `raster`): DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, PNG, il GeoPackage sviluppato (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, senza CRS, con una colonna `geom_world` in WKT) e il GeoPackage in 3D sul rilievo |
 | `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | i disegni collocati sul rilievo in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` di una sezione), nel CRS del prospetto (`entry["crs"]`); scritti con la Z in un GeoPackage aperto |
 | `io.qgis_link.LiveLink.write_elevations({id: (crs, tabelle)})`, `elevation_tables()` | quelle tabelle nel GeoPackage dal vivo come `prospetto_<id>_<nome>` (in un solo senso), lette anche dal collegamento con RustGIS (`RustGisLink.refresh_elevations()`) |
 | `io.qgis_link.PLAN_TABLES`, `two_way_tables()`, `plan_identities(layers)` | le tabelle degli altri disegni della pianta (`poligoni`, `curve`, `linee`, `punti`), rilette da `LiveLink.read_changes()` come quelle nei due sensi; tutte le tabelle rilette; `{ppg_id: (tabella, layer, attributi)}` degli elementi dei layer della vista 2D come `LiveLink.write` identifica le loro righe. Un layer dato a `LiveLink.write` con `"sent": False` (nascosto nel pannello *Layer*) è trattenuto: identificato con gli altri, le sue righe escono dal file e dal suo registro (niente riletto come eliminato) finché non viene inviato di nuovo; lo stesso per i disegni liberi di un layer non visibile (`free_drawings.set_layer(..., visible=False)`); `RasterView.layer_shown(nome, mostrato)` è emesso quando un layer viene mostrato o nascosto. La finestra tiene le modifiche dei layer che non disegna lei in `chunk.meta["plan_edits"]` (`{layer: {"rev", "changed", "deleted", "added"}}`) |
@@ -1872,6 +1872,33 @@ La finestra tiene i disegni della pianta in `units`, `quote`, `probe_points` e `
 quelli del prospetto mostrato in `frame_units`, `frame_quote`, `frame_points` e `frame_stones`; gli strumenti di
 disegno, il ridisegno dei layer e Modifica > Annulla lavorano sugli insiemi mostrati (`shown_units`...). Il pacchetto
 QField porta solo i disegni della pianta; il collegamento dal vivo con QGIS aggiunge quelli dei prospetti in 3D.
+
+`engine.elevation_drawings` (dalla 1.9.1) legge e cambia i disegni di un prospetto fuori dalla finestra - per i
+plugin, gli script e la riga di comando. Il formato salvato è quello sopra (`frames[<id>]`: `units`, `quote`,
+`points`, `lines`, `stones` `{<id>: [WKT]}`); unità, linee e pietre stanno sul piano (`d` = 0), quote e punti di misura
+sulla superficie (i loro `x`, `y` e quota). I piani sono nel sistema in cui il prospetto è stato fatto, `entry["crs"]`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `entries(chunk)`, `entry_of(chunk, id)`, `frame_of(entry)` | i prospetti del chunk, uno per id, il suo piano o cilindro |
+| `world_of_uv(entry, uv, d=0.0)`, `uv_of(entry, xyz)` | da `(u, v)` (+ profondità) a punti nel mondo `(N, 3)`, e ritorno a `(u, v, d)` |
+| `surface_depths(chunk, entry, uv)` | la profondità della superficie (il rilievo) in ogni `(u, v)`; NaN dove non ce l'ha |
+| `drawings(chunk, id, world=False)` | i disegni come record con geometrie shapely in `(u, v)` (`units`: `id`, `us`, `area`, `tipo`, `sito`, `layer`, `attributes`, `geometry`; `quote`, `points`: `id`, `u`, `v`, `geometry`, `record`; `lines`: `id`, `kind`, `attributes`, `geometry`; `stones`: `n`, `geometry`), con `world` (Z, nel sistema del prospetto) se richiesto; copie |
+| `counts(chunk, id)`, `has_drawings(chunk, id)` | quanti di ogni tipo |
+| `add_units(chunk, id, units)` | `UnitPolygon` in `(u, v)` tra i disegni del prospetto (non quello mostrato dalla finestra: `Context.add_units(..., elevation=)` li gestisce tutti e due) |
+| `take_frame(chunk, id)`, `give_frame(chunk, id, data)` | i disegni fuori dal chunk e di nuovo dentro (la rimozione del prospetto: lo fanno `core.removal` e `engine.elevation.remove_elevation`) |
+| `transfer(chunk, source, target, copy_=True, surface=True)` | i disegni di un prospetto dati a un altro attraverso i loro punti nel mondo (sulla superficie del primo dove ha un rilievo); le quote tengono il loro punto nel mondo |
+| `migrate_legacy(chunk)` | i disegni dei progetti prima della 1.7.0 spostati dalla pianta al loro prospetto (lo chiama `Document` all'apertura, in memoria); restituisce quanti sono stati spostati e quanti stanno su più prospetti (quelli restano) |
+| `write_dxf_3d(chunk, entry, path)` | i disegni in 3D come DXF (polilinee 3D e punti) nel sistema del prospetto |
+| `world_features(chunk, eids=None, data=None)` | i disegni come elementi 3D (`id`, `kind`, `xyz`, `elevation`) per la vista 3D (`ModelView.set_guests`) |
+| `write_snapshot(gpkg)`, `read_unfolded(gpkg)`, `apply_unfolded(chunk, id, gpkg)` | il GeoPackage sviluppato di *Apri il prospetto in QGIS*: ciò che vi è stato scritto, ciò che QGIS ha cambiato da allora (`changed`, `added`, `deleted` per tipo), quei cambiamenti nei disegni |
+
+La finestra li mostra nella vista 3D (*Vista > Disegni dei prospetti nella vista 3D*, `ModelView.set_guests`, in sola
+lettura), li elenca sotto il loro prospetto nell'area di lavoro (righe di tipo `"elevation_drawings"`), rilegge il
+progetto QGIS del prospetto (*QGIS > Rileggi il prospetto da QGIS*) e dà i disegni di un prospetto a un altro
+(*Disegni da un altro prospetto...*). Plugin: `Context.shown_elevation()`, `Context.elevations(chunk=None)`,
+`Context.elevation_drawings(elevation=None, chunk=None, world=False)` e `Context.add_units(..., elevation=id)`
+([Plugin](plugins.it.md)).
 
 ## Maschere delle foto
 

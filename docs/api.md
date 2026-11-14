@@ -1806,7 +1806,7 @@ elevation keeps `u`, `v` and has `x`, `y`, `quota_q` = its world point on the su
 | `engine.elevation.world_of(entry, u, v, d=None, chunk=None)` | the world point (chunk CRS) of `(u, v)` at the depth `d`; `d` None: on the surface, from the relief (needs `chunk`; None where the relief has no value) |
 | `relief_at(chunk, entry, u, v)` | the depth of the surface at `(u, v)` |
 | `frame_drawings(chunk, id)` | the drawings kept with the elevation `id` |
-| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"ortho"` with `raster`): DXF in `(u, v)` (layers US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG at 1:`scale` over the orthophoto, PNG, the GeoPackage unfolded (table `frame` with the plane; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, no CRS, with a `geom_world` WKT column) and the GeoPackage in 3D on the survey |
+| `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False, dxf_3d=True)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"dxf_3d"`, `<stem>_disegni_3d.dxf` in the coordinates of the survey, with `dxf_3d`; + `"ortho"` with `raster`): DXF in `(u, v)` (layers US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG at 1:`scale` over the orthophoto, PNG, the GeoPackage unfolded (table `frame` with the plane; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, no CRS, with a `geom_world` WKT column) and the GeoPackage in 3D on the survey |
 | `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | the drawings placed on the survey in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` of a section), in the CRS of the elevation (`entry["crs"]`); written with Z into an open GeoPackage |
 | `io.qgis_link.LiveLink.write_elevations({id: (crs, tables)})`, `elevation_tables()` | those tables in the live GeoPackage as `prospetto_<id>_<name>` (one-way), also read by the RustGIS link (`RustGisLink.refresh_elevations()`) |
 | `io.qgis_link.PLAN_TABLES`, `two_way_tables()`, `plan_identities(layers)` | the tables of the other drawings of the plan (`poligoni`, `curve`, `linee`, `punti`), read back by `LiveLink.read_changes()` like the two-way ones; every table read back; `{ppg_id: (table, layer, attributes)}` of the features of the layers of the 2D view as `LiveLink.write` identifies their rows. A layer given to `LiveLink.write` with `"sent": False` (hidden in the *Layer* pane) is held: identified with the others, its rows leave the file and its record (nothing read back as deleted) until it is sent again; the free drawings of a layer not visible (`free_drawings.set_layer(..., visible=False)`) likewise; `RasterView.layer_shown(name, shown)` is emitted when a layer is shown or hidden. The window keeps the edits of the layers it does not draw itself in `chunk.meta["plan_edits"]` (`{layer: {"rev", "changed", "deleted", "added"}}`) |
@@ -1817,6 +1817,34 @@ The window keeps the plan's drawings in `units`, `quote`, `probe_points` and `st
 the elevation shown in `frame_units`, `frame_quote`, `frame_points` and `frame_stones`; the drawing tools, the layer
 redraw and Modifica > Annulla work on the sets shown (`shown_units`...). The QField package carries the plan drawings
 only; the QGIS live link adds the elevations' drawings in 3D.
+
+`engine.elevation_drawings` (since 1.9.1) reads and changes the drawings of an elevation outside the window - for
+plugins, scripts and the command line. The stored format is the one above (`frames[<id>]`: `units`, `quote`,
+`points`, `lines`, `stones` `{<id>: [WKT]}`); units, lines and stones lie on the plane (`d` = 0), spot
+heights and measuring points on the surface (their `x`, `y` and height). The frames are in the system the elevation
+was made in, `entry["crs"]`.
+
+| Call | Description |
+| --- | --- |
+| `entries(chunk)`, `entry_of(chunk, id)`, `frame_of(entry)` | the elevations of the chunk, one by id, its plane or cylinder |
+| `world_of_uv(entry, uv, d=0.0)`, `uv_of(entry, xyz)` | `(u, v)` (+ depth) to world points `(N, 3)`, and back to `(u, v, d)` |
+| `surface_depths(chunk, entry, uv)` | the depth of the surface (the relief) at each `(u, v)`; NaN where it has none |
+| `drawings(chunk, id, world=False)` | the drawings as records with shapely geometries in `(u, v)` (`units`: `id`, `us`, `area`, `tipo`, `sito`, `layer`, `attributes`, `geometry`; `quote`, `points`: `id`, `u`, `v`, `geometry`, `record`; `lines`: `id`, `kind`, `attributes`, `geometry`; `stones`: `n`, `geometry`), with `world` (Z, the system of the elevation) when asked; copies |
+| `counts(chunk, id)`, `has_drawings(chunk, id)` | how many of each kind |
+| `add_units(chunk, id, units)` | `UnitPolygon`s in `(u, v)` into the drawings of the elevation (not the one the window shows: `Context.add_units(..., elevation=)` handles both) |
+| `take_frame(chunk, id)`, `give_frame(chunk, id, data)` | the drawings out of the chunk and back (a removal of the elevation: `core.removal` and `engine.elevation.remove_elevation` do it) |
+| `transfer(chunk, source, target, copy_=True, surface=True)` | the drawings of one elevation given to another through their world points (on the surface of the source where it has a relief); spot heights keep their world point |
+| `migrate_legacy(chunk)` | the drawings of the projects before 1.7.0 moved from the plan to their elevation (called by `Document` on open, in memory); returns how many moved and how many fit several elevations (those stay) |
+| `write_dxf_3d(chunk, entry, path)` | the drawings in 3D as a DXF (3D polylines and points) in the system of the elevation |
+| `world_features(chunk, eids=None, data=None)` | the drawings as 3D features (`id`, `kind`, `xyz`, `elevation`) for the 3D view (`ModelView.set_guests`) |
+| `write_snapshot(gpkg)`, `read_unfolded(gpkg)`, `apply_unfolded(chunk, id, gpkg)` | the unfolded GeoPackage of *Apri il prospetto in QGIS*: what was written, what QGIS changed since (`changed`, `added`, `deleted` per kind), those changes into the drawings |
+
+The window shows them in the 3D view (*Vista > Disegni dei prospetti nella vista 3D*, `ModelView.set_guests`, read
+only), lists them under their elevation in the workspace (rows of kind `"elevation_drawings"`), reads the QGIS project
+of the elevation back (*QGIS > Rileggi il prospetto da QGIS*) and gives the drawings of one elevation to another
+(*Disegni da un altro prospetto...*). Plugins: `Context.shown_elevation()`, `Context.elevations(chunk=None)`,
+`Context.elevation_drawings(elevation=None, chunk=None, world=False)` and `Context.add_units(..., elevation=id)`
+([Plugins](plugins.md)).
 
 ## Masks of the photos
 
