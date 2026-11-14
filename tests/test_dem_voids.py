@@ -254,9 +254,8 @@ def test_interface_fills_the_voids_and_undo_brings_the_dem_back(trench, monkeypa
     px, py = t.c + 125.5 * t.a, t.f + 105.5 * t.e
     assert "interpolata" in w._interpolated_note(px, py)
     assert w._interpolated_note(t.c + 10.5 * t.a, t.f + 10.5 * t.e) == ""
-    assert w.history.undo()
-    w._probe_reset()
+    w.undo()  # as Modifica > Annulla: the readout above left the DEM open, which Windows would not replace
     assert np.isnan(_read(ch.dem_path)[100:110, 120:130]).all()
     assert dem_voids.mask_path(ch) is None and w._interpolated_note(px, py) == ""
-    assert w.history.redo()
+    w.redo()
     assert np.isfinite(_read(ch.dem_path)[100:110, 120:130]).all() and dem_voids.mask_path(ch) is not None

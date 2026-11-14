@@ -6964,6 +6964,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
+        self._probe_reset()  # a step that brings files back: Windows does not replace a DEM the readout holds open
         try:
             text = self.history.undo() if self.history is not None else None
         except ScriptChanged as exc:
@@ -6979,6 +6980,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
+        self._probe_reset()  # a step that brings files back: Windows does not replace a DEM the readout holds open
         try:
             text = self.history.redo() if self.history is not None else None
         except ScriptChanged as exc:
