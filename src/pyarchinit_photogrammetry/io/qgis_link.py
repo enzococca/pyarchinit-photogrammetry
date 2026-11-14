@@ -1227,8 +1227,10 @@ def group(name):
 
 def key_of(lyr):
     """The identity the program gives its layers (io.qgis_styles.vector_key / raster_key)."""
-    if lyr.type() == lyr.RasterLayer:
+    if isinstance(lyr, QgsRasterLayer):
         return "raster|" + lyr.name()
+    if not isinstance(lyr, QgsVectorLayer):
+        return None
     if lyr.providerType() != "ogr":
         return None
     parts = QgsProviderRegistry.instance().decodeUri("ogr", lyr.source())
