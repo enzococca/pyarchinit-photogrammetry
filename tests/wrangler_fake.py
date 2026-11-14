@@ -21,6 +21,7 @@ SCRIPT = r'''
 import hashlib, json, os, sys
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")  # as the real one (Node): on Windows a pipe would be cp1252, no emoji
 home = Path(os.environ["FAKE_WRANGLER_DIR"])
 modes = set(filter(None, os.environ.get("FAKE_WRANGLER_MODE", "").split(",")))
 args = sys.argv[1:]
