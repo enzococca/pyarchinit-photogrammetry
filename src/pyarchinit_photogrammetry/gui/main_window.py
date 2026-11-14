@@ -5790,7 +5790,19 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
                 self._add_captures(paths, recursive=folder)
                 return
         self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder, progress=p),
-                      lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
+                      self._photos_added)
+
+    def _photos_added(self, cams) -> None:
+        """The status bar says how many photos were added; the log warns about the cameras whose photos
+        say no focal length (it is guessed and the alignment estimates it)."""
+        self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000)
+        keys = {c.sensor_key for c in cams}
+        for s in self.chunk.sensors.values():
+            if s.key in keys and s.focal_guessed:
+                self.log_pane.warning(tr(
+                    "{0}: le foto non dicono la focale; parte da {1} px (un {2} mm su una camera 35 mm) e "
+                    "l'allineamento la stima. Se la si conosce, scriverla nella calibrazione della camera.",
+                    s.label, f"{s.focal_px:.0f}", f"{36.0 * s.focal_px / max(s.width, s.height):.0f}"))
 
     # ---------------------------------------------------------------- GNSS positions of the photos
     def _gnss_changed(self) -> None:

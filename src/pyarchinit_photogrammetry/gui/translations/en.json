@@ -3553,7 +3553,8 @@
   "Il modello non è in metri": "The model is not in metres",
   "La scala la danno le posizioni delle foto: togli i loro riferimenti o disattivali": "The positions of the photos give the scale: remove their references or switch them off",
   "Il chunk è allineato a {0}: scala il chunk di riferimento, quelli allineati lo seguono": "The chunk is aligned to {0}: scale the reference chunk, the chunks aligned to it follow",
-  "Scala: clic sul primo e sul secondo punto della distanza nota - Esc annulla": "Scale: click the first and the second point of the known distance - Esc cancels"
+  "Scala: clic sul primo e sul secondo punto della distanza nota - Esc annulla": "Scale: click the first and the second point of the known distance - Esc cancels",
+  "{0}: le foto non dicono la focale; parte da {1} px (un {2} mm su una camera 35 mm) e l'allineamento la stima. Se la si conosce, scriverla nella calibrazione della camera.": "{0}: the photos do not say their focal length; it starts from {1} px (a {2} mm lens on a 35 mm camera) and the alignment estimates it. If you know it, write it in the camera calibration."
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
