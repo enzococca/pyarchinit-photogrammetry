@@ -364,7 +364,7 @@ def overlap(doc: "Document", a, b, margin: float = MARGIN) -> dict:
     grown = cv2.dilate(vb.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)) > 0 \
         if radius > 0 else vb
     smaller = max(1, min(int(va.sum()), int(vb.sum())))
-    return {"share": float(both.sum() / smaller), "share_margin": float((va & grown).sum() / smaller),
+    return {"share": float(both.sum() / smaller), "share_margin": min(1.0, float((va & grown).sum() / smaller)),
             "area": float(both.sum() * cell * cell)}
 
 

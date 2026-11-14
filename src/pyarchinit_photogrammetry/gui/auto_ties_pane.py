@@ -199,8 +199,9 @@ class AutoTiesPanel(QWidget):
             use.setData(Qt.ItemDataRole.UserRole, list(key))
             self.table.setItem(i, 0, use)
             self.table.setItem(i, 1, QTableWidgetItem(f"{p['b_label']} → {p['a_label']}"))
-            share = i18n.number(100 * p["share_margin"], 0) + " %"
-            self.table.setItem(i, 2, QTableWidgetItem(share))
+            share = QTableWidgetItem(i18n.number(100 * p["share"], 0) + " %")
+            share.setToolTip(tr("Con lo scarto della posizione: {0} %", i18n.number(100 * p["share_margin"], 0)))
+            self.table.setItem(i, 2, share)
             cells = ["", "", "", "", "", "", ""]
             if r is not None:
                 cells = [str(r.matches), str(r.inliers), str(r.refined)]
