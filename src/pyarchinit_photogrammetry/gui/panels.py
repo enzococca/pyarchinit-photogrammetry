@@ -155,6 +155,8 @@ class WorkspaceTree(QTreeWidget):
     rename_requested = Signal(str, object, object)  # kind, chunk, payload of the current item
     populated = Signal()  # filled again (the selection is gone)
     shown_in_3d = Signal(object, bool)  # a chunk ticked or unticked: shown in the 3D view with the active one
+    group_shown_3d = Signal(str, bool)  # the box of a group of chunks: all its chunks shown or hidden
+    chunks_dropped = Signal(object, object, object)  # [chunk keys], group id or None, before chunk key or None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,6 +174,11 @@ class WorkspaceTree(QTreeWidget):
         self._plugin_nodes: list[tuple[QTreeWidgetItem, tuple]] = []  # their nodes, by plugin, chunk and labels
         self._filling = False
         self.itemChanged.connect(self._item_changed)
+        # chunks dragged into a group of chunks (or out of it, onto the project): the window changes the groups
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
 
     @staticmethod
     def _place(item) -> tuple | None:
@@ -211,6 +218,9 @@ class WorkspaceTree(QTreeWidget):
         if self._filling:
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data and data[0] == "chunk_group":  # a group: all its chunks (partly ticked by a click: shown)
+            self.group_shown_3d.emit(data[2], item.checkState(0) != Qt.CheckState.Unchecked)
+            return
         if not data or data[0] != "chunk" or data[1] is None:
             return
         shown = item.checkState(0) == Qt.CheckState.Checked
@@ -233,6 +243,9 @@ class WorkspaceTree(QTreeWidget):
         from . import theme
 
         dark = theme.is_dark()
+        from . import chunk_groups
+
+        group_parent, groups_finish = chunk_groups.tree_nodes(self, document, root)
         for ch in document.chunks:
             n_al = len(ch.aligned_cameras)
             active = tr("  [attivo]") if ch is document.chunk else ""
@@ -259,7 +272,7 @@ class WorkspaceTree(QTreeWidget):
             ci.setFont(0, f)
             if not ch.enabled:
                 ci.setForeground(0, QColor(PALETTE["grey"]))
-            root.addChild(ci)
+            group_parent(ch).addChild(ci)
             info = QTreeWidgetItem([tr("Sistema di riferimento: {0}", ch.crs)])
             info.setIcon(0, icon("crs"))
             info.setData(0, Qt.ItemDataRole.UserRole, ("crs", ch, None))
@@ -481,6 +494,7 @@ class WorkspaceTree(QTreeWidget):
                 cnode.setExpanded(True)
             self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
+        groups_finish()
         merged = self._mosaics_item(document)
         if merged is not None:
             root.addChild(merged)
@@ -557,7 +571,7 @@ class WorkspaceTree(QTreeWidget):
     @staticmethod
     def _renameable(data) -> bool:
         """A chunk, a kept version, a product with versions (its active version is renamed)."""
-        return bool(data) and (data[0] in ("chunk", "version") or
+        return bool(data) and (data[0] in ("chunk", "version", "chunk_group") or
                                (data[0] == "product" and data[2] in ("point_cloud", "model", "dem", "orthomosaic")))
 
     def event(self, event) -> bool:
@@ -712,6 +726,35 @@ class WorkspaceTree(QTreeWidget):
             tip += "\n" + tr("Nuvola densa corretta per la rifrazione")
         it.setToolTip(0, tip + "\n" + tr("Doppio clic: Livello dell'acqua e rifrazione"))
         return it
+
+    # ---------------------------------------------------------------- chunks dragged into groups
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        from . import chunk_groups
+
+        if event.source() is self and chunk_groups.dragged_chunks(self):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        from . import chunk_groups
+
+        if event.source() is self and chunk_groups.dragged_chunks(self) and \
+                chunk_groups.drop_target(self, event) is not False:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        """Never a move of the nodes by Qt: the window puts the chunks into the group and fills the tree again."""
+        from . import chunk_groups
+
+        target = chunk_groups.drop_target(self, event) if event.source() is self else False
+        keys = [c.key for c in chunk_groups.dragged_chunks(self)]
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+        if target is not False and keys:
+            self.chunks_dropped.emit(keys, target[0], target[1] if target[1] not in keys else None)
 
     def _double(self, item, _col) -> None:
         data = self._data(item)
