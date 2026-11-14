@@ -1517,6 +1517,9 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         self.a_qgis_live.setChecked(False)
         self.a_qgis_live.toggled.connect(self._qgis_live_toggled)
         m.addAction(self.a_qgis_live)
+        self._act(m, tr("Ripristina gli stili predefiniti in QGIS..."), self.restore_qgis_styles, icon_name="refresh",
+                  tip=tr("I layer del programma nel progetto QGIS riprendono i colori del programma; gli stili fatti "
+                         "a mano in QGIS, conservati finora, vengono dimenticati"))
         self._act(m, tr("Apri il prospetto in QGIS"), self.open_elevation_in_qgis, icon_name="view_ortho")
         self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
@@ -12807,7 +12810,8 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         except Exception:  # noqa: BLE001 - no project yet, a file busy: nothing to say
             return
         if missing and missing != self._qgis_missing_said:
-            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo riscrive con i layer di adesso",
+            text = tr("QGIS: il progetto aperto non mostra ancora {0}: «Apri in QGIS» lo aggiorna con i layer di adesso "
+                      "(gli stili restano)",
                       ", ".join(f"«{n}»" for n in missing[:6]) + ("…" if len(missing) > 6 else ""))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
@@ -14251,9 +14255,28 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         if not self.run_task("Sezione", job, done, refresh=False, save=False):
             self._qgis_waiting["sections"] += sdicts
 
-    def open_in_qgis(self) -> None:
+    def restore_qgis_styles(self) -> None:
+        """*Ripristina gli stili predefiniti*: the styles made by hand in QGIS for the layers of the program forgotten,
+        those layers given the program's style in the QGIS project (the user's other layers left as they are)."""
+        from ..io import qgis_styles
+
+        kept = qgis_styles.kept_styles(self._qgis_project())
+        text = tr("I layer del programma nel progetto QGIS riprendono gli stili del programma. Gli altri layer del "
+                  "progetto restano come sono. Salva prima il progetto in QGIS e chiudilo.")
+        if kept:
+            text += "\n\n" + tr("Stili fatti a mano che verranno dimenticati: {0}", ", ".join(kept[:12])
+                                 + ("…" if len(kept) > 12 else ""))
+        r = message(self, "question", tr("Ripristina gli stili predefiniti"), text,
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.No)
+        if r == QMessageBox.StandardButton.Yes:
+            self.open_in_qgis(restyle=True)
+
+    def open_in_qgis(self, restyle: bool = False) -> None:
         """QGIS project with orthomosaic, DEM and the drawn layers, which QGIS reloads every
-        second while the drawings change here."""
+        second while the drawings change here. The project of the user is kept: opened as it is when it shows every
+        layer, updated in place otherwise, the styles made by hand in QGIS kept (:mod:`..io.qgis_styles`);
+        ``restyle``: the program's layers given the program's style again."""
         from ..io import qgis_link
 
         q = qgis_link.find_qgis()
@@ -14274,7 +14297,7 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
         def job(p):
             p(0.2, "Creazione del progetto QGIS")
             rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q,
-                                          extra_vectors=extra_vectors)
+                                          extra_vectors=extra_vectors, restyle=restyle)
             qgis_link.open_in_qgis(project, q)
             return rep
 
@@ -14285,6 +14308,13 @@ class MainWindow(FreeDrawingActions, ModelMeasureActions, QMainWindow):
             self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
                                   project, len(rep['vectors']), len(rep['rasters']))
                                + (tr("; non validi: {0}", ', '.join(bad)) if bad else ""))
+            if rep.get("kept"):
+                self.log_pane.info(tr("Progetto QGIS aperto com'è: mostra già tutti i layer, stili compresi"))
+            elif rep.get("added") or rep.get("removed") or rep.get("restyled"):
+                self.log_pane.info(tr("Progetto QGIS aggiornato: aggiunti {0}, tolti {1}, stili ripristinati {2}; gli "
+                                      "altri layer e i loro stili restano come sono",
+                                      len(rep.get("added") or []), len(rep.get("removed") or []),
+                                      len(rep.get("restyled") or [])))
             self.statusBar().showMessage(tr("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo"),
                                          15000)
 
