@@ -41,7 +41,7 @@ main { flex: 1; display: flex; min-height: 0; }
 a.download { display: inline-block; margin: 4px 0; color: var(--mark); }
 #view3d { position: relative; overflow: hidden; touch-action: none; }
 #view3d canvas { display: block; width: 100%; height: 100%; }
-#tabs { display: flex; gap: 4px; }
+#tabs { display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
 #tabs[hidden] { display: none; }
 .tab { padding: 3px 12px; }
 h2 { margin: 14px 0 6px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--soft); }
@@ -73,4 +73,6 @@ footer { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); 
   main { flex-direction: column-reverse; }
   #side { width: auto; max-height: 42%; border-right: 0; border-top: 1px solid var(--line); }
   header p { display: none; }
+  header { flex-wrap: wrap; align-items: center; }
+  .tab { padding: 3px 8px; }
 }
