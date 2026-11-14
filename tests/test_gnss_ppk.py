@@ -2869,11 +2869,11 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     # a note in sight, not a tooltip: the phase-centre offset of the antenna of its header is applied from igs20.atx,
     # downloaded once (on by default); without it, it is not applied and the heights can be too low
     assert dlg.atx_download.isChecked() and dlg.antenna_warning.isVisibleTo(dlg)
-    assert dlg.antenna_warning.text().startswith("Lo scostamento del centro di fase dell'antenna TRM29659.00 della "
+    assert dlg.antenna_warning.text().startswith("L'offset del centro di fase dell'antenna TRM29659.00 della "
                                                  "base viene applicato con le calibrazioni dell'IGS (igs20.atx)")
     dlg.atx_download.setChecked(False)
     assert dlg.antenna_warning.text().startswith(
-        "Lo scostamento del centro di fase dell'antenna TRM29659.00 della base non viene applicato")
+        "L'offset del centro di fase dell'antenna TRM29659.00 della base non viene applicato")
     assert "più basse di qualche centimetro" in dlg.antenna_warning.text()
     assert dlg.values()["atx"] == "auto"
     dlg.atx_download.setChecked(True)
@@ -3325,7 +3325,7 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     assert any(re.fullmatch(rf"Base 0759 \(antenna TRM29659\.00\): posizione dell'intestazione RINEX, sistema "
                             rf"sconosciuto \(WGS 84\); a 3,\d km dal volo; soluzione {run}", t) for t in logged), logged
     assert any(t.startswith("la posizione della base 0759 viene dalla sua intestazione RINEX") for t in logged)
-    assert any(t.startswith("lo scostamento del centro di fase dell'antenna TRM29659.00 della base 0759 non viene "
+    assert any(t.startswith("l'offset del centro di fase dell'antenna TRM29659.00 della base 0759 non viene "
                             "applicato")
                for t in logged)
     assert any(t.startswith(f"3 photos were taken where the solution {run} has no position") for t in logged)

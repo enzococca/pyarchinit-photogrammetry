@@ -350,7 +350,7 @@ class GnssPane(QWidget):
 
         heads = [(tr("Volo"), tr("Un volo finisce con una pausa di oltre 20 minuti; le foto senza data sono nel volo 0")),
                  (tr("Foto"), tr("Le foto del volo")),
-                 (tr("Fix"), tr("Foto con una posizione RTK fissata")),
+                 (tr("Fix"), tr("Foto con una posizione RTK fix")),
                  (tr("Float"), tr("Foto con una posizione RTK float")),
                  (tr("Singola"), tr("Foto con una posizione GNSS singola, senza correzioni")),
                  (tr("Senza RTK"), tr("Foto con una posizione e nessun dato RTK (il GPS dell'EXIF)")),
@@ -372,7 +372,7 @@ class GnssPane(QWidget):
         step(3, "quality", tr("Qualità per volo"), [], table=self.table)
 
         self.c_only_fix = QCheckBox(tr("Usa solo le foto con posizione fix"))
-        self.c_only_fix.setToolTip(tr("Disattiva i riferimenti delle foto la cui posizione non è un RTK fissato: non "
+        self.c_only_fix.setToolTip(tr("Disattiva i riferimenti delle foto la cui posizione non è un fix RTK: non "
                                       "contano più nell'allineamento e nell'ottimizzazione. Togli la spunta per "
                                       "riattivarli (quelli che avevi disattivato a mano restano disattivati)"))
         step(4, "only_fix", tr("Solo le posizioni fix"), [self.c_only_fix])

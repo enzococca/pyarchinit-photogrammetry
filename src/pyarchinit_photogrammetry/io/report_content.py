@@ -434,7 +434,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "calibration_without_radome": (", la voce senza il radome dell'intestazione",
                                    ", the entry without the radome of the header"),
     "calibration_missing": ("non calibrata: {0} non ha l'antenna {1}", "not calibrated: {0} has no entry for the antenna {1}"),
-    "calibration_no_l1": ("non calibrata: la voce {0} di {1} non ha gli scostamenti di L1 (G01)",
+    "calibration_no_l1": ("non calibrata: la voce {0} di {1} non ha gli offset di L1 (G01)",
                           "not calibrated: the entry {0} of {1} has no offsets of L1 (G01)"),
     "calibration_unnamed": ("non calibrata: l'intestazione RINEX non dice il tipo dell'antenna",
                             "not calibrated: the RINEX header does not name the antenna type"),

@@ -440,7 +440,7 @@ PPK_MESSAGES = {  # what the PPK and the RINEX reader write, and how the windows
     "the phase-centre offset of the antenna TRM57971.00 NONE of the base base.25o is not applied: no antenna "
     "calibrations were given to RTKLIB, so the heights can be a few centimetres too low, more than 10 cm with some "
     "choke-ring antennas":
-        "lo scostamento del centro di fase dell'antenna TRM57971.00 NONE della base base.25o non viene applicato: a "
+        "l'offset del centro di fase dell'antenna TRM57971.00 NONE della base base.25o non viene applicato: a "
         "RTKLIB non sono state date calibrazioni delle antenne, quindi le quote possono risultare più basse di "
         "qualche centimetro, oltre 10 cm con alcune antenne choke ring",
     "the navigation file brdc.25p beside your base mine.25o or the station ROMA.25o cannot be read (and 2 more): "
