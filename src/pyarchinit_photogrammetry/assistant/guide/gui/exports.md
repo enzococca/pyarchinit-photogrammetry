@@ -67,6 +67,31 @@ workbook too.
 
 The plugins add their own formats to this menu.
 
+### Web site (Publish on the web)
+
+*File > Export > Web site (Publish on the web)...* opens the pane **Publish on the web** (also from *View > Panes*,
+closable, movable and floatable as the other panes): the survey as a static web site - orthophoto, DEM with its
+shaded relief, stratigraphic units, drawings and 3D model on a page any hosting publishes, what `ppg web build` writes
+(see [A survey as a web site](../api.md#a-survey-as-a-web-site)). Four steps, each with its state beside its title
+(*to do*, *done*, *to redo*, *running*, *failed*):
+
+1. **Choose the contents**: the chunks (by default every chunk with something to publish, the active one alone
+   when they are in different reference systems), the products (only those a ticked chunk has can be ticked), title,
+   description, languages (Italian, English) and the coordinates: **Local frame** (default: shifted to the centre of
+   the survey, no reference system - nothing in the folder says where the site is) or **Real coordinates**, which the
+   pane flags in red: the pages then write the real position of the site. *Advanced*: the WebP quality of the
+   orthophoto (85) and the texture size of the model (4096 px, or the vertex colours alone). The folder of the site
+   (by default `<project>_sito_web` beside the project file) must be new, empty or a site built before: a folder with
+   other files is refused and never touched.
+2. **Build**: in the background, with its progress and *Cancel*; the steps in the Log pane, the size of the site at
+   the end. The site is kept with the project (its folder, relative to the project when it lies beside it, the
+   choices and the time) and appears in the Workspace as **Web site**; when a product it holds is built again or
+   changed (or its chunk is moved) the step and the tree say *to redo*.
+3. **Preview**: a server on this computer alone (127.0.0.1, a free port) and the page in the browser; the pane shows
+   the address with *Open in the browser*, *Copy address* and *Stop*. Closing the project or the window stops it.
+4. **Publish**: not available from the program yet. The folder of the site is copied as it is to any static hosting
+   (*Open the folder*).
+
 ### Paradata
 
 Every export of the cloud, the model, the DEM or the orthophoto gets a `<file>.prov.jsonld` beside it, and so does the
