@@ -1060,6 +1060,16 @@ o il modello della fotocamera), oppure una focale equivalente a 35 mm fino a 15 
 viene allineato con una sola focale (`RADIAL_FISHEYE`) a meno che una calibrazione non dica
 altrimenti. Le proiezioni lontane dall'asse non vengono più tagliate al riquadro pinhole.
 
+**Focale delle foto** (`Sensor.focal_source`): dall'equivalente 35 mm dell'EXIF (`exif`), altrimenti
+dalla focale in mm sulla dimensione del pixel del sensore (`FocalPlaneXResolution`, `exif_mm`;
+`io.exif.focal_px(info)`); le foto che non dicono né l'una né l'altra partono da un'ipotesi,
+`core.camera.FOCAL_GUESS` (0,85 volte il lato lungo, un 31 mm su una camera 35 mm: telefoni e droni
+sono più grandangolari, l'1,2 di COLMAP era troppo lungo per loro), `focal_source = "guess"`
+(`Sensor.focal_guessed`), un avviso nel registro e una riga nel report. Quando l'allineamento
+dall'ipotesi colloca meno del 90% delle foto viene rifatto da 0,75 e 1,4 volte (`engine.sfm.GUESSED_FOCAL_STARTS`)
+e si tiene quello che ne colloca di più (`chunk.meta["sfm"]["focal_guess"]`); dopo l'allineamento la
+focale è `aligned`.
+
 **`engine.panorama.add_panoramas(...)`** prende foto equirettangolari (larghezza doppia
 dell'altezza; le altre restano fuori) e scrive le facce di un cubo (`front`, `right`, `back`,
 `left`, `up`, `down`, o quelle in `faces`): foto pinhole di `fov` gradi (più di 90: le facce vicine
@@ -2116,7 +2126,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
 | `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
-| `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `rim_diameter_around` (diametro dell'orlo come mediana delle sezioni tutto intorno all'asse, usato quando l'orlo non segue un cerchio: una sola sezione può sbagliare di mezzo centimetro su una mesh fatta da foto), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
+| `archaeo.pottery` | `estimate_axis` (assi candidati dalle rette normali, robusto ad anse e facce di frattura, affinato con i centri delle sezioni su vasi interi e frammenti grandi, tenuto quello con il profilo più sottile; `sections=False` per le sole normali), `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato `rim_preserved_pct` e `rim_arc_deg` - i settori attorno al centro il cui punto più alto sta sul piano del labbro -, affidabilità), `rim_diameter_around` (diametro dell'orlo come mediana delle sezioni tutto intorno all'asse, usato quando l'orlo non segue un cerchio: una sola sezione può sbagliare di mezzo centimetro su una mesh fatta da foto), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
 | `engine.tin` | `build_tin`, `chunk_tin`, `tin_to_dem`, `contours`, `tin_contours`, `volume`, `tin_volume`, `export`, `read_landxml`, `report`, `triangulate`, `rasterize`, `contour_segments`, `prism_volume`, `Tin` |
 | `archaeo.breaklines` | `records`, `new_record`, `for_tin`, `as_arrays`, `write_lines`, `KINDS` |
