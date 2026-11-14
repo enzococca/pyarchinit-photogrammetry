@@ -2,7 +2,8 @@
 
 Works on whole vessels and on sherds. The rotation axis is estimated from the
 surface normals (on a surface of revolution every normal line meets the axis)
-or given explicitly (e.g. the turntable axis when the scan was referenced with
+and, on whole vessels and large sherds, from the centres of the sections across
+it, or given explicitly (e.g. the turntable axis when the scan was referenced with
 a turntable mat: ``axis=((0, 0, 0), (0, 0, 1))``).
 
 The drawing follows the usual convention: axis in the middle, section (profile,
