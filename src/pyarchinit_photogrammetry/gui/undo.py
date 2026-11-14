@@ -55,7 +55,7 @@ PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sect
               "plugins": "Dati dei plugin"}
 ABSORBED_PARTS = ("plugins",)  # a change of these made in the turn of the last entry: a part of that entry
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",
-                 "reconstruction": "Punti di legame", "model_textured": "Texture"}
+                 "reconstruction": "Punti di legame", "model_textured": "Texture", "dem": "DEM"}
 
 
 def _remove(path: Path) -> None:
