@@ -1569,6 +1569,9 @@ spazio tangente di un modello leggero è `engine.normalmap.light_model`.
 | --- | --- |
 | `chunk.edit_dem(polygon, method="plane", value=None, breaklines=None, keep_version=True, version_name=None)` | nuove quote per le celle dentro `polygon` (CRS del chunk) da quelle in un anello di tre celle intorno; restituisce `cells`, `dz_mean`, `dz_max`, `version` |
 | `engine.dem_edit.fill_area(...)` | lo stesso come funzione del modulo |
+| `chunk.fill_dem_voids(max_width=1.0, max_area=None, keep_version=True, version_name=None)` | i vuoti (buchi circondati da quote) fino a `max_width` m e `max_area` m2 (None: nessun limite) riempiti per interpolazione armonica dai bordi, a finestre; il terreno fuori dai dati e i vuoti più grandi restano vuoti; restituisce `holes`, `cells`, `area`, `skipped`, `skipped_cells`, `skipped_area`, `version`; anche `chunk.build_dem(..., fill_voids=larghezza, fill_voids_area=area)` |
+| `engine.dem_voids.mask_path(chunk)` / `mask_stats(chunk)` / `interpolated_at(chunk, x, y)` | la maschera delle celle interpolate del DEM in uso (uint8, 1 tra i punti alla costruzione, 2 vuoti riempiti, 0 misurate; legata al suo DEM dal tag GeoTIFF `PPG_INTERPOLATED`), i suoi conteggi, il valore in un punto |
+| `engine.dem_voids.fill_voids_array(dem, resolution, max_width, max_area)` | lo stesso su un array (NaN = vuoto): `(dem, maschera dei riempiti, info)` |
 | `engine.dem_edit.new_heights(known, target, method, value=None)` | la sola interpolazione |
 
 **`chunk.edit_dem(...)`**: `plane` (il piano che meglio si adatta), `linear` (triangolazione

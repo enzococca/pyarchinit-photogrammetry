@@ -156,7 +156,8 @@ face; the view *Textured model* shows the whole model.
 
 ![The Build DEM window](../img/gui/dialog-dem.png)
 
-*Workflow > Build DEM...*: the source data, the resolution (automatic by default) and *Interpolate the gaps*.
+*Workflow > Build DEM...*: the source data, the resolution (automatic by default), *Fill the cells without points
+between nearby points* and *Interpolate the voids* up to a width and an area ([voids of the DEM](#voids-of-the-dem)).
 When the dense cloud is classified the window lists its classes with their points: ticking only *Ground* gives a
 terrain model (DTM), with the gaps under what is left out interpolated; contours and volumes then use it. Noise
 (classes 7 and 18) never makes a DEM or a mesh.
@@ -529,6 +530,23 @@ in the menu of a selected polygon: the heights inside the area come again from t
 it, a linear interpolation, IDW or a constant height - and the selected lines can be breaklines (the edge of a
 wall or of a step keeps its heights). Trees, tents, vehicles, spoil heaps or holes of the reconstruction leave
 contour lines and volumes; the DEM as it was stays among the versions (compare it, make it active again).
+
+## Voids of the DEM
+
+*Tools > Interpolate the voids of the DEM...* (or the two *Interpolate the voids* fields of *Build DEM*): the holes
+without heights enclosed by heights - a puddle, a shadow, a gap of the reconstruction - get heights from their
+edges, the smooth surface that joins the edge (harmonic interpolation: a plane stays a plane, no height goes above
+or below those of the edge). Only holes up to the chosen **width** (m, the widest part) and **area** (m2) are
+filled; larger voids, the empty ground around the survey and the bays open to it stay empty: nothing is
+extrapolated outside the data. The DEM is read and written window by window, so a large DEM stays within memory.
+
+The interpolated cells stay marked in a mask kept with the DEM (`dem_interpolated_<id>.tif` in the chunk folder,
+1 = filled between points when the DEM was built, 2 = void filled): the height under the cursor and of a measuring
+point says *(interpolated)* (measuring points get the field `z_interp`), a spot height read there says so in the
+status bar, *Export DEM* writes `<name>_interpolata.tif` beside the DEM and the report gives the share of
+interpolated heights. *Edit > Undo* and the versions bring back the DEM as it was, with its own mask. This is not
+the hole filling of the model (*Height field* with holes closed, `ppg process --fill-holes`) nor the small holes of
+the orthophoto. Command line: `ppg dem-fill-voids scavo.ppg --max-width 1`, `ppg dem scavo.ppg --fill-voids 1`.
 
 ## DEM coregistration
 

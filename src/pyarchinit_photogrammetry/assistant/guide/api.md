@@ -1526,6 +1526,9 @@ under a drawing in QGIS; the normal map in tangent space of a light model is
 | --- | --- |
 | `chunk.edit_dem(polygon, method="plane", value=None, breaklines=None, keep_version=True, version_name=None)` | new heights for the cells inside `polygon` (chunk CRS) from those in a ring of three cells around it; returns `cells`, `dz_mean`, `dz_max`, `version` |
 | `engine.dem_edit.fill_area(...)` | the same as a module function |
+| `chunk.fill_dem_voids(max_width=1.0, max_area=None, keep_version=True, version_name=None)` | the voids (holes enclosed by heights) up to `max_width` m and `max_area` m2 (None: no limit) filled by harmonic interpolation from their edges, window by window; the ground outside the data and larger voids stay empty; returns `holes`, `cells`, `area`, `skipped`, `skipped_cells`, `skipped_area`, `version`; also `chunk.build_dem(..., fill_voids=width, fill_voids_area=area)` |
+| `engine.dem_voids.mask_path(chunk)` / `mask_stats(chunk)` / `interpolated_at(chunk, x, y)` | the mask of the interpolated cells of the DEM in use (uint8, 1 between points at the build, 2 voids filled, 0 measured; tied to its DEM by the GeoTIFF tag `PPG_INTERPOLATED`), its counts, the value at a point |
+| `engine.dem_voids.fill_voids_array(dem, resolution, max_width, max_area)` | the same on an array (NaN = empty): `(dem, filled mask, info)` |
 | `engine.dem_edit.new_heights(known, target, method, value=None)` | the interpolation alone |
 
 **`chunk.edit_dem(...)`**: `plane` (the best-fit plane), `linear` (triangulation of the ring, IDW
