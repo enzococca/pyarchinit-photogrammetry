@@ -18,11 +18,30 @@ main { flex: 1; display: flex; min-height: 0; }
   width: 290px; flex: none; overflow-y: auto; padding: 4px 14px 10px; background: var(--paper);
   border-right: 1px solid var(--line);
 }
-#map, #view3d { flex: 1; min-width: 0; background: #dfe3e6; }
-#map[hidden], #view3d[hidden] { display: none; }
+#map, #view3d, #sections, #extra { flex: 1; min-width: 0; background: #dfe3e6; }
+#map[hidden], #view3d[hidden], #sections[hidden], #extra[hidden], #tab-3d[hidden], #tab-sections[hidden],
+#measure-box[hidden], #info-box[hidden], #fit[hidden], #dates[hidden] { display: none; }
+#sections { display: flex; flex-direction: column; }
+#section-title { margin: 0; padding: 6px 12px; background: var(--paper); border-bottom: 1px solid var(--line);
+  color: var(--soft); }
+#section-map { flex: 1; min-height: 0; }
+#extra { overflow-y: auto; padding: 12px 18px; background: var(--ground); }
+.extra-part h2 { margin-top: 4px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.card img { display: block; width: 100%; height: auto; border-radius: 4px; margin-bottom: 6px; }
+.plugin-page { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px;
+  max-width: 900px; }
+.plugin-page img { max-width: 100%; height: auto; }
+#dates { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 14px; background: var(--paper);
+  border-bottom: 1px solid var(--line); }
+#dates input[type=range] { width: 160px; }
+.dates-title { color: var(--soft); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.section-item { display: block; width: 100%; text-align: left; margin: 2px 0; }
+a.download { display: inline-block; margin: 4px 0; color: var(--mark); }
 #view3d { position: relative; overflow: hidden; touch-action: none; }
 #view3d canvas { display: block; width: 100%; height: 100%; }
-#tabs { display: flex; gap: 4px; }
+#tabs { display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
 #tabs[hidden] { display: none; }
 .tab { padding: 3px 12px; }
 h2 { margin: 14px 0 6px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--soft); }
@@ -54,4 +73,6 @@ footer { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); 
   main { flex-direction: column-reverse; }
   #side { width: auto; max-height: 42%; border-right: 0; border-top: 1px solid var(--line); }
   header p { display: none; }
+  header { flex-wrap: wrap; align-items: center; }
+  .tab { padding: 3px 8px; }
 }

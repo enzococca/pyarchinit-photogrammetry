@@ -93,6 +93,13 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "sensor_photos": ("Foto", "Photos"),
     "focal_px": ("Focale", "Focal length"),
     "pixel_size": ("Dimensione del pixel", "Pixel size"),
+    "focal_source": ("Origine della focale", "Focal length from"),
+    "focal_exif": ("EXIF (equivalente 35 mm)", "EXIF (35 mm equivalent)"),
+    "focal_exif_mm": ("EXIF (mm e dimensione del pixel)", "EXIF (mm and pixel size)"),
+    "focal_guess": ("ipotizzata: le foto non la dicono, l'allineamento la stima",
+                    "a guess: the photos do not say it, align to estimate it"),
+    "focal_aligned": ("stimata dall'allineamento (le foto non la dicono)",
+                      "estimated by the alignment (the photos do not say it)"),
     "fixed": ("Calibrazione fissa", "Fixed calibration"),
     "h_parameter": ("Parametro", "Parameter"),
     "h_value": ("Valore", "Value"),
@@ -1389,6 +1396,8 @@ def _sensors(chunk, w: Words) -> Section | None:
                 (w("sensor_photos"), w.integer(count.get(s.key, 0))), (w("focal_px"), focal)]
         if s.pixel_size_mm:
             rows.append((w("pixel_size"), f"{w.number(s.pixel_size_mm * 1000, 2)} µm"))
+        if s.focal_source in ("exif", "exif_mm", "guess", "aligned"):
+            rows.append((w("focal_source"), w("focal_" + s.focal_source)))
         rows.append((w("fixed"), w.yes_no(s.fixed)))
         sub.blocks.append(KeyValues(rows))
         labels = names.get(s.model, [f"p{i}" for i in range(len(s.params))])

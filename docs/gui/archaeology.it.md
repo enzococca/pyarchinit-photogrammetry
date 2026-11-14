@@ -194,11 +194,17 @@ scelta. Vedi [Coregistrazione dei DEM](processing.md#coregistrazione-dei-dem).
 
 *Strumenti > Profilo ceramico da mesh...*: scegli la mesh di un vaso o di un frammento (OBJ, PLY, STL), la scala, le
 unità e l'asse (stimato dalle normali della superficie, oppure la Z della mesh con l'orlo in alto, come su un turntable,
-o in basso, un frammento appoggiato sull'orlo).
+o in basso, un frammento appoggiato sull'orlo). L'asse stimato è verificato sulla forma: fra gli assi che le normali
+suggeriscono (un'ansa ha il suo) si tiene quello attorno al quale la superficie cade sul profilo più sottile, e sui vasi
+interi e sui frammenti grandi lo si affina con i centri delle sezioni che lo attraversano (una mesh fatta da foto ha
+normali ruvide: l'asse della ciotola del turntable pendeva fino a 2 gradi, ora pochi decimi). I frammenti piccoli (sotto
+circa 40 gradi di orlo) danno un asse non sicuro, ancor più con un'ansa: appoggiarli sull'orlo e usare la Z della mesh.
 
 * Il **diametro dell'orlo** viene dal cerchio del labbro, che sposta anche l'asse al suo centro (un frammento messo sul
   turntable lontano dal centro si misura giusto), con l'arco conservato (*Orlo conservato*, 34% (25-50) per un terzo
-  dell'orlo). Sotto i 40 gradi di arco, o con un labbro irregolare, l'orlo viene segnato *incerto*, misurato attorno
+  dell'orlo): la parte del cerchio dove c'è il labbro, trovata come punto più alto in ogni piccolo settore attorno
+  all'asse e piano che passa per essi, così un labbro un po' inclinato rispetto all'asse, una punta della mesh o una
+  scheggiatura del labbro non la cambiano (la scheggiatura non conta come orlo). Sotto i 40 gradi di arco, o con un labbro irregolare, l'orlo viene segnato *incerto*, misurato attorno
   all'asse, e non scritto in PyArchInit.
 * Il **profilo** con diametro massimo e del fondo, altezza totale o conservata e spessore della parete viene disegnato
   come SVG, DXF e PNG, in una finestra che resta aperta.

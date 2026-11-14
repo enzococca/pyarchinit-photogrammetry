@@ -606,34 +606,66 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
     return paths[0]
 
 
+def _obj_name(name, fallback: str) -> str:
+    """A group or object name of an OBJ: one word (spaces and control characters become ``_``)."""
+    text = "".join(ch if ch.isprintable() and not ch.isspace() else "_" for ch in str(name or "").strip())
+    return text or fallback
+
+
 def write_obj(path: Path, verts: np.ndarray, faces: np.ndarray, uv: np.ndarray | None, texture,
-              transform: np.ndarray | None = None, pages: np.ndarray | None = None) -> Path:
+              transform: np.ndarray | None = None, pages: np.ndarray | None = None, groups: np.ndarray | None = None,
+              group_names: dict | None = None) -> Path:
     """Write an OBJ with per-face-corner UVs (``uv`` shape ``(F,3,2)``); ``texture``: the image,
-    or the images of the pages with ``pages`` the page of every face (a material per page)."""
+    or the images of the pages with ``pages`` the page of every face (a material per page).
+
+    ``groups`` (an int per face): the faces written group by group, each opened by ``o <name>`` and
+    ``g <name>`` (``group_names`` {id: name}, default ``group_<id>``; names made one word), and within a
+    group a ``usemtl`` for every texture page it uses. The MTL holds one material per page, ``material<k>``
+    on page ``k``, in the order of the pages."""
     textures = [texture] if isinstance(texture, str) else list(texture or [])
     v = verts if transform is None else verts @ transform[:3, :3].T + transform[:3, 3]
     mtl = path.with_suffix(".mtl")
+    faces = np.asarray(faces)
     paged = uv is not None and pages is not None and len(textures) > 1
+    page = np.asarray(pages, np.int64) if paged else np.zeros(len(faces), np.int64)
+    textured = uv is not None and bool(textures)
+    if groups is not None:
+        groups = np.asarray(groups, np.int64).reshape(-1)
+        if len(groups) != len(faces):
+            raise ValueError(f"{len(groups)} groups for {len(faces)} faces")
+    names = {int(k): str(n) for k, n in (group_names or {}).items()}
     with open(path, "w") as fh:
         if textures:
-            fh.write(f"mtllib {mtl.name}\n" + ("" if paged else "usemtl material0\n"))
+            fh.write(f"mtllib {mtl.name}\n")
         np.savetxt(fh, v, fmt="v %.6f %.6f %.6f")
         if uv is not None:
             np.savetxt(fh, uv.reshape(-1, 2), fmt="vt %.6f %.6f")
             idx = np.column_stack([faces[:, 0] + 1, np.arange(len(faces)) * 3 + 1,
                                    faces[:, 1] + 1, np.arange(len(faces)) * 3 + 2,
                                    faces[:, 2] + 1, np.arange(len(faces)) * 3 + 3])
-            if paged:
-                for k in range(len(textures)):
-                    sel = np.asarray(pages) == k
-                    if sel.any():
-                        fh.write(f"usemtl material{k}\n")
-                        np.savetxt(fh, idx[sel], fmt="f %d/%d %d/%d %d/%d")
-            else:
-                np.savetxt(fh, idx, fmt="f %d/%d %d/%d %d/%d")
+            fmt = "f %d/%d %d/%d %d/%d"
         else:
-            np.savetxt(fh, faces + 1, fmt="f %d %d %d")
+            idx, fmt = faces + 1, "f %d %d %d"
+        if groups is None:
+            blocks = [(None, np.arange(len(faces)))]
+        else:
+            order = np.argsort(groups, kind="stable")
+            ids, starts = np.unique(groups[order], return_index=True)
+            blocks = [(int(g), order[a:b]) for g, a, b in zip(ids, starts, list(starts[1:]) + [len(order)])]
+        for g, rows in blocks:
+            if g is not None:
+                name = _obj_name(names.get(g), f"group_{g}")
+                fh.write(f"o {name}\ng {name}\n")
+            if not textures:
+                np.savetxt(fh, idx[rows], fmt=fmt)
+                continue
+            pr = page[rows]
+            for k in np.unique(pr):
+                sel = rows[pr == k]
+                fh.write(f"usemtl material{int(k)}\n")
+                np.savetxt(fh, idx[sel], fmt=fmt)
     if textures:
-        mtl.write_text("".join(f"newmtl material{k}\nKa 1 1 1\nKd 1 1 1\nd 1\nillum 1\nmap_Kd {t}\n"
+        mtl.write_text("".join(f"newmtl material{k}\nKa 1 1 1\nKd 1 1 1\nd 1\nillum 1\n"
+                               + (f"map_Kd {t}\n" if textured else "")
                                for k, t in enumerate(textures)))
     return path

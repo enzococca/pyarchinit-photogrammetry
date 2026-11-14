@@ -179,7 +179,7 @@ def test_mapping_camera_has_square_pixels_unless_calibrated():
 
     s = Sensor(key=0, label="c", width=1200, height=900)  # OPENCV, fx = fy, no distortion
     model, params = mapping_camera(s)
-    assert model == "RADIAL" and params == [1440.0, 600.0, 450.0, 0.0, 0.0]
+    assert model == "RADIAL" and params == [1020.0, 600.0, 450.0, 0.0, 0.0]  # FOCAL_GUESS 0.85 times the width
     assert sensor_model_params("RADIAL", [1100.0, 601.0, 449.0, 0.01, -0.002], "OPENCV") == (
         "OPENCV", [1100.0, 1100.0, 601.0, 449.0, 0.01, -0.002, 0.0, 0.0])
     pin = Sensor(key=1, label="p", width=1200, height=900, model="PINHOLE")

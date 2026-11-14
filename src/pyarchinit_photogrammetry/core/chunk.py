@@ -7,6 +7,7 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -17,10 +18,12 @@ import numpy as np
 
 from . import crs as crs_mod
 from . import geometry, stamps
-from .camera import Camera, Reference, Sensor
+from .camera import FOCAL_GUESS, Camera, Reference, Sensor
 from .marker import Marker, Projection, ScaleBar
 from .pointcloud import PointCloud
 from .progress import ProgressCallback, as_progress
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover
     from .document import Document
@@ -320,16 +323,22 @@ class Chunk:
         for s in self.sensors.values():
             if (s.label, s.width, s.height, s.focal_length_mm) == (f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera", sig[2], sig[3], sig[4]):
                 return s
+        from ..io import exif
+
         w, h = info["width"], info["height"]
-        f35 = info.get("focal_length_35mm")
-        f_px = (f35 / 36.0) * max(w, h) if f35 else 1.2 * max(w, h)
+        f_px, source = exif.focal_px(info)
+        if f_px is None:
+            f_px, source = FOCAL_GUESS * max(w, h), "guess"
+            log.warning("%s: the photos say no focal length, guessed %.0f px (a %.0f mm lens on a 35 mm camera); "
+                        "the alignment estimates it", sig[1] or "camera", f_px, 36.0 * FOCAL_GUESS)
+        f35 = 36.0 * f_px / max(w, h)
         lens = f"{info.get('lens') or ''} {sig[1] or ''}".lower()
-        fisheye = "fisheye" in lens or "fish-eye" in lens or (f35 is not None and f35 <= 15)
+        fisheye = "fisheye" in lens or "fish-eye" in lens or (source != "guess" and f35 <= 15)
         sensor = Sensor(key=self._next_key(self.sensors.values()),
                         label=f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera",
                         width=w, height=h, model="OPENCV_FISHEYE" if fisheye else "OPENCV",
                         params=[f_px, f_px, w / 2.0, h / 2.0, 0.0, 0.0, 0.0, 0.0],
-                        focal_length_mm=info.get("focal_length_mm"))
+                        focal_length_mm=info.get("focal_length_mm"), focal_source=source)
         self.sensors[sensor.key] = sensor
         return sensor
 
@@ -845,7 +854,8 @@ class Chunk:
                           skip_unreadable: bool = False, workers: int | None = None,
                           max_angle: float = 70.0, blend_sigma: float = 8.0,
                           colour_correction: bool | None = None, ghosting: bool = False,
-                          fill_holes: bool = False) -> Path:
+                          fill_holes: bool = False, texture: bool | None = None,
+                          supersample: int | None = None) -> Path:
         """Orthomosaic (GeoTIFF RGBA), made tile by tile (any size). ``hide_classes``: where the
         visible surface belongs to these classes of the dense cloud the orthomosaic is
         transparent. Photos that cannot be read stop the step unless ``skip_unreadable``.
@@ -854,14 +864,17 @@ class Chunk:
         ``mosaic`` (seamless), ``disabled`` or ``average``; ``colour_correction``: gains of the
         photos and vignetting (None = the one measured in the chunk, see :meth:`calibrate_colours`);
         ``ghosting``: people and vehicles seen by a few photos left out; ``fill_holes``: small holes
-        no photo sees filled from their edges."""
+        no photo sees filled from their edges. ``texture``: from the texture of the model instead of the photos
+        (None: when the chunk has no aligned photo - an imported or merged model; ``supersample`` rays per cell
+        side there), see :mod:`engine.texture_ortho`."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
                                        hide_classes=hide_classes, progress=as_progress(progress),
                                        skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle,
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
-                                       ghosting=ghosting, fill_holes=fill_holes)
+                                       ghosting=ghosting, fill_holes=fill_holes, texture=texture,
+                                       supersample=supersample)
 
     def provenance(self, product: str, path: str | os.PathLike | None = None, operator: str | None = None) -> dict:
         """How ``product`` was made, as W3C PROV in JSON-LD (:mod:`core.paradata`); ``path``: a copy
@@ -1076,10 +1089,14 @@ class Chunk:
                          as_version=as_version, name=name, cap=cap, progress=as_progress(progress))
 
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
-                     zmax: float | None = None) -> Path:
+                     zmax: float | None = None, groups: str = "none", labels=None,
+                     max_texture: int | None = None) -> Path:
         """The model in world coordinates (OBJ with the texture when built, PLY with colours and
         confidence, GLB with the texture around its centre, see :func:`io.web.export_glb`);
-        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB)."""
+        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB). OBJ: ``groups`` "none",
+        "source" (the groups kept with the model: source chunks of a merged model, objects of an
+        imported OBJ), "component" (connected pieces), or ``labels`` (a label per face); ``max_texture``:
+        pages reduced to this side (pixels) in the copies. See :func:`io.exports.export_mesh`."""
         if str(path).lower().endswith(".glb"):
             if region is not None or zmin is not None or zmax is not None:
                 raise ValueError("GLB: export the whole model (crop it in the project first)")
@@ -1088,7 +1105,8 @@ class Chunk:
             return export_glb(self, path)
         from ..io import exports
 
-        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
+        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax, groups=groups, labels=labels,
+                                    max_texture=max_texture)
 
     def export_3dtiles(self, folder: str | os.PathLike, max_faces: int = 150_000,
                        progress: ProgressCallback | None = None, *, origin=None,

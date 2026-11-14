@@ -195,6 +195,7 @@ the next start (`ppg plugin` lists its command at once).
 | `add_pane(widget, title, icon=None, area="right")` | since 1.3.4: `widget` as a pane of the window, a dock of its own tabbed with the panes of `area` (`"left"`, `"bottom"`, `"right"`): the user moves it, floats it, closes it and opens it again from *Vista > Pannelli*, and the window remembers where it was. `icon` is a `QIcon` or the name of an icon of the program (`"plugin"`, `"relief"`...); returns the dock (its object name `pane_plugin_` + the plugin's name), `None` in the command line; the pane goes away with the plugin |
 | `show_pane(widget)` | since 1.3.4: a pane of the plugin in front, also when the user closed it or floated it |
 | `add_rasters(provider)` | since 1.4.0: the plugin's rasters by name in the raster calculator (*Strumenti > Calcolatore raster*, `engine.rastercalc`): `provider(chunk)` returns dicts `{"name", "label", "path"}` (`name` in the formulas: letters, digits and `_`, made so if it is not). Without it the calculator finds every GeoTIFF of the chunk folder anyway, named by its folder and file (`terrain_twi`) or by its `ppg_name` tag; taken out with the plugin, also in the command line |
+| `add_site_contributions(provider)` | since 1.10.0: what the plugin adds to the web site of a survey (`ppg web build`, the pane *Pubblica sul web*): `provider(chunk)` returns a list of contributions - layers of the plan, tabs of cards, pages of text (see [On the web site of a survey](#on-the-web-site-of-a-survey)); taken out with the plugin, also in the command line |
 | `rasters(chunk=None)` | since 1.4.0: every raster of `chunk` (the active one) the calculator reads, with its name in the formulas: dicts `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; a formula on them: `engine.rastercalc.calculate(chunk, formula, name)` |
 | `add_units(polygons, tipo="US", attributes=None, chunk=None)` | since 1.5.0: stratigraphic units made by the plugin, as if drawn in the window - in the live QGIS link, numbered by *Proponi US e rapporti*, in the US forms of PyArchInit. `polygons`: shapely (Multi)Polygons or vertex lists `(N, 2)` in the coordinates of the chunk (an invalid outline is made valid, one with no area left out); `attributes`: one dict for all or one per polygon - `us`, `area`, `tipo`, `sito` and the columns of `pyunitastratigrafiche`, any other key an attribute of the unit; the site is the project's when not given. On the active chunk they are drawn and are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into `chunk.meta["drawings"]`. Only in the interface thread; returns how many were added |
 | `orient(chunk=None, **kw)` | since 1.7.2: the local system of `chunk` (the active one) oriented as `engine.orient.orient` (`points`, `markers`, `plane_xyz`, `toward`, `x_along_ab`, `quota`, `origin_xy`, `distance`, `flip`, `M`, `move_aligned`, `dry_run`): in the window a step of *Modifica > Annulla* with the views shown again, in the command line the plugin saves; refusals raise `engine.orient.OrientRefused` (`reason`, `names`); returns the result (`M`, `describe`, `moved`, `stale`...). `chunk.orient(M)` applies a motion the plugin computed as it is |
@@ -240,13 +241,55 @@ snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of 
   after its first step - before that step a change of it is a "Plugin data" step, after it none. Keep such data
   (settings, caches the user may want back) under another key, or cover it with a step.
 
+### On the web site of a survey
+
+Since 1.10.0 a plugin adds to the web site of a survey (`ppg web build`, *File > Export > Web site*) with
+`context.add_site_contributions(provider)`. When a site is built, `provider(chunk)` is called for every chunk that
+goes in and returns a list of dicts, each with a `kind`:
+
+- `"layer"`: a layer of the plan - `id`, `title` (a text or `{"it": ..., "en": ...}`), `features` (a GeoJSON
+  FeatureCollection or a list of features in the coordinates of the chunk, `z` included), `colour`, `legend`
+  (`{"field": "classe", "items": [{"value", "title", "colour"}]}`: the attribute that gives the class of a feature, a
+  colour and a tick per class in the list of layers) and `fields` (`{"classe": {"it": "Classe", "en": "Class"}}`:
+  the names of the attributes in the panel of a click);
+- `"table"`: a tab of cards - `id`, `title`, `columns` (`[{"key", "title"}]`), `rows` (dicts; the path of a picture
+  under the key named by `image`, default `"image"`);
+- `"html"`: a tab with a page of text - `id`, `title`, `html`, `images` (`{"name.jpg": path}`: the pictures the page
+  shows with `<img src="name.jpg">`).
+
+The site takes care of the rest: the coordinates go into the frame of the site (shifted in the local frame), every
+text is cleaned as the texts of the program (no path of the computer, no key starting with `_`), the pictures are
+written again as JPEG of at most 1600 pixels with nothing but their pixels (no EXIF, no GPS), and the HTML keeps
+only plain tags (paragraphs, headings, lists, tables, emphasis, links to `http(s)` and `mailto`, its own pictures):
+no script, no style, no event, no frame; the page cleans it again before showing it. The files go in
+`data/plugins/<plugin>/`, listed in `plugins` of the chunk in `site.json`. A provider that raises, or a contribution
+that is not understood, is left out and said in the notes of the build; the site is built all the same. The `id`
+is lowercase letters, digits, `-` and `_`, once per plugin.
+
+```python
+def activate(self, context):
+    context.add_site_contributions(self.site)
+
+def site(self, chunk):
+    finds = chunk.meta.get("my_finds") or []
+    return [{"kind": "layer", "id": "finds", "title": {"it": "Reperti", "en": "Finds"},
+             "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [f["x"], f["y"], f["z"]]},
+                           "properties": {"n": f["n"], "classe": f["classe"]}} for f in finds],
+             "legend": {"field": "classe", "items": [{"value": "anfora", "title": "Anfore", "colour": "#d62728"}]}},
+            {"kind": "table", "id": "catalogue", "title": "Catalogo",
+             "columns": [{"key": "n", "title": "N."}, {"key": "classe", "title": "Classe"}],
+             "rows": [{"n": f["n"], "classe": f["classe"], "image": f.get("photo")} for f in finds]}]
+```
+
+The tests of the program carry a plugin of this kind (`tests/test_site_more.py`, class `Finds`).
+
 ### Compatibility
 
 `Plugin.api` is the plugin API the plugin was written for (`pyarchinit_photogrammetry.plugins.API_VERSION`,
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
-1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4 (1.7.3 and older
+1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4, `add_site_contributions` 1.10.0 (1.7.3 and older
 ignore an action added later). The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with

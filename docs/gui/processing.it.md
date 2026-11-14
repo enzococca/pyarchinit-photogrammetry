@@ -186,6 +186,9 @@ Ogni cella sceglie tra tutte le foto che la inquadrano, così nessuna cucitura s
 sintetico con metà delle foto più scure del 30 % e ogni foto vignettata, il mosaico corretto differisce da quello
 delle foto intatte di 0,3 livelli nelle basse frequenze (25 senza correzione).
 
+Un chunk **senza foto allineate** (un modello importato o unito) ha l'ortofoto dalla texture del modello: vedi
+[Ortofoto di un chunk senza foto](multi-survey.md#ortofoto-di-un-chunk-senza-foto).
+
 ### Elabora tutto
 
 *Flusso di lavoro > Elabora tutto...* (++ctrl+r++) fa tutti i passi in fila con le scelte predefinite; con un file

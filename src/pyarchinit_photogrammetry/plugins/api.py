@@ -106,6 +106,7 @@ class Contributions:
     tree_items: list = field(default_factory=list)  # (plugin, provider) of the workspace, taken out with it
     rasters: list = field(default_factory=list)  # entries of engine.rastercalc.register, taken out with it
     rail_groups: list = field(default_factory=list)  # RailGroup of the tool rails, taken out with it
+    site: list = field(default_factory=list)  # providers of io.site_plugins (the web site), taken out with it
 
 
 class Context:
@@ -436,6 +437,21 @@ class Context:
 
         self.contributions.rasters.append(rastercalc.register(provider, owner=self.name))
 
+    def add_site_contributions(self, provider: Callable[[object], list]) -> None:
+        """Since 1.10.0: what the plugin adds to the web site of a survey (``ppg web build``, the pane *Pubblica sul
+        web*). ``provider(chunk)`` is called for every chunk that goes on a site and returns a list of dicts, each
+        one of: a layer of the plan (``{"kind": "layer", "id", "title", "features": GeoJSON in the coordinates of
+        the chunk, "colour", "legend": {"field", "items": [{"value", "title", "colour"}]}, "fields"}``), a tab of
+        cards (``{"kind": "table", "id", "title", "columns", "rows", "image"}``, a row with the path of a picture
+        under ``image``) or a tab with a page of text (``{"kind": "html", "id", "title", "html", "images"}``). The
+        site moves the coordinates into its frame, cleans every text and the HTML, writes the pictures again
+        without their metadata and puts the files in ``data/plugins/<plugin>/``; see
+        :mod:`..io.site_plugins`. A provider that fails is left out of the site and said in its notes. Taken
+        out when the plugin is disabled; also in the command line."""
+        from ..io import site_plugins
+
+        self.contributions.site.append(site_plugins.register(provider, owner=self.name))
+
     def rasters(self, chunk=None) -> list[dict]:
         """Since 1.4.0: every raster of ``chunk`` (the active one when None) the raster calculator reads,
         with its name in the formulas: dicts ``name``, ``label``, ``path``, ``source``, ``bands`` (their
@@ -599,6 +615,12 @@ class Context:
             for entry in self.contributions.rasters:
                 rastercalc.unregister(entry)
             self.contributions.rasters.clear()
+        if self.contributions.site:
+            from ..io import site_plugins
+
+            for entry in self.contributions.site:
+                site_plugins.unregister(entry)
+            self.contributions.site.clear()
         tree = getattr(self.window, "workspace", None)
         if self.contributions.tree_items and tree is not None:
             tree.providers[:] = [p for p in tree.providers if not any(p is e for e in self.contributions.tree_items)]

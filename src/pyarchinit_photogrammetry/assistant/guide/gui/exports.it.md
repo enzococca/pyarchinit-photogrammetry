@@ -66,6 +66,14 @@ le forme ceramiche simili, la calibrazione di un sensore. Le esportazioni che sc
 
 I plugin aggiungono a questo menu i loro formati.
 
+**OBJ a gruppi**: esportando il modello in OBJ si scelgono i **gruppi** - nessuno, uno per chunk di partenza di un
+modello unito (o per oggetto di un OBJ importato), oppure uno per parte connessa (`part_001` la più grande) - e il
+**lato massimo delle pagine di texture** nelle copie accanto al file. Ogni gruppo è scritto come `o`/`g` con un
+`usemtl` per ogni pagina che usa; l'MTL ha un materiale per pagina, nell'ordine delle pagine. Da riga di comando:
+`ppg export --model m.obj --groups source|component|none [--labels etichette.npy] [--max-texture 4096]` (`--labels`:
+un'etichetta per faccia, da un `.npy` o da un file di testo con un'etichetta per riga). Importando un OBJ i gruppi si
+rileggono (`g`, altrimenti `o`) e restano con il modello; le pagine di texture seguono l'ordine dell'MTL.
+
 ### Sito web (Pubblica sul web)
 
 *File > Esporta > Sito web (Pubblica sul web)...* apre il pannello **Pubblica sul web** (anche da *Vista > Pannelli*;
@@ -79,7 +87,12 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
    descrizione, lingue (italiano, inglese) e le coordinate: **Sistema locale** (predefinito: spostate al centro del
    rilievo, senza sistema di riferimento - nulla nella cartella dice dove si trova il sito) o **Coordinate vere**, che
    il pannello segnala in rosso: le pagine scrivono allora la posizione reale del sito. *Avanzate*: la qualità del WebP
-   dell'ortofoto (85) e la texture del modello (4096 px, o solo i colori dei vertici). La cartella del sito (in
+   dell'ortofoto (85), la texture del modello (4096 px, o solo i colori dei vertici), la **Dimensione massima** del sito
+   (500 MB, o *Nessun limite*: il modello e la nuvola vengono sfoltiti per restarci, il pannello Log dice che cosa è
+   stato ridotto), i **Punti della nuvola** al massimo (3 milioni) e **Una data alla volta** (i chunk come rilievi di
+   date diverse - la data del chunk o delle sue foto -, mostrati uno alla volta con un selettore delle date). La
+   **Nuvola di punti** è un prodotto da spuntare (non spuntata in partenza: pesa), **Sezioni e prospetti** vanno con le
+   loro ortofoto e i loro disegni in una scheda a sé. La cartella del sito (in
    partenza `<progetto>_sito_web` accanto al file del progetto) dev'essere nuova, vuota o un sito costruito prima: una
    cartella con altri file viene rifiutata e non viene mai toccata.
 2. **Costruisci**: in background, con l'avanzamento e *Annulla*; i passi nel pannello Log, la dimensione del sito alla

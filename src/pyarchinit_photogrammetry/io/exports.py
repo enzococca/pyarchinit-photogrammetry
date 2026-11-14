@@ -19,12 +19,14 @@ def _subset(verts: np.ndarray, faces: np.ndarray, keep: np.ndarray):
     return verts[used], remap[faces], used
 
 
-def export_model(chunk, path, region=None, zmin: float | None = None, zmax: float | None = None) -> Path:
+def export_model(chunk, path, region=None, zmin: float | None = None, zmax: float | None = None,
+                 groups: str = "none", labels=None, max_texture: int | None = None) -> Path:
     """Export the mesh in world coordinates. ``.ply`` keeps every vertex property (colours,
     confidence) with double-precision coordinates (UTM and other map coordinates lose
     centimetres in single precision) and the texture coordinates, with the texture next to it;
     ``.obj`` keeps the texture. ``region`` (a polygon in the chunk CRS, see
-    :func:`engine.crop.as_polygon`) and ``zmin``/``zmax``: only the faces inside."""
+    :func:`engine.crop.as_polygon`) and ``zmin``/``zmax``: only the faces inside. ``groups``,
+    ``labels``, ``max_texture``: see :func:`export_mesh`."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     cropping = region is not None or zmin is not None or zmax is not None
@@ -51,6 +53,13 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
     from .mesh_ply import read_mesh
 
     mesh = read_mesh(model_path)
+    if labels is not None:
+        labels = np.asarray(labels).reshape(-1)
+        if len(labels) != len(mesh.faces):
+            raise ValueError(f"{len(labels)} labels for {len(mesh.faces)} faces of the model")
+        mesh.set_groups(np.unique(labels, return_inverse=True)[1].reshape(-1),
+                        {k: str(v) for k, v in enumerate(np.unique(labels))})
+        groups = "labels"
     if cropping:
         from ..engine.crop import faces_inside
 
@@ -58,14 +67,80 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
         if not keep.any():
             raise ValueError("no face of the model lies inside the region")
         mesh = mesh.subset_faces(keep)
-    return export_mesh(chunk, mesh, path)
+    return export_mesh(chunk, mesh, path, groups=groups, max_texture=max_texture)
 
 
-def export_mesh(chunk, mesh, path) -> Path:
+GROUPINGS = ("none", "source", "labels", "component")
+
+
+def components(faces: np.ndarray) -> np.ndarray:
+    """The connected piece of every face (faces sharing a vertex are connected), numbered from the
+    largest piece (0) down."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    faces = np.asarray(faces, np.int64)
+    if not len(faces):
+        return np.zeros(0, np.int32)
+    n = int(faces.max()) + 1
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]]])
+    graph = coo_matrix((np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), shape=(n, n))
+    _count, label = connected_components(graph, directed=False)
+    piece = label[faces[:, 0]]
+    _u, inverse, counts = np.unique(piece, return_inverse=True, return_counts=True)
+    rank = np.empty(len(counts), np.int64)
+    rank[np.argsort(-counts, kind="stable")] = np.arange(len(counts))
+    return rank[inverse.reshape(-1)].astype(np.int32)
+
+
+def face_groups(mesh, groups: str = "none") -> tuple[np.ndarray | None, dict]:
+    """The group of every face of ``mesh`` for an export and the names of the groups: ``groups``
+    "none" (no groups), "source"/"labels" (the groups stored with the model: the source chunks of a
+    merged model, the objects of an imported OBJ, labels given to :func:`export_model`; a model
+    without them gives one group), "component" (the connected pieces, ``part_001`` the largest)."""
+    if groups not in GROUPINGS:
+        raise ValueError(f"groups: one of {', '.join(GROUPINGS)}")
+    if groups == "none":
+        return None, {}
+    if groups == "component":
+        g = components(mesh.faces)
+        return g, {k: f"part_{k + 1:03d}" for k in range(int(g.max()) + 1 if len(g) else 0)}
+    if mesh.groups is not None and len(mesh.groups) == len(mesh.faces):
+        names = mesh.group_names
+        return np.asarray(mesh.groups, np.int32), {int(k): names.get(int(k), f"group_{int(k)}")
+                                                   for k in np.unique(mesh.groups)}
+    return np.zeros(len(mesh.faces), np.int32), {0: "model"}
+
+
+def _copy_page(src: Path, dst: Path, max_texture: int | None) -> None:
+    """A texture page beside an export: copied, or reduced to ``max_texture`` pixels on its longer
+    side (the texture coordinates do not change: they are fractions of the page)."""
+    import cv2
+
+    if max_texture:
+        from PIL import Image
+
+        with Image.open(src) as im:
+            w, h = im.size
+        if max(w, h) > int(max_texture):
+            f = int(max_texture) / max(w, h)
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+            img = cv2.resize(img, (max(1, int(w * f + 1e-9)), max(1, int(h * f + 1e-9))), interpolation=cv2.INTER_AREA)
+            if not cv2.imwrite(str(dst), img, [cv2.IMWRITE_JPEG_QUALITY, 92]):
+                raise OSError(f"cannot write {dst}")
+            return
+    shutil.copy2(src, dst)
+
+
+def export_mesh(chunk, mesh, path, groups: str = "none", max_texture: int | None = None) -> Path:
     """A mesh in the internal frame of ``chunk`` (the model, a part of it) written in world
     coordinates as :func:`export_model` writes the model: ``.ply`` with every vertex property in
-    double precision and the texture pages the faces use, ``.obj`` with the texture, other formats
-    through trimesh with the vertex colours."""
+    double precision and the texture pages the faces use (and the face groups), ``.obj`` with the
+    texture, other formats through trimesh with the vertex colours.
+
+    ``groups`` (OBJ): see :func:`face_groups` - every group an ``o``/``g`` of the file with a ``usemtl``
+    for each page it uses. ``max_texture``: pages larger than this (pixels, longer side) reduced in
+    the copies beside the file (OBJ and PLY)."""
     from .mesh_ply import write_mesh
 
     path = Path(path)
@@ -90,7 +165,7 @@ def export_mesh(chunk, mesh, path) -> Path:
         out.set_xyz(world, double=True)
         if pages:
             for page, name in zip(pages, names):
-                shutil.copy2(page, path.with_name(name))
+                _copy_page(page, path.with_name(name), max_texture)
             out.set_texture_files(names)
             if len(pages) == 1:
                 out.texnumber = None
@@ -101,10 +176,18 @@ def export_mesh(chunk, mesh, path) -> Path:
     if path.suffix.lower() == ".obj" and pages:
         from ..engine.texturing import write_obj
 
+        g, gnames = face_groups(mesh, groups)
         write_obj(path, mesh.xyz, mesh.faces, mesh.texcoords.reshape(-1, 3, 2), names if len(names) > 1 else names[0],
-                  transform=chunk.transform, pages=mesh.texnumber if len(names) > 1 else None)
+                  transform=chunk.transform, pages=mesh.texnumber if len(names) > 1 else None, groups=g,
+                  group_names=gnames)
         for page, name in zip(pages, names):
-            shutil.copy2(page, path.with_name(name))
+            _copy_page(page, path.with_name(name), max_texture)
+        return path
+    if path.suffix.lower() == ".obj" and groups != "none":  # no texture: the groups with the bare faces
+        from ..engine.texturing import write_obj
+
+        g, gnames = face_groups(mesh, groups)
+        write_obj(path, mesh.xyz, mesh.faces, None, None, transform=chunk.transform, groups=g, group_names=gnames)
         return path
     import trimesh
 

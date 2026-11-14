@@ -134,12 +134,38 @@ def patches(chunk: Chunk, frame: str | None = None) -> list[dict]:
     return [dict(p) for p in held.get("patches") or []]
 
 
+TEXTURE_IT = ("le patch scelgono le foto di un'area, ma questa immagine è fatta dalla texture del modello (il chunk "
+              "non ha foto allineate): ritocca la texture o rifai l'immagine dalle foto")
+TEXTURE_EN = ("patches choose the photos of an area, but this image is made from the texture of the model (the chunk has "
+              "no aligned photos): retouch the texture or build the image from the photos")
+
+
+class TexturePainted(ValueError):
+    """Patches asked on an orthophoto or an elevation painted from the texture of the model: ``str()`` English,
+    ``italian`` Italian."""
+
+    def __init__(self):
+        super().__init__(TEXTURE_EN)
+        self.english, self.italian = TEXTURE_EN, TEXTURE_IT
+
+
+def texture_painted(chunk: Chunk, frame: str | None = None) -> bool:
+    """Whether the orthophoto (or the elevation ``frame``) of ``chunk`` was painted from the texture of the model
+    (:mod:`.texture_ortho`): patches of photos do not apply to it."""
+    if frame is None:
+        return (chunk.meta.get("orthomosaic") or {}).get("source") == "texture"
+    return next((e.get("source") == "texture" for e in chunk.meta.get("elevations") or [] if e.get("id") == frame),
+                False)
+
+
 def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str = "dem",
               frame: str | None = None) -> dict:
     """A new patch: inside ``polygon`` (CRS of the chunk; (u, v) metres on the elevation ``frame``) the colours come
     only from ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
     ``surface`` "dem" or "ground" (see the module; an elevation takes its relief, "dem", only). Call
     :func:`update_orthomosaic` / :func:`update_elevation` (or build the product) to apply it."""
+    if texture_painted(chunk, frame):
+        raise TexturePainted()
     if mode not in MODES:
         raise ValueError(f"mode: one of {', '.join(MODES)}")
     if surface not in SURFACES:
@@ -207,6 +233,8 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     path = chunk.orthomosaic_path
     if path is None or not path.exists():
         raise RuntimeError("build the orthomosaic first")
+    if texture_painted(chunk) and changed_patches(chunk):
+        raise TexturePainted()
     changed = changed_patches(chunk)
     meta = _meta(chunk)
     if not changed:
@@ -309,6 +337,9 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     from .elevation import elevation_paths, entry_settings, frame_grid
     from .ortho import _context, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
+
+    if texture_painted(chunk, frame):
+        raise TexturePainted()
 
     progress = as_progress(progress)
     entry = entry_of(chunk, frame)

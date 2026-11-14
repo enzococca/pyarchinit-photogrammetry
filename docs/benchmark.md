@@ -311,6 +311,42 @@ lidar cells with a height within 1 m. Script: `benchmark/satellite_wv3.py`.
   forty); they are not measured on exactly the same grid and polygon, so take the comparison as an
   order of magnitude.
 
+## Measuring on large models and clouds (version 1.10)
+
+How picking and measuring on the 3D view behave on big data, measured with `tools/bench_model_pick.py` (a procedural
+terrain, two sines over a 100 x 100 m square, as a triangle grid or as random points with 2 mm of noise, in a chunk
+whose transform scales, turns and moves it to UTM coordinates, EPSG:32633). Mac mini M4 Pro, 24 GB, macOS 27, with
+other jobs running. Error of a pick: the distance between the target and the point picked at the target's own pixel
+(the line of sight through it meets the terrain at the target), 40 random targets.
+
+| Data | Shown | Ready for measuring¹ | Peak memory | Pick | Pick error, median / max | Shown alone² |
+| --- | --- | --- | --- | --- | --- | --- |
+| model 5 M faces, 4 texture pages | whole, textured (VTK size) | 2.4 s | 2.9 GB | 0.3 ms | 0.04 / 0.17 mm | 27 / 44 mm |
+| model 20 M faces | preview 600 000 faces | 9.3 s | 3.4 GB | 0.8 ms | 0.013 / 0.07 mm | 88 / 124 mm |
+| model 50 M faces | preview 600 000 faces | 24 s | 5.2 GB | 1.8 ms | 0.010 / 0.06 mm | 78 / 143 mm |
+| cloud 20 M points | 3 M points (VTK size) | 8.2 s | 2.9 GB | 39 ms | 1.1 / 3.3 mm | 25 / 74 mm |
+| cloud 50 M points | 3 M points | 23 s | 4.9 GB | 42 ms | 0.31 / 0.86 mm | 34 / 60 mm |
+
+¹ the ray caster of the model or the index of the cloud, built in a worker thread when a measure starts; the longest
+pause of the interface meanwhile was 0.12-0.21 s (the caster is built in pieces of 500 000 faces: Open3D builds the
+search tree of a mesh holding the interpreter lock, about 1 s per 5 million faces in one piece). ² the nearest point
+or vertex shown within 8 pixels: what the pick gave on a big model before, while its caster was not ready.
+
+Along the surface, the 84.29 m section from (15, 20) to (80, 70): 84.2902 m on 5 M faces (-0.4 mm), 84.2906 m on
+20 M (0.0 mm), 84.2908 m on 50 M (+0.1 mm); before, draped every 20 pixels, -124 mm on a model of 1 M faces. Surface
+of the model inside a quadrilateral of 888.47 m²: within 2 parts per million at every size, reading only the faces
+around the polygon (3.6 s at 5 M, 15 s at 20 M, 41 s at 50 M, in the background). A click outside the model gives
+nothing in 0.1-1.7 ms instead of projecting every vertex shown (0.2-0.6 s for a textured model of 5 M faces).
+
+Through VTK itself (pyvista off screen; the Qt window of the program cannot be driven without a display): the scene
+the view shows drawn by VTK, the projection and line of sight of the VTK canvas read from that VTK camera, our pick at
+the centre of a pixel against VTK's `vtkCellPicker` on the geometry drawn: 0.001 mm apart on the textured model shown
+whole, 0.5-0.6 mm (max 2.3 mm) on the 600 000-face preview, where VTK picks the coarse copy and we the full model. The
+depth buffer read back agrees with our pick within 0.02 mm on a cloud (median); on a mesh it is offset by about 1 cm,
+the polygon offset VTK applies to surfaces. VTK's hardware pickers (`vtkWorldPointPicker`, `vtkPropPicker`) crash off
+screen on this Mac; the program does not use them, its picks are computed from the camera matrices. Shown time of a
+cloud of 50 M points: 9.7 s, the whole cloud read in the interface thread to sample it (not changed here).
+
 ## What changed in pyarchinit-photogrammetry
 
 These tests changed the program; the numbers above are those of the version with the changes:

@@ -67,6 +67,14 @@ workbook too.
 
 The plugins add their own formats to this menu.
 
+**OBJ with groups**: exporting the model as OBJ asks for the **groups** - none, one per source chunk of a merged model
+(or per object of an imported OBJ), or one per connected piece (`part_001` the largest) - and for the **largest side
+of the texture pages** in the copies beside the file. Every group is written as `o`/`g` with a `usemtl` for each page
+it uses; the MTL has one material per page, in the order of the pages. On the command line: `ppg export --model m.obj
+--groups source|component|none [--labels labels.npy] [--max-texture 4096]` (`--labels`: a label per face, from a `.npy`
+or a text file with one label per line). Importing an OBJ reads its groups back (`g`, else `o`) and keeps them with the
+model; its texture pages follow the order of the MTL.
+
 ### Web site (Publish on the web)
 
 *File > Export > Web site (Publish on the web)...* opens the pane **Publish on the web** (also from *View > Panes*,
@@ -80,7 +88,12 @@ shaded relief, stratigraphic units, drawings and 3D model on a page any hosting 
    description, languages (Italian, English) and the coordinates: **Local frame** (default: shifted to the centre of
    the survey, no reference system - nothing in the folder says where the site is) or **Real coordinates**, which the
    pane flags in red: the pages then write the real position of the site. *Advanced*: the WebP quality of the
-   orthophoto (85) and the texture size of the model (4096 px, or the vertex colours alone). The folder of the site
+   orthophoto (85), the texture size of the model (4096 px, or the vertex colours alone), the **Largest size** of the
+   site (500 MB, or *No limit*: the model and the cloud are thinned to keep to it, the Log pane says what was
+   reduced), the **Points of the cloud** at most (3 million) and **One date at a time** (the chunks as surveys of
+   different dates - the date of the chunk or of its photos -, shown one at a time with a selector of the dates).
+   The **Point cloud** is a product to tick (not ticked by default: it weighs), **Sections and elevations** go with
+   their orthophotos and drawings in a tab of their own. The folder of the site
    (by default `<project>_sito_web` beside the project file) must be new, empty or a site built before: a folder with
    other files is refused and never touched.
 2. **Build**: in the background, with its progress and *Cancel*; the steps in the Log pane, the size of the site at

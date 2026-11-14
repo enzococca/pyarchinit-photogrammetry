@@ -131,3 +131,57 @@ def live_text(chunk, kind: str, world) -> str:
     else:
         return ""
     return out if metric else out + tr(" (unità del modello)")
+
+
+AROUND_MARGIN = 0.5  # the faces read around a polygon: its footprint widened by this share of its larger side
+
+
+def model_around(source, xyz, margin: float = AROUND_MARGIN):
+    """The part of the model of ``source`` (a chunk or a :class:`.free_drawing_dialog.ModelSource`) that the surface
+    inside the polygon ``xyz`` (world) can be measured on, as a trimesh in world coordinates at full resolution: the
+    faces whose projection (vertical, or along the normal of a steep polygon, as
+    :func:`..archaeo.measures.model_area_inside` projects) meets the footprint widened by ``margin`` of its larger side
+    on every side. The PLY is read through its memory map, the faces block by block: a model of tens of millions of
+    faces is never held whole. None when the file is not a binary PLY of triangles (the caller reads it whole) or the
+    polygon has no plane."""
+    from ..archaeo import measures
+    from ..io.mesh_ply import PlyMesh
+
+    path = source.product_path("model") if source is not None else None
+    if path is None or not path.exists():
+        return None
+    try:
+        mesh = PlyMesh(path, check=0)
+        p = np.asarray(xyz, np.float64).reshape(-1, 3)
+        centre, n = measures.best_plane(p)
+    except (ValueError, KeyError, OSError):
+        return None
+    if abs(n[2]) < measures.STEEP_COS:
+        axes = np.stack(measures._plane_frame(n))
+    else:
+        axes = np.eye(3)[:2]
+    foot = (p - centre) @ axes.T
+    lo, hi = foot.min(axis=0), foot.max(axis=0)
+    pad = margin * float(max(hi - lo)) + 1e-9
+    lo, hi = lo - pad, hi + pad
+    proj = np.empty((mesh.n_vertices, 2), np.float32)  # about the polygon's centre: single precision is plenty
+    block = 4_000_000
+    for s in range(0, mesh.n_vertices, block):
+        w = source.to_world(mesh.xyz(slice(s, s + block)))
+        proj[s:s + len(w)] = (w - centre) @ axes.T
+    kept = []
+    for faces in mesh.face_chunks():
+        fx, fy = proj[faces, 0], proj[faces, 1]
+        ok = ((fx.max(axis=1) >= lo[0]) & (fx.min(axis=1) <= hi[0]) & (fy.max(axis=1) >= lo[1])
+              & (fy.min(axis=1) <= hi[1]))
+        if ok.any():
+            kept.append(faces[ok])
+    del proj
+    import trimesh
+
+    if not kept:
+        return trimesh.Trimesh(np.zeros((0, 3)), np.zeros((0, 3), np.int64), process=False)
+    faces = np.concatenate(kept)
+    used, inverse = np.unique(faces, return_inverse=True)
+    vertices = source.to_world(mesh.xyz(used))
+    return trimesh.Trimesh(vertices, inverse.reshape(-1, 3), process=False)
