@@ -1033,6 +1033,15 @@ camera model), or a 35 mm equivalent focal length up to 15 mm; the sensor is ali
 length (`RADIAL_FISHEYE`) unless a calibration says otherwise. Projections far from the axis are no
 longer cut at the pinhole frame.
 
+**Focal length of the photos** (`Sensor.focal_source`): from the 35 mm equivalent of the EXIF (`exif`),
+else from the focal length in mm over the pixel size of the sensor (`FocalPlaneXResolution`, `exif_mm`;
+`io.exif.focal_px(info)`); photos that say neither start from a guess, `core.camera.FOCAL_GUESS` (0.85
+times the longer side, a 31 mm lens on a 35 mm camera: phones and drones are wider, COLMAP's 1.2 was
+too long for them), `focal_source = "guess"` (`Sensor.focal_guessed`), a warning in the log and a line
+in the report. When the alignment from the guess places less than 90% of the photos it is run again
+from 0.75 and 1.4 times it (`engine.sfm.GUESSED_FOCAL_STARTS`) and the one that places the most is kept
+(`chunk.meta["sfm"]["focal_guess"]`); after the alignment the focal length is `aligned`.
+
 **`engine.panorama.add_panoramas(...)`** takes equirectangular photos (width twice the height; others
 left out) and writes the faces of a cube (`front`, `right`, `back`, `left`, `up`, `down`, or the ones
 in `faces`): pinhole photos of `fov` degrees (more than 90: neighbouring faces overlap), `size` px a
@@ -2063,7 +2072,7 @@ assistant ("limited for scripts" under 2).
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
 | `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
-| `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `rim_diameter_around` (rim diameter as the median of the sections all around the axis, used when the lip does not follow a circle: one section alone can be half a centimetre off on a mesh made from photos), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
+| `archaeo.pottery` | `estimate_axis` (candidate axes from the normal lines, robust to handles and fracture faces, refined through the centres of the sections on whole vessels and large sherds, the one with the thinnest profile kept; `sections=False` for the normals only), `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept `rim_preserved_pct` and `rim_arc_deg` - the sectors around the centre whose highest point lies on the plane of the lip -, reliability), `rim_diameter_around` (rim diameter as the median of the sections all around the axis, used when the lip does not follow a circle: one section alone can be half a centimetre off on a mesh made from photos), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
 | `engine.tin` | `build_tin`, `chunk_tin`, `tin_to_dem`, `contours`, `tin_contours`, `volume`, `tin_volume`, `export`, `read_landxml`, `report`, `triangulate`, `rasterize`, `contour_segments`, `prism_volume`, `Tin` |
 | `archaeo.breaklines` | `records`, `new_record`, `for_tin`, `as_arrays`, `write_lines`, `KINDS` |

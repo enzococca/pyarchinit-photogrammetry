@@ -241,25 +241,89 @@ def write_dataset(out_dir: str | Path, scene: Scene | None = None, n_x: int = 5,
     return scene
 
 
-def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.006, sectors: int = 128,
-                sherd: tuple[float, float] | None = None, noise: float = 0.0, seed: int = 3):
-    """A wheel-made bowl as a closed :class:`trimesh.Trimesh` (metres, axis = +Z).
+# outer profiles (radius, height) of the vessel shapes of :func:`make_vessel`, from the base edge to the rim
+VESSEL_SHAPES = {
+    "jar": ((0.045, 0.0), (0.075, 0.03), (0.10, 0.08), (0.09, 0.13), (0.05, 0.17), (0.045, 0.185), (0.055, 0.20)),
+    "plate": ((0.05, 0.0), (0.07, 0.006), (0.10, 0.016), (0.12, 0.025), (0.13, 0.03)),
+    "beaker": ((0.035, 0.0), (0.037, 0.03), (0.039, 0.06), (0.041, 0.09), (0.044, 0.12)),
+}
 
-    ``sherd=(a0, a1)`` keeps only the angular sector between ``a0`` and ``a1``
-    degrees (a fragment); ``noise`` adds Gaussian roughness (metres).
+
+def _shape_profile(shape: str, thickness: float) -> np.ndarray:
+    """Profile (outer surface from the base centre to the lip, then the inner surface back to the
+    axis) of a named shape: the inner surface is the outer one moved inwards by ``thickness``."""
+    from scipy.interpolate import PchipInterpolator
+
+    ctrl = np.array(VESSEL_SHAPES[shape], float)
+    s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(ctrl, axis=0).T))]
+    t = np.linspace(0.0, s[-1], 80)
+    wall = np.column_stack([PchipInterpolator(s, ctrl[:, 0])(t), PchipInterpolator(s, ctrl[:, 1])(t)])
+    base = np.column_stack([np.linspace(0.0, wall[0, 0], 12, endpoint=False), np.zeros(12)])
+    outer = np.vstack([base, wall])
+    tang = np.gradient(outer, axis=0)
+    tang /= np.linalg.norm(tang, axis=1, keepdims=True)
+    inner = outer + thickness * np.column_stack([-tang[:, 1], tang[:, 0]])  # to the left = inside
+    inner[0, 0] = 0.0
+    inner[:, 0] = np.maximum(inner[:, 0], 0.0)
+    return np.vstack([outer, inner[::-1]])
+
+
+def _handle(prof: np.ndarray, angle: float, thickness: float):
+    """A loop handle on the outside of the wall at ``angle`` degrees (a torus in the vertical plane
+    through the axis, half sunk into the wall), between a third and two thirds of the height."""
+    import trimesh
+
+    outer = prof[: len(prof) // 2]
+    h0, h1 = outer[:, 1].max() * 0.35, outer[:, 1].max() * 0.75
+    mid = outer[np.argmin(np.abs(outer[:, 1] - (h0 + h1) / 2))]
+    major = (h1 - h0) / 2
+    tor = trimesh.creation.torus(major_radius=major, minor_radius=max(thickness, 0.004), major_sections=48,
+                                 minor_sections=12)
+    tor.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))  # into the x-z plane
+    tor.apply_translation([mid[0] + 0.3 * major, 0.0, (h0 + h1) / 2])
+    tor.apply_transform(trimesh.transformations.rotation_matrix(np.radians(angle), [0, 0, 1]))
+    return tor
+
+
+def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.006, sectors: int = 128,
+                sherd: tuple[float, float] | None = None, noise: float = 0.0, seed: int = 3,
+                shape: str = "bowl", above: float | None = None, handles: int = 0):
+    """A wheel-made vessel as a :class:`trimesh.Trimesh` (metres, axis = +Z, base centre at the origin).
+
+    ``shape``: ``bowl`` (the default, an open bowl of rim radius ``rim_r`` and ``height``), ``jar``
+    (closed form, belly 20 cm across, neck 9 cm, everted rim 11 cm, 20 cm high), ``plate`` (26 cm
+    across, 3.5 cm high) or ``beaker`` (an almost cylindrical cup, rim 8.8 cm, 12 cm high); the
+    named shapes ignore ``rim_r`` and ``height``. ``sherd=(a0, a1)`` keeps only the angular sector
+    between ``a0`` and ``a1`` degrees (a fragment); ``above`` keeps only the part above that height
+    (metres: a rim sherd, or a vessel broken below the shoulder); ``handles`` loop handles evenly
+    spaced around the vessel (inside the sherd when there is one), ``noise`` Gaussian roughness
+    (metres).
     """
     import trimesh
 
-    hs = np.linspace(0, height, 60)
-    r_out = 0.04 + (rim_r - 0.04) * np.sin(hs / height * np.pi / 2) ** 0.7 + 0.01 * np.sin(hs / height * np.pi)
-    prof = np.vstack([[0, 0], np.column_stack([r_out, hs]), np.column_stack([(r_out - thickness)[::-1], hs[::-1]]),
-                      [0, thickness]])
+    if shape == "bowl":
+        hs = np.linspace(0, height, 60)
+        r_out = 0.04 + (rim_r - 0.04) * np.sin(hs / height * np.pi / 2) ** 0.7 + 0.01 * np.sin(hs / height * np.pi)
+        prof = np.vstack([[0, 0], np.column_stack([r_out, hs]), np.column_stack([(r_out - thickness)[::-1], hs[::-1]]),
+                          [0, thickness]])
+    elif shape in VESSEL_SHAPES:
+        prof = _shape_profile(shape, thickness)
+    else:
+        raise ValueError(f"unknown vessel shape {shape!r}: bowl, {', '.join(VESSEL_SHAPES)}")
+    full = prof
+    ring = above is not None
+    if ring:  # outer and inner surfaces are cut at the same index: the profile stays symmetric
+        half = len(prof) // 2
+        outer, inner = prof[:half], prof[half:][::-1]
+        keep = (outer[:, 1] >= above) & (inner[:, 1] >= above)
+        prof = np.vstack([outer[keep], inner[keep][::-1]])
     if sherd is None:
         a = np.linspace(0, 2 * np.pi, sectors, endpoint=False)
         closed = True
     else:
         a = np.radians(np.linspace(sherd[0], sherd[1], max(8, int(sectors * abs(sherd[1] - sherd[0]) / 360))))
-        prof = prof[1:-1]  # a fragment has no base centre
+        if not ring:
+            prof = prof[1:-1]  # a fragment has no base centre
         closed = False
     v = np.vstack([np.column_stack([prof[:, 0] * np.cos(x), prof[:, 0] * np.sin(x), prof[:, 1]]) for x in a])
     m = len(prof)
@@ -269,8 +333,8 @@ def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.
         j = (i + 1) % len(a)
         for k in range(m - 1):
             f += [[i * m + k, j * m + k, i * m + k + 1], [i * m + k + 1, j * m + k, j * m + k + 1]]
-        if not closed:
-            continue
+        if ring:  # the lower fracture: from the inner surface back to the outer one
+            f += [[i * m + m - 1, j * m + m - 1, i * m], [i * m, j * m + m - 1, j * m]]
     if not closed:  # cap the two fracture faces
         for i, flip in ((0, False), (len(a) - 1, True)):
             for k in range(m // 2 - 1):
@@ -279,7 +343,18 @@ def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.
                 f += [t1[::-1], t2[::-1]] if not flip else [t1, t2]
     if noise > 0:
         v = v + np.random.default_rng(seed).normal(0, noise, v.shape)
-    return trimesh.Trimesh(v, np.array(f), process=True)
+    mesh = trimesh.Trimesh(v, np.array(f), process=True)
+    if handles:
+        a0, a1 = (sherd if sherd is not None else (0.0, 360.0))
+        step = (a1 - a0) / (handles + (0 if sherd is None else 1))
+        parts = [mesh]
+        for i in range(handles):
+            tor = _handle(full, a0 + step * (i + (0 if sherd is None else 1)), thickness)
+            if noise > 0:
+                tor.vertices = tor.vertices + np.random.default_rng(seed + 1 + i).normal(0, noise, tor.vertices.shape)
+            parts.append(tor)
+        mesh = trimesh.util.concatenate(parts)
+    return mesh
 
 
 # ---------------------------------------------------------------- pottery on a turntable
@@ -448,18 +523,25 @@ def _jpeg_with_focal(img: np.ndarray, focal_35mm: float, quality: int = 95) -> b
 
 
 def write_pottery_dataset(out_dir: str | Path, scene: MeshScene | None = None, size=(1200, 900), focal: float = 1100.0,
-                          k1: float = -0.03) -> MeshScene:
+                          k1: float = -0.03, exif_focal: bool | float = True) -> MeshScene:
     """Render turntable photos of a bowl to ``out_dir/photos`` and write ``out_dir/targets.csv``
     (code, X, Y, Z in metres, local frame: origin on the rotation axis, z up). The photos carry
     their focal length in the EXIF, as those of a camera do: the mat is flat and the alignment
-    started from a guessed focal length sometimes stops at a handful of photos."""
+    started from a guessed focal length sometimes stops at a handful of photos. ``exif_focal``:
+    ``False`` writes no focal length (a scan or a phone app that drops the EXIF), a number writes
+    that 35 mm equivalent instead of the true one (a wrong EXIF)."""
     out = Path(out_dir)
     (out / "photos").mkdir(parents=True, exist_ok=True)
     scene = scene or make_turntable_scene()
     K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
     for i, pose in enumerate(turntable_poses()):
         img = render_mesh(scene, pose, K, size, k1)
-        (out / "photos" / f"VASO_{i:04d}.jpg").write_bytes(_jpeg_with_focal(img, 36.0 * focal / max(size)))
+        name = out / "photos" / f"VASO_{i:04d}.jpg"
+        if exif_focal is False:
+            cv2.imwrite(str(name), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        else:
+            f35 = 36.0 * focal / max(size) if exif_focal is True else float(exif_focal)
+            name.write_bytes(_jpeg_with_focal(img, f35))
         scene.cameras.append({"label": f"VASO_{i:04d}", "world_from_cam": pose.copy()})
     with open(out / "targets.csv", "w") as fh:
         fh.write("# label,X,Y,Z (LOCAL, metres)\n")

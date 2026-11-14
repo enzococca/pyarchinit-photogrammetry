@@ -7,6 +7,7 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -17,10 +18,12 @@ import numpy as np
 
 from . import crs as crs_mod
 from . import geometry, stamps
-from .camera import Camera, Reference, Sensor
+from .camera import FOCAL_GUESS, Camera, Reference, Sensor
 from .marker import Marker, Projection, ScaleBar
 from .pointcloud import PointCloud
 from .progress import ProgressCallback, as_progress
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover
     from .document import Document
@@ -320,16 +323,22 @@ class Chunk:
         for s in self.sensors.values():
             if (s.label, s.width, s.height, s.focal_length_mm) == (f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera", sig[2], sig[3], sig[4]):
                 return s
+        from ..io import exif
+
         w, h = info["width"], info["height"]
-        f35 = info.get("focal_length_35mm")
-        f_px = (f35 / 36.0) * max(w, h) if f35 else 1.2 * max(w, h)
+        f_px, source = exif.focal_px(info)
+        if f_px is None:
+            f_px, source = FOCAL_GUESS * max(w, h), "guess"
+            log.warning("%s: the photos say no focal length, guessed %.0f px (a %.0f mm lens on a 35 mm camera); "
+                        "the alignment estimates it", sig[1] or "camera", f_px, 36.0 * FOCAL_GUESS)
+        f35 = 36.0 * f_px / max(w, h)
         lens = f"{info.get('lens') or ''} {sig[1] or ''}".lower()
-        fisheye = "fisheye" in lens or "fish-eye" in lens or (f35 is not None and f35 <= 15)
+        fisheye = "fisheye" in lens or "fish-eye" in lens or (source != "guess" and f35 <= 15)
         sensor = Sensor(key=self._next_key(self.sensors.values()),
                         label=f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera",
                         width=w, height=h, model="OPENCV_FISHEYE" if fisheye else "OPENCV",
                         params=[f_px, f_px, w / 2.0, h / 2.0, 0.0, 0.0, 0.0, 0.0],
-                        focal_length_mm=info.get("focal_length_mm"))
+                        focal_length_mm=info.get("focal_length_mm"), focal_source=source)
         self.sensors[sensor.key] = sensor
         return sensor
 

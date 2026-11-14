@@ -85,6 +85,12 @@ def exif_fields(exif) -> dict:
         info["focal_length_mm"] = round(_ratio(sub[_TAGS["FocalLength"]]), 3)
     if sub.get(_TAGS["FocalLengthIn35mmFilm"]):
         info["focal_length_35mm"] = float(sub[_TAGS["FocalLengthIn35mmFilm"]])
+    res, unit = sub.get(0xA20E), sub.get(0xA210, 2)  # FocalPlaneXResolution, FocalPlaneResolutionUnit
+    unit_mm = {2: 25.4, 3: 10.0, 4: 1.0}.get(int(unit) if isinstance(unit, (int, float)) else 2)
+    if res and unit_mm and _ratio(res) > 0:
+        info["focal_plane_mm_per_px"] = unit_mm / _ratio(res)
+        if sub.get(0xA002):  # PixelXDimension: the width the resolution above refers to
+            info["exif_width"] = int(sub[0xA002])
     if sub.get(_TAGS["DateTimeOriginal"]):
         info["datetime"] = sub[_TAGS["DateTimeOriginal"]]
     lens = sub.get(_TAGS["LensModel"]) if "LensModel" in _TAGS else None
@@ -102,6 +108,29 @@ def exif_fields(exif) -> dict:
         except Exception:
             pass
     return info
+
+
+def focal_px(info: dict) -> tuple[float | None, str | None]:
+    """The focal length in pixels of a photo from its EXIF (:func:`read_exif`) and where it comes from:
+    the 35 mm equivalent over 36 mm across the longer side (``exif``), else the focal length in mm
+    over the size of a pixel on the sensor (FocalPlaneXResolution, ``exif_mm``); ``(None, None)``
+    when the photo says neither, or a value no camera has (an equivalent under 4 mm or over 2000 mm,
+    a sensor under 1 mm or over 100 mm across)."""
+    w, h = info.get("width"), info.get("height")
+    if not w or not h:
+        return None, None
+    side = max(w, h)
+    f35 = info.get("focal_length_35mm")
+    if f35 and 4.0 <= f35 <= 2000.0:
+        return f35 / 36.0 * side, "exif"
+    fmm, pitch = info.get("focal_length_mm"), info.get("focal_plane_mm_per_px")
+    if fmm and pitch:
+        width = info.get("exif_width") or w
+        pitch *= width / w  # a photo made smaller after the camera keeps the EXIF of the full size
+        across = pitch * side
+        if 1.0 <= across <= 100.0 and 4.0 <= 36.0 * fmm / across <= 2000.0:
+            return fmm / pitch, "exif_mm"
+    return None, None
 
 
 def _text(value) -> str | None:

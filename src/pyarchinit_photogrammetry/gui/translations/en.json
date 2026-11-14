@@ -3554,6 +3554,7 @@
   "La scala la danno le posizioni delle foto: togli i loro riferimenti o disattivali": "The positions of the photos give the scale: remove their references or switch them off",
   "Il chunk è allineato a {0}: scala il chunk di riferimento, quelli allineati lo seguono": "The chunk is aligned to {0}: scale the reference chunk, the chunks aligned to it follow",
   "Scala: clic sul primo e sul secondo punto della distanza nota - Esc annulla": "Scale: click the first and the second point of the known distance - Esc cancels",
+  "{0}: le foto non dicono la focale; parte da {1} px (un {2} mm su una camera 35 mm) e l'allineamento la stima. Se la si conosce, scriverla nella calibrazione della camera.": "{0}: the photos do not say their focal length; it starts from {1} px (a {2} mm lens on a 35 mm camera) and the alignment estimates it. If you know it, write it in the camera calibration.",
   "Pubblica sul web": "Publish on the web",
   "Sito web (Pubblica sul web)...": "Web site (Publish on the web)...",
   "Il rilievo come sito web statico: ortofoto, DEM, unità, disegni e modello 3D in una cartella che qualsiasi hosting pubblica, con l'anteprima su questo computer": "The survey as a static web site: orthophoto, DEM, units, drawings and 3D model in a folder any hosting publishes, with the preview on this computer",

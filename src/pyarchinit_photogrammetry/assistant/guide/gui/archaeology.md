@@ -193,11 +193,17 @@ a new choice. See [DEM coregistration](processing.md#dem-coregistration).
 
 *Tools > Pottery profile from a mesh...*: choose the mesh of a vessel or a sherd (OBJ, PLY, STL), the scale, the units
 and the axis (estimated from the normals of the surface, or the Z of the mesh with the rim up, as on a turntable, or
-down, a sherd resting on its rim).
+down, a sherd resting on its rim). The estimated axis is checked against the shape: of the axes the normals suggest (a
+handle has one of its own) the one around which the surface falls on the thinnest profile is kept, and on whole vessels
+and large sherds it is refined through the centres of the sections across it (a mesh made from photos has rough normals:
+the axis of the turntable bowl leaned by up to 2 degrees, now a few tenths). Small sherds (under about 40 degrees of
+rim) give an axis that is not certain, more so with a handle: lay them on the rim and use the Z of the mesh.
 
 * The **rim diameter** comes from the circle of the lip, which also moves the axis to its centre (a sherd laid on the
   turntable away from its centre is measured right), with the arc kept (*Rim preserved*, 34% (25-50) for a third of the
-  rim). Below 40 degrees of arc, or with an irregular lip, the rim is marked *uncertain*, measured around the axis, and
+  rim): the share of the circle where the lip is, found as the highest point in every small sector around the axis and
+  the plane through them, so a lip slightly tilted to the axis, a spike of the mesh or a chip of the lip do not change
+  it (a chip is not counted as rim). Below 40 degrees of arc, or with an irregular lip, the rim is marked *uncertain*, measured around the axis, and
   not written into PyArchInit.
 * The **profile** with maximum and base diameter, total or preserved height and wall thickness is drawn as SVG, DXF and
   PNG, in a window that stays open.
