@@ -146,9 +146,12 @@ class TexturedModel:
         t[miss] = np.inf
         return t, face, bary
 
-    def colour(self, start_int: np.ndarray, dir_int: np.ndarray) -> np.ndarray:
-        """RGBA (n, 4) float seen along the rays: the texture at the first hit, alpha 0 without one."""
-        _t, face, bary = self.cast(start_int, dir_int)
+    def colour(self, start_int: np.ndarray, dir_int: np.ndarray, max_t: float | None = None) -> np.ndarray:
+        """RGBA (n, 4) float seen along the rays: the texture at the first hit, alpha 0 without one (or when the hit
+        is further than ``max_t``, internal units: behind the depth band of an elevation)."""
+        t, face, bary = self.cast(start_int, dir_int)
+        if max_t is not None:
+            face = np.where(t <= max_t, face, -1)
         out = np.zeros((len(face), 4), np.float64)
         hit = face >= 0
         if not hit.any():
@@ -183,15 +186,16 @@ def _bilinear(img: np.ndarray, uv: np.ndarray) -> np.ndarray:
 
 def render_tile(model: TexturedModel, rays, r0: int, c0: int, th: int, tw: int, k: int) -> np.ndarray:
     """RGBA uint8 ``(4, th, tw)`` of the cells ``r0:r0+th, c0:c0+tw``: ``rays(r, c)`` (fractional rows and columns
-    of the grid, cell centres at half integers) gives the starts and directions in the internal frame; ``k`` x ``k``
+    of the grid, cell centres at half integers) gives the starts and directions in the internal frame (and, as a
+    third item, the furthest hit kept, internal units); ``k`` x ``k``
     rays per cell averaged (transparent rays left out of the mean)."""
     acc = np.zeros((th * tw, 4))
     offs = (np.arange(k) + 0.5) / k
     rr0, cc0 = np.meshgrid(np.arange(th, dtype=np.float64), np.arange(tw, dtype=np.float64), indexing="ij")
     for dy in offs:
         for dx in offs:
-            start, direction = rays(r0 + rr0.ravel() + dy, c0 + cc0.ravel() + dx)
-            rgba = model.colour(start, direction)
+            got = rays(r0 + rr0.ravel() + dy, c0 + cc0.ravel() + dx)
+            rgba = model.colour(*got)
             acc[:, :3] += rgba[:, :3] * (rgba[:, 3:] > 0)
             acc[:, 3] += rgba[:, 3] > 0
     seen = acc[:, 3] > 0
@@ -322,7 +326,7 @@ def build_orthomosaic(chunk: "Chunk", resolution: float | None = None, progress:
 
 def frame_rays(chunk: "Chunk", surface):
     """The ray maker of an elevation frame (:class:`.elevation.FrameSurface`): from the viewer side of the frame,
-    at ``dmax``, towards it."""
+    at ``dmax``, towards it; what lies behind ``dmin`` is not seen (as on the relief)."""
     inv = np.linalg.inv(np.asarray(chunk.transform, float))
     res = surface.resolution
 
@@ -333,7 +337,9 @@ def frame_rays(chunk: "Chunk", surface):
         direction = -surface.frame.view(u, v)
         s = start @ inv[:3, :3].T + inv[:3, 3]
         d = direction @ inv[:3, :3].T
-        return s, d / np.linalg.norm(d, axis=1, keepdims=True)
+        return s, d / np.linalg.norm(d, axis=1, keepdims=True), max_t
+
+    max_t = (surface.dmax - surface.dmin) / float(chunk.scale) if np.isfinite(surface.dmin) else None
 
     return rays
 

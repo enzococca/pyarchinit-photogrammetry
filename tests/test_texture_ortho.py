@@ -155,3 +155,29 @@ def test_dem_surface_of_the_photo_orthophoto_wider_than_32767_cells(tmp_path):
     x = (79488 + np.arange(512) + 0.5) * 0.5
     expected = np.interp(x - 0.5, np.arange(40000), np.linspace(0.0, 40.0, 40000))
     assert np.allclose(heights[0], expected, atol=1e-3)
+
+
+def test_elevation_from_the_texture_keeps_to_its_depth_band(tmp_path):
+    """A wall over half the width in the band, another one behind it (out of the band) over the whole width: the half
+    without the front wall stays transparent, it does not show the wall behind."""
+    doc = new_doc(tmp_path)
+    xyz1, f1, uv1 = grid_mesh(0.0, 0.0, 1.0, 1.0, 10, 10)
+    xyz2, f2, uv2 = grid_mesh(0.0, 0.0, 2.0, 1.0, 20, 10)
+    front = np.column_stack([xyz1[:, 0], np.zeros(len(xyz1)), xyz1[:, 1]])
+    back = np.column_stack([xyz2[:, 0], np.zeros(len(xyz2)), xyz2[:, 1]])
+    walls = []
+    for depth in (0.3, -0.3):
+        b = back.copy()
+        b[:, 1] = depth
+        walls.append(b)
+    xyz = np.vstack([front] + walls)
+    faces = np.vstack([f1, f2 + len(front), f2 + len(front) + len(back)])
+    uv = np.vstack([uv1, uv2, uv2])
+    ch = textured_chunk(doc, "Muri", xyz, faces, uv, [checker(64, 64, COLOUR)])
+    frame = E.plane_from_view(np.array([1.0, 0.0, 0.5]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0]))
+    entry = E.build_elevation(ch, frame, resolution=0.02, depth=(-0.1, 0.1), bounds=(-1.0, 0.0, 1.0, 1.0))
+    ortho, _relief = E.elevation_paths(ch, entry)
+    with rasterio.open(ortho) as src:
+        alpha = src.read(4)
+    cols = alpha.mean(axis=0) / 255.0
+    assert 0.4 < (cols > 0.5).mean() < 0.6  # half the columns seen (the front wall), the other half transparent
