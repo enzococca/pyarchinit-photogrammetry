@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 from typer.testing import CliRunner
 
 import pyarchinit_photogrammetry as ppg
@@ -131,3 +132,61 @@ def test_untextured_obj_groups(tmp_path):
     text = (tmp_path / "back.obj").read_text()
     assert "g primo" in text and "g secondo" in text and "mtllib" not in text
     assert isinstance(ppg.Document, type)
+
+
+def _obj_text(layout: str, crlf: bool = False, quads: bool = False, negative: bool = False) -> str:
+    xyz, f, _uv = grid_mesh(0.0, 0.0, 1.0, 1.0, 3, 3)
+    lines = ["mtllib x.mtl"] + [f"v {x:.4f} {y:.4f} {z:.4f}" for x, y, z in xyz]
+    lines += [f"vt {u:.3f} {v:.3f}" for u, v in xyz[:, :2]] + ["vn 0 0 1"]
+    lines += ["o primo", "usemtl a"]
+    for k, (a, b, c) in enumerate(f):
+        if k == 9:
+            lines += ["g secondo", "usemtl b"]
+        if negative:
+            n = len(xyz)
+            a, b, c = a - n, b - n, c - n
+        else:
+            a, b, c = a + 1, b + 1, c + 1
+        corner = {"v": "{0}", "v/vt": "{0}/{0}", "v//vn": "{0}//1", "v/vt/vn": "{0}/{0}/1"}[layout]
+        lines.append("f " + " ".join(corner.format(i) for i in (a, b, c)))
+    if quads:
+        lines.append("f 1 2 6 5")
+    return ("\r\n" if crlf else "\n").join(lines) + "\n"
+
+
+@pytest.mark.parametrize("layout", ["v", "v/vt", "v//vn", "v/vt/vn"])
+def test_fast_obj_parsing_matches_the_line_by_line_reader(layout):
+    text = _obj_text(layout)
+    fast = mesh_import._parse_obj_fast(text.encode())
+    slow = mesh_import._parse_obj_slow(text)
+    assert fast is not None
+    for key in ("xyz", "vt", "faces", "corner_t"):
+        assert np.array_equal(fast[key], slow[key]), key
+    assert fast["states"] == slow["states"] and fast["libs"] == slow["libs"] == ["x.mtl"]
+    crlf = mesh_import._parse_obj_fast(_obj_text(layout, crlf=True).encode())
+    assert crlf is not None and np.array_equal(crlf["faces"], slow["faces"])
+    assert crlf["states"] == slow["states"]
+
+
+def test_polygons_and_relative_indices_go_line_by_line(tmp_path):
+    for kw in ({"quads": True}, {"negative": True}):
+        text = _obj_text("v/vt", **kw)
+        assert mesh_import._parse_obj_fast(text.encode()) is None
+        (tmp_path / "x.obj").write_text(text)
+        m = mesh_import._read_obj(tmp_path / "x.obj")
+        assert len(m.faces) == 18 + (2 if kw.get("quads") else 0)
+        assert m.group_names == {0: "secondo", 1: "default"} or set(m.group_names.values()) == {"secondo", "default"}
+
+
+def test_blocks_cut_at_line_ends():
+    text = _obj_text("v/vt").encode()
+    whole = mesh_import._parse_obj_fast(text)
+    old = mesh_import.BLOCK
+    try:
+        mesh_import.BLOCK = 50  # many small blocks
+        parts = list(mesh_import._blocks(text, 50))
+        assert b"".join(parts) == text and all(p.endswith(b"\n") for p in parts)
+        small = mesh_import._parse_obj_fast(text)
+    finally:
+        mesh_import.BLOCK = old
+    assert np.array_equal(small["faces"], whole["faces"]) and np.array_equal(small["vt"], whole["vt"])

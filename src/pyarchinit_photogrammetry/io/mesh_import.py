@@ -29,6 +29,7 @@ mesh are read from the texture, normals are left out (the program does not keep 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -170,40 +171,197 @@ def _is_number(text: str) -> bool:
         return False
 
 
-def _read_obj(path: Path) -> Mesh:
-    """An OBJ read line by line: positions (and vertex colours ``v x y z r g b``), texture coordinates, faces
-    (polygons fanned into triangles, negative indices), the material of every face (its page: the texture of the
-    material, pages in the order of the MTL; materials without a texture on a page of plain colours) and the
-    group of every face (``g``, else ``o``)."""
-    text = path.read_text(encoding="utf-8", errors="replace")
+def _obj_state(kinds_names, nf: int, mat_names: list, mat_index: dict, group_index: dict, objects: dict):
+    """The material and the group of every face from the ``usemtl``/``g``/``o`` statements in file order
+    (``(kind, name, faces before it)``): (mats, grps) int arrays, -1 where none applies."""
+    has_g = any(k == "g" for k, _n, _f in kinds_names)
+    mat_at, mat_val, grp_at, grp_val = [], [], [], []
+    for kind, name, at in kinds_names:
+        if kind == "usemtl":
+            if name not in mat_index:
+                mat_index[name] = len(mat_names)
+                mat_names.append(name)
+            mat_at.append(at)
+            mat_val.append(mat_index[name])
+        elif kind == "g" or (kind == "o" and not has_g):
+            if kind == "o":
+                objects.setdefault(name or "object", len(objects))
+            grp_at.append(at)
+            grp_val.append(group_index.setdefault(name or ("default" if kind == "g" else "object"), len(group_index)))
+        elif kind == "o":
+            objects.setdefault(name or "object", len(objects))
+
+    def per_face(at, val):
+        out = np.full(nf, -1, np.int64)
+        if at:
+            k = np.searchsorted(np.asarray(at), np.arange(nf), side="right") - 1
+            ok = k >= 0
+            out[ok] = np.asarray(val, np.int64)[k[ok]]
+        return out
+
+    mats, grps = per_face(mat_at, mat_val), per_face(grp_at, grp_val)
+    return mats, grps
+
+
+def _numbers(lines: list, dtype) -> np.ndarray:
+    """The numbers of ``lines`` (bytes, the keyword taken away) read in one call of numpy."""
+    if not lines:
+        return np.zeros(0, dtype)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        joined = b" ".join(lines)
+        if b"\r" in joined:
+            joined = joined.replace(b"\r", b" ")
+        return np.fromstring(joined, dtype=dtype, sep=" ")
+
+
+BLOCK = 32 << 20  # bytes of an OBJ parsed at once (the lists of lines of a block stay small)
+
+
+def _blocks(data: bytes, size: int = BLOCK):
+    """``data`` in pieces of about ``size`` bytes cut at line ends."""
+    start = 0
+    while start < len(data):
+        end = data.find(b"\n", min(start + size, len(data)))
+        end = len(data) if end < 0 else end + 1
+        yield data[start:end]
+        start = end
+
+
+def _parse_block(block: bytes):
+    """The ``v`` rows (n, 3 or 6), ``vt`` rows (n, 2 or 3), the faces (n, 3, per) - 0-based - and their layout
+    ``(per, no_vt)`` of a piece of an OBJ; None when it needs the line-by-line reader."""
+    vl = re.findall(rb"^v ([^\n]*)", block, re.M)
+    v = _numbers(vl, np.float64)
+    if len(vl):
+        if len(v) not in (3 * len(vl), 6 * len(vl)):
+            return None
+        v = v.reshape(len(vl), -1)
+    else:
+        v = np.zeros((0, 3))
+    tl = re.findall(rb"^vt ([^\n]*)", block, re.M)
+    t = _numbers(tl, np.float64)
+    if len(tl):
+        if len(t) not in (2 * len(tl), 3 * len(tl)):
+            return None
+        t = t.reshape(len(tl), -1)
+    else:
+        t = np.zeros((0, 2))
+    fl = re.findall(rb"^f ([^\n]*)", block, re.M)
+    nf = len(fl)
+    if not nf:
+        return v, t, None, None
+    joined = b" ".join(fl)
+    del fl
+    if b"\r" in joined:
+        joined = joined.replace(b"\r", b"")
+    if b"  " in joined or joined.count(b" ") + 1 != 3 * nf:
+        return None  # not all triangles, or spaces of another kind
+    no_vt = b"//" in joined
+    if no_vt:
+        joined = joined.replace(b"//", b"/")
+    slashes = joined.count(b"/")
+    per = slashes // (3 * nf) + 1
+    if slashes != (per - 1) * 3 * nf or per > 3:
+        return None
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        idx = np.fromstring(joined.replace(b"/", b" "), dtype=np.int64, sep=" ")
+    if len(idx) != 3 * nf * per or (idx <= 0).any():
+        return None  # negative (relative) indices: line by line
+    return v, t, (idx.reshape(nf, 3, per) - 1), (per, no_vt)
+
+
+def _parse_obj_fast(data: bytes) -> dict | None:
+    """An OBJ of triangles whose faces all have the same layout (``v``, ``v/vt``, ``v//vn`` or ``v/vt/vn``, positive
+    indices), as this program and most others write them, parsed with numpy a block of lines at a time. None for any
+    other file (polygons, negative indices, indented lines, ...): :func:`_parse_obj_slow` reads those."""
+    if data.count(b"\n ") or data.count(b"\n\t") or data[:1] in (b" ", b"\t") or b"\t" in data:
+        return None  # indented lines or tabs: line by line
+    xs, ts, fs, layout = [], [], [], None
+    for block in _blocks(data, BLOCK):
+        got = _parse_block(block)
+        if got is None:
+            return None
+        v, t, f, lay = got
+        if f is not None:
+            if layout is not None and lay != layout:
+                return None  # faces of two layouts
+            layout = lay
+            fs.append(f)
+        xs.append(v)
+        ts.append(t)
+    v = np.concatenate(xs) if xs else np.zeros((0, 3))
+    del xs
+    widths = {a.shape[1] for a in ts if len(a)}
+    if len(widths) > 1:
+        return None
+    vt = np.concatenate([a[:, :2] if len(a) else np.zeros((0, 2)) for a in ts]) if ts else np.zeros((0, 2))
+    del ts
+    if not len(v) or not fs or v.shape[1] not in (3, 6):
+        return None
+    xyz, vc = (v, None) if v.shape[1] == 3 else (v[:, :3], v[:, 3:])
+    idx = np.concatenate(fs)
+    del fs
+    per, no_vt = layout
+    nf = len(idx)
+    faces = np.ascontiguousarray(idx[:, :, 0])
+    corner_t = np.ascontiguousarray(idx[:, :, 1]) if per >= 2 and not no_vt else np.full((nf, 3), -1, np.int64)
+    del idx
+    if faces.max() >= len(xyz) or (corner_t.max() >= len(vt) if len(vt) else (corner_t >= 0).any()):
+        return None
+    # the statements in file order, with the faces before each (counted between two statements, in C)
+    found = []  # the statements are few: found with bytes.find, not with a scan of every line
+    for key in (b"usemtl", b"g", b"o", b"mtllib"):
+        for pat, bare in ((b"\n" + key + b" ", False), (b"\n" + key + b"\n", True)):  # "g" alone: default group
+            at = -1 if data.startswith(pat[1:]) else data.find(pat)  # -1: the first line of the file
+            if at < 0 and not data.startswith(pat[1:]):
+                at = -2  # not found
+            while at >= -1:
+                end = data.find(b"\n", at + 1)
+                end = len(data) if end < 0 else end
+                found.append((at, key.decode(), "" if bare else
+                              data[at + len(pat):end].decode("utf-8", "replace").strip()))
+                nxt = data.find(pat, at + 1)
+                at = nxt if nxt >= 0 else -2
+    found.sort()
+    states, libs = [], []
+    count = 1 if data.startswith(b"f ") else 0
+    prev = 0
+    for at, kind, name in found:
+        if at > prev:
+            count += data.count(b"\nf ", prev, at)
+            prev = at
+        if kind == "mtllib":
+            libs.append(name)
+        else:
+            states.append((kind, name, count))
+    return {"xyz": xyz, "vc": vc, "vt": vt, "faces": faces, "corner_t": corner_t, "states": states, "libs": libs}
+
+
+def _parse_obj_slow(text: str) -> dict:
+    """Any OBJ, line by line: polygons fanned into triangles, negative indices."""
     v, vc, vt = [], [], []
-    tris, tuv, mats, grps = [], [], [], []
-    libs: list[str] = []
-    mat_names: list[str] = []
-    mat_index: dict[str, int] = {}
-    group_index: dict[str, int] = {}
-    objects: dict[str, int] = {}
-    mat, grp, obj_grp = -1, -1, -1
-    has_g = "\ng " in text or text.startswith("g ")  # groups when the file has them, else the objects
-
-    def gid(name: str) -> int:
-        return group_index.setdefault(name, len(group_index))
-
+    tris, tuv, states, libs = [], [], [], []
     for line in text.splitlines():
+        line = line.strip()
         if not line or line[0] == "#":
             continue
         key, _, rest = line.partition(" ")
         if key == "v":
-            p = rest.split()
-            v.append(p[:3])
-            if len(p) >= 6:
-                vc.append(p[3:6])
+            q = rest.split()
+            v.append(q[:3])
+            if len(q) >= 6:
+                vc.append(q[3:6])
         elif key == "vt":
             vt.append(rest.split()[:2])
         elif key == "f":
-            corners = rest.split()
             vi, ti = [], []
-            for c in corners:
+            for c in rest.split():
                 parts = c.split("/")
                 a = int(parts[0])
                 vi.append(a - 1 if a > 0 else len(v) + a)
@@ -215,38 +373,45 @@ def _read_obj(path: Path) -> Mesh:
             for k in range(1, len(vi) - 1):
                 tris.append((vi[0], vi[k], vi[k + 1]))
                 tuv.append((ti[0], ti[k], ti[k + 1]))
-                mats.append(mat)
-                grps.append(grp if has_g else obj_grp)
-        elif key == "usemtl":
-            name = rest.strip()
-            if name not in mat_index:
-                mat_index[name] = len(mat_names)
-                mat_names.append(name)
-            mat = mat_index[name]
+        elif key in ("usemtl", "g", "o"):
+            states.append((key, rest.strip(), len(tris)))
         elif key == "mtllib":
             libs.append(rest.strip())
-        elif key == "g":
-            grp = gid(rest.strip() or "default")
-        elif key == "o":
-            name = rest.strip() or "object"
-            objects.setdefault(name, len(objects))
-            if not has_g:
-                obj_grp = gid(name)
-    if not tris:
+    xyz = np.asarray(v, np.float64).reshape(-1, 3)
+    return {"xyz": xyz, "vc": np.asarray(vc, np.float64) if vc and len(vc) == len(v) else None,
+            "vt": np.asarray(vt, np.float64).reshape(-1, 2), "faces": np.asarray(tris, np.int64).reshape(-1, 3),
+            "corner_t": np.asarray(tuv, np.int64).reshape(-1, 3), "states": states, "libs": libs}
+
+
+def _read_obj(path: Path) -> Mesh:
+    """An OBJ: positions (and vertex colours ``v x y z r g b``), texture coordinates, faces (polygons fanned into
+    triangles, negative indices), the material of every face (its page: the texture of the material, pages in the
+    order of the MTL; materials without a texture on a page of plain colours) and the group of every face (``g``,
+    else ``o``). Files of triangles of one layout are parsed with numpy (:func:`_parse_obj_fast`), the others line by
+    line."""
+    data = path.read_bytes()
+    parsed = _parse_obj_fast(data)
+    if parsed is None:
+        parsed = _parse_obj_slow(data.decode("utf-8", errors="replace"))
+    del data
+    xyz, faces, corner_t, libs = parsed["xyz"], parsed["faces"], parsed["corner_t"], parsed["libs"]
+    if not len(faces):
         raise ValueError(f"{path.name}: no triangles in the file")
-    xyz = np.asarray(v, np.float64)
-    faces = np.asarray(tris, np.int64)
-    corner_t = np.asarray(tuv, np.int64)
-    mats = np.asarray(mats, np.int64)
+    mat_names: list[str] = []
+    mat_index: dict[str, int] = {}
+    group_index: dict[str, int] = {}
+    objects: dict[str, int] = {}
+    mats, grps = _obj_state(parsed["states"], len(faces), mat_names, mat_index, group_index, objects)
+    vt = parsed["vt"]
     colors = None
-    if vc and len(vc) == len(v):
-        c = np.asarray(vc, np.float64)
+    if parsed["vc"] is not None:
+        c = parsed["vc"]
         colors = np.clip(c * (255.0 if c.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
     materials = _mtl_materials(path, libs)
     # pages: the textured materials used, in the order of the MTL (then any other order of use)
     order = [m for m in materials if m in mat_index] + [m for m in mat_names if m not in materials]
     pages, page_of, missing = [], {}, []
-    uv = np.asarray(vt, np.float64) if vt else np.zeros((0, 2))
+    uv = np.asarray(vt, np.float64).reshape(-1, 2)
     for name in order:
         img = (materials.get(name) or {}).get("image")
         if img is None:
@@ -257,7 +422,10 @@ def _read_obj(path: Path) -> Mesh:
         if img not in pages:
             pages.append(img)
         page_of[mat_index[name]] = pages.index(img)
-    page = np.array([page_of.get(int(m), -1) for m in mats], np.int64) if len(mats) else np.zeros(0, np.int64)
+    lut = np.full(len(mat_names) + 1, -1, np.int64)  # material -> page; the last entry: no material (-1)
+    for m, k in page_of.items():
+        lut[m] = k
+    page = lut[mats]
     page[(corner_t < 0).any(axis=1)] = -1  # a face without texture coordinates: plain
     tex = texnumber = None
     if pages:
@@ -265,7 +433,7 @@ def _read_obj(path: Path) -> Mesh:
         ok = page >= 0
         tex[ok] = uv[corner_t[ok]]
         if (page < 0).any():  # faces without a texture: blocks of plain colour on a last page
-            plain = sorted({int(m) for m in mats[page < 0]})
+            plain = [int(m) for m in np.unique(mats[page < 0])]
             side = 8
             cols = int(np.ceil(np.sqrt(len(plain))))
             rows = int(np.ceil(len(plain) / cols))
@@ -372,14 +540,20 @@ def closed_components(xyz: np.ndarray, faces: np.ndarray) -> np.ndarray:
     e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]]])
     graph = coo_matrix((np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), shape=(n, n))
     _count, label = connected_components(graph, directed=False)
-    rows = np.ascontiguousarray(np.column_stack([np.asarray(xyz, np.float64), label.astype(np.float64)]))
-    _u, pid = np.unique(rows.view(np.dtype((np.void, 32))).ravel(), return_inverse=True)
-    f = pid.reshape(-1)[faces]
+    xyz = np.asarray(xyz, np.float64)
+    order = np.lexsort((label, xyz[:, 2], xyz[:, 1], xyz[:, 0]))  # vertices at the same position in one piece
+    srt = np.column_stack([xyz[order], label[order]])
+    new = np.ones(n, bool)
+    new[1:] = (srt[1:] != srt[:-1]).any(axis=1)
+    pid = np.empty(n, np.int64)
+    pid[order] = np.cumsum(new) - 1
+    f = pid[faces]
     edges = np.sort(np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
     owner = np.tile(label[faces[:, 0]], 3)
     real = edges[:, 0] != edges[:, 1]
     edges, owner = edges[real], owner[real]
-    uniq, first, counts = np.unique(edges, axis=0, return_index=True, return_counts=True)
+    key = edges[:, 0] * np.int64(int(pid.max()) + 1) + edges[:, 1]  # one integer per edge: a fast unique
+    _uniq, first, counts = np.unique(key, return_index=True, return_counts=True)
     closed = np.ones(label.max() + 1, bool)
     closed[np.unique(owner[first[counts % 2 == 1]])] = False
     faces_per = np.bincount(label[faces[:, 0]], minlength=len(closed))
