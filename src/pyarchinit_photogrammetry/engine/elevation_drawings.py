@@ -533,23 +533,27 @@ def write_dxf_3d(chunk, entry: dict, path) -> Path:
     return path
 
 
-def world_features(chunk, eids=None) -> list[dict]:
+def world_features(chunk, eids=None, data: dict | None = None) -> list[dict]:
     """The drawings of the elevations of ``chunk`` (``eids``, all by default) in 3D, as the 3D view draws the free
     drawings: records ``id`` (``"elevation:<id>:<kind>:<n>"``), ``kind`` (line, polygon, point), ``xyz`` (world, in
-    the chunk's system), ``elevation`` (its id). Elevations made in another system than the chunk's now are left out
-    (said in the log)."""
+    the chunk's system), ``elevation`` (its id). ``data``: ``{id: drawings}`` read in place of those the chunk keeps
+    (the elevation the window shows). Elevations made in another system than the chunk's now are left out (said in
+    the log)."""
     from .elevation import same_crs, world_tables
 
     out = []
     for entry in entries(chunk):
         eid = entry["id"]
-        if (eids is not None and eid not in eids) or not has_drawings(chunk, eid):
+        mine = (data or {}).get(eid)
+        if eids is not None and eid not in eids:
+            continue
+        if not (any(mine.get(k) for k in KINDS) if mine is not None else has_drawings(chunk, eid)):
             continue
         if not same_crs(entry.get("crs") or chunk.crs, chunk.crs):
             log.info("Disegni del prospetto %s non mostrati in 3D: è in un altro sistema", entry.get("name"))
             continue
         try:
-            tables = world_tables(chunk, entry)
+            tables = world_tables(chunk, entry, mine)
         except Exception as exc:  # noqa: BLE001 - a broken elevation: the others are shown
             log.warning("Disegni del prospetto %s non mostrati in 3D: %s", entry.get("name"), exc)
             continue
