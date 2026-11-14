@@ -224,6 +224,9 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "elevations": ("Quote (minima - massima)", "Elevations (minimum - maximum)"),
     "mean_elevation": ("Quota media", "Mean elevation"),
     "area_data": ("Area con dati", "Area with data"),
+    "interpolated": ("Quote interpolate", "Interpolated heights"),
+    "interpolated_value": ("{0} delle celle con dati (tra i punti {1}, vuoti riempiti {2})",
+                           "{0} of the cells with data (between points {1}, voids filled {2})"),
     "elevation_m": ("Quota (m)", "Elevation (m)"),
     "dem_caption": ("Tinte ipsometriche sull'ombreggiatura del rilievo", "Hypsometric tints over the hillshade"),
     "ortho_title": ("Ortofoto", "Orthomosaic"),
@@ -2133,6 +2136,7 @@ def _dem(chunk, w: Words, dem: Raster) -> Section:
         rows.append((w("elevations"), f"{w.number(st['min'], 3)} - {w.number(st['max'], 3)} m"))
         rows.append((w("mean_elevation"), f"{w.number(st['mean'], 3)} m"))
         rows.append((w("area_data"), w.area(st["n"] * dem.cell * dem.cell)))
+    rows += _interpolated_rows(w, chunk, dem.path)
     rows += _file_rows(w, chunk, dem.path)
     sec.blocks.append(KeyValues(rows))
     if dem.sampled and st:
@@ -2146,6 +2150,22 @@ def _dem(chunk, w: Words, dem: Raster) -> Section:
                                   colour_bar=ColourBar(DEM_STOPS, lo, hi, w("elevation_m"), _decimals_for(lo, hi)),
                                   metres_per_pixel=_scale(chunk, dem, rgb.shape[1]), north=_georeferenced(chunk)))
     return sec
+
+
+def _interpolated_rows(w: Words, chunk, path) -> list[tuple[str, str]]:
+    """How many heights of the DEM are interpolated, not measured (its mask, :mod:`..engine.dem_voids`)."""
+    try:
+        from ..engine.dem_voids import mask_stats
+
+        st = mask_stats(chunk, path)
+    except Exception:  # noqa: BLE001 - a report never stops on this
+        return []
+    if not st or not st["cells"] or not (st["gap"] or st["void"]):
+        return []
+    share = 100.0 * (st["gap"] + st["void"]) / st["cells"]
+    a = st["resolution"] ** 2
+    return [(w("interpolated"), w("interpolated_value", f"{w.number(share, 1)} %", w.area(st["gap"] * a),
+                                  w.area(st["void"] * a)))]
 
 
 def _ortho(chunk, w: Words, ortho: Raster) -> Section:
