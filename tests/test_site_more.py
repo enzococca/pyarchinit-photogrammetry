@@ -1080,12 +1080,18 @@ def test_dates_in_a_browser(dated_site, tmp_path):
             browser.wait("ppgSite.state.view3d && ppgSite.state.view3d.ready()", 90)
             models = "ppgSite.state.view3d.models.map(m => m.holder.visible)"
             assert browser.js(models) == [True, False]
-            camera = browser.js("ppgSite.state.view3d.camera.position.toArray()")
+            position = "ppgSite.state.view3d.camera.position.toArray()"
+            first = browser.js(position)
+            # nearer than the view the page opens with: a date that framed the model again would put it back there
+            browser.js("ppgSite.state.view3d.camera.position.multiplyScalar(0.8).toArray()")
+            camera = browser.js(position)
+            assert camera != pytest.approx(first, rel=0.05)
             browser.js("(() => { const s = document.getElementById('date-slider'); s.value = '1';"
                        " s.dispatchEvent(new Event('input')); })()")
             browser.wait("document.documentElement.dataset.epoch === '1'", 10)
             assert browser.js(models) == [False, True]
-            assert browser.js("ppgSite.state.view3d.camera.position.toArray()") == camera
+            # the controls write the position again at every frame, from its angles: the same but for the last digits
+            assert browser.js(position) == pytest.approx(camera, rel=1e-9, abs=1e-9)
             assert not browser.errors, browser.errors
     finally:
         browser.close()
