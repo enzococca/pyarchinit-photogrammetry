@@ -396,3 +396,131 @@ def test_a_wrangler_folder_in_the_home_is_named_by_the_pane(make_window, home, m
     pane = _check(w, qapp)
     assert pane.step_states["publish"] == "unavailable"
     assert str(legacy) in pane.states["publish"].text() and "cancellala" in pane.states["publish"].text()
+
+
+# ------------------------------------------------------------------------------------- removing the site (1.10.2)
+def _publish_r2(w, qapp):
+    pane = w.web_pane
+    pane.cf_bucket.setText("scavo-dati")
+    pane.cf_bucket.textEdited.emit("scavo-dati")
+    pane = _check(w, qapp)
+    w.answers.append(_yes())
+    pane.b_publish.click()
+    _settle(w, qapp)
+    assert pane.step_states["publish"] == "done", pane.states["publish"].text()
+    return pane
+
+
+def test_the_removal_dialog_needs_the_name(qapp, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gui.web_pane import UnpublishDialog
+    from pyarchinit_photogrammetry.io import site_publish as sp
+
+    home = tmp_path / "fake"
+    home.mkdir()
+    fake.environment(monkeypatch, home)
+    folder = fake.make_site(tmp_path / "sito", data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati"), public=True)
+    d = UnpublishDialog(sp.removal_plan(folder))
+    text = d.text.text()
+    assert "<b>scavo</b>" in text and "<b>scavo-dati</b>" in text and "2 file" in text and "Non si può" in text
+    assert "spento" in text
+    assert not d.b_remove.isEnabled() and d.c_bucket.isEnabled() and not d.delete_bucket()
+    d.name.setText("scav")
+    assert not d.b_remove.isEnabled()
+    d.accept()
+    assert d.result() != d.DialogCode.Accepted  # Enter with the name not typed does nothing
+    d.name.setText("scavo")
+    assert d.b_remove.isEnabled()
+    d.c_bucket.setChecked(True)
+    assert d.delete_bucket()
+    d.deleteLater()
+    # a bucket the program did not create: the tick is off
+    state = sp.read_state(folder)
+    state["cloudflare"].pop("bucket_created")
+    (folder / sp.STATE).write_text(json.dumps(state))
+    d = UnpublishDialog(sp.removal_plan(folder))
+    assert not d.c_bucket.isEnabled() and not d.delete_bucket()
+    d.deleteLater()
+    assert [c for c in fake.calls(home) if c[:3] == ["pages", "project", "delete"]] == []
+
+
+def test_remove_the_site_from_the_pane(make_window, home, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.gui import web_pane
+
+    fake.environment(monkeypatch, home)
+    w = make_window(data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    pane = w.web_pane
+    assert not pane.b_unpublish.isVisible()  # nothing published yet
+    pane = _publish_r2(w, qapp)
+    assert pane.b_unpublish.isVisible() and pane.b_unpublish.isEnabled()
+    asked: list = []
+    answers = [None, True]
+    monkeypatch.setattr(web_pane, "ask_removal", lambda parent, removal: asked.append(removal) or answers.pop(0))
+    pane.b_unpublish.click()  # declined: nothing removed
+    _settle(w, qapp)
+    assert asked[0].project == "scavo" and len(asked[0].objects) == 2 and asked[0].bucket_allowed
+    assert not any(c[:3] == ["pages", "project", "delete"] for c in fake.calls(home))
+    assert "published" in w.doc.meta["web_site"]
+
+    pane.b_unpublish.click()
+    _settle(w, qapp)
+    assert not [s for s in w.said if s[0] == "error"], w.said
+    cloud = fake.cloud(home)
+    assert "scavo" not in cloud["projects"] and "scavo-dati" not in cloud["buckets"]
+    assert "published" not in w.doc.meta["web_site"]
+    import pyarchinit_photogrammetry as ppg
+
+    assert "published" not in ppg.Document.open(w.doc.path).meta["web_site"]  # saved
+    assert not pane.b_unpublish.isVisible() and pane.step_states["publish"] != "failed"
+    folder = w.doc.path.parent / "scavo_sito_web"
+    assert (folder / "site.json").exists() and not (folder / ".ppg-publish.json").exists()
+
+
+def test_a_removal_that_fails_halfway_goes_on_later(make_window, home, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.gui import web_pane
+
+    fake.environment(monkeypatch, home)
+    w = make_window()
+    pane = _check(w, qapp)
+    w.answers.append(_yes())
+    pane.b_publish.click()
+    _settle(w, qapp)
+    monkeypatch.setattr(web_pane, "ask_removal", lambda parent, removal: False)
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "fail_project_delete")
+    pane.b_unpublish.click()
+    _settle(w, qapp)
+    assert pane.step_states["publish"] == "failed"
+    text = pane.states["publish"].text()
+    assert "Rimuovi dal web" in text and "Authentication error" in text
+    for secret in (fake.SECRET, fake.ACCOUNT, fake.EMAIL):
+        assert secret not in text
+    assert pane.b_unpublish.isVisible() and "published" in w.doc.meta["web_site"]
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "")
+    pane.b_unpublish.click()
+    _settle(w, qapp)
+    assert "scavo" not in fake.cloud(home)["projects"] and "published" not in w.doc.meta["web_site"]
+    assert not pane.b_unpublish.isVisible()
+
+
+def test_cancel_a_removal(make_window, home, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.gui import web_pane
+
+    fake.environment(monkeypatch, home)
+    w = make_window(data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    pane = _publish_r2(w, qapp)
+    monkeypatch.setattr(web_pane, "ask_removal", lambda parent, removal: False)
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "slow_delete")
+    pane.b_unpublish.click()
+    assert pane.step_states["publish"] == "running" and pane.b_cf_cancel.isEnabled()
+    assert not pane.b_unpublish.isEnabled()
+    limit = time.monotonic() + 30
+    while not (home / "deleting").exists() and time.monotonic() < limit:
+        qapp.processEvents()
+        time.sleep(0.05)
+    t0 = time.monotonic()
+    pane.b_cf_cancel.click()
+    _settle(w, qapp)
+    assert time.monotonic() - t0 < 20
+    assert pane.step_states["publish"] != "running" and not pane.cf_removing
+    assert pane.b_unpublish.isVisible() and pane.b_unpublish.isEnabled()  # what is left, removed next time
+    assert "scavo" in fake.cloud(home)["projects"]

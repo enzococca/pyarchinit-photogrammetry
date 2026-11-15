@@ -13,9 +13,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QRadioButton, QSpinBox,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+                               QRadioButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..io import site
 from ..io import site_publish
@@ -172,6 +172,114 @@ def folder_note(folder) -> str:
                        "restano).")}.get(kind, folder_problem(folder))
 
 
+def removal_items(removal) -> list[str]:
+    """What removing the site from Cloudflare does (:func:`site_publish.removal_plan`), in plain words, one item
+    each (HTML escaped)."""
+    from html import escape as esc
+
+    out = []
+    if removal.project and not removal.project_done:
+        out.append(tr("il progetto Cloudflare Pages <b>{0}</b> viene cancellato, con tutte le sue versioni "
+                      "pubblicate: l'indirizzo del sito smette di funzionare", esc(removal.project)))
+    elif removal.project:
+        out.append(tr("il progetto Pages {0} è già stato cancellato", esc(removal.project)))
+    if removal.bucket:
+        out.append(tr("dal bucket R2 <b>{0}</b> si cancellano i {1} file che il programma ha inviato; gli altri "
+                      "file del bucket non si toccano", esc(removal.bucket), number(len(removal.objects))))
+        out.append({
+            "disable": tr("l'indirizzo pubblico r2.dev del bucket, acceso dal programma, viene spento"),
+            "unknown": tr("l'indirizzo pubblico r2.dev del bucket resta com'è: la pubblicazione è stata fatta da una "
+                          "versione precedente alla 1.10.2, che non annotava se l'aveva acceso il programma; "
+                          "spegnilo dalla dashboard (R2 > bucket > Settings) se vuoi"),
+            "not_ours": tr("l'indirizzo pubblico r2.dev del bucket resta com'è (non l'ha acceso il programma)"),
+            "custom": tr("l'indirizzo dei dati {0} (il tuo dominio) resta com'è", esc(removal.data_address or "")),
+            "done": tr("l'indirizzo pubblico r2.dev del bucket è già spento"),
+            "none": tr("il bucket non ha un indirizzo pubblico da spegnere"),
+        }[removal.dev_url])
+        if removal.bucket_rule == "done":
+            out.append(tr("il bucket {0} è già stato cancellato", esc(removal.bucket)))
+    out.append(tr("la cartella del sito su questo computer resta: {0}", esc(str(removal.folder))))
+    return out
+
+
+def bucket_reason(removal) -> str:
+    """Why the bucket can or cannot be deleted, in plain words."""
+    return {"allowed": tr("Il bucket l'ha creato il programma: si cancella dopo i suoi file (non riesce se contiene "
+                          "file che il programma non ha inviato)."),
+            "not_created": tr("Il bucket non l'ha creato il programma: resta."),
+            "unknown": tr("La pubblicazione è stata fatta da una versione precedente alla 1.10.2, che non annotava "
+                          "se il bucket l'aveva creato il programma: resta."),
+            "done": tr("Il bucket è già stato cancellato."),
+            "none": ""}.get(removal.bucket_rule, "")
+
+
+class UnpublishDialog(QDialog):
+    """The confirmation of the removal from Cloudflare: what is removed, that it cannot be undone, the tick *Elimina
+    anche il bucket* (only when the program created it) and the name of the project to type before the button
+    is enabled. Not native (as every message of the program)."""
+
+    def __init__(self, removal, parent=None):
+        super().__init__(parent)
+        self.removal = removal
+        self.setWindowTitle(tr("Rimuovi dal web"))
+        lay = QVBoxLayout(self)
+        head = QLabel("<p>" + tr("Si cancella da Cloudflare:") + "</p><ul>" +
+                      "".join(f"<li>{x}</li>" for x in removal_items(removal)) + "</ul>" +
+                      f"<p style='color:{PALETTE['red']}'><b>" + tr("Non si può annullare.") + "</b></p>")
+        head.setWordWrap(True)
+        head.setTextFormat(Qt.TextFormat.RichText)
+        head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text = head
+        lay.addWidget(head)
+        self.c_bucket = QCheckBox(tr("Elimina anche il bucket"))
+        self.c_bucket.setEnabled(removal.bucket_allowed)
+        self.c_bucket.setVisible(bool(removal.bucket) and removal.bucket_rule != "done")
+        reason = bucket_reason(removal)
+        self.c_bucket.setToolTip(reason)
+        lay.addWidget(self.c_bucket)
+        if removal.bucket and reason:
+            note = QLabel(reason)
+            note.setWordWrap(True)
+            lay.addWidget(note)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText(removal.confirm_name)
+        ask = QLabel(tr("Per confermare scrivi il nome del progetto: <b>{0}</b>", removal.confirm_name))
+        ask.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(ask)
+        lay.addWidget(self.name)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.b_remove = self.buttons.addButton(tr("Rimuovi dal web"), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.b_remove.setIcon(icon("remove"))
+        self.b_remove.setEnabled(False)
+        self.b_remove.setAutoDefault(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.name.textChanged.connect(self._typed)
+        lay.addWidget(self.buttons)
+        self.resize(560, self.sizeHint().height())
+
+    def _typed(self, text: str) -> None:
+        self.b_remove.setEnabled(bool(self.removal.confirm_name) and text.strip() == self.removal.confirm_name)
+
+    def accept(self) -> None:
+        if self.b_remove.isEnabled():
+            super().accept()
+
+    def delete_bucket(self) -> bool:
+        return self.c_bucket.isEnabled() and self.c_bucket.isChecked()
+
+
+def ask_removal(parent, removal) -> bool | None:
+    """The confirmation of :class:`UnpublishDialog`: None when declined, else whether the bucket goes too."""
+    dialog = UnpublishDialog(removal, parent)
+    try:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.delete_bucket()
+    finally:
+        dialog.deleteLater()
+
+
 class WebPane(QWidget):
     """The four steps of a web site of the project, each with its title, its state (*da fare*, *fatto*, *da rifare*,
     *in corso*, *non riuscito*), its commands and a line that says what it has. The work is done by
@@ -186,6 +294,7 @@ class WebPane(QWidget):
     publish_requested = Signal()
     cancel_requested = Signal()  # the publication (or the login) running
     login_requested = Signal()  # wrangler login run by the program (since 1.10.1)
+    unpublish_requested = Signal()  # the site published removed from Cloudflare (since 1.10.2)
     address_typed = Signal(str)  # the address of the site typed by the user (wrangler did not say it)
 
     def __init__(self, parent=None):
@@ -427,8 +536,14 @@ class WebPane(QWidget):
         self.b_site_copy.clicked.connect(self._copy_published)
         self.b_open_folder = QPushButton(icon("folder"), tr("Apri la cartella"))
         self.b_open_folder.clicked.connect(self.folder_requested)
+        self.b_unpublish = QPushButton(icon("remove"), tr("Rimuovi dal web..."))
+        self.b_unpublish.setToolTip(tr("Cancella da Cloudflare quello che il programma ha pubblicato da questa "
+                                       "cartella: il progetto Pages e i file inviati al bucket R2. Prima mostra "
+                                       "cosa cancella e chiede conferma; la cartella sul computer resta."))
+        self.b_unpublish.clicked.connect(self.unpublish_requested)
+        self.b_unpublish.setVisible(False)
         for b in (self.b_cf_check, self.b_cf_login, self.b_publish, self.b_cf_cancel, self.b_site_open, self.b_site_copy,
-                  self.b_open_folder):
+                  self.b_open_folder, self.b_unpublish):
             bar.addWidget(b)
         cl.addWidget(holder)
         self.published_address = QLineEdit()
@@ -443,6 +558,7 @@ class WebPane(QWidget):
         self.cf_plan_obj: site_publish.Plan | None = None
         self.cf_running = False
         self.cf_login_running = False  # wrangler login started from the pane, waiting for the browser
+        self.cf_removing = False  # the site being removed from Cloudflare
         self.cf_failure = ""
         self.record: dict | None = None
         self.stale: list[str] = []
@@ -513,6 +629,21 @@ class WebPane(QWidget):
         if not running:
             self.cf_plan_obj = None  # the next publication is planned again (what was sent changed)
         self.update_states()
+
+    def set_removing(self, running: bool, failure: str = "") -> None:
+        """The removal from Cloudflare started, or ended (``failure``: what was not removed)."""
+        self.cf_removing = running
+        self.cf_failure = failure
+        if not running:
+            self.cf_plan_obj = None
+        self.update_states()
+
+    def removable_folder(self) -> Path | None:
+        """The site folder whose publication is recorded (``.ppg-publish.json``), None without one."""
+        if self.document is None or self.record is None:
+            return None
+        folder = site.site_folder(self.document, self.record)
+        return folder if site_publish.publication_recorded(folder) else None
 
     def _chunks_changed(self) -> None:
         self.update_states()
@@ -779,6 +910,9 @@ class WebPane(QWidget):
         elif self.cf_running:
             state, text = "running", tr("Pubblicazione in corso: i passi nel log. Annulla per fermarla (i file "
                                         "già inviati restano e non si inviano di nuovo).")
+        elif self.cf_removing:
+            state, text = "running", tr("Rimozione da Cloudflare in corso: i passi nel log. Annulla per fermarla "
+                                        "(Rimuovi dal web riprende da quello che resta).")
         elif self.cf_failure:
             state, text = "failed", tr("Non riuscito: {0}", self.cf_failure)
         elif not built:
@@ -820,7 +954,7 @@ class WebPane(QWidget):
         self.states["publish"].setStyleSheet(f"color: {PALETTE['red']};" if state == "failed" else "")
         self.cf_plan.setText(plan_text(plan) if plan is not None and not self.cf_running else "")
         self.cf_plan.setVisible(plan is not None and not self.cf_running)
-        working = self.cf_running or self.cf_login_running
+        working = self.cf_running or self.cf_login_running or self.cf_removing
         idle = not self._busy and not working and build != "running"
         for w in (self.cf_project, self.cf_data, self.cf_bucket, self.cf_data_url):
             w.setEnabled(not working)
@@ -839,6 +973,9 @@ class WebPane(QWidget):
         if not self.published_address.hasFocus() or not typing:
             self.published_address.setText(address)
         self.b_open_folder.setEnabled(built)
+        removable = self.removable_folder() is not None
+        self.b_unpublish.setVisible(removable)
+        self.b_unpublish.setEnabled(removable and idle)
 
 
 class WebPublishing(QObject):
@@ -860,9 +997,11 @@ class WebPublishing(QObject):
         self.pane.publish_requested.connect(self.publish)
         self.pane.cancel_requested.connect(self.cancel_publish)
         self.pane.login_requested.connect(self.login_cloudflare)
+        self.pane.unpublish_requested.connect(self.unpublish)
         self.pane.address_typed.connect(self.set_address)
         self._publishing = False
         self._logging_in = False
+        self._removing = False
 
     # --------------------------------------------------------------- build
     def build(self) -> bool:
@@ -945,6 +1084,14 @@ class WebPublishing(QObject):
             QTimer.singleShot(0, self._publish_ended)
         if self._logging_in:
             QTimer.singleShot(0, self._login_ended)
+        if self._removing:
+            QTimer.singleShot(0, self._removal_ended)
+
+    def _removal_ended(self) -> None:
+        if self._removing:  # neither done nor failed: cancelled; what went is recorded, the next run goes on
+            self._removing = False
+            log.warning(tr("Rimozione da Cloudflare annullata: Rimuovi dal web riprende da quello che resta"))
+            self.pane.set_removing(False)
 
     def _login_ended(self) -> None:
         if self._logging_in:  # neither done nor failed: cancelled (wrangler stopped)
@@ -1142,9 +1289,76 @@ class WebPublishing(QObject):
         return True
 
     def cancel_publish(self) -> None:
-        """Annulla in step 4: the publication or the login running."""
-        if self._publishing or self._logging_in:
+        """Annulla in step 4: the publication, the login or the removal running."""
+        if self._publishing or self._logging_in or self._removing:
             self.window.runner.cancel()
+
+    def unpublish(self) -> bool:
+        """The site removed from Cloudflare (since 1.10.2): what the program published from the site folder, as
+        :func:`site_publish.removal_plan` says, confirmed in :class:`UnpublishDialog` (the name of the project
+        typed), then :func:`site_publish.unpublish` in the worker. The publication kept with the project is
+        forgotten once everything went."""
+        pane = self.pane
+        folder = pane.removable_folder()
+        if folder is None:
+            self.window._warn(tr("Nessuna pubblicazione registrata in questa cartella: il programma cancella solo "
+                                 "quello che ha pubblicato lui."))
+            return False
+        removal = site_publish.removal_plan(folder)
+        if not removal.ok:
+            self.window._warn("; ".join(removal.problems))
+            return False
+        choice = ask_removal(self.window, removal)
+        if choice is None:
+            log.info(tr("Rimozione dal web non confermata: nulla è stato cancellato"))
+            return False
+        for line in site_publish.removal_plan(folder, choice).lines():
+            log.info("Cloudflare: %s", line)
+        status = pane.cf_status
+        wrangler = site_publish.Wrangler(status.command if status is not None and status.command else None)
+        doc = self.window.doc
+
+        def job(progress):
+            return site_publish.unpublish(folder, delete_bucket=choice, wrangler=wrangler, progress=progress)
+
+        def done(result):
+            self._removing = False
+            for line in result.transcript:
+                log.info("wrangler: %s", line)
+            for line in result.lines():
+                (log.info if result.complete else log.warning)("Cloudflare: %s", site_publish.scrub(line))
+            if result.complete:
+                log.info(tr("Sito rimosso da Cloudflare; la cartella sul computer resta"))
+                if site_publish.forget_published(doc):
+                    if doc.path:
+                        try:
+                            doc.save()
+                        except Exception as exc:  # noqa: BLE001 - said in the log
+                            log.error("Salvataggio non riuscito: %s", exc)
+                    else:
+                        self.window._dirty(True)
+                pane.set_removing(False)
+            else:
+                text = site_publish.scrub("; ".join(result.failures) or tr("non tutto è stato cancellato"))
+                pane.set_removing(False, tr("non tutto è stato rimosso da Cloudflare ({0}); premi di nuovo Rimuovi "
+                                            "dal web per continuare", text))
+            self.window.workspace.populate(doc)
+
+        def failed(summary, details=""):
+            self._removing = False
+            for line in wrangler.transcript:
+                log.info("wrangler: %s", line)
+            text = site_publish.scrub(summary.split(": ", 1)[-1] if summary else tr("errore"))
+            pane.set_removing(False, text)
+            self.window._error(site_publish.scrub(summary), site_publish.scrub(details))
+
+        self._removing = True
+        pane.set_removing(True)
+        if not self.window.runner.run(tr("Rimozione da Cloudflare"), job, done, failed):
+            self._removing = False
+            pane.set_removing(False)
+            return False
+        return True
 
     # --------------------------------------------------------------- preview
     def start_preview(self) -> str | None:
@@ -1206,5 +1420,5 @@ class WebPublishing(QObject):
         self.stop_preview()
 
 
-__all__ = ["WebPane", "WebPublishing", "state_names", "product_names", "default_folder", "folder_problem",
+__all__ = ["WebPane", "WebPublishing", "UnpublishDialog", "ask_removal", "removal_items", "state_names", "product_names", "default_folder", "folder_problem",
            "plan_text", "issue_texts", "data_modes"]
