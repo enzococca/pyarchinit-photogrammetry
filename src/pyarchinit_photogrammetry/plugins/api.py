@@ -113,6 +113,21 @@ class Context:
     """What a plugin receives in :meth:`Plugin.activate`: the open project, the window (None in
     the command line), a folder and settings of its own, a logger, and the registrations."""
 
+    #: Since 1.10.1: given as ``elevation`` to :meth:`add_units`, the plan of the chunk whatever the window shows.
+    PLAN = ""
+    #: Since 1.10.1: what this program does that a plugin cannot tell from the methods alone (:meth:`supports`).
+    FEATURES = frozenset({
+        "elevation-drawings",  # 1.10.0: what is drawn on an elevation is kept with it, in its (u, v)
+        "elevation-removal-takes-drawings",  # 1.10.0: removing an elevation removes its drawings too
+        "plan-units-while-elevation",  # 1.10.1: add_units(elevation=Context.PLAN)
+    })
+
+    def supports(self, feature: str) -> bool:
+        """Since 1.10.1: whether the program has the behaviour ``feature`` (one of :attr:`FEATURES`), for what a
+        plugin cannot tell from the presence of a method - e.g. ``"elevation-removal-takes-drawings"``: removing an
+        elevation removes the drawings kept with it. With an older program: ``getattr(context, "supports", None)``."""
+        return feature in self.FEATURES
+
     def __init__(self, name: str, folder: Path, window=None):
         self.name = name
         self.window = window
@@ -527,7 +542,8 @@ class Context:
         (the command line saves the project). While the window shows an elevation or a section, the polygons are in
         its ``(u, v)`` metres and join its drawings. Since 1.10.0, ``elevation``: the id of an elevation or a section
         of the chunk the units go to, in its ``(u, v)`` metres, whatever the window shows (:meth:`elevation_drawings`
-        reads them back). Only in the interface thread (an action, ``done``), as :meth:`store_drawings`. Returns how
+        reads them back). Since 1.10.1, ``elevation=Context.PLAN``: the units of the plan, in the coordinates of the
+        chunk, also while the window shows an elevation (they are drawn when the plan is shown again). Only in the interface thread (an action, ``done``), as :meth:`store_drawings`. Returns how
         many units were added."""
         import threading
 
@@ -546,7 +562,7 @@ class Context:
         units = units_from_polygons(polygons, tipo, attributes, sito=str(doc.meta.get("sito") or "") or None)
         if not units:
             return 0
-        if elevation is not None:
+        if elevation is not None and elevation != self.PLAN:
             from ..engine import elevation_drawings
 
             if elevation_drawings.entry_of(chunk, elevation) is None:
@@ -567,7 +583,7 @@ class Context:
                 self.mark_modified()
             return n
         if window is not None and chunk is getattr(window, "chunk", None) and hasattr(window, "add_units"):
-            window.add_units(units, source=self.name)
+            window.add_units(units, source=self.name, plan=elevation == self.PLAN)
             return len(units)
         drawings = chunk.meta.setdefault("drawings", {})
         drawings.setdefault("units", []).extend({**u.to_dict(), "layer": None} for u in units)

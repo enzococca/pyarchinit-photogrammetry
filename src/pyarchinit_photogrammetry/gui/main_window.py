@@ -11310,16 +11310,20 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                            + (tr(" (sito {0})", u.sito) if u.sito else ""))
         self._matrix_hint([u])
 
-    def add_units(self, units, source: str = "") -> None:
+    def add_units(self, units, source: str = "", plan: bool = False) -> None:
         """Units made elsewhere (a plugin: ``context.add_units``) added to those drawn on the active
         chunk: drawn on the view, one entry of Modifica > Annulla for all of them, one line of the log,
-        the hint about the US forms not yet in PyArchInit."""
+        the hint about the US forms not yet in PyArchInit. ``plan``: units of the plan whatever is shown - while an
+        elevation is shown they join the plan's, and are drawn when the plan is shown again."""
         units = list(units)
         if not units:
             return
-        start = len(self.shown_units)
-        self.shown_units.extend(units)
-        if self.ortho_view.tr is not None:  # else drawn with the orthophoto or the DEM, when shown
+        target = self.units if plan else self.shown_units
+        start = len(target)
+        target.extend(units)
+        if plan and self.drawings_frame is not None:
+            self._ensure_ppg_ids()  # not drawn now: their identity given here, as the drawing would
+        elif self.ortho_view.tr is not None:  # else drawn with the orthophoto or the DEM, when shown
             with self.ortho_view.batch():  # hundreds of units: one update of the panes and of QGIS
                 for i, u in enumerate(units, start):
                     self._draw_unit(u, i)
