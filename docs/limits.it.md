@@ -51,6 +51,15 @@ cosa ha questo computer.
 * **Le chiavi dell'assistente** stanno nel portachiavi del sistema; senza (un server Linux senza sessione grafica)
   imposta `ANTHROPIC_API_KEY` o `OPENAI_API_KEY` prima di avviare il programma
   ([Errori e aggiornamenti](gui/help.md)).
+* **Strumenti > Apri un terminale** (dalla 1.10.1) apre il terminale del sistema, non uno dentro il programma:
+  Terminal.app su macOS (sempre Terminal, anche se il predefinito è un altro), Windows Terminal o altrimenti una nuova
+  console `cmd` su Windows, su Linux `$TERMINAL` o il primo fra `x-terminal-emulator`, `gnome-terminal`, `konsole`,
+  `xfce4-terminal`, `mate-terminal`, `tilix`, `kitty`, `alacritty`, `wezterm`, `lxterminal`, `xterm` (se non ne
+  trova nessuno lo dice). Da un'installazione pip `ppg` viene per primo nel PATH. **Le applicazioni non hanno il
+  comando `ppg`**: il loro terminale offre `ppg-run script.py` (lo script eseguito dall'applicazione, come `--run`) e
+  `ppg-doctor`, e `PPG_APP` indica l'eseguibile; su Windows il loro output compare quando finiscono. I file di avvio
+  della shell (`.zshrc`, `.bashrc`, l'inizializzazione di Anaconda) possono comunque mettere altre cartelle, e un
+  altro `ppg`, prima: lo dice `which ppg`.
 
 ## macOS su Apple Silicon
 

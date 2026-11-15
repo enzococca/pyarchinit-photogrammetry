@@ -48,6 +48,15 @@ there is one. `ppg doctor` (in the window: *Help > Environment diagnosis...*) sa
 * **The assistant's keys** are kept in the keychain of the system; without one (a Linux server with no desktop
   session) set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` before starting the program
   ([Errors and updates](gui/help.md)).
+* **Tools > Open a terminal** (since 1.10.1) opens the terminal of the system, not one inside the program: Terminal.app
+  on macOS (always Terminal, even when another is the default), Windows Terminal or else a new `cmd` console on
+  Windows, on Linux `$TERMINAL` or the first of `x-terminal-emulator`, `gnome-terminal`, `konsole`,
+  `xfce4-terminal`, `mate-terminal`, `tilix`, `kitty`, `alacritty`, `wezterm`, `lxterminal`, `xterm` (none found:
+  a message says so). From a pip installation `ppg` comes first on the PATH. **The applications have no `ppg`
+  command**: their terminal offers `ppg-run script.py` (the script run by the application, as `--run`) and
+  `ppg-doctor`, and `PPG_APP` names the executable; on Windows their output appears when they end. The shell's own
+  start-up files (`.zshrc`, `.bashrc`, Anaconda's initialisation) may still put other folders, and another `ppg`,
+  before them: `which ppg` tells.
 
 ## macOS on Apple Silicon
 

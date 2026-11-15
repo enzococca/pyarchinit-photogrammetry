@@ -103,7 +103,8 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
    mostra l'indirizzo con *Apri nel browser*, *Copia indirizzo* e *Ferma*. Chiudere il progetto o la finestra lo
    ferma.
 4. **Pubblica**: su Cloudflare Pages (gratuito; un bucket R2 per i dati quando i file superano i limiti di Pages) con
-   il tuo `wrangler`, dopo `wrangler login` in un terminale. **Controlla** mostra il piano - cosa va dove, i limiti
+   il tuo `wrangler`, dopo *Accedi a Cloudflare* nel pannello (o `wrangler login`, `npx wrangler login`, in un
+   terminale). **Controlla** mostra il piano - cosa va dove, i limiti
    gratuiti rispettati o superati, che cosa diventa pubblico - senza inviare nulla; **Pubblica...** chiede di
    confermare che il sito diventa pubblico (una seconda volta, in rosso, con le coordinate vere). L'indirizzo compare
    nel pannello e nell'Area di lavoro con *Apri nel browser* e *Copia l'indirizzo*. Passo per passo, i limiti,

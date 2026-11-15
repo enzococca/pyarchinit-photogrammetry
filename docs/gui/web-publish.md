@@ -47,11 +47,15 @@ viewer takes each raster whole (up to 50 MB a file, the viewer's own limit): it 
 
    The program never installs it by itself. It looks for `wrangler` on the PATH and in the usual folders of Node
    (Homebrew, `~/.npm-global/bin`, nvm, Volta), then for `npx --no wrangler` (which never downloads anything).
-4. **Log in**, once, in the same terminal:
+4. **Log in**, once. Since 1.10.1 the simplest way is the program itself: press **Check** in step 4 and, when it says
+   wrangler is not logged in, press **Log in to Cloudflare** (below). Or in the same terminal:
 
         wrangler login
 
-   The browser opens on Cloudflare: allow wrangler. The credentials stay with wrangler; the program never sees them.
+   When wrangler is not installed but `npx` finds it (it sits only in the cache of npx), `wrangler` alone answers
+   *command not found*: type `npx wrangler login` instead. The pane and `ppg web publish cloudflare` name the command
+   as you can type it, from the one they found. The browser opens on Cloudflare: allow wrangler. The credentials stay
+   with wrangler; the program never sees them.
 5. In the program: build the site (steps 1-2 of the pane), then in step 4 write the **Pages project** name
    (lowercase letters, digits, dashes; the site will be at `https://<name>.pages.dev`; Cloudflare adds a suffix when
    the name is taken, and the pane shows the address it gives).
@@ -66,6 +70,26 @@ viewer takes each raster whole (up to 50 MB a file, the viewer's own limit): it 
    address**; the address is kept with the project. The address is read from wrangler's answers, never guessed: when
    they do not say it, the pane says so, the answers go whole (cleaned) to the Log pane - send them to us - and you
    write the address (from the dashboard, *Workers & Pages*, or `wrangler pages project list`) in the field below.
+
+**Log in to Cloudflare** (since 1.10.1). When the check says wrangler is not logged in, step 4 shows this button: the
+program runs your own `wrangler login` (the same command a terminal would run), wrangler opens the browser, you sign
+in there, and when wrangler ends the program checks again by itself (the login and the plan). Meanwhile the step says
+*complete it in the browser*; **Cancel** stops wrangler, and after 10 minutes without an answer it stops by itself.
+Nothing of what wrangler prints - the sign-in address, the account - is kept, written to the Log pane or shown: only
+whether it worked. The program never reads wrangler's files.
+
+**A terminal from the program** (since 1.10.1): *Tools > Open a terminal* opens the terminal of your system in the
+folder of the project with `ppg`, `npx` and `wrangler` reachable ([Tools](menus.md#tools)).
+
+**Started from the application** (Finder, Start menu) wrangler has no folder of its own to work in: since 1.10.1 the
+program gives it a cache folder of yours in the temporary directory (`WRANGLER_CACHE_DIR`, unless you set one), so
+commands such as `pages project list` no longer end with *Missing file or directory: /.wrangler/cache*. When a command
+fails, the message starts from wrangler's `[ERROR]` line.
+
+**"Not logged in" right after a login that worked**: a folder `~/.wrangler` holding only `cache` or `logs` was
+made by running wrangler with the home folder as working folder, and wrangler now takes it for its configuration
+and finds no login there. Delete that folder and press **Check** again: the login is kept elsewhere. Since 1.10.1
+the pane and the error messages name the folder when they find it (they only check that it exists).
 
 Publishing again sends only what changed: Pages skips the files it already has, and the program remembers the files
 sent to R2 (`.ppg-publish.json` in the site folder, never published) so that it sends only new or changed ones and
@@ -106,11 +130,14 @@ bucket and protect it with Access too, or keep the whole site on Pages.
 
 ## From the command line
 
+    ppg web login cloudflare                                             # your wrangler login (since 1.10.1)
     ppg web publish cloudflare SITE_FOLDER --project NAME --dry-run      # the plan, nothing run or sent
     ppg web publish cloudflare SITE_FOLDER --project NAME --yes-public
     ppg web publish cloudflare SITE_FOLDER --project NAME --bucket NAME-data --yes-public
     ppg web publish cloudflare SITE_FOLDER --project NAME --yes-public --yes-true-coordinates   # site built with --frame crs
 
+`ppg web login cloudflare` does nothing when wrangler is logged in already; otherwise it runs `wrangler login`
+(`--timeout` seconds, 600 by default; Ctrl+C stops it) and prints only whether it worked.
 `--yes-public` is required; a site built with real coordinates also needs `--yes-true-coordinates`. Other options:
 `--data auto|pages|r2`, `--data-url https://...` (a custom domain of the bucket), `--origin https://...` (another
 address of the page allowed to read the bucket), `--record PROJECT.ppg` (keeps the address in the project).

@@ -103,7 +103,8 @@ shaded relief, stratigraphic units, drawings and 3D model on a page any hosting 
 3. **Preview**: a server on this computer alone (127.0.0.1, a free port) and the page in the browser; the pane shows
    the address with *Open in the browser*, *Copy address* and *Stop*. Closing the project or the window stops it.
 4. **Publish**: on Cloudflare Pages (free; an R2 bucket for the data when files are above the limits of Pages) with
-   your own `wrangler`, after `wrangler login` in a terminal. **Check** shows the plan - what goes where, the free
+   your own `wrangler`, after *Log in to Cloudflare* in the pane (or `wrangler login`, `npx wrangler login`, in a
+   terminal). **Check** shows the plan - what goes where, the free
    limits met or exceeded, what becomes public - without sending anything; **Publish...** asks to confirm that the
    site becomes public (a second time, in red, for real coordinates). The address appears in the pane and in the
    Workspace with *Open in the browser* and *Copy the address*. Step by step, the limits, Cloudflare Access and the
