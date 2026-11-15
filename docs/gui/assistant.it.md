@@ -97,7 +97,11 @@ a OpenAI.
 Con un modello locale non esce niente. Con Claude o OpenAI il testo passa prima da un filtro:
 
 * i nomi del sito, dei luoghi e delle persone del progetto sono sostituiti da segnaposto ("Sito A",
-  "Persona 1") e rimessi al loro posto nella risposta;
+  "Persona 1") e rimessi al loro posto nella risposta. Le persone sono quelle che le schede nominano negli
+  attributi in cui PyArchInit le tiene (l'elenco di [Nomi delle persone](web-publish.it.md#nomi-delle-persone)):
+  un nome che sta solo in una nota o in una descrizione il filtro non lo conosce, e dove un testo elenca più
+  persone il testo intero è un nome solo - una di loro scritta da sola altrove non viene riconosciuta. L'account
+  di chi ha scritto una scheda resta fuori da quello che rispondono gli strumenti;
 * si inviano solo coordinate e quote relative, il sistema di riferimento come "proiettato, in metri" o
   "geografico"; i nomi di file, chunk e progetto diventano neutri;
 * foto, posizioni GPS e GNSS non si inviano mai;

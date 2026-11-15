@@ -80,8 +80,9 @@ rileggono (`g`, altrimenti `o`) e restano con il modello; le pagine di texture s
 si chiude, si sposta e si stacca come gli altri pannelli): il rilievo come sito web statico - ortofoto, DEM con il
 rilievo ombreggiato, unità stratigrafiche, disegni e modello 3D in una pagina che qualsiasi hosting pubblica, quello che
 scrive `ppg web build` (vedi [Il rilievo come sito web](../api.it.md#il-rilievo-come-sito-web)). Dalla 2.0.0 i nomi
-delle persone tenuti con le unità e i disegni (chi ha schedato, diretto, era responsabile, ha disegnato) non vengono
-pubblicati ([Nomi delle persone](web-publish.it.md#nomi-delle-persone)). Quattro passi, ognuno
+delle persone tenuti con le unità e i disegni (chi ha schedato, diretto, era responsabile, ha compilato, ha
+disegnato) e gli account di chi ha scritto una scheda non vengono pubblicati
+([Nomi delle persone](web-publish.it.md#nomi-delle-persone)). Quattro passi, ognuno
 con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*, *non riuscito*):
 
 1. **Scegli i contenuti**: i chunk (in partenza ogni chunk con qualcosa da pubblicare, solo quello attivo quando sono

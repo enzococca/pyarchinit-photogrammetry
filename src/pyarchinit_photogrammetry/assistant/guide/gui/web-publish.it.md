@@ -115,18 +115,33 @@ in **Indirizzo dei dati**: allora il programma non tocca r2.dev.
 
 ## Nomi delle persone
 
-Dalla 2.0.0 il sito non pubblica gli attributi in cui PyArchInit tiene il nome di una persona - `schedatore`,
-`direttore_us`, `responsabile_us`, `disegnatore`: chi ha schedato, chi ha diretto, chi era responsabile, chi ha
-disegnato. Restano fuori da tutto quello che il sito pubblica - unità, quote, disegni, sezioni e prospetti, quello che
-aggiungono i plugin (i loro layer, tabelle e legende) - comunque sia scritto il nome dell'attributo (anche
-`Disegnatore`). Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
+Dalla 2.0.0 il sito non pubblica gli attributi in cui PyArchInit tiene il nome di una persona:
 
-Il programma non cerca i nomi nei testi: un nome scritto altrove - nel titolo o nella descrizione del sito, in
-un'etichetta, in una nota, in un altro attributo - viene pubblicato com'è scritto.
+- `schedatore`, `direttore_us`, `responsabile_us`, `disegnatore`: chi ha schedato un'unità, chi ha diretto, chi era
+  responsabile, chi ha disegnato;
+- `responsabile`, `responsabile_scheda`, `compilatore`, `nome_compilatore`: chi è responsabile di un'unità
+  topografica o di una scheda, chi l'ha compilata;
+- `team_members`, la squadra di un'unità topografica, e `draa`, l'autore di un disegno nelle schede dei materiali.
 
-Le versioni 1.10.0, 1.10.1 e 1.10.2 pubblicavano quegli attributi insieme agli altri: in un sito costruito con una di
-quelle il pannello di un clic e i file sotto `data/` mostrano, per esempio, chi ha disegnato un'unità. Per togliere i
-nomi da un sito già online:
+Né quelli in cui tiene l'account di chi ha scritto una scheda: `last_modified_by`, `created_by`, `updated_by`,
+`editing_by`. Restano fuori da tutto quello che il sito pubblica - unità, quote, disegni (un layer importato tra i
+disegni porta le sue colonne), sezioni e prospetti, quello che aggiungono i plugin (i loro layer, tabelle e legende).
+Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
+
+Un attributo si riconosce dal nome, maiuscole o minuscole e qualunque cosa ci sia tra le lettere (`Disegnatore`,
+`Direttore US`, `direttore-us`, `nomeCompilatore`), anche come uno shapefile taglia un nome lungo: ai primi dieci
+caratteri (`responsabi`) o a otto e un numero (`responsa_1`). Quello che contiene resta fuori per intero. Quello
+che il programma non fa:
+
+- un nome che dice di più è un altro attributo e viene pubblicato (`disegnatore2`, `us_disegnatore`), e così una
+  colonna che non è nell'elenco (`autore`, `rilevatore`): togli quella colonna dal layer prima di importarlo, oppure
+  lascia i disegni fuori dai prodotti del sito (passo 1);
+- non cerca i nomi nei testi: un nome scritto altrove - nel titolo o nella descrizione del sito, in un'etichetta,
+  in una nota, nel nome di un layer o di un disegno - viene pubblicato com'è scritto.
+
+I siti costruiti con le versioni dalla 1.9.0 alla 1.10.2 contengono quegli attributi insieme agli altri: il pannello
+di un clic e i file sotto `data/` mostrano, per esempio, chi ha disegnato un'unità (la 1.9.0 costruiva il sito, da
+mettere online a mano; dalla 1.10.0 lo pubblica il programma). Per togliere i nomi da un sito già online:
 
 1. Costruisci di nuovo il sito (passo 2) e pubblicalo di nuovo (passo 4) con la 2.0.0 o successiva: l'indirizzo
    principale e i dati su R2 danno allora i file nuovi (i dati su R2 entro l'ora della loro cache).
@@ -139,6 +154,11 @@ nomi da un sito già online:
 
 Oppure usa **Rimuovi dal web...** ([Cancellare il sito](#cancellare-il-sito)), che cancella il progetto con tutte le
 sue versioni pubblicate, e pubblica di nuovo.
+
+Un sito messo online in un altro modo - la sua cartella copiata su un server, un repository dietro GitHub Pages - si
+sostituisce lì con la cartella costruita di nuovo. Dove l'hosting conserva quello che era pubblicato prima, i nomi
+restano lì: un repository Git, per esempio, tiene i file precedenti di `data/` nella sua storia finché la storia non
+viene riscritta o il repository rifatto.
 
 ## Limitare chi può aprire il sito: Cloudflare Access
 

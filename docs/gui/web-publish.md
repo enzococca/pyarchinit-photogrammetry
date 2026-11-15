@@ -109,18 +109,33 @@ address in **Address of the data**: the program then leaves r2.dev alone.
 
 ## Names of people
 
-Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps the name of a person - `schedatore`,
-`direttore_us`, `responsabile_us`, `disegnatore`: who recorded, who directed, who was in charge, who drew. They are
-left out of everything the site publishes - units, spot heights, drawings, sections and elevations, what the plugins
-add (their layers, tables and legends) - however the name of the attribute is written (`Disegnatore` too). Nothing
-changes in the project or in PyArchInit: the names stay there.
+Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps the name of a person:
 
-The program does not look for names in the texts: a name written elsewhere - in the title or the description of the
-site, in a label, in a note, in another attribute - is published as it is written.
+- `schedatore`, `direttore_us`, `responsabile_us`, `disegnatore`: who recorded a unit, who directed, who was in
+  charge, who drew;
+- `responsabile`, `responsabile_scheda`, `compilatore`, `nome_compilatore`: who is in charge of a survey unit or of
+  a record, who filled it in;
+- `team_members`, the team of a survey unit, and `draa`, the author of a drawing in the records of the materials.
 
-Versions 1.10.0, 1.10.1 and 1.10.2 published those attributes with the others: in a site built with one of them the
-panel of a click and the files under `data/` show, for instance, who drew a unit. To take the names off a site that
-is already online:
+Nor those in which it keeps the account of whoever wrote a record: `last_modified_by`, `created_by`, `updated_by`,
+`editing_by`. They are left out of everything the site publishes - units, spot heights, drawings (a layer imported
+among them brings its columns), sections and elevations, what the plugins add (their layers, tables and legends).
+Nothing changes in the project or in PyArchInit: the names stay there.
+
+An attribute is recognised by its name, whatever the case of its letters and whatever stands between them
+(`Disegnatore`, `Direttore US`, `direttore-us`, `nomeCompilatore`), also as a shapefile cuts a long name: to its
+first ten characters (`responsabi`) or to eight and a number (`responsa_1`). What it holds is left out whole. What
+the program does not do:
+
+- a name that says more is another attribute and is published (`disegnatore2`, `us_disegnatore`), and so is a
+  column that is not in the list (`autore`, `rilevatore`): take such a column out of the layer before importing it,
+  or leave the drawings out of the products of the site (step 1);
+- it does not look for names in the texts: a name written elsewhere - in the title or the description of the site,
+  in a label, in a note, in the name of a layer or of a drawing - is published as it is written.
+
+The sites built with versions 1.9.0 to 1.10.2 hold those attributes with the others: the panel of a click and the
+files under `data/` show, for instance, who drew a unit (1.9.0 built the site, to be put online by hand; since
+1.10.0 the program publishes it). To take the names off a site that is already online:
 
 1. Build the site again (step 2) and publish it again (step 4) with 2.0.0 or later: the main address and the data in
    R2 then give the new files (the data in R2 within the hour of their cache).
@@ -133,6 +148,11 @@ is already online:
 
 Or use **Remove from the web...** ([Deleting the site](#deleting-the-site)), which deletes the project with all its
 deployments, and publish again.
+
+A site put online in another way - its folder copied to a server, a repository behind GitHub Pages - is replaced
+there with the folder built again. Where the hosting keeps what was published before, the names stay in it: a Git
+repository, for instance, keeps the earlier files of `data/` in its history until the history is rewritten or the
+repository is made again.
 
 ## Restricting who can open the site: Cloudflare Access
 

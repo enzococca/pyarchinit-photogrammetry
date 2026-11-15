@@ -93,7 +93,11 @@ or OpenAI.
 With a local model nothing leaves. With Claude or OpenAI the text goes through a privacy filter first:
 
 * the names of the site, of the places and of the people of the project are replaced by placeholders
-  ("Sito A", "Persona 1") and put back in the answer;
+  ("Sito A", "Persona 1") and put back in the answer. The people are those the records name in the attributes
+  PyArchInit keeps them in (the list of [Names of people](web-publish.md#names-of-people)): a name that is only in
+  a note or in a description is not known to the filter, and where one text lists several people the whole text is
+  one name - one of them written alone elsewhere is not recognised. The account of whoever wrote a record is left
+  out of what the tools answer;
 * only relative coordinates and heights are sent, the reference system as "projected, in metres" or
   "geographic"; file, chunk and project names become neutral;
 * photos, GPS and GNSS positions are never sent;

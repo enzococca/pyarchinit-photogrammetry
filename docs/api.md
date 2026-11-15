@@ -1207,7 +1207,7 @@ and the page asks nothing outside its own folder (no CDN).
 | Call | Description |
 | --- | --- |
 | `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | the site of the chunks (objects, keys or labels, or chunk objects of other projects; default every chunk with something to publish); returns the path of `site.json`. Since 1.10.0 the cloud, the sections, the dates, the budget (below) |
-| `io.site.build_notes(manifest)` | since 1.10.0: what the build reduced or left out (`build.notes` of `site.json`) |
+| `io.site.build_notes(manifest)` | since 1.10.0: what the build reduced or left out (`build.notes` of `site.json`, published with the site; since 2.0.0 they give the kind alone of the error of a plugin, whose text is in the log of the program) |
 | `io.site.chunk_date(chunk)` | since 1.10.0: the date of a survey, `YYYY-MM-DD`: the one set on the chunk (`archaeo.timeline.set_phase_date`), else the earliest of its photos |
 | `io.site.export_site(document, folder, ...)` | the same as a module function |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address`; `ranges=False` answers with whole files, as a host without range requests |
@@ -1244,12 +1244,19 @@ chunks: a choice to make knowingly (the tileset of the model is then the one of 
 globe, with the centre of the model in the `origin` of its layer). In both frames the photos are never copied, no tag of the source
 rasters reaches the site, and every text typed by the user (attributes and their names, the names of chunks, layers and drawings,
 title and description) that holds the path of a computer is cut to its last name.
-Since 2.0.0 the names of people are not published: an attribute named `schedatore`, `direttore_us`,
-`responsabile_us` or `disegnatore` (`assistant.privacy.PEOPLE_FIELDS`; in any case of letters, also inside a value
-that is a dict or a list) is left out of every feature - units, spot heights, lines, points, free drawings, the
-drawings of the elevations - and of what the plugins give; a name written elsewhere (a title, a description, a label,
-a note, another attribute) is published as it is written. Versions 1.10.0-1.10.2 published those attributes with the
-others ([Names of people](gui/web-publish.md#names-of-people)).
+A value that is neither a text, a number, a list nor a dictionary (a `Path`, a date) is published as its text, cleaned
+in the same way.
+Since 2.0.0 the names of people are not published: an attribute of `assistant.privacy.PEOPLE_FIELDS` (`schedatore`,
+`direttore_us`, `responsabile_us`, `disegnatore`, `responsabile`, `responsabile_scheda`, `compilatore`,
+`nome_compilatore`, `team_members`, `draa`) or of `ACCOUNT_FIELDS` (the account of whoever wrote the record:
+`last_modified_by`, `created_by`, `updated_by`, `editing_by`) is left out of every feature - units, spot heights,
+lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of what the
+plugins give, also inside a value that is a dict or a list. `assistant.privacy.is_people_field(name)` and
+`is_account_field(name)` tell such an attribute by its name: its letters and digits, in any case and whatever stands
+between them (`Direttore US`, `nomeCompilatore`), or what a shapefile keeps of it (`responsabi`, `responsa_1`); a
+name that says more (`disegnatore2`) is another attribute. A name written elsewhere (a title, a description, a label,
+a note, another attribute) is published as it is written. Versions 1.9.0 to 1.10.2 published those attributes with
+the others ([Names of people](gui/web-publish.md#names-of-people)).
 The chunks of one site must share one reference system, in metres (a system in degrees is refused).
 
 **The folder is never someone else's**: a folder that holds anything but a site built by this program

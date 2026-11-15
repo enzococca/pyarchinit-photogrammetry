@@ -1241,7 +1241,7 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 | Chiamata | Descrizione |
 | --- | --- |
 | `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | il sito dei chunk (oggetti, chiavi o etichette, o chunk di altri progetti; predefinito ogni chunk con qualcosa da pubblicare); restituisce il percorso di `site.json`. Dalla 1.10.0 la nuvola, le sezioni, le date, il limite di dimensione (sotto) |
-| `io.site.build_notes(manifest)` | dalla 1.10.0: quello che la costruzione ha ridotto o lasciato fuori (`build.notes` di `site.json`) |
+| `io.site.build_notes(manifest)` | dalla 1.10.0: quello che la costruzione ha ridotto o lasciato fuori (`build.notes` di `site.json`, pubblicate con il sito; dalla 2.0.0 dell'errore di un plugin danno solo il tipo, il suo testo è nel log del programma) |
 | `io.site.chunk_date(chunk)` | dalla 1.10.0: la data di un rilievo, `AAAA-MM-GG`: quella impostata sul chunk (`archaeo.timeline.set_phase_date`), altrimenti la prima delle sue foto |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
@@ -1278,12 +1278,20 @@ fare sapendolo (il tileset del modello è allora quello di `export_3dtiles`, sul
 modello in `origin` del suo livello). In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
 arriva al sito, e ogni testo scritto dall'utente (gli attributi e i loro nomi, i nomi di chunk, layer e disegni, titolo
 e descrizione) che contiene il percorso di un computer è ridotto al suo ultimo nome.
-Dalla 2.0.0 i nomi delle persone non vengono pubblicati: un attributo che si chiama `schedatore`, `direttore_us`,
-`responsabile_us` o `disegnatore` (`assistant.privacy.PEOPLE_FIELDS`; maiuscole o minuscole, anche dentro un valore
-che è un dizionario o una lista) resta fuori da ogni elemento - unità, quote, linee, punti, disegni liberi, i disegni
-dei prospetti - e da quello che danno i plugin; un nome scritto altrove (un titolo, una descrizione, un'etichetta, una
-nota, un altro attributo) viene pubblicato com'è scritto. Le versioni 1.10.0-1.10.2 pubblicavano quegli attributi con
-gli altri ([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)).
+Un valore che non è un testo, un numero, una lista né un dizionario (un `Path`, una data) viene pubblicato come il
+suo testo, ripulito allo stesso modo.
+Dalla 2.0.0 i nomi delle persone non vengono pubblicati: un attributo di `assistant.privacy.PEOPLE_FIELDS`
+(`schedatore`, `direttore_us`, `responsabile_us`, `disegnatore`, `responsabile`, `responsabile_scheda`,
+`compilatore`, `nome_compilatore`, `team_members`, `draa`) o di `ACCOUNT_FIELDS` (l'account di chi ha scritto la
+scheda: `last_modified_by`, `created_by`, `updated_by`, `editing_by`) resta fuori da ogni elemento - unità, quote,
+linee, punti, disegni liberi e i layer importati tra questi, i disegni dei prospetti - e da quello che danno i
+plugin, anche dentro un valore che è un dizionario o una lista. `assistant.privacy.is_people_field(nome)` e
+`is_account_field(nome)` riconoscono un attributo così dal nome: le sue lettere e cifre, maiuscole o minuscole e
+qualunque cosa ci sia in mezzo (`Direttore US`, `nomeCompilatore`), o quello che ne tiene uno shapefile
+(`responsabi`, `responsa_1`); un nome che dice di più (`disegnatore2`) è un altro attributo. Un nome scritto altrove
+(un titolo, una descrizione, un'etichetta, una nota, un altro attributo) viene pubblicato com'è scritto. Le versioni
+dalla 1.9.0 alla 1.10.2 pubblicavano quegli attributi con gli altri
+([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)).
 I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
 rifiutato).
 
