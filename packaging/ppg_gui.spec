@@ -96,7 +96,7 @@ if sys.platform == "darwin":
 
     app = BUNDLE(coll, name=f"{NAME}.app", icon=ICON, bundle_identifier="org.pyarchinit.photogrammetry",
                  info_plist={"CFBundleShortVersionString": __version__, "CFBundleVersion": __version__,
-                             "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "12.0",
+                             "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "15.0",
                              "CFBundleDocumentTypes": [{"CFBundleTypeExtensions": ["ppg"],
                                                         "CFBundleTypeName": "pyarchinit-photogrammetry project",
                                                         "CFBundleTypeRole": "Editor"}]})
