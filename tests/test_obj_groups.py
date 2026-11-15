@@ -190,3 +190,16 @@ def test_blocks_cut_at_line_ends():
     finally:
         mesh_import.BLOCK = old
     assert np.array_equal(small["faces"], whole["faces"]) and np.array_equal(small["vt"], whole["vt"])
+
+
+def test_colours_of_an_obj_are_rounded_not_cut(tmp_path):
+    """A colour written with four decimals comes back as it was: 90/255 = 0.3529 is 90, not 89."""
+    rgb = (139, 90, 43)
+    kd = " ".join(f"{v / 255:.4f}" for v in rgb)
+    tri = "v 0 0 0{c}\nv 1 0 0{c}\nv 0 1 0{c}\n"
+    (tmp_path / "m.mtl").write_text(f"newmtl unit\nKd {kd}\n")
+    (tmp_path / "m.obj").write_text("mtllib m.mtl\n" + tri.format(c="") + "usemtl unit\nf 1 2 3\n")
+    (tmp_path / "v.obj").write_text(tri.format(c=" " + kd) + "f 1 2 3\n")
+    for name in ("m.obj", "v.obj"):
+        m = mesh_import._read_obj(tmp_path / name)
+        assert {tuple(int(v) for v in c) for c in m.colors} == {rgb}, name

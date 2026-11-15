@@ -147,7 +147,7 @@ def _mtl_materials(obj: Path, libs: list[str]) -> dict:
                 continue
             elif key == "Kd":
                 try:
-                    cur["kd"] = np.clip(np.asarray(rest.split()[:3], float) * 255.0, 0, 255).astype(np.uint8)
+                    cur["kd"] = np.clip(np.rint(np.asarray(rest.split()[:3], float) * 255.0), 0, 255).astype(np.uint8)
                 except ValueError:
                     pass
             elif key == "map_Kd" and rest:
@@ -406,7 +406,7 @@ def _read_obj(path: Path) -> Mesh:
     colors = None
     if parsed["vc"] is not None:
         c = parsed["vc"]
-        colors = np.clip(c * (255.0 if c.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
+        colors = np.clip(np.rint(c * (255.0 if c.max() <= 1.0 else 1.0)), 0, 255).astype(np.uint8)
     materials = _mtl_materials(path, libs)
     # pages: the textured materials used, in the order of the MTL (then any other order of use)
     order = [m for m in materials if m in mat_index] + [m for m in mat_names if m not in materials]
