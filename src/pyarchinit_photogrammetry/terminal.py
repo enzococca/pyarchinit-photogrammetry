@@ -75,13 +75,16 @@ def script_folder() -> Path:
     return Path(tempfile.gettempdir()) / f"ppg-terminal-{who}"
 
 
-def _posix_script(folder: str, first: list[str], last: list[str], app: str | None) -> str:
+def _posix_script(folder: str, first: list[str], last: list[str], app: str | None, cache: str = "") -> str:
     q = shlex.quote
     path = ":".join([q(d) for d in first] + ['"$PATH"'] + [q(d) for d in last])
     lines = ["#!/bin/sh", "# opened by PyArchInit Photogrammetry: its tools on the PATH, then the user's shell",
              f"export PATH={path}"]
     if app:
         lines.append(f"export PPG_APP={q(app)}")
+    if cache:  # wrangler run in the home folder would make ~/.wrangler/cache, which hides its login
+        lines.append(f'export WRANGLER_CACHE_DIR="${{WRANGLER_CACHE_DIR:-{cache}}}"' if "'" not in q(cache)
+                     else f"export WRANGLER_CACHE_DIR={q(cache)}")
     lines += [f"cd {q(folder)} || exit 1",
               "echo " + q("PyArchInit Photogrammetry: " + ("ppg-run script.py, ppg-doctor" if app else
                                                            "ppg --help") + "; npx and wrangler if installed"),
@@ -95,7 +98,8 @@ def _posix_wrappers(where: Path, app: str) -> dict[str, str]:
             str(where / "bin" / "ppg-doctor"): f"#!/bin/sh\nexec {q(app)} --doctor \"$@\"\n"}
 
 
-def _windows_files(where: Path, folder: str, first: list[str], last: list[str], app: str | None) -> dict[str, str]:
+def _windows_files(where: Path, folder: str, first: list[str], last: list[str], app: str | None,
+                   cache: str = "") -> dict[str, str]:
     def esc(text: str) -> str:
         return text.replace("%", "%%")
 
@@ -103,6 +107,8 @@ def _windows_files(where: Path, folder: str, first: list[str], last: list[str], 
     lines = ["@echo off", f'set "PATH={path}"']
     if app:
         lines.append(f'set "PPG_APP={esc(app)}"')
+    if cache:
+        lines.append(f'if not defined WRANGLER_CACHE_DIR set "WRANGLER_CACHE_DIR={esc(cache)}"')
     lines += [f'cd /d "{esc(folder)}"',
               "echo PyArchInit Photogrammetry: " + ("ppg-run script.py, ppg-doctor" if app else "ppg --help") +
               "; npx and wrangler if installed"]
@@ -132,6 +138,10 @@ def build(platform: str, folder: str | os.PathLike, env: Mapping[str, str] | Non
         from .io.site_publish import extra_dirs
 
         extra = extra_dirs()
+    from .io.site_publish import wrangler_cache_dir
+
+    cache = env.get("WRANGLER_CACHE_DIR") or str(wrangler_cache_dir())
+    env["WRANGLER_CACHE_DIR"] = cache
     where = Path(where) if where is not None else script_folder()
     first = list(tools) + ([str(where / "bin")] if app else [])
     sep = ";" if platform == "win32" else ":"
@@ -141,7 +151,7 @@ def build(platform: str, folder: str | os.PathLike, env: Mapping[str, str] | Non
     if app:
         env["PPG_APP"] = app
     if platform == "win32":
-        files = _windows_files(where, folder, first, last, app)
+        files = _windows_files(where, folder, first, last, app, cache)
         script = str(where / "ppg-terminal.cmd")
         wt = which("wt.exe") or which("wt")
         if wt:
@@ -151,10 +161,10 @@ def build(platform: str, folder: str | os.PathLike, env: Mapping[str, str] | Non
     files = _posix_wrappers(where, app) if app else {}
     if platform == "darwin":
         script = str(where / "ppg-terminal.command")
-        files[script] = _posix_script(folder, first, last, app)
+        files[script] = _posix_script(folder, first, last, app, cache)
         return Launch([which("open") or "/usr/bin/open", "-a", "Terminal", script], folder, env, files)
     script = str(where / "ppg-terminal.sh")
-    files[script] = _posix_script(folder, first, last, app)
+    files[script] = _posix_script(folder, first, last, app, cache)
     chosen = env.get("TERMINAL")
     candidates = ([(chosen, lambda t, d, s: [t, "-e", s])] if chosen else []) + LINUX_TERMINALS
     for name, make in candidates:

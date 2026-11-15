@@ -165,3 +165,20 @@ def test_the_menu_action(tmp_path, monkeypatch):
     assert said and str(tmp_path.resolve()) in said[0][3]
     w.setWindowModified(False)
     w.close()
+
+
+def test_terminal_gives_wrangler_a_cache_folder_outside_the_home(tmp_path):
+    """wrangler run in the home folder makes ~/.wrangler/cache, which then hides its login: the terminal sets
+    WRANGLER_CACHE_DIR (a value of the user is kept)."""
+    from pyarchinit_photogrammetry import terminal
+    from pyarchinit_photogrammetry.io.site_publish import wrangler_cache_dir
+
+    for platform in ("darwin", "linux", "win32"):
+        launch = terminal.build(platform, tmp_path, env={"PATH": ""}, tools=[], extra=[], where=tmp_path / "w",
+                                which=lambda name: "/usr/bin/" + name)
+        text = "".join(launch.files.values())
+        assert "WRANGLER_CACHE_DIR" in text and str(wrangler_cache_dir()) in text, platform
+        assert launch.env["WRANGLER_CACHE_DIR"] == str(wrangler_cache_dir())
+    mine = terminal.build("darwin", tmp_path, env={"PATH": "", "WRANGLER_CACHE_DIR": "/mine"}, tools=[], extra=[],
+                          where=tmp_path / "w")
+    assert mine.env["WRANGLER_CACHE_DIR"] == "/mine"
