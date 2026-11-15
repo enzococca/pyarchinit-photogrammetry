@@ -178,6 +178,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "p_cpu_pairs": ("Coppie sulla CPU", "Pairs on the CPU"),
     "p_reprojection_error": ("Errore di riproiezione (px)", "Reprojection error (px)"),
     "p_engine": ("Motore", "Engine"),
+    "p_engine_used": ("Motore usato", "Engine used"),
     "p_iterations": ("Iterazioni", "Iterations"),
     "p_converged": ("Convergenza", "Converged"),
     "p_control_points": ("Punti di controllo", "Control points"),
@@ -1118,6 +1119,8 @@ PARAM_STEPS = [  # (key in chunk.meta, title, parameters in order)
 PARAM_SKIP = {"image_root", "names", "gpu_shares", "nodes", "ba_schedule", "tie_point_limit", "optimize", "added",
               "continued", "gps_priors", "applied_patches", "base", "before", "after", "gnss_bias",
               "rolling_shutter_m", "rigs", "masks", "stationary", "skipped"}
+# the methods of the chunk that take an engine (engine.select), by the step of PARAM_STEPS their rows go under
+ENGINE_METHODS = {"sfm": ("match_photos", "align_cameras"), "dense": ("build_depth_maps",)}
 
 
 def _param_value(w: Words, key: str, value) -> str | None:
@@ -1146,10 +1149,31 @@ def _param_value(w: Words, key: str, value) -> str | None:
     return None
 
 
+def _engine_rows(chunk, w: Words, key: str, title: str) -> list[tuple[str, str, str]]:
+    """The rows of the engine of the step ``key``, from ``chunk.meta["engine"]`` (:func:`..engine.select.record`): one
+    for each of its methods that was asked of an engine that does not do it and ran on another - the engine used and
+    the reason - or that ran on an engine other than the classic one. The classic engine doing what was asked, or
+    what ``auto`` gives, is no row."""
+    kept = chunk.meta.get("engine")
+    out = []
+    for method in ENGINE_METHODS.get(key, ()):
+        record = kept.get(method) if isinstance(kept, dict) else None
+        if not isinstance(record, dict):
+            continue
+        used, fallback = record.get("used"), record.get("fallback")
+        if fallback:
+            out.append((w(title), w("p_engine_used"), f"{used} ({fallback})"))
+        elif used and used != "classic":
+            out.append((w(title), w("p_engine_used"), str(used)))
+    return out
+
+
 def parameter_rows(chunk, w: Words) -> list[tuple[str, str, str]]:
-    """``(step, parameter, value)`` of the processing parameters kept in ``chunk.meta``."""
+    """``(step, parameter, value)`` of the processing parameters kept in ``chunk.meta``, each step after the engine
+    it ran on when that is worth a row (:func:`_engine_rows`)."""
     out = []
     for key, title, keys in PARAM_STEPS:
+        out.extend(_engine_rows(chunk, w, key, title))
         if key == "optimize":
             meta = (chunk.meta.get("sfm") or {}).get("optimize")
         else:
