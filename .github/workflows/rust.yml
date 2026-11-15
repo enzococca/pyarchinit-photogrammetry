@@ -6,8 +6,11 @@ name: rust
 #   deny          the licences and the sources of the crates of the workspace, against native/deny.toml;
 #   software-gpu  a trial and not a gate: the GPU kernels on the software rasterisers of the runners, which have
 #                 no GPU (lavapipe on Linux, WARP on Windows). The program never takes such an adapter by itself,
-#                 so the job names it: `ppg-bench match --device N`, and PPG_TEST_SOFTWARE_GPU=1 for the tests.
-#                 It says which kernels work there and how slow they are, and may fail without failing the run.
+#                 so the job names it: `ppg-bench match --device N`, and PPG_TEST_SOFTWARE_GPU=1 for the tests
+#                 of the kernels in tests/test_native.py. One of them is left out, the fusion compared with
+#                 COLMAP's; the others are tried, SIFT included, and their times on a software rasteriser are
+#                 not known before the first run: the job says which kernels work there and how slow each test
+#                 is, may fail without failing the run, and has a timeout that is an estimate.
 on:
   push:
     paths: ["native/**", ".github/workflows/rust.yml"]
@@ -129,13 +132,16 @@ jobs:
         run: |
           set +e
           export GLOG_minloglevel=2
-          # "not colmaps" leaves out the two tests with COLMAP in their names: test_gpu_fusion_agrees_with_colmaps
-          # (COLMAP's fusion beside the kernel: far too slow on a software rasteriser) and
-          # test_gpu_sift_finds_colmaps_points
-          python -m pytest tests/test_native.py -k "gpu and not colmaps" -q -rs 2>&1 | tee pytest.log
+          # the tests of the GPU kernels in tests/test_native.py, all but one: test_gpu_fusion_agrees_with_colmaps
+          # needs COLMAP's fusion beside the kernel and is far too slow on a software rasteriser.
+          # test_gpu_sift_finds_colmaps_points is tried: its time there is not known before the first run, which
+          # is why the job has continue-on-error and a timeout that is an estimate. --durations=0 prints the time
+          # of each test (setup, call, teardown)
+          python -m pytest tests/test_native.py -k "gpu and not fusion_agrees_with_colmaps" -q -rs --durations=0 \
+            2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
           {
-            echo 'pytest tests/test_native.py -k "gpu and not colmaps"'
+            echo 'pytest tests/test_native.py -k "gpu and not fusion_agrees_with_colmaps"'
             echo '```'; tail -60 pytest.log; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
