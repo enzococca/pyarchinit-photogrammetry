@@ -38,6 +38,21 @@ def test_site_place_and_people_names_leave_as_placeholders(tmp_path):
     assert f.incoming("il sito a nord") == "il sito a nord"
 
 
+def test_the_names_of_a_record_are_found_however_its_fields_are_written(tmp_path):
+    """The fields of a record that hold a site, a place or a person are read whatever the case of their names and
+    the spaces around them (a layer whose columns are ``Sito``, ``COMUNE``, ``Disegnatore``): what they hold leaves
+    as placeholders like the rest."""
+    doc = Document(tmp_path / "Rilievo.ppg")
+    ch = doc.add_chunk("Volo 1")
+    ch.meta["drawings"] = {"units": [{"wkt": "POLYGON EMPTY", "Sito": "Veio", "us": "1",
+                                      "attributes": {"COMUNE": "Formello", "Disegnatore": "Anna Verdi",
+                                                     " schedatore ": "Mario Rossi"}}], "quote": []}
+    f = Filter(doc)
+    out = f.outgoing("Veio, Formello: disegno di Anna Verdi, scheda di Mario Rossi")
+    assert out == "Sito A, Luogo 1: disegno di Persona 2, scheda di Persona 1"
+    assert f.incoming(out) == "Veio, Formello: disegno di Anna Verdi, scheda di Mario Rossi"
+
+
 def test_extra_people_and_places(tmp_path):
     f = Filter(None, people=["Anna Verdi"], places=["Veio"])
     assert f.outgoing("Anna Verdi a Veio") == "Persona 1 a Luogo 1"

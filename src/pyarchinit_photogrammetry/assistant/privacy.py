@@ -368,12 +368,14 @@ class Filter:
         for source in (rec, rec.get("attributes")):
             if not isinstance(source, dict):
                 continue
-            for f in _SITE_ONLY:
-                self._add("site", source.get(f))
-            for f in _PLACE_FIELDS:
-                self._add("place", source.get(f))
-            for f in PEOPLE_FIELDS:
-                self._add("person", source.get(f))
+            # the fields as their names are compared: a layer may write ``Sito``, ``COMUNE``, ``Disegnatore``
+            named: dict[str, list] = {}
+            for key, value in source.items():
+                named.setdefault(str(key).strip().lower(), []).append(value)
+            for kind, fields in (("site", _SITE_ONLY), ("place", _PLACE_FIELDS), ("person", PEOPLE_FIELDS)):
+                for f in fields:
+                    for value in named.get(f, ()):
+                        self._add(kind, value)
 
     def _collect(self, doc: Any) -> None:
         meta = getattr(doc, "meta", None) or {}
