@@ -145,8 +145,9 @@ def test_not_logged_in(make_window, home, monkeypatch, qapp):
     w = make_window()
     pane = _check(w, qapp)
     assert pane.step_states["publish"] == "unavailable"
-    assert "wrangler login" in pane.states["publish"].text()
+    assert "wrangler login" in pane.states["publish"].text() and "npx" not in pane.states["publish"].text()
     assert not pane.b_publish.isEnabled()
+    assert pane.b_cf_login.isVisible() and pane.b_cf_login.isEnabled()
     assert fake.calls(home) == [["--version"], ["whoami", "--json"]]
 
 
@@ -301,3 +302,87 @@ def test_an_address_not_said_by_wrangler_is_typed_by_the_user(make_window, home,
     assert w.doc.meta["web_site"]["published"]["address"] == "https://scavo-7xq.pages.dev"
     assert pane.published_address.isReadOnly() and pane.b_site_open.isEnabled()
     assert "scavo-7xq.pages.dev" in _site_item(w).text(0)
+
+
+# ------------------------------------------------------------------------------------- the login from the pane
+def _no_secret_logged(caplog):
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    for secret in (fake.SECRET, fake.ACCOUNT, fake.EMAIL, "oauth2"):
+        assert secret not in text, secret
+
+
+def test_the_hint_names_npx_when_wrangler_runs_only_through_it(make_window, home, monkeypatch, qapp):
+    fake.npx_environment(monkeypatch, home, "logged_out")
+    w = make_window()
+    pane = _check(w, qapp)
+    assert pane.step_states["publish"] == "unavailable"
+    assert "npx wrangler login" in pane.states["publish"].text()
+    assert pane.b_cf_login.isVisible() and pane.b_cf_login.isEnabled()
+
+
+def test_login_from_the_pane_then_checked_again(make_window, home, monkeypatch, qapp, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    fake.npx_environment(monkeypatch, home, "logged_out")
+    w = make_window()
+    pane = _check(w, qapp)
+    assert pane.b_cf_login.isVisible() and not pane.b_publish.isEnabled()
+    pane.b_cf_login.click()
+    assert pane.step_states["publish"] == "running" and pane.b_cf_cancel.isEnabled()
+    assert not pane.b_cf_check.isEnabled() and not pane.b_cf_login.isEnabled()
+    _settle(w, qapp)
+    assert ["login"] in fake.calls(home)
+    assert fake.calls(home)[-2:] == [["--version"], ["whoami", "--json"]]  # checked again by itself
+    assert pane.cf_status.state == "ready" and pane.b_publish.isEnabled()  # the plan made again too
+    assert not pane.b_cf_login.isVisible() and not pane.b_cf_cancel.isEnabled()
+    _no_secret_logged(caplog)
+    assert fake.SECRET not in pane.states["publish"].text() and fake.EMAIL not in pane.states["publish"].text()
+
+
+def test_a_failed_login_in_the_pane(make_window, home, monkeypatch, qapp, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    fake.environment(monkeypatch, home, "logged_out,login_fail")
+    w = make_window()
+    pane = _check(w, qapp)
+    pane.b_cf_login.click()
+    _settle(w, qapp)
+    assert pane.step_states["publish"] == "failed"
+    assert "non completato" in pane.states["publish"].text()
+    assert pane.b_cf_login.isVisible() and pane.b_cf_login.isEnabled()  # to try again
+    _no_secret_logged(caplog)
+    assert w.said == []  # no error window: the pane says it
+
+
+def test_a_login_never_finished_stops_by_itself(make_window, home, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.io import site_publish
+
+    monkeypatch.setattr(site_publish, "LOGIN_TIMEOUT", 2.0)
+    fake.environment(monkeypatch, home, "logged_out,login_hang")
+    w = make_window()
+    pane = _check(w, qapp)
+    t0 = time.monotonic()
+    pane.b_cf_login.click()
+    _settle(w, qapp)
+    assert time.monotonic() - t0 < 20
+    assert pane.step_states["publish"] == "failed" and "2 s" in pane.states["publish"].text()
+
+
+def test_cancel_a_login(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home, "logged_out,login_hang")
+    w = make_window()
+    pane = _check(w, qapp)
+    pane.b_cf_login.click()
+    limit = time.monotonic() + 30
+    while not (home / "login_started").exists() and time.monotonic() < limit:
+        qapp.processEvents()
+        time.sleep(0.05)
+    assert (home / "login_started").exists()
+    t0 = time.monotonic()
+    pane.b_cf_cancel.click()
+    _settle(w, qapp)
+    assert time.monotonic() - t0 < 20  # wrangler stopped, not waited for
+    assert pane.step_states["publish"] == "unavailable" and not pane.cf_login_running
+    assert pane.b_cf_login.isEnabled() and not pane.b_cf_cancel.isEnabled()

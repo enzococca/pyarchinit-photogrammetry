@@ -78,6 +78,7 @@ ICONS = {
     "doctor": ("mdi6.stethoscope", "teal"), "error": ("mdi6.alert-circle", "red"),
     "warning": ("mdi6.alert", "amber"), "info": ("mdi6.information", "blue"),
     "copy": ("mdi6.content-copy", "grey"), "folder": ("mdi6.folder-outline", "amber"),
+    "login": ("mdi6.login", "orange"), "terminal": ("mdi6.console-line", "slate"),
     "search": ("mdi6.magnify", "grey"), "clear": ("mdi6.delete-sweep-outline", "grey"),
     "ok": ("mdi6.check-circle", "green"), "view": ("mdi6.eye-outline", "blue"), "settings": ("mdi6.tune-variant", "slate"), "edit": ("mdi6.pencil-outline", "slate"),
     "version": ("mdi6.layers-outline", "amber"),
