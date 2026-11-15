@@ -21,7 +21,7 @@ cosa ha questo computer.
 | Termico R-JPEG DJI (DJI Thermal SDK) | in Docker Desktop | in Docker Desktop | nativo | non verificato | nativo | non verificato |
 | Vista 3D VTK | sì | sì | sì | sì dalla 1.3.5, serve OpenGL 3.2 | sì | sì |
 | Scansioni E57 | sì | sì | sì | sì dalla 1.3.5 | sì | compilate all'installazione |
-| File raw delle fotocamere (rawpy) | sì | con pip | sì | **non nell'applicazione**; pip con Python 3.11+ | sì | con pip |
+| File raw delle fotocamere (rawpy) | sì | con pip | sì | sì (applicazione dalla 1.10.1); pip con Python 3.11+ | sì | con pip |
 | Prove nella CI del progetto | l'applicazione viene costruita e avviata | nessuna | tutti i test, applicazione costruita e avviata | applicazione costruita e avviata, test a richiesta | tutti i test | test a richiesta |
 
 ## Su tutti i sistemi
@@ -112,8 +112,8 @@ cosa ha questo computer.
 * **Niente SpatiaLite**: la sua unica versione per Windows arriva con QGIS, che è x64, e un programma ARM64 non
   può caricarla. La scrittura di geometrie in un database **SQLite** di PyArchInit non è disponibile; **PostGIS**
   funziona (con psycopg 3).
-* **Niente file raw delle fotocamere nell'applicazione**: è costruita senza rawpy, quindi DNG, CR2, NEF, ARW...
-  non si possono aggiungere; esporta le foto in JPEG o TIFF. Con pip, rawpy qui richiede Python 3.11 o successivo.
+* **File raw delle fotocamere**: nell'applicazione dalla 1.10.1 (le versioni precedenti erano costruite senza
+  rawpy: lì esporta le foto in JPEG o TIFF). Con pip, rawpy qui richiede Python 3.11 o successivo.
 * **La vista 3D VTK richiede OpenGL 3.2** (dalla 1.3.5): i computer Snapdragon lo hanno dal driver grafico o dal
   *OpenCL, OpenGL, and Vulkan Compatibility Pack* di Microsoft (Microsoft Store). Dove Windows offre solo OpenGL 1.1
   (macchine virtuali senza driver 3D) il programma usa il renderer software, e la diagnostica dice quale OpenGL

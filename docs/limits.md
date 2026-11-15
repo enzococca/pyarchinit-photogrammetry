@@ -20,7 +20,7 @@ there is one. `ppg doctor` (in the window: *Help > Environment diagnosis...*) sa
 | DJI R-JPEG thermal (DJI Thermal SDK) | in Docker Desktop | in Docker Desktop | native | not checked | native | not checked |
 | VTK 3D view | yes | yes | yes | yes from 1.3.5, needs OpenGL 3.2 | yes | yes |
 | E57 scans | yes | yes | yes | yes from 1.3.5 | yes | compiled when installed |
-| Camera raw files (rawpy) | yes | with pip | yes | **not in the application**; pip with Python 3.11+ | yes | with pip |
+| Camera raw files (rawpy) | yes | with pip | yes | yes (application since 1.10.1); pip with Python 3.11+ | yes | with pip |
 | Tests in the project's CI | the application is built and started | none | whole test suite, application built and started | application built and started, test suite on demand | whole test suite | test suite on demand |
 
 ## On every system
@@ -107,8 +107,8 @@ there is one. `ppg doctor` (in the window: *Help > Environment diagnosis...*) sa
 * **No SpatiaLite**: its only Windows build comes with QGIS, which is x64, and an ARM64 program cannot load it.
   Writing geometries into a PyArchInit **SQLite** database is not available; **PostGIS** works (through
   psycopg 3).
-* **No camera raw files in the application**: it is built without rawpy, so DNG, CR2, NEF, ARW... cannot be
-  added; export the photos to JPEG or TIFF. With pip, rawpy needs Python 3.11 or later here.
+* **Camera raw files**: in the application since 1.10.1 (earlier versions were built without rawpy: export the
+  photos to JPEG or TIFF there). With pip, rawpy needs Python 3.11 or later here.
 * **The VTK 3D view needs OpenGL 3.2** (from 1.3.5): Snapdragon computers have it from their graphics driver or
   from Microsoft's *OpenCL, OpenGL, and Vulkan Compatibility Pack* (Microsoft Store). Where Windows offers only
   OpenGL 1.1 (virtual machines without a 3D driver) the program uses the software renderer, and the diagnosis
