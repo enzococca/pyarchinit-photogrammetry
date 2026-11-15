@@ -7,6 +7,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 
 import pytest
@@ -161,13 +162,23 @@ def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch, stan
     target = _fake_app(tmp_path / "Applications", "0.6.1", stand_ins)
     # the copies the updater makes: the new version it stages and the old one it sets aside during the swap
     stand_ins += [tmp_path / "staging" / target.name, target.with_name(".PyArchInit Photogrammetry.old.app")]
+    mounts, mkdtemp = [], tempfile.mkdtemp  # the updater mounts the disk image on a folder of the temporary folder
+
+    def recorded(*args, **kwargs):
+        made = mkdtemp(*args, **kwargs)
+        if os.path.basename(made).startswith("ppg-update-"):
+            mounts.append(made)
+        return made
+
+    monkeypatch.setattr(tempfile, "mkdtemp", recorded)
 
     with pytest.raises(updates.UpdateError) as e:
         updates.prepare_macos_update(dmg, target, expected_version="9.9.8")
     assert e.value.kind == "install"
     new = updates.prepare_macos_update(dmg, target, expected_version="9.9.9")
     assert updates.bundle_version(new) == "9.9.9" and updates.bundle_version(target) == "0.6.1"
-    assert not any(p.name.startswith("ppg-update-") for p in tmp_path.iterdir())  # mount point removed
+    # a mount point for each call, the refused one too: the image detached and the folder removed
+    assert len(mounts) == 2 and not any(os.path.exists(m) for m in mounts)
 
     running = subprocess.Popen(["/bin/sleep", "1"], close_fds=False)  # stands for the running application
     helper = updates.finish_macos_update(new, target, pid=running.pid, relaunch=False)
