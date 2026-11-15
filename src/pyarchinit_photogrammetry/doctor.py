@@ -8,6 +8,7 @@ import os
 import platform
 import shutil
 import sys
+import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,6 +131,48 @@ def outside(dist: str, version: str | None) -> str | None:
 #: editable install made before the requirement keeps the requirements of its day in its metadata, which
 #: :func:`outside` reads, and runs the code of today
 AFFINE_MIN = "3.0"
+
+
+def _scripts_dir(user: bool = False) -> Path:
+    """The folder of the launchers of this environment, or of an install made for the user (``--user``).
+
+    It is not the folder of the interpreter: the ``python`` of a virtual environment is a link to an interpreter
+    elsewhere, and a base install on Windows keeps ``python.exe`` beside ``Scripts``, not inside it.
+    """
+    if user:
+        return Path(sysconfig.get_path("scripts", scheme=sysconfig.get_preferred_scheme("user")))
+    return Path(sysconfig.get_path("scripts"))
+
+
+def _installed_for_the_user() -> bool:
+    """Whether this distribution is in the site-packages of the user (``pip install --user``)."""
+    import site
+    from importlib import metadata
+
+    try:
+        where = Path(str(metadata.distribution("pyarchinit-photogrammetry").locate_file(""))).resolve()
+        return where == Path(site.getusersitepackages()).resolve()
+    except Exception:  # run from a source tree, or an interpreter without a user site
+        return False
+
+
+def launcher_check() -> Check:
+    """Whose ``ppg-gui`` a terminal runs: the one of this install, also through a link to it, or another one."""
+    name = "ppg-gui on PATH"
+    found = shutil.which("ppg-gui")
+    if not found:
+        return Check(name, WARN, "not found",
+                     "Activate the virtual environment, or run 'python -m pyarchinit_photogrammetry.gui'.")
+    for_user = _installed_for_the_user()
+    mine = _scripts_dir(user=for_user)
+    own = {_scripts_dir().resolve(), mine.resolve()}
+    target = Path(found).resolve()
+    if target.parent in own:
+        return Check(name, OK, found)
+    return Check(name, WARN, found,
+                 f"Typing 'ppg-gui' in a terminal runs this file, not the one in {mine}. Activate the "
+                 f"environment of this install ('source .venv/bin/activate') or remove the other one "
+                 f"('{target.parent / 'python'} -m pip uninstall pyarchinit-photogrammetry').")
 
 
 def affine_check() -> Check:
@@ -293,20 +336,9 @@ def run_checks(gui: bool = True) -> Report:
           "" if sys.version_info >= (3, 10) else "Python 3.10 or newer is required")
     r.add("System", OK, f"{platform.system()} {platform.release()} ({platform.machine()})")
 
-    # another ppg-gui earlier on PATH than this interpreter's one (stale install)
+    # another ppg-gui earlier on PATH than the one of this install (stale install)
     if not frozen:
-        here = Path(sys.executable).resolve().parent
-        found = shutil.which("ppg-gui")
-        if found and Path(found).resolve().parent != here:
-            r.add("ppg-gui on PATH", WARN, found,
-                  f"Typing 'ppg-gui' in a terminal runs this file, not the one in {here}. Activate the "
-                  f"environment of this install ('source .venv/bin/activate') or remove the other one "
-                  f"('{Path(found).parent / 'python'} -m pip uninstall pyarchinit-photogrammetry').")
-        elif found:
-            r.add("ppg-gui on PATH", OK, found)
-        else:
-            r.add("ppg-gui on PATH", WARN, "not found",
-                  "Activate the virtual environment, or run 'python -m pyarchinit_photogrammetry.gui'.")
+        r.checks.append(launcher_check())
     if "anaconda3" in sys.executable.lower() or "miniconda" in sys.executable.lower():
         r.add("Interpreter", WARN, "Anaconda/Miniconda base environment",
               "Use a dedicated virtual environment: Anaconda's own compiled wheels (SciPy, VTK) may not load "
