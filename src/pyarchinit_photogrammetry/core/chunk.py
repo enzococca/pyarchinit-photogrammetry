@@ -414,6 +414,7 @@ class Chunk:
         from ..engine import sfm, switch
 
         choice = switch.resolve("match_photos", engine)
+        switch.classic_only("match_photos", choice)
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
                          pair_selection=pair_selection, progress=as_progress(progress),
                          exclude_stationary=exclude_stationary, generic=generic, reference=reference,
@@ -439,6 +440,7 @@ class Chunk:
         from ..engine import sfm, switch
 
         choice = switch.resolve("align_cameras", engine)
+        switch.classic_only("align_cameras", choice)
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
                               ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
@@ -721,6 +723,7 @@ class Chunk:
         from ..engine import dense, switch
 
         choice = switch.resolve("build_depth_maps", engine)
+        switch.classic_only("build_depth_maps", choice)
         dense.build_depth_maps(self, quality=quality, filter_mode=filter_mode, backend=backend,
                                progress=as_progress(progress), skip_unreadable=skip_unreadable, gpu=gpu)
         switch.record(self, "build_depth_maps", choice)

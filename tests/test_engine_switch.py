@@ -17,8 +17,6 @@ from pyarchinit_photogrammetry.cli import app
 from pyarchinit_photogrammetry.core.chunk import Chunk
 from pyarchinit_photogrammetry.engine import switch
 
-METHODS = ("match_photos", "align_cameras", "build_depth_maps")
-
 
 def _plain_words(output: str) -> str:
     """What a command printed, as plain words on one line: Typer prints a usage error in a box that wraps the
@@ -115,16 +113,16 @@ def test_only_a_fallback_is_logged(monkeypatch, caplog):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     assert switch.NATIVE_STEPS == frozenset()  # the steps the native engine does: none in this milestone
     with caplog.at_level("INFO"):
-        for step in METHODS:
+        for step in switch.STEPS:
             for word in (None, "auto", "classic"):
                 c = switch.resolve(step, word)
                 assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
     assert not caplog.records
     with caplog.at_level("INFO"):
-        for step in METHODS:
+        for step in switch.STEPS:
             assert switch.resolve(step, "native").fallback == f"the native engine does not do '{step}' yet"
     assert [record.getMessage().split(":")[0] for record in caplog.records] == [
-        f"engine 'native' asked for {step}" for step in METHODS]  # one line per step that fell back
+        f"engine 'native' asked for {step}" for step in switch.STEPS]  # one line per step that fell back
 
 
 def test_a_step_the_native_engine_does_is_its_own_when_asked_for(monkeypatch, caplog):
@@ -144,6 +142,36 @@ def test_a_step_the_native_engine_does_is_its_own_when_asked_for(monkeypatch, ca
     assert (c.used, c.fallback) == ("classic", "the native engine does not do 'align_cameras' yet")
 
 
+# ------------------------------------------------------------------------------------------------------ the steps
+def test_a_name_that_is_not_a_step_is_refused(monkeypatch, caplog):
+    """``resolve`` knows the steps that take an engine and refuses any other name, whatever the engine asked for,
+    with the name in the error: a misspelt step stops before its work, where it would otherwise leave a record the
+    report never finds."""
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    with caplog.at_level("INFO"):
+        for name in ("align_camera", "optimize_cameras", ""):
+            for word in (None, "classic", "native"):
+                with pytest.raises(ValueError) as refused:
+                    switch.resolve(name, word)
+                assert str(refused.value) == (f"unknown step '{name}': the steps that take an engine are "
+                                              "match_photos, align_cameras and build_depth_maps")
+    assert not caplog.records  # refused before the fallback of ``native`` is thought of
+
+
+def test_the_steps_are_written_once():
+    """``STEPS`` names the steps that take an engine, by their method of the chunk. The methods the report looks for
+    (``ENGINE_METHODS``) are those and no other, each of them is a method of the chunk that takes an ``engine``, and
+    the steps the native engine does (``NATIVE_STEPS``) are some of them."""
+    from pyarchinit_photogrammetry.io import report_content as rc
+
+    assert switch.STEPS == ("match_photos", "align_cameras", "build_depth_maps")
+    assert sorted(method for methods in rc.ENGINE_METHODS.values() for method in methods) == sorted(switch.STEPS)
+    for name in switch.STEPS:
+        method = getattr(Chunk, name, None)
+        assert inspect.isfunction(method) and "engine" in inspect.signature(method).parameters, name
+    assert switch.NATIVE_STEPS <= set(switch.STEPS)
+
+
 # ------------------------------------------------------------------------------------------- what the chunk keeps
 def test_a_chunk_records_the_engine_it_used(monkeypatch, idle_engine):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
@@ -158,7 +186,7 @@ def test_a_chunk_records_the_engine_it_used(monkeypatch, idle_engine):
     assert chunk.meta["engine"]["match_photos"] == record  # each step has its own record
     chunk.build_depth_maps(engine=" Classic ")
     assert chunk.meta["engine"]["build_depth_maps"] == {"requested": "classic", "used": "classic", "fallback": None}
-    assert idle_engine == list(METHODS)
+    assert idle_engine == list(switch.STEPS)
     monkeypatch.setenv("PPG_ENGINE", "native")  # without the argument, the variable
     chunk.align_cameras()
     assert chunk.meta["engine"]["align_cameras"]["requested"] == "native"
@@ -166,18 +194,18 @@ def test_a_chunk_records_the_engine_it_used(monkeypatch, idle_engine):
 
 def test_the_record_is_of_a_step_that_finished(monkeypatch, idle_engine):
     """An unknown word stops a step before it starts, and a step that fails leaves the record of the last one that
-    ended: what the chunk keeps is the engine of what it holds."""
+    ended: what the chunk keeps is the engine of the last run of each method that ended, not of what it holds."""
     from pyarchinit_photogrammetry.engine import dense, sfm
 
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     chunk = Chunk(key=0, label="x")
-    for name in METHODS:
+    for name in switch.STEPS:
         with pytest.raises(ValueError, match="auto, classic or native"):
             getattr(chunk, name)(engine="colmap")
     assert idle_engine == [] and "engine" not in chunk.meta
-    for name in METHODS:
+    for name in switch.STEPS:
         getattr(chunk, name)(engine="classic")
-    kept = {name: dict(chunk.meta["engine"][name]) for name in METHODS}
+    kept = {name: dict(chunk.meta["engine"][name]) for name in switch.STEPS}
 
     def fails(chunk, **kwargs):
         raise RuntimeError("the step failed")
@@ -185,16 +213,79 @@ def test_the_record_is_of_a_step_that_finished(monkeypatch, idle_engine):
     monkeypatch.setattr(sfm, "match_photos", fails)
     monkeypatch.setattr(sfm, "align_cameras", fails)
     monkeypatch.setattr(dense, "build_depth_maps", fails)
-    for name in METHODS:
+    for name in switch.STEPS:
         with pytest.raises(RuntimeError, match="the step failed"):
             getattr(chunk, name)(engine="native")
     assert chunk.meta["engine"] == kept
 
 
+def test_an_unknown_word_in_the_variable_stops_the_three_steps(monkeypatch, idle_engine):
+    """Without the argument the word is the variable's: an unknown one there stops each of the three steps before it
+    starts, with the variable and the word named, and leaves no record."""
+    monkeypatch.setenv("PPG_ENGINE", "colmap")
+    chunk = Chunk(key=0, label="x")
+    for name in switch.STEPS:
+        with pytest.raises(ValueError) as refused:
+            getattr(chunk, name)()
+        assert str(refused.value) == "unknown engine 'colmap' in PPG_ENGINE: use auto, classic or native"
+    assert idle_engine == [] and "engine" not in chunk.meta
+
+
+@pytest.mark.parametrize("held", ["openmvs", None, ["x"], 3], ids=["str", "None", "list", "int"])
+@pytest.mark.parametrize("name", switch.STEPS)
+def test_a_step_bears_whatever_is_under_the_key(name, held, monkeypatch, caplog, idle_engine):
+    """``meta["engine"]`` was a name a plugin or a script could use before the program took it, and a project file
+    can hold anything under it. A step that has done its work does not fail on it: what is there and is not the
+    engines of the steps is replaced by them, with one warning that names its type and not its value (none for
+    ``None``: nothing is lost). The alignment goes on to what comes after its record, the new frame of the chunk."""
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    chunk = Chunk(key=0, label="x")
+    chunk.meta.update(engine=held, alignment_id="before", levelled=True)
+    with caplog.at_level("INFO"):
+        result = getattr(chunk, name)()
+    assert result == (0 if name == "align_cameras" else None) and idle_engine == [name]
+    assert chunk.meta["engine"] == {name: {"requested": "auto", "used": "classic", "fallback": None}}
+    warned = [line for line in caplog.records if line.name == switch.__name__]
+    if held is None:
+        assert warned == []
+    else:
+        assert [line.levelname for line in warned] == ["WARNING"]
+        said = warned[0].getMessage()
+        assert said == ('meta["engine"] keeps the engines of the steps and held a value of type '
+                        f'{type(held).__name__}: it was replaced')
+        assert str(held) not in said and repr(held) not in said
+    if name == "align_cameras":
+        assert chunk.meta["alignment_id"] != "before" and "levelled" not in chunk.meta
+
+
+def test_a_method_records_no_engine_it_did_not_run(monkeypatch, idle_engine):
+    """The three methods call the classic engine and no other. With a step named in ``NATIVE_STEPS`` before its
+    method calls the native engine, ``native`` stops the method - the step and the engine named, nothing run,
+    nothing recorded - where the classic engine would have run under the name of the native one; ``auto`` and
+    ``classic`` run the classic engine as they do."""
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    for name in switch.STEPS:
+        monkeypatch.setattr(switch, "NATIVE_STEPS", frozenset({name}))
+        chunk = Chunk(key=0, label="x")
+        with pytest.raises(NotImplementedError) as stopped:
+            getattr(chunk, name)(engine="native")
+        assert str(stopped.value) == f"{name} cannot run on the 'native' engine: it calls only the classic one"
+        assert idle_engine == [] and "engine" not in chunk.meta
+        for word in (None, "auto", "classic"):
+            getattr(chunk, name)(engine=word)
+            assert chunk.meta["engine"] == {name: {"requested": word or "auto", "used": "classic", "fallback": None}}
+        assert idle_engine == [name] * 3
+        with pytest.raises(NotImplementedError):
+            getattr(chunk, name)(engine="native")
+        assert idle_engine == [name] * 3  # stopped again, and the record is still of the last run that ended
+        assert chunk.meta["engine"] == {name: {"requested": "classic", "used": "classic", "fallback": None}}
+        idle_engine.clear()
+
+
 def test_the_engine_is_the_last_argument_and_by_keyword_only():
     """The other arguments of the three methods keep their places (the program and its plugins also give them by
     position): the engine comes after them, by its name."""
-    for name in METHODS:
+    for name in switch.STEPS:
         parameters = inspect.signature(getattr(Chunk, name)).parameters
         engine = parameters["engine"]
         assert list(parameters)[-1] == "engine", name
@@ -244,11 +335,11 @@ def test_the_commands_ask_the_steps_for_the_engine(tmp_path, monkeypatch, idle_e
     for command in ("align", "dense"):
         result = run(app, [command, str(project)])
         assert result.exit_code == 0, result.output
-    assert kept() == dict.fromkeys(METHODS, ("auto", "classic", False))
+    assert kept() == dict.fromkeys(switch.STEPS, ("auto", "classic", False))
     for command in ("align", "dense"):
         result = run(app, [command, str(project), "--engine", "Native"])
         assert result.exit_code == 0, result.output
-    assert kept() == dict.fromkeys(METHODS, ("native", "classic", True))
+    assert kept() == dict.fromkeys(switch.STEPS, ("native", "classic", True))
     monkeypatch.setenv("PPG_ENGINE", "classic")
     result = run(app, ["align", str(project)])
     assert result.exit_code == 0, result.output
@@ -272,7 +363,7 @@ def test_process_with_the_native_engine_asked_for(scene_dir, tmp_path, monkeypat
     assert result.exit_code == 0, result.output[-3000:]
     chunk = ppg.Document.open(project).chunk
     assert len(chunk.aligned_cameras) == len(chunk.cameras) > 0
-    assert sorted(chunk.meta["engine"]) == sorted(METHODS)
+    assert sorted(chunk.meta["engine"]) == sorted(switch.STEPS)
     for step, record in chunk.meta["engine"].items():
         assert (record["requested"], record["used"]) == ("native", "classic"), step
         assert isinstance(record["fallback"], str) and step in record["fallback"], step
