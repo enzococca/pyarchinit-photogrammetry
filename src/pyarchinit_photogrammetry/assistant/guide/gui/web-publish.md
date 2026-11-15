@@ -127,16 +127,25 @@ Since 1.10.2, step 4 has **Remove from the web...**, shown when the site folder 
 `.ppg-publish.json` the program writes in it). The program removes only what it published itself from that folder:
 
 - the Cloudflare Pages project, with all its deployments: the address of the site stops working;
-- the files it sent to the R2 bucket, one by one; other files of the bucket are never touched;
 - the public r2.dev address of the bucket, only when the program turned it on;
+- the files it sent to the R2 bucket, one by one; other files of the bucket are never touched;
 - the bucket itself only when you tick **Delete the bucket too**, which is enabled only when the program created
   the bucket, and only after every file it sent is gone (a bucket holding other files is not deleted).
 
 A custom domain you connected to the bucket is never touched, and the site folder on your computer stays. The window
 lists what will be removed, says it cannot be undone, and enables its button only once you type the name of the
-project. The removal runs like the publication: its steps in the log, **Cancel** stops it. If it is cancelled or a
-step fails, press **Remove from the web...** again: it goes on with what is left. Once everything went, the record
-in the folder is removed and the project forgets the address.
+project. The removal runs like the publication: its steps in the log, **Cancel** stops it. It goes in the order of
+the list: the Pages project first, so that the address of the site stops answering before the slower removal of the
+data. If it is cancelled or a step fails, press **Remove from the web...** again: it goes on with what is left. Once
+everything went, the record in the folder is removed and the project forgets the address.
+
+wrangler looks only in the Cloudflare account it is logged in to. A project or a bucket it does not find there counts
+as removed, and the program says so: a window in the application, a `note:` line on the command line, with its name
+and the address the publication recorded. If the site or its data still answer at that address, they are in another
+account: delete them in the dashboard of that account (*Workers & Pages*, *R2*).
+
+Publishing the folder again after a removal left halfway makes again what was removed: the next removal starts from
+the beginning.
 
 Sites published before 1.10.2 did not record whether the program created the bucket or turned on its r2.dev address:
 for them both are left as they are (the window says so); turn them off in the dashboard if you wish.
@@ -169,9 +178,11 @@ BUCKET --file RULE.json -y`; last `pages deploy FOLDER --project-name NAME --bra
 `ppg web unpublish cloudflare` prints what it will remove and, without `--yes`, asks you to type the name of the
 project; `--delete-bucket` deletes the bucket too (only when the program created it); `--record PROJECT.ppg` forgets
 the address in the project once everything went. It ends with code 1 when something was not removed: run it again
-to go on. The wrangler commands, in order: `r2 object delete BUCKET/KEY --remote` for each file the program sent,
-`r2 bucket dev-url disable BUCKET -y` (when the program turned the address on), `r2 bucket delete BUCKET` (when asked
-and allowed), last `pages project delete NAME --yes`.
+to go on. The wrangler commands, in order: `pages project delete NAME --yes`, `r2 bucket dev-url disable BUCKET -y`
+(when the program turned the address on), `r2 object delete BUCKET/KEY --remote` for each file the program sent,
+last `r2 bucket delete BUCKET` (when asked and allowed). A project or a bucket that wrangler does not find in its
+account is written as `not found in this Cloudflare account (it counts as removed)`, with a `note:` line naming the
+address to check.
 
 ## Other hostings
 

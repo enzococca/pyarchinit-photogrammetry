@@ -134,16 +134,25 @@ Dalla 1.10.2 il passo 4 ha **Rimuovi dal web...**, che compare quando la cartell
 quella cartella:
 
 - il progetto Cloudflare Pages, con tutte le sue versioni pubblicate: l'indirizzo del sito smette di funzionare;
-- i file che ha inviato al bucket R2, uno per uno; gli altri file del bucket non si toccano mai;
 - l'indirizzo pubblico r2.dev del bucket, solo se l'ha acceso il programma;
+- i file che ha inviato al bucket R2, uno per uno; gli altri file del bucket non si toccano mai;
 - il bucket stesso solo se spunti **Elimina anche il bucket**, attivo solo quando il bucket l'ha creato il programma,
   e solo dopo che tutti i file inviati sono stati cancellati (un bucket con altri file non si cancella).
 
 Un dominio tuo collegato al bucket non si tocca mai, e la cartella del sito sul computer resta. La finestra elenca
 cosa si cancella, dice che non si può annullare e attiva il pulsante solo dopo che hai scritto il nome del progetto.
-La rimozione va come la pubblicazione: i passi nel log, **Annulla** la ferma. Se la annulli o un passo non riesce,
-premi di nuovo **Rimuovi dal web...**: riprende da quello che resta. Quando tutto è andato, la registrazione nella
-cartella si cancella e il progetto dimentica l'indirizzo.
+La rimozione va come la pubblicazione: i passi nel log, **Annulla** la ferma. Segue l'ordine dell'elenco: per primo
+il progetto Pages, così l'indirizzo del sito smette di rispondere prima della rimozione, più lenta, dei dati. Se la
+annulli o un passo non riesce, premi di nuovo **Rimuovi dal web...**: riprende da quello che resta. Quando tutto è
+andato, la registrazione nella cartella si cancella e il progetto dimentica l'indirizzo.
+
+wrangler guarda solo nell'account Cloudflare a cui è collegato. Un progetto o un bucket che lì non trova conta come
+rimosso, e il programma lo dice: una finestra nell'applicazione, una riga `note:` dalla riga di comando, con il suo
+nome e l'indirizzo registrato dalla pubblicazione. Se il sito o i suoi dati rispondono ancora a quell'indirizzo, sono
+in un altro account: cancellali dalla dashboard di quell'account (*Workers & Pages*, *R2*).
+
+Pubblicare di nuovo la cartella dopo una rimozione rimasta a metà ricrea quello che era stato rimosso: la rimozione
+successiva riparte dall'inizio.
 
 I siti pubblicati prima della 1.10.2 non annotavano se il bucket o il suo indirizzo r2.dev li aveva creati o accesi il
 programma: per quelli restano entrambi come sono (la finestra lo dice); spegnili dalla dashboard se vuoi.
@@ -176,9 +185,11 @@ BUCKET --file REGOLA.json -y`; per ultimo `pages deploy CARTELLA --project-name 
 `ppg web unpublish cloudflare` scrive cosa cancellerà e, senza `--yes`, chiede di scrivere il nome del progetto;
 `--delete-bucket` cancella anche il bucket (solo se l'ha creato il programma); `--record PROGETTO.ppg` fa dimenticare
 l'indirizzo al progetto quando tutto è andato. Esce con codice 1 se qualcosa non è stato cancellato: avvialo di nuovo
-per continuare. I comandi di wrangler, in ordine: `r2 object delete BUCKET/CHIAVE --remote` per ogni file inviato dal
-programma, `r2 bucket dev-url disable BUCKET -y` (se l'indirizzo l'ha acceso il programma), `r2 bucket delete BUCKET`
-(se chiesto e permesso), per ultimo `pages project delete NOME --yes`.
+per continuare. I comandi di wrangler, in ordine: `pages project delete NOME --yes`, `r2 bucket dev-url disable
+BUCKET -y` (se l'indirizzo l'ha acceso il programma), `r2 object delete BUCKET/CHIAVE --remote` per ogni file inviato
+dal programma, per ultimo `r2 bucket delete BUCKET` (se chiesto e permesso). Un progetto o un bucket che wrangler non
+trova nel suo account è scritto come `not found in this Cloudflare account (it counts as removed)`, con una riga
+`note:` che indica l'indirizzo da controllare.
 
 ## Altri hosting
 
