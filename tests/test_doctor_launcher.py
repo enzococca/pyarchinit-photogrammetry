@@ -39,12 +39,22 @@ def _on_path(monkeypatch, folder: Path) -> None:
     monkeypatch.setenv("PATH", str(folder))
 
 
+def _shown(path) -> str:
+    """A path as it is compared with the one the diagnosis shows.
+
+    On Windows ``shutil.which`` answers with the extension as ``PATHEXT`` spells it (``ppg-gui.EXE`` for the file
+    ``ppg-gui.exe``): the same file, since names there do not tell the case apart. Elsewhere the comparison is exact.
+    """
+    return os.path.normcase(str(path))
+
+
 def test_the_launcher_in_the_scripts_folder_of_the_environment_is_this_install(env, monkeypatch):
     scripts, _ = env
     launcher = _launcher(scripts)
     _on_path(monkeypatch, scripts)
     check = doctor.launcher_check()
-    assert (check.name, check.level, check.detail, check.hint) == ("ppg-gui on PATH", doctor.OK, str(launcher), "")
+    assert (check.name, check.level, _shown(check.detail), check.hint) == (
+        "ppg-gui on PATH", doctor.OK, _shown(launcher), "")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="links need a privilege on Windows")
@@ -56,7 +66,7 @@ def test_a_link_to_the_launcher_of_this_install_is_this_install(env, tmp_path, m
     link.symlink_to(launcher)
     _on_path(monkeypatch, link.parent)
     check = doctor.launcher_check()
-    assert (check.level, check.detail) == (doctor.OK, str(link))
+    assert (check.level, _shown(check.detail)) == (doctor.OK, _shown(link))
 
 
 def test_the_launcher_of_another_install_is_reported_with_its_own_python(env, tmp_path, monkeypatch):
@@ -65,7 +75,7 @@ def test_the_launcher_of_another_install_is_reported_with_its_own_python(env, tm
     other = _launcher(tmp_path / "other" / "bin")
     _on_path(monkeypatch, other.parent)
     check = doctor.launcher_check()
-    assert (check.level, check.detail) == (doctor.WARN, str(other))
+    assert (check.level, _shown(check.detail)) == (doctor.WARN, _shown(other))
     assert f"not the one in {scripts}" in check.hint
     assert f"'{other.parent.resolve() / 'python'} -m pip uninstall pyarchinit-photogrammetry'" in check.hint
 
@@ -77,7 +87,7 @@ def test_the_user_scripts_folder_counts_only_for_an_install_made_for_the_user(en
     assert doctor.launcher_check().level == doctor.WARN  # another Python may have put it there
     monkeypatch.setattr(doctor, "_installed_for_the_user", lambda: True)
     check = doctor.launcher_check()
-    assert (check.level, check.detail) == (doctor.OK, str(launcher))
+    assert (check.level, _shown(check.detail)) == (doctor.OK, _shown(launcher))
 
 
 def test_no_launcher_on_the_path(env, tmp_path, monkeypatch):
