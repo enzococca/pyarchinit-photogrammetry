@@ -183,7 +183,10 @@ def removal_items(removal) -> list[str]:
                       "pubblicate: l'indirizzo del sito smette di funzionare", esc(removal.project)))
     elif removal.project:
         out.append(tr("il progetto Pages {0} è già stato cancellato", esc(removal.project)))
-    if removal.bucket:
+    if removal.bucket and removal.bucket_missing:
+        out.append(tr("il bucket R2 {0} non è stato trovato nell'account Cloudflare da una rimozione precedente: di "
+                      "suo non resta nulla da cancellare", esc(removal.bucket)))
+    elif removal.bucket:
         out.append(tr("dal bucket R2 <b>{0}</b> si cancellano i {1} file che il programma ha inviato; gli altri "
                       "file del bucket non si toccano", esc(removal.bucket), number(len(removal.objects))))
         out.append({
@@ -204,6 +207,8 @@ def removal_items(removal) -> list[str]:
 
 def bucket_reason(removal) -> str:
     """Why the bucket can or cannot be deleted, in plain words."""
+    if removal.bucket_missing:  # said among what is removed
+        return ""
     return {"allowed": tr("Il bucket l'ha creato il programma: si cancella dopo i suoi file (non riesce se contiene "
                           "file che il programma non ha inviato)."),
             "not_created": tr("Il bucket non l'ha creato il programma: resta."),
@@ -267,6 +272,24 @@ class UnpublishDialog(QDialog):
 
     def delete_bucket(self) -> bool:
         return self.c_bucket.isEnabled() and self.c_bucket.isChecked()
+
+
+def not_found_text(result) -> str:
+    """What to tell the user when wrangler did not find the Pages project or the bucket in the Cloudflare account it
+    is logged in to (:attr:`site_publish.Removed.not_found`): they count as removed, but wrangler looks in one
+    account only, and a site that still answers is in another one. Empty when everything was found."""
+    parts = []
+    if "project" in result.not_found:
+        parts.append(tr("Il progetto Pages {0} non è stato trovato nell'account Cloudflare a cui wrangler è "
+                        "collegato: è contato come rimosso. Se il sito risponde ancora a {1}, è in un altro account: "
+                        "cancellalo dalla dashboard di quell'account (Workers & Pages).", result.project,
+                        result.address or tr("il suo indirizzo pages.dev")))
+    if "bucket" in result.not_found:
+        parts.append(tr("Il bucket R2 {0} non è stato trovato nell'account Cloudflare a cui wrangler è collegato: è "
+                        "contato come rimosso, con i suoi file. Se i dati rispondono ancora a {1}, il bucket è in un "
+                        "altro account: svuotalo o cancellalo dalla dashboard di quell'account (R2).", result.bucket,
+                        result.data_address or tr("il loro indirizzo")))
+    return "\n\n".join(parts)
 
 
 def ask_removal(parent, removal) -> bool | None:
@@ -1325,8 +1348,10 @@ class WebPublishing(QObject):
             self._removing = False
             for line in result.transcript:
                 log.info("wrangler: %s", line)
-            for line in result.lines():
-                (log.info if result.complete else log.warning)("Cloudflare: %s", site_publish.scrub(line))
+            for line in result.lines():  # what was left or not found is a warning also when everything went
+                plain = result.complete and not line.startswith(("note:", "failed:"))
+                (log.info if plain else log.warning)("Cloudflare: %s", site_publish.scrub(line))
+            missing = not_found_text(result)
             if result.complete:
                 log.info(tr("Sito rimosso da Cloudflare; la cartella sul computer resta"))
                 if site_publish.forget_published(doc):
@@ -1343,6 +1368,8 @@ class WebPublishing(QObject):
                 pane.set_removing(False, tr("non tutto è stato rimosso da Cloudflare ({0}); premi di nuovo Rimuovi "
                                             "dal web per continuare", text))
             self.window.workspace.populate(doc)
+            if missing:  # not only in the log: the site may still be on the web, in another account
+                self.window._warn(missing)
 
         def failed(summary, details=""):
             self._removing = False
@@ -1420,5 +1447,6 @@ class WebPublishing(QObject):
         self.stop_preview()
 
 
-__all__ = ["WebPane", "WebPublishing", "UnpublishDialog", "ask_removal", "removal_items", "state_names", "product_names", "default_folder", "folder_problem",
-           "plan_text", "issue_texts", "data_modes"]
+__all__ = ["WebPane", "WebPublishing", "UnpublishDialog", "ask_removal", "removal_items", "not_found_text",
+           "state_names", "product_names", "default_folder", "folder_problem", "plan_text", "issue_texts",
+           "data_modes"]

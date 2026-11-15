@@ -105,6 +105,8 @@ if args[:3] == ["r2", "bucket", "create"]:
     out(f"Created bucket '{args[3]}' with default storage class of Standard.")
 if args[:2] == ["r2", "object"]:
     bucket, key = args[3].split("/", 1)
+    if bucket not in cloud["buckets"]:
+        out("✘ [ERROR] The specified bucket does not exist. [code: 10006]", 1)
     b = cloud["buckets"][bucket]
     if args[2] == "put":
         assert "--remote" in args

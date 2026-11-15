@@ -902,6 +902,8 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
     # the Pages project
     progress(0.03, f"Cloudflare Pages: project {p.project}")
     _code, out = w.run(["pages", "project", "list", "--json"], progress, check=True)
+    if state.pop("removing", None) is not None:  # a removal left halfway (unpublish): from here on this publication
+        _write_state(folder, state)  # makes again what that removed, so all its steps are to do again
     ok, entry = listed(out)
     if not ok:
         not_read("the list of the Pages projects (pages project list --json)", out)
@@ -932,6 +934,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
 
     data_address = None
     sent = removed = 0
+    upload, remove, unchanged = list(p.upload), list(p.remove), len(p.unchanged)
     if p.data == "r2":
         bucket = p.bucket
         code, _out = w.run(["r2", "bucket", "info", bucket], progress)
@@ -941,18 +944,24 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
             created = True
         cf = state.get("cloudflare") if isinstance(state.get("cloudflare"), dict) else {}
         if cf.get("bucket") != bucket:
-            cf = {"bucket": bucket, "objects": {}}
+            # a new record: bucket_created and dev_url_enabled are written from here on, their absence means "no".
+            # A record of the same bucket written before 1.10.2 gets no "records": what it does not say stays
+            # unknown, and unpublish then leaves the bucket and its r2.dev address as they are
+            cf = {"bucket": bucket, "objects": {}, "records": RECORDS}
         objects = cf.setdefault("objects", {})
         cf["project"] = p.project
         if created:  # what the program made, so that removing the site (unpublish) may undo it (since 1.10.2)
             cf["bucket_created"] = True
-        cf["records"] = RECORDS  # bucket_created and dev_url_enabled are written: their absence means "no"
         state["cloudflare"] = cf
+        if created and objects:  # a new bucket holds nothing of what an earlier publication recorded as sent (the
+            objects.clear()  # bucket was deleted meanwhile, in the dashboard): every file is sent again
+            upload, remove, unchanged = [e.path for e in p.r2_files], [], 0
+            progress(0.05, f"R2: the bucket {bucket} is new: every file is sent again")
         _write_state(folder, state)
         sizes = {e.path: e for e in p.r2_files}
-        total = max(1, p.upload_bytes)
+        total = max(1, sum(sizes[k].size for k in upload))
         done = 0
-        for key in p.upload:
+        for key in upload:
             e = sizes[key]
             progress.sub(0.05 + 0.8 * done / total, 0.8 * e.size / total)(0.0, f"R2: sending {key}")
             w.run(["r2", "object", "put", f"{bucket}/{key}", "--file", str((folder / key).resolve()),
@@ -962,7 +971,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
             _write_state(folder, state)  # a publication cancelled or failed starts again from here
             done += e.size
             sent += 1
-        for key in p.remove:
+        for key in remove:
             progress(0.86, f"R2: deleting {key}")
             code, _out = w.run(["r2", "object", "delete", f"{bucket}/{key}", "--remote"], progress)
             objects.pop(key, None)
@@ -1017,7 +1026,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
                           f"known (https://{known}): publish again to correct it")
     address = f"https://{known}" if known else None
     result = Result(address=address, project=p.project, data=p.data, data_address=data_address,
-                    bucket=p.bucket if p.data == "r2" else None, sent=sent, unchanged=len(p.unchanged),
+                    bucket=p.bucket if p.data == "r2" else None, sent=sent, unchanged=unchanged,
                     removed=removed, when=datetime.now().isoformat(timespec="seconds"), frame=p.frame,
                     transcript=list(w.transcript), unread=unread, unread_output=unread_output)
     state["published"] = result.record()
@@ -1076,7 +1085,14 @@ def stale_publication(document) -> bool:
 # <bucket> -y". Not checked against a real account: one constant each, to change in one place.
 PAGES_DELETE_YES = "--yes"
 DEV_URL_DISABLE_YES = "-y"
-_GONE = re.compile(r"(?i)not found|does not exist|no such (bucket|object|key|project)|could not find")
+# What wrangler answers for a thing that is not there, which then counts as removed: Cloudflare's "Project not found.
+# [...] [code: 8000007]", "The specified bucket does not exist. [code: 10006]", "The specified key does not exist.
+# [code: 10007]". Only a project, a bucket, an object or a key said missing: another failure that happens to say
+# "not found" must not pass for a removal. A wording not foreseen is then said as a failure (the dashboard is left)
+_GONE = re.compile(r"(?i)\b(?:project|bucket|object|key)\b[^\n]{0,60}?\b(?:not found|does not exist)\b"
+                   r"|\bno such (?:bucket|object|key|project)\b|\[code: (?:8000007|10006|10007)\]")
+_NO_BUCKET = re.compile(r"(?i)\bbucket\b[^\n]{0,60}?\b(?:not found|does not exist)\b|\bno such bucket\b"
+                        r"|\[code: 10006\]")
 
 
 class NotPublished(ValueError):
@@ -1092,7 +1108,8 @@ class Removal:
     turned on by it: left), ``"custom"`` (the data are served from the user's own domain: never touched), ``"done"``
     (turned off by an earlier run), ``"none"`` (no data in R2). ``bucket_rule``: ``"allowed"`` (the program created
     the bucket: it may be deleted, when asked, once every object the program sent is gone), ``"not_created"``,
-    ``"unknown"`` (a record before 1.10.2), ``"done"``, ``"none"``."""
+    ``"unknown"`` (a record before 1.10.2), ``"done"``, ``"none"``. ``bucket_missing``: an earlier run did not find
+    the bucket in the Cloudflare account, so nothing of it is left to remove."""
 
     folder: Path
     project: str | None
@@ -1104,6 +1121,7 @@ class Removal:
     delete_bucket: bool = False  # asked and allowed
     bucket_asked: bool = False
     project_done: bool = False
+    bucket_missing: bool = False
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -1128,7 +1146,10 @@ class Removal:
             out.append(f"Cloudflare Pages: the project {self.project} is deleted, with all its deployments")
         elif self.project:
             out.append(f"Cloudflare Pages: the project {self.project} was deleted already")
-        if self.bucket:
+        if self.bucket and self.bucket_missing:
+            out.append(f"R2: the bucket {self.bucket} was not found in the Cloudflare account by an earlier run: "
+                       "nothing of it is left to remove")
+        elif self.bucket:
             out.append(f"R2, bucket {self.bucket}: {len(self.objects)} objects the program sent are deleted (other "
                        "objects of the bucket are never touched)")
             out.append({"disable": f"the public r2.dev address of the bucket is turned off "
@@ -1159,7 +1180,7 @@ class Removal:
         return {"project": self.project, "bucket": self.bucket, "objects": len(self.objects),
                 "data_address": self.data_address, "dev_url": self.dev_url, "bucket_rule": self.bucket_rule,
                 "delete_bucket": self.delete_bucket, "project_done": self.project_done,
-                "problems": list(self.problems)}
+                "bucket_missing": self.bucket_missing, "problems": list(self.problems)}
 
 
 def _cf_records(state: dict) -> tuple[dict, dict]:
@@ -1200,6 +1221,9 @@ def removal_plan(folder: str | os.PathLike, delete_bucket: bool = False) -> Remo
         r.objects = sorted(str(k) for k in objects)
         address = str(cf.get("data_address") or pub.get("data_address") or "").strip() or None
         r.data_address = address
+        if done.get("bucket_not_found"):  # an earlier run did not find it: nothing of it is left to remove
+            r.bucket_missing, r.objects, r.bucket_rule = True, [], "done"
+            return r
         records = cf.get("records") == RECORDS
         if done.get("dev_url_disabled"):
             r.dev_url = "done"
@@ -1223,26 +1247,36 @@ def removal_plan(folder: str | os.PathLike, delete_bucket: bool = False) -> Remo
 
 @dataclass
 class Removed:
-    """What :func:`unpublish` did."""
+    """What :func:`unpublish` did. ``not_found``: ``"project"``, ``"bucket"`` when wrangler said that it is not
+    in the Cloudflare account it is logged in to; it then counts as removed (``project_deleted`` is True), and a
+    note says what to look at."""
 
     project: str | None
     bucket: str | None
+    address: str | None = None  # of the page and of the data, as recorded by the publication: where to look when
+    data_address: str | None = None  # a project or a bucket was not found
     project_deleted: bool = False
     objects_deleted: int = 0
     objects_left: list[str] = field(default_factory=list)
     dev_url_disabled: bool = False
     bucket_deleted: bool = False
+    not_found: list[str] = field(default_factory=list)
     complete: bool = False  # everything planned went: the state file is gone
     failures: list[str] = field(default_factory=list)  # English, scrubbed
-    notes: list[str] = field(default_factory=list)  # what was left as it is, and why (English)
+    notes: list[str] = field(default_factory=list)  # what was left as it is or not found, and why (English)
     codes: list[tuple[str, str]] = field(default_factory=list)  # the notes by key ("dev_url_unknown", ...), value
     transcript: list[str] = field(default_factory=list)
 
     def lines(self) -> list[str]:
         out = []
+        missing = "not found in this Cloudflare account (it counts as removed)"
         if self.project:
-            out.append(f"Pages project {self.project}: " + ("deleted" if self.project_deleted else "NOT deleted"))
-        if self.bucket:
+            out.append(f"Pages project {self.project}: " + (missing if "project" in self.not_found else
+                                                             "deleted" if self.project_deleted else "NOT deleted"))
+        if self.bucket and "bucket" in self.not_found:
+            out.append(f"R2 bucket {self.bucket}: " + missing +
+                       (f"; {self.objects_deleted} objects deleted before" if self.objects_deleted else ""))
+        elif self.bucket:
             out.append(f"R2 bucket {self.bucket}: {self.objects_deleted} objects deleted, {len(self.objects_left)} "
                        "left" + ("; r2.dev address turned off" if self.dev_url_disabled else "") +
                        ("; bucket deleted" if self.bucket_deleted else ""))
@@ -1256,13 +1290,15 @@ class Removed:
 def unpublish(folder: str | os.PathLike, delete_bucket: bool = False, wrangler: Wrangler | None = None,
               progress=None) -> Removed:
     """Remove from Cloudflare what the program published from the site folder ``folder`` (:func:`removal_plan`),
-    with the user's wrangler (since 1.10.2). In order: ``r2 object delete <bucket>/<key> --remote`` for each object
-    recorded as sent (never another), ``r2 bucket dev-url disable <bucket> -y`` when the program turned the address
-    on, ``r2 bucket delete <bucket>`` when ``delete_bucket`` and the program created it and every recorded object
-    went, last ``pages project delete <project> --yes``. A custom data domain is never touched; the folder on this
-    computer is never deleted. The state file is written after each step (a run cancelled or failed goes on from
-    there next time) and removed once everything went. A step that fails is said in :attr:`Removed.failures` and the
-    others are tried; an object, a bucket or a project that wrangler says is not there counts as removed.
+    with the user's wrangler (since 1.10.2). In order, so that the site stops answering first: ``pages project
+    delete <project> --yes``; ``r2 bucket dev-url disable <bucket> -y`` when the program turned the address on;
+    ``r2 object delete <bucket>/<key> --remote`` for each object recorded as sent (never another); last ``r2 bucket
+    delete <bucket>`` when ``delete_bucket``, the program created it and every recorded object went. A custom data
+    domain is never touched; the folder on this computer is never deleted. The state file is written after each
+    step (a run cancelled or failed goes on from there next time) and removed once everything went. A step that
+    fails is said in :attr:`Removed.failures` and the others are tried. An object, a bucket or a project that
+    wrangler says is not there counts as removed; wrangler looks only in the account it is logged in to, so a
+    project or a bucket not found is said (:attr:`Removed.not_found`, :attr:`Removed.notes`).
 
     Raises :class:`NotPublished` (nothing recorded), :class:`WranglerMissing`, :class:`NotLoggedIn` or
     :class:`Cancelled`."""
@@ -1282,66 +1318,108 @@ def unpublish(folder: str | os.PathLike, delete_bucket: bool = False, wrangler: 
         raise NotLoggedIn(status.text)
     w.transcript.append(f"wrangler {status.version}: logged in")
     state = read_state(folder)
-    cf = state.get("cloudflare") if isinstance(state.get("cloudflare"), dict) else {}
+    cf, pub = _cf_records(state)
     objects = cf.get("objects") if isinstance(cf.get("objects"), dict) else {}
     done = state.get("removing") if isinstance(state.get("removing"), dict) else {}
     state["removing"] = done
     done.setdefault("started", datetime.now().isoformat(timespec="seconds"))
-    out = Removed(project=r.project, bucket=r.bucket)
+    out = Removed(project=r.project, bucket=r.bucket, address=str(pub.get("address") or "").strip() or None,
+                  data_address=r.data_address)
 
     def note(code: str, value: str, text: str) -> None:
         out.notes.append(text)
         out.codes.append((code, value))
 
-    def step(args: list[str], what: str) -> bool:
-        """``wrangler <args>``: True when it worked or the thing is not there; a failure is said in the result."""
+    def step(args: list[str], what: str) -> str:
+        """``wrangler <args>``: ``"done"`` when it worked; when wrangler says the thing is not there, which counts
+        as removed, ``"no_bucket"`` (a command on a bucket that is not there) or ``"gone"``; ``""`` after a failure,
+        which is said in the result."""
         code, text = w.run(args, progress)
-        if not code or _GONE.search(text or ""):
-            return True
+        if not code:
+            return "done"
+        if args[0] == "r2" and _NO_BUCKET.search(text or ""):
+            return "no_bucket"
+        if _GONE.search(text or ""):
+            return "gone"
         out.failures.append(f"{what}: {_failure_text(text)}")
-        return False
+        return ""
 
-    total = len(r.objects) + 3
+    # the page first: its address stops answering before the slower removal of the data
+    if r.project and not r.project_done:
+        progress(0.05, f"Cloudflare Pages: deleting the project {r.project}")
+        got = step(["pages", "project", "delete", r.project, PAGES_DELETE_YES], f"the Pages project {r.project}")
+        if got:
+            done["project_deleted"] = True
+            if got == "gone":
+                done["project_not_found"] = True
+            _write_state(folder, state)
+
+    there = bool(r.bucket) and not done.get("bucket_not_found")  # the bucket, as far as wrangler said
+    if there and r.dev_url == "disable":
+        progress(0.1, f"R2: turning off the public address of {r.bucket}")
+        got = step(["r2", "bucket", "dev-url", "disable", r.bucket, DEV_URL_DISABLE_YES],
+                   f"the r2.dev address of {r.bucket}")
+        if got == "no_bucket":
+            there = False
+        elif got:
+            done["dev_url_disabled"] = True
+            _write_state(folder, state)
+    elif r.bucket and r.dev_url == "unknown":
+        note("dev_url_unknown", r.bucket,
+             f"the r2.dev address of the bucket {r.bucket} was left as it is: the record of this publication "
+             "(made before 1.10.2) does not say whether the program turned it on; turn it off in the dashboard "
+             "(R2 > bucket > Settings) if you wish")
+    elif r.bucket and r.dev_url == "custom":
+        note("custom_domain", str(r.data_address), f"the data address {r.data_address} (your own domain) was left "
+                                                   "as it is")
     for i, key in enumerate(r.objects):
-        progress(0.05 + 0.75 * i / total, f"R2: deleting {key}")
-        if step(["r2", "object", "delete", f"{r.bucket}/{key}", "--remote"], f"the object {key}"):
+        if not there:
+            break
+        progress(0.15 + 0.75 * i / len(r.objects), f"R2: deleting {key}")
+        got = step(["r2", "object", "delete", f"{r.bucket}/{key}", "--remote"], f"the object {key}")
+        if got == "no_bucket":
+            there = False
+        elif got:
             objects.pop(key, None)
             out.objects_deleted += 1
             _write_state(folder, state)  # a run cancelled or failed goes on from here
-    out.objects_left = sorted(objects)
-    if r.bucket:
-        if r.dev_url == "disable":
-            progress(0.8, f"R2: turning off the public address of {r.bucket}")
-            if step(["r2", "bucket", "dev-url", "disable", r.bucket, DEV_URL_DISABLE_YES],
-                    f"the r2.dev address of {r.bucket}"):
-                done["dev_url_disabled"] = True
-                _write_state(folder, state)
-        elif r.dev_url == "unknown":
-            note("dev_url_unknown", r.bucket,
-                 f"the r2.dev address of the bucket {r.bucket} was left as it is: the record of this publication "
-                 "(made before 1.10.2) does not say whether the program turned it on; turn it off in the dashboard "
-                 "(R2 > bucket > Settings) if you wish")
-        elif r.dev_url == "custom":
-            note("custom_domain", str(r.data_address), f"the data address {r.data_address} (your own domain) was "
-                                                       "left as it is")
-        if r.delete_bucket and not out.objects_left:
-            progress(0.85, f"R2: deleting the bucket {r.bucket}")
-            if step(["r2", "bucket", "delete", r.bucket], f"the bucket {r.bucket}"):
-                done["bucket_deleted"] = True
-                _write_state(folder, state)
-        elif r.delete_bucket:
-            note("bucket_objects_left", r.bucket, f"the bucket {r.bucket} was kept: {len(out.objects_left)} objects "
-                                                  "the program sent are still there")
-        elif r.bucket_asked and r.bucket_rule in ("not_created", "unknown"):
-            note("bucket_" + r.bucket_rule, r.bucket,
-                 f"the bucket {r.bucket} was kept: " +
-                 ("the program did not create it" if r.bucket_rule == "not_created" else
-                  "the record of this publication (made before 1.10.2) does not say whether the program created it"))
-    if r.project and not r.project_done:
-        progress(0.9, f"Cloudflare Pages: deleting the project {r.project}")
-        if step(["pages", "project", "delete", r.project, PAGES_DELETE_YES], f"the Pages project {r.project}"):
-            done["project_deleted"] = True
+    if there and r.delete_bucket and not objects:
+        progress(0.92, f"R2: deleting the bucket {r.bucket}")
+        got = step(["r2", "bucket", "delete", r.bucket], f"the bucket {r.bucket}")
+        if got == "no_bucket":
+            there = False
+        elif got:
+            done["bucket_deleted"] = True
             _write_state(folder, state)
+    elif there and r.delete_bucket:
+        note("bucket_objects_left", r.bucket, f"the bucket {r.bucket} was kept: {len(objects)} objects the program "
+                                              "sent are still there")
+    elif there and r.bucket_asked and r.bucket_rule in ("not_created", "unknown"):
+        note("bucket_" + r.bucket_rule, r.bucket,
+             f"the bucket {r.bucket} was kept: " +
+             ("the program did not create it" if r.bucket_rule == "not_created" else
+              "the record of this publication (made before 1.10.2) does not say whether the program created it"))
+    if r.bucket and not there:  # not there: nothing of it is left to remove
+        objects.clear()
+        done["bucket_not_found"] = True
+        _write_state(folder, state)
+
+    # wrangler looks only in the account it is logged in to: what it did not find there may be in another one
+    if done.get("project_not_found"):
+        out.not_found.append("project")
+        note("project_not_found", str(r.project),
+             f"the Pages project {r.project} was not found in the Cloudflare account wrangler is logged in to: it "
+             f"counts as removed. If the site still answers at {out.address or 'its pages.dev address'}, it is in "
+             "another account: delete it in the dashboard of that account (Workers & Pages)")
+    if done.get("bucket_not_found"):
+        out.not_found.append("bucket")
+        note("bucket_not_found", str(r.bucket),
+             f"the bucket {r.bucket} was not found in the Cloudflare account wrangler is logged in to: it counts as "
+             "removed, with its objects" +
+             (f". If the data still answer at {r.data_address}, the bucket is in another account: empty or delete "
+              "it in the dashboard of that account (R2)" if r.data_address else
+              ". If it is in another account, empty or delete it in the dashboard of that account (R2)"))
+    out.objects_left = sorted(objects)
     out.project_deleted = bool(done.get("project_deleted"))
     out.bucket_deleted = bool(done.get("bucket_deleted"))
     out.dev_url_disabled = bool(done.get("dev_url_disabled"))

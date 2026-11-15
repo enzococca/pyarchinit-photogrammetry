@@ -353,6 +353,22 @@ def test_publish_with_the_data_in_r2_and_again(tmp_path, wr):
     assert "data/model/tileset.json" not in fake.cloud(wr)["buckets"]["scavo-dati"]["objects"]
 
 
+def test_a_bucket_deleted_meanwhile_gets_every_file_again(tmp_path, wr):
+    folder = fake.make_site(tmp_path / "sito", data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    first = sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati"), public=True)
+    assert first.sent == 2
+    cloud = fake.cloud(wr)
+    del cloud["buckets"]["scavo-dati"]  # deleted in the dashboard
+    (wr / "cloud.json").write_text(json.dumps(cloud))
+    p = sp.plan(folder, "scavo", bucket="scavo-dati")
+    assert not p.upload and len(p.unchanged) == 2  # as the state file remembers it
+    again = sp.publish(p, public=True)
+    assert again.sent == 2 and again.unchanged == 0 and again.removed == 0
+    assert set(fake.cloud(wr)["buckets"]["scavo-dati"]["objects"]) == {"data/ortho.tif", "data/units.geojson"}
+    cf = sp.read_state(folder)["cloudflare"]
+    assert set(cf["objects"]) == {"data/ortho.tif", "data/units.geojson"} and cf["bucket_created"] is True
+
+
 def test_a_custom_domain_for_the_data(tmp_path, wr):
     folder = fake.make_site(tmp_path / "sito")
     p = sp.plan(folder, "scavo", bucket="scavo-dati", data="r2", data_url="https://dati.example.org/")

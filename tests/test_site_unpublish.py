@@ -1,6 +1,7 @@
 """Removing a published site from Cloudflare (``site_publish.removal_plan``/``unpublish``, ``ppg web unpublish
 cloudflare``) on the fake wrangler: the plan, the full removal, objects the program did not send never deleted, a
-partial failure then the rest, cancel, no record, the bucket kept unless asked and allowed. No network, no account."""
+partial failure then the rest, cancel, no record, the bucket kept unless asked and allowed, what wrangler does not
+find. No network, no account."""
 from __future__ import annotations
 
 import json
@@ -68,18 +69,20 @@ def test_full_removal(tmp_path, wr):
     folder = _published(tmp_path)
     before = sorted(p.name for p in folder.rglob("*") if p.name != sp.STATE)
     w = sp.Wrangler()
+    n = len(fake.calls(wr))
     out = sp.unpublish(folder, delete_bucket=True, wrangler=w)
     assert out.complete and out.project_deleted and out.bucket_deleted and out.dev_url_disabled
     assert out.objects_deleted == 3 and not out.objects_left and not out.failures
+    assert not out.not_found and not out.notes
     cloud = fake.cloud(wr)
     assert "scavo" not in cloud["projects"] and "scavo-dati" not in cloud["buckets"]
-    calls = fake.calls(wr)
-    assert ["pages", "project", "delete", "scavo", sp.PAGES_DELETE_YES] in calls
-    assert ["r2", "bucket", "dev-url", "disable", "scavo-dati", sp.DEV_URL_DISABLE_YES] in calls
-    assert ["r2", "object", "delete", "scavo-dati/data/ortho.tif", "--remote"] in calls
-    order = [c[:3] for c in calls if c[:2] in (["r2", "object"], ["r2", "bucket"], ["pages", "project"])]
-    assert order.index(["r2", "bucket", "delete"]) > order.index(["r2", "object", "delete"])
-    assert order[-1] == ["pages", "project", "delete"]
+    new = [c for c in fake.calls(wr)[n:] if c[:1] in (["pages"], ["r2"])]
+    # the page first (its address stops answering), then the public address of the data, the objects, the bucket
+    assert new[0] == ["pages", "project", "delete", "scavo", sp.PAGES_DELETE_YES]
+    assert new[1] == ["r2", "bucket", "dev-url", "disable", "scavo-dati", sp.DEV_URL_DISABLE_YES]
+    assert sorted(new[2:5]) == [["r2", "object", "delete", f"scavo-dati/data/{name}", "--remote"]
+                                for name in ("model/tileset.json", "ortho.tif", "units.geojson")]
+    assert new[5:] == [["r2", "bucket", "delete", "scavo-dati"]]
     assert not (folder / sp.STATE).exists()  # removed at the end
     assert sorted(p.name for p in folder.rglob("*")) == before  # the local folder kept whole
     _no_secret("\n".join(w.transcript + out.lines()))
@@ -150,6 +153,83 @@ def test_a_project_gone_already_counts_as_removed(tmp_path, wr):
     (wr / "cloud.json").write_text(json.dumps(cloud))
     out = sp.unpublish(folder)
     assert out.complete and out.project_deleted and not out.failures
+    # wrangler looks only in the account it is logged in to: said, with the address to look at
+    assert out.not_found == ["project"] and [c for c, _v in out.codes] == ["project_not_found"]
+    assert "https://scavo.pages.dev" in out.notes[0] and "another account" in out.notes[0]
+    assert any("not found in this Cloudflare account" in line for line in out.lines())
+    assert not (folder / sp.STATE).exists()
+
+
+def test_a_bucket_not_found_counts_as_removed_and_is_said(tmp_path, wr):
+    folder = _published(tmp_path)
+    (wr / "cloud.json").write_text(json.dumps({"projects": {}, "buckets": {}}))  # as in another account
+    n = len(fake.calls(wr))
+    out = sp.unpublish(folder, delete_bucket=True)
+    new = [c[:4] for c in fake.calls(wr)[n:] if c[:1] in (["pages"], ["r2"])]
+    # nothing is asked of a bucket that is not there: no object, no deletion of the bucket
+    assert new == [["pages", "project", "delete", "scavo"], ["r2", "bucket", "dev-url", "disable"]]
+    assert out.complete and not out.failures and out.not_found == ["project", "bucket"]
+    assert out.objects_deleted == 0 and not out.objects_left and not out.bucket_deleted and not out.dev_url_disabled
+    assert [c for c, _v in out.codes] == ["project_not_found", "bucket_not_found"]
+    assert fake.R2_DEV in out.notes[1] and "another account" in out.notes[1]
+    text = "\n".join(out.lines())
+    assert text.count("not found in this Cloudflare account") == 2 and "bucket deleted" not in text
+    assert not (folder / sp.STATE).exists()
+
+
+def test_the_objects_of_a_bucket_not_found_are_not_asked_one_by_one(tmp_path, wr):
+    folder = _published(tmp_path, data_url="https://dati.example.org")  # no r2.dev address to turn off first
+    cloud = fake.cloud(wr)
+    del cloud["buckets"]["scavo-dati"]  # deleted in the dashboard meanwhile
+    (wr / "cloud.json").write_text(json.dumps(cloud))
+    n = len(fake.calls(wr))
+    out = sp.unpublish(folder)
+    assert len([c for c in fake.calls(wr)[n:] if c[:3] == ["r2", "object", "delete"]]) == 1
+    assert out.complete and out.project_deleted and out.not_found == ["bucket"] and not out.objects_left
+    assert "scavo" not in fake.cloud(wr)["projects"]
+
+
+def test_a_bucket_not_found_by_an_earlier_run_is_not_asked_again(tmp_path, wr, monkeypatch):
+    folder = _published(tmp_path)
+    cloud = fake.cloud(wr)
+    del cloud["buckets"]["scavo-dati"]
+    (wr / "cloud.json").write_text(json.dumps(cloud))
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "fail_project_delete")
+    out = sp.unpublish(folder, delete_bucket=True)
+    assert not out.complete and not out.project_deleted and out.not_found == ["bucket"] and not out.objects_left
+    r = sp.removal_plan(folder, delete_bucket=True)
+    assert r.ok and r.bucket_missing and not r.objects and not r.delete_bucket and not r.project_done
+    assert r.as_dict()["bucket_missing"] is True
+    assert any("not found in the Cloudflare account by an earlier run" in line for line in r.lines())
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "")
+    n = len(fake.calls(wr))
+    out = sp.unpublish(folder, delete_bucket=True)
+    assert [c[:3] for c in fake.calls(wr)[n:] if c[:1] in (["pages"], ["r2"])] == [["pages", "project", "delete"]]
+    assert out.complete and out.project_deleted and out.not_found == ["bucket"]
+    assert not (folder / sp.STATE).exists()
+
+
+def test_another_failure_is_not_taken_for_a_thing_not_there(tmp_path, wr, monkeypatch):
+    for text in ("✘ [ERROR] A request to the Cloudflare API failed. Project not found. [code: 8000007]",
+                 "Project not found. The specified project name does not match any of your existing projects.",
+                 "The specified bucket does not exist. [code: 10006]", "The specified key does not exist.",
+                 "NoSuchBucket [code: 10006]", "no such bucket: scavo-dati"):
+        assert sp._GONE.search(text), text
+    for text in ("✘ [ERROR] A file or directory could not be found.\n  Missing file or directory: /.wrangler/cache\n"
+                 "  The error was: ENOENT: no such file or directory, mkdir '/.wrangler/cache'",
+                 "npm error 404 Not Found - GET https://registry.npmjs.org/wrangler - Not found",
+                 "zsh: command not found: wrangler", "Could not find wrangler.toml", "Account not found",
+                 "Authentication error [code: 10000]", "fetch failed"):
+        assert not sp._GONE.search(text), text
+    assert sp._NO_BUCKET.search("The specified bucket does not exist. [code: 10006]")
+    assert not sp._NO_BUCKET.search("The specified key does not exist. [code: 10007]")
+    folder = fake.make_site(tmp_path / "sito")
+    sp.publish(sp.plan(folder, "scavo"), public=True)
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "cache_error")  # "A file or directory could not be found"
+    out = sp.unpublish(folder)
+    assert not out.complete and not out.project_deleted and not out.not_found
+    assert any("could not be found" in f for f in out.failures)
+    assert "scavo" in fake.cloud(wr)["projects"] and sp.publication_recorded(folder)
 
 
 def test_cancel_then_go_on(tmp_path, wr, monkeypatch):
@@ -172,11 +252,52 @@ def test_cancel_then_go_on(tmp_path, wr, monkeypatch):
         sp.unpublish(folder, progress=prog)
     t.join()
     assert time.monotonic() - t0 < 30
-    assert sp.publication_recorded(folder) and len(sp.removal_plan(folder).objects) == 3
-    assert "scavo" in fake.cloud(wr)["projects"]
+    left = sp.removal_plan(folder)
+    assert sp.publication_recorded(folder) and len(left.objects) == 3
+    # the page went first: cancelled while the data are removed, the site answers no more
+    assert "scavo" not in fake.cloud(wr)["projects"] and left.project_done and left.dev_url == "done"
+    assert fake.cloud(wr)["buckets"]["scavo-dati"]["dev_url"] is False
     monkeypatch.setenv("FAKE_WRANGLER_MODE", "")
+    n = len(fake.calls(wr))
     out = sp.unpublish(folder)
-    assert out.complete
+    assert out.complete and out.project_deleted and out.objects_deleted == 3 and not out.not_found
+    assert not any(c[:3] == ["pages", "project", "delete"] for c in fake.calls(wr)[n:])  # done before
+
+
+def test_a_new_publication_after_a_removal_left_halfway(tmp_path, wr, monkeypatch):
+    folder = _published(tmp_path)
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "fail_object_delete")
+    monkeypatch.setenv("FAKE_WRANGLER_FAIL_KEY", "units")
+    out = sp.unpublish(folder)
+    assert not out.complete and out.project_deleted and out.dev_url_disabled
+    assert out.objects_left == ["data/units.geojson"]
+    assert sp.read_state(folder)["removing"]["project_deleted"] is True
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "")
+    result = sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati"), public=True)  # published again
+    assert result.sent == 2 and result.unchanged == 1
+    assert "removing" not in sp.read_state(folder)  # what the removal did is to do again
+    cloud = fake.cloud(wr)
+    assert "scavo" in cloud["projects"] and cloud["buckets"]["scavo-dati"]["dev_url"] is True
+    r = sp.removal_plan(folder)
+    assert not r.project_done and r.dev_url == "disable" and len(r.objects) == 3
+    out = sp.unpublish(folder)
+    assert out.complete and out.project_deleted and out.objects_deleted == 3 and not out.not_found
+    cloud = fake.cloud(wr)
+    assert "scavo" not in cloud["projects"]
+    assert cloud["buckets"]["scavo-dati"] == {"objects": {}, "cors": cloud["buckets"]["scavo-dati"]["cors"],
+                                              "dev_url": False}
+
+
+def test_a_publication_that_cannot_start_keeps_the_removal_left_halfway(tmp_path, wr, monkeypatch):
+    folder = fake.make_site(tmp_path / "sito")
+    sp.publish(sp.plan(folder, "scavo"), public=True)
+    state = sp.read_state(folder)
+    state["removing"] = {"started": "2026-11-15T10:00:00", "project_deleted": True}
+    (folder / sp.STATE).write_text(json.dumps(state))
+    monkeypatch.setenv("FAKE_WRANGLER_MODE", "cache_error")  # the list of the projects fails: nothing was changed
+    with pytest.raises(sp.WranglerFailed):
+        sp.publish(sp.plan(folder, "scavo"), public=True)
+    assert sp.read_state(folder)["removing"]["project_deleted"] is True
 
 
 def test_the_bucket_is_kept_unless_created_by_the_program(tmp_path, wr):
@@ -232,6 +353,21 @@ def test_a_record_before_1_10_2_leaves_the_address_and_the_bucket(tmp_path, wr):
     assert not any(c[:4] == ["r2", "bucket", "dev-url", "disable"] for c in calls)
     assert not any(c[:3] == ["r2", "bucket", "delete"] for c in calls)
     assert fake.cloud(wr)["buckets"]["scavo-dati"]["objects"] == {}
+
+
+def test_a_record_before_1_10_2_stays_unknown_when_published_again(tmp_path, wr):
+    folder = _published(tmp_path)
+    state = sp.read_state(folder)
+    for key in ("records", "bucket_created", "dev_url_enabled"):  # as 1.10.0-1.10.1 wrote it
+        state["cloudflare"].pop(key)
+    (folder / sp.STATE).write_text(json.dumps(state))
+    (folder / "data" / "units.geojson").write_bytes(b"{}")  # something changed
+    sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati"), public=True)  # with 1.10.2, the same bucket
+    cf = sp.read_state(folder)["cloudflare"]
+    # who created the bucket and turned its address on is not known, and publishing again does not make it known
+    assert "records" not in cf and "bucket_created" not in cf and "dev_url_enabled" not in cf
+    r = sp.removal_plan(folder, delete_bucket=True)
+    assert r.dev_url == "unknown" and r.bucket_rule == "unknown" and not r.delete_bucket
 
 
 def test_not_logged_in(tmp_path, wr, monkeypatch):

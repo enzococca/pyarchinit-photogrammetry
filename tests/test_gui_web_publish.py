@@ -523,4 +523,50 @@ def test_cancel_a_removal(make_window, home, monkeypatch, qapp):
     assert time.monotonic() - t0 < 20
     assert pane.step_states["publish"] != "running" and not pane.cf_removing
     assert pane.b_unpublish.isVisible() and pane.b_unpublish.isEnabled()  # what is left, removed next time
-    assert "scavo" in fake.cloud(home)["projects"]
+    cloud = fake.cloud(home)
+    assert "scavo" not in cloud["projects"]  # the page went first: the site answers no more
+    assert len(cloud["buckets"]["scavo-dati"]["objects"]) == 2 and "published" in w.doc.meta["web_site"]
+
+
+def test_a_site_not_found_in_the_account_is_said_in_a_window(make_window, home, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.gui import web_pane
+
+    fake.environment(monkeypatch, home)
+    w = make_window(data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    pane = _publish_r2(w, qapp)
+    (home / "cloud.json").write_text(json.dumps({"projects": {}, "buckets": {}}))  # wrangler in another account
+    monkeypatch.setattr(web_pane, "ask_removal", lambda parent, removal: True)
+    before = len(w.said)
+    pane.b_unpublish.click()
+    _settle(w, qapp)
+    said = w.said[before:]
+    assert [s[0] for s in said] == ["warn"], said  # not an error: it counts as removed, and the user is told
+    text = said[0][1]
+    assert "scavo" in text and "scavo-dati" in text and text.count("altro account") == 2
+    assert "https://scavo.pages.dev" in text and fake.R2_DEV in text
+    for secret in (fake.SECRET, fake.ACCOUNT, fake.EMAIL):
+        assert secret not in text
+    assert "published" not in w.doc.meta["web_site"] and not pane.b_unpublish.isVisible()
+    assert pane.step_states["publish"] != "failed"
+
+
+def test_the_removal_dialog_says_a_bucket_not_found_before(qapp, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.gui.web_pane import UnpublishDialog, bucket_reason
+    from pyarchinit_photogrammetry.io import site_publish as sp
+
+    home = tmp_path / "fake"
+    home.mkdir()
+    fake.environment(monkeypatch, home)
+    folder = fake.make_site(tmp_path / "sito", data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})
+    sp.publish(sp.plan(folder, "scavo", bucket="scavo-dati"), public=True)
+    state = sp.read_state(folder)
+    state["cloudflare"]["objects"] = {}
+    state["removing"] = {"started": "2026-11-15T10:00:00", "bucket_not_found": True}  # as an earlier run left it
+    (folder / sp.STATE).write_text(json.dumps(state))
+    removal = sp.removal_plan(folder)
+    d = UnpublishDialog(removal)
+    text = d.text.text()
+    assert "<b>scavo</b>" in text and "scavo-dati" in text and "non è stato trovato" in text
+    assert "si cancellano" not in text and "spento" not in text  # nothing of the bucket is left to remove
+    assert d.c_bucket.isHidden() and not d.delete_bucket() and bucket_reason(removal) == ""
+    d.deleteLater()
