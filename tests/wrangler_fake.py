@@ -188,6 +188,7 @@ def environment(monkeypatch, folder: Path, mode: str = "") -> Path:
     monkeypatch.delenv("WRANGLER_CACHE_DIR", raising=False)
     monkeypatch.setattr(site_publish, "extra_dirs", lambda: [])
     monkeypatch.setattr(site_publish, "wrangler_cache_dir", lambda: folder / "wrangler-cache")
+    monkeypatch.setattr(site_publish, "_home", lambda: folder / "home")  # never the user's home
     return bin_dir
 
 

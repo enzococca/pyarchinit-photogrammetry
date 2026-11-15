@@ -791,6 +791,10 @@ class WebPane(QWidget):
             state, text = "unavailable", tr("wrangler non ha l'accesso a Cloudflare. Premi Accedi a Cloudflare, oppure "
                                             "in un terminale: {0} login (si apre il browser; il programma non vede "
                                             "le credenziali), poi Controlla di nuovo.", typed)
+            if self.cf_status.legacy_folder:  # ~/.wrangler made by wrangler run in the home hides the login
+                text += " " + tr("Se hai già fatto l'accesso: la cartella {0} (solo cache e log, creata avviando "
+                                 "wrangler nella cartella home) nasconde l'accesso a wrangler; cancellala e premi "
+                                 "Controlla (l'accesso resta altrove).", self.cf_status.legacy_folder)
         elif pub:
             stale = site_publish.stale_publication(self.document)
             state = "stale" if stale else "done"

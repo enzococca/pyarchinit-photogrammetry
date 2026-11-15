@@ -129,6 +129,41 @@ def login_hint(command: list[str] | None = None) -> str:
 
 
 LOGIN_HINT = login_hint()
+_NOT_LOGGED = re.compile(r"(?i)not (logged in|authenticated)|\"loggedIn\"\s*:\s*false")
+
+
+def legacy_folder(home: str | os.PathLike) -> Path | None:
+    """``~/.wrangler`` holding no ``config`` folder: made by running wrangler with the home as working folder (its
+    ``cache``, ``logs``), it makes wrangler take it as its configuration folder, find no login there and answer "Not
+    logged in" although the login exists elsewhere. Only ``is_dir()`` checks: nothing inside is read (since
+    1.10.1)."""
+    folder = Path(home) / ".wrangler"
+    try:
+        return folder if folder.is_dir() and not (folder / "config").is_dir() else None
+    except OSError:
+        return None
+
+
+def legacy_folder_hint(home: str | os.PathLike) -> str:
+    """What to do about :func:`legacy_folder`, or "" when there is none."""
+    folder = legacy_folder(home)
+    if folder is None:
+        return ""
+    return (f" If you logged in already: the folder {folder} (only a cache and logs, made by running wrangler in the "
+            "home folder) hides the login from wrangler; delete it and check again (the login is kept elsewhere).")
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def _failure_text(out: str) -> str:
+    """The head of the error of a wrangler output, scrubbed, with :func:`legacy_folder_hint` when it says "Not
+    logged in"."""
+    text = _last_lines(scrub(out))
+    if _NOT_LOGGED.search(out or ""):
+        text += legacy_folder_hint(_home())
+    return text
 
 
 # --------------------------------------------------------------------------------------------- scrubbing the output
@@ -496,6 +531,7 @@ class Status:
     version: str = ""
     command: list[str] = field(default_factory=list)
     text: str = ""
+    legacy_folder: str = ""  # ~/.wrangler hiding the login (:func:`legacy_folder`), when "Not logged in"
 
 
 def wrangler_cache_dir() -> Path:
@@ -585,7 +621,7 @@ class Wrangler:
             if proc.returncode:
                 self.transcript.append(f"(exit code {proc.returncode})")
         if check and proc.returncode:
-            raise WranglerFailed(f"{line} failed (exit code {proc.returncode}): {_last_lines(scrub(out))}",
+            raise WranglerFailed(f"{line} failed (exit code {proc.returncode}): {_failure_text(out)}",
                                  scrub(out))
         return proc.returncode, out
 
@@ -604,10 +640,13 @@ class Wrangler:
         code, out = self.run(["whoami", "--json"], progress, keep=False, timeout=120)
         if code and re.search(r"(?i)unknown (argument|option)", out):  # an old wrangler without --json
             code, out = self.run(["whoami"], progress, keep=False, timeout=120)
-            if re.search(r"(?i)not (authenticated|logged in)", out):
+            if _NOT_LOGGED.search(out):
                 code = 1
         if code:
-            return Status("logged_out", version, self.command, login_hint(self.command))
+            legacy = legacy_folder(_home()) if _NOT_LOGGED.search(out) else None
+            return Status("logged_out", version, self.command,
+                          login_hint(self.command) + (legacy_folder_hint(_home()) if legacy else ""),
+                          legacy_folder=str(legacy) if legacy else "")
         return Status("ready", version, self.command, f"wrangler {version}, logged in")
 
     def login(self, progress=None, timeout: float | None = None) -> Status:
@@ -862,7 +901,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
         code, out = w.run(["pages", "project", "create", p.project, "--production-branch", BRANCH], progress)
         if code and not (not ok and re.search(r"(?i)already (exists|taken|in use)", out)):
             raise WranglerFailed(f"wrangler pages project create {p.project} failed (exit code {code}): "
-                                 f"{_last_lines(scrub(out))}", scrub(out))
+                                 f"{_failure_text(out)}", scrub(out))
         known = _pages_host(out, p.project)
         if known is None:  # the project exists now: its address from the list
             _code, again = w.run(["pages", "project", "list", "--json"], progress)
@@ -1012,4 +1051,5 @@ def stale_publication(document) -> bool:
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
-           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "wrangler_cache_dir", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "wrangler_cache_dir", "legacy_folder",
+           "legacy_folder_hint", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]

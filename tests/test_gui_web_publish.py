@@ -386,3 +386,13 @@ def test_cancel_a_login(make_window, home, monkeypatch, qapp):
     assert time.monotonic() - t0 < 20  # wrangler stopped, not waited for
     assert pane.step_states["publish"] == "unavailable" and not pane.cf_login_running
     assert pane.b_cf_login.isEnabled() and not pane.b_cf_cancel.isEnabled()
+
+
+def test_a_wrangler_folder_in_the_home_is_named_by_the_pane(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home, "logged_out")
+    legacy = home / "home" / ".wrangler"
+    (legacy / "logs").mkdir(parents=True)
+    w = make_window()
+    pane = _check(w, qapp)
+    assert pane.step_states["publish"] == "unavailable"
+    assert str(legacy) in pane.states["publish"].text() and "cancellala" in pane.states["publish"].text()
