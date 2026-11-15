@@ -102,11 +102,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           # everything as on x64 (VTK and pye57 from the windows-arm wheels), PostGIS through psycopg 3
-          pip install -e ".[gui,scans,mesh,bim,learn,munsell,postgis,build]"
+          pip install -e ".[gui,scans,mesh,bim,learn,munsell,postgis,raw,build]"
           # the native core of this commit (the runner image has Rust, as in the windows-arm workflow)
           maturin build --release -m native/Cargo.toml --out core_wheels
           pip install (Get-ChildItem core_wheels/*.whl).FullName
-          python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pye57, pyvistaqt, pyarchinit_photogrammetry as ppg; from vtkmodules.vtkCommonCore import vtkVersion; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__, vtkVersion.GetVTKVersion())"
+          python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pye57, rawpy, pyvistaqt, pyarchinit_photogrammetry as ppg; from vtkmodules.vtkCommonCore import vtkVersion; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__, vtkVersion.GetVTKVersion())"
           # RTKLIB inside the core this app ships: a PPK on RTKLIB's test data (.github/scripts/ppk_smoke.py)
           python .github/scripts/ppk_smoke.py
           # and its Hatanaka decoder, for the Compact RINEX of the permanent stations
