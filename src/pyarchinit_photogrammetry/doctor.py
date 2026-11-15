@@ -125,6 +125,34 @@ def outside(dist: str, version: str | None) -> str | None:
     return None
 
 
+#: The oldest affine the code runs with: it combines the transforms of the rasters with ``@``
+#: (``src.transform @ Affine.scale(...)``), an operator affine has from 3.0. Here as well as in pyproject.toml: an
+#: editable install made before the requirement keeps the requirements of its day in its metadata, which
+#: :func:`outside` reads, and runs the code of today
+AFFINE_MIN = "3.0"
+
+
+def affine_check() -> Check:
+    """affine, the transforms of the rasters (it comes with rasterio, which takes any version of it): one older than
+    :data:`AFFINE_MIN` has no ``@`` operator, and opening an orthophoto or a DEM ends with ``TypeError: unsupported
+    operand type(s) for @: 'Affine' and 'Affine'``. The hint is the command for the interpreter that runs the check:
+    a ``pip`` found on the PATH may belong to another Python. The release candidates of 3.0 have the operator."""
+    from packaging.version import InvalidVersion, Version
+
+    v = _version("affine")
+    install = f'"{sys.executable}" -m pip install -U "affine>={AFFINE_MIN}"'
+    if v is None:
+        return Check("affine", FAIL, "missing", install)
+    try:
+        old = Version(v).release < Version(AFFINE_MIN).release
+    except InvalidVersion:
+        old = False
+    if old:
+        return Check("affine", FAIL, f"{v}: older than {AFFINE_MIN}, without the '@' operator of the transforms "
+                                     "(TypeError when a project with an orthophoto or a DEM is opened)", install)
+    return Check("affine", OK, v)
+
+
 def colmap_gpu_check() -> Check:
     """What COLMAP itself can run on a GPU here (:func:`.engine.upstream.colmap_gpu`): CUDA makes the depth maps with
     COLMAP's PatchMatch; a back-end of a later build is named, and used once measured against the program's own
@@ -294,6 +322,7 @@ def run_checks(gui: bool = True) -> Report:
             r.add(label, WARN, f"{v}: not a version this install was tested with", f'pip install "{req}"')
         else:
             r.add(label, OK if v else FAIL, v or "missing", "" if v else "pip install \"pyarchinit-photogrammetry[all]\"")
+    r.checks.append(affine_check())
     try:
         from scipy.optimize import least_squares  # noqa: F401
         from scipy.sparse.linalg import svds  # noqa: F401

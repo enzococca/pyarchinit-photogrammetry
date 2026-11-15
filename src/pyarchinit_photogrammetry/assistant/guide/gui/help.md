@@ -33,7 +33,7 @@ of the system; crashes of the native code are written to `crash.log` in the same
 
 *Help > Environment diagnosis...* (or `ppg-gui --doctor`, `ppg doctor`) lists Python and every library with its
 version, the known pitfalls - another `ppg-gui` earlier on `PATH`, the Anaconda base environment, Open3D 0.20.0, an old
-pyvistaqt, a missing SpatiaLite - and what to do about them. *Copy* puts the report on the clipboard, to attach to a bug
+pyvistaqt, an affine older than 3.0, a missing SpatiaLite - and what to do about them. *Copy* puts the report on the clipboard, to attach to a bug
 report together with the log.
 
 ## Updates

@@ -129,6 +129,12 @@ interface writes a log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 * **Native dialogs crashing on macOS 26/27** (`NSInternalInconsistencyException ...
   targetSizeInPoints`): the interface uses Qt's own message boxes, no action needed.
 * **The 3D view hangs on macOS**: pyvistaqt older than 0.13 hangs on start; `pip install -U pyvistaqt`.
+* **`TypeError: unsupported operand type(s) for @: 'Affine' and 'Affine'`** when a project with an orthophoto
+  or a DEM is opened: the environment has affine older than 3.0, without the `@` operator of the transforms.
+  It happens in an environment made long ago and never updated - an editable install, or a `ppg-gui` of
+  another Python that comes first on the `PATH`. `python -m pip install -U "affine>=3.0"` with the Python of
+  that environment (`ppg doctor` prints the command), or start the program from its own environment. From
+  1.10.1 the program asks for affine 3.0, so `pip install -U pyarchinit-photogrammetry` brings it.
 
 ## Screenshots
 

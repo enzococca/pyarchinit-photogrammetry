@@ -119,6 +119,12 @@ scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
   messaggio di Qt, non serve fare nulla.
 * **La vista 3D si blocca su macOS**: pyvistaqt precedente alla 0.13 si blocca all'avvio;
   `pip install -U pyvistaqt`.
+* **`TypeError: unsupported operand type(s) for @: 'Affine' and 'Affine'`** aprendo un progetto con
+  un'ortofoto o un DEM: l'ambiente ha affine precedente alla 3.0, senza l'operatore `@` delle trasformazioni.
+  Succede in un ambiente creato tempo fa e mai aggiornato - un'installazione editable, oppure un `ppg-gui` di
+  un altro Python che viene prima nel `PATH`. `python -m pip install -U "affine>=3.0"` con il Python di
+  quell'ambiente (`ppg doctor` stampa il comando), oppure avvia il programma dal suo ambiente. Dalla 1.10.1
+  il programma richiede affine 3.0, quindi `pip install -U pyarchinit-photogrammetry` la porta.
 
 ## Lavorare con QGIS, Metashape, WebODM e Photo3D
 

@@ -126,3 +126,31 @@ def test_doctor_warns_of_a_version_the_program_was_not_tested_with(monkeypatch):
     names = list(checks)
     assert names.index("COLMAP GPU") == names.index("Open3D") + 1
     assert names.index("Open3D GPU") == names.index("COLMAP GPU") + 1
+    assert checks["affine"].level == doctor.OK  # the one of this environment, among the lines of the report
+
+
+def test_doctor_reports_an_affine_without_the_operator_of_the_transforms(monkeypatch):
+    """affine before 3.0 has no ``@`` between transforms, which the program uses wherever it reads a raster at a
+    reduced size: opening a project with an orthophoto ended with ``TypeError: unsupported operand type(s) for @:
+    'Affine' and 'Affine'`` in an environment that had affine 2.4 (rasterio takes any version; an editable install
+    keeps the requirements of the day it was made). The program asks for 3.0 and the diagnosis names an older one,
+    with the command for the interpreter it runs in."""
+    real = doctor._version
+    monkeypatch.setattr(doctor, "_version", lambda mod: "2.4.0" if mod == "affine" else real(mod))
+    check = doctor.affine_check()
+    assert (check.name, check.level) == ("affine", doctor.FAIL) and check.detail.startswith("2.4.0: older than 3.0")
+    assert check.hint == f'"{sys.executable}" -m pip install -U "affine>=3.0"'
+    for version in ("3.0", "3.0rc3", "3.0.0", "3.0.1", "3.1", "?"):  # the release candidates of 3.0 have the operator
+        monkeypatch.setattr(doctor, "_version", lambda mod, v=version: v if mod == "affine" else real(mod))
+        assert doctor.affine_check().level == doctor.OK, version
+    monkeypatch.setattr(doctor, "_version", lambda mod: None if mod == "affine" else real(mod))
+    assert (doctor.affine_check().level, doctor.affine_check().detail) == (doctor.FAIL, "missing")
+    monkeypatch.setattr(doctor, "_version", real)
+    assert doctor.affine_check().level == doctor.OK  # this environment
+    from affine import Affine
+
+    tr = Affine.translation(10.0, 20.0) @ Affine.scale(2.0, -2.0)  # what the code does with the transform of a raster
+    assert tr @ (1.0, 1.0) == (12.0, 18.0) and ~tr @ (12.0, 18.0) == (1.0, 1.0)
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    deps = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    assert f"affine>={doctor.AFFINE_MIN}" in deps

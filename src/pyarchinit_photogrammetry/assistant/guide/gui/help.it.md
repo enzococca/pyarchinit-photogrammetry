@@ -33,7 +33,7 @@ del sistema; gli arresti del codice nativo vengono scritti in `crash.log` nella 
 
 *Aiuto > Diagnostica ambiente...* (oppure `ppg-gui --doctor`, `ppg doctor`) elenca Python e ogni libreria con la sua
 versione, i problemi noti - un altro `ppg-gui` prima nel `PATH`, l'ambiente base di Anaconda, Open3D 0.20.0, un pyvistaqt
-vecchio, SpatiaLite mancante - e cosa fare. *Copia* mette il rapporto negli appunti, da allegare a una segnalazione
+vecchio, un affine precedente alla 3.0, SpatiaLite mancante - e cosa fare. *Copia* mette il rapporto negli appunti, da allegare a una segnalazione
 insieme al log.
 
 ## Aggiornamenti
