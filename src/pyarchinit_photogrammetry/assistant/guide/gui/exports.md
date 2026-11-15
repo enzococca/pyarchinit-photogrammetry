@@ -107,7 +107,9 @@ shaded relief, stratigraphic units, drawings and 3D model on a page any hosting 
    terminal). **Check** shows the plan - what goes where, the free
    limits met or exceeded, what becomes public - without sending anything; **Publish...** asks to confirm that the
    site becomes public (a second time, in red, for real coordinates). The address appears in the pane and in the
-   Workspace with *Open in the browser* and *Copy the address*. Step by step, the limits, Cloudflare Access and the
+   Workspace with *Open in the browser* and *Copy the address*. **Remove from the web...** (since 1.10.2) deletes
+   from Cloudflare what the program published, after you type the name of the project. Step by step, the limits,
+   Cloudflare Access and the
    other hostings: [Publishing the web site](web-publish.md). The folder can still be copied as it is to any static
    hosting (*Open the folder*).
 

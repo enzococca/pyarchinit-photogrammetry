@@ -107,7 +107,9 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
    terminale). **Controlla** mostra il piano - cosa va dove, i limiti
    gratuiti rispettati o superati, che cosa diventa pubblico - senza inviare nulla; **Pubblica...** chiede di
    confermare che il sito diventa pubblico (una seconda volta, in rosso, con le coordinate vere). L'indirizzo compare
-   nel pannello e nell'Area di lavoro con *Apri nel browser* e *Copia l'indirizzo*. Passo per passo, i limiti,
+   nel pannello e nell'Area di lavoro con *Apri nel browser* e *Copia l'indirizzo*. **Rimuovi dal web...** (dalla
+   1.10.2) cancella da Cloudflare quello che il programma ha pubblicato, dopo che hai scritto il nome del progetto.
+   Passo per passo, i limiti,
    Cloudflare Access e gli altri hosting: [Pubblicare il sito web](web-publish.it.md). La cartella si può sempre
    copiare così com'è su qualsiasi hosting statico (*Apri la cartella*).
 

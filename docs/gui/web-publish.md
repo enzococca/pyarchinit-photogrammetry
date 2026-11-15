@@ -123,10 +123,26 @@ bucket and protect it with Access too, or keep the whole site on Pages.
 
 ## Deleting the site
 
-- The site: *Workers & Pages* > the project > *Settings* > **Delete project**, or in a terminal
-  `wrangler pages project delete <name>`.
-- The data: *R2* > the bucket > delete its objects, then the bucket; or turn off its public address with
-  `wrangler r2 bucket dev-url disable <bucket>`.
+Since 1.10.2, step 4 has **Remove from the web...**, shown when the site folder records a publication (the file
+`.ppg-publish.json` the program writes in it). The program removes only what it published itself from that folder:
+
+- the Cloudflare Pages project, with all its deployments: the address of the site stops working;
+- the files it sent to the R2 bucket, one by one; other files of the bucket are never touched;
+- the public r2.dev address of the bucket, only when the program turned it on;
+- the bucket itself only when you tick **Delete the bucket too**, which is enabled only when the program created
+  the bucket, and only after every file it sent is gone (a bucket holding other files is not deleted).
+
+A custom domain you connected to the bucket is never touched, and the site folder on your computer stays. The window
+lists what will be removed, says it cannot be undone, and enables its button only once you type the name of the
+project. The removal runs like the publication: its steps in the log, **Cancel** stops it. If it is cancelled or a
+step fails, press **Remove from the web...** again: it goes on with what is left. Once everything went, the record
+in the folder is removed and the project forgets the address.
+
+Sites published before 1.10.2 did not record whether the program created the bucket or turned on its r2.dev address:
+for them both are left as they are (the window says so); turn them off in the dashboard if you wish.
+
+By hand, in the dashboard: *Workers & Pages* > the project > *Settings* > **Delete project**; *R2* > the bucket >
+delete its objects, then the bucket, or turn off its public address in *Settings*.
 
 ## From the command line
 
@@ -135,6 +151,7 @@ bucket and protect it with Access too, or keep the whole site on Pages.
     ppg web publish cloudflare SITE_FOLDER --project NAME --yes-public
     ppg web publish cloudflare SITE_FOLDER --project NAME --bucket NAME-data --yes-public
     ppg web publish cloudflare SITE_FOLDER --project NAME --yes-public --yes-true-coordinates   # site built with --frame crs
+    ppg web unpublish cloudflare SITE_FOLDER [--delete-bucket] [--yes]   # remove it from Cloudflare (since 1.10.2)
 
 `ppg web login cloudflare` does nothing when wrangler is logged in already; otherwise it runs `wrangler login`
 (`--timeout` seconds, 600 by default; Ctrl+C stops it) and prints only whether it worked.
@@ -148,6 +165,13 @@ BUCKET` when missing), `r2 object put BUCKET/KEY --file FILE --content-type TYPE
 max-age=3600" --remote` for each new or changed file, `r2 object delete BUCKET/KEY --remote` for each file gone,
 `r2 bucket dev-url enable BUCKET -y` and `r2 bucket dev-url get BUCKET` (without a custom domain), `r2 bucket cors set
 BUCKET --file RULE.json -y`; last `pages deploy FOLDER --project-name NAME --branch main --commit-dirty=true`.
+
+`ppg web unpublish cloudflare` prints what it will remove and, without `--yes`, asks you to type the name of the
+project; `--delete-bucket` deletes the bucket too (only when the program created it); `--record PROJECT.ppg` forgets
+the address in the project once everything went. It ends with code 1 when something was not removed: run it again
+to go on. The wrangler commands, in order: `r2 object delete BUCKET/KEY --remote` for each file the program sent,
+`r2 bucket dev-url disable BUCKET -y` (when the program turned the address on), `r2 bucket delete BUCKET` (when asked
+and allowed), last `pages project delete NAME --yes`.
 
 ## Other hostings
 

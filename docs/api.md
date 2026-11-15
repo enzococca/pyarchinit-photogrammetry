@@ -1341,10 +1341,14 @@ program never handles a token - see [Publishing the web site](gui/web-publish.md
 | `site_publish.publish(plan, public=False, coordinates=False, origins=None, progress=None)` | runs wrangler; refuses (`ConsentError`) without `public=True`, and without `coordinates=True` for a site built with `frame="crs"`; returns a `Result` with `address` and `data_address` |
 | `site_publish.Wrangler().status()` | `missing`, `logged_out` or `ready` (`wrangler --version`, `wrangler whoami --json`) |
 | `site_publish.record_published(document, result)` | the address, the project, the bucket and the date in `document.meta["web_site"]["published"]` |
+| `site_publish.removal_plan(folder, delete_bucket=False)` | since 1.10.2: what would be removed from Cloudflare, read from the folder's `.ppg-publish.json` alone (`project`, `bucket`, the `objects` the program sent, `dev_url`, `bucket_rule`, `delete_bucket`; `problems` when no publication is recorded); nothing run |
+| `site_publish.unpublish(folder, delete_bucket=False, progress=None)` | since 1.10.2: deletes the objects sent, turns off the r2.dev address when the program turned it on, the bucket when asked and created by the program, then the Pages project; goes on where it stopped; returns a `Removed` (`complete`, `failures`, `notes`); `NotPublished` when nothing is recorded |
+| `site_publish.forget_published(document)` | forgets `document.meta["web_site"]["published"]` after the removal |
 
 ```bash
 ppg web publish cloudflare site --project scavo-2026 --dry-run
 ppg web publish cloudflare site --project scavo-2026 --yes-public --record scavo.ppg
+ppg web unpublish cloudflare site --delete-bucket --record scavo.ppg   # since 1.10.2: asks for the project name
 ```
 
 ## Measures
