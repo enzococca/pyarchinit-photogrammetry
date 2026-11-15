@@ -31,7 +31,12 @@ sys.stdout.reconfigure(encoding="utf-8")  # as the real one (Node): on Windows a
 home = Path(os.environ["FAKE_WRANGLER_DIR"])
 modes = set(filter(None, os.environ.get("FAKE_WRANGLER_MODE", "").split(",")))
 args = sys.argv[1:]
-if args[:2] == ["--no", "wrangler"]:  # run as npx: npx --no wrangler <args>
+if args[:3] == ["--no", "--", "wrangler"]:  # run as npx: npx --no -- wrangler <args>
+    args = args[3:]
+elif args[:2] == ["--no", "wrangler"]:  # without "--" the real npx takes --version for itself (the version of npm)
+    if "--version" in args:
+        print("10.9.9")
+        sys.exit(0)
     args = args[2:]
 with open(home / "calls.jsonl", "a", encoding="utf-8") as fh:
     fh.write(json.dumps(args) + "\n")

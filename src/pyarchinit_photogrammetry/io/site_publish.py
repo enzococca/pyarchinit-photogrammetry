@@ -522,7 +522,8 @@ def find_wrangler(env: dict | None = None) -> list[str] | None:
         return [str(Path(found).absolute())]
     npx = shutil.which("npx", path=path)
     if npx:
-        return [str(Path(npx).absolute()), "--no", "wrangler"]
+        # "--": npx would take --version for itself and answer the version of npm
+        return [str(Path(npx).absolute()), "--no", "--", "wrangler"]
     return None
 
 

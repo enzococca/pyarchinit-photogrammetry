@@ -183,7 +183,7 @@ def test_npx_is_used_without_installing(tmp_path, monkeypatch):
         npx.write_text("#!/bin/sh\nexit 1\n")
         npx.chmod(0o755)
     got = sp.find_wrangler()
-    assert [Path(got[0]), *got[1:]] == [npx, "--no", "wrangler"]  # as paths: Windows gives the extension in capitals
+    assert [Path(got[0]), *got[1:]] == [npx, "--no", "--", "wrangler"]  # as paths: Windows gives the extension in capitals
 
 
 def test_not_logged_in(tmp_path, wr, monkeypatch):
@@ -532,3 +532,11 @@ def test_cli_says_when_the_address_is_unknown(tmp_path, wr, monkeypatch):
     assert "published; the address is shown in the Cloudflare dashboard" in r.output
     assert "https://scavo.pages.dev" not in r.output and "Projects:" in r.output
     _no_secret(r.output)
+
+
+def test_version_through_npx_is_the_one_of_wrangler(tmp_path, monkeypatch):
+    """``npx --no wrangler --version`` answers the version of npm (npx takes the option): the command has ``--``."""
+    home = tmp_path / "w"
+    fake.npx_environment(monkeypatch, home, "")
+    status = sp.Wrangler().status()
+    assert status.version == "4.51.0", status
