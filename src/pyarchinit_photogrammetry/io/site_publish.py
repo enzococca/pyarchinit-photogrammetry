@@ -498,10 +498,34 @@ class Status:
     text: str = ""
 
 
+def wrangler_cache_dir() -> Path:
+    """Where wrangler keeps its cache when the program runs it: a folder of this user in the temporary directory.
+    wrangler 4 writes it in ``.wrangler/cache`` under the working folder, which is ``/`` (not writable) for the
+    application started from the Finder (since 1.10.1)."""
+    who = str(os.getuid()) if hasattr(os, "getuid") else (os.environ.get("USERNAME") or "user")
+    return Path(tempfile.gettempdir()) / f"ppg-wrangler-cache-{who}"
+
+
+def _cache_env(env: dict) -> None:
+    """``WRANGLER_CACHE_DIR`` set to :func:`wrangler_cache_dir`, made on demand, unless the user set one; left
+    unset when the folder cannot be made."""
+    if env.get("WRANGLER_CACHE_DIR"):
+        return
+    try:
+        folder = wrangler_cache_dir()
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not os.access(folder, os.W_OK):
+            return
+    except OSError:
+        return
+    env["WRANGLER_CACHE_DIR"] = str(folder)
+
+
 class Wrangler:
     """The user's wrangler, run as a child process: stdin closed (no prompt waits), the output read and scrubbed,
     cancelled through ``progress``. The environment is passed as it is (wrangler reads its own login); the program
-    adds only ``WRANGLER_SEND_METRICS=false`` and no colours."""
+    adds only ``WRANGLER_SEND_METRICS=false``, no colours and a writable ``WRANGLER_CACHE_DIR`` when none is set
+    (:func:`wrangler_cache_dir`: the child runs without a working folder of its own)."""
 
     def __init__(self, command: list[str] | None = None, env: dict | None = None, timeout: float = 1800.0):
         self.command = list(command) if command else find_wrangler(env)
@@ -512,6 +536,7 @@ class Wrangler:
             first = str(Path(self.command[0]).parent)
             path = os.pathsep.join([first] + [p for p in path.split(os.pathsep) if p != first])
         base.update({"PATH": path, "WRANGLER_SEND_METRICS": "false", "NO_COLOR": "1", "FORCE_COLOR": "0"})
+        _cache_env(base)
         self.env = base
         self.transcript: list[str] = []  # the commands run and their output, scrubbed
 
@@ -612,7 +637,12 @@ def _version(text: str) -> str:
 
 
 def _last_lines(text: str, n: int = 6) -> str:
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    """The error of a wrangler output in one short line: from the first line naming ``ERROR`` (``✘ [ERROR] ...``)
+    up to 8 non-empty lines, so the head of the error is never cut; without one, the last ``n`` lines."""
+    lines = [ln.strip() for ln in _ANSI.sub("", text or "").splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if "ERROR" in ln:
+            return " | ".join(lines[i:i + 8])
     return " | ".join(lines[-n:])
 
 
@@ -982,4 +1012,4 @@ def stale_publication(document) -> bool:
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
-           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "wrangler_cache_dir", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]

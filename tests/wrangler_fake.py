@@ -4,7 +4,9 @@ calls and answers as the real one does (logged in or not, a failure, a file too 
 The behaviour comes from the environment: ``FAKE_WRANGLER_DIR`` (where it keeps its calls and its "cloud"),
 ``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``,
 ``slow``, ``quiet``: no address in the answers of create and deploy, ``garbled``: no JSON either; ``login_fail``,
-``login_hang``: ``wrangler login`` failing or never ending; a ``login`` that succeeds ends ``logged_out``)."""
+``login_hang``: ``wrangler login`` failing or never ending; a ``login`` that succeeds ends ``logged_out``;
+``cache_error``: ``pages project ...`` failing as wrangler 4 does in "/" without a cache folder). Each call writes
+``WRANGLER_CACHE_DIR`` as it got it in ``cache_dir``."""
 from __future__ import annotations
 
 import json
@@ -30,6 +32,7 @@ if args[:2] == ["--no", "wrangler"]:  # run as npx: npx --no wrangler <args>
     args = args[2:]
 with open(home / "calls.jsonl", "a", encoding="utf-8") as fh:
     fh.write(json.dumps(args) + "\n")
+(home / "cache_dir").write_text(os.environ.get("WRANGLER_CACHE_DIR", ""), encoding="utf-8")
 state_path = home / "cloud.json"
 cloud = json.loads(state_path.read_text()) if state_path.exists() else {"projects": {}, "buckets": {}}
 
@@ -60,6 +63,13 @@ if args[:1] == ["whoami"]:
     if "logged_out" in modes and not (home / "logged_in").exists():
         out("You are not authenticated. Please run `wrangler login`.", 1)
     out(json.dumps({"loggedIn": True, "email": "%(email)s", "accounts": [{"id": "%(account)s"}]}))
+if "cache_error" in modes and args[:2] == ["pages", "project"]:  # wrangler 4 started in "/" without a cache dir
+    out(" \u26c5\ufe0f wrangler 4.51.0\n------------------\n"
+        "\x1b[31m\u2718 \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mA file or directory could not be "
+        "found.\x1b[0m\n\n  Missing file or directory: /.wrangler/cache\n\n"
+        "  The error was: ENOENT: no such file or directory, mkdir '/.wrangler/cache'\n\n"
+        "\U0001fab5  Logs were written to \"/tmp/wrangler-logs/wrangler.log\"\n"
+        "line 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14", 1)
 if args[:3] == ["pages", "project", "list"]:
     if "garbled" in modes:  # not the JSON expected
         out("Projects:\n" + "\n".join(f" - {n} ({d['domain']})" if "quiet" not in modes else f" - {n}"
@@ -175,7 +185,9 @@ def environment(monkeypatch, folder: Path, mode: str = "") -> Path:
     monkeypatch.setenv("FAKE_WRANGLER_DIR", str(folder))
     monkeypatch.setenv("FAKE_WRANGLER_MODE", mode)
     monkeypatch.delenv("PPG_WRANGLER", raising=False)
+    monkeypatch.delenv("WRANGLER_CACHE_DIR", raising=False)
     monkeypatch.setattr(site_publish, "extra_dirs", lambda: [])
+    monkeypatch.setattr(site_publish, "wrangler_cache_dir", lambda: folder / "wrangler-cache")
     return bin_dir
 
 
