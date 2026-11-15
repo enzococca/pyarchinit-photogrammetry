@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
 import sys
 import sysconfig
@@ -156,6 +157,97 @@ def _installed_for_the_user() -> bool:
         return False
 
 
+def _typed(path) -> str:
+    """A path as it is typed in a command: between double quotes when it has a space."""
+    text = str(path)
+    return f'"{text}"' if " " in text else text
+
+
+def _as_on_disk(path: str, windows: bool) -> str:
+    """A path with its last name as its folder spells it.
+
+    On Windows ``shutil.which`` answers with the extension as ``PATHEXT`` spells it (``ppg-gui.EXE`` for the file
+    ``ppg-gui.exe``). Unchanged elsewhere, and when the folder cannot be listed.
+    """
+    if not windows:
+        return path
+    folder, name = os.path.split(path)
+    try:
+        names = os.listdir(folder or os.curdir)
+    except OSError:
+        return path
+    if name in names:
+        return path
+    return next((os.path.join(folder, entry) for entry in names if entry.lower() == name.lower()), path)
+
+
+def _shebang_python(launcher: Path) -> Path | None:
+    """The interpreter a launcher names in its first line, on macOS and Linux.
+
+    ``#!/path/python`` or, when that path is long or has a space in it, ``#!/bin/sh`` and the interpreter in the
+    second line (``'''exec' /path/python "$0" "$@"``, as pip and uv write it). None for anything else:
+    ``/usr/bin/env``, a path worked out by the shell, a launcher that is not a script.
+    """
+    try:
+        with open(launcher, "rb") as handle:
+            lines = handle.read(4096).decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    words = lines[0][2:].split() if lines and lines[0].startswith("#!") else []
+    if not words:
+        return None
+    named = words[0]
+    if Path(named).name == "sh" and len(lines) > 1:
+        try:
+            tokens = shlex.split(lines[1])
+        except ValueError:  # a quote left open
+            return None
+        if len(tokens) < 2 or tokens[0] != "exec":
+            return None
+        named = tokens[1]
+    python = Path(named)
+    return python if python.is_absolute() and python.name.lower().startswith(("python", "pypy")) else None
+
+
+def _python_of(launcher: Path, windows: bool) -> Path | None:
+    """The interpreter of the install a launcher belongs to; None when it is not found.
+
+    On macOS and Linux the one the launcher names, then ``python`` or ``python3`` beside it. On Windows a launcher
+    is an executable: ``python.exe`` beside it (a virtual environment) or beside its ``Scripts`` folder (a base
+    install). Only a file that is there, and never followed to what it links to: the ``python`` of a virtual
+    environment is a link to the interpreter of another install.
+    """
+    folder = launcher.parent
+    if windows:
+        candidates = [folder / "python.exe"]
+        if folder.name.lower() == "scripts":
+            candidates.append(folder.parent / "python.exe")
+    else:
+        named = _shebang_python(launcher)
+        candidates = ([named] if named is not None else []) + [folder / "python", folder / "python3"]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _other_launcher_hint(mine: Path, target: Path, windows: bool) -> str:
+    """What to do when a terminal runs ``target``, the ``ppg-gui`` of another install, and not the one in ``mine``.
+
+    Each command is given only when the file it names is there: the activation of a virtual environment
+    (``activate.bat`` is what ``...\\Scripts\\activate`` runs on Windows), the interpreter of the other install.
+    """
+    if (mine / ("activate.bat" if windows else "activate")).is_file():
+        typed = ("" if windows else "source ") + _typed(mine / "activate")
+        first = f"Activate the environment of this install ('{typed}')"
+    else:
+        first = "Put that folder first on the PATH"
+    python = _python_of(target, windows)
+    if python is not None:
+        remove = f"remove the other one ('{_typed(python)} -m pip uninstall pyarchinit-photogrammetry')"
+    else:
+        remove = ("remove the other one with the Python it was installed with "
+                  "('python -m pip uninstall pyarchinit-photogrammetry', where 'python' is that Python)")
+    return f"Typing 'ppg-gui' in a terminal runs this file, not the one in {mine}. {first} or {remove}."
+
+
 def launcher_check() -> Check:
     """Whose ``ppg-gui`` a terminal runs: the one of this install, also through a link to it, or another one."""
     name = "ppg-gui on PATH"
@@ -163,16 +255,15 @@ def launcher_check() -> Check:
     if not found:
         return Check(name, WARN, "not found",
                      "Activate the virtual environment, or run 'python -m pyarchinit_photogrammetry.gui'.")
+    windows = sys.platform == "win32"
+    shown = _as_on_disk(found, windows)
     for_user = _installed_for_the_user()
     mine = _scripts_dir(user=for_user)
     own = {_scripts_dir().resolve(), mine.resolve()}
     target = Path(found).resolve()
     if target.parent in own:
-        return Check(name, OK, found)
-    return Check(name, WARN, found,
-                 f"Typing 'ppg-gui' in a terminal runs this file, not the one in {mine}. Activate the "
-                 f"environment of this install ('source .venv/bin/activate') or remove the other one "
-                 f"('{target.parent / 'python'} -m pip uninstall pyarchinit-photogrammetry').")
+        return Check(name, OK, shown)
+    return Check(name, WARN, shown, _other_launcher_hint(mine, target, windows))
 
 
 def affine_check() -> Check:
