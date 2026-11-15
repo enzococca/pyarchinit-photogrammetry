@@ -196,6 +196,69 @@ def test_not_logged_in(tmp_path, wr, monkeypatch):
     assert [c for c in fake.calls(wr) if c[:1] == ["pages"]] == []  # nothing sent
 
 
+# --------------------------------------------------------------------------------------------- the cache of wrangler
+def test_wrangler_gets_a_writable_cache_folder(wr):
+    w = sp.Wrangler()
+    w.run(["--version"], keep=False)
+    given = (wr / "cache_dir").read_text(encoding="utf-8")
+    assert given == w.env["WRANGLER_CACHE_DIR"] == str(wr / "wrangler-cache")
+    assert Path(given).is_dir() and os.access(given, os.W_OK)
+
+
+def test_a_cache_folder_set_by_the_user_is_kept(tmp_path, wr, monkeypatch):
+    mine = tmp_path / "mine"
+    monkeypatch.setenv("WRANGLER_CACHE_DIR", str(mine))
+    sp.Wrangler().run(["--version"], keep=False)
+    assert (wr / "cache_dir").read_text(encoding="utf-8") == str(mine)
+    assert not (wr / "wrangler-cache").exists()
+
+
+def test_a_cache_folder_that_cannot_be_made_is_left_unset(tmp_path, wr, monkeypatch):
+    blocker = tmp_path / "a_file"
+    blocker.write_text("x")
+    monkeypatch.setattr(sp, "wrangler_cache_dir", lambda: blocker / "cache")
+    assert "WRANGLER_CACHE_DIR" not in sp.Wrangler().env
+
+
+def test_the_head_of_an_error_of_wrangler_is_kept(tmp_path, wr, monkeypatch):
+    _mode(monkeypatch, "cache_error")
+    with pytest.raises(sp.WranglerFailed) as err:
+        sp.Wrangler().run(["pages", "project", "list", "--json"], check=True)
+    text = str(err.value)
+    assert "[ERROR] A file or directory could not be found." in text
+    assert "Missing file or directory: /.wrangler/cache" in text
+    assert "\x1b" not in text and "wrangler 4.51.0" not in text and "line 14" not in text
+    with pytest.raises(sp.WranglerFailed, match="Missing file or directory: /.wrangler/cache"):
+        sp.publish(sp.plan(fake.make_site(tmp_path / "sito"), "scavo"), public=True)
+    assert sp._last_lines("a\nb\nc", 2) == "b | c"
+
+
+def test_a_wrangler_folder_in_the_home_that_hides_the_login(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    assert sp.legacy_folder(home) is None and sp.legacy_folder_hint(home) == ""
+    (home / ".wrangler" / "cache").mkdir(parents=True)
+    (home / ".wrangler" / "logs").mkdir()
+    assert sp.legacy_folder(home) == home / ".wrangler"
+    assert str(home / ".wrangler") in sp.legacy_folder_hint(home) and "delete it" in sp.legacy_folder_hint(home)
+    (home / ".wrangler" / "config").mkdir()  # a real configuration folder: not the case
+    assert sp.legacy_folder(home) is None
+
+
+def test_not_logged_in_names_the_wrangler_folder_of_the_home(tmp_path, wr, monkeypatch):
+    _mode(monkeypatch, "logged_out")
+    st = sp.Wrangler().status()
+    assert st.legacy_folder == "" and "delete it" not in st.text
+    legacy = tmp_path / "fake" / "home" / ".wrangler"
+    (legacy / "cache").mkdir(parents=True)
+    st = sp.Wrangler().status()
+    assert st.state == "logged_out" and st.legacy_folder == str(legacy) and str(legacy) in st.text
+    with pytest.raises(sp.NotLoggedIn, match="delete it"):
+        sp.publish(sp.plan(fake.make_site(tmp_path / "sito"), "scavo"), public=True)
+    assert "delete it" in sp._failure_text("X [ERROR] Not logged in.")
+    assert "delete it" not in sp._failure_text("X [ERROR] something else")
+
+
 def test_an_old_wrangler_without_json(tmp_path, wr, monkeypatch):
     _mode(monkeypatch, "old")
     assert sp.Wrangler().status().state == "ready"

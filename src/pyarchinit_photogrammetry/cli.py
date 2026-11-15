@@ -5822,6 +5822,41 @@ def web_serve(folder: Path,
 
 publish_app = typer.Typer(help="Publish a site folder (ppg web build) on a hosting")
 web_app.add_typer(publish_app, name="publish")
+login_app = typer.Typer(help="Log in to a hosting with its own command line, before publishing")
+web_app.add_typer(login_app, name="login")
+
+
+@login_app.command("cloudflare")
+def web_login_cloudflare(
+        timeout: float = typer.Option(600.0, "--timeout", help="seconds to finish the login in the browser")):
+    """Run your own `wrangler login` (since 1.10.1): wrangler opens the browser, you sign in to Cloudflare there and
+    wrangler keeps its login. The program shows and keeps nothing of what wrangler prints (the sign-in address, the
+    account): only whether it worked. Nothing is done when wrangler is logged in already."""
+    from .io import site_publish as sp
+
+    found = sp.find_wrangler()
+    if found is None:
+        typer.echo(sp.INSTALL_HINT, err=True)
+        raise typer.Exit(1)
+    w = sp.Wrangler(found)
+    status = w.status()
+    if status.state == "missing":
+        typer.echo(status.text, err=True)
+        raise typer.Exit(1)
+    if status.state == "ready":
+        typer.echo(f"wrangler {status.version}: logged in already")
+        return
+    typer.echo("Cloudflare login: complete it in the browser that wrangler opens (Ctrl+C to stop)")
+    try:
+        status = w.login(timeout=timeout)
+    except (sp.WranglerMissing, sp.WranglerFailed) as exc:
+        typer.echo(f"not logged in: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if status.state != "ready":
+        typer.echo(f"not logged in: {status.text}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"wrangler {status.version}: logged in")
+
 
 
 @publish_app.command("cloudflare")
@@ -5848,7 +5883,8 @@ def web_publish_cloudflare(
         record: Optional[Path] = typer.Option(None, "--record", help="a project (.ppg) that keeps the address of "
                                               "the published site")):
     """Publish a site on Cloudflare Pages (and R2 for large data) with your own wrangler: log in first with
-    `wrangler login` in a terminal. The program never reads or keeps a token."""
+    `ppg web login cloudflare` (or `wrangler login`, `npx wrangler login` when wrangler runs only through npx).
+    The program never reads or keeps a token."""
     from .io import site_publish as sp
 
     if not (folder / "site.json").exists():
@@ -5892,7 +5928,7 @@ def web_publish_cloudflare(
         typer.echo(f"published: {result.address}")
     else:
         typer.echo("published; the address is shown in the Cloudflare dashboard (Workers & Pages) or by "
-                   "`wrangler pages project list` (it was not found in the answer of wrangler)")
+                   f"`{sp.typed_command(found)} pages project list` (it was not found in the answer of wrangler)")
     if result.data_address:
         typer.echo(f"data: {result.data_address} (bucket {result.bucket}: {result.sent} sent, {result.unchanged} "
                    f"unchanged, {result.removed} deleted)")

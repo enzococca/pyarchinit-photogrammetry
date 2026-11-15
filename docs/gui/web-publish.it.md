@@ -49,11 +49,16 @@ più lentamente.
 
    Il programma non lo installa mai da solo. Cerca `wrangler` nel PATH e nelle cartelle solite di Node (Homebrew,
    `~/.npm-global/bin`, nvm, Volta), poi `npx --no wrangler` (che non scarica mai nulla).
-4. **Fai l'accesso**, una volta, nello stesso terminale:
+4. **Fai l'accesso**, una volta. Dalla 1.10.1 il modo più semplice è il programma stesso: premi **Controlla** nel
+   passo 4 e, quando dice che wrangler non ha l'accesso, premi **Accedi a Cloudflare** (qui sotto). Oppure nello
+   stesso terminale:
 
         wrangler login
 
-   Il browser si apre su Cloudflare: autorizza wrangler. Le credenziali restano a wrangler; il programma non le vede.
+   Quando wrangler non è installato ma `npx` lo trova (sta solo nella cache di npx), `wrangler` da solo risponde
+   *command not found*: scrivi invece `npx wrangler login`. Il pannello e `ppg web publish cloudflare` scrivono il
+   comando come lo puoi digitare, da quello che hanno trovato. Il browser si apre su Cloudflare: autorizza wrangler.
+   Le credenziali restano a wrangler; il programma non le vede.
 5. Nel programma: costruisci il sito (passi 1-2 del pannello), poi nel passo 4 scrivi il nome del **Progetto Pages**
    (lettere minuscole, cifre, trattini; il sito sarà su `https://<nome>.pages.dev`; Cloudflare aggiunge un suffisso se
    il nome è già preso, e il pannello mostra l'indirizzo che assegna).
@@ -74,6 +79,27 @@ Pubblicare di nuovo invia solo ciò che è cambiato: Pages salta i file che ha g
 a R2 (`.ppg-publish.json` nella cartella del sito, mai pubblicato), così invia solo quelli nuovi o cambiati e cancella
 quelli che non sono più nel sito. Quando il sito viene costruito di nuovo dopo una pubblicazione, il passo 4 dice *da
 rifare*.
+
+**Accedi a Cloudflare** (dalla 1.10.1). Quando il controllo dice che wrangler non ha l'accesso, il passo 4 mostra
+questo pulsante: il programma avvia il tuo `wrangler login` (lo stesso comando di un terminale), wrangler apre il
+browser, accedi lì, e quando wrangler finisce il programma controlla di nuovo da solo (l'accesso e il piano). Intanto
+il passo dice *completa nel browser*; **Annulla** ferma wrangler, e dopo 10 minuti senza risposta si ferma da solo.
+Nulla di ciò che wrangler scrive - l'indirizzo di accesso, l'account - viene tenuto, scritto nel pannello Log o
+mostrato: solo se è riuscito. Il programma non legge mai i file di wrangler.
+
+**Un terminale dal programma** (dalla 1.10.1): *Strumenti > Apri un terminale* apre il terminale del sistema nella
+cartella del progetto con `ppg`, `npx` e `wrangler` raggiungibili ([Strumenti](menus.md#strumenti)).
+
+**Avviato dall'applicazione** (Finder, menu Start) wrangler non ha una cartella sua in cui lavorare: dalla 1.10.1 il
+programma gli dà una cartella di cache tua nella cartella temporanea (`WRANGLER_CACHE_DIR`, se non ne hai impostata
+una), così comandi come `pages project list` non finiscono più con *Missing file or directory: /.wrangler/cache*.
+Quando un comando fallisce, il messaggio parte dalla riga `[ERROR]` di wrangler.
+
+**"Not logged in" subito dopo un accesso riuscito**: una cartella `~/.wrangler` con solo `cache` o `logs` è stata
+creata avviando wrangler con la cartella home come cartella di lavoro, e ora wrangler la prende per la sua
+configurazione e non ci trova l'accesso. Cancella quella cartella e premi di nuovo **Controlla**: l'accesso resta
+altrove. Dalla 1.10.1 il pannello e i messaggi d'errore indicano la cartella quando la trovano (guardano solo se
+esiste).
 
 ## Quando i dati vanno su R2
 
@@ -110,11 +136,14 @@ bucket e proteggi anche quello con Access, oppure tieni tutto il sito su Pages.
 
 ## Dalla riga di comando
 
+    ppg web login cloudflare                                             # il tuo wrangler login (dalla 1.10.1)
     ppg web publish cloudflare CARTELLA_SITO --project NOME --dry-run      # il piano, nulla eseguito né inviato
     ppg web publish cloudflare CARTELLA_SITO --project NOME --yes-public
     ppg web publish cloudflare CARTELLA_SITO --project NOME --bucket NOME-dati --yes-public
     ppg web publish cloudflare CARTELLA_SITO --project NOME --yes-public --yes-true-coordinates   # sito con --frame crs
 
+`ppg web login cloudflare` non fa nulla quando wrangler ha già l'accesso; altrimenti avvia `wrangler login` (`--timeout`
+secondi, 600 se non indicato; Ctrl+C lo ferma) e scrive solo se è riuscito.
 `--yes-public` è obbligatorio; un sito costruito con le coordinate vere chiede anche `--yes-true-coordinates`. Altre
 opzioni: `--data auto|pages|r2`, `--data-url https://...` (un dominio del bucket), `--origin https://...` (un altro
 indirizzo della pagina autorizzato a leggere il bucket), `--record PROGETTO.ppg` (conserva l'indirizzo nel progetto).

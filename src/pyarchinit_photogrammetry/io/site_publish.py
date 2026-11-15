@@ -8,7 +8,8 @@ Two steps:
   costs in free-tier terms. Nothing is sent.
 * :func:`publish`: the plan carried out by running ``wrangler`` (on the PATH, in the usual folders of Node, or
   ``npx --no wrangler``: never installed by the program). The login is the user's (``wrangler login`` in a
-  terminal): the program never asks for, reads, stores or passes a token, a key or an account id; it reads only the
+  terminal, or :meth:`Wrangler.login`, which runs it and keeps nothing of its output): the program never asks for,
+  reads, stores or passes a token, a key or an account id; it reads only the
   exit codes and the output of wrangler, and what it keeps or shows of that output goes through :func:`scrub`.
 
 Where the data go (``data``): ``"auto"`` puts everything on Pages when every file fits its limits (25 MiB a file,
@@ -109,8 +110,60 @@ class WranglerFailed(RuntimeError):
 INSTALL_HINT = ("wrangler, the command line of Cloudflare, is not installed on this computer. Install Node.js "
                 "(https://nodejs.org), then in a terminal: npm install -g wrangler ; then wrangler login. "
                 "The program never installs it by itself.")
-LOGIN_HINT = ("wrangler is not logged in to Cloudflare. Open a terminal and run: wrangler login (it opens the "
-              "browser to sign in; the program never sees the credentials), then try again.")
+LOGIN_TIMEOUT = 600.0  # seconds given to the user to finish ``wrangler login`` in the browser
+
+
+def typed_command(command: list[str] | None) -> str:
+    """wrangler as the user types it in a terminal, from the command actually found by :func:`find_wrangler`:
+    ``npx wrangler`` when only npx runs it (wrangler alone is then "command not found" in a terminal), else
+    ``wrangler`` (since 1.10.1)."""
+    if command and len(command) >= 2 and Path(command[0]).stem.lower() == "npx" and command[-1] == "wrangler":
+        return "npx wrangler"
+    return "wrangler"
+
+
+def login_hint(command: list[str] | None = None) -> str:
+    """What to do when wrangler is not logged in, with the login command as the user can type it."""
+    return (f"wrangler is not logged in to Cloudflare. Open a terminal and run: {typed_command(command)} login (it "
+            "opens the browser to sign in; the program never sees the credentials), then try again.")
+
+
+LOGIN_HINT = login_hint()
+_NOT_LOGGED = re.compile(r"(?i)not (logged in|authenticated)|\"loggedIn\"\s*:\s*false")
+
+
+def legacy_folder(home: str | os.PathLike) -> Path | None:
+    """``~/.wrangler`` holding no ``config`` folder: made by running wrangler with the home as working folder (its
+    ``cache``, ``logs``), it makes wrangler take it as its configuration folder, find no login there and answer "Not
+    logged in" although the login exists elsewhere. Only ``is_dir()`` checks: nothing inside is read (since
+    1.10.1)."""
+    folder = Path(home) / ".wrangler"
+    try:
+        return folder if folder.is_dir() and not (folder / "config").is_dir() else None
+    except OSError:
+        return None
+
+
+def legacy_folder_hint(home: str | os.PathLike) -> str:
+    """What to do about :func:`legacy_folder`, or "" when there is none."""
+    folder = legacy_folder(home)
+    if folder is None:
+        return ""
+    return (f" If you logged in already: the folder {folder} (only a cache and logs, made by running wrangler in the "
+            "home folder) hides the login from wrangler; delete it and check again (the login is kept elsewhere).")
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def _failure_text(out: str) -> str:
+    """The head of the error of a wrangler output, scrubbed, with :func:`legacy_folder_hint` when it says "Not
+    logged in"."""
+    text = _last_lines(scrub(out))
+    if _NOT_LOGGED.search(out or ""):
+        text += legacy_folder_hint(_home())
+    return text
 
 
 # --------------------------------------------------------------------------------------------- scrubbing the output
@@ -478,12 +531,37 @@ class Status:
     version: str = ""
     command: list[str] = field(default_factory=list)
     text: str = ""
+    legacy_folder: str = ""  # ~/.wrangler hiding the login (:func:`legacy_folder`), when "Not logged in"
+
+
+def wrangler_cache_dir() -> Path:
+    """Where wrangler keeps its cache when the program runs it: a folder of this user in the temporary directory.
+    wrangler 4 writes it in ``.wrangler/cache`` under the working folder, which is ``/`` (not writable) for the
+    application started from the Finder (since 1.10.1)."""
+    who = str(os.getuid()) if hasattr(os, "getuid") else (os.environ.get("USERNAME") or "user")
+    return Path(tempfile.gettempdir()) / f"ppg-wrangler-cache-{who}"
+
+
+def _cache_env(env: dict) -> None:
+    """``WRANGLER_CACHE_DIR`` set to :func:`wrangler_cache_dir`, made on demand, unless the user set one; left
+    unset when the folder cannot be made."""
+    if env.get("WRANGLER_CACHE_DIR"):
+        return
+    try:
+        folder = wrangler_cache_dir()
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not os.access(folder, os.W_OK):
+            return
+    except OSError:
+        return
+    env["WRANGLER_CACHE_DIR"] = str(folder)
 
 
 class Wrangler:
     """The user's wrangler, run as a child process: stdin closed (no prompt waits), the output read and scrubbed,
     cancelled through ``progress``. The environment is passed as it is (wrangler reads its own login); the program
-    adds only ``WRANGLER_SEND_METRICS=false`` and no colours."""
+    adds only ``WRANGLER_SEND_METRICS=false``, no colours and a writable ``WRANGLER_CACHE_DIR`` when none is set
+    (:func:`wrangler_cache_dir`: the child runs without a working folder of its own)."""
 
     def __init__(self, command: list[str] | None = None, env: dict | None = None, timeout: float = 1800.0):
         self.command = list(command) if command else find_wrangler(env)
@@ -494,6 +572,7 @@ class Wrangler:
             first = str(Path(self.command[0]).parent)
             path = os.pathsep.join([first] + [p for p in path.split(os.pathsep) if p != first])
         base.update({"PATH": path, "WRANGLER_SEND_METRICS": "false", "NO_COLOR": "1", "FORCE_COLOR": "0"})
+        _cache_env(base)
         self.env = base
         self.transcript: list[str] = []  # the commands run and their output, scrubbed
 
@@ -542,7 +621,7 @@ class Wrangler:
             if proc.returncode:
                 self.transcript.append(f"(exit code {proc.returncode})")
         if check and proc.returncode:
-            raise WranglerFailed(f"{line} failed (exit code {proc.returncode}): {_last_lines(scrub(out))}",
+            raise WranglerFailed(f"{line} failed (exit code {proc.returncode}): {_failure_text(out)}",
                                  scrub(out))
         return proc.returncode, out
 
@@ -561,11 +640,34 @@ class Wrangler:
         code, out = self.run(["whoami", "--json"], progress, keep=False, timeout=120)
         if code and re.search(r"(?i)unknown (argument|option)", out):  # an old wrangler without --json
             code, out = self.run(["whoami"], progress, keep=False, timeout=120)
-            if re.search(r"(?i)not (authenticated|logged in)", out):
+            if _NOT_LOGGED.search(out):
                 code = 1
         if code:
-            return Status("logged_out", version, self.command, LOGIN_HINT)
+            legacy = legacy_folder(_home()) if _NOT_LOGGED.search(out) else None
+            return Status("logged_out", version, self.command,
+                          login_hint(self.command) + (legacy_folder_hint(_home()) if legacy else ""),
+                          legacy_folder=str(legacy) if legacy else "")
         return Status("ready", version, self.command, f"wrangler {version}, logged in")
+
+    def login(self, progress=None, timeout: float | None = None) -> Status:
+        """``wrangler login`` (since 1.10.1): wrangler opens the browser, the user signs in there, wrangler keeps
+        its own login. Its output (the sign-in address, the account) is neither kept, shown, logged nor returned:
+        only the exit code counts. Cancelled through ``progress``; after ``timeout`` seconds (:data:`LOGIN_TIMEOUT`)
+        wrangler is stopped. Then :meth:`status` again."""
+        if not self.command:
+            raise WranglerMissing(INSTALL_HINT)
+        progress = as_progress(progress)
+        limit = timeout or LOGIN_TIMEOUT
+        progress(0.0, "Cloudflare login: complete it in the browser")
+        try:
+            code, out = self.run(["login"], progress, keep=False, timeout=limit)
+        except WranglerFailed:  # its message names only the command; said again without it
+            raise WranglerFailed(f"Cloudflare login not completed within {int(limit)} s") from None
+        del out
+        if code:
+            raise WranglerFailed(f"Cloudflare login not completed (wrangler exit code {code})")
+        progress(0.9, "Cloudflare login: checking it")
+        return self.status(progress)
 
 
 def _version(text: str) -> str:
@@ -574,7 +676,12 @@ def _version(text: str) -> str:
 
 
 def _last_lines(text: str, n: int = 6) -> str:
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    """The error of a wrangler output in one short line: from the first line naming ``ERROR`` (``✘ [ERROR] ...``)
+    up to 8 non-empty lines, so the head of the error is never cut; without one, the last ``n`` lines."""
+    lines = [ln.strip() for ln in _ANSI.sub("", text or "").splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if "ERROR" in ln:
+            return " | ".join(lines[i:i + 8])
     return " | ".join(lines[-n:])
 
 
@@ -794,7 +901,7 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
         code, out = w.run(["pages", "project", "create", p.project, "--production-branch", BRANCH], progress)
         if code and not (not ok and re.search(r"(?i)already (exists|taken|in use)", out)):
             raise WranglerFailed(f"wrangler pages project create {p.project} failed (exit code {code}): "
-                                 f"{_last_lines(scrub(out))}", scrub(out))
+                                 f"{_failure_text(out)}", scrub(out))
         known = _pages_host(out, p.project)
         if known is None:  # the project exists now: its address from the list
             _code, again = w.run(["pages", "project", "list", "--json"], progress)
@@ -944,4 +1051,5 @@ def stale_publication(document) -> bool:
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
-           "WranglerFailed", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "wrangler_cache_dir", "legacy_folder",
+           "legacy_folder_hint", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]

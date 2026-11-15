@@ -184,7 +184,8 @@ class WebPane(QWidget):
     folder_requested = Signal()  # the folder of the site in the file manager
     check_requested = Signal()  # wrangler, the login and the plan of the publication
     publish_requested = Signal()
-    cancel_requested = Signal()  # the publication running
+    cancel_requested = Signal()  # the publication (or the login) running
+    login_requested = Signal()  # wrangler login run by the program (since 1.10.1)
     address_typed = Signal(str)  # the address of the site typed by the user (wrangler did not say it)
 
     def __init__(self, parent=None):
@@ -411,6 +412,11 @@ class WebPane(QWidget):
                                       "piano: cosa va dove, i limiti gratuiti, cosa diventa pubblico. Non invia "
                                       "nulla."))
         self.b_cf_check.clicked.connect(self.check_requested)
+        self.b_cf_login = QPushButton(icon("login"), tr("Accedi a Cloudflare"))
+        self.b_cf_login.setToolTip(tr("Avvia il tuo wrangler login: si apre il browser, accedi lì a Cloudflare e il "
+                                      "programma controlla di nuovo da solo. Il programma non vede le credenziali."))
+        self.b_cf_login.clicked.connect(self.login_requested)
+        self.b_cf_login.setVisible(False)
         self.b_publish = QPushButton(icon("publish"), tr("Pubblica..."))
         self.b_publish.clicked.connect(self.publish_requested)
         self.b_cf_cancel = QPushButton(icon("cancel"), tr("Annulla"))
@@ -421,7 +427,7 @@ class WebPane(QWidget):
         self.b_site_copy.clicked.connect(self._copy_published)
         self.b_open_folder = QPushButton(icon("folder"), tr("Apri la cartella"))
         self.b_open_folder.clicked.connect(self.folder_requested)
-        for b in (self.b_cf_check, self.b_publish, self.b_cf_cancel, self.b_site_open, self.b_site_copy,
+        for b in (self.b_cf_check, self.b_cf_login, self.b_publish, self.b_cf_cancel, self.b_site_open, self.b_site_copy,
                   self.b_open_folder):
             bar.addWidget(b)
         cl.addWidget(holder)
@@ -436,6 +442,7 @@ class WebPane(QWidget):
         self.cf_status: site_publish.Status | None = None  # wrangler and the login, from the last check
         self.cf_plan_obj: site_publish.Plan | None = None
         self.cf_running = False
+        self.cf_login_running = False  # wrangler login started from the pane, waiting for the browser
         self.cf_failure = ""
         self.record: dict | None = None
         self.stale: list[str] = []
@@ -492,6 +499,12 @@ class WebPane(QWidget):
         """The result of a check: the state of wrangler and the plan."""
         self.cf_status, self.cf_plan_obj = status, plan
         self.cf_failure = ""
+        self.update_states()
+
+    def set_logging_in(self, running: bool, failure: str = "") -> None:
+        """wrangler login started from the pane, or ended (``failure``: why it did not complete)."""
+        self.cf_login_running = running
+        self.cf_failure = failure
         self.update_states()
 
     def set_publishing(self, running: bool, failure: str = "") -> None:
@@ -758,8 +771,12 @@ class WebPane(QWidget):
         crs = built and site_publish.site_frame(folder) != "local"
         self.cf_warning.setVisible(bool(crs))
         status = self.cf_status.state if self.cf_status is not None else None
+        typed = site_publish.typed_command(self.cf_status.command if self.cf_status is not None else None)
         plan = self.cf_plan_obj
-        if self.cf_running:
+        if self.cf_login_running:
+            state, text = "running", tr("Accesso a Cloudflare: completa nel browser che wrangler ha aperto. Annulla "
+                                        "per fermarlo.")
+        elif self.cf_running:
             state, text = "running", tr("Pubblicazione in corso: i passi nel log. Annulla per fermarla (i file "
                                         "già inviati restano e non si inviano di nuovo).")
         elif self.cf_failure:
@@ -771,9 +788,13 @@ class WebPane(QWidget):
                                             "(nodejs.org), poi in un terminale: npm install -g wrangler e wrangler "
                                             "login. Il programma non lo installa da solo.")
         elif status == "logged_out":
-            state, text = "unavailable", tr("wrangler non ha l'accesso a Cloudflare. In un terminale: wrangler login "
-                                            "(si apre il browser; il programma non vede le credenziali), poi "
-                                            "Controlla di nuovo.")
+            state, text = "unavailable", tr("wrangler non ha l'accesso a Cloudflare. Premi Accedi a Cloudflare, oppure "
+                                            "in un terminale: {0} login (si apre il browser; il programma non vede "
+                                            "le credenziali), poi Controlla di nuovo.", typed)
+            if self.cf_status.legacy_folder:  # ~/.wrangler made by wrangler run in the home hides the login
+                text += " " + tr("Se hai già fatto l'accesso: la cartella {0} (solo cache e log, creata avviando "
+                                 "wrangler nella cartella home) nasconde l'accesso a wrangler; cancellala e premi "
+                                 "Controlla (l'accesso resta altrove).", self.cf_status.legacy_folder)
         elif pub:
             stale = site_publish.stale_publication(self.document)
             state = "stale" if stale else "done"
@@ -781,8 +802,8 @@ class WebPane(QWidget):
                 text = tr("Pubblicato il {0} su {1}", when_text(pub.get("when")), pub.get("address"))
             else:
                 text = tr("Pubblicato il {0}; l'indirizzo non si è letto nella risposta di wrangler: lo trovi nella "
-                          "dashboard di Cloudflare (Workers & Pages) o con wrangler pages project list. Scrivilo qui "
-                          "sotto.", when_text(pub.get("when")))
+                          "dashboard di Cloudflare (Workers & Pages) o con {1} pages project list. Scrivilo qui "
+                          "sotto.", when_text(pub.get("when")), typed)
             if pub.get("data_address"):
                 text += " " + tr("(dati su {0})", pub["data_address"])
             if stale:
@@ -790,24 +811,28 @@ class WebPane(QWidget):
         elif status == "ready":
             state, text = "todo", tr("Pronto: {0}. Controlla il piano qui sopra, poi Pubblica.", self.cf_status.text)
         else:
-            state, text = "todo", tr("Su Cloudflare Pages (gratuito; R2 per i dati grandi) con il tuo wrangler, dopo "
-                                     "wrangler login in un terminale. Premi Controlla: non invia nulla.")
+            state, text = "todo", tr("Su Cloudflare Pages (gratuito; R2 per i dati grandi) con il tuo wrangler. Premi "
+                                     "Controlla: non invia nulla; se manca l'accesso a Cloudflare, poi Accedi a "
+                                     "Cloudflare.")
         self.step_states["publish"] = state
         self._title("publish", state)
         self.states["publish"].setText(text)
         self.states["publish"].setStyleSheet(f"color: {PALETTE['red']};" if state == "failed" else "")
         self.cf_plan.setText(plan_text(plan) if plan is not None and not self.cf_running else "")
         self.cf_plan.setVisible(plan is not None and not self.cf_running)
-        idle = not self._busy and not self.cf_running and build != "running"
+        working = self.cf_running or self.cf_login_running
+        idle = not self._busy and not working and build != "running"
         for w in (self.cf_project, self.cf_data, self.cf_bucket, self.cf_data_url):
-            w.setEnabled(not self.cf_running)
+            w.setEnabled(not working)
         self.b_cf_check.setEnabled(built and idle)
+        self.b_cf_login.setVisible(status == "logged_out" or self.cf_login_running)
+        self.b_cf_login.setEnabled(built and idle and status == "logged_out")
         self.b_publish.setEnabled(built and idle and status == "ready" and plan is not None and plan.ok)
-        self.b_cf_cancel.setEnabled(self.cf_running)
+        self.b_cf_cancel.setEnabled(working)
         address = (pub or {}).get("address") or ""
         self.b_site_open.setEnabled(bool(address))
         self.b_site_copy.setEnabled(bool(address))
-        typing = bool(pub) and not address and not self.cf_running  # the user writes the address wrangler did not say
+        typing = bool(pub) and not address and not working  # the user writes the address wrangler did not say
         self.published_address.setReadOnly(not typing)
         self.published_address.setPlaceholderText(tr("https://... l'indirizzo del sito, dalla dashboard di Cloudflare")
                                                   if typing else tr("L'indirizzo del sito pubblicato"))
@@ -834,8 +859,10 @@ class WebPublishing(QObject):
         self.pane.check_requested.connect(self.check_cloudflare)
         self.pane.publish_requested.connect(self.publish)
         self.pane.cancel_requested.connect(self.cancel_publish)
+        self.pane.login_requested.connect(self.login_cloudflare)
         self.pane.address_typed.connect(self.set_address)
         self._publishing = False
+        self._logging_in = False
 
     # --------------------------------------------------------------- build
     def build(self) -> bool:
@@ -916,6 +943,14 @@ class WebPublishing(QObject):
             self.pane.set_running(False)
         if self._publishing:  # the worker says it stopped before it calls done or failed: look after them
             QTimer.singleShot(0, self._publish_ended)
+        if self._logging_in:
+            QTimer.singleShot(0, self._login_ended)
+
+    def _login_ended(self) -> None:
+        if self._logging_in:  # neither done nor failed: cancelled (wrangler stopped)
+            self._logging_in = False
+            log.warning(tr("Accesso a Cloudflare annullato"))
+            self.pane.set_logging_in(False)
 
     def _publish_ended(self) -> None:
         if self._publishing:  # neither done nor failed: cancelled
@@ -956,6 +991,50 @@ class WebPublishing(QObject):
             self.window._error(summary, details)
 
         return bool(self.window.runner.run(tr("Controllo di Cloudflare"), job, done, failed, quiet=True))
+
+    def login_cloudflare(self) -> bool:
+        """The user's ``wrangler login`` run by the program, in the worker (since 1.10.1): wrangler opens the browser,
+        the user signs in there; then the check again (the login and the plan). Cancelled from the pane; stopped
+        after :data:`site_publish.LOGIN_TIMEOUT`. Nothing of what wrangler prints (the sign-in address, the account)
+        is kept, logged or shown: only whether it worked."""
+        status = self.pane.cf_status
+        if status is None or status.state != "logged_out":
+            self.window._warn(tr("Premi prima Controlla."))
+            return False
+        folder = self._site_folder()
+        o = self.pane.cf_options()
+        wrangler = site_publish.Wrangler(status.command or None)
+
+        def job(progress):
+            st = wrangler.login(progress)
+            plan = (site_publish.plan(folder, o["project"], bucket=o["bucket"], data=o["data"],
+                                      data_url=o["data_url"]) if folder is not None else None)
+            return st, plan
+
+        def done(result):
+            self._logging_in = False
+            st, plan = result
+            if st.state == "ready":
+                log.info(tr("Accesso a Cloudflare riuscito"))
+            for line in (plan.lines() if plan is not None else []):
+                log.info("Cloudflare: %s", line)
+            self.pane.set_logging_in(False)
+            self.pane.set_cloudflare(st, plan)
+
+        def failed(summary, details=""):
+            self._logging_in = False
+            text = site_publish.scrub(summary.split(": ", 1)[-1] if summary else tr("errore"))
+            log.warning(tr("Accesso a Cloudflare non completato: {0}", text))
+            self.pane.set_logging_in(False, tr("accesso a Cloudflare non completato ({0})", text))
+
+        self._logging_in = True
+        self.pane.set_logging_in(True)
+        log.info(tr("Accesso a Cloudflare: completa nel browser"))
+        if not self.window.runner.run(tr("Accesso a Cloudflare"), job, done, failed, quiet=True):
+            self._logging_in = False
+            self.pane.set_logging_in(False)
+            return False
+        return True
 
     def _consent(self, plan) -> tuple[bool, bool]:
         """The explicit consent: the site becomes public; a second, red, one for true coordinates."""
@@ -1014,8 +1093,8 @@ class WebPublishing(QObject):
             if result.address:
                 log.info(tr("Sito pubblicato su {0}", result.address))
             else:
-                log.warning(tr("Sito pubblicato; l'indirizzo è nella dashboard di Cloudflare o in wrangler pages "
-                               "project list: scrivilo nel passo 4"))
+                log.warning(tr("Sito pubblicato; l'indirizzo è nella dashboard di Cloudflare o in {0} pages "
+                               "project list: scrivilo nel passo 4", site_publish.typed_command(wrangler.command)))
             if doc.path:
                 try:
                     doc.save()
@@ -1063,7 +1142,8 @@ class WebPublishing(QObject):
         return True
 
     def cancel_publish(self) -> None:
-        if self._publishing:
+        """Annulla in step 4: the publication or the login running."""
+        if self._publishing or self._logging_in:
             self.window.runner.cancel()
 
     # --------------------------------------------------------------- preview

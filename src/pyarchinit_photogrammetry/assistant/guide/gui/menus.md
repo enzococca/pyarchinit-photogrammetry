@@ -235,6 +235,7 @@ thermal and satellite captures, plugins.
 | **Satellite imagery** | satellite scenes on the DEM of the survey: [see below](#tools-satellite-imagery) |
 | **Network nodes...** | other computers working on the same project ([nodes](processing.md#network-nodes)) |
 | **Plugins...** | installs, enables and disables the plugins ([plugins](../plugins.md)) |
+| **Open a terminal** | the terminal of the system in the folder of the project (the home folder without one), with `ppg`, `npx` and `wrangler` reachable; since 1.10.1 ([limits](../limits.md)) |
 
 ### Tools > Target
 

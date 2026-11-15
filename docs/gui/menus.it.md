@@ -235,6 +235,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **Immagini satellitari** | scene satellitari sul DEM del rilievo: [vedi sotto](#strumenti-immagini-satellitari) |
 | **Nodi di rete...** | altri computer che lavorano allo stesso progetto ([nodi](processing.md#nodi-di-rete)) |
 | **Plugin...** | installa, attiva e disattiva i plugin ([plugin](../plugins.md)) |
+| **Apri un terminale** | il terminale del sistema nella cartella del progetto (la cartella home senza progetto), con `ppg`, `npx` e `wrangler` raggiungibili; dalla 1.10.1 ([limiti](../limits.md)) |
 
 ### Strumenti > Target
 
