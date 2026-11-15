@@ -560,3 +560,62 @@ def test_names_in_the_drawings_of_the_elevations_leave_as_placeholders(tmp_path)
     out = f.outgoing("Prospetto di Giulia Bianchi ad Ariano")
     assert "Giulia" not in out and "Ariano" not in out
     assert f.incoming(out) == "Prospetto di Giulia Bianchi ad Ariano"
+
+
+def test_a_field_of_people_or_of_an_account_is_recognised_however_it_is_written():
+    """The attributes that hold a person (``PEOPLE_FIELDS``) and the account that wrote a record
+    (``ACCOUNT_FIELDS``) are told by the letters and digits of their name - whatever the case, the spaces, hyphens
+    and underscores between them and the characters nobody sees - by the ten characters a shapefile keeps of it,
+    and by the eight characters and the number a shapefile gives a second field cut to the same name."""
+    from pyarchinit_photogrammetry.assistant.privacy import (ACCOUNT_FIELDS, PEOPLE_FIELDS, is_account_field,
+                                                             is_people_field)
+
+    assert PEOPLE_FIELDS[:4] == ("schedatore", "direttore_us", "responsabile_us", "disegnatore")
+    assert set(PEOPLE_FIELDS[4:]) == {"responsabile", "responsabile_scheda", "compilatore", "nome_compilatore",
+                                      "team_members", "draa"}
+    assert set(ACCOUNT_FIELDS) == {"last_modified_by", "created_by", "updated_by", "editing_by"}
+    for name in (*PEOPLE_FIELDS, "Disegnatore", " SCHEDATORE ", "Direttore US", "direttore-us", "DirettoreUs",
+                 "\ufeffdisegnatore", "responsabile\u200b_us", "\uff44\uff52\uff41\uff41", "responsabi",
+                 "nome_compi", "team_membe", "responsa_1", "disegnat_2"):
+        assert is_people_field(name) and not is_account_field(name), name
+    for name in (*ACCOUNT_FIELDS, "Last Modified By", "lastModifiedBy", "CREATED-BY", "last_modif", "last_mod_1"):
+        assert is_account_field(name) and not is_people_field(name), name
+    # not told: a name with something more, the bare word of a longer name, the other columns of a record
+    for name in ("us", "note", "direttore", "cognome", "us_table_schedatore", "responsa_0", "disegnatore2", "draa_1",
+                 "", None, 12):
+        assert not is_people_field(name) and not is_account_field(name), name
+
+
+def test_people_are_learned_wherever_a_record_keeps_them(tmp_path):
+    """The people a layer brought with its columns (those of PyArchInit, a shapefile's cut names) leave as
+    placeholders also when the record keeps them in a list, in a record of its own, or under a name that starts
+    with a mark nobody sees; the account that wrote a record is not a name of the project."""
+    doc = make_document(tmp_path)
+    doc.chunks[0].meta["drawings"]["free"] = [{"kind": "polygon", "created_by": "lbianchi", "attributes": {
+        "Compilatore": "Luca Bianchi", "responsabi": "Anna Verdi", "Direttore_US": ["Carla Viola", "Dario Rosa"],
+        "scheda": {"nomeCompilatore": "Sara Blu", "elenco": [{"draa": "Elio Gatti"}]},
+        "\ufeffdisegnatore": "Giulia Bruni", "team_members": {"it": "Squadra Nord"}, "us": "12"}}]
+    f = Filter(doc)
+    for name in ("Luca Bianchi", "Anna Verdi", "Carla Viola", "Dario Rosa", "Sara Blu", "Elio Gatti", "Giulia Bruni",
+                 "Squadra Nord"):
+        out = f.outgoing(f"scheda di {name}")
+        assert re.fullmatch(r"scheda di Persona \d+", out), (name, out)
+        assert f.incoming(out) == f"scheda di {name}"
+    assert f.outgoing("US 12 di lbianchi") == "US 12 di lbianchi"
+
+
+def test_a_tool_result_leaves_without_accounts_and_with_people_as_placeholders(tmp_path):
+    """What a tool answers passes like the rest: the account that wrote a record is left out, and whoever a field
+    of people names becomes a placeholder - also a person the drawings do not name - wherever the answer holds
+    the name, before the field as after it."""
+    from types import MappingProxyType
+
+    f = Filter(make_document(tmp_path))
+    assert f.facts({"last_modified_by": "admin", "us": 3}) == {"us": 3}
+    assert f.facts(MappingProxyType({"createdBy": "admin", "us": 3})) == {"us": 3}
+    out = f.facts({"note": "scheda di Luca Bianchi, rivista da Anna Verdi",
+                   "units": [{"us": 3, "Compilatore": "Luca Bianchi", "updated_by": "lbianchi",
+                              "scheda": {"responsabi": ["Anna Verdi"], "editing_by": None}}]})
+    assert out == {"note": "scheda di Persona 2, rivista da Persona 3",
+                   "units": [{"us": 3, "Compilatore": "Persona 2", "scheda": {"responsabi": ["Persona 3"]}}]}
+    assert f.incoming(out["note"]) == "scheda di Luca Bianchi, rivista da Anna Verdi"

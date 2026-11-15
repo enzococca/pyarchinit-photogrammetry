@@ -135,7 +135,8 @@ def _enu_to_ecef(chunk, centre) -> list[float]:
 
 def _page_images(pages: list[Path], folder: Path, texture_size: int) -> tuple[list[str], list[np.ndarray]]:
     """The texture pages as JPEG images of at most ``texture_size`` pixels a side in ``folder/textures``
-    (written by the program: no tag of the source images); their names and their pixels (RGB)."""
+    (made new from the pixels: no tag and no comment of the source images); their names and their pixels
+    (RGB)."""
     from PIL import Image
 
     names, pixels = [], []
@@ -147,7 +148,9 @@ def _page_images(pages: list[Path], folder: Path, texture_size: int) -> tuple[li
                 f = texture_size / max(im.size)
                 im = im.resize((max(1, round(im.width * f)), max(1, round(im.height * f))), Image.LANCZOS)
             name = f"textures/page_{k}.jpg"
-            im.save(folder / name, "JPEG", quality=85, optimize=True)
+            bare = Image.new("RGB", im.size)  # ``im`` still holds what the file says beside its pixels (``info``)
+            bare.paste(im)                    # and a JPEG is saved with the comment found there
+            bare.save(folder / name, "JPEG", quality=85, optimize=True)
             names.append(name)
             pixels.append(np.asarray(im))
     return names, pixels

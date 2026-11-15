@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +21,32 @@ import pytest
 
 SECRET = "appunti riservati.txt"
 # people of an excavation as the drawings and the records name them, one per field of
-# ``assistant.privacy.PEOPLE_FIELDS``: names no other text of the tests holds
+# ``assistant.privacy.PEOPLE_FIELDS``, and the accounts of who wrote a record, one per field of
+# ``assistant.privacy.ACCOUNT_FIELDS``: names no other text of the tests holds
 PEOPLE = {"disegnatore": "Disegnatrice Prova 7391", "schedatore": "Schedatore Prova 5826",
-          "direttore_us": "Direttrice Prova 4407", "responsabile_us": "Responsabile Prova 9152"}
+          "direttore_us": "Direttrice Prova 4407", "responsabile_us": "Responsabile Prova 9152",
+          "responsabile": "Referente Prova 6034", "responsabile_scheda": "Curatrice Prova 2718",
+          "compilatore": "Compilatore Prova 8465", "nome_compilatore": "Compilatrice Prova 3590",
+          "team_members": "Squadra Prova 1276", "draa": "Autrice Prova 5143"}
+ACCOUNTS = {"last_modified_by": "utente_prova_6641", "created_by": "utente_prova_2093",
+            "updated_by": "utente_prova_7718", "editing_by": "utente_prova_4350"}
+
+
+def _personal(key) -> bool:
+    """The rule of the program written again, for the keys of the files of a site: a name is the one of a field
+    of people or of an account when its letters and digits alone - whatever the case, the spaces, hyphens and
+    underscores between them, the characters nobody sees - are those of the field; when it is the ten characters
+    a shapefile keeps of the field; when it is eight of them and the number a shapefile gives a second field cut
+    to the same name."""
+    text = unicodedata.normalize("NFKC", str(key))
+    text = "".join(c for c in text if c.isspace() or unicodedata.category(c) not in ("Cf", "Cc")).strip().lower()
+    bare = "".join(c for c in text if c.isalnum())
+    fields = [*PEOPLE, *ACCOUNTS]
+    if any(bare == f.replace("_", "") for f in fields):
+        return True
+    if len(text) == 10 and any(len(f) > 10 and f.startswith(text) for f in fields):
+        return True
+    return bool(re.fullmatch(r".{8}_[1-9]", text)) and any(len(f) >= 8 and f[:8] == text[:8] for f in fields)
 
 
 # ------------------------------------------------------------------------------------------------ the project
@@ -492,55 +516,72 @@ def _keys(value):
 
 
 def _people_in(folder: Path) -> list[str]:
-    """What the text files under ``folder`` hold of the people of an excavation: one of the names of
-    :data:`PEOPLE`, or an attribute named as a field of people (``assistant.privacy.PEOPLE_FIELDS``) however it
-    is written. Empty: nothing."""
-    from pyarchinit_photogrammetry.assistant.privacy import PEOPLE_FIELDS
-
-    assert set(PEOPLE) == set(PEOPLE_FIELDS)  # a field of people added to the list is tried by these tests too
+    """What the files under ``folder`` hold of the people of an excavation: one of the names of :data:`PEOPLE` or
+    of the accounts of :data:`ACCOUNTS` in the bytes of any file, or an attribute named as one of their fields
+    (:func:`_personal`) in a data file. Empty: nothing."""
     found = []
     for f in sorted(folder.rglob("*")):
-        if not f.is_file() or f.suffix not in (".json", ".geojson", ".html", ".svg"):
+        if not f.is_file():
             continue
-        text = f.read_text(encoding="utf-8")
-        found += [f"{f.name}: the {field}" for field, name in PEOPLE.items() if name in text]
+        data = f.read_bytes()
+        found += [f"{f.name}: the {field}" for field, name in (PEOPLE | ACCOUNTS).items() if name.encode() in data]
         if f.suffix in (".json", ".geojson"):
-            found += [f"{f.name}: the attribute {k!r}" for k in sorted(set(_keys(json.loads(text))))
-                      if k.strip().lower() in PEOPLE_FIELDS]
+            found += [f"{f.name}: the attribute {k!r}" for k in sorted(set(_keys(json.loads(data.decode("utf-8")))))
+                      if _personal(k)]
     return found
+
+
+def test_the_tests_try_every_field_of_people_and_of_accounts():
+    """A field added to the lists of the program is tried by these tests too, and the rule written again here
+    (:func:`_personal`) knows each of them."""
+    from pyarchinit_photogrammetry.assistant import privacy
+
+    assert set(PEOPLE) == set(privacy.PEOPLE_FIELDS) and set(ACCOUNTS) == set(privacy.ACCOUNT_FIELDS)
+    assert not set(PEOPLE) & set(ACCOUNTS) and all(_personal(f) for f in (*PEOPLE, *ACCOUNTS))
+    names = [*PEOPLE.values(), *ACCOUNTS.values()]
+    assert len(set(names)) == len(names) and not any(a in b for a in names for b in names if a is not b)
 
 
 def test_names_of_people_are_not_published(tmp_path):
     """The names of the people of an excavation - who drew a unit or took a height, who filled in, directed or
-    answers for a record (``assistant.privacy.PEOPLE_FIELDS``) - do not reach the site, whatever the drawing that
-    carries them and however the name of the attribute is written; the other attributes do."""
+    answers for a record (``assistant.privacy.PEOPLE_FIELDS``) - and the accounts of who wrote a record
+    (``ACCOUNT_FIELDS``) do not reach the site, whatever the drawing that carries them and however the name of the
+    attribute is written; the other attributes do. The project keeps them all."""
     from shapely.geometry import box
 
     import pyarchinit_photogrammetry as ppg
     from pyarchinit_photogrammetry.archaeo import breaklines
     from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
     from pyarchinit_photogrammetry.core import free_drawings
-    from pyarchinit_photogrammetry.io import site as site_mod
 
-    people = PEOPLE
+    people, accounts = PEOPLE, ACCOUNTS
     doc = ppg.Document()
     ch = doc.add_chunk("Saggio 3")
     ch.crs = "EPSG:32633"
     unit = UnitPolygon(box(1000.0, 5000.0, 1002.0, 5002.0), us="1",
                        attributes={"disegnatore": people["disegnatore"], "schedatore": people["schedatore"],
+                                   "Responsabile": people["responsabile"],
+                                   "last_modified_by": accounts["last_modified_by"],
                                    "tipo_us_s": "positiva", "data": "2026-06-12"})
     ch.meta["drawings"] = {
         "units": [unit.to_dict() | {"attributes": dict(unit.attributes)}],
         "quote": [{"x": 1001.0, "y": 5001.0, "quota_q": 10.25, "us_q": "1", "unita_misu_q": "m",
-                   "disegnatore": people["disegnatore"]}],
+                   "disegnatore": people["disegnatore"], "CREATED_BY": accounts["created_by"]}],
         "lines": [breaklines.new_record("breakline", [(1000.0, 5000.5, 10.0), (1002.0, 5000.6, 10.1)],
-                                        {"etichetta": "ciglio", "Disegnatore": people["disegnatore"]})],
-        "points": [{"x": 1001.5, "y": 5001.5, "z": 10.2, "label": "P1", "schedatore": people["schedatore"]}],
+                                        {"etichetta": "ciglio", "Disegnatore": people["disegnatore"],
+                                         "compilator": people["compilatore"], "DRAA": people["draa"]})],
+        "points": [{"x": 1001.5, "y": 5001.5, "z": 10.2, "label": "P1", "schedatore": people["schedatore"],
+                    "Nome Compilatore": people["nome_compilatore"], "updated_by": accounts["updated_by"]}],
     }
     free_drawings.add(ch, "line", [[1000.0, 5001.8, 10.0], [1002.0, 5001.8, 10.0]], layer="Limiti", name="limite",
                       attributes={"fase": "II", "DIRETTORE_US": people["direttore_us"],
-                                  " responsabile_us ": people["responsabile_us"]})
+                                  " responsabile_us ": people["responsabile_us"],
+                                  "responsabile_scheda": people["responsabile_scheda"],
+                                  "team_members": [people["team_members"]],
+                                  "editing_by": accounts["editing_by"], "last_modif": accounts["last_modified_by"]})
     doc.save(tmp_path / "persone.ppg")
+    saved = (tmp_path / "persone.ppg").read_text(encoding="utf-8")
+    assert all(name in saved for name in (*people.values(), *accounts.values()))  # the project keeps them
     site = doc.export_site(tmp_path / "site").parent
 
     units = json.loads((site / "data/units.geojson").read_text(encoding="utf-8"))["features"]
@@ -555,12 +596,49 @@ def test_names_of_people_are_not_published(tmp_path):
     assert drawn["Linee di rottura"]["label"] == "ciglio" and drawn["Linee di rottura"]["etichetta"] == "ciglio"
     assert drawn["Punti di misura"]["label"] == "P1"
     assert drawn["Limiti"]["fase"] == "II" and drawn["Limiti"]["label"] == "limite"
-    # the rule itself: the name of the attribute however it is written, at any depth; nothing else
+
+
+def test_the_rule_for_the_names_of_the_fields_of_people():
+    """The rule itself: the name of the attribute however it is written - the case, the spaces, hyphens or
+    underscores between its words, the words joined, a character nobody sees in it, the ten characters a shapefile
+    keeps of it, also numbered - at any depth; and nothing else: a name that only resembles one is published."""
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    gone = ["Disegnatore", " SCHEDATORE", "direttore_us ", "responsabile_us", "Direttore US", "direttore-us",
+            "DirettoreUS", "Responsabile", "responsabile scheda", "COMPILATORE", "Nome_Compilatore",
+            "NomeCompilatore", "teamMembers", "Team Members", "DRAA", "last_modified_by", "lastModifiedBy",
+            "Last Modified By", "CreatedBy", "created-by", "UPDATED_BY", "editing_by",
+            "disegnator", "direttore_", "responsabi", "compilator", "nome_compi", "team_membe", "last_modif",
+            "RESPONSA_1", "schedato_2", "created__1",
+            "\ufeffdisegnatore", "dise\u200bgnatore", "\uff44\uff49segnatore", "schedatore\x00"]
+    stay = ["disegno", "direttore", "compilazione", "modified", "disegnato", "disegno_n1", "us_table_schedatore",
+            "responsabilita", "responsa_0", "responsa_12", "created", "by", "team", "draa_n", "schedatori",
+            "nome", "data", "disegnatori", "direttor", "sito", "us"]
+    for name in gone:
+        assert _personal(name), name
+        assert site_mod._attributes({name: "a", "n": 1}, []) == {"n": 1}, name
+        assert site_mod._attributes({"nota": {name: "a", "testo": "g"}, "elenco": [{name: "h", "n": 1}, "i"]},
+                                    []) == {"nota": {"testo": "g"}, "elenco": [{"n": 1}, "i"]}, name
+    for name in stay:
+        assert not _personal(name), name
+        assert site_mod._attributes({name: "a"}, []) == {name: "a"}, name
+
+
+def test_a_value_of_an_unusual_type_goes_out_by_the_same_rule():
+    """What a drawing or a plugin keeps in a mapping that is not a dict, in a set or as a path goes out as the
+    rest does: the names of people left out, the path of the computer cut to its last name (it went out as its
+    text, the mapping with the names in it and the path whole)."""
+    from collections import UserDict
+    from types import MappingProxyType
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+
     kept = site_mod._attributes(
-        {"Disegnatore": "a", " SCHEDATORE": "b", "direttore_us ": "c", "responsabile_us": "d",
-         "disegno": "pianta 3", "direttore": "e", "nota": {"schedatore": "f", "testo": "g"},
-         "elenco": [{"disegnatore": "h", "n": 1}, "i"]}, [])
-    assert kept == {"disegno": "pianta 3", "direttore": "e", "nota": {"testo": "g"}, "elenco": [{"n": 1}, "i"]}
+        {"scheda": MappingProxyType({"schedatore": PEOPLE["schedatore"], "anno": 2026}),
+         "altro": UserDict({"Disegnatore": PEOPLE["disegnatore"], "n": 1}),
+         "insieme": {"b", "a"}, "fisso": frozenset({3}), "file": Path.home() / "scavi" / SECRET}, [])
+    assert kept == {"scheda": {"anno": 2026}, "altro": {"n": 1}, "insieme": ["a", "b"], "fisso": [3], "file": SECRET}
+    assert json.loads(json.dumps(kept)) == kept  # plain values, as a JSON file takes them
 
 
 def test_a_name_of_attribute_cut_to_a_field_of_people_is_not_published():
