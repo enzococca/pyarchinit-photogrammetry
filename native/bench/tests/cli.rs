@@ -106,3 +106,17 @@ fn a_command_line_the_binary_does_not_know_is_refused() {
         assert!(said.contains("usage: ppg-bench"), "ppg-bench {args:?} said: {said}");
     }
 }
+
+#[test]
+fn a_size_beyond_the_largest_is_refused_before_the_kernel_is_called() {
+    // 46336 is the most the binary takes (its MAX_N): one more is refused as `--n 0` is, and so is
+    // the largest number the option reads, whatever adapters the computer has
+    for n in [String::from("46337"), usize::MAX.to_string()] {
+        let output = ppg_bench(&["match", "--n", &n]);
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "ppg-bench match --n {n} said: {said}");
+        assert!(output.stdout.is_empty(), "--n {n} printed {:?}", String::from_utf8_lossy(&output.stdout));
+        assert!(said.starts_with("ppg-bench: --n takes 46336 at most"), "ppg-bench match --n {n} said: {said}");
+        assert!(said.contains("usage: ppg-bench"), "ppg-bench match --n {n} said: {said}");
+    }
+}

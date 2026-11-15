@@ -7,9 +7,11 @@
 //!   `backend` and `device_type` of each.
 //! - `ppg-bench match [--n 4096] [--device N]`: the matching of descriptors, timed on two
 //!   generated sets of `n` descriptors of which the right matches are known; it prints `device`
-//!   (the name of the adapter), `n`, `dim`, `matches`, `correct` and `seconds`. Without
-//!   `--device` the first adapter that is no software rasteriser is taken; when there is none
-//!   the answer is `{"skipped": "no adapter"}`, with exit code 0.
+//!   (the name of the adapter), `n`, `dim`, `matches`, `correct` and `seconds` (the time of one
+//!   call, the first on a new matcher: not a repeated or a warmed timing). Without `--device`
+//!   the first adapter that is no software rasteriser is taken; when there is none the answer
+//!   is `{"skipped": "no adapter"}`, with exit code 0. `n` is 46336 at most (`MAX_N`): more is
+//!   a command line the binary refuses, before a device is opened.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -19,6 +21,19 @@ use serde_json::{json, Value};
 
 /// The descriptors of each set when `--n` is not given: a choice, not a measured figure.
 const DEFAULT_N: usize = 4096;
+
+/// The most descriptors `--n` takes: derived, not measured. The buffer of the matching kernel
+/// that grows fastest holds its partial results, 8 bytes for every tile of the first set (128
+/// descriptors, `TILE_A` in gpu.rs of the engine; the last tile counts whole) and every
+/// descriptor of the second, and the kernel binds it whole as a storage buffer: for two sets of
+/// `n` that is ceil(n / 128) * n * 8 bytes, within 128 MiB up to 46336 (362 tiles, 134 189 056
+/// bytes) and above it from 46337 (363 tiles, 134 562 648 bytes). 128 MiB is the storage binding
+/// wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size` of
+/// `Limits::default()`). The engine does not say what the device it opens holds, and with a
+/// buffer beyond that the kernel, which has no error scope, ends in a panic of wgpu: the figure
+/// is what can be said without the device. Many devices hold more, and an adapter below the
+/// defaults of wgpu (a downlevel one) holds less.
+const MAX_N: usize = 46336;
 
 // COLMAP's matching options as the program passes them: the defaults of `gpu_match` in
 // src/pyarchinit_photogrammetry/_native.py, copied here (to be changed with them)
@@ -144,7 +159,10 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
     let (a, b, twin_of) = descriptor_sets(n);
     // the device is there: what is timed is the matching alone, from the descriptors sent to the
     // GPU (under the key 0: the matcher does not keep them on it) to the matches chosen among what
-    // it answers
+    // it answers. `seconds` is ONE call, the first on a new matcher, and includes what a first
+    // call pays: the working buffers of the kernel, made in it and kept for the calls after it,
+    // and whatever a driver leaves to the first run of a pipeline. It is not a repeated or a
+    // warmed timing: not the time of a pair among the many of a project
     let start = Instant::now();
     let matches = matcher.matches(0, &a, 0, &b, MAX_RATIO, MAX_DISTANCE, CROSS_CHECK)?;
     let seconds = start.elapsed().as_secs_f64();
@@ -175,6 +193,12 @@ fn command(words: &[String]) -> Result<Command, String> {
                         n = whole_number(option, words.next())?;
                         if n == 0 {
                             return Err("--n takes 1 or more: two empty sets have nothing to match".into());
+                        }
+                        if n > MAX_N {
+                            return Err(format!(
+                                "--n takes {MAX_N} at most: the kernel's working buffer for more is above the \
+                                 128 MiB a device is sure to bind"
+                            ));
                         }
                     }
                     "--device" => device = Some(whole_number(option, words.next())?),
@@ -226,6 +250,32 @@ mod tests {
 
     fn norm(values: impl Iterator<Item = f64>) -> f64 {
         values.map(|v| v * v).sum::<f64>().sqrt()
+    }
+
+    /// A command line as `command` takes it.
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn the_largest_size_is_the_last_whose_partial_results_fit_a_storage_binding() {
+        // the bytes of the kernel's buffer of partial results for two sets of n descriptors (8 for
+        // every tile of 128 descriptors of the first and every descriptor of the second), against
+        // the 128 MiB of a storage binding: the two figures MAX_N is derived from
+        let partials = |n: usize| n.div_ceil(128) * n * 8;
+        let binding = 128 << 20;
+        assert!(partials(MAX_N) <= binding, "{} bytes for {MAX_N} descriptors", partials(MAX_N));
+        assert!(partials(MAX_N + 1) > binding, "{} bytes for one descriptor more", partials(MAX_N + 1));
+    }
+
+    #[test]
+    fn the_largest_size_is_taken_and_one_more_is_refused() {
+        let (most, more) = (MAX_N.to_string(), (MAX_N + 1).to_string());
+        let taken = command(&words(&["match", "--n", &most]));
+        assert!(matches!(taken, Ok(Command::Match { n: MAX_N, device: None })), "{most} descriptors are refused");
+        // the refusal says how many are taken, with or without an adapter named
+        let refused = command(&words(&["match", "--n", &more, "--device", "0"])).err();
+        assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{more} descriptors: {refused:?}");
     }
 
     #[test]

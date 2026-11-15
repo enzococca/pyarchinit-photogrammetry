@@ -3,6 +3,8 @@ name = "ppg_engine"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
+description = "The kernels of pyarchinit-photogrammetry without Python"
+repository = "https://github.com/enzococca/pyarchinit-photogrammetry"
 publish = false
 
 [dependencies]

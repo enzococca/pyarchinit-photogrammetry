@@ -3,6 +3,8 @@ name = "ppg_bench"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
+description = "ppg-bench, the binary that runs the kernels of ppg_engine without Python and times them"
+repository = "https://github.com/enzococca/pyarchinit-photogrammetry"
 publish = false
 
 [[bin]]
