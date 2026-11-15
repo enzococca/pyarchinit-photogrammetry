@@ -728,11 +728,19 @@ dependencies = [
 name = "ppg_core"
 version = "0.8.0"
 dependencies = [
- "bytemuck",
  "cc",
  "numpy",
- "pollster",
+ "ppg_engine",
  "pyo3",
+ "rayon",
+]
+
+[[package]]
+name = "ppg_engine"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster",
  "rayon",
  "spade",
  "wgpu",
