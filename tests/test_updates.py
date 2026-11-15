@@ -115,8 +115,29 @@ def test_download_is_complete_or_absent(tmp_path):
     assert out == tmp_path / "safe" / "escape.dmg"
 
 
-def _fake_app(folder, version: str):
+@pytest.fixture
+def stand_ins():
+    """Paths of the application bundles of a test, taken out of Launch Services when it ends.
+
+    macOS registers an application bundle it comes across by itself (within seconds in a folder such as
+    /Users/Shared, not in the default temporary folder) and keeps the entry when the bundle is deleted: one more
+    "PyArchInit Photogrammetry" in the database of the computer at every run with ``--basetemp`` in such a folder.
+    """
+    paths: list = []
+    yield paths
+    for path in paths:  # deleted first: nothing is left there to be registered once its entry is removed
+        shutil.rmtree(path, ignore_errors=True)
+    if paths and os.access(updates.LSREGISTER, os.X_OK):
+        try:  # it answers with an error for a path it never registered, and goes on with the others
+            subprocess.run([updates.LSREGISTER, "-u", *map(str, paths)], capture_output=True, timeout=120,
+                           close_fds=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # the tidying of the computer never fails a test
+
+
+def _fake_app(folder, version: str, stand_ins: list):
     app = folder / "PyArchInit Photogrammetry.app"
+    stand_ins.append(app)  # before it is there: its entry is removed also when the test stops half way
     (app / "Contents" / "MacOS").mkdir(parents=True)
     with open(app / "Contents" / "Info.plist", "wb") as f:
         plistlib.dump({"CFBundleShortVersionString": version, "CFBundleName": "PyArchInit Photogrammetry"}, f)
@@ -125,11 +146,11 @@ def _fake_app(folder, version: str):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="disk images and application bundles are macOS")
-def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch):
+def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch, stand_ins):
     monkeypatch.setattr(updates, "staging_folder", lambda: tmp_path / "staging")
     source = tmp_path / "dmg-content"
     source.mkdir()
-    _fake_app(source, "9.9.9")
+    _fake_app(source, "9.9.9", stand_ins)
     os.symlink("/Applications", source / "Applications")
     dmg = tmp_path / "PyArchInit-Photogrammetry-9.9.9-macos-arm64.dmg"
     r = subprocess.run(["/usr/bin/hdiutil", "create", "-volname", "PyArchInit Photogrammetry", "-srcfolder", str(source),
@@ -137,7 +158,9 @@ def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch):
                        close_fds=False)  # posix_spawn, never a fork of the process of the tests (see test_env)
     if r.returncode != 0:
         pytest.skip(f"hdiutil create: {r.stderr.strip()}")
-    target = _fake_app(tmp_path / "Applications", "0.6.1")
+    target = _fake_app(tmp_path / "Applications", "0.6.1", stand_ins)
+    # the copies the updater makes: the new version it stages and the old one it sets aside during the swap
+    stand_ins += [tmp_path / "staging" / target.name, target.with_name(".PyArchInit Photogrammetry.old.app")]
 
     with pytest.raises(updates.UpdateError) as e:
         updates.prepare_macos_update(dmg, target, expected_version="9.9.8")
@@ -157,9 +180,9 @@ def test_macos_application_is_swapped_after_quitting(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or os.geteuid() == 0, reason="permissions of a macOS folder")
-def test_macos_update_refused_where_the_user_cannot_write(tmp_path, monkeypatch):
+def test_macos_update_refused_where_the_user_cannot_write(tmp_path, monkeypatch, stand_ins):
     monkeypatch.setattr(updates, "staging_folder", lambda: tmp_path / "staging")
-    target = _fake_app(tmp_path / "Locked", "0.6.1")
+    target = _fake_app(tmp_path / "Locked", "0.6.1", stand_ins)
     os.chmod(target.parent, 0o555)
     try:
         with pytest.raises(updates.UpdateError) as e:
