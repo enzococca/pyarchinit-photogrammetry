@@ -5,7 +5,10 @@ The behaviour comes from the environment: ``FAKE_WRANGLER_DIR`` (where it keeps 
 ``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``,
 ``slow``, ``quiet``: no address in the answers of create and deploy, ``garbled``: no JSON either; ``login_fail``,
 ``login_hang``: ``wrangler login`` failing or never ending; a ``login`` that succeeds ends ``logged_out``;
-``cache_error``: ``pages project ...`` failing as wrangler 4 does in "/" without a cache folder). Each call writes
+``cache_error``: ``pages project ...`` failing as wrangler 4 does in "/" without a cache folder; removing a site:
+``fail_object_delete`` (the keys holding ``FAKE_WRANGLER_FAIL_KEY``, all without it), ``slow_delete``,
+``fail_dev_url``, ``fail_bucket_delete``, ``fail_project_delete``; a bucket that is not empty is not deleted, as
+the real one). Each call writes
 ``WRANGLER_CACHE_DIR`` as it got it in ``cache_dir``."""
 from __future__ import annotations
 
@@ -110,6 +113,14 @@ if args[:2] == ["r2", "object"]:
         out(f"Creating object \"{key}\" in bucket \"{bucket}\".\nUsing token %(secret)s for account %(account)s\n"
             "Upload complete.")
     if args[2] == "delete":
+        assert "--remote" in args
+        if "slow_delete" in modes:  # a long removal, to be cancelled
+            import time
+            (home / "deleting").write_text("1")
+            time.sleep(60)
+        if "fail_object_delete" in modes and os.environ.get("FAKE_WRANGLER_FAIL_KEY", "") in key:
+            out("✘ [ERROR] A request to the Cloudflare API (/accounts/%(account)s/r2/buckets) failed.\n"
+                "  Internal error [code: 10001] Bearer %(secret)s", 1)
         b["objects"].pop(key, None)
         save()
         out(f"Deleted object \"{key}\".")
@@ -118,7 +129,41 @@ if args[:4] == ["r2", "bucket", "dev-url", "enable"]:
     save()
     out(f"Public access enabled at '%(r2dev)s'.")
 if args[:4] == ["r2", "bucket", "dev-url", "get"]:
+    if not cloud["buckets"].get(args[4], {}).get("dev_url"):
+        out(f"Public access via the r2.dev URL is disabled for bucket '{args[4]}'.")
     out(f"Public access is enabled at '%(r2dev)s'.")
+if args[:4] == ["r2", "bucket", "dev-url", "disable"]:
+    if "-y" not in args and "--force" not in args:  # stdin closed: the prompt of the real one cannot be answered
+        out("? Are you sure you want to disable public access via the r2.dev URL?\n✘ [ERROR] aborted", 1)
+    if "fail_dev_url" in modes:
+        out("✘ [ERROR] A request to the Cloudflare API failed. Authentication error [code: 10000]", 1)
+    if args[4] not in cloud["buckets"]:
+        out("✘ [ERROR] The specified bucket does not exist.", 1)
+    cloud["buckets"][args[4]]["dev_url"] = False
+    save()
+    out(f"Public access via the r2.dev URL disabled for bucket '{args[4]}'.")
+if args[:3] == ["r2", "bucket", "delete"]:
+    if "fail_bucket_delete" in modes:
+        out("✘ [ERROR] A request to the Cloudflare API failed. Authentication error [code: 10000]", 1)
+    if args[3] not in cloud["buckets"]:
+        out("✘ [ERROR] The specified bucket does not exist. [code: 10006]", 1)
+    if cloud["buckets"][args[3]]["objects"]:
+        out("✘ [ERROR] The bucket you tried to delete is not empty. [code: 10008]", 1)
+    del cloud["buckets"][args[3]]
+    save()
+    out(f"Deleted bucket '{args[3]}'.")
+if args[:3] == ["pages", "project", "delete"]:
+    if "--yes" not in args and "-y" not in args:
+        out("? Are you sure you want to delete \"" + args[3] + "\"? This action cannot be undone.\n"
+            "✘ [ERROR] aborted", 1)
+    if "fail_project_delete" in modes:
+        out("✘ [ERROR] A request to the Cloudflare API (/accounts/%(account)s/pages/projects) failed.\n"
+            "  Authentication error [code: 10000] Bearer %(secret)s", 1)
+    if args[3] not in cloud["projects"]:
+        out("✘ [ERROR] A request to the Cloudflare API failed. Project not found. [code: 8000007]", 1)
+    del cloud["projects"][args[3]]
+    save()
+    out(f"Successfully deleted {args[3]}")
 if args[:4] == ["r2", "bucket", "cors", "set"]:
     cloud["buckets"][args[4]]["cors"] = json.loads(Path(args[args.index("--file") + 1]).read_text())
     save()

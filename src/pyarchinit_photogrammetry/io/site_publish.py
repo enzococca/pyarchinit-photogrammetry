@@ -73,6 +73,7 @@ LIMITS = {"pages_files": PAGES_FREE_FILES, "pages_file_bytes": PAGES_FILE_BYTES,
 
 DATA = "data"  # the folder of a site that may go to R2
 STATE = ".ppg-publish.json"  # what was sent where, inside the site folder (never published)
+RECORDS = 2  # the state records what the program created (bucket_created, dev_url_enabled): since 1.10.2
 DATA_MODES = ("auto", "pages", "r2")
 CACHE_DATA = "public, max-age=3600"
 BRANCH = "main"  # the production branch of the Pages projects the program creates
@@ -713,6 +714,13 @@ def _pages_host(text: str, project: str) -> str | None:
     return best
 
 
+def _dev_url_on(text: str) -> bool:
+    """Whether the answer of ``r2 bucket dev-url get`` says the r2.dev address is on: an r2.dev address in it and no
+    "disabled" (the wording of wrangler is not verified on a real account: anything else counts as off, so the
+    program records the address as turned on by itself and turns it off when the site is removed)."""
+    return bool(_r2_dev(text)) and not re.search(r"(?i)\bdisabled\b|not enabled", text or "")
+
+
 def _r2_dev(text: str) -> str | None:
     m = re.search(r"https://[A-Za-z0-9.-]+\.r2\.dev\b", text or "")
     return m.group(0) if m else None
@@ -926,14 +934,20 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
     if p.data == "r2":
         bucket = p.bucket
         code, _out = w.run(["r2", "bucket", "info", bucket], progress)
+        created = False
         if code:
             w.run(["r2", "bucket", "create", bucket], progress, check=True)
+            created = True
         cf = state.get("cloudflare") if isinstance(state.get("cloudflare"), dict) else {}
         if cf.get("bucket") != bucket:
             cf = {"bucket": bucket, "objects": {}}
         objects = cf.setdefault("objects", {})
         cf["project"] = p.project
+        if created:  # what the program made, so that removing the site (unpublish) may undo it (since 1.10.2)
+            cf["bucket_created"] = True
+        cf["records"] = RECORDS  # bucket_created and dev_url_enabled are written: their absence means "no"
         state["cloudflare"] = cf
+        _write_state(folder, state)
         sizes = {e.path: e for e in p.r2_files}
         total = max(1, p.upload_bytes)
         done = 0
@@ -957,6 +971,13 @@ def publish(p: Plan, public: bool = False, coordinates: bool = False, wrangler: 
         if p.data_url:
             data_address = p.data_url
         else:
+            if not cf.get("dev_url_enabled"):  # on already before the program (an existing bucket): not ours
+                was_on = False
+                if not created:
+                    code, before = w.run(["r2", "bucket", "dev-url", "get", bucket], progress)
+                    was_on = not code and _dev_url_on(before)
+                if not was_on:
+                    cf["dev_url_enabled"] = True
             w.run(["r2", "bucket", "dev-url", "enable", bucket, "-y"], progress, check=True)
             _code, out = w.run(["r2", "bucket", "dev-url", "get", bucket], progress, check=True)
             data_address = _r2_dev(out)
@@ -1048,8 +1069,308 @@ def stale_publication(document) -> bool:
     return bool(pub and record.get("when") and str(record["when"]) > str(pub.get("when") or ""))
 
 
+# ------------------------------------------------------------------------------------------- removing the site
+# The flags that skip wrangler's own confirmation, as Cloudflare's documentation of wrangler names them
+# (SOURCES["wrangler_pages"], ["wrangler_r2"]): "pages project delete <name> --yes", "r2 bucket dev-url disable
+# <bucket> -y". Not checked against a real account: one constant each, to change in one place.
+PAGES_DELETE_YES = "--yes"
+DEV_URL_DISABLE_YES = "-y"
+_GONE = re.compile(r"(?i)not found|does not exist|no such (bucket|object|key|project)|could not find")
+
+
+class NotPublished(ValueError):
+    """No publication recorded in the site folder: the program removes only what it published itself."""
+
+
+@dataclass
+class Removal:
+    """What :func:`unpublish` would remove from Cloudflare (:func:`removal_plan`): nothing is run to make it.
+
+    ``dev_url``: ``"disable"`` (the program turned the r2.dev address on: it is turned off), ``"unknown"`` (a
+    record written before 1.10.2 does not say: left as it is), ``"not_ours"`` (on before the program, or never
+    turned on by it: left), ``"custom"`` (the data are served from the user's own domain: never touched), ``"done"``
+    (turned off by an earlier run), ``"none"`` (no data in R2). ``bucket_rule``: ``"allowed"`` (the program created
+    the bucket: it may be deleted, when asked, once every object the program sent is gone), ``"not_created"``,
+    ``"unknown"`` (a record before 1.10.2), ``"done"``, ``"none"``."""
+
+    folder: Path
+    project: str | None
+    bucket: str | None = None
+    objects: list[str] = field(default_factory=list)  # the R2 keys the program recorded as sent, still there
+    data_address: str | None = None
+    dev_url: str = "none"
+    bucket_rule: str = "none"
+    delete_bucket: bool = False  # asked and allowed
+    bucket_asked: bool = False
+    project_done: bool = False
+    problems: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    @property
+    def bucket_allowed(self) -> bool:
+        return self.bucket_rule == "allowed"
+
+    @property
+    def confirm_name(self) -> str:
+        """What the user types to confirm: the name of the Pages project (the bucket when no project is known)."""
+        return self.project or self.bucket or ""
+
+    def lines(self) -> list[str]:
+        """The plan in English, for the command line and the log."""
+        if self.problems:
+            return [f"cannot remove: {p}" for p in self.problems]
+        out = [f"site folder {self.folder} (kept on this computer)"]
+        if self.project and not self.project_done:
+            out.append(f"Cloudflare Pages: the project {self.project} is deleted, with all its deployments")
+        elif self.project:
+            out.append(f"Cloudflare Pages: the project {self.project} was deleted already")
+        if self.bucket:
+            out.append(f"R2, bucket {self.bucket}: {len(self.objects)} objects the program sent are deleted (other "
+                       "objects of the bucket are never touched)")
+            out.append({"disable": f"the public r2.dev address of the bucket is turned off "
+                                   f"({self.data_address or 'r2.dev'})",
+                        "unknown": "the r2.dev address of the bucket is left as it is: the record of this "
+                                   "publication (before 1.10.2) does not say whether the program turned it on; turn "
+                                   "it off in the dashboard (R2 > bucket > Settings) if you wish",
+                        "not_ours": "the r2.dev address of the bucket is left as it is (the program did not turn "
+                                    "it on)",
+                        "custom": f"the data address {self.data_address} (your own domain) is left as it is",
+                        "done": "the r2.dev address of the bucket was turned off already",
+                        "none": "no public address of the bucket to turn off"}[self.dev_url])
+            if self.delete_bucket:
+                out.append(f"the bucket {self.bucket} is deleted once its objects are gone (it fails if it holds "
+                           "objects the program did not send)")
+            elif self.bucket_rule == "done":
+                out.append(f"the bucket {self.bucket} was deleted already")
+            else:
+                why = {"allowed": "not asked (--delete-bucket)",
+                       "not_created": "the program did not create it",
+                       "unknown": "the record of this publication (before 1.10.2) does not say whether the program "
+                                  "created it"}.get(self.bucket_rule, "")
+                out.append(f"the bucket {self.bucket} is kept" + (f": {why}" if why else ""))
+        out.append("this cannot be undone")
+        return out
+
+    def as_dict(self) -> dict:
+        return {"project": self.project, "bucket": self.bucket, "objects": len(self.objects),
+                "data_address": self.data_address, "dev_url": self.dev_url, "bucket_rule": self.bucket_rule,
+                "delete_bucket": self.delete_bucket, "project_done": self.project_done,
+                "problems": list(self.problems)}
+
+
+def _cf_records(state: dict) -> tuple[dict, dict]:
+    cf = state.get("cloudflare") if isinstance(state.get("cloudflare"), dict) else {}
+    pub = state.get("published") if isinstance(state.get("published"), dict) else {}
+    return cf, pub
+
+
+def publication_recorded(folder: str | os.PathLike | None) -> bool:
+    """A publication of this site folder is recorded (``.ppg-publish.json`` names a project or a bucket)."""
+    if folder is None:
+        return False
+    cf, pub = _cf_records(read_state(folder))
+    return bool(pub.get("project") or cf.get("project") or cf.get("bucket"))
+
+
+def removal_plan(folder: str | os.PathLike, delete_bucket: bool = False) -> Removal:
+    """What :func:`unpublish` would remove (see :class:`Removal`), from the state file of the site folder alone: no
+    network, no wrangler. Only what the program recorded as published is named; without a record,
+    :attr:`Removal.problems` says why nothing can be removed."""
+    folder = Path(folder)
+    state = read_state(folder)
+    cf, pub = _cf_records(state)
+    done = state.get("removing") if isinstance(state.get("removing"), dict) else {}
+    project = str(pub.get("project") or cf.get("project") or "").strip() or None
+    bucket = str(cf.get("bucket") or "").strip() or None
+    r = Removal(folder=folder, project=project, bucket=bucket, bucket_asked=bool(delete_bucket))
+    if not (folder / STATE).is_file() or not (project or bucket):
+        r.problems.append(f"no publication is recorded in {folder} ({STATE}): the program removes only what it "
+                          "published itself; delete the site in the Cloudflare dashboard (Workers & Pages, R2)")
+        return r
+    if (project and not _PROJECT.match(project)) or (bucket and not _BUCKET.match(bucket)):
+        r.problems.append(f"the record of the publication in {folder / STATE} names an invalid project or bucket")
+        return r
+    r.project_done = bool(done.get("project_deleted"))
+    if bucket:
+        objects = cf.get("objects") if isinstance(cf.get("objects"), dict) else {}
+        r.objects = sorted(str(k) for k in objects)
+        address = str(cf.get("data_address") or pub.get("data_address") or "").strip() or None
+        r.data_address = address
+        records = cf.get("records") == RECORDS
+        if done.get("dev_url_disabled"):
+            r.dev_url = "done"
+        elif cf.get("dev_url_enabled"):
+            r.dev_url = "disable"
+        elif address and not _r2_dev(address):
+            r.dev_url = "custom"
+        elif records:
+            r.dev_url = "not_ours"
+        elif address:
+            r.dev_url = "unknown"
+        if done.get("bucket_deleted"):
+            r.bucket_rule = "done"
+        elif cf.get("bucket_created"):
+            r.bucket_rule = "allowed"
+        else:
+            r.bucket_rule = "not_created" if records else "unknown"
+        r.delete_bucket = bool(delete_bucket) and r.bucket_rule == "allowed"
+    return r
+
+
+@dataclass
+class Removed:
+    """What :func:`unpublish` did."""
+
+    project: str | None
+    bucket: str | None
+    project_deleted: bool = False
+    objects_deleted: int = 0
+    objects_left: list[str] = field(default_factory=list)
+    dev_url_disabled: bool = False
+    bucket_deleted: bool = False
+    complete: bool = False  # everything planned went: the state file is gone
+    failures: list[str] = field(default_factory=list)  # English, scrubbed
+    notes: list[str] = field(default_factory=list)  # what was left as it is, and why (English)
+    codes: list[tuple[str, str]] = field(default_factory=list)  # the notes by key ("dev_url_unknown", ...), value
+    transcript: list[str] = field(default_factory=list)
+
+    def lines(self) -> list[str]:
+        out = []
+        if self.project:
+            out.append(f"Pages project {self.project}: " + ("deleted" if self.project_deleted else "NOT deleted"))
+        if self.bucket:
+            out.append(f"R2 bucket {self.bucket}: {self.objects_deleted} objects deleted, {len(self.objects_left)} "
+                       "left" + ("; r2.dev address turned off" if self.dev_url_disabled else "") +
+                       ("; bucket deleted" if self.bucket_deleted else ""))
+        out += [f"note: {n}" for n in self.notes]
+        out += [f"failed: {f}" for f in self.failures]
+        out.append("removed from Cloudflare (the site folder on this computer is kept)" if self.complete else
+                   "not everything was removed: run it again to go on with what is left")
+        return out
+
+
+def unpublish(folder: str | os.PathLike, delete_bucket: bool = False, wrangler: Wrangler | None = None,
+              progress=None) -> Removed:
+    """Remove from Cloudflare what the program published from the site folder ``folder`` (:func:`removal_plan`),
+    with the user's wrangler (since 1.10.2). In order: ``r2 object delete <bucket>/<key> --remote`` for each object
+    recorded as sent (never another), ``r2 bucket dev-url disable <bucket> -y`` when the program turned the address
+    on, ``r2 bucket delete <bucket>`` when ``delete_bucket`` and the program created it and every recorded object
+    went, last ``pages project delete <project> --yes``. A custom data domain is never touched; the folder on this
+    computer is never deleted. The state file is written after each step (a run cancelled or failed goes on from
+    there next time) and removed once everything went. A step that fails is said in :attr:`Removed.failures` and the
+    others are tried; an object, a bucket or a project that wrangler says is not there counts as removed.
+
+    Raises :class:`NotPublished` (nothing recorded), :class:`WranglerMissing`, :class:`NotLoggedIn` or
+    :class:`Cancelled`."""
+    progress = as_progress(progress)
+    folder = Path(folder)
+    r = removal_plan(folder, delete_bucket)
+    if not r.ok:
+        raise NotPublished("; ".join(r.problems))
+    w = wrangler or Wrangler()
+    if not w.command:
+        raise WranglerMissing(INSTALL_HINT)
+    progress(0.01, "Cloudflare: checking wrangler and the login")
+    status = w.status(progress)
+    if status.state == "missing":
+        raise WranglerMissing(status.text)
+    if status.state == "logged_out":
+        raise NotLoggedIn(status.text)
+    w.transcript.append(f"wrangler {status.version}: logged in")
+    state = read_state(folder)
+    cf = state.get("cloudflare") if isinstance(state.get("cloudflare"), dict) else {}
+    objects = cf.get("objects") if isinstance(cf.get("objects"), dict) else {}
+    done = state.get("removing") if isinstance(state.get("removing"), dict) else {}
+    state["removing"] = done
+    done.setdefault("started", datetime.now().isoformat(timespec="seconds"))
+    out = Removed(project=r.project, bucket=r.bucket)
+
+    def note(code: str, value: str, text: str) -> None:
+        out.notes.append(text)
+        out.codes.append((code, value))
+
+    def step(args: list[str], what: str) -> bool:
+        """``wrangler <args>``: True when it worked or the thing is not there; a failure is said in the result."""
+        code, text = w.run(args, progress)
+        if not code or _GONE.search(text or ""):
+            return True
+        out.failures.append(f"{what}: {_failure_text(text)}")
+        return False
+
+    total = len(r.objects) + 3
+    for i, key in enumerate(r.objects):
+        progress(0.05 + 0.75 * i / total, f"R2: deleting {key}")
+        if step(["r2", "object", "delete", f"{r.bucket}/{key}", "--remote"], f"the object {key}"):
+            objects.pop(key, None)
+            out.objects_deleted += 1
+            _write_state(folder, state)  # a run cancelled or failed goes on from here
+    out.objects_left = sorted(objects)
+    if r.bucket:
+        if r.dev_url == "disable":
+            progress(0.8, f"R2: turning off the public address of {r.bucket}")
+            if step(["r2", "bucket", "dev-url", "disable", r.bucket, DEV_URL_DISABLE_YES],
+                    f"the r2.dev address of {r.bucket}"):
+                done["dev_url_disabled"] = True
+                _write_state(folder, state)
+        elif r.dev_url == "unknown":
+            note("dev_url_unknown", r.bucket,
+                 f"the r2.dev address of the bucket {r.bucket} was left as it is: the record of this publication "
+                 "(made before 1.10.2) does not say whether the program turned it on; turn it off in the dashboard "
+                 "(R2 > bucket > Settings) if you wish")
+        elif r.dev_url == "custom":
+            note("custom_domain", str(r.data_address), f"the data address {r.data_address} (your own domain) was "
+                                                       "left as it is")
+        if r.delete_bucket and not out.objects_left:
+            progress(0.85, f"R2: deleting the bucket {r.bucket}")
+            if step(["r2", "bucket", "delete", r.bucket], f"the bucket {r.bucket}"):
+                done["bucket_deleted"] = True
+                _write_state(folder, state)
+        elif r.delete_bucket:
+            note("bucket_objects_left", r.bucket, f"the bucket {r.bucket} was kept: {len(out.objects_left)} objects "
+                                                  "the program sent are still there")
+        elif r.bucket_asked and r.bucket_rule in ("not_created", "unknown"):
+            note("bucket_" + r.bucket_rule, r.bucket,
+                 f"the bucket {r.bucket} was kept: " +
+                 ("the program did not create it" if r.bucket_rule == "not_created" else
+                  "the record of this publication (made before 1.10.2) does not say whether the program created it"))
+    if r.project and not r.project_done:
+        progress(0.9, f"Cloudflare Pages: deleting the project {r.project}")
+        if step(["pages", "project", "delete", r.project, PAGES_DELETE_YES], f"the Pages project {r.project}"):
+            done["project_deleted"] = True
+            _write_state(folder, state)
+    out.project_deleted = bool(done.get("project_deleted"))
+    out.bucket_deleted = bool(done.get("bucket_deleted"))
+    out.dev_url_disabled = bool(done.get("dev_url_disabled"))
+    out.complete = not out.failures and not out.objects_left and (out.project_deleted or not r.project)
+    if out.complete:
+        (folder / STATE).unlink(missing_ok=True)
+    else:
+        _write_state(folder, state)
+    out.transcript = list(w.transcript)
+    progress(1.0, "Cloudflare: the site was removed" if out.complete else
+             "Cloudflare: not everything was removed (run it again to go on)")
+    return out
+
+
+def forget_published(document) -> bool:
+    """The publication kept with the project (``meta["web_site"]["published"]``) forgotten, once the site was
+    removed from Cloudflare. True when there was one."""
+    from .site import META_KEY
+
+    record = document.meta.get(META_KEY)
+    if isinstance(record, dict) and "published" in record:
+        del record["published"]
+        return True
+    return False
+
+
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
            "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "wrangler_cache_dir", "legacy_folder",
-           "legacy_folder_hint", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "legacy_folder_hint", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE", "removal_plan",
+           "unpublish", "Removal", "Removed", "NotPublished", "publication_recorded", "forget_published",
+           "PAGES_DELETE_YES", "DEV_URL_DISABLE_YES"]

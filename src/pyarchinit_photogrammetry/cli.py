@@ -5940,6 +5940,56 @@ def web_publish_cloudflare(
         typer.echo(f"recorded in {record}")
 
 
+unpublish_app = typer.Typer(help="Remove from a hosting a site the program published there")
+web_app.add_typer(unpublish_app, name="unpublish")
+
+
+@unpublish_app.command("cloudflare")
+def web_unpublish_cloudflare(
+        folder: Path = typer.Argument(..., help="the site folder that was published (it holds .ppg-publish.json)"),
+        delete_bucket: bool = typer.Option(False, "--delete-bucket", help="delete the R2 bucket too, when the "
+                                           "program created it and every object it sent is gone"),
+        yes: bool = typer.Option(False, "--yes", help="do not ask to type the name of the project to confirm"),
+        record: Optional[Path] = typer.Option(None, "--record", help="a project (.ppg) whose record of the "
+                                              "published site is forgotten once the site is removed")):
+    """Remove from Cloudflare a site published by the program (since 1.10.2): the Pages project, the objects the
+    program sent to the R2 bucket (never others), the r2.dev address when the program turned it on and, with
+    --delete-bucket, the bucket the program created. A custom data domain is left as it is; the site folder on this
+    computer is kept. It cannot be undone. Interrupted or failed, run it again: it goes on with what is left."""
+    from .io import site_publish as sp
+
+    r = sp.removal_plan(folder, delete_bucket)
+    for line in r.lines():
+        typer.echo(line)
+    if not r.ok:
+        raise typer.Exit(1)
+    if not yes:
+        typed = typer.prompt(f"type the name {r.confirm_name} to remove it from Cloudflare", default="",
+                             show_default=False)
+        if typed.strip() != r.confirm_name:
+            typer.echo("the name does not match: nothing was removed", err=True)
+            raise typer.Exit(2)
+    found = sp.find_wrangler()
+    if found is None:
+        typer.echo(sp.INSTALL_HINT, err=True)
+        raise typer.Exit(1)
+    w = sp.Wrangler(found)
+    try:
+        out = sp.unpublish(folder, delete_bucket=delete_bucket, wrangler=w, progress=print_progress)
+    except (sp.WranglerMissing, sp.NotLoggedIn, sp.NotPublished) as exc:
+        typer.echo(f"nothing removed: {exc}", err=True)
+        raise typer.Exit(1) from None
+    for line in out.lines():
+        typer.echo(line)
+    if record is not None and out.complete:
+        doc = Document.open(record)
+        if sp.forget_published(doc):
+            doc.save()
+            typer.echo(f"the publication is forgotten in {record}")
+    if not out.complete:
+        raise typer.Exit(1)
+
+
 def main():  # pragma: no cover - console entry point
     app()
 
