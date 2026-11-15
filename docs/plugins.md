@@ -347,7 +347,7 @@ now 1): a program with an older API refuses the plugin with a message. The index
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
 1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4, `add_site_contributions` 1.10.0 (1.7.3 and older
-ignore an action added later), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` and `add_units(elevation=)` 1.10.0. The plugins written before 1.3.4 put their pane among the tabs of the window with
+ignore an action added later), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` and `add_units(elevation=)` 1.10.0, `add_units(elevation=Context.PLAN)` (units of the plan while an elevation is shown: they are drawn when the plan is shown again) and `supports(feature)` 1.10.1 - `Context.FEATURES`: `elevation-drawings`, `elevation-removal-takes-drawings` (removing an elevation removes the drawings kept with it), `plan-units-while-elevation`; with an older program `getattr(context, "supports", None)` is None. The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
 `removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -

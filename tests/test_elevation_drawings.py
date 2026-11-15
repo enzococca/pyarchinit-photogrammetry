@@ -784,3 +784,35 @@ def test_a_plugin_shows_an_elevation_with_its_own_drawings(with_elevations, tmp_
     assert ctx.show_raster("ortho", path=ortho) is True
     assert ctx.shown_elevation() == wid  # the elevation, not a raster of the plan
     assert ctx.show_raster("ortho", path=ch.orthomosaic_path) is True and ctx.shown_elevation() is None
+
+
+def test_a_plugin_adds_plan_units_while_an_elevation_is_shown(with_elevations, tmp_path, gui):
+    """``add_units(elevation=Context.PLAN)``: the units join those of the plan whatever the window shows, are one
+    step of *Modifica > Annulla*, and are there when the plan is shown again and in the project saved."""
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    open_window, _app, _mw = gui
+    doc, sid, _wid = _copy(with_elevations, tmp_path)
+    w = open_window(doc)
+    ch = w.chunk
+    ctx = Context("prova", tmp_path / "plugin")
+    ctx.window = w
+    assert ctx.supports("plan-units-while-elevation") and ctx.supports("elevation-removal-takes-drawings")
+    assert not ctx.supports("nope")
+    plan, frame = len(w.units), len(ctx.elevation_drawings(sid)["units"])
+    assert ctx.show_elevation(sid) is True
+    square = [(0.0, 0.0), (0.4, 0.0), (0.4, 0.3), (0.0, 0.3)]
+    assert ctx.add_units([square], attributes={"us": "901"}, elevation=Context.PLAN) == 1
+    assert ctx.shown_elevation() == sid  # the view stays on the elevation
+    assert len(w.units) == plan + 1 and len(w.frame_units) == frame  # among the plan's, not the elevation's
+    assert (w.units[-1].attributes or {}).get("ppg_id")
+    assert ctx.add_units([square], attributes={"us": "902"}) == 1  # without it: on what the window shows
+    assert len(w.units) == plan + 1 and len(w.frame_units) == frame + 1
+    assert ctx.show_raster() is True and ctx.shown_elevation() is None
+    assert [u.us for u in w.units[plan:]] == ["901"]
+    w._store_drawings()
+    assert [d["us"] for d in ch.meta["drawings"]["units"]][-1] == "901"
+    assert [u["us"] for u in ctx.elevation_drawings(sid)["units"]][-1] == "902"
+    w.undo()  # the unit on the elevation
+    w.undo()  # the unit on the plan
+    assert len(w.units) == plan
