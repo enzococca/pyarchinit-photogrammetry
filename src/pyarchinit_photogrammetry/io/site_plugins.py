@@ -48,7 +48,11 @@ chunk (a layer also among the ``layers`` of the chunk, drawn by the plan as the 
 
 What the site makes sure of, whatever the plugin gives: the coordinates of a layer are moved into the frame of the
 site (the local one: shifted, the heights ``z`` too); every text goes through the same cleaning as the texts of the
-program (no path of the computer, no private key ``_...``); the pictures are decoded and written again as JPEG of at
+program (no path of the computer, no private key ``_...``) and holds no name of a person - an attribute of
+``assistant.privacy.PEOPLE_FIELDS`` is left out of the properties of a feature and of the rows of a table, and has
+no column, no name among the ``fields`` and no legend (its values, the names, would be in ``site.json``); what a
+plugin writes under another key, in a title or in the text of a page is its own; the pictures are decoded and
+written again as JPEG of at
 most :data:`IMAGE_SIDE` pixels (no EXIF, no GPS, nothing but the pixels); the HTML keeps only the tags and attributes
 of :data:`TAGS` (no script, no style, no event, no link but ``http(s)``/``mailto``, pictures only among its
 ``images``), and the page cleans it again when it shows it. A provider that fails, or a contribution that is not
@@ -399,6 +403,12 @@ def _values(values: dict, clean, scrub) -> dict:
     return {k: w for k, v in out.items() if (w := _words(v, scrub)) is not None}
 
 
+def _published(key, clean) -> bool:
+    """Whether the site publishes an attribute named ``key``: what ``clean`` leaves out of a feature or a row - a
+    private key, an identity of the program, the name of a person - gets no column, no title and no legend."""
+    return bool(clean({str(key): True}))
+
+
 def _texts(value) -> list[str]:
     """The texts a legend matches a value with: both, for a value in two languages."""
     if isinstance(value, dict):
@@ -421,7 +431,7 @@ def _layer(item: dict, folder: Path, url: str, move, name: str, clean, scrub) ->
     out = {"url": f"{url}/{name}.geojson", "count": len(feats), "colour": _colour(item.get("colour"), "#7b3fa0")}
     legend = item.get("legend") or {}
     field = scrub(str(legend.get("field") or "")) if isinstance(legend, dict) else ""
-    if field and legend.get("items"):
+    if field and legend.get("items") and _published(field, clean):  # else its values would be in the manifest
         groups = []
         for x in legend["items"]:
             value = scrub(str(x.get("value")))
@@ -431,7 +441,7 @@ def _layer(item: dict, folder: Path, url: str, move, name: str, clean, scrub) ->
         out.update(groups=groups, group_by=field)
     fields = item.get("fields")
     if isinstance(fields, dict):
-        out["fields"] = {scrub(str(k)): _title(v, scrub, str(k)) for k, v in fields.items()}
+        out["fields"] = {scrub(str(k)): _title(v, scrub, str(k)) for k, v in fields.items() if _published(k, clean)}
     return out
 
 
@@ -462,7 +472,9 @@ def _table(item: dict, folder: Path, url: str, clean, scrub) -> dict:
     columns = []
     for c in item.get("columns") or []:
         c = c if isinstance(c, dict) else {"key": c}
-        columns.append({"key": scrub(str(c.get("key"))), "title": _title(c.get("title"), scrub, str(c.get("key")))})
+        if _published(c.get("key"), clean):
+            columns.append({"key": scrub(str(c.get("key"))),
+                            "title": _title(c.get("title"), scrub, str(c.get("key")))})
     rows = []
     for n, row in enumerate(item.get("rows") or [], 1):
         if not isinstance(row, dict):

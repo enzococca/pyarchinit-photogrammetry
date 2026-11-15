@@ -27,6 +27,12 @@ alone (a VRT), so no tag of the source files reaches the site, the photos and th
 text typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
 description - that holds the path of a computer is cut to its last name.
 
+The names of people are not published: an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew,
+who recorded, who directed, who was in charge) is left out of every feature of the site - units, spot heights,
+lines, points, free drawings, the drawings of the elevations - and of what the plugins give (:mod:`.site_plugins`),
+wherever the record keeps it and however its name is written (:func:`_attributes`). Names are not looked for in the
+texts: one written elsewhere - a title, a description, a label, a note, another attribute - is published as written.
+
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
 parts - bound to this computer alone unless another host is asked for; :class:`Preview` runs it in a thread of its
 own and stops it (the window's pane *Pubblica sul web*).
@@ -58,6 +64,7 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
+from ..assistant.privacy import is_people_field
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
 
@@ -211,13 +218,28 @@ def _scrub(value, roots: list[str]):
     return str(value)
 
 
+def _without_people(value):
+    """``value`` (JSON-like) without the attributes that hold the name of a person, at any depth."""
+    if isinstance(value, dict):
+        return {k: _without_people(v) for k, v in value.items() if not is_people_field(k)}
+    if isinstance(value, (list, tuple)):
+        return [_without_people(v) for v in value]
+    return value
+
+
 def _attributes(values: dict, roots: list[str]) -> dict:
-    """The attributes of a feature as the page shows them: no private key, no identity, no empty value."""
+    """The attributes of a feature as the page shows them: no private key, no identity, no empty value and no
+    name of a person (``assistant.privacy.PEOPLE_FIELDS``, also inside a value: the site is public and they are
+    names of other people). Everything the site publishes of a record passes through here. The names of the
+    attributes are judged as they are published - after the cleaning of the paths, which cuts one to its last
+    name."""
     out = {}
     for k, v in (values or {}).items():
         if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
             continue
-        out[_scrub(str(k), roots)] = _scrub(v, roots)
+        key = _scrub(str(k), roots)
+        if not is_people_field(key):
+            out[key] = _without_people(_scrub(v, roots))
     return out
 
 

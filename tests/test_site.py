@@ -19,6 +19,10 @@ import numpy as np
 import pytest
 
 SECRET = "appunti riservati.txt"
+# people of an excavation as the drawings and the records name them, one per field of
+# ``assistant.privacy.PEOPLE_FIELDS``: names no other text of the tests holds
+PEOPLE = {"disegnatore": "Disegnatrice Prova 7391", "schedatore": "Schedatore Prova 5826",
+          "direttore_us": "Direttrice Prova 4407", "responsabile_us": "Responsabile Prova 9152"}
 
 
 # ------------------------------------------------------------------------------------------------ the project
@@ -474,6 +478,100 @@ def test_names_typed_by_the_user_carry_no_path(tmp_path):
         assert site_mod._scrub(text, []) != text, text
     for text in ("US 12/13", "scala 1:20", "km/h", "N/A", "a: b", "http e https", "~10 cm", "1/2"):
         assert site_mod._scrub(text, []) == text, text
+
+
+def _keys(value):
+    """Every key of a JSON value, at any depth."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _keys(v)
+
+
+def _people_in(folder: Path) -> list[str]:
+    """What the text files under ``folder`` hold of the people of an excavation: one of the names of
+    :data:`PEOPLE`, or an attribute named as a field of people (``assistant.privacy.PEOPLE_FIELDS``) however it
+    is written. Empty: nothing."""
+    from pyarchinit_photogrammetry.assistant.privacy import PEOPLE_FIELDS
+
+    assert set(PEOPLE) == set(PEOPLE_FIELDS)  # a field of people added to the list is tried by these tests too
+    found = []
+    for f in sorted(folder.rglob("*")):
+        if not f.is_file() or f.suffix not in (".json", ".geojson", ".html", ".svg"):
+            continue
+        text = f.read_text(encoding="utf-8")
+        found += [f"{f.name}: the {field}" for field, name in PEOPLE.items() if name in text]
+        if f.suffix in (".json", ".geojson"):
+            found += [f"{f.name}: the attribute {k!r}" for k in sorted(set(_keys(json.loads(text))))
+                      if k.strip().lower() in PEOPLE_FIELDS]
+    return found
+
+
+def test_names_of_people_are_not_published(tmp_path):
+    """The names of the people of an excavation - who drew a unit or took a height, who filled in, directed or
+    answers for a record (``assistant.privacy.PEOPLE_FIELDS``) - do not reach the site, whatever the drawing that
+    carries them and however the name of the attribute is written; the other attributes do."""
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo import breaklines
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.core import free_drawings
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    people = PEOPLE
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio 3")
+    ch.crs = "EPSG:32633"
+    unit = UnitPolygon(box(1000.0, 5000.0, 1002.0, 5002.0), us="1",
+                       attributes={"disegnatore": people["disegnatore"], "schedatore": people["schedatore"],
+                                   "tipo_us_s": "positiva", "data": "2026-06-12"})
+    ch.meta["drawings"] = {
+        "units": [unit.to_dict() | {"attributes": dict(unit.attributes)}],
+        "quote": [{"x": 1001.0, "y": 5001.0, "quota_q": 10.25, "us_q": "1", "unita_misu_q": "m",
+                   "disegnatore": people["disegnatore"]}],
+        "lines": [breaklines.new_record("breakline", [(1000.0, 5000.5, 10.0), (1002.0, 5000.6, 10.1)],
+                                        {"etichetta": "ciglio", "Disegnatore": people["disegnatore"]})],
+        "points": [{"x": 1001.5, "y": 5001.5, "z": 10.2, "label": "P1", "schedatore": people["schedatore"]}],
+    }
+    free_drawings.add(ch, "line", [[1000.0, 5001.8, 10.0], [1002.0, 5001.8, 10.0]], layer="Limiti", name="limite",
+                      attributes={"fase": "II", "DIRETTORE_US": people["direttore_us"],
+                                  " responsabile_us ": people["responsabile_us"]})
+    doc.save(tmp_path / "persone.ppg")
+    site = doc.export_site(tmp_path / "site").parent
+
+    units = json.loads((site / "data/units.geojson").read_text(encoding="utf-8"))["features"]
+    drawn = {f["properties"]["layer"]: f["properties"]
+             for f in json.loads((site / "data/drawings.geojson").read_text(encoding="utf-8"))["features"]}
+    assert len(units) == 1 and sorted(drawn) == ["Limiti", "Linee di rottura", "Punti di misura", "Quote"]
+    assert _people_in(site) == []
+    # what is not the name of a person is published as before
+    p = units[0]["properties"]
+    assert (p["us"], p["tipo_us_s"], p["data"]) == ("1", "positiva", "2026-06-12")
+    assert (drawn["Quote"]["us_q"], drawn["Quote"]["unita_misu_q"]) == ("1", "m")
+    assert drawn["Linee di rottura"]["label"] == "ciglio" and drawn["Linee di rottura"]["etichetta"] == "ciglio"
+    assert drawn["Punti di misura"]["label"] == "P1"
+    assert drawn["Limiti"]["fase"] == "II" and drawn["Limiti"]["label"] == "limite"
+    # the rule itself: the name of the attribute however it is written, at any depth; nothing else
+    kept = site_mod._attributes(
+        {"Disegnatore": "a", " SCHEDATORE": "b", "direttore_us ": "c", "responsabile_us": "d",
+         "disegno": "pianta 3", "direttore": "e", "nota": {"schedatore": "f", "testo": "g"},
+         "elenco": [{"disegnatore": "h", "n": 1}, "i"]}, [])
+    assert kept == {"disegno": "pianta 3", "direttore": "e", "nota": {"testo": "g"}, "elenco": [{"n": 1}, "i"]}
+
+
+def test_a_name_of_attribute_cut_to_a_field_of_people_is_not_published():
+    """The name of an attribute that holds the path of a computer is cut to its last name: when what is left is
+    the name of a field of people the attribute is left out like the others, at any depth."""
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    kept = site_mod._attributes(
+        {"/Users/someone/disegnatore": "a", "C:\\dati\\Schedatore": "b", "/Users/someone/fase": "II",
+         "nota": {"/home/someone/direttore_us": "c", "testo": "g"}}, [])
+    assert kept == {"fase": "II", "nota": {"testo": "g"}}
 
 
 # ------------------------------------------------------------------------------------------------ the server

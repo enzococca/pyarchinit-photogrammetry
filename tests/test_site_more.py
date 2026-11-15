@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from test_site import SECRET, Browser, _glb, _leaves, _serving, _with_drawings, find_browser
+from test_site import PEOPLE, SECRET, Browser, _glb, _leaves, _people_in, _serving, _with_drawings, find_browser
 
 GPS_PICTURE_TEXT = "Fotocamera di prova"
 
@@ -21,7 +21,7 @@ GPS_PICTURE_TEXT = "Fotocamera di prova"
 # ------------------------------------------------------------------------------------------------ the project
 def _section(ch, origin):
     """A section across the synthetic trench at x = 2 m, seen from the west, with a spot height and a unit drawn
-    on it, as the window stores them (``(u, v)`` of the section)."""
+    on it, as the window stores them (``(u, v)`` of the section), with the names of who drew and recorded them."""
     from shapely.geometry import box
 
     from pyarchinit_photogrammetry.engine import elevation as E
@@ -35,8 +35,9 @@ def _section(ch, origin):
     frames = ch.meta.setdefault("drawings", {}).setdefault("frames", {})
     frames[entry["id"]] = {
         "units": [{"wkt": box(um - 0.2, vm - 0.1, um + 0.2, vm + 0.1).wkt, "us": "7", "tipo": "US",
-                   "note": str(Path.home() / SECRET)}],
-        "quote": [{"u": um, "v": vm, "quota_q": vm, "us_q": "7"}]}
+                   "note": str(Path.home() / SECRET), "disegnatore": PEOPLE["disegnatore"],
+                   "attributes": {"schedatore": PEOPLE["schedatore"], "periodo": "II"}}],
+        "quote": [{"u": um, "v": vm, "quota_q": vm, "us_q": "7", "disegnatore": PEOPLE["disegnatore"]}]}
     return entry
 
 
@@ -461,6 +462,99 @@ def test_a_provider_of_the_first_form_is_called_with_the_chunk_alone(tmp_path):
     assert rows == [{"a": {"it": "uno", "en": "one"}}]
 
 
+def test_what_a_plugin_gives_goes_out_without_the_names_of_people(tmp_path):
+    """A plugin gives what it read of the units, names of people included: they are left out of the features of a
+    layer, of its legend and of the titles of its fields, of the columns and of the rows of a table - whatever
+    the case of the name of the field - and the rest goes out as given."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    def feature(**properties):
+        return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [1.0, 2.0]},
+                "properties": properties}
+
+    def provider(chunk):
+        return [
+            {"kind": "layer", "id": "persone", "title": "Unita'",
+             "features": [feature(us="4", Disegnatore=PEOPLE["disegnatore"],
+                                  scheda={"schedatore": PEOPLE["schedatore"], "anno": 2026})],
+             "legend": {"field": "Disegnatore", "items": [{"value": PEOPLE["disegnatore"], "colour": "#112233",
+                                                          "title": PEOPLE["disegnatore"]}]},
+             "fields": {"us": "US", "Disegnatore": "Disegnato da",
+                        "direttore_us": {"it": "Direttore", "en": "Director"}}},
+            {"kind": "layer", "id": "periodi", "title": "Periodi",
+             "features": [feature(us="4", periodo="II")],
+             "legend": {"field": "periodo", "items": [{"value": "II", "title": "Secondo", "colour": "#445566"}]},
+             "fields": {"periodo": "Periodo"}},
+            {"kind": "table", "id": "schede", "title": "Schede",
+             "columns": ["us", {"key": "responsabile_us", "title": "Responsabile"}, " Schedatore"],
+             "rows": [{"us": "4", "responsabile_us": PEOPLE["responsabile_us"],
+                       " Schedatore": {"it": PEOPLE["schedatore"], "en": PEOPLE["schedatore"]}}]},
+            {"kind": "table", "id": "elenco", "title": "Elenco",
+             "rows": [{"us": "4", "direttore_us": PEOPLE["direttore_us"]}]},
+        ]
+
+    entry = site_plugins.register(provider, owner="prova-persone")
+    try:
+        notes = []
+        layers, listed, _ = site_plugins.write(SimpleNamespace(label="c"), tmp_path, "data", site_mod._Shift(),
+                                               lambda values: site_mod._attributes(values, []),
+                                               lambda text: site_mod._scrub(text, []), notes)
+    finally:
+        site_plugins.unregister(entry)
+    assert not notes
+    (tmp_path / "site.json").write_text(json.dumps({"layers": layers, "plugins": listed}, ensure_ascii=False),
+                                        encoding="utf-8")  # as export_site() writes them in the manifest
+    assert _people_in(tmp_path) == []
+
+    def read(name):
+        return json.loads((tmp_path / "plugins/prova-persone" / name).read_text(encoding="utf-8"))
+
+    people, periods = (next(x for x in layers if x["id"] == f"plugin:prova-persone:{n}") for n in ("persone",
+                                                                                                    "periodi"))
+    assert "groups" not in people and "group_by" not in people  # a legend of names: the layer in one colour
+    assert people["fields"] == {"us": {"it": "US", "en": "US"}}
+    assert [f["properties"] for f in read("persone.geojson")["features"]] == [{"us": "4", "scheda": {"anno": 2026}}]
+    assert periods["group_by"] == "periodo" and periods["fields"] == {"periodo": {"it": "Periodo", "en": "Periodo"}}
+    assert [(g["name"], g["count"], g["colour"]) for g in periods["groups"]] == [("II", 1, "#445566")]
+    assert [f["properties"] for f in read("periodi.geojson")["features"]] == [{"us": "4", "periodo": "II"}]
+    for name in ("schede.json", "elenco.json"):
+        table = read(name)
+        assert [c["key"] for c in table["columns"]] == ["us"] and table["rows"] == [{"us": "4"}], name
+
+
+def test_the_drawings_of_an_elevation_go_out_without_the_names_of_people(tmp_path):
+    """What is drawn on an elevation - units, spot heights, points, lines - is published without the names of
+    people, wherever the record keeps them, and with its other attributes."""
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo import breaklines
+    from pyarchinit_photogrammetry.io import site as site_mod
+    from pyarchinit_photogrammetry.io import site_sections
+
+    ch = ppg.Document().add_chunk()
+    ch.meta["drawings"] = {"frames": {"e1": {
+        "units": [{"wkt": box(0, 0, 1, 1).wkt, "us": "7", "tipo": "USM", "disegnatore": PEOPLE["disegnatore"],
+                   "attributes": {"schedatore": PEOPLE["schedatore"], "periodo": "II"}}],
+        "quote": [{"u": 0.5, "v": 0.5, "quota_q": 1.25, "us_q": "7", "Disegnatore": PEOPLE["disegnatore"]}],
+        "points": [{"u": 0.2, "v": 0.3, "name": "p1", "RESPONSABILE_US": PEOPLE["responsabile_us"]}],
+        "lines": [breaklines.new_record("breakline", [(0.0, 0.0), (1.0, 0.5)],
+                                        {"direttore_us": PEOPLE["direttore_us"], "nota": "bordo"})]}}}
+    feats = site_sections.drawing_features(ch, {"id": "e1", "kind": "elevation"}, 0.0, 0.0,
+                                           lambda values: site_mod._attributes(values, []))
+    (tmp_path / "drawings.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
+                                                          ensure_ascii=False), encoding="utf-8")
+    assert _people_in(tmp_path) == []
+    assert {f["properties"]["layer"]: f["properties"] for f in feats} == {
+        "USM": {"layer": "USM", "label": "USM 7", "us": "7", "tipo": "USM", "attributes": {"periodo": "II"}},
+        "quote": {"layer": "quote", "label": "1.250", "quota": 1.25, "us_q": "7"},
+        "points": {"layer": "points", "name": "p1"},
+        "lines": {"layer": "lines", "tipo": "Linea di rottura", "colour": "#ff7f0e", "nota": "bordo"}}
+
+
 # ------------------------------------------------------------------------------------------------ what goes out
 def test_new_files_hold_no_place_and_no_path(full_site, tmp_path):
     import rasterio
@@ -492,6 +586,11 @@ def test_new_files_hold_no_place_and_no_path(full_site, tmp_path):
     data = (site / "data/cloud.copc.laz").read_bytes()
     for word in (b"EPSG", b"PROJCS", b"Monte Mario", b"GEOGCS"):
         assert word not in data
+
+
+def test_the_site_holds_no_name_of_people(full_site):
+    """The names the drawings of the section keep (``_section``) are in no file of the site, plugins included."""
+    assert _people_in(full_site[3]) == []
 
 
 # ------------------------------------------------------------------------------------------------ the budget

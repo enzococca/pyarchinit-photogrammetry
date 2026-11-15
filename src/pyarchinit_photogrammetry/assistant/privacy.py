@@ -122,6 +122,12 @@ _PLACEHOLDER = re.compile(
     r"|(?i:chunk)[\s_]+(?P<c>\d+))(?![^\W_])")
 
 
+def is_people_field(name: Any) -> bool:
+    """Whether ``name`` is one of :data:`PEOPLE_FIELDS` - an attribute that holds the name of a person - however
+    it is written: any case, spaces around it."""
+    return str(name).strip().lower() in PEOPLE_FIELDS
+
+
 def _letters(n: int) -> str:
     """A, B, ... Z, AA, AB, ... for n = 0, 1, ..."""
     out = ""
