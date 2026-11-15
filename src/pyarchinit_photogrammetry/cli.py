@@ -65,13 +65,13 @@ def _open(project: Path, chunk: Optional[str] = None):
 
 
 def _engine(engine: Optional[str]) -> str:
-    """The word of ``--engine`` (None: of ``PPG_ENGINE``, else ``auto``; :mod:`.engine.select`), checked before a
+    """The word of ``--engine`` (None: of ``PPG_ENGINE``, else ``auto``; :mod:`.engine.switch`), checked before a
     command opens its project: an unknown one is a usage error that names the accepted ones. The option is hidden:
     the native engine does none of the steps yet, and every word runs the classic one."""
-    from .engine import select
+    from .engine import switch
 
     try:
-        return select.check(engine)
+        return switch.check(engine)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--engine" if engine is not None else None) from exc
 

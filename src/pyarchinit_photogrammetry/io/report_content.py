@@ -1119,7 +1119,7 @@ PARAM_STEPS = [  # (key in chunk.meta, title, parameters in order)
 PARAM_SKIP = {"image_root", "names", "gpu_shares", "nodes", "ba_schedule", "tie_point_limit", "optimize", "added",
               "continued", "gps_priors", "applied_patches", "base", "before", "after", "gnss_bias",
               "rolling_shutter_m", "rigs", "masks", "stationary", "skipped"}
-# the methods of the chunk that take an engine (engine.select), by the step of PARAM_STEPS their rows go under
+# the methods of the chunk that take an engine (engine.switch), by the step of PARAM_STEPS their rows go under
 ENGINE_METHODS = {"sfm": ("match_photos", "align_cameras"), "dense": ("build_depth_maps",)}
 
 
@@ -1150,7 +1150,7 @@ def _param_value(w: Words, key: str, value) -> str | None:
 
 
 def _engine_rows(chunk, w: Words, key: str, title: str) -> list[tuple[str, str, str]]:
-    """The rows of the engine of the step ``key``, from ``chunk.meta["engine"]`` (:func:`..engine.select.record`): one
+    """The rows of the engine of the step ``key``, from ``chunk.meta["engine"]`` (:func:`..engine.switch.record`): one
     for each of its methods that was asked of an engine that does not do it and ran on another - the engine used and
     the reason - or that ran on an engine other than the classic one. The classic engine doing what was asked, or
     what ``auto`` gives, is no row."""

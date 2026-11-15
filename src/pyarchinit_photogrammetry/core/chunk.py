@@ -408,18 +408,18 @@ class Chunk:
         or learned key points matched by LightGlue, ``disk`` or ``aliked`` (:mod:`engine.learned`:
         more matches on thermal frames and on surfaces with little texture). ``engine``:
         ``auto``, ``classic`` or ``native`` (None: the ``PPG_ENGINE`` environment variable,
-        ``auto`` by default; :mod:`engine.select`): the native engine does not do this step yet,
+        ``auto`` by default; :mod:`engine.switch`): the native engine does not do this step yet,
         so ``native`` runs it on the classic one and says so; what was asked and what was used
         are kept in ``meta["engine"]``."""
-        from ..engine import select, sfm
+        from ..engine import sfm, switch
 
-        choice = select.resolve("match_photos", engine)
+        choice = switch.resolve("match_photos", engine)
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
                          pair_selection=pair_selection, progress=as_progress(progress),
                          exclude_stationary=exclude_stationary, generic=generic, reference=reference,
                          neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
                          reset=reset, gpu=gpu, matcher=matcher)
-        select.record(self, "match_photos", choice)
+        switch.record(self, "match_photos", choice)
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
                       use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
@@ -436,13 +436,13 @@ class Chunk:
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
         chunk is georeferenced/scaled again automatically.
         """
-        from ..engine import select, sfm
+        from ..engine import sfm, switch
 
-        choice = select.resolve("align_cameras", engine)
+        choice = switch.resolve("align_cameras", engine)
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
                               ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
-        select.record(self, "align_cameras", choice)  # the alignment is there, whatever its georeference meets
+        switch.record(self, "align_cameras", choice)  # the alignment is there, whatever its georeference meets
         # a new frame: what was kept in the old one knows it. Also with reset=False (photos added to the block):
         # COLMAP continues from the old model but its mapper scales and moves it again (the cameras of the test
         # trench moved by a similarity of scale 0.90), so the old internal coordinates are not the new ones
@@ -718,12 +718,12 @@ class Chunk:
         by Dropbox) stop the step unless ``skip_unreadable``. ``gpu``: the PatchMatch kernel on
         the GPU (``auto``, ``off``, an adapter; None: ``PPG_GPU``). ``engine``: as in
         :meth:`match_photos`."""
-        from ..engine import dense, select
+        from ..engine import dense, switch
 
-        choice = select.resolve("build_depth_maps", engine)
+        choice = switch.resolve("build_depth_maps", engine)
         dense.build_depth_maps(self, quality=quality, filter_mode=filter_mode, backend=backend,
                                progress=as_progress(progress), skip_unreadable=skip_unreadable, gpu=gpu)
-        select.record(self, "build_depth_maps", choice)
+        switch.record(self, "build_depth_maps", choice)
 
     def build_point_cloud(self, point_colors: bool = True, progress: ProgressCallback | None = None,
                           gpu: str | None = None) -> PointCloud:

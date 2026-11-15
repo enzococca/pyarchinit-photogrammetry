@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry.cli import app
 from pyarchinit_photogrammetry.core.chunk import Chunk
-from pyarchinit_photogrammetry.engine import select
+from pyarchinit_photogrammetry.engine import switch
 
 METHODS = ("match_photos", "align_cameras", "build_depth_maps")
 
@@ -54,7 +54,7 @@ def idle_engine(monkeypatch):
 # ---------------------------------------------------------------------------------------- the word and the engine
 def test_the_default_is_auto_and_auto_is_classic_today(monkeypatch):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    c = select.resolve("align_cameras")
+    c = switch.resolve("align_cameras")
     assert (c.requested, c.used, c.fallback) == ("auto", "classic", None)
 
 
@@ -62,13 +62,13 @@ def test_native_falls_back_to_classic_and_says_so(monkeypatch, caplog):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     monkeypatch.setenv("PPG_ENGINE", " Native ")
     with caplog.at_level("INFO"):
-        c = select.resolve("match_photos")
+        c = switch.resolve("match_photos")
     assert (c.requested, c.used) == ("native", "classic") and "match_photos" in c.fallback
     assert c.fallback == "the native engine does not do 'match_photos' yet"
     assert "classic" in caplog.text
     assert len(caplog.records) == 1  # one line for one fallback
     line = caplog.records[0]
-    assert (line.name, line.levelname) == (select.__name__, "WARNING")
+    assert (line.name, line.levelname) == (switch.__name__, "WARNING")
     assert line.getMessage() == ("engine 'native' asked for match_photos: classic used "
                                  "(the native engine does not do 'match_photos' yet)")
 
@@ -76,53 +76,53 @@ def test_native_falls_back_to_classic_and_says_so(monkeypatch, caplog):
 def test_the_argument_wins_over_the_environment(monkeypatch):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     monkeypatch.setenv("PPG_ENGINE", "native")
-    assert select.resolve("align_cameras", "classic").requested == "classic"
+    assert switch.resolve("align_cameras", "classic").requested == "classic"
 
 
 def test_an_unknown_engine_names_the_accepted_words(monkeypatch):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     with pytest.raises(ValueError, match="auto, classic or native"):
-        select.resolve("align_cameras", "colmap")
+        switch.resolve("align_cameras", "colmap")
     monkeypatch.setenv("PPG_ENGINE", "fast")
     with pytest.raises(ValueError, match="PPG_ENGINE"):
-        select.resolve("align_cameras")
+        switch.resolve("align_cameras")
 
 
 def test_the_word_is_checked_as_it_is_resolved(monkeypatch):
     """``check`` gives the word the program goes by - of the argument, else of the variable, else ``auto`` - without
     the spaces around it and in small letters, and refuses any other with the sentence the command line prints."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert select.ENGINES == ("auto", "classic", "native")
-    assert [select.check(word) for word in (None, "auto", " Classic ", "NATIVE")] == ["auto", "auto", "classic",
+    assert switch.ENGINES == ("auto", "classic", "native")
+    assert [switch.check(word) for word in (None, "auto", " Classic ", "NATIVE")] == ["auto", "auto", "classic",
                                                                                       "native"]
     monkeypatch.setenv("PPG_ENGINE", "Classic")
-    assert select.check(None) == "classic" and select.check("native") == "native"
+    assert switch.check(None) == "classic" and switch.check("native") == "native"
     monkeypatch.setenv("PPG_ENGINE", "  ")  # a variable set to nothing asks for nothing
-    assert select.check(None) == "auto"
+    assert switch.check(None) == "auto"
     with pytest.raises(ValueError) as refused:
-        select.check(" Colmap ")
+        switch.check(" Colmap ")
     assert str(refused.value) == "unknown engine 'colmap': use auto, classic or native"
     assert "PPG_ENGINE" not in str(refused.value)  # the variable is named only when the word came from it
     with pytest.raises(ValueError, match="auto, classic or native"):
-        select.check("")  # nothing, given as the argument, is not a word
+        switch.check("")  # nothing, given as the argument, is not a word
     monkeypatch.setenv("PPG_ENGINE", "fast")
     with pytest.raises(ValueError, match="unknown engine 'fast'.*PPG_ENGINE.*: use auto, classic or native"):
-        select.check(None)
+        switch.check(None)
 
 
 def test_only_a_fallback_is_logged(monkeypatch, caplog):
     """The classic engine doing what was asked, or what ``auto`` gives, is not news: no line in the log."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert select.NATIVE_STEPS == frozenset()  # the steps the native engine does: none in this milestone
+    assert switch.NATIVE_STEPS == frozenset()  # the steps the native engine does: none in this milestone
     with caplog.at_level("INFO"):
         for step in METHODS:
             for word in (None, "auto", "classic"):
-                c = select.resolve(step, word)
+                c = switch.resolve(step, word)
                 assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
     assert not caplog.records
     with caplog.at_level("INFO"):
         for step in METHODS:
-            assert select.resolve(step, "native").fallback == f"the native engine does not do '{step}' yet"
+            assert switch.resolve(step, "native").fallback == f"the native engine does not do '{step}' yet"
     assert [record.getMessage().split(":")[0] for record in caplog.records] == [
         f"engine 'native' asked for {step}" for step in METHODS]  # one line per step that fell back
 
@@ -132,15 +132,15 @@ def test_a_step_the_native_engine_does_is_its_own_when_asked_for(monkeypatch, ca
     ``native`` is asked for, with no fallback and no line in the log; ``auto`` stays on the classic engine, and the
     steps not named fall back as before."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    monkeypatch.setattr(select, "NATIVE_STEPS", frozenset({"match_photos"}))
+    monkeypatch.setattr(switch, "NATIVE_STEPS", frozenset({"match_photos"}))
     with caplog.at_level("INFO"):
-        c = select.resolve("match_photos", "native")
+        c = switch.resolve("match_photos", "native")
         assert (c.requested, c.used, c.fallback) == ("native", "native", None)
         for word in (None, "auto", "classic"):
-            c = select.resolve("match_photos", word)
+            c = switch.resolve("match_photos", word)
             assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
     assert not caplog.records
-    c = select.resolve("align_cameras", "native")
+    c = switch.resolve("align_cameras", "native")
     assert (c.used, c.fallback) == ("classic", "the native engine does not do 'align_cameras' yet")
 
 
