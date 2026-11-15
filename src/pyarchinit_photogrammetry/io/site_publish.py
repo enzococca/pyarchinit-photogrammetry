@@ -8,7 +8,8 @@ Two steps:
   costs in free-tier terms. Nothing is sent.
 * :func:`publish`: the plan carried out by running ``wrangler`` (on the PATH, in the usual folders of Node, or
   ``npx --no wrangler``: never installed by the program). The login is the user's (``wrangler login`` in a
-  terminal): the program never asks for, reads, stores or passes a token, a key or an account id; it reads only the
+  terminal, or :meth:`Wrangler.login`, which runs it and keeps nothing of its output): the program never asks for,
+  reads, stores or passes a token, a key or an account id; it reads only the
   exit codes and the output of wrangler, and what it keeps or shows of that output goes through :func:`scrub`.
 
 Where the data go (``data``): ``"auto"`` puts everything on Pages when every file fits its limits (25 MiB a file,
@@ -109,8 +110,25 @@ class WranglerFailed(RuntimeError):
 INSTALL_HINT = ("wrangler, the command line of Cloudflare, is not installed on this computer. Install Node.js "
                 "(https://nodejs.org), then in a terminal: npm install -g wrangler ; then wrangler login. "
                 "The program never installs it by itself.")
-LOGIN_HINT = ("wrangler is not logged in to Cloudflare. Open a terminal and run: wrangler login (it opens the "
-              "browser to sign in; the program never sees the credentials), then try again.")
+LOGIN_TIMEOUT = 600.0  # seconds given to the user to finish ``wrangler login`` in the browser
+
+
+def typed_command(command: list[str] | None) -> str:
+    """wrangler as the user types it in a terminal, from the command actually found by :func:`find_wrangler`:
+    ``npx wrangler`` when only npx runs it (wrangler alone is then "command not found" in a terminal), else
+    ``wrangler`` (since 1.10.1)."""
+    if command and len(command) >= 2 and Path(command[0]).stem.lower() == "npx" and command[-1] == "wrangler":
+        return "npx wrangler"
+    return "wrangler"
+
+
+def login_hint(command: list[str] | None = None) -> str:
+    """What to do when wrangler is not logged in, with the login command as the user can type it."""
+    return (f"wrangler is not logged in to Cloudflare. Open a terminal and run: {typed_command(command)} login (it "
+            "opens the browser to sign in; the program never sees the credentials), then try again.")
+
+
+LOGIN_HINT = login_hint()
 
 
 # --------------------------------------------------------------------------------------------- scrubbing the output
@@ -564,8 +582,28 @@ class Wrangler:
             if re.search(r"(?i)not (authenticated|logged in)", out):
                 code = 1
         if code:
-            return Status("logged_out", version, self.command, LOGIN_HINT)
+            return Status("logged_out", version, self.command, login_hint(self.command))
         return Status("ready", version, self.command, f"wrangler {version}, logged in")
+
+    def login(self, progress=None, timeout: float | None = None) -> Status:
+        """``wrangler login`` (since 1.10.1): wrangler opens the browser, the user signs in there, wrangler keeps
+        its own login. Its output (the sign-in address, the account) is neither kept, shown, logged nor returned:
+        only the exit code counts. Cancelled through ``progress``; after ``timeout`` seconds (:data:`LOGIN_TIMEOUT`)
+        wrangler is stopped. Then :meth:`status` again."""
+        if not self.command:
+            raise WranglerMissing(INSTALL_HINT)
+        progress = as_progress(progress)
+        limit = timeout or LOGIN_TIMEOUT
+        progress(0.0, "Cloudflare login: complete it in the browser")
+        try:
+            code, out = self.run(["login"], progress, keep=False, timeout=limit)
+        except WranglerFailed:  # its message names only the command; said again without it
+            raise WranglerFailed(f"Cloudflare login not completed within {int(limit)} s") from None
+        del out
+        if code:
+            raise WranglerFailed(f"Cloudflare login not completed (wrangler exit code {code})")
+        progress(0.9, "Cloudflare login: checking it")
+        return self.status(progress)
 
 
 def _version(text: str) -> str:
@@ -944,4 +982,4 @@ def stale_publication(document) -> bool:
 __all__ = ["plan", "publish", "Plan", "Result", "Limit", "Wrangler", "Status", "find_wrangler", "scrub",
            "check_consent", "record_published", "published_record", "set_address", "stale_publication", "site_frame",
            "default_project", "site_files", "cors_rule", "stage", "ConsentError", "WranglerMissing", "NotLoggedIn",
-           "WranglerFailed", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]
+           "WranglerFailed", "typed_command", "login_hint", "LOGIN_TIMEOUT", "ISSUES", "LIMITS", "SOURCES", "CHECKED", "DATA_MODES", "STATE"]

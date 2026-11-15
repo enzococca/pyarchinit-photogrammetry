@@ -3,7 +3,8 @@ calls and answers as the real one does (logged in or not, a failure, a file too 
 
 The behaviour comes from the environment: ``FAKE_WRANGLER_DIR`` (where it keeps its calls and its "cloud"),
 ``FAKE_WRANGLER_MODE`` (comma separated: ``logged_out``, ``fail_deploy``, ``too_large``, ``old``, ``taken``,
-``slow``, ``quiet``: no address in the answers of create and deploy, ``garbled``: no JSON either)."""
+``slow``, ``quiet``: no address in the answers of create and deploy, ``garbled``: no JSON either; ``login_fail``,
+``login_hang``: ``wrangler login`` failing or never ending; a ``login`` that succeeds ends ``logged_out``)."""
 from __future__ import annotations
 
 import json
@@ -25,6 +26,8 @@ sys.stdout.reconfigure(encoding="utf-8")  # as the real one (Node): on Windows a
 home = Path(os.environ["FAKE_WRANGLER_DIR"])
 modes = set(filter(None, os.environ.get("FAKE_WRANGLER_MODE", "").split(",")))
 args = sys.argv[1:]
+if args[:2] == ["--no", "wrangler"]:  # run as npx: npx --no wrangler <args>
+    args = args[2:]
 with open(home / "calls.jsonl", "a", encoding="utf-8") as fh:
     fh.write(json.dumps(args) + "\n")
 state_path = home / "cloud.json"
@@ -39,10 +42,22 @@ def out(text, code=0):
 
 if args[:1] == ["--version"]:
     out(" ⛅️ wrangler 4.51.0" if "old" not in modes else "3.0.0")
+if args[:1] == ["login"]:  # the real one opens the browser and waits for the sign-in there; this one does not
+    (home / "login_started").write_text("1")
+    print("Attempting to login via OAuth...\nOpening a link in your default browser: "
+          "https://dash.cloudflare.com/oauth2/auth?response_type=code&client_id=%(account)s&state=%(secret)s",
+          flush=True)
+    if "login_hang" in modes:  # the user never finishes in the browser
+        import time
+        time.sleep(60)
+    if "login_fail" in modes:
+        out("✘ [ERROR] Timed out waiting for authorization code, please try again.", 1)
+    (home / "logged_in").write_text("1")
+    out("Successfully logged in as %(email)s (token %(secret)s).")
 if args[:1] == ["whoami"]:
     if "old" in modes and "--json" in args:
         out("Unknown argument: json", 1)
-    if "logged_out" in modes:
+    if "logged_out" in modes and not (home / "logged_in").exists():
         out("You are not authenticated. Please run `wrangler login`.", 1)
     out(json.dumps({"loggedIn": True, "email": "%(email)s", "accounts": [{"id": "%(account)s"}]}))
 if args[:3] == ["pages", "project", "list"]:
@@ -122,16 +137,18 @@ out("unknown command: " + " ".join(args), 1)
 ''' % {"email": EMAIL, "account": ACCOUNT, "secret": SECRET, "r2dev": R2_DEV}
 
 
-def install(folder: Path) -> Path:
-    """The fake ``wrangler`` in ``folder/bin`` (run by this Python), its records in ``folder``: the bin folder."""
-    bin_dir = folder / "bin"
+def install(folder: Path, name: str = "wrangler") -> Path:
+    """The fake ``wrangler`` in ``folder/bin`` (run by this Python), its records in ``folder``: the bin folder.
+    ``name="npx"``: the same fake as an ``npx`` that answers ``npx --no wrangler <args>`` (put in ``folder/npx_bin``,
+    with no ``wrangler`` beside it)."""
+    bin_dir = folder / ("bin" if name == "wrangler" else name + "_bin")
     bin_dir.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":  # no shebang there: a .cmd, as the one npm installs, that runs the script with this Python
         (bin_dir / "wrangler_fake_script.py").write_text(SCRIPT, encoding="utf-8")
-        (bin_dir / "wrangler.cmd").write_text(f'@"{sys.executable}" "%~dp0wrangler_fake_script.py" %*\r\n',
-                                              encoding="utf-8")
+        (bin_dir / f"{name}.cmd").write_text(f'@"{sys.executable}" "%~dp0wrangler_fake_script.py" %*\r\n',
+                                             encoding="utf-8")
         return bin_dir
-    script = bin_dir / "wrangler"
+    script = bin_dir / name
     script.write_text(f"#!{sys.executable}\n" + SCRIPT, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return bin_dir
@@ -160,6 +177,15 @@ def environment(monkeypatch, folder: Path, mode: str = "") -> Path:
     monkeypatch.delenv("PPG_WRANGLER", raising=False)
     monkeypatch.setattr(site_publish, "extra_dirs", lambda: [])
     return bin_dir
+
+
+def npx_environment(monkeypatch, folder: Path, mode: str = "") -> Path:
+    """The fake reachable only as ``npx --no wrangler`` (wrangler itself on no PATH), as when it sits in the npx
+    cache alone."""
+    bin_dir = environment(monkeypatch, folder, mode)
+    npx_dir = install(folder, "npx")
+    monkeypatch.setenv("PATH", str(npx_dir))
+    return npx_dir
 
 
 def no_wrangler(monkeypatch, folder: Path) -> None:
@@ -197,7 +223,7 @@ def make_site(folder: Path, frame: str = "local", data_files: dict | None = None
     return folder
 
 
-__all__ = ["install", "calls", "cloud", "environment", "no_wrangler", "make_site", "SECRET", "ACCOUNT", "EMAIL",
+__all__ = ["install", "calls", "cloud", "environment", "npx_environment", "no_wrangler", "make_site", "SECRET", "ACCOUNT", "EMAIL",
            "R2_DEV"]
 
 if os.environ.get("_FAKE_WRANGLER_SELFTEST"):  # pragma: no cover
