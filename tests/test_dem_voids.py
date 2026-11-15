@@ -223,7 +223,15 @@ def test_trench_holes_cut_in_the_cloud_and_the_dem(processed, scene, tmp_path):
     err = np.abs(after[small] - scene.world_height(x[small], y[small]))
     assert np.median(err) < 0.003 and np.percentile(err, 95) < 0.008
     assert np.isnan(after[big]).all()
-    assert np.isnan(after[empty_before & ~small]).all()
+    # the empty ground around the survey stays empty: the cells empty before the cuts that reach the edge of the
+    # grid. Not every cell empty before: a void the survey left inside its own data, narrower than the limit, is
+    # rightly filled (seen once on Linux, where the dense cloud of the trench had one)
+    from scipy import ndimage
+
+    rim = np.zeros(z.shape, bool)
+    rim[0], rim[-1], rim[:, 0], rim[:, -1] = True, True, True, True
+    outside = ndimage.binary_propagation(rim & empty_before, structure=np.ones((3, 3), bool), mask=empty_before)
+    assert outside.any() and np.isnan(after[outside]).all()
     assert info["skipped"] >= 1
     # 3. the DEM built with the option: the mask of its interpolated cells
     ch.build_dem(fill_voids=0.25)

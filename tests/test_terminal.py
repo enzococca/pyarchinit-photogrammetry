@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -126,7 +127,7 @@ def test_the_generated_script_sets_path_and_folder(tmp_path):
     Path(script).parent.mkdir()
     Path(script).write_text(launch.files[script])
     out = subprocess.run(["/bin/sh", script], env={"PATH": "/usr/bin:/bin", "SHELL": str(shell)},
-                         capture_output=True, text=True, timeout=30).stdout
+                         capture_output=True, text=True, timeout=30, close_fds=False).stdout
     pwd = next(line[4:] for line in out.splitlines() if line.startswith("PWD="))
     assert Path(pwd).resolve() == folder.resolve()
     assert "PATH=/tools dir:/usr/bin:/bin:/node" in out
@@ -151,6 +152,12 @@ def test_the_menu_action(tmp_path, monkeypatch):
     doc = ppg.Document()
     doc.save(tmp_path / "scavo.ppg")
     w = main_window.MainWindow(ppg.Document.open(tmp_path / "scavo.ppg"), autoconnect=False)
+    # Linux: the terminal named by TERMINAL, as a machine without a terminal emulator (a CI runner) has none to
+    # find; macOS and Windows have theirs and do not read the variable
+    chosen = tmp_path / "terminale"
+    chosen.write_text("#!/bin/sh\n")
+    chosen.chmod(0o755)
+    monkeypatch.setenv("TERMINAL", str(chosen))
     started, said = [], []
     monkeypatch.setattr(terminal, "open_terminal", lambda launch: started.append(launch))
     monkeypatch.setattr(main_window, "message", lambda *a, **k: said.append(a))
@@ -159,6 +166,8 @@ def test_the_menu_action(tmp_path, monkeypatch):
     actions[0].trigger()
     assert len(started) == 1 and said == []
     assert started[0].cwd == str(tmp_path.resolve())
+    if sys.platform.startswith("linux"):
+        assert started[0].argv[:2] == [str(chosen), "-e"]
     monkeypatch.setattr(terminal, "for_this_program",
                         lambda folder: terminal.Launch([], str(folder), {}, problem="no_terminal"))
     assert w.open_terminal() is False and len(started) == 1
