@@ -1,0 +1,25 @@
+# What `cargo deny check licenses sources` accepts for the crates the workspace is built from: the licences of
+# the list, crates.io as the only registry and no git repository. Run by the job `deny` of
+# .github/workflows/rust.yml.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "MPL-2.0", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0",
+]
+# how sure the tool has to be of a licence it reads in the text of a file: one step stricter than its default of
+# 0.8, a choice and not a measured figure
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true        # the three crates of the workspace (publish = false) are GPL-2.0-or-later
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

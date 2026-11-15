@@ -325,10 +325,19 @@ def test_auto_takes_patchmatch_for_surveys_from_the_air(processed, monkeypatch):
                 cam.meta["reference_crs"] = ref_crs
 
 
-def test_gpu_matching_agrees_with_the_brute_force(rng):
+def test_the_test_device_is_the_best_gpu_or_a_software_adapter_on_request():
+    from pyarchinit_photogrammetry.testing.gpu import pick_test_device
+    real, soft = {"device_type": "IntegratedGpu"}, {"device_type": "Cpu"}
+    assert pick_test_device([real], -1, software=False) == -1
+    assert pick_test_device([], None, software=False) is None
+    assert pick_test_device([soft], None, software=False) is None      # software only: not "auto"
+    assert pick_test_device([real, soft], -1, software=True) == 1      # its position in the list
+    assert pick_test_device([real], -1, software=True) is None
+
+
+def test_gpu_matching_agrees_with_the_brute_force(rng, gpu_test_device):
     """The GPU matcher (wgpu) picks the matches COLMAP's rules pick, checked against numpy."""
-    if _native.gpu_device("auto") is None:
-        pytest.skip("no GPU (wgpu adapter) on this computer")
+    device = gpu_test_device
 
     def descriptors(n):
         v = rng.random((n, 128), np.float32) ** 2
@@ -354,31 +363,31 @@ def test_gpu_matching_agrees_with_the_brute_force(rng):
     a, b = descriptors(2000), descriptors(1700)
     b[:900] = np.clip(a[:900].astype(np.int32) + rng.integers(-6, 7, (900, 128)), 0, 255).astype(np.uint8)
     for cross in (True, False):
-        got = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, cross)}
+        got = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, cross, device=device)}
         want = brute_force(a, b, 0.8, 0.7, cross)
         assert got == want and len(got) >= 850
     # cached descriptors (keys) give the same answer, and a stricter distance fewer matches
-    again = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, True, a_key=11, b_key=12)}
+    again = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, True, device=device, a_key=11, b_key=12)}
     assert again == brute_force(a, b, 0.8, 0.7, True)
-    assert len(_native.gpu_match(a, b, 0.8, 0.02, True, a_key=11, b_key=12)) < len(again)  # the noise is more
-    assert len(_native.gpu_match(a[:0], b, 0.8, 0.7, True)) == 0
+    stricter = _native.gpu_match(a, b, 0.8, 0.02, True, device=device, a_key=11, b_key=12)
+    assert len(stricter) < len(again)  # the noise is more
+    assert len(_native.gpu_match(a[:0], b, 0.8, 0.7, True, device=device)) == 0
     _native.gpu_forget()
 
 
-def test_gpu_descriptor_cache_keeps_the_pair_it_matches():
+def test_gpu_descriptor_cache_keeps_the_pair_it_matches(gpu_test_device):
     """A full cache of descriptors on the GPU forgets the photos used least recently, never the
     other photo of the pair being matched: before, a photo found in the cache could be destroyed
     while the second one went in, and wgpu stopped the matching ("Buffer has been destroyed") -
     on 48-megapixel photos, once 768 MB of descriptors were on the GPU. Run with a cache of 1 MB
     (PPG_GPU_CACHE_MB) in a process of its own: two photos fit."""
-    if _native.gpu_device("auto") is None:
-        pytest.skip("no GPU (wgpu adapter) on this computer")
     import subprocess
     import sys
 
     code = (
         "import numpy as np\n"
         "from pyarchinit_photogrammetry import _native\n"
+        f"device = {gpu_test_device}\n"  # the adapter of this test, by its index: the child does not choose one
         "rng = np.random.default_rng(5)\n"
         "v = rng.random((3000, 128), np.float32) ** 2\n"
         "v /= np.linalg.norm(v, axis=1, keepdims=True)\n"
@@ -386,8 +395,8 @@ def test_gpu_descriptor_cache_keeps_the_pair_it_matches():
         "photos = {k: np.clip(base + rng.integers(-4, 5, base.shape), 0, 255).astype(np.uint8) for k in range(1, 6)}\n"
         "out = []\n"
         "for a, b in [(1, 2), (1, 3), (4, 1), (1, 5), (2, 3), (5, 4), (1, 2)]:\n"
-        "    keyed = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True, a_key=a, b_key=b)\n"
-        "    plain = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True)\n"
+        "    keyed = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True, device=device, a_key=a, b_key=b)\n"
+        "    plain = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True, device=device)\n"
         "    out.append(len(keyed) > 100 and sorted(map(tuple, keyed.tolist())) == sorted(map(tuple, plain.tolist())))\n"
         "print(all(out), len(out))\n")
     env = dict(__import__("os").environ, PPG_GPU_CACHE_MB="1")
@@ -396,12 +405,14 @@ def test_gpu_descriptor_cache_keeps_the_pair_it_matches():
     assert r.stdout.split() == ["True", "7"], r.stdout + r.stderr[-1000:]
 
 
-def test_gpu_patchmatch_agrees_with_the_cpu_kernel():
+def test_gpu_patchmatch_agrees_with_the_cpu_kernel(gpu_test_device):
     """The PatchMatch kernel on the GPU (wgpu) finds the slanted plane the CPU kernel finds."""
-    if _native.gpu_device("auto") is None or not hasattr(ppg_core, "gpu_patchmatch_depth"):
-        pytest.skip("no GPU (wgpu adapter) or a native core without the GPU kernels")
+    if not hasattr(ppg_core, "gpu_patchmatch_depth"):
+        pytest.skip("a native core without the GPU kernels")
+    device = gpu_test_device
     ref, truth, k, sources, normal = _plane_views()
-    depth, normals, cost = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), iterations=4, max_cost=0.5)
+    depth, normals, cost = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), iterations=4, max_cost=0.5,
+                                                         device=device)
     valid = depth > 0
     err = np.abs(depth[valid] - truth[valid]) / truth[valid]
     assert valid.mean() > 0.9 and np.median(err) < 0.005 and np.percentile(err, 90) < 0.02
@@ -413,12 +424,13 @@ def test_gpu_patchmatch_agrees_with_the_cpu_kernel():
     assert both.mean() > 0.85 and np.median(np.abs(depth[both] - d_cpu[both]) / d_cpu[both]) < 0.005
     # started from the right depths the planes stay there; a wrong start is corrected
     start = truth * np.where(np.arange(truth.size).reshape(truth.shape) % 7 == 0, 1.3, 1.0).astype(np.float32)
-    d2, _, _ = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), init_depth=start, iterations=2)
+    d2, _, _ = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), init_depth=start, iterations=2,
+                                             device=device)
     ok = d2 > 0
     assert np.median(np.abs(d2[ok] - truth[ok]) / truth[ok]) < 0.005
 
 
-def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path):
+def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
     """The SIFT kernel of the GPU, on the photo as COLMAP sees it (its grey, its reduction),
     finds the key points COLMAP's extractor finds, with the same descriptors, in a fixed order."""
     import sqlite3
@@ -428,9 +440,9 @@ def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path):
 
     from pyarchinit_photogrammetry.engine import sfm
 
-    device = _native.gpu_device("auto")
-    if device is None or _native.kernel("gpu_sift") is None:
-        pytest.skip("no GPU (wgpu adapter) or no GPU SIFT in the native core")
+    device = gpu_test_device
+    if _native.kernel("gpu_sift") is None:
+        pytest.skip("no GPU SIFT in the native core")
     photo = scene_dir / "photos" / "IMG_0000.jpg"
     (tmp_path / "im").mkdir()
     shutil.copy(photo, tmp_path / "im" / photo.name)
@@ -501,12 +513,12 @@ def test_gpu_fusion_agrees_with_colmaps(processed, scene):
     assert np.abs(np.linalg.norm(pc.normals, axis=1) - 1).max() < 1e-3
 
 
-def test_gpu_fusion_replaces_a_map_given_again():
+def test_gpu_fusion_replaces_a_map_given_again(gpu_test_device):
     """A depth map given under a key the GPU already holds replaces the old one (image ids repeat
     from one workspace to the next: chunk B fused with the maps of chunk A, one night)."""
-    if _native.gpu_device("auto") is None or _native.kernel("gpu_fuse") is None:
-        pytest.skip("no GPU (wgpu adapter) or no fusion kernel in the native core")
-    device = _native.gpu_device("auto")
+    if _native.kernel("gpu_fuse") is None:
+        pytest.skip("no fusion kernel in the native core")
+    device = gpu_test_device
     _native.gpu_fuse_forget(device)
     h, w = 24, 32
     depth = np.full((h, w), 2.0, np.float32)
