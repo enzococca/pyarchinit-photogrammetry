@@ -147,7 +147,8 @@ markers in too few photos.
 * ARM builds. Linux aarch64 *done*: wheels of pycolmap 4.2.1 and Open3D 0.19.0, which their
   projects do not publish, built in Docker with their own recipes (`packaging/arm`, workflow
   `arm-wheels`) and tested with this project. Windows on ARM: the x64 application runs under the
-  emulation of Windows 11 (checked); native ARM64 builds (pycolmap, Open3D, OpenCV, lazrs) next.
+  emulation of Windows 11 (checked); the native ARM64 application *done* in 1.1.0 (pycolmap, Open3D,
+  OpenCV, lazrs built by the `windows-arm` workflow; VTK and pye57 from 1.3.5).
 
 ## After 1.0
 
@@ -155,7 +156,7 @@ markers in too few photos.
 * Plugins: a plugin interface, a guide to writing plugins and a repository that collects them.
 * Benchmark against Metashape and WebODM on Tell Tuqan (with control points): alignment, depth
   maps, dense cloud, mesh, DEM and orthomosaic - times, results and errors.
-* Native Windows ARM64 builds.
+* Native Windows ARM64 builds (*done* in 1.1.0; what they lack is in [Limits by system](limits.md)).
 
 ## After 1.1 (done, released as 1.2.0)
 

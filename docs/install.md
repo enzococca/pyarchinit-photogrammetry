@@ -25,10 +25,13 @@ person.
 | Windows 10/11, 64 bit | `PyArchInit-Photogrammetry-<version>-windows-x64.zip` | unzip, run `PyArchInit Photogrammetry.exe` |
 | Windows 11 on ARM (Snapdragon, ARM64 virtual machines) | `PyArchInit-Photogrammetry-<version>-windows-arm64.zip` | native build (from 1.1.0; VTK 3D view and E57 scans from 1.3.5, the software renderer where Windows has no OpenGL 3.2); the x64 zip also runs, under emulation |
 
-The builds are not signed. On macOS right-click the app > *Open* the first time (or
-`xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`); on Windows choose
-*More info > Run anyway*. The application looks for new versions at start (at most once a day) and,
-on macOS, installs them and restarts.
+The macOS dmg is signed with a Developer ID and notarized by Apple (from 1.1.0): it opens without
+warnings. The Windows zips are not signed: SmartScreen may ask the first time (*More info > Run anyway*).
+The application looks for new versions at start (at most once a day); on macOS it installs them and
+restarts, on Windows it downloads the zip to replace the program folder with.
+
+There is no application for Intel Macs nor for Linux: install with pip (below). What works differently
+on each system is in [Limits by system](limits.md).
 
 The window opens on a start page with *Nuovo progetto*, *Apri progetto* and *Progetto demo*
 (the [tutorials](tutorials/index.md) start there). The interface is in Italian or English
@@ -54,7 +57,8 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 
 `[all]` brings the mesh (Open3D), IFC, PostgreSQL, the desktop interface, E57 scans, camera raw
 files (rawpy) and Munsell colours; `[sam]` adds Segment Anything 2.1 (PyTorch). The native core in Rust (depth maps and
-orthophotos several times faster) is built from the source (below); the desktop applications
+orthophotos several times faster) is `[fast]` (`pip install "pyarchinit-photogrammetry[fast]"`: wheels for macOS,
+Windows x64 and Linux x86-64 and aarch64; elsewhere it is built from the source, below); the desktop applications
 include it. The PPK of the GNSS positions needs the core 0.5 or later, which holds RTKLIB, and the
 RINEX files compressed with Hatanaka (`.crx`, `.##d`, as the archives of the permanent stations give them)
 the core 0.6 or later (`pip install "pyarchinit-photogrammetry-core>=0.6"`), or the `CRX2RNX` program of
@@ -121,6 +125,7 @@ More in [Heights above the geoid and the system of the survey](gui/photos-marker
 
 ## When something does not work
 
+* [Limits by system](limits.md) lists what is missing or different on each system.
 * `ppg doctor` (in the window: *Help > Environment diagnosis...*) lists versions and known problems.
 * The log of the window: *Help > Open the log folder*.
 * `ppg-gui` does nothing: an older copy installed in another Python comes first on `PATH`

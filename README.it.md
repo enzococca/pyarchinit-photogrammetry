@@ -29,6 +29,7 @@ Scarica la versione per il tuo sistema dalla pagina
 | --- | --- |
 | macOS 15 o successivo (Apple Silicon) | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` |
 | Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` |
+| Windows 11 su ARM | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` |
 
 Su macOS apri l'immagine disco e trascina l'app in *Applicazioni*; su Windows estrai la
 cartella e avvia `PyArchInit Photogrammetry.exe`. L'applicazione si apre su una pagina con
@@ -36,9 +37,10 @@ cartella e avvia `PyArchInit Photogrammetry.exe`. L'applicazione si apre su una 
 sintetico e una ciotola su turntable e li elabora in pochi minuti. Se PyArchInit 5 è
 installato (`~/pyarchinit_5`), l'interfaccia si collega al suo database all'avvio e il database
 demo viene scritto dentro `pyarchinit_DB_folder`, così lo apre anche QGIS; i server
-PostgreSQL/PostGIS si raggiungono da *PyArchInit > Connetti*. Le build non sono firmate: su macOS la prima
-volta tasto destro > *Apri* (oppure `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
-su Windows *Ulteriori informazioni > Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md).
+PostgreSQL/PostGIS si raggiungono da *PyArchInit > Connetti*. La dmg per macOS è firmata con un Developer ID e
+notarizzata da Apple; gli zip per Windows non sono firmati: su Windows, la prima volta, *Ulteriori informazioni >
+Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md); quello che cambia da un sistema all'altro
+(per esempio: nessuna applicazione per i Mac Intel e Linux) in [docs/limits.it.md](docs/limits.it.md).
 L'applicazione cerca le nuove versioni all'avvio (al massimo una volta al giorno) e, su macOS, le
 installa e si riavvia; vedi *Aggiornamenti* in [docs/gui/help.it.md](docs/gui/help.it.md#aggiornamenti).
 

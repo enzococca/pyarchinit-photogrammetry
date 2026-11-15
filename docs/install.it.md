@@ -25,10 +25,14 @@ sola.
 | Windows 10/11, 64 bit | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` | estrai la cartella e avvia `PyArchInit Photogrammetry.exe` |
 | Windows 11 su ARM (Snapdragon, macchine virtuali ARM64) | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` | versione nativa (dalla 1.1.0; vista 3D VTK e scansioni E57 dalla 1.3.5, renderer software dove Windows non ha OpenGL 3.2); anche lo zip x64 gira, in emulazione |
 
-Le versioni non sono firmate. Su macOS, la prima volta, tasto destro sull'app > *Apri* (oppure
-`xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`); su Windows *Ulteriori
-informazioni > Esegui comunque*. All'avvio l'applicazione controlla se ci sono versioni nuove (al
-massimo una volta al giorno) e, su macOS, le installa e si riavvia.
+La dmg per macOS è firmata con un Developer ID e notarizzata da Apple (dalla 1.1.0): si apre senza
+avvisi. Gli zip per Windows non sono firmati: SmartScreen può chiedere conferma la prima volta (*Ulteriori
+informazioni > Esegui comunque*). All'avvio l'applicazione controlla se ci sono versioni nuove (al
+massimo una volta al giorno); su macOS le installa e si riavvia, su Windows scarica lo zip con cui
+sostituire la cartella del programma.
+
+Non c'è un'applicazione per i Mac Intel né per Linux: si installa con pip (sotto). Quello che cambia da
+un sistema all'altro è in [Limiti per sistema](limits.md).
 
 La finestra si apre su una pagina con *Nuovo progetto*, *Apri progetto* e *Progetto demo* (da lì
 partono i [tutorial](tutorials/index.md)). L'interfaccia è in italiano o in inglese
@@ -55,7 +59,8 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 `[all]` comprende modelli (Open3D), IFC, PostgreSQL, interfaccia desktop, scansioni E57, file raw delle
 fotocamere (rawpy) e colori
 Munsell; `[sam]` aggiunge Segment Anything 2.1 (PyTorch). Il nucleo nativo in Rust (mappe di
-profondità e ortofoto molto più veloci) si costruisce dai sorgenti (sotto); le applicazioni desktop
+profondità e ortofoto molto più veloci) è `[fast]` (`pip install "pyarchinit-photogrammetry[fast]"`: wheel per
+macOS, Windows x64 e Linux x86-64 e aarch64; altrove si costruisce dai sorgenti, sotto); le applicazioni desktop
 lo contengono già. Il PPK delle posizioni GNSS richiede il nucleo 0.5 o più recente, che contiene
 RTKLIB, e i file RINEX compressi con Hatanaka (`.crx`, `.##d`, come li danno gli archivi delle stazioni
 permanenti) il nucleo 0.6 o più recente (`pip install "pyarchinit-photogrammetry-core>=0.6"`), o il
@@ -122,6 +127,7 @@ Di più in [Quote sul geoide e sistema del rilievo](gui/photos-markers.md#quote-
 
 ## Quando qualcosa non va
 
+* [Limiti per sistema](limits.md) elenca che cosa manca o funziona diversamente su ciascun sistema.
 * `ppg doctor` (nella finestra: *Aiuto > Diagnostica ambiente*) elenca versioni e problemi noti.
 * Il registro della finestra: *Aiuto > Apri cartella dei log*.
 * `ppg-gui` non fa nulla: una copia vecchia installata in un altro Python viene prima nel `PATH`

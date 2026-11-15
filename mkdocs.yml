@@ -61,6 +61,7 @@ plugins:
           nav_translations:
             Home: Home
             Installation: Installazione
+            Limits by system: Limiti per sistema
             Tutorials: Tutorial
             Plugin guides: Guide ai plugin
             Overview: Panoramica
@@ -148,6 +149,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Installation: install.md
+  - Limits by system: limits.md
   - Tutorials:
       - tutorials/index.md
       - tutorials/tell.md

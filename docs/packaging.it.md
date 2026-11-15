@@ -7,26 +7,28 @@ PyInstaller:
 | --- | --- | --- |
 | macOS 15 o successivo (Apple Silicon) | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` | apri l'immagine disco e trascina l'app in *Applicazioni* |
 | Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` | estrai lo zip e avvia `PyArchInit Photogrammetry.exe` |
+| Windows 11 su ARM | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` | estrai lo zip e avvia `PyArchInit Photogrammetry.exe` |
 
 Sono allegate a ogni [release su GitHub](https://github.com/enzococca/pyarchinit-photogrammetry/releases)
-e le produce il workflow `desktop` (`.github/workflows/desktop.yml`, runner `macos-15`
-e `windows-latest`). L'applicazione impacchettata contiene lo stesso codice del pacchetto
+e le produce il workflow `desktop` (`.github/workflows/desktop.yml`, runner `macos-15`,
+`windows-latest` e `windows-11-arm`). Non ce n'è una per i Mac Intel né per Linux (solo pip): vedi
+[Limiti per sistema](limits.md). L'applicazione impacchettata contiene lo stesso codice del pacchetto
 `pip`: Open3D, VTK, qtawesome e IfcOpenShell sono inclusi; Segment Anything (PyTorch)
 no, e viene installato al primo uso in un ambiente separato (vedi
 [integrations.md](integrations.md#segment-anything-21-nellapplicazione-desktop)).
 
 ## Primo avvio
 
-* **macOS**: l'applicazione non è firmata con un certificato di sviluppatore Apple. Gatekeeper
-  mostra *"Impossibile aprire ... perché non è possibile verificare lo sviluppatore"* (o *"è
-  danneggiata"* sui sistemi più recenti). Tasto destro sull'app e *Apri* una volta, oppure togli
-  l'attributo di quarantena dal terminale:
+* **macOS**: la dmg allegata a ogni release (dalla 1.1.0) è firmata con un Developer ID e
+  notarizzata da Apple, quindi Gatekeeper la apre senza avvisi. Una dmg costruita altrove -
+  l'artifact del workflow `desktop`, una build locale senza identità di firma - non lo è: tasto
+  destro sull'app e *Apri* una volta, oppure togli l'attributo di quarantena dal terminale:
 
   ```bash
   xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"
   ```
 
-* **Windows**: SmartScreen può chiedere una conferma la prima volta (*Ulteriori informazioni > Esegui comunque*).
+* **Windows**: gli zip non sono firmati; SmartScreen può chiedere una conferma la prima volta (*Ulteriori informazioni > Esegui comunque*).
   Per scrivere geometrie in un database SQLite di PyArchInit serve `mod_spatialite.dll`: viene trovata
   in un'installazione di QGIS o di OSGeo4W, oppure imposta `SPATIALITE_LIBRARY_PATH`.
 
@@ -176,7 +178,11 @@ pip install "pyarchinit-photogrammetry[all]"
 
 ## Firma, notarizzazione, TestFlight
 
-Le build non sono firmate. Le vie Apple sono due:
+La dmg per macOS di ogni release è firmata con un Developer ID e notarizzata (dalla 1.1.0); gli zip per Windows
+non sono firmati. Il runner macOS di GitHub non ha un Developer ID, quindi il workflow `desktop` tiene la sua dmg
+solo come artifact: la dmg della release è costruita e firmata sul Mac del maintainer e notarizzata lì o dal
+workflow `notarize` (`.github/workflows/notarize.yml`), che controlla la firma, la fa notarizzare da Apple, allega
+il biglietto e la mette nella release. Le vie Apple sono due:
 
 * **Developer ID + notarizzazione** (download dal web/GitHub, nessun avviso): serve un
   certificato *Developer ID Application* (creato dall'Account Holder del team Apple
