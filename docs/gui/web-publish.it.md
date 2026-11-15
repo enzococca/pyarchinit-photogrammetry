@@ -113,6 +113,33 @@ L'indirizzo r2.dev serve per le prove: per un sito che resta in linea collega un
 (*R2 > il bucket > Settings > Custom Domains*; il dominio dev'essere su Cloudflare) e scrivi il suo indirizzo `https://`
 in **Indirizzo dei dati**: allora il programma non tocca r2.dev.
 
+## Nomi delle persone
+
+Dalla 2.0.0 il sito non pubblica gli attributi in cui PyArchInit tiene il nome di una persona - `schedatore`,
+`direttore_us`, `responsabile_us`, `disegnatore`: chi ha schedato, chi ha diretto, chi era responsabile, chi ha
+disegnato. Restano fuori da tutto quello che il sito pubblica - unità, quote, disegni, sezioni e prospetti, quello che
+aggiungono i plugin (i loro layer, tabelle e legende) - comunque sia scritto il nome dell'attributo (anche
+`Disegnatore`). Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
+
+Il programma non cerca i nomi nei testi: un nome scritto altrove - nel titolo o nella descrizione del sito, in
+un'etichetta, in una nota, in un altro attributo - viene pubblicato com'è scritto.
+
+Le versioni 1.10.0, 1.10.1 e 1.10.2 pubblicavano quegli attributi insieme agli altri: in un sito costruito con una di
+quelle il pannello di un clic e i file sotto `data/` mostrano, per esempio, chi ha disegnato un'unità. Per togliere i
+nomi da un sito già online:
+
+1. Costruisci di nuovo il sito (passo 2) e pubblicalo di nuovo (passo 4) con la 2.0.0 o successiva: l'indirizzo
+   principale e i dati su R2 danno allora i file nuovi (i dati su R2 entro l'ora della loro cache).
+2. Cancella le versioni pubblicate prima (i *deployment*). Cloudflare Pages le conserva, ognuna a un indirizzo suo
+   (`<hash>.<nome>.pages.dev`, quello che wrangler stampa): pubblicare di nuovo cambia quello che mostra
+   `<nome>.pages.dev` e le lascia dove sono, quindi la copia pubblicata prima si apre ancora al suo indirizzo.
+   `npx wrangler pages deployment list --project-name <nome>` le elenca e
+   `npx wrangler pages deployment delete <id> --project-name <nome>` ne cancella una (comandi di Cloudflare, letti
+   sulla sua documentazione il 15 novembre 2026).
+
+Oppure usa **Rimuovi dal web...** ([Cancellare il sito](#cancellare-il-sito)), che cancella il progetto con tutte le
+sue versioni pubblicate, e pubblica di nuovo.
+
 ## Limitare chi può aprire il sito: Cloudflare Access
 
 Il programma pubblica un sito pubblico. Per farlo aprire solo ad alcune persone, imposta **Cloudflare Access** (Zero

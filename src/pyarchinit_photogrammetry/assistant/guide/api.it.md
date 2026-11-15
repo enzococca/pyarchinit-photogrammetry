@@ -1278,6 +1278,12 @@ fare sapendolo (il tileset del modello è allora quello di `export_3dtiles`, sul
 modello in `origin` del suo livello). In entrambi i casi le foto non vengono mai copiate, nessun tag dei raster di origine
 arriva al sito, e ogni testo scritto dall'utente (gli attributi e i loro nomi, i nomi di chunk, layer e disegni, titolo
 e descrizione) che contiene il percorso di un computer è ridotto al suo ultimo nome.
+Dalla 2.0.0 i nomi delle persone non vengono pubblicati: un attributo che si chiama `schedatore`, `direttore_us`,
+`responsabile_us` o `disegnatore` (`assistant.privacy.PEOPLE_FIELDS`; maiuscole o minuscole, anche dentro un valore
+che è un dizionario o una lista) resta fuori da ogni elemento - unità, quote, linee, punti, disegni liberi, i disegni
+dei prospetti - e da quello che danno i plugin; un nome scritto altrove (un titolo, una descrizione, un'etichetta, una
+nota, un altro attributo) viene pubblicato com'è scritto. Le versioni 1.10.0-1.10.2 pubblicavano quegli attributi con
+gli altri ([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)).
 I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
 rifiutato).
 

@@ -267,8 +267,13 @@ written again as JPEG of at most 1600 pixels with nothing but their pixels (no E
 only plain tags (paragraphs, headings, lists, tables, emphasis, links to `http(s)` and `mailto`, its own pictures):
 no script, no style, no event, no frame; the page cleans it again before showing it. The files go in
 `data/plugins/<plugin>/`, listed in `plugins` of the chunk in `site.json`. A provider that raises, or a contribution
-that is not understood, is left out and said in the notes of the build; the site is built all the same. The `id`
-is lowercase letters, digits, `-` and `_`, once per plugin.
+that is not understood, is left out and said in the notes of the build; the site is built all the same. Since 2.0.0
+the site publishes no name of people: an attribute named `schedatore`, `direttore_us`, `responsabile_us` or
+`disegnatore` (in any case of letters) is left out of the properties of a feature and of the rows of a table, at any
+depth, and gets no column, no name in `fields` and no legend - a legend on such a field would write its values, the
+names, in `site.json`. What a plugin writes elsewhere is published as given - a name under another key, in a title, in
+the text of an `html` page: keep the names of people out of it. The `id` is lowercase letters, digits, `-` and `_`,
+once per plugin.
 
 ```python
 def activate(self, context):

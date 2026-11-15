@@ -1244,6 +1244,12 @@ chunks: a choice to make knowingly (the tileset of the model is then the one of 
 globe, with the centre of the model in the `origin` of its layer). In both frames the photos are never copied, no tag of the source
 rasters reaches the site, and every text typed by the user (attributes and their names, the names of chunks, layers and drawings,
 title and description) that holds the path of a computer is cut to its last name.
+Since 2.0.0 the names of people are not published: an attribute named `schedatore`, `direttore_us`,
+`responsabile_us` or `disegnatore` (`assistant.privacy.PEOPLE_FIELDS`; in any case of letters, also inside a value
+that is a dict or a list) is left out of every feature - units, spot heights, lines, points, free drawings, the
+drawings of the elevations - and of what the plugins give; a name written elsewhere (a title, a description, a label,
+a note, another attribute) is published as it is written. Versions 1.10.0-1.10.2 published those attributes with the
+others ([Names of people](gui/web-publish.md#names-of-people)).
 The chunks of one site must share one reference system, in metres (a system in degrees is refused).
 
 **The folder is never someone else's**: a folder that holds anything but a site built by this program

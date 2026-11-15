@@ -270,7 +270,12 @@ solo i tag semplici (paragrafi, titoli, elenchi, tabelle, enfasi, link a `http(s
 niente script, stili, eventi o frame; la pagina lo ripulisce di nuovo prima di mostrarlo. I file vanno in
 `data/plugins/<plugin>/`, elencati in `plugins` del chunk in `site.json`. Un provider che solleva un'eccezione, o un
 contributo che non si capisce, viene lasciato fuori e detto nelle note della costruzione; il sito si costruisce lo
-stesso. L'`id` è fatto di lettere minuscole, cifre, `-` e `_`, una volta per plugin.
+stesso. Dalla 2.0.0 il sito non pubblica nomi di persone: un attributo che si chiama `schedatore`, `direttore_us`,
+`responsabile_us` o `disegnatore` (maiuscole o minuscole) resta fuori dalle proprietà di un elemento e dalle righe di
+una tabella, a qualsiasi profondità, e non ha colonna, nome in `fields` né legenda - una legenda su un campo così
+scriverebbe i suoi valori, i nomi, in `site.json`. Quello che un plugin scrive altrove viene pubblicato com'è - un nome
+sotto un'altra chiave, in un titolo, nel testo di una pagina `html`: tieni fuori i nomi delle persone. L'`id` è fatto
+di lettere minuscole, cifre, `-` e `_`, una volta per plugin.
 
 ```python
 def activate(self, context):

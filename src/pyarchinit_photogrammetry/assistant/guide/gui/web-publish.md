@@ -107,6 +107,33 @@ The r2.dev address is meant for trying: for a site that stays online, connect a 
 dashboard (*R2 > the bucket > Settings > Custom Domains*; the domain must be on Cloudflare) and write its `https://`
 address in **Address of the data**: the program then leaves r2.dev alone.
 
+## Names of people
+
+Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps the name of a person - `schedatore`,
+`direttore_us`, `responsabile_us`, `disegnatore`: who recorded, who directed, who was in charge, who drew. They are
+left out of everything the site publishes - units, spot heights, drawings, sections and elevations, what the plugins
+add (their layers, tables and legends) - however the name of the attribute is written (`Disegnatore` too). Nothing
+changes in the project or in PyArchInit: the names stay there.
+
+The program does not look for names in the texts: a name written elsewhere - in the title or the description of the
+site, in a label, in a note, in another attribute - is published as it is written.
+
+Versions 1.10.0, 1.10.1 and 1.10.2 published those attributes with the others: in a site built with one of them the
+panel of a click and the files under `data/` show, for instance, who drew a unit. To take the names off a site that
+is already online:
+
+1. Build the site again (step 2) and publish it again (step 4) with 2.0.0 or later: the main address and the data in
+   R2 then give the new files (the data in R2 within the hour of their cache).
+2. Delete the earlier deployments. Cloudflare Pages keeps them, each at an address of its own
+   (`<hash>.<name>.pages.dev`, the one wrangler prints): publishing again changes what `<name>.pages.dev` shows and
+   leaves them where they are, so the copy published before can still be opened at its address.
+   `npx wrangler pages deployment list --project-name <name>` lists them and
+   `npx wrangler pages deployment delete <id> --project-name <name>` deletes one (commands of Cloudflare, read on its
+   documentation on 15 November 2026).
+
+Or use **Remove from the web...** ([Deleting the site](#deleting-the-site)), which deletes the project with all its
+deployments, and publish again.
+
 ## Restricting who can open the site: Cloudflare Access
 
 The program publishes a public site. To let only some people open it, set **Cloudflare Access** (Zero Trust) in the
