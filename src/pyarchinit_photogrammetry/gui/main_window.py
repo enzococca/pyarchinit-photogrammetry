@@ -1493,6 +1493,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                   tip=tr("Altri computer che lavorano a questo progetto dalla cartella condivisa"))
         self._act(m, tr("Plugin..."), self.show_plugins, icon_name="plugin",
                   tip=tr("I plugin installati e quelli del repository dei plugin: installa, attiva, disattiva"))
+        self._act(m, tr("Apri un terminale"), self.open_terminal, icon_name="terminal",
+                  tip=tr("Il terminale del sistema nella cartella del progetto, con i comandi del programma (ppg) "
+                         "e npx/wrangler raggiungibili"))
         # ------------------------------------------------------------ PyArchInit
         m = mb.addMenu("&PyArchInit")
         self._act(m, tr("Connetti (config.cfg, SQLite o PostgreSQL)..."), lambda: self.pyarchinit_connect(ask=True),
@@ -3267,6 +3270,27 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             self._warn("Salva prima il progetto: i nodi lavorano dalla sua cartella.")
             return
         NodesDialog(files_dir, self.settings, self).exec()
+
+    def open_terminal(self) -> bool:
+        """*Strumenti > Apri un terminale* (since 1.10.1): the system terminal in the folder of the project (the home
+        folder without one), the program's tools first on the PATH (:mod:`..terminal`)."""
+        from .. import terminal
+
+        folder = terminal.project_folder(self.doc)
+        launch = terminal.for_this_program(folder)
+        if launch.problem:
+            message(self, "warning", tr("Apri un terminale"), tr(
+                "Nessun terminale trovato su questo sistema (cercati: x-terminal-emulator, gnome-terminal, konsole, "
+                "xfce4-terminal, xterm e altri; oppure la variabile TERMINAL). Installane uno, oppure apri il tuo "
+                "terminale nella cartella {0}.", folder))
+            return False
+        try:
+            terminal.open_terminal(launch)
+        except OSError as exc:
+            message(self, "warning", tr("Apri un terminale"), tr("Il terminale non si è aperto: {0}", exc))
+            return False
+        log.info(tr("Terminale aperto in {0}", folder))
+        return True
 
     def show_plugins(self, *, fetch: bool = False) -> None:
         """Strumenti > Plugin: those found and those of the plugin repository. ``fetch``: with the index already read
