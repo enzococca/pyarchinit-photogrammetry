@@ -59,6 +59,49 @@ def test_the_tail_maps_the_lines_into_the_phases(tmp_path):
     assert tail.lines == 6
 
 
+def test_the_tail_marks_the_stages_colmap_announces(tmp_path):
+    """With ``stages`` every ``=== Running ... ===`` line closes the stage before it and opens its own, by its name
+    in small letters with underscores; the progress is the one of a tail without them."""
+    from pyarchinit_photogrammetry.engine.timing import Stages
+
+    now = [0.0]
+    stages = Stages(clock=lambda: now[0])
+    events, plain = [], []
+    tail = colmap_log._Tail(tmp_path / "colmap_log.", Progress(lambda f, m: events.append((round(f, 3), m))),
+                            total=10, phases={"stage": (0.0, 1.0)}, stages=stages)
+    old = colmap_log._Tail(tmp_path / "colmap_log.", Progress(lambda f, m: plain.append((round(f, 3), m))),
+                           total=10, phases={"stage": (0.0, 1.0)})
+    for t in (tail, old):
+        t.line(PREFIX + "global_mapper.cc:553] === Running rotation averaging ===")
+    now[0] = 4.0  # four seconds later
+    for t in (tail, old):
+        t.line(PREFIX + "global_mapper.cc:575] === Running global positioning ===")
+    now[0] = 6.5
+    stages.close()
+    assert stages.as_dict() == {"rotation_averaging": 4.0, "global_positioning": 2.5}
+    assert events == plain == [(0.1, "Global alignment: rotation averaging"),
+                               (0.4, "Global alignment: global positioning")]
+
+
+def test_a_relay_marks_the_stages_of_its_log_and_closes_the_last_one(tmp_path):
+    """The stages the log of the block announces are marked as they come - names outside ``STAGES`` too - and the
+    last one ends with the block: a later close adds nothing to it."""
+    pytest.importorskip("pycolmap")
+    from pyarchinit_photogrammetry.engine.timing import Stages
+
+    now = [0.0]
+    stages = Stages(clock=lambda: now[0])
+    work = tmp_path / "work"
+    lines = [f"{PREFIX}global_mapper.cc:553] === Running {name} ===\n"
+             for name in ("rotation averaging", "view graph calibration")]
+    with colmap_log.relay(Progress(), work, stages=stages):
+        (work / "colmap_log.INFO").write_text("".join(lines))  # as COLMAP would write it
+    now[0] = 5.0
+    stages.close()
+    assert stages.as_dict() == {"rotation_averaging": 0.0, "view_graph_calibration": 0.0}
+    assert list(work.glob("colmap_log.*")) == []
+
+
 def test_relay_reports_colmaps_feature_extraction(scene_dir: Path, tmp_path):
     pycolmap = pytest.importorskip("pycolmap")
     photos = scene_dir / "photos"

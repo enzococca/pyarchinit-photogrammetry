@@ -236,8 +236,8 @@ PROGRAM_KEYS = frozenset((
     "metric", "model", "multispectral", "normal_map", "optimize", "orientation", "orthomosaic", "panorama",
     "plan_edits", "point_cloud_cleaning", "point_cloud_source", "pottery", "precision", "proxies", "quality", "region",
     "relief",
-    "satellite", "scans", "section_options", "sfm", "sharpness", "stones", "texture", "thermal", "tin", "versions",
-    "video", "view", "water",
+    "satellite", "scans", "section_options", "sfm", "sharpness", "stones", "texture", "thermal", "timings", "tin",
+    "versions", "video", "view", "water",
 ))
 _LISTENERS: list[tuple] = []  # (callback, keys)
 
