@@ -54,27 +54,8 @@ timed("align_cameras", lambda: chunk.align_cameras())
 stats["aligned"] = len(chunk.aligned_cameras)
 stats["crs"] = chunk.crs
 stats["tie_points"] = len(chunk.tie_points) if chunk.tie_points is not None else 0
-import numpy as np  # noqa: E402
-import pycolmap  # noqa: E402
-
-
-def reprojection_rms(model) -> float:
-    """RMS of the reprojection errors of all the observations of the tie points, in pixels of the
-    photos (the measure of bench_metashape.py)."""
-    rec = pycolmap.Reconstruction(str(model))
-    xyz = {pid: p.xyz for pid, p in rec.points3D.items()}
-    squares, count = 0.0, 0
-    for image in rec.images.values():
-        seen = [(p.xy, xyz[p.point3D_id]) for p in image.points2D if p.has_point3D()]
-        if not seen:
-            continue
-        pose = image.cam_from_world()
-        cam = (pose.rotation.matrix() @ np.array([s[1] for s in seen]).T).T + pose.translation
-        err = np.array(rec.cameras[image.camera_id].img_from_cam(cam)) - np.array([s[0] for s in seen])
-        squares += float((err ** 2).sum())
-        count += len(seen)
-    return (squares / count) ** 0.5
-
+# the measure of bench_metashape.py, computed by the bench of the program (one function, not a copy)
+from pyarchinit_photogrammetry.bench.steps import reprojection_rms  # noqa: E402
 
 stats["reprojection_rms_px"] = round(reprojection_rms(chunk.product_path("reconstruction")), 3)
 stats["pairs"] = (chunk.meta.get("sfm") or {}).get("pairs")

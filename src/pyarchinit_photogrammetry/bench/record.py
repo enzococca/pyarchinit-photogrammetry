@@ -1,0 +1,151 @@
+"""One record per run of the bench: the facts the measurement depends on, its steps, its results, and whether it is
+valid and why.
+
+A record (:func:`new`) holds exactly the keys of :data:`KEYS`. :func:`judge` says whether the run is a valid measurement
+- not when the disk is on a slow link, reads slowly, when photos were online-only or when the run failed - and warns of
+what does not invalidate it (a running Dropbox, a busy machine, a laptop on its battery). :func:`write` puts the record
+in a folder, named by the run, its start and its index, and refuses a record that holds a path. Records may be shared:
+they hold no path, no photo name, no coordinate and no CRS, and the text of an error goes through :func:`scrub` before
+it is kept.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .. import __version__
+
+SCHEMA = 1
+KEYS = ("schema", "name", "started", "program", "machine", "disk", "set", "settings", "steps", "results", "warnings",
+        "valid", "invalid_reasons", "error")
+# a link below 5000 Mb/s is USB 2 (480 Mb/s) or slower: USB 3 starts at 5000 Mb/s
+SLOW_LINK_MBPS = 5000
+# 100 MB/s lies between what USB 2 gives (about 30-40 MB/s) and what an SSD on USB 3 gives (several hundred): an
+# estimate of where a measurement stops being one of the engine and becomes one of the disk
+SLOW_DISK_MB_S = 100
+# a load average above 2.0 over the last minute means other work on the cores: an estimate, not measured
+HIGH_LOAD = 2.0
+# the name of a run: it becomes part of the name of a file, never a path
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+# an absolute path in a text: a token starting with / that has a second /, a token starting with ~, or one starting
+# with a drive letter; a token runs to a space or a quote and never starts inside a word
+_ABSOLUTE = re.compile(r"""(?<![\w.~-])(?:/[^\s'"]*/[^\s'"]*|~[^\s'"]+|[A-Za-z]:[\\/][^\s'"]*)""")
+_EPSG = re.compile(r"EPSG:\d+", re.IGNORECASE)
+# a coordinate: four or more digits before the point (metres), or five or more after it (degrees)
+_NUMBER = re.compile(r"(?<![\d.])(?:\d{4,}(?:\.\d+)?|\d*\.\d{5,})")
+
+
+def check_name(name: str) -> str:
+    """``name`` when it is a name a file can take (letters, digits, ``.``, ``_``, ``-``, not starting with a point);
+    else a ValueError, before anything is run under it."""
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise ValueError("the name of a run is letters, digits, '.', '_' and '-', starting with a letter or a digit")
+    return name
+
+
+def new(name: str, machine: dict, disk: dict, set_: dict, settings: dict) -> dict:
+    """A record of the run ``name``, started now (UTC, ISO 8601, to the second), of this version of the program, with
+    the facts of the machine, the disk and the set of photos and the ``settings`` of the engine; its steps, results
+    and warnings empty, ``valid`` None until :func:`judge`, no error."""
+    return {"schema": SCHEMA, "name": check_name(name),
+            "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "program": __version__,
+            "machine": machine, "disk": disk, "set": set_, "settings": settings, "steps": [], "results": {},
+            "warnings": [], "valid": None, "invalid_reasons": [], "error": None}
+
+
+def judge(rec: dict) -> dict:
+    """``valid``, ``invalid_reasons`` and ``warnings`` of ``rec``, which is returned. Not valid: the link of the disk is
+    known and below :data:`SLOW_LINK_MBPS` (``slow disk link: 480 Mb/s``), the disk reads below :data:`SLOW_DISK_MB_S`
+    (``slow disk: 32 MB/s``), photos were online-only (``online-only photos: N``), the run failed (``failed: ...``,
+    from ``error``) or the extra results failed (``failed: ...``, from ``results["error"]``). Warnings, which do not
+    invalidate: Dropbox running, a load above :data:`HIGH_LOAD`, the battery. A fact that is None is not known and
+    neither invalidates nor warns."""
+    disk, machine, set_ = rec.get("disk") or {}, rec.get("machine") or {}, rec.get("set") or {}
+    reasons, warnings = [], []
+    link = disk.get("link_mbps")
+    if link is not None and link < SLOW_LINK_MBPS:
+        reasons.append(f"slow disk link: {link:g} Mb/s")
+    rate = disk.get("read_mb_s")
+    if rate is not None and rate < SLOW_DISK_MB_S:
+        reasons.append(f"slow disk: {rate:.0f} MB/s")
+    online_only = set_.get("online_only") or 0
+    if online_only > 0:
+        reasons.append(f"online-only photos: {online_only}")
+    if rec.get("error"):
+        reasons.append(f"failed: {rec['error']}")
+    extra = (rec.get("results") or {}).get("error")
+    if extra:
+        reasons.append(f"failed: {extra}")
+    if machine.get("dropbox_running") is True:
+        warnings.append("Dropbox running")
+    load = machine.get("load")
+    if load is not None and load > HIGH_LOAD:
+        warnings.append(f"load {load:.1f} above {HIGH_LOAD}")
+    if machine.get("on_battery") is True:
+        warnings.append("on battery")
+    rec["warnings"], rec["valid"], rec["invalid_reasons"] = warnings, not reasons, reasons
+    return rec
+
+
+def _forms(private) -> list[str]:
+    """The spellings of the private paths to look for, longest first: each as given when it is absolute (or starts
+    with ``~``) and as resolved (``/var`` and ``/private/var`` are one folder on macOS); never a relative spelling,
+    which would match words."""
+    forms = set()
+    for path in private:
+        given = str(path)
+        if os.path.isabs(given) or given.startswith("~"):
+            forms.add(given)
+        forms.add(str(Path(path).expanduser().resolve()))
+    return sorted((f for f in forms if f and f != os.sep), key=len, reverse=True)
+
+
+def scrub(text: str, private=(), names=()) -> str:
+    """``text`` (of an exception) with what a record must not hold replaced, in this order: every path of ``private``
+    (as given and resolved, longest first) and then every remaining absolute path by ``<path>``; every photo file name
+    of ``names`` and every stem of them, longest first and whole, by ``<photo>``; every ``EPSG:<digits>``, case
+    ignored, by ``<crs>``; every number with four or more digits before the point or five or more after it (a
+    coordinate in metres or in degrees) by ``<number>``."""
+    for form in _forms(private):
+        text = text.replace(form, "<path>")
+    text = _ABSOLUTE.sub("<path>", text)
+    words = {str(n) for n in names} | {Path(str(n)).stem for n in names}
+    for word in sorted((w for w in words if w), key=len, reverse=True):
+        text = re.sub(rf"(?<![\w-]){re.escape(word)}(?![\w-])", "<photo>", text, flags=re.IGNORECASE)
+    text = _EPSG.sub("<crs>", text)
+    return _NUMBER.sub("<number>", text)
+
+
+def _strings(value, where: str = "record"):
+    """Every string of ``value``, keys included, with where it sits."""
+    if isinstance(value, str):
+        yield where, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(key, f"{where}.<key>")
+            yield from _strings(item, f"{where}.{key}" if isinstance(key, str) else where)
+    elif isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            yield from _strings(item, f"{where}[{i}]")
+
+
+def write(rec: dict, folder: Path, private=(), index: int = 1) -> Path:
+    """``rec`` written as ``<name>-<digits of started>-<index>.json`` in ``folder`` (made when missing), never over an
+    existing file (a FileExistsError goes to the caller). A ValueError, and no file, when any string of the record - a
+    key or a value, the error among them - starts with ``/``, ``~`` or a drive letter, or holds one of the ``private``
+    paths (as given or resolved): the ValueError names where the string sits, never the string."""
+    forms = _forms(private)
+    for where, text in _strings(rec):
+        if text.startswith(("/", "~")) or _DRIVE.match(text) or any(form in text for form in forms):
+            raise ValueError(f"the record holds a path ({where}): not written")
+    name = check_name(rec["name"])
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}-{re.sub(r'[^0-9]', '', str(rec['started']))}-{int(index)}.json"
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+    return path
