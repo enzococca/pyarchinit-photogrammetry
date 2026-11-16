@@ -5,8 +5,9 @@ starts the child (:mod:`.steps`, the same interpreter, with the environment the 
 folder of its own, samples every :data:`SAMPLE_SECONDS` the memory of the child and of its children, and when the child
 ends builds the record (:mod:`.record`), judges it and writes it. A run that fails, dies or is cancelled leaves a record
 too, with its error and the steps done; photos that are online-only are left out and make the record not valid. What
-the run writes beside the records (a work folder it could not remove, one left by a child that could not start) is
-said in the log by the name of the folder, never by its path.
+a run leaves beside the records - a work folder it could not remove, or one left by any stop after the folder was
+made (a job or a log that cannot be written, a child that cannot start, a record that is refused or cannot be
+written, a cancel whose cleanup failed) - is said in the log by the name of the folder, never by its path.
 """
 from __future__ import annotations
 
@@ -106,7 +107,7 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
         raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
     for index in range(1, int(repeat) + 1):
         work = out / f"{name}-{index}"
-        if records == work or work in records.parents:
+        if _under(records, work):
             raise ValueError("the records folder must not be inside a work folder, which is removed after its run")
         if work.exists():
             raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
@@ -132,6 +133,14 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
                  set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
                  extra_results=extra_results, targets=targets, reference=reference, crs=crs)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
+
+
+def _under(folder: Path, work: Path) -> bool:
+    """Whether ``folder`` is ``work`` or lies under it, by their spellings with the case folded (``os.path.normcase``,
+    then ``casefold``) at a separator: neither exists yet, so the file system cannot be asked, and the disks of macOS
+    and Windows fold case (refusing too much on a disk that does not is harmless)."""
+    folder_s, work_s = (os.path.normcase(str(p)).casefold() for p in (folder, work))
+    return folder_s == work_s or folder_s.startswith(work_s.rstrip(os.sep) + os.sep)
 
 
 def _inside(folder: Path, photos: Path) -> bool:

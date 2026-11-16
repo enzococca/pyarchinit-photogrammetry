@@ -45,9 +45,10 @@ _TAIL = r"""(?:(?! - |: )(?:[^'"\n]|""" + _IN_WORD + r"""))*"""
 _TOKEN = re.compile(r"\S+")
 _URL = re.compile(r"https?://", re.IGNORECASE)
 # an unquoted absolute path: a token starting with / that has a second /, a token starting with ~, or one starting
-# with a drive letter, never starting inside a word, after a colon or after a slash (the // of a URL is no path),
-# with its tail
-_ABSOLUTE = re.compile(r"""(?<![\w.~:/-])(?:/[^\s'"]*/|~[^\s'"]+|[A-Za-z]:[\\/])""" + _TAIL)
+# with a drive letter, never starting inside a word nor right after the scheme of a web URL (its // is no path; a
+# path right after another word and a colon, or a file:// or sqlite:// URI, is a path), with its tail
+_ABSOLUTE = re.compile(r"""(?<![\w.~-])(?<!https:)(?<!http:)(?<!https:/)(?<!http:/)"""
+                       r"""(?:/[^\s'"]*/|~[^\s'"]+|[A-Za-z]:[\\/])""" + _TAIL)
 # what may follow a private path: its end (the end of the text, a space, a quote) or a separator with the tail of
 # the path under it; a letter means a longer name (/Users/x is not /Users/xy)
 _PRIVATE_END = r"""(?:(?=$|[\s'"])|[/\\]""" + _TAIL + ")"
@@ -150,7 +151,13 @@ def scrub(text: str, private=(), names=()) -> str:
     digits before the point or five or more after it (a coordinate in metres or in degrees) by ``<number>``; last,
     every token between spaces that still holds a separator (what a stop left of a path: a folder named with
     `` - ``, a private folder whose name is another's up to a space; a relative path; a unit such as ``m/s``), a
-    URL excepted, by ``<path>``. A lone word of a folder name before `` - `` may remain: the one residual."""
+    URL excepted, by ``<path>``.
+
+    What remains, since a pass over tokens cannot close it: the words of a folder name after a `` - `` inside it
+    (``<path> - Saggio Est <path>``); the inner words of a folder name of three or more words that a stop split at
+    a space - a private folder whose name is another folder's up to a space, a private home that is the start of
+    another user's home (``<path> Nord <path>``, ``<path> Maria <path>``); the words of a relative path with spaces
+    (``Scavo Nord <path>``). A folder of one or two words leaves nothing."""
     text = _QUOTED.sub("'<path>'", text)
     forms = _forms(private)
     if forms:

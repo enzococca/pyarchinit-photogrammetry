@@ -30,11 +30,12 @@ STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "max_ratio",
             "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets"]
 
-# Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters on an
-# external disk, a work folder, and a home on Windows whose user name has two words
+# Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters under a
+# made-up root (never the mount point of the external disks: a private path is resolved, and no test makes the
+# system look there), a work folder, and a home on Windows whose user name has two words
 HOME = "/Users/fieldteam"
-PHOTOS = "/Volumes/Field Unit/Scavo Nord/Données été"
-OUT = "/Volumes/Field Unit/bench-work"
+PHOTOS = "/srv/field-unit/Scavo Nord/Données été"
+OUT = "/srv/field-unit/bench-work"
 WIN_HOME = r"C:\Users\Field Team"
 WIN_FILE = WIN_HOME + r"\Pictures\scavo 2024\IMG_0001.JPG"
 PRIVATE = (Path(PHOTOS), Path(OUT), Path(HOME), WIN_HOME)
@@ -44,14 +45,14 @@ ERRNO_2 = "FileNotFoundError: [Errno 2] No such file or directory: "
 # scrub must leave of it
 REAL_TEXTS = [
     pytest.param(ERRNO_2 + "'" + PHOTOS + "/IMG_0001.JPG'", ERRNO_2 + "'<path>'", id="open-private"),
-    pytest.param(ERRNO_2 + "'/Volumes/Other Disk/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'", id="open-outside"),
+    pytest.param(ERRNO_2 + "'/srv/other-unit/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'", id="open-outside"),
     pytest.param(ERRNO_2 + "'" + HOME + "/Scavi/Site Alpha 2024/gcp.csv'", ERRNO_2 + "'<path>'", id="open-home"),
     pytest.param("OSError: cannot read " + HOME + "lovelace/notes/x.txt", "OSError: cannot read <path>",
                  id="prefix-of-home"),
     pytest.param('ValueError: [reconstruction.cc:995] rigs, cameras, frames, images, points3D files do not exist '
                  'at "' + PHOTOS + '/sparse 0"', "ValueError: [reconstruction.cc:995] rigs, cameras, frames, images, "
                  "points3D files do not exist at '<path>'", id="pycolmap"),
-    pytest.param(ERRNO_2 + "'/Volumes/Other Disk/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'",
+    pytest.param(ERRNO_2 + "'/srv/other-unit/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'",
                  id="import-reference"),  # the same text as open-outside: Chunk.import_reference opens the file
     pytest.param("FileNotFoundError: " + str(FileNotFoundError(2, "No such file or directory", WIN_FILE)),
                  ERRNO_2 + "'<path>'", id="windows-oserror"),
@@ -60,7 +61,7 @@ REAL_TEXTS = [
 ]
 # a photo folder with an apostrophe, as Italian place names have, and a photo of the set with one; the texts of the
 # re-review of the fix, with what the scrub must leave of them
-POGGIO = "/Volumes/Field Unit/Poggio d'Alto/foto"
+POGGIO = "/srv/field-unit/Poggio d'Alto/foto"
 NAMES = ("IMG_0001.JPG", "Sant'Elmo_001.jpg")
 APOSTROPHE_TEXTS = [
     pytest.param("RuntimeError: can't read " + POGGIO + "/IMG_0001.JPG", "RuntimeError: can't read <path>",
@@ -394,6 +395,20 @@ def test_scrub_leaves_no_token_with_a_separator_after_its_stops(tmp_path):
     assert record.scrub("see https://example.org/guide and <path>", ()) == "see https://example.org/guide and <path>"
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("RuntimeError: bad path:/srv/field-unit/Field Unit/Scavo Nord Est/x.jpg", "RuntimeError: bad path:<path>"),
+    ("RuntimeError: cannot open file:///srv/field-unit/Scavo Nord Est/x.jpg", "RuntimeError: cannot open file:<path>"),
+    ("OperationalError: sqlite:////srv/field-unit/My Data Folder/db.sqlite", "OperationalError: sqlite:<path>"),
+    (r"RuntimeError: error:C:\Users\Field Team Lead\x.jpg", "RuntimeError: error:<path>"),
+    ("see https://example.org/guide and http://example.org/a/b",
+     "see https://example.org/guide and http://example.org/a/b"),
+], ids=["after-colon", "file-uri", "sqlite-url", "drive-after-colon", "urls"])
+def test_an_unquoted_path_right_after_a_colon_or_a_scheme_is_taken_whole_and_a_url_stays(text, expected):
+    """Only the schemes of a URL keep a slash from starting a path: a path written right after ``word:``, a
+    ``file://`` or ``sqlite://`` URI go whole, with the inner words of their folders; a web URL stays."""
+    assert record.scrub(text, ()) == expected
+
+
 def test_describe_keeps_the_strerror_of_an_os_error_never_its_file_name():
     exc = FileNotFoundError(2, "No such file or directory", PHOTOS + "/IMG_0001.JPG")
     assert record.describe(exc) == "FileNotFoundError: No such file or directory"
@@ -592,6 +607,10 @@ def test_a_work_folder_inside_the_photos_a_bad_name_or_unknown_steps_are_refused
         runner.run(photos, tmp_path / "out", name="t", records=tmp_path / "out" / "t-1")
     with pytest.raises(ValueError):
         runner.run(photos, tmp_path / "out", name="t", repeat=2, records=tmp_path / "out" / "t-2" / "sub")
+    with pytest.raises(ValueError):  # another case of the letters: one folder on the disks of macOS and Windows
+        runner.run(photos, tmp_path / "out", name="t", records=tmp_path / "out" / "T-1")
+    with pytest.raises(ValueError):
+        runner.run(photos, tmp_path / "out", name="t", repeat=2, records=tmp_path / "out" / "T-2" / "sub")
     assert not (tmp_path / "out").exists()
     (tmp_path / "out" / "t-2").mkdir(parents=True)  # a stray work folder of a later repeat: refused before any child
     with pytest.raises(FileExistsError):
