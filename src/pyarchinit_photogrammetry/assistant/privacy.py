@@ -151,21 +151,24 @@ def _field_text(name: Any) -> str:
 def _field_named(text: str, fields: tuple[str, ...]) -> str | None:
     """The one of ``fields`` that ``text`` (:func:`_field_text`) names, or None.  A field is named by its letters
     and digits, whatever stands between them (``direttore us``, ``direttore-us``, ``direttoreus``); by the ten
-    characters a shapefile keeps of a longer name (``responsabi``); by the eight characters and the number a
-    shapefile gives a second field cut to the same name (``responsa_1``).  A name that says more than the field
-    (``us_table_schedatore``, ``disegnatore2``) is another attribute."""
+    characters a shapefile keeps of a longer name (``responsabi``, ``nomeCompil``); by the eight characters and the
+    number a shapefile gives a second field cut to the same name (``responsa_1``, ``lastModi_1``) - in both, the
+    letters and digits of the cut name are compared, as the name was written.  A name that says more than the
+    field (``us_table_schedatore``, ``disegnatore2``) is another attribute."""
     bare = "".join(c for c in text if c.isalnum())
     for f in fields:
         if bare == f.replace("_", ""):
             return f
-    if len(text) == 10:
+    if len(text) == 10 and len(bare) >= 8:
         for f in fields:
-            if len(f) > 10 and f.startswith(text):
+            if len(f) > 10 and f.replace("_", "").startswith(bare):
                 return f
     if _NUMBERED.fullmatch(text):
-        for f in fields:
-            if len(f) >= 8 and f[:8] == text[:8]:
-                return f
+        head = "".join(c for c in text[:8] if c.isalnum())
+        if len(head) >= 6:
+            for f in fields:
+                if len(f) >= 8 and f.replace("_", "").startswith(head):
+                    return f
     return None
 
 

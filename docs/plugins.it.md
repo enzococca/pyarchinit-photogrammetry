@@ -266,7 +266,8 @@ ogni chunk che ci entra e restituisce una lista di dizionari, ognuno con un `kin
 Il resto lo fa il sito: le coordinate vanno nel sistema del sito (traslate nel sistema locale), ogni testo è ripulito
 come i testi del programma (nessun percorso del computer, nessuna chiave che comincia con `_`; un valore che non è un
 testo, un numero, una lista né un dizionario - un `Path`, una data - viene pubblicato come il suo testo, ripulito
-allo stesso modo), le immagini sono rifatte dai loro pixel in JPEG di al massimo 1600 pixel (niente EXIF, niente GPS,
+allo stesso modo: dai un record come dizionario, perché un oggetto di altro tipo - una dataclass, un namespace -
+viene pubblicato come il suo testo, nomi compresi), le immagini sono rifatte dai loro pixel in JPEG di al massimo 1600 pixel (niente EXIF, niente GPS,
 nessun commento: del file niente oltre a quello che mostra), e l'HTML tiene
 solo i tag semplici (paragrafi, titoli, elenchi, tabelle, enfasi, link a `http(s)` e `mailto`, le sue immagini):
 niente script, stili, eventi o frame; la pagina lo ripulisce di nuovo prima di mostrarlo. I file vanno in
@@ -281,8 +282,8 @@ sito non pubblica nemmeno nomi di persone: un attributo di `assistant.privacy.PE
 [Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone), resta fuori dalle proprietà di un elemento e dalle
 righe di una tabella, a qualsiasi profondità, e non ha colonna, nome in `fields` né legenda - una legenda su un campo
 così scriverebbe i suoi valori, i nomi, in `site.json`. Quello che un plugin scrive altrove viene pubblicato com'è -
-un nome sotto un'altra chiave, in un titolo, nel testo di una pagina `html`, nell'`id` o nel `kind` di un
-contributo: tieni fuori i nomi delle persone. L'`id` è fatto di lettere minuscole, cifre, `-` e `_`, una volta per
+un nome sotto un'altra chiave, in un titolo, nel testo di una pagina `html`, nell'`id`, nel `kind` o nell'`elevation` di un
+contributo (un rifiuto del programma li cita nelle note): tieni fuori i nomi delle persone. L'`id` è fatto di lettere minuscole, cifre, `-` e `_`, una volta per
 plugin.
 
 ```python

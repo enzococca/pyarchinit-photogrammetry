@@ -124,12 +124,14 @@ Nothing changes in the project or in PyArchInit: the names stay there.
 
 An attribute is recognised by its name, whatever the case of its letters and whatever stands between them
 (`Disegnatore`, `Direttore US`, `direttore-us`, `nomeCompilatore`), also as a shapefile cuts a long name: to its
-first ten characters (`responsabi`) or to eight and a number (`responsa_1`). What it holds is left out whole. What
-the program does not do:
+first ten characters (`responsabi`, `nomeCompil`) or to eight and a number (`responsa_1`, `lastModi_1`). What it
+holds is left out whole; so is a column whose cut name is the one of these fields, even when it held something else
+(`last_modified`, a date, cut to `last_modif`). What the program does not do:
 
 - a name that says more is another attribute and is published (`disegnatore2`, `us_disegnatore`), and so is a
-  column that is not in the list (`autore`, `rilevatore`): take such a column out of the layer before importing it,
-  or leave the drawings out of the products of the site (step 1);
+  column that is not in the list (`autore`, `rilevatore`), and so is a name a shapefile cut to a word of its own
+  (`Direttore US` cut to `Direttore`): take such a column out of the layer before importing it, or leave the
+  drawings out of the products of the site (step 1);
 - it does not look for names in the texts: a name written elsewhere - in the title or the description of the site,
   in a label, in a note, in the name of a layer or of a drawing - is published as it is written.
 
@@ -137,8 +139,8 @@ The sites built with versions 1.9.0 to 1.10.2 hold those attributes with the oth
 files under `data/` show, for instance, who drew a unit (1.9.0 built the site, to be put online by hand; since
 1.10.0 the program publishes it). To take the names off a site that is already online:
 
-1. Build the site again (step 2) and publish it again (step 4) with 2.0.0 or later: the main address and the data in
-   R2 then give the new files (the data in R2 within the hour of their cache).
+1. Build the site again (step 2) and publish it again (step 4) with 2.0.0 or later: the main address and the data then
+   give the new files (the data within the hour of their cache).
 2. Delete the earlier deployments. Cloudflare Pages keeps them, each at an address of its own
    (`<hash>.<name>.pages.dev`, the one wrangler prints): publishing again changes what `<name>.pages.dev` shows and
    leaves them where they are, so the copy published before can still be opened at its address.

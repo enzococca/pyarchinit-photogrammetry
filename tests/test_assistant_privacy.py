@@ -576,9 +576,13 @@ def test_a_field_of_people_or_of_an_account_is_recognised_however_it_is_written(
     assert set(ACCOUNT_FIELDS) == {"last_modified_by", "created_by", "updated_by", "editing_by"}
     for name in (*PEOPLE_FIELDS, "Disegnatore", " SCHEDATORE ", "Direttore US", "direttore-us", "DirettoreUs",
                  "\ufeffdisegnatore", "responsabile\u200b_us", "\uff44\uff52\uff41\uff41", "responsabi",
-                 "nome_compi", "team_membe", "responsa_1", "disegnat_2"):
+                 "nome_compi", "team_membe", "responsa_1", "disegnat_2",
+                 # a shapefile cuts the name as it was written, with or without underscores
+                 "nomeCompil", "Nome Compi", "nome-compi", "teamMember", "direttoreU", "direttore-", "nomeComp_1",
+                 "teamMemb_1", "\ufeffresponsabi", "respon\u200bsa_1", "\ufeffnomeCompil"):
         assert is_people_field(name) and not is_account_field(name), name
-    for name in (*ACCOUNT_FIELDS, "Last Modified By", "lastModifiedBy", "CREATED-BY", "last_modif", "last_mod_1"):
+    for name in (*ACCOUNT_FIELDS, "Last Modified By", "lastModifiedBy", "CREATED-BY", "last_modif", "last_mod_1",
+                 "lastModifi", "Last Modif", "lastModi_1", "createdB_1", "updatedB_1", "editingB_1"):
         assert is_account_field(name) and not is_people_field(name), name
     # not told: a name with something more, the bare word of a longer name, the other columns of a record
     for name in ("us", "note", "direttore", "cognome", "us_table_schedatore", "responsa_0", "disegnatore2", "draa_1",

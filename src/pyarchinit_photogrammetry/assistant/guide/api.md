@@ -1253,8 +1253,8 @@ Since 2.0.0 the names of people are not published: an attribute of `assistant.pr
 lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of what the
 plugins give, also inside a value that is a dict or a list. `assistant.privacy.is_people_field(name)` and
 `is_account_field(name)` tell such an attribute by its name: its letters and digits, in any case and whatever stands
-between them (`Direttore US`, `nomeCompilatore`), or what a shapefile keeps of it (`responsabi`, `responsa_1`); a
-name that says more (`disegnatore2`) is another attribute. A name written elsewhere (a title, a description, a label,
+between them (`Direttore US`, `nomeCompilatore`), or what a shapefile keeps of it (`responsabi`, `nomeCompil`,
+`responsa_1`); a name that says more (`disegnatore2`) is another attribute. A name written elsewhere (a title, a description, a label,
 a note, another attribute) is published as it is written. Versions 1.9.0 to 1.10.2 published those attributes with
 the others ([Names of people](gui/web-publish.md#names-of-people)).
 The chunks of one site must share one reference system, in metres (a system in degrees is refused).

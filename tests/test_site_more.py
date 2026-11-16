@@ -78,7 +78,8 @@ class Finds:
                  {"type": "Feature", "geometry": {"type": "Point", "coordinates": [cx + 0.1, cy, z]},
                   "properties": {"n": 1, "classe": "anfora", "_private": "x", "path": str(Path.home() / SECRET)}},
                  {"type": "Feature", "geometry": {"type": "Point", "coordinates": [cx - 0.1, cy, z]},
-                  "properties": {"n": 2, "classe": "moneta"}}]},
+                  "properties": {"n": 2, "classe": "moneta", "Disegnatore": PEOPLE["disegnatore"],
+                                 "lastModifi": ACCOUNTS["last_modified_by"]}}]},
              "colour": "#1f77b4",
              "legend": {"field": "classe", "items": [{"value": "anfora", "title": {"it": "Anfore", "en": "Amphorae"},
                                                       "colour": "#d62728"},
@@ -88,7 +89,8 @@ class Finds:
              "columns": [{"key": "n", "title": "N."}, {"key": "descrizione", "title": {"it": "Descrizione",
                                                                                       "en": "Description"}}],
              "rows": [{"n": 1, "descrizione": "Anfora", "image": str(self.picture)},
-                      {"n": 2, "descrizione": "Moneta"}]},
+                      {"n": 2, "descrizione": "Moneta", "nomeCompil": PEOPLE["nome_compilatore"],
+                       "scheda": {"team_members": [PEOPLE["team_members"]], "updated_by": ACCOUNTS["updated_by"]}}]},
             {"kind": "html", "id": "note", "title": "Note",
              "html": '<h3>Note di scavo</h3><p onclick="alert(1)">Testo <a href="javascript:alert(1)">x</a> '
                      '<a href="https://example.org/">y</a></p><script>alert(2)</script><style>p{}</style>'

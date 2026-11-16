@@ -44,9 +44,12 @@ def _personal(key) -> bool:
     fields = [*PEOPLE, *ACCOUNTS]
     if any(bare == f.replace("_", "") for f in fields):
         return True
-    if len(text) == 10 and any(len(f) > 10 and f.startswith(text) for f in fields):
+    if len(text) == 10 and len(bare) >= 8 and any(len(f) > 10 and f.replace("_", "").startswith(bare)
+                                                  for f in fields):
         return True
-    return bool(re.fullmatch(r".{8}_[1-9]", text)) and any(len(f) >= 8 and f[:8] == text[:8] for f in fields)
+    head = "".join(c for c in text[:8] if c.isalnum())
+    return bool(re.fullmatch(r".{8}_[1-9]", text)) and len(head) >= 6 and any(
+        len(f) >= 8 and f.replace("_", "").startswith(head) for f in fields)
 
 
 # ------------------------------------------------------------------------------------------------ the project
@@ -610,6 +613,9 @@ def test_the_rule_for_the_names_of_the_fields_of_people():
             "Last Modified By", "CreatedBy", "created-by", "UPDATED_BY", "editing_by",
             "disegnator", "direttore_", "responsabi", "compilator", "nome_compi", "team_membe", "last_modif",
             "RESPONSA_1", "schedato_2", "created__1",
+            "nomeCompil", "Nome Compi", "teamMember", "lastModifi", "Last Modif", "direttoreU", "direttore-",
+            "nomeComp_1", "teamMemb_1", "lastModi_1", "createdB_1", "updatedB_1", "editingB_1",
+            "\ufeffresponsabi", "respon\u200bsa_1",
             "\ufeffdisegnatore", "dise\u200bgnatore", "\uff44\uff49segnatore", "schedatore\x00"]
     stay = ["disegno", "direttore", "compilazione", "modified", "disegnato", "disegno_n1", "us_table_schedatore",
             "responsabilita", "responsa_0", "responsa_12", "created", "by", "team", "draa_n", "schedatori",

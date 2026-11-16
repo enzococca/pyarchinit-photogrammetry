@@ -130,12 +130,14 @@ Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
 
 Un attributo si riconosce dal nome, maiuscole o minuscole e qualunque cosa ci sia tra le lettere (`Disegnatore`,
 `Direttore US`, `direttore-us`, `nomeCompilatore`), anche come uno shapefile taglia un nome lungo: ai primi dieci
-caratteri (`responsabi`) o a otto e un numero (`responsa_1`). Quello che contiene resta fuori per intero. Quello
-che il programma non fa:
+caratteri (`responsabi`, `nomeCompil`) o a otto e un numero (`responsa_1`, `lastModi_1`). Quello che contiene resta
+fuori per intero; così una colonna il cui nome tagliato è quello di uno di questi campi, anche se conteneva altro
+(`last_modified`, una data, tagliato in `last_modif`). Quello che il programma non fa:
 
 - un nome che dice di più è un altro attributo e viene pubblicato (`disegnatore2`, `us_disegnatore`), e così una
-  colonna che non è nell'elenco (`autore`, `rilevatore`): togli quella colonna dal layer prima di importarlo, oppure
-  lascia i disegni fuori dai prodotti del sito (passo 1);
+  colonna che non è nell'elenco (`autore`, `rilevatore`), e così un nome che uno shapefile ha tagliato in una parola
+  a sé (`Direttore US` tagliato in `Direttore`): togli quella colonna dal layer prima di importarlo, oppure lascia i
+  disegni fuori dai prodotti del sito (passo 1);
 - non cerca i nomi nei testi: un nome scritto altrove - nel titolo o nella descrizione del sito, in un'etichetta,
   in una nota, nel nome di un layer o di un disegno - viene pubblicato com'è scritto.
 
@@ -144,7 +146,7 @@ di un clic e i file sotto `data/` mostrano, per esempio, chi ha disegnato un'uni
 mettere online a mano; dalla 1.10.0 lo pubblica il programma). Per togliere i nomi da un sito già online:
 
 1. Costruisci di nuovo il sito (passo 2) e pubblicalo di nuovo (passo 4) con la 2.0.0 o successiva: l'indirizzo
-   principale e i dati su R2 danno allora i file nuovi (i dati su R2 entro l'ora della loro cache).
+   principale e i dati danno allora i file nuovi (i dati entro l'ora della loro cache).
 2. Cancella le versioni pubblicate prima (i *deployment*). Cloudflare Pages le conserva, ognuna a un indirizzo suo
    (`<hash>.<nome>.pages.dev`, quello che wrangler stampa): pubblicare di nuovo cambia quello che mostra
    `<nome>.pages.dev` e le lascia dove sono, quindi la copia pubblicata prima si apre ancora al suo indirizzo.

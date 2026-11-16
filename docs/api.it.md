@@ -1288,7 +1288,7 @@ linee, punti, disegni liberi e i layer importati tra questi, i disegni dei prosp
 plugin, anche dentro un valore che è un dizionario o una lista. `assistant.privacy.is_people_field(nome)` e
 `is_account_field(nome)` riconoscono un attributo così dal nome: le sue lettere e cifre, maiuscole o minuscole e
 qualunque cosa ci sia in mezzo (`Direttore US`, `nomeCompilatore`), o quello che ne tiene uno shapefile
-(`responsabi`, `responsa_1`); un nome che dice di più (`disegnatore2`) è un altro attributo. Un nome scritto altrove
+(`responsabi`, `nomeCompil`, `responsa_1`); un nome che dice di più (`disegnatore2`) è un altro attributo. Un nome scritto altrove
 (un titolo, una descrizione, un'etichetta, una nota, un altro attributo) viene pubblicato com'è scritto. Le versioni
 dalla 1.9.0 alla 1.10.2 pubblicavano quegli attributi con gli altri
 ([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)).
