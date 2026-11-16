@@ -97,8 +97,6 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     photos = Path(photos).resolve()
     out, records = check(out, name, steps, repeat, records, photos=photos)
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
-    if not files:
-        raise ValueError(f"no photos in {photos}")
     local = tuple(p for p in files if not machine.is_online_only(p))
     if not local:
         raise RuntimeError("every photo is online-only: make them available offline first")
@@ -125,8 +123,9 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
     set (``ppg bench synthetic`` renders its photos after this): a name that is not one a file can take
     (ValueError), unknown steps or a repeat below 1 (ValueError), ``photos`` - when given - that is not a folder or
     holds ``out`` or ``records`` (ValueError), ``records`` inside a work folder (ValueError), a work folder of one of
-    the repeats that exists already (FileExistsError), psutil missing (RuntimeError). Returned: ``out`` and
-    ``records`` resolved (``records`` is ``out`` when not given)."""
+    the repeats that exists already (FileExistsError), psutil missing (RuntimeError), ``photos`` - when given -
+    without a photo (ValueError). Returned: ``out`` and ``records`` resolved (``records`` is ``out`` when not
+    given)."""
     record.check_name(name)
     if steps not in child.CHAINS:
         raise ValueError(f"steps must be {' or '.join(child.CHAINS)}, not {steps!r}")
@@ -142,15 +141,17 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
             raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
     for index in range(1, int(repeat) + 1):
         work = out / f"{name}-{index}"
-        if _under(records, work):
+        if under(records, work):
             raise ValueError("the records folder must not be inside a work folder, which is removed after its run")
         if work.exists():
             raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
     _psutil()
+    if photos is not None and not rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]:
+        raise ValueError(f"no photos in {photos}")
     return out, records
 
 
-def _under(folder: Path, work: Path) -> bool:
+def under(folder: Path, work: Path) -> bool:
     """Whether ``folder`` is ``work`` or lies under it, by their spellings with the case folded (``os.path.normcase``,
     then ``casefold``) at a separator: neither exists yet, so the file system cannot be asked, and the disks of macOS
     and Windows fold case (refusing too much on a disk that does not is harmless)."""

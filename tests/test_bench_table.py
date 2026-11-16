@@ -38,10 +38,10 @@ TABLE_LOG = "pyarchinit_photogrammetry.bench.table"
 
 
 def a_record(seconds: float, *, link=None, stages=None, peak=100.0, results=None, name="t", program=None,
-             started=None, step="align_cameras", engine=ENGINE, settings=None, machine=None) -> dict:
+             started=None, step="align_cameras", engine=ENGINE, settings=None, machine=None, set_facts=None) -> dict:
     """A judged record of one step of ``seconds``; ``link`` below 5000 Mb/s makes it not valid (``slow disk link``);
-    ``settings`` and ``machine`` change entries of the defaults."""
-    rec = record.new(name, {**MACHINE, **(machine or {})}, {**DISK, "link_mbps": link}, dict(SET),
+    ``settings``, ``machine`` and ``set_facts`` change entries of the defaults."""
+    rec = record.new(name, {**MACHINE, **(machine or {})}, {**DISK, "link_mbps": link}, {**SET, **(set_facts or {})},
                      {**SETTINGS, **(settings or {})})
     if program:
         rec["program"] = program
@@ -82,6 +82,13 @@ def raising(exc: BaseException):
     def fail(*args, **kwargs):
         raise exc
     return fail
+
+
+def a_photo_folder(folder: Path) -> Path:
+    """A folder with one photo file (empty: the checks list it, nothing reads it)."""
+    folder.mkdir(parents=True)
+    (folder / "IMG_0001.jpg").write_bytes(b"")
+    return folder
 
 
 # --- summarise and render ---------------------------------------------------------------------------------------------
@@ -148,6 +155,7 @@ def test_programs_sort_as_versions():
 def test_runs_that_differ_in_their_settings_or_their_machine_are_marked_and_are_no_baseline():
     rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0)])
     assert rows[0]["mixed_settings"] is False and rows[0]["mixed_machines"] is False and rows[0]["baseline"] is True
+    assert rows[0]["mixed_sets"] is False
     rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, settings={"photo_cache_mb": 0})])
     assert rows[0]["mixed_settings"] is True and rows[0]["mixed_machines"] is False and rows[0]["baseline"] is False
     assert "| not a baseline (mixed settings) |" in table.render(rows, {})
@@ -160,16 +168,26 @@ def test_runs_that_differ_in_their_settings_or_their_machine_are_marked_and_are_
     for key, value in (("cores", 8), ("load", 3.0), ("release", "26.1"), ("adapters", ["GPU A"])):
         rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, machine={key: value})])
         assert rows[0]["mixed_machines"] is False, key
-    # what two runs of one set with the same settings differ in is no mix: the version of pycolmap and how the pairs
-    # were split between the GPU and the CPU (the GPU takes pairs as it goes); another count of pairs is one
-    rows, _ = table.summarise([a_record(10.0, settings={"pycolmap": "4.2.0"}),
-                               a_record(12.0, settings={"gpu_pairs": 68, "cpu_pairs": 310}), a_record(30.0)])
-    assert rows[0]["mixed_settings"] is False and rows[0]["baseline"] is True
-    rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, settings={"pairs": 377})])
-    assert rows[0]["mixed_settings"] is True
-    rows, _ = table.summarise([a_record(10.0, settings={"quality": "medium"}), a_record(12.0, machine={"arch": "x"})])
+    # what two runs of one set with the same settings differ in by themselves is no mix: the version of pycolmap,
+    # the count of pairs (above 40 photos the preselection's RANSAC has a random seed) and their split between the
+    # GPU and the CPU (the GPU takes pairs as it goes), the mapper and its fallback (what the alignment did)
+    rows, _ = table.summarise([a_record(10.0, settings={"pycolmap": "4.2.0", "pairs": 488}),
+                               a_record(12.0, settings={"gpu_pairs": 68, "cpu_pairs": 310, "pairs": 494}),
+                               a_record(30.0, settings={"mapper": "global", "global_fallback": "incremental: 3/72"})])
+    assert rows[0]["mixed_settings"] is False and rows[0]["mixed_sets"] is False and rows[0]["baseline"] is True
+    # another set under the same name (how many photos, their bytes) is a mix of sets; the counts of photos with
+    # GPS and online-only are not compared
+    rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, set_facts={"photos": 29})])
+    assert rows[0]["mixed_sets"] is True and rows[0]["mixed_settings"] is False and rows[0]["baseline"] is False
+    assert "| not a baseline (mixed sets) |" in table.render(rows, {})
+    rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, set_facts={"bytes": 2})])
+    assert rows[0]["mixed_sets"] is True and rows[0]["baseline"] is False
+    rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, set_facts={"gps": 28, "online_only": 1})])
+    assert rows[0]["mixed_sets"] is False
+    rows, _ = table.summarise([a_record(10.0, settings={"quality": "medium"}),
+                               a_record(12.0, machine={"arch": "x"}, set_facts={"photos": 1})])
     assert rows[0]["baseline"] is False
-    assert "| not a baseline (n < 3, mixed settings, mixed machines) |" in table.render(rows, {})
+    assert "| not a baseline (n < 3, mixed settings, mixed machines, mixed sets) |" in table.render(rows, {})
 
 
 def test_every_reason_of_a_record_left_out_is_counted_before_its_colon():
@@ -219,8 +237,7 @@ def test_run_without_a_name_exits_2():
 def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch):
     pytest.importorskip("psutil")
     monkeypatch.setattr(runner, "run", lambda *a, **k: pytest.fail("the runner must not start"))
-    photos, out = tmp_path / "p", tmp_path / "o"
-    photos.mkdir()
+    photos, out = a_photo_folder(tmp_path / "p"), tmp_path / "o"
     result = invoke(["run", str(tmp_path / "nowhere"), str(out), "--name", "n"])
     assert result.exit_code == 2 and "is not a folder of photos" in plain(result)
     result = invoke(["run", str(photos), str(out), "--name", "bad/name"])
@@ -234,6 +251,12 @@ def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch
     (out / "n-1").mkdir(parents=True)
     result = invoke(["run", str(photos), str(out), "--name", "n"])
     assert result.exit_code == 2 and "exists: delete it or choose another name" in plain(result)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    result = invoke(["run", str(empty), str(tmp_path / "other"), "--name", "n"])
+    assert result.exit_code == 2 and "no photos in" in plain(result)
+    with pytest.raises(ValueError, match="no photos in"):
+        runner.check(tmp_path / "other", "n", photos=empty)
     monkeypatch.setattr(runner, "_psutil", raising(RuntimeError(runner.PSUTIL_MISSING)))
     result = invoke(["run", str(photos), str(tmp_path / "other"), "--name", "n"])
     assert result.exit_code == 1 and "error: the bench needs psutil" in result.output
@@ -248,8 +271,7 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
         return [record.write(a_record(1.5, link=480, name=name), Path(out))]
 
     monkeypatch.setattr(runner, "run", fake_run)
-    photos = tmp_path / "p"
-    photos.mkdir()
+    photos = a_photo_folder(tmp_path / "p")
     result = invoke(["run", str(photos), str(tmp_path / "o"), "--name", "n", "--steps", "all", "--repeat", "2",
                      "--keep", "--records", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
@@ -260,8 +282,7 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
 
 def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_records_written(tmp_path, monkeypatch):
     pytest.importorskip("psutil")
-    photos, out = tmp_path / "p", tmp_path / "o"
-    photos.mkdir()
+    photos, out = a_photo_folder(tmp_path / "p"), tmp_path / "o"
 
     def one_record_then_a_refusal(p, o, name, **kwargs):
         record.write(a_record(1.5, name=name), Path(o))  # the record of the first repeat
@@ -354,11 +375,26 @@ def test_the_runners_checks_run_before_the_set_is_rendered(tmp_path, stand_ins, 
     assert result.exit_code == 2 and "repeat must be 1 or more" in plain(result)
     result = invoke(["synthetic", "trench", str(out), "--records", str(out / "synthetic-trench-1" / "r")])
     assert result.exit_code == 2 and "must not be inside a work folder" in plain(result)
+    for records in (out / "synthetic-trench-set", out / "synthetic-trench-set" / "photos" / "r"):
+        result = invoke(["synthetic", "trench", str(out), "--records", str(records)])  # the set, rendered later
+        assert result.exit_code == 2 and "must not be inside the folder of the set" in plain(result)
     monkeypatch.setattr(runner, "_psutil", raising(RuntimeError(runner.PSUTIL_MISSING)))
     result = invoke(["synthetic", "trench", str(out)])
     assert result.exit_code == 1 and "error: the bench needs psutil" in result.output
     assert not (out / "synthetic-trench-set").exists() and not (out / "synthetic-ring-set").exists()
     assert stand_ins == []
+
+
+def test_an_os_error_of_the_checks_is_an_error_without_a_traceback_or_a_path(tmp_path, monkeypatch, stand_ins):
+    secret = tmp_path / "secret"
+    monkeypatch.setattr(runner, "check", raising(PermissionError(13, "Permission denied", str(secret))))
+    photos = a_photo_folder(tmp_path / "p")
+    commands = (["run", str(photos), str(tmp_path / "o"), "--name", "n"], ["synthetic", "trench", str(tmp_path / "b")])
+    for args in commands:
+        result = invoke(args)
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
+        assert "error: PermissionError: Permission denied" in result.output and "secret" not in result.output
+    assert stand_ins == [] and not (tmp_path / "b").exists()
 
 
 # --- the truth of the synthetic sets ----------------------------------------------------------------------------------

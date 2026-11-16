@@ -6,8 +6,8 @@ process, timed, with their memory and their results, one record per run (:mod:`.
 apart, is the Rust binary of ``native/bench``, which times the kernels of the engine alone, without Python.
 
 Every command checks its arguments before anything runs (:func:`.runner.check`: a usage error, exit 2; psutil
-missing is an error, exit 1), ``synthetic`` before it renders its set; what stops a run once it started is an error
-(exit 1) said after the records already written, which stay.
+missing, or a folder the system will not let the checks look at, an error, exit 1), ``synthetic`` before it renders
+its set; what stops a run once it started is an error (exit 1) said after the records already written, which stay.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+
+from . import record
 
 bench_app = typer.Typer(help="The bench: a version of the program measured on a set of photos - the steps timed in a "
                              "child process, their memory, their results, one record per run -, on the synthetic sets "
@@ -77,9 +79,7 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
         raise typer.BadParameter(f"{' or '.join(SETS)}, not {which!r}")
     out = Path(out)
     name = f"synthetic-{which}"
-    set_dir = out / f"{name}-set"
-    if set_dir.exists():
-        raise typer.BadParameter(f"{set_dir} exists (the set of an earlier run): delete it or give another OUT")
+    set_dir = _check(_set_folder, out, name, records)
     steps = "all" if which == "trench" else "align"
     _, records_folder = _check(runner.check, out, name, steps, repeat, records)
     if which == "trench":
@@ -108,15 +108,34 @@ def bench_table(folder: Path = typer.Argument(..., help="the folder of the recor
     typer.echo(table.render(*table.summarise(records)))
 
 
-def _check(check, *args, **kwargs) -> tuple[Path, Path]:
-    """``check`` (:func:`.runner.check`) called: what it refuses is a usage error (exit 2), psutil missing an error
-    (exit 1)."""
+def _set_folder(out: Path, name: str, records: Optional[Path]) -> Path:
+    """The folder of the set of the run ``name`` under ``out``, refused (ValueError) when it exists already - the set
+    of an earlier run - or when ``records`` is it or lies under it: the run would read its photos from there, which
+    the runner refuses only once the set is rendered."""
+    from . import runner
+
+    set_dir = out / f"{name}-set"
+    if set_dir.exists():
+        raise ValueError(f"{set_dir} exists (the set of an earlier run): delete it or give another OUT")
+    if records is not None and runner.under(Path(records).resolve(), set_dir.resolve()):
+        raise ValueError("the records folder must not be inside the folder of the set, which the run reads its "
+                         "photos from")
+    return set_dir
+
+
+def _check(check, *args, **kwargs):
+    """``check`` (:func:`.runner.check`, :func:`_set_folder`) called and what it returns: what it refuses is a usage
+    error (exit 2); psutil missing, or a folder the system will not let it look at (an OSError: its type and its
+    message, never the path), an error (exit 1)."""
     try:
         return check(*args, **kwargs)
     except (ValueError, FileExistsError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     except RuntimeError as exc:
         typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except OSError as exc:
+        typer.echo(f"error: {record.describe(exc)}", err=True)
         raise typer.Exit(1)
 
 

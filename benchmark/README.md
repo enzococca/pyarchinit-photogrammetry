@@ -102,9 +102,11 @@ ppg bench table DIR
   median: `0.002 (2 of 3)`); last, the records left out, counted by reason. The `engine` column is
   the engine the step ran with (`classic`, `native`; `classic/native` when the runs of the row
   differ): it is what the table of 2.0.0 compares. A row whose valid runs differ in their settings
-  (other than the version of pycolmap and the split of the pairs between the GPU and the CPU, which
-  changes from one run to the next) or in their machine (system, architecture, processor, memory)
-  says `mixed settings` or `mixed machines` and is no baseline.
+  (other than what records what a run did rather than what it was asked: the version of pycolmap,
+  the count of pairs - above 40 photos the preselection's RANSAC has a random seed - and their split
+  between the GPU and the CPU, the mapper and its fallback), in their machine (system, architecture,
+  processor, memory) or in their set (how many photos, their bytes) says `mixed settings`, `mixed
+  machines` or `mixed sets` and is no baseline.
 
 **What a record holds**: the name of the run, its start, the version of the program; the machine
 (system, processor, cores, memory, GPU adapters, load, battery, whether Dropbox runs); the disk of the

@@ -21,12 +21,15 @@ log = logging.getLogger(__name__)
 
 # the runs a figure needs to be a baseline: the median of three stands against one run the machine disturbed
 BASELINE_RUNS = 3
-# the entries of a record's settings that are not what the run was asked for but what it did: the version of pycolmap
-# and the split of the pairs between the GPU and the CPU, which the GPU threads decide as they go (two runs of one
-# set differ in it); runs that differ in any other setting are not one measurement
-RUN_FACTS = ("pycolmap", "gpu_pairs", "cpu_pairs")
+# the entries of a record's settings that record what the run did, not what it was asked for: the version of pycolmap,
+# the count of pairs (above 40 photos the preselection's RANSAC has a random seed, so it moves between repeats) and
+# their split between the GPU and the CPU (the GPU threads take pairs as they go), the mapper and its fallback (a
+# global alignment that falls back in some runs); runs that differ in any other setting are not one measurement
+RUN_FACTS = ("pycolmap", "pairs", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback")
 # the facts of the machine that two runs of one measurement share
 MACHINE_KEYS = ("system", "arch", "cpu", "memory_gb")
+# the facts of the set that two runs of one measurement share: the same photos (how many, their bytes)
+SET_KEYS = ("photos", "bytes")
 HEAD = ("name", "program", "step", "engine", "runs", "seconds (median)", "min", "max", "peak memory (MB)", "stages",
         "baseline")
 # the results of every alignment, first in the table of the results in this order; the others follow by name
@@ -87,6 +90,12 @@ def _machine_key(rec: dict) -> str:
     return json.dumps([machine.get(key) for key in MACHINE_KEYS], default=str)
 
 
+def _set_key(rec: dict) -> str:
+    """The facts of :data:`SET_KEYS` of the set of a run, as one text."""
+    set_ = rec.get("set") or {}
+    return json.dumps([set_.get(key) for key in SET_KEYS], default=str)
+
+
 def _engine(value) -> str | None:
     """The engine a step used, as its entry records it (``used`` of the engine's record, or the text)."""
     if isinstance(value, dict):
@@ -102,9 +111,9 @@ def summarise(records) -> tuple[list[dict], dict[str, int]]:
     each), ``engine`` (the engines the step used, joined by ``/``), ``baseline``, and of the name and program as a
     whole ``valid_runs`` (its valid records), ``results`` (the median of each number of their results; a result that
     is no number, the text of an error, gives no figure), ``result_runs`` (how many of them hold each result),
-    ``mixed_settings`` (they differ in a setting other than :data:`RUN_FACTS`) and ``mixed_machines`` (they differ in
-    a fact of :data:`MACHINE_KEYS`), the same for every step. A row is a ``baseline`` with :data:`BASELINE_RUNS` runs
-    or more of one setting on one machine.
+    ``mixed_settings`` (they differ in a setting other than :data:`RUN_FACTS`), ``mixed_machines`` (they differ in a
+    fact of :data:`MACHINE_KEYS`) and ``mixed_sets`` (they differ in a fact of :data:`SET_KEYS`), the same for every
+    step. A row is a ``baseline`` with :data:`BASELINE_RUNS` runs or more of one setting on one machine and one set.
 
     With them the records left out: those not valid, counted by the text of each of their reasons before its colon
     (``slow disk link``; a record with two reasons counts under both); one not valid without a reason, or never
@@ -118,10 +127,12 @@ def summarise(records) -> tuple[list[dict], dict[str, int]]:
                 left_out[kind] = left_out.get(kind, 0) + 1
             continue
         group = groups.setdefault((str(rec.get("name")), str(rec.get("program"))),
-                                  {"runs": 0, "results": {}, "steps": {}, "settings": set(), "machines": set()})
+                                  {"runs": 0, "results": {}, "steps": {}, "settings": set(), "machines": set(),
+                                   "sets": set()})
         group["runs"] += 1
         group["settings"].add(_settings_key(rec))
         group["machines"].add(_machine_key(rec))
+        group["sets"].add(_set_key(rec))
         for key, value in (rec.get("results") or {}).items():
             if _is_number(value):
                 group["results"].setdefault(str(key), []).append(value)
@@ -144,14 +155,17 @@ def summarise(records) -> tuple[list[dict], dict[str, int]]:
         results = {key: median(values) for key, values in group["results"].items()}
         result_runs = {key: len(values) for key, values in group["results"].items()}
         mixed_settings, mixed_machines = len(group["settings"]) > 1, len(group["machines"]) > 1
+        mixed_sets = len(group["sets"]) > 1
+        mixed = mixed_settings or mixed_machines or mixed_sets
         for step, s in group["steps"].items():
             rows.append({"name": name, "program": program, "step": step, "engine": "/".join(s["engines"]) or None,
                          "runs": len(s["seconds"]), "seconds": median(s["seconds"]), "min": min(s["seconds"]),
                          "max": max(s["seconds"]), "peak_memory_mb": max(s["peaks"]) if s["peaks"] else None,
                          "stages": {stage: median(values) for stage, values in s["stages"].items()},
-                         "baseline": len(s["seconds"]) >= BASELINE_RUNS and not (mixed_settings or mixed_machines),
+                         "baseline": len(s["seconds"]) >= BASELINE_RUNS and not mixed,
                          "valid_runs": group["runs"], "results": results, "result_runs": result_runs,
-                         "mixed_settings": mixed_settings, "mixed_machines": mixed_machines})
+                         "mixed_settings": mixed_settings, "mixed_machines": mixed_machines,
+                         "mixed_sets": mixed_sets})
     return rows, left_out
 
 
@@ -166,7 +180,7 @@ def _number(value) -> str:
 
 def _baseline(row: dict) -> str:
     """The baseline cell of a row: ``yes``, or ``not a baseline`` with why (``n < 3``, ``mixed settings``, ``mixed
-    machines``)."""
+    machines``, ``mixed sets``)."""
     reasons = []
     if row["runs"] < BASELINE_RUNS:
         reasons.append(f"n < {BASELINE_RUNS}")
@@ -174,6 +188,8 @@ def _baseline(row: dict) -> str:
         reasons.append("mixed settings")
     if row["mixed_machines"]:
         reasons.append("mixed machines")
+    if row["mixed_sets"]:
+        reasons.append("mixed sets")
     return "yes" if not reasons else f"not a baseline ({', '.join(reasons)})"
 
 
