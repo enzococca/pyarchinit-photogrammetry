@@ -14,6 +14,7 @@ from typing import NoReturn, Optional
 import typer
 
 from . import __version__
+from .bench.cli import bench_app
 from .core.document import Document
 from .core.progress import print_progress
 
@@ -29,6 +30,7 @@ app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
 photos_app = typer.Typer(help="Enable or disable photos: a disabled photo keeps its pose, the next steps leave it out")
 app.add_typer(gnss_app, name="gnss")
+app.add_typer(bench_app, name="bench")
 app.add_typer(photos_app, name="photos")
 assistant_app = typer.Typer(help="The assistant from the command line: a question about a project, the models of a "
                                  "server or service, the evaluation of a model on the evaluation set")
