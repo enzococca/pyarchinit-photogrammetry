@@ -94,24 +94,8 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     in it, or a value that is not a number, is kept as ``results["error"]`` and makes the record not valid, the times
     stay. A KeyboardInterrupt while the child runs terminates it and its children, writes the record with the error
     ``cancelled``, removes the work folder unless ``keep`` and is raised again."""
-    record.check_name(name)
-    if steps not in child.CHAINS:
-        raise ValueError(f"steps must be {' or '.join(child.CHAINS)}, not {steps!r}")
-    if int(repeat) < 1:
-        raise ValueError("repeat must be 1 or more")
-    photos, out = Path(photos).resolve(), Path(out).resolve()
-    records = Path(records).resolve() if records else out
-    if not photos.is_dir():
-        raise ValueError(f"{photos} is not a folder of photos")
-    if _inside(out, photos) or _inside(records, photos):
-        raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
-    for index in range(1, int(repeat) + 1):
-        work = out / f"{name}-{index}"
-        if _under(records, work):
-            raise ValueError("the records folder must not be inside a work folder, which is removed after its run")
-        if work.exists():
-            raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
-    _psutil()
+    photos = Path(photos).resolve()
+    out, records = check(out, name, steps, repeat, records, photos=photos)
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     if not files:
         raise ValueError(f"no photos in {photos}")
@@ -133,6 +117,37 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
                  set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
                  extra_results=extra_results, targets=targets, reference=reference, crs=crs)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
+
+
+def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: Path | None = None, *,
+          photos: Path | None = None) -> tuple[Path, Path]:
+    """What :func:`run` refuses before anything runs, in its order, for a caller that must know before it makes its
+    set (``ppg bench synthetic`` renders its photos after this): a name that is not one a file can take
+    (ValueError), unknown steps or a repeat below 1 (ValueError), ``photos`` - when given - that is not a folder or
+    holds ``out`` or ``records`` (ValueError), ``records`` inside a work folder (ValueError), a work folder of one of
+    the repeats that exists already (FileExistsError), psutil missing (RuntimeError). Returned: ``out`` and
+    ``records`` resolved (``records`` is ``out`` when not given)."""
+    record.check_name(name)
+    if steps not in child.CHAINS:
+        raise ValueError(f"steps must be {' or '.join(child.CHAINS)}, not {steps!r}")
+    if int(repeat) < 1:
+        raise ValueError("repeat must be 1 or more")
+    out = Path(out).resolve()
+    records = Path(records).resolve() if records else out
+    if photos is not None:
+        photos = Path(photos).resolve()
+        if not photos.is_dir():
+            raise ValueError(f"{photos} is not a folder of photos")
+        if _inside(out, photos) or _inside(records, photos):
+            raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
+    for index in range(1, int(repeat) + 1):
+        work = out / f"{name}-{index}"
+        if _under(records, work):
+            raise ValueError("the records folder must not be inside a work folder, which is removed after its run")
+        if work.exists():
+            raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
+    _psutil()
+    return out, records
 
 
 def _under(folder: Path, work: Path) -> bool:

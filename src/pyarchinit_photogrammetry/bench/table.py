@@ -21,7 +21,12 @@ log = logging.getLogger(__name__)
 
 # the runs a figure needs to be a baseline: the median of three stands against one run the machine disturbed
 BASELINE_RUNS = 3
-NOT_A_BASELINE = f"not a baseline (n < {BASELINE_RUNS})"
+# the entries of a record's settings that are not what the run was asked for but what it did: the version of pycolmap
+# and the split of the pairs between the GPU and the CPU, which the GPU threads decide as they go (two runs of one
+# set differ in it); runs that differ in any other setting are not one measurement
+RUN_FACTS = ("pycolmap", "gpu_pairs", "cpu_pairs")
+# the facts of the machine that two runs of one measurement share
+MACHINE_KEYS = ("system", "arch", "cpu", "memory_gb")
 HEAD = ("name", "program", "step", "engine", "runs", "seconds (median)", "min", "max", "peak memory (MB)", "stages",
         "baseline")
 # the results of every alignment, first in the table of the results in this order; the others follow by name
@@ -50,10 +55,36 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _version(program: str) -> tuple:
-    """The version of a program as it sorts: its runs of digits as numbers (``1.9.0`` before ``1.10.2``), the rest as
-    text after them (``2.0.0`` before ``2.0.0.dev1``)."""
+def _pieces(program: str) -> tuple:
+    """The version of a program as it sorts without ``packaging``: its runs of digits as numbers (``1.9.0`` before
+    ``1.10.2``), the rest as text after them (``2.0.0`` before ``2.0.0.dev1``, unlike the rules of versions)."""
     return tuple((0, int(piece)) if piece.isdigit() else (1, piece) for piece in re.findall(r"\d+|[^\d.]+", program))
+
+
+def _version(program: str) -> tuple:
+    """The version of a program as it sorts: by the rules of versions when ``packaging`` can be imported (it is not a
+    dependency of the program: ``1.9.0`` before ``1.10.2``, ``2.0.0.dev1`` before ``2.0.0``; a text that is no version
+    after every version), else :func:`_pieces`."""
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:  # pragma: no cover - the tests run with pytest, which brings packaging
+        return (0, _pieces(program))
+    try:
+        return (0, Version(program))
+    except InvalidVersion:
+        return (1, _pieces(program))
+
+
+def _settings_key(rec: dict) -> str:
+    """The settings a run was asked for, as one text: the record's settings without :data:`RUN_FACTS`."""
+    settings = {key: value for key, value in (rec.get("settings") or {}).items() if key not in RUN_FACTS}
+    return json.dumps(settings, sort_keys=True, default=str)
+
+
+def _machine_key(rec: dict) -> str:
+    """The facts of :data:`MACHINE_KEYS` of the machine of a run, as one text."""
+    machine = rec.get("machine") or {}
+    return json.dumps([machine.get(key) for key in MACHINE_KEYS], default=str)
 
 
 def _engine(value) -> str | None:
@@ -65,12 +96,15 @@ def _engine(value) -> str | None:
 
 
 def summarise(records) -> tuple[list[dict], dict[str, int]]:
-    """The rows of the valid records, one per ``(name, program, step)``, in the order of the names and the programs
-    and, within them, of the steps as the records list them: ``runs`` (the valid records that ran the step),
-    ``seconds`` (the median), ``min``, ``max``, ``peak_memory_mb`` (the highest), ``stages`` (the median of each),
-    ``engine`` (the engines the step used, joined by ``/``), ``baseline`` (``runs >= BASELINE_RUNS``), and of the
-    name and program as a whole ``valid_runs`` (its valid records) and ``results`` (the median of each number of
-    their results; a result that is no number, the text of an error, gives no figure), the same for every step.
+    """The rows of the valid records, one per ``(name, program, step)``, in the order of the names, of the programs
+    as versions and, within them, of the steps as the records list them: ``runs`` (the valid records that ran the
+    step), ``seconds`` (the median), ``min``, ``max``, ``peak_memory_mb`` (the highest), ``stages`` (the median of
+    each), ``engine`` (the engines the step used, joined by ``/``), ``baseline``, and of the name and program as a
+    whole ``valid_runs`` (its valid records), ``results`` (the median of each number of their results; a result that
+    is no number, the text of an error, gives no figure), ``result_runs`` (how many of them hold each result),
+    ``mixed_settings`` (they differ in a setting other than :data:`RUN_FACTS`) and ``mixed_machines`` (they differ in
+    a fact of :data:`MACHINE_KEYS`), the same for every step. A row is a ``baseline`` with :data:`BASELINE_RUNS` runs
+    or more of one setting on one machine.
 
     With them the records left out: those not valid, counted by the text of each of their reasons before its colon
     (``slow disk link``; a record with two reasons counts under both); one not valid without a reason, or never
@@ -83,9 +117,11 @@ def summarise(records) -> tuple[list[dict], dict[str, int]]:
                 kind = str(reason).split(":", 1)[0].strip() or "not valid"
                 left_out[kind] = left_out.get(kind, 0) + 1
             continue
-        group = groups.setdefault((str(rec.get("name")), str(rec.get("program"))), {"runs": 0, "results": {},
-                                                                                     "steps": {}})
+        group = groups.setdefault((str(rec.get("name")), str(rec.get("program"))),
+                                  {"runs": 0, "results": {}, "steps": {}, "settings": set(), "machines": set()})
         group["runs"] += 1
+        group["settings"].add(_settings_key(rec))
+        group["machines"].add(_machine_key(rec))
         for key, value in (rec.get("results") or {}).items():
             if _is_number(value):
                 group["results"].setdefault(str(key), []).append(value)
@@ -106,13 +142,16 @@ def summarise(records) -> tuple[list[dict], dict[str, int]]:
     rows = []
     for (name, program), group in sorted(groups.items(), key=lambda item: (item[0][0], _version(item[0][1]))):
         results = {key: median(values) for key, values in group["results"].items()}
+        result_runs = {key: len(values) for key, values in group["results"].items()}
+        mixed_settings, mixed_machines = len(group["settings"]) > 1, len(group["machines"]) > 1
         for step, s in group["steps"].items():
             rows.append({"name": name, "program": program, "step": step, "engine": "/".join(s["engines"]) or None,
                          "runs": len(s["seconds"]), "seconds": median(s["seconds"]), "min": min(s["seconds"]),
                          "max": max(s["seconds"]), "peak_memory_mb": max(s["peaks"]) if s["peaks"] else None,
                          "stages": {stage: median(values) for stage, values in s["stages"].items()},
-                         "baseline": len(s["seconds"]) >= BASELINE_RUNS, "valid_runs": group["runs"],
-                         "results": results})
+                         "baseline": len(s["seconds"]) >= BASELINE_RUNS and not (mixed_settings or mixed_machines),
+                         "valid_runs": group["runs"], "results": results, "result_runs": result_runs,
+                         "mixed_settings": mixed_settings, "mixed_machines": mixed_machines})
     return rows, left_out
 
 
@@ -125,30 +164,52 @@ def _number(value) -> str:
     return f"{value:g}"
 
 
+def _baseline(row: dict) -> str:
+    """The baseline cell of a row: ``yes``, or ``not a baseline`` with why (``n < 3``, ``mixed settings``, ``mixed
+    machines``)."""
+    reasons = []
+    if row["runs"] < BASELINE_RUNS:
+        reasons.append(f"n < {BASELINE_RUNS}")
+    if row["mixed_settings"]:
+        reasons.append("mixed settings")
+    if row["mixed_machines"]:
+        reasons.append("mixed machines")
+    return "yes" if not reasons else f"not a baseline ({', '.join(reasons)})"
+
+
+def _result(row: dict, key: str) -> str:
+    """The cell of the result ``key`` of a name and program: its median, with its count when fewer than the valid
+    runs hold it (``0.002 (2 of 3)``); ``-`` when none does."""
+    if key not in row["results"]:
+        return "-"
+    text = _number(row["results"][key])
+    runs = row["result_runs"].get(key, row["valid_runs"])
+    return text if runs >= row["valid_runs"] else f"{text} ({runs} of {row['valid_runs']})"
+
+
 def render(rows, left_out: dict[str, int]) -> str:
     """``rows`` (of :func:`summarise`) as a Markdown table - seconds and stages to a tenth of a second, the memory in
-    whole MB; a row with fewer than :data:`BASELINE_RUNS` runs says :data:`NOT_A_BASELINE` -, then the table of the
-    results (one line per name and program: the median of each number over its valid runs, the keys of
-    :data:`FIRST_RESULTS` first, the others by name, ``-`` where a program has no such number) and, as its last line,
-    the count of the records left out, by reason."""
+    whole MB; a row that is no baseline says why (:func:`_baseline`) -, then the table of the results (one line per
+    name and program: the median of each number over its valid runs, with its count when only some of them hold it,
+    the keys of :data:`FIRST_RESULTS` first, the others by name, ``-`` where a program has no such number) and, as
+    its last line, the count of the records left out, by reason."""
     lines = [_line(HEAD), _line(["---"] * len(HEAD))]
     for row in rows:
         stages = ", ".join(f"{stage} {value:.1f}" for stage, value in row["stages"].items()) or "-"
         peak = "-" if row["peak_memory_mb"] is None else f"{row['peak_memory_mb']:.0f}"
         lines.append(_line([row["name"], row["program"], row["step"], row["engine"] or "-", row["runs"],
                             f"{row['seconds']:.1f}", f"{row['min']:.1f}", f"{row['max']:.1f}", peak, stages,
-                            "yes" if row["baseline"] else NOT_A_BASELINE]))
-    groups: dict[tuple[str, str], tuple[int, dict]] = {}
+                            _baseline(row)]))
+    groups: dict[tuple[str, str], dict] = {}
     for row in rows:
-        groups.setdefault((row["name"], row["program"]), (row["valid_runs"], row["results"]))
-    keys = sorted({key for _, results in groups.values() for key in results},
+        groups.setdefault((row["name"], row["program"]), row)
+    keys = sorted({key for row in groups.values() for key in row["results"]},
                   key=lambda k: (k not in FIRST_RESULTS, FIRST_RESULTS.index(k) if k in FIRST_RESULTS else 0, k))
     if keys:
         lines += ["", "Results, the median of the valid runs:", "", _line(["name", "program", "runs", *keys]),
                   _line(["---"] * (3 + len(keys)))]
-        for (name, program), (runs, results) in groups.items():
-            lines.append(_line([name, program, runs,
-                                *("-" if key not in results else _number(results[key]) for key in keys)]))
+        for (name, program), row in groups.items():
+            lines.append(_line([name, program, row["valid_runs"], *(_result(row, key) for key in keys)]))
     counted = ", ".join(f"{kind} {count}" for kind, count in sorted(left_out.items()))
     lines += ["", f"Records left out: {counted or 'none'}."]
     return "\n".join(lines)

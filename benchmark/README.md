@@ -72,34 +72,47 @@ ppg bench table DIR
 ```
 
 * `run`: `--name` (required) names the run and its records (letters, digits, `.`, `_`, `-`): say the
-  set and what is measured, e.g. `trench-28-align`. `--steps align` (the default) detects the markers
-  when targets are given, matches, aligns and, when the set has references, imports them and
-  georeferences; `all` goes on with the depth maps, the dense cloud, the model, the texture, the DEM
-  and the orthophoto: the chain of `ppg process` with its defaults, which the record writes out. Each
-  of the `--repeat` runs works in `OUT/NAME-<i>`, removed after unless `--keep`; the records go to
-  `OUT`, or to `--records DIR`. The run needs the `bench` extra (`pip install
-  "pyarchinit-photogrammetry[bench]"`: psutil, for the memory of the child).
-* `synthetic trench|ring`: writes the set in `OUT` (`OUT/photos`, `OUT/gcp.csv`) and runs it as
-  `synthetic-trench` (28 photos, all the steps, the targets detected and `gcp.csv` imported: the chain
-  of the metric tests) or `synthetic-ring` (72 photos around a mound, a GPS position in the EXIF of
-  each, the steps of `align` with the targets detected, georeferenced by those positions). The results
-  of these runs add the errors against the truth of the set, the keys that start with `truth_`: for
-  the trench `truth_control_rmse` and `truth_check_rmse` (targets 4 and 5 left out of the fit and
-  measured, as the metric tests do); for the ring `truth_target_rmse` over the `truth_targets` targets
-  found, `truth_camera_rmse`, `truth_camera_height_mean` (estimated minus true: heights that landed
-  too high or too low keep their sign) and `truth_camera_height_rmse`, against the true targets and
-  poses of the scene. The two sets are synthetic: their coordinates are made up and name no place.
+  set and what is measured, e.g. `trench-28-align`. `--steps align` (the default) matches, aligns
+  and, when the photos carry a GPS position, georeferences by those positions; `all` detects the
+  default targets (`aruco_4x4_50`) first and goes on with the depth maps, the dense cloud, the model,
+  the texture, the DEM and the orthophoto: the chain of `ppg process` with its defaults, which the
+  record writes out. A reference file or other targets are not options of `run` (the synthetic sets
+  pass them; a real set is measured as its photos come). Each of the `--repeat` runs works in
+  `OUT/NAME-<i>`, removed after unless `--keep`; the records go to `OUT`, or to `--records DIR`. The
+  run needs the `bench` extra (`pip install "pyarchinit-photogrammetry[bench]"`: psutil, for the
+  memory of the child).
+* `synthetic trench|ring`: writes the set in a folder of its own, `OUT/synthetic-trench-set/` or
+  `OUT/synthetic-ring-set/` (its photos and `gcp.csv`), which must not exist yet, and runs it as
+  `synthetic-trench` (28 photos, all the steps of `ppg process` with its defaults - the depth maps at
+  `medium`, where the metric tests build them at `high` -, the targets detected and `gcp.csv`
+  imported: the set and the georeferencing of the metric tests) or `synthetic-ring` (72 photos around
+  a mound, a GPS position in the EXIF of each, the steps of `align` with the targets detected,
+  georeferenced by those positions). The set stays after the runs, beside its records; to run the
+  same set again in the same `OUT`, delete its folder (`rm -r OUT/synthetic-trench-set`) or give
+  another `OUT`. The results of these runs add the errors against the truth of the set, the keys that
+  start with `truth_`: for the trench `truth_control_rmse` and `truth_check_rmse` (targets 4 and 5
+  left out of the fit and measured, as the metric tests do); for the ring `truth_target_rmse` over
+  the `truth_targets` targets found, `truth_camera_rmse`, `truth_camera_height_mean` (estimated minus
+  true: heights that landed too high or too low keep their sign) and `truth_camera_height_rmse`,
+  against the true targets and poses of the scene. The two sets are synthetic: their coordinates are
+  made up and name no place.
 * `table DIR`: per run, program and step the median, the least and the most of the seconds of the
-  valid runs, the highest peak memory, the median of each stage and the engine used; then the results
-  as medians per run and program; last, the records left out, counted by reason.
+  valid runs, the highest peak memory, the median of each stage and the engine; then the results as
+  medians per run and program (a result present in some of the runs only shows its count beside its
+  median: `0.002 (2 of 3)`); last, the records left out, counted by reason. The `engine` column is
+  the engine the step ran with (`classic`, `native`; `classic/native` when the runs of the row
+  differ): it is what the table of 2.0.0 compares. A row whose valid runs differ in their settings
+  (other than the version of pycolmap and the split of the pairs between the GPU and the CPU, which
+  changes from one run to the next) or in their machine (system, architecture, processor, memory)
+  says `mixed settings` or `mixed machines` and is no baseline.
 
 **What a record holds**: the name of the run, its start, the version of the program; the machine
 (system, processor, cores, memory, GPU adapters, load, battery, whether Dropbox runs); the disk of the
 photos (bus, link speed, read rate, solid state); the set (how many photos, their bytes, how many
 online-only, how many with GPS); the settings of the engine (matching and its parameters, mapper, GPU,
 version of pycolmap, `photo_cache_mb`, georeferencing method, targets); the steps (seconds, peak
-memory in MB, stages, engine); the results; the warnings; whether it is valid and why not; the error
-of a run that failed. **What a record never holds**: paths, coordinates, CRS codes, photo names, the
+memory in MB, stages, engine; for the orthophoto the counts of its photo cache: reads, hits, rereads);
+the results; the warnings; whether it is valid and why not; the error of a run that failed. **What a record never holds**: paths, coordinates, CRS codes, photo names, the
 name of the host or of the user. The text of an error is scrubbed of them before it is written, and
 a record that would still hold a path is refused. Records can be shared as they are.
 
@@ -118,5 +131,7 @@ settings, on the reference machine (Mac mini M4 Pro, 12 cores, 24 GB, memory bud
 
 **The photo cache of the orthophoto**: the photos it reads again are kept in a cache whose size is
 `PPG_PHOTO_CACHE_MB`, a whole number of megabytes, kept in the record as `settings.photo_cache_mb`
-(`null` when unset: a share of the memory of the machine). `PPG_PHOTO_CACHE_MB=0` leaves the floor of
-photos alone, which is the cache of version 1.10: that is how the 1.10 baseline is measured.
+(`null` when unset: a share of the memory of the machine). Whatever the size, the cache always holds
+a floor of photos, `max(12, 3 × workers)`, so that the workers never wait for a photo another one
+has just read. `PPG_PHOTO_CACHE_MB=0` leaves that floor alone and nothing more, which is the cache of
+version 1.10: that is how the 1.10 baseline is measured.
