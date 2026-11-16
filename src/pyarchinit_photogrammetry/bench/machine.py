@@ -13,6 +13,7 @@ import os
 import platform
 import plistlib
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -37,14 +38,41 @@ _READ_CHUNK = 4 * 2**20
 # Provider), FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS and FILE_ATTRIBUTE_OFFLINE of Windows (OneDrive, Dropbox)
 _SF_DATALESS = 0x40000000
 _WINDOWS_ONLINE_ONLY = 0x400000 | 0x1000
-# the two keys read from a device block of ioreg, searched (the lines carry tree bars in front), in either order
+# the keys read from the blocks of ioreg, searched (the lines carry tree bars in front), in either order
 _USB_PRODUCT = re.compile(r'"USB Product Name" = "([^"]*)"')
 _USB_SPEED = re.compile(r'"UsbLinkSpeed" = (\d+)')
+_BSD_NAME = re.compile(r'"BSD Name" = "([^"]*)"')
+_NODE_CLASS = re.compile(r"<class (\w+)")
+# the system tools of macOS at their fixed places: an absolute program, close_fds=False and no cwd get posix_spawn,
+# not a fork (a child made with fork dies once SpatiaLite has loaded its PROJ: see pyarchinit/database.py)
+_DARWIN_PROGRAMS = {"diskutil": "/usr/sbin/diskutil", "ioreg": "/usr/sbin/ioreg", "sysctl": "/usr/sbin/sysctl",
+                    "pmset": "/usr/bin/pmset", "pgrep": "/usr/bin/pgrep"}
+
+
+def _program(name: str, system: str) -> str | None:
+    """The absolute program for ``name``: the fixed places of macOS, ``shutil.which`` on Linux and elsewhere (None
+    when it finds nothing), the bare name on Windows (no fork there)."""
+    if system == "Darwin":
+        return _DARWIN_PROGRAMS.get(name)
+    if system == "Windows":
+        return name
+    return shutil.which(name)
 
 
 def _run(cmd: list[str], text: bool = True) -> subprocess.CompletedProcess:
-    """One system tool, its output captured; the caller catches what goes wrong (a missing tool, a timeout)."""
-    return subprocess.run(cmd, capture_output=True, text=text, close_fds=False, timeout=TOOL_TIMEOUT)
+    """One system tool, its output captured (text decoded with ``errors="replace"``: one stray byte must not cost
+    the fact); the caller catches what goes wrong (a missing tool, a timeout)."""
+    options = {"text": True, "errors": "replace"} if text else {}
+    return subprocess.run(cmd, capture_output=True, close_fds=False, timeout=TOOL_TIMEOUT, **options)
+
+
+def _tool(name: str, args: list[str], system: str, text: bool = True) -> subprocess.CompletedProcess | None:
+    """``name`` started by its absolute program (:func:`_program`) with ``args``; None, and no call, when the
+    program is missing."""
+    program = _program(name, system)
+    if program is None:
+        return None
+    return _run([program, *args], text=text)
 
 
 # --- the machine ------------------------------------------------------------------------------------------------------
@@ -53,7 +81,8 @@ def machine_facts() -> dict:
     """The machine a measurement ran on: ``system``, ``release``, ``arch`` (``platform.system``, ``release``,
     ``machine``), ``cpu`` (the model name of the processor, or None), ``cores`` (``os.cpu_count()``), ``memory_gb``
     (``float | None``, from :func:`.._env.physical_memory`), ``adapters`` (the names of the GPUs wgpu lists, without
-    the software rasterisers the program never uses unless asked by name), ``load`` (the load average of the last
+    the software rasterisers the program never uses unless asked by name; ``[]`` also when the native core is off
+    or the GPU setting is ``off``), ``load`` (the load average of the last
     minute, None where the system has none), ``on_battery`` and ``dropbox_running`` (``bool | None``: None means not
     known and warns of nothing). Never the host name, the user name or a path; never raises."""
     system = platform.system()
@@ -73,7 +102,7 @@ def _memory_gb() -> float | None:
 def _gpu_names() -> list[str]:
     """The adapters :func:`.._native.gpu_adapters` lists (in index order, as the native core gives them) whose type
     is not ``Cpu``: the rule of ``gpu_device("auto")``, a software rasteriser is no GPU. [] without the native
-    module."""
+    module, and also when the native core is off or the GPU setting is ``off`` (that function lists nothing then)."""
     try:
         adapters = _native.gpu_adapters()
     except Exception:
@@ -83,29 +112,23 @@ def _gpu_names() -> list[str]:
 
 def _cpu_name(system: str) -> str | None:
     """The model name of the processor: ``sysctl`` on macOS, ``/proc/cpuinfo`` on Linux, the registry on Windows;
-    elsewhere, or when those fail, ``platform.processor()`` (None when that is empty too)."""
+    None elsewhere or when the reader fails (never ``platform.processor()``: it starts ``uname`` by a bare name and
+    without a timeout)."""
     try:
         if system == "Darwin":
-            name = _cpu_darwin()
-        elif system == "Linux":
-            name = _cpu_linux()
-        elif system == "Windows":
-            name = _cpu_windows()
-        else:
-            name = None
+            return _cpu_darwin()
+        if system == "Linux":
+            return _cpu_linux()
+        if system == "Windows":
+            return _cpu_windows()
     except Exception:
-        name = None
-    if name:
-        return name
-    try:
-        return platform.processor() or None
-    except Exception:
-        return None
+        pass
+    return None
 
 
 def _cpu_darwin() -> str | None:
-    done = _run(["sysctl", "-n", "machdep.cpu.brand_string"])
-    return (done.stdout.strip() or None) if done.returncode == 0 else None
+    done = _tool("sysctl", ["-n", "machdep.cpu.brand_string"], "Darwin")
+    return (done.stdout.strip() or None) if done is not None and done.returncode == 0 else None
 
 
 def _cpu_linux(cpuinfo: Path = Path("/proc/cpuinfo")) -> str | None:
@@ -141,8 +164,8 @@ def _on_battery(system: str) -> bool | None:
     of sysfs on Linux, ``GetSystemPowerStatus`` on Windows; None where this cannot be told."""
     try:
         if system == "Darwin":
-            done = _run(["pmset", "-g", "batt"])
-            return _battery_from_pmset(done.stdout) if done.returncode == 0 else None
+            done = _tool("pmset", ["-g", "batt"], "Darwin")
+            return _battery_from_pmset(done.stdout) if done is not None and done.returncode == 0 else None
         if system == "Linux":
             return _battery_from_power_supply()
         if system == "Windows":
@@ -197,8 +220,8 @@ def _dropbox_running(system: str) -> bool | None:
             if "dropbox.exe" in done.stdout.lower():
                 return True
             return False if done.returncode == 0 else None
-        done = _run(["pgrep", "-ix", "dropbox"])
-        return {0: True, 1: False}.get(done.returncode)
+        done = _tool("pgrep", ["-ix", "dropbox"], system)
+        return None if done is None else {0: True, 1: False}.get(done.returncode)
     except Exception:
         return None
 
@@ -229,6 +252,38 @@ def _ioreg_blocks(text: str) -> list[str]:
         elif blocks:
             blocks[-1].append(line)
     return ["\n".join(lines) for lines in blocks]
+
+
+def parse_ioreg_devices(text: str) -> dict[str, int]:
+    """BSD name -> link speed in bit/s of every medium that sits in the subtree of a USB device, from
+    ``ioreg -r -c IOUSBHostDevice -l -w0``: a ``+-o`` line opens a node (its depth is the column of ``+-o``, its
+    class is read from ``<class ...>``), the lines up to the next node are its properties, a child is deeper than
+    its parent. A medium gets the lowest ``UsbLinkSpeed`` of the ``IOUSBHostDevice`` nodes above it (a disk behind
+    a hub goes at the slower of the two links); a name seen twice keeps the lowest. No other key is read."""
+    links: dict[str, int] = {}
+    stack: list[list] = []  # [column, class, speed] of the open nodes, outermost first
+    for line in text.splitlines():
+        if "+-o " in line:
+            column = line.index("+-o ")
+            while stack and stack[-1][0] >= column:
+                stack.pop()
+            found = _NODE_CLASS.search(line)
+            stack.append([column, found.group(1) if found else "", None])
+            continue
+        if not stack:
+            continue
+        speed = _USB_SPEED.search(line)
+        if speed is not None:
+            stack[-1][2] = int(speed.group(1))
+            continue
+        bsd = _BSD_NAME.search(line)
+        if bsd is None or not bsd.group(1):
+            continue
+        speeds = [node[2] for node in stack if node[1] == "IOUSBHostDevice" and node[2] is not None]
+        if speeds:
+            lowest = min(speeds)
+            links[bsd.group(1)] = min(lowest, links.get(bsd.group(1), lowest))
+    return links
 
 
 def parse_diskutil(plist: dict) -> dict:
@@ -273,12 +328,14 @@ def _mount_point(path: Path) -> str:
 
 
 def _darwin_disk_facts(path: Path) -> dict:
-    """``diskutil info -plist`` of the volume gives the bus and the kind of disk. For a USB disk the media name,
-    matched to the products of ``ioreg``, gives the link: on an APFS volume of an external disk it is empty on the
-    volume and on its physical store and sits on the whole disk, so the store (else the parent) of each answer is
-    asked in turn, at most three ``diskutil`` calls in all, never an identifier already asked."""
+    """``diskutil info -plist`` of the volume gives the bus and the kind of disk. For a USB disk the chain of
+    ``diskutil`` reaches the whole disk: on an APFS volume of an external disk the media name is empty on the volume
+    and on its physical store and sits on the whole disk, so the store (else the parent) of each answer is asked in
+    turn, at most three calls in all, never an identifier already asked. The link comes first by the exact route,
+    the ``UsbLinkSpeed`` of the USB device whose subtree holds the whole disk's BSD name (``ioreg -r``); when that
+    gives nothing, by name: the media name matched to the products of the plain USB list (``ioreg -p``)."""
     facts = {"bus": None, "link_mbps": None, "solid_state": None}
-    target, asked, media = _mount_point(path), set(), None
+    target, asked, media, whole = _mount_point(path), set(), None, None
     for step in range(3):
         plist = _diskutil_info(target)
         asked.add(target)
@@ -289,21 +346,22 @@ def _darwin_disk_facts(path: Path) -> dict:
             facts["bus"], facts["solid_state"] = info["bus"], info["solid_state"]
             if info["bus"] != "USB":
                 return facts
-        media = info["media"]
+        media, whole = info["media"], info["parent"] or target
         if media:
             break
         target = info["store"] or info["parent"]
         if target is None or target in asked:
             break
-    if not media:
-        return facts
-    # a product matches when its name starts with the media name or the media name starts with it, case ignored;
-    # of several matches (a reader and its disk) the lowest speed, in Mb/s
-    key = media.lower()
-    matches = [bits for name, bits in _ioreg_usb_speeds().items()
-               if name and (name.lower().startswith(key) or key.startswith(name.lower()))]
-    if matches:
-        facts["link_mbps"] = min(matches) // 1_000_000
+    bits = _ioreg_links().get(whole) if whole else None
+    if bits is None and media:
+        # a product matches when its name holds the media name or the media name holds it, case ignored (a disk
+        # may be named by one word of its product name); of several matches (a reader and its disk) the lowest
+        key = media.lower()
+        matches = [speed for name, speed in _ioreg_usb_speeds().items()
+                   if name and (name.lower() in key or key in name.lower())]
+        bits = min(matches) if matches else None
+    if bits is not None:
+        facts["link_mbps"] = bits // 1_000_000
     return facts
 
 
@@ -311,8 +369,8 @@ def _diskutil_info(target: str) -> dict | None:
     """The plist ``diskutil info -plist`` gives for a mount point or a disk identifier, read as bytes; None when
     the tool is missing, fails or answers something that is not a plist."""
     try:
-        done = _run(["diskutil", "info", "-plist", target], text=False)
-        if done.returncode != 0:
+        done = _tool("diskutil", ["info", "-plist", target], "Darwin", text=False)
+        if done is None or done.returncode != 0:
             return None
         plist = plistlib.loads(done.stdout)
     except Exception:
@@ -320,12 +378,23 @@ def _diskutil_info(target: str) -> dict | None:
     return plist if isinstance(plist, dict) else None
 
 
+def _ioreg_links() -> dict[str, int]:
+    """BSD name -> link speed from the subtrees of the USB devices (the exact route)."""
+    return _ioreg(["-r", "-c", "IOUSBHostDevice", "-l", "-w0"], parse_ioreg_devices)
+
+
 def _ioreg_usb_speeds() -> dict[str, int]:
+    """Product name -> link speed from the plain USB list (the route by name)."""
+    return _ioreg(["-p", "IOUSB", "-l", "-w0"], parse_ioreg_usb)
+
+
+def _ioreg(args: list[str], parse) -> dict[str, int]:
+    """``ioreg`` with ``args`` through ``parse``; {} when the tool is missing, fails or cannot be parsed."""
     try:
-        done = _run(["ioreg", "-p", "IOUSB", "-l", "-w0"])
+        done = _tool("ioreg", args, "Darwin")
+        return parse(done.stdout) if done is not None and done.returncode == 0 else {}
     except Exception:
         return {}
-    return parse_ioreg_usb(done.stdout) if done.returncode == 0 else {}
 
 
 def _linux_block_facts(major: int, minor: int, sys_root: Path = Path("/sys")) -> dict:
@@ -385,9 +454,10 @@ def read_rate(files: list[Path], max_bytes: int = READ_RATE_MAX_BYTES) -> float 
     """MB/s at which the disk gives the local files of the list, read past the system cache (``F_NOCACHE`` on
     macOS, ``posix_fadvise(POSIX_FADV_DONTNEED)`` on Linux) 4 MiB at a time, at most ``max_bytes`` in all, only
     the reads timed. The figure is an upper bound of what the disk gives: a file still in the system cache reads
-    faster. None on Windows and on any system other than macOS and Linux, when no file of the list is local (a file
-    :func:`is_online_only` says is online-only is never opened), on any ``OSError``, when fewer than
-    ``READ_RATE_MIN_BYTES`` were read, and when no time passed."""
+    faster. None on Windows and on any system other than macOS and Linux, when the system could not be asked to
+    read past the cache, when no file of the list is local (a file :func:`is_online_only` says is online-only is
+    never opened), on any ``OSError``, when fewer than ``READ_RATE_MIN_BYTES`` were read, and when no time
+    passed."""
     system = platform.system()
     if system not in ("Darwin", "Linux"):
         return None
@@ -400,7 +470,8 @@ def read_rate(files: list[Path], max_bytes: int = READ_RATE_MAX_BYTES) -> float 
                 continue
             fd = os.open(file, os.O_RDONLY)
             try:
-                _read_past_the_cache(fd, system)
+                if not _read_past_the_cache(fd, system):
+                    return None
                 while total < max_bytes:
                     started = time.perf_counter()
                     chunk = os.read(fd, min(_READ_CHUNK, max_bytes - total))
@@ -417,12 +488,16 @@ def read_rate(files: list[Path], max_bytes: int = READ_RATE_MAX_BYTES) -> float 
     return total / 1e6 / seconds
 
 
-def _read_past_the_cache(fd: int, system: str) -> None:
-    """Before the reads: ``F_NOCACHE`` on the open file (macOS), the cached pages dropped (Linux)."""
+def _read_past_the_cache(fd: int, system: str) -> bool:
+    """Before the reads: ``F_NOCACHE`` on the open file (macOS), the cached pages dropped (Linux). False when the
+    system cannot be asked: a figure read from the cache would say nothing about the disk."""
     if system == "Darwin" and fcntl is not None and hasattr(fcntl, "F_NOCACHE"):
         fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
-    elif system == "Linux" and hasattr(os, "posix_fadvise"):
+        return True
+    if system == "Linux" and hasattr(os, "posix_fadvise"):
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        return True
+    return False
 
 
 def photo_set_facts(photos: list[Path]) -> dict:

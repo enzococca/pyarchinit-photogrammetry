@@ -47,6 +47,76 @@ IOREG_TREE = '''
   |       }
 '''
 
+# ``ioreg -r -c IOUSBHostDevice -l -w0``: the subtree of every USB device, children two columns deeper, the properties
+# right after each ``+-o`` line; a disk behind a hub sits inside the hub's subtree; the media of a disk carry its BSD
+# names (the whole disk, its partitions, the APFS disks synthesized on it)
+IOREG_DEVICES = '''
++-o Travel Hub 4P@00100000  <class IOUSBHostDevice, id 0x100000300, registered, matched, active>
+  | {
+  |   "UsbLinkSpeed" = 5000000000
+  |   "USB Serial Number" = "0000"
+  |   "USB Product Name" = "Travel Hub 4P"
+  | }
+  |
+  +-o Field Disk 9Z@00110000  <class IOUSBHostDevice, id 0x100000400, registered, matched, active>
+    | {
+    |   "USB Product Name" = "Field Disk 9Z"
+    |   "USB Serial Number" = "0000"
+    |   "UsbLinkSpeed" = 480000000
+    | }
+    |
+    +-o Field Disk 9Z@00110000  <class IOUSBHostInterface, id 0x100000401, registered, matched, active>
+      | {
+      |   "bInterfaceNumber" = 0
+      | }
+      |
+      +-o IOUSBMassStorageInterfaceNub@00110000  <class IOUSBMassStorageInterfaceNub, id 0x100000402, registered>
+        +-o Field Disk 9Z Media  <class IOMedia, id 0x100000410, registered, matched, active>
+          | {
+          |   "BSD Name" = "disk7"
+          |   "Whole" = Yes
+          | }
+          |
+          +-o Field Disk 9Z Media  <class IOMedia, id 0x100000411, registered, matched, active>
+            | {
+            |   "BSD Name" = "disk7s1"
+            |   "Whole" = No
+            | }
+            |
+            +-o AppleAPFSMedia  <class AppleAPFSMedia, id 0x100000420, registered, matched, active>
+                {
+                  "BSD Name" = "disk8"
+                }
+
++-o Zip Box Vega@00200000  <class IOUSBHostDevice, id 0x100000500, registered, matched, active>
+  | {
+  |   "USB Product Name" = "Zip Box Vega"
+  |   "UsbLinkSpeed" = 10000000000
+  | }
+  |
+  +-o Zip Box Vega Media  <class IOMedia, id 0x100000510, registered, matched, active>
+      {
+        "BSD Name" = "disk5"
+      }
+
++-o Slow Hub 2P@00300000  <class IOUSBHostDevice, id 0x100000600, registered, matched, active>
+  | {
+  |   "UsbLinkSpeed" = 480000000
+  |   "USB Product Name" = "Slow Hub 2P"
+  | }
+  |
+  +-o Fast Stick@00310000  <class IOUSBHostDevice, id 0x100000700, registered, matched, active>
+    | {
+    |   "UsbLinkSpeed" = 5000000000
+    |   "USB Product Name" = "Fast Stick"
+    | }
+    |
+    +-o Fast Stick Media  <class IOMedia, id 0x100000710, registered, matched, active>
+        {
+          "BSD Name" = "disk9"
+        }
+'''
+
 # ``diskutil info -plist`` of an APFS volume on an external disk: the media name is empty on the volume and on its
 # physical store and sits on the whole disk, two steps up (the shapes of a real disk, the names made up)
 VOLUME = {"BusProtocol": "USB", "SolidState": True, "MediaName": "",
@@ -58,18 +128,20 @@ INTERNAL = {"BusProtocol": "Apple Fabric", "SolidState": True, "MediaName": ""}
 NONE = {"bus": None, "link_mbps": None, "solid_state": None}
 
 
-def _tools(monkeypatch, volume=VOLUME, ioreg=IOREG_TREE, **plists):
+def _tools(monkeypatch, volume=VOLUME, ioreg=IOREG_TREE, devices=IOREG_DEVICES, **plists):
     """A Darwin whose ``subprocess.run`` answers ``diskutil`` by the identifier asked (anything that is not a known
-    identifier is the volume) and ``ioreg`` with a text; every call is recorded (command, keyword arguments)."""
+    identifier is the volume), ``ioreg -r`` (the device tree) with ``devices`` and ``ioreg -p`` with ``ioreg``;
+    every call is recorded (command, keyword arguments); any other tool is missing."""
     answers = {"disk7s1": STORE, "disk7": WHOLE, **plists}
     calls = []
 
     def run(cmd, **kwargs):
         calls.append((list(cmd), kwargs))
-        if cmd[0] == "diskutil":
+        name = Path(cmd[0]).name
+        if name == "diskutil":
             return subprocess.CompletedProcess(cmd, 0, plistlib.dumps(answers.get(cmd[-1], volume)), b"")
-        if cmd[0] == "ioreg":
-            return subprocess.CompletedProcess(cmd, 0, ioreg, "")
+        if name == "ioreg":
+            return subprocess.CompletedProcess(cmd, 0, devices if "-r" in cmd else ioreg, "")
         raise FileNotFoundError(cmd[0])
 
     monkeypatch.setattr(machine.platform, "system", lambda: "Darwin")
@@ -115,6 +187,20 @@ def test_a_product_seen_twice_keeps_the_lowest_speed_and_a_block_needs_both_keys
     assert all(isinstance(k, str) and isinstance(v, int) for k, v in machine.parse_ioreg_usb(IOREG_TREE).items())
 
 
+def test_the_usb_link_is_read_per_bsd_name_from_the_device_tree():
+    """The exact route: a BSD name gets the lowest ``UsbLinkSpeed`` of the USB devices its subtree is in (a disk
+    behind a slow hub goes at the hub's speed); every medium of a disk is listed, the synthesized ones too."""
+    assert machine.parse_ioreg_devices(IOREG_DEVICES) == {"disk7": 480_000_000, "disk7s1": 480_000_000,
+                                                          "disk8": 480_000_000, "disk5": 10_000_000_000,
+                                                          "disk9": 480_000_000}
+    assert machine.parse_ioreg_devices("") == {}
+    assert machine.parse_ioreg_devices(IOREG_TREE) == {}  # no medium in the plain list
+    # a BSD name outside any USB device (a device without a speed) is not listed
+    orphan = ('+-o Root  <class IORegistryEntry, id 0x1>\n  +-o Disk  <class IOMedia, id 0x2>\n'
+              '    "BSD Name" = "disk1"\n')
+    assert machine.parse_ioreg_devices(orphan) == {}
+
+
 def test_diskutil_answers_are_read_into_five_keys():
     assert machine.parse_diskutil(VOLUME) == {"bus": "USB", "solid_state": True, "store": "disk7s1", "media": None,
                                               "parent": "disk8"}
@@ -127,51 +213,114 @@ def test_diskutil_answers_are_read_into_five_keys():
 
 # --- disk_facts -------------------------------------------------------------------------------------------------------
 
+def _names(calls):
+    return [Path(cmd[0]).name for cmd, _ in calls]
+
+
 def test_the_link_of_an_external_disk_is_found_two_steps_up(monkeypatch, tmp_path):
+    """The chain of diskutil reaches the whole disk; its BSD name in the device tree gives the link (the exact route:
+    one ioreg call, the plain list is not asked)."""
     calls = _tools(monkeypatch)
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": 480, "solid_state": True}
-    assert [cmd[0] for cmd, _ in calls] == ["diskutil", "diskutil", "diskutil", "ioreg"]
-    diskutil = [cmd for cmd, _ in calls if cmd[0] == "diskutil"]
-    assert [cmd[:3] for cmd in diskutil] == [["diskutil", "info", "-plist"]] * 3
+    assert _names(calls) == ["diskutil", "diskutil", "diskutil", "ioreg"]
+    diskutil = [cmd for cmd, _ in calls if Path(cmd[0]).name == "diskutil"]
+    assert [cmd[1:3] for cmd in diskutil] == [["info", "-plist"]] * 3
     assert [cmd[-1] for cmd in diskutil][1:] == ["disk7s1", "disk7"]  # the store first, never disk8
-    assert calls[3][0] == ["ioreg", "-p", "IOUSB", "-l", "-w0"]
+    assert calls[3][0][1:] == ["-r", "-c", "IOUSBHostDevice", "-l", "-w0"]
     for cmd, kwargs in calls:
         assert kwargs["capture_output"] is True and kwargs["close_fds"] is False and kwargs["timeout"] == 20
-        assert bool(kwargs.get("text")) is (cmd[0] == "ioreg")  # the plist of diskutil is read as bytes
+        assert "cwd" not in kwargs
+        if Path(cmd[0]).name == "ioreg":
+            assert kwargs["text"] is True and kwargs["errors"] == "replace"
+        else:  # the plist of diskutil is read as bytes: neither text nor errors (which would turn text on)
+            assert not kwargs.get("text") and "errors" not in kwargs
+
+
+def test_every_tool_is_started_by_an_absolute_program(monkeypatch, tmp_path):
+    """An absolute program with ``close_fds=False`` and no ``cwd`` gets posix_spawn, not a fork (a fork dies once
+    SpatiaLite has loaded its PROJ: the convention of the program). macOS: fixed places; Linux: ``shutil.which``,
+    and no call when it finds nothing."""
+    calls = _tools(monkeypatch)
+    machine.disk_facts(tmp_path)
+    machine.machine_facts()
+    assert calls and all(os.path.isabs(cmd[0]) for cmd, _ in calls)
+    assert set(_names(calls)) == {"diskutil", "ioreg", "sysctl", "pmset", "pgrep"}
+    assert all("cwd" not in kwargs for _, kwargs in calls)
+    calls.clear()
+    monkeypatch.setattr(machine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(machine.shutil, "which", lambda name: "/usr/bin/" + name)
+    machine.machine_facts()
+    assert calls and all(os.path.isabs(cmd[0]) for cmd, _ in calls) and set(_names(calls)) == {"pgrep"}
+    calls.clear()
+    monkeypatch.setattr(machine.shutil, "which", lambda name: None)
+    assert machine._dropbox_running("Linux") is None and calls == []
 
 
 def test_an_internal_disk_has_no_link_speed_and_ioreg_is_not_asked(monkeypatch, tmp_path):
     calls = _tools(monkeypatch, volume=INTERNAL)
     assert machine.disk_facts(tmp_path) == {"bus": "Apple Fabric", "link_mbps": None, "solid_state": True}
-    assert [cmd[0] for cmd, _ in calls] == ["diskutil"]
+    assert _names(calls) == ["diskutil"]
 
 
-def test_the_media_name_is_matched_to_the_product_by_prefix_case_ignored(monkeypatch, tmp_path):
-    # the media name starts with the product name
-    _tools(monkeypatch, disk7=dict(WHOLE, MediaName="FIELD DISK 9Z MEDIA"))
+def test_the_link_falls_back_to_the_product_name_when_the_device_tree_has_no_such_disk(monkeypatch, tmp_path):
+    """Without the whole disk in the device tree (or with a tree that cannot be read) the plain USB list is asked and
+    the media name is matched to a product by containment either way, case ignored."""
+    calls = _tools(monkeypatch, devices=IOREG_DEVICES.replace('"disk7"', '"disk2"'))
+    assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": 480, "solid_state": True}
+    assert _names(calls) == ["diskutil"] * 3 + ["ioreg", "ioreg"]
+    assert calls[3][0][1:] == ["-r", "-c", "IOUSBHostDevice", "-l", "-w0"]
+    assert calls[4][0][1:] == ["-p", "IOUSB", "-l", "-w0"]
+    # the device tree cannot be read: the same fallback
+    calls = _tools(monkeypatch)
+    real = machine.subprocess.run
+
+    def run(cmd, **kwargs):
+        if "-r" in cmd:
+            calls.append((list(cmd), kwargs))  # recorded, as the stand-in would have, then the tool hangs
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
     assert machine.disk_facts(tmp_path)["link_mbps"] == 480
-    # the product name starts with the media name; of several matches the lowest speed
+    assert _names(calls) == ["diskutil"] * 3 + ["ioreg", "ioreg"]
+
+
+def test_the_media_name_is_matched_to_the_product_by_containment_case_ignored(monkeypatch, tmp_path):
+    # the case of the review: a media name of four characters inside a product name of three words
+    _tools(monkeypatch, devices="", ioreg=IOREG_TREE.replace("Travel Hub 4P", "Zip Box Vega"),
+           disk7=dict(WHOLE, MediaName="Vega"))
+    assert machine.disk_facts(tmp_path)["link_mbps"] == 5000
+    # the product name inside the media name
+    _tools(monkeypatch, devices="", disk7=dict(WHOLE, MediaName="FIELD DISK 9Z MEDIA"))
+    assert machine.disk_facts(tmp_path)["link_mbps"] == 480
+    # the media name inside two product names: the lowest speed
     two = IOREG_TREE.replace("Travel Hub 4P", "Field Disk 9Z Reader")
-    _tools(monkeypatch, ioreg=two, disk7=dict(WHOLE, MediaName="field disk"))
+    _tools(monkeypatch, devices="", ioreg=two, disk7=dict(WHOLE, MediaName="field disk"))
     assert machine.disk_facts(tmp_path)["link_mbps"] == 480
     # no match, and a product without a name matches nothing
-    _tools(monkeypatch, disk7=dict(WHOLE, MediaName="Other Disk"))
+    _tools(monkeypatch, devices="", disk7=dict(WHOLE, MediaName="Other Disk"))
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": None, "solid_state": True}
     nameless = IOREG.replace('"Field Disk 9Z"', '""')
-    _tools(monkeypatch, ioreg=nameless, disk7=dict(WHOLE, MediaName="Other Disk"))
+    _tools(monkeypatch, devices="", ioreg=nameless, disk7=dict(WHOLE, MediaName="Other Disk"))
     assert machine.disk_facts(tmp_path)["link_mbps"] is None
 
 
 def test_the_chain_of_diskutil_stops_at_three_calls_or_at_an_identifier_already_asked(monkeypatch, tmp_path):
-    # the whole disk has no media name either and names a further parent: three calls, no ioreg, no link
-    calls = _tools(monkeypatch, disk7={"MediaName": "", "ParentWholeDisk": "disk6"})
+    # the whole disk has no media name either and names a further parent: three calls; the device tree is asked for
+    # that parent, the plain list is not (no media name to match)
+    calls = _tools(monkeypatch, devices="", disk7={"MediaName": "", "ParentWholeDisk": "disk6"})
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": None, "solid_state": True}
-    assert [cmd[0] for cmd, _ in calls] == ["diskutil"] * 3
+    assert _names(calls) == ["diskutil"] * 3 + ["ioreg"]
+    # the same whole disk in the device tree: the exact route needs no media name
+    calls = _tools(monkeypatch, devices=IOREG_DEVICES.replace('"disk5"', '"disk6"'),
+                   disk7={"MediaName": "", "ParentWholeDisk": "disk6"})
+    assert machine.disk_facts(tmp_path)["link_mbps"] == 10000
     # a volume without a store whose parent names itself: two calls
-    calls = _tools(monkeypatch, volume={"BusProtocol": "USB", "SolidState": False, "ParentWholeDisk": "disk8"},
+    calls = _tools(monkeypatch, devices="", volume={"BusProtocol": "USB", "SolidState": False,
+                                                    "ParentWholeDisk": "disk8"},
                    disk8={"MediaName": "", "ParentWholeDisk": "disk8"})
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": None, "solid_state": False}
-    assert [cmd[-1] for cmd, _ in calls] == [calls[0][0][-1], "disk8"]
+    assert [cmd[-1] for cmd, _ in calls][:2] == [calls[0][0][-1], "disk8"] and _names(calls)[2:] == ["ioreg"]
     # a diskutil that fails on the store keeps what the volume said
     calls = _tools(monkeypatch)
     real = machine.subprocess.run
@@ -240,12 +389,32 @@ def test_on_linux_the_block_device_is_the_one_of_the_path(monkeypatch, tmp_path)
 
 
 def test_disk_facts_of_a_folder_of_this_computer(tmp_path):
-    """The real tools, on the internal disk the test folder is on: the three keys, nothing raised."""
+    """The real tools, on the internal disk the test folder is on: the three keys, nothing raised; on macOS diskutil
+    answers for the mount point of the folder, so the bus is known."""
     facts = machine.disk_facts(tmp_path)
     assert set(facts) == {"bus", "link_mbps", "solid_state"}
     assert facts["bus"] is None or isinstance(facts["bus"], str)
     assert facts["link_mbps"] is None or isinstance(facts["link_mbps"], int)
     assert facts["solid_state"] in (True, False, None)
+    if platform.system() == "Darwin":
+        assert isinstance(facts["bus"], str) and facts["bus"]
+
+
+def test_the_mount_point_of_a_folder_is_a_mount_point_above_it(tmp_path):
+    real = os.path.realpath(tmp_path)
+    point = machine._mount_point(tmp_path)
+    assert os.path.ismount(point)
+    assert real == point or real.startswith(point.rstrip(os.sep) + os.sep)
+    assert machine._mount_point(tmp_path / "missing" / "deeper") == point
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a symbolic link")
+def test_the_mount_point_is_found_through_a_symlink(tmp_path):
+    target = tmp_path / "real"
+    target.mkdir()
+    os.symlink(target, tmp_path / "link")
+    assert machine._mount_point(tmp_path / "link") == machine._mount_point(target)
+    assert machine._mount_point(tmp_path / "link" / "deeper") == machine._mount_point(target)
 
 
 # --- online-only photos -----------------------------------------------------------------------------------------------
@@ -292,7 +461,19 @@ def test_the_read_rate_needs_at_least_8_mib_of_local_files(tmp_path):
         assert rate is None
     assert machine.read_rate([big], max_bytes=4 * 2**20) is None  # capped below the least it accepts
     assert machine.read_rate([tmp_path / "missing.bin"]) is None  # an OSError
-    assert machine.read_rate([tmp_path]) is None  # a folder: an OSError of os.read
+    # a folder: on APFS it reports st_blocks == 0, so is_online_only skips it; on Linux os.read raises an OSError
+    assert machine.read_rate([tmp_path]) is None
+
+
+def test_the_read_rate_is_none_when_the_cache_cannot_be_bypassed(monkeypatch, tmp_path):
+    """A figure read from the cache would say nothing about the disk: None rather than a wrong figure."""
+    big = _write(tmp_path / "big.bin", 9 * 2**20)
+    monkeypatch.setattr(machine.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(machine, "fcntl", None)
+    assert machine.read_rate([big]) is None
+    monkeypatch.setattr(machine.platform, "system", lambda: "Linux")
+    monkeypatch.delattr(machine.os, "posix_fadvise", raising=False)
+    assert machine.read_rate([big]) is None
 
 
 def test_the_read_rate_never_opens_an_online_only_file(monkeypatch, tmp_path):
@@ -364,7 +545,8 @@ def test_the_machine_facts_name_no_host_no_user_no_path():
     assert set(facts) == {"system", "release", "arch", "cpu", "cores", "memory_gb", "adapters", "load",
                           "on_battery", "dropbox_running"}
     text = json.dumps(facts)
-    assert str(Path.home()) not in text and socket.gethostname() not in text
+    assert json.dumps(str(Path.home()))[1:-1] not in text  # as JSON writes it (Windows doubles the backslashes)
+    assert socket.gethostname() not in text
     if _user_name():
         assert _user_name() not in text
     assert facts["system"] == platform.system() and facts["release"] == platform.release()
@@ -400,8 +582,16 @@ def test_the_memory_is_in_gb_or_none(monkeypatch):
 
 
 def test_the_cpu_name_per_system(monkeypatch, tmp_path):
-    monkeypatch.setattr(machine.subprocess, "run", lambda cmd, **k: _completed(cmd, 0, "Example CPU 12-Core\n"))
+    seen = []
+
+    def sysctl(cmd, **kwargs):
+        seen.append(cmd)
+        return _completed(cmd, 0, "Example CPU 12-Core\n")
+
+    monkeypatch.setattr(machine.subprocess, "run", sysctl)
     assert machine._cpu_name("Darwin") == "Example CPU 12-Core"
+    assert len(seen) == 1 and Path(seen[0][0]).name == "sysctl" and os.path.isabs(seen[0][0])
+    assert seen[0][1:] == ["-n", "machdep.cpu.brand_string"]
     cpuinfo = tmp_path / "cpuinfo"
     cpuinfo.write_text("processor\t: 0\nvendor_id\t: Example\nmodel name\t: Example CPU @ 3.0GHz\n"
                        "processor\t: 1\nmodel name\t: Example CPU @ 3.0GHz\n")
@@ -410,15 +600,13 @@ def test_the_cpu_name_per_system(monkeypatch, tmp_path):
     assert machine._cpu_linux(tmp_path / "no-model") is None
     if sys.platform == "win32":
         assert isinstance(machine._cpu_windows(), str)
-    # elsewhere, or when the tool fails: platform.processor(), None when that is empty too
-    monkeypatch.setattr(machine.platform, "processor", lambda: "Fallback CPU")
-    assert machine._cpu_name("Plan9") == "Fallback CPU"
-    monkeypatch.setattr(machine.subprocess, "run", lambda cmd, **k: _completed(cmd, 1, ""))
-    assert machine._cpu_name("Darwin") == "Fallback CPU"
-    monkeypatch.setattr(machine, "_cpu_linux", _raising(OSError("no cpuinfo")))
-    assert machine._cpu_name("Linux") == "Fallback CPU"
-    monkeypatch.setattr(machine.platform, "processor", lambda: "")
+    # elsewhere, or when the reader fails: None (no platform.processor(), which starts uname by a bare name)
     assert machine._cpu_name("Plan9") is None
+    monkeypatch.setattr(machine.subprocess, "run", lambda cmd, **k: _completed(cmd, 1, ""))
+    assert machine._cpu_name("Darwin") is None
+    monkeypatch.setattr(machine, "_cpu_linux", _raising(OSError("no cpuinfo")))
+    assert machine._cpu_name("Linux") is None
+    assert machine._cpu_name("Windows") is None or sys.platform == "win32"
 
 
 def test_the_load_is_none_where_the_system_has_none(monkeypatch):
@@ -496,7 +684,9 @@ def test_dropbox_running_per_system(monkeypatch):
     for code, expected in ((0, True), (1, False), (2, None), (3, None)):
         monkeypatch.setattr(machine.subprocess, "run", pgrep(code))
         assert machine._dropbox_running("Darwin") is expected
-    assert seen == [["pgrep", "-ix", "dropbox"]] * 4
+    assert [cmd[1:] for cmd in seen] == [["-ix", "dropbox"]] * 4
+    assert all(Path(cmd[0]).name == "pgrep" and os.path.isabs(cmd[0]) for cmd in seen)
+    monkeypatch.setattr(machine.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(machine.subprocess, "run", _raising(FileNotFoundError("pgrep")))
     assert machine._dropbox_running("Linux") is None
     # Windows: tasklist
@@ -526,7 +716,6 @@ def test_the_machine_facts_never_raise(monkeypatch):
     monkeypatch.setattr(machine._native, "gpu_adapters", failing)
     monkeypatch.setattr(machine._env, "physical_memory", failing)
     monkeypatch.setattr(machine.os, "getloadavg", failing, raising=False)
-    monkeypatch.setattr(machine.platform, "processor", lambda: "")
     facts = machine.machine_facts()
     assert facts["adapters"] == [] and facts["memory_gb"] is None and facts["load"] is None
     assert facts["cpu"] is None and facts["on_battery"] is None and facts["dropbox_running"] is None
