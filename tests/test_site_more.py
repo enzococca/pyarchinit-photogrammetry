@@ -4,6 +4,7 @@ what plugins add. Synthetic data only: the trench of testing.synthetic."""
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import struct
@@ -13,7 +14,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from test_site import SECRET, Browser, _glb, _leaves, _serving, _with_drawings, find_browser
+from test_site import (ACCOUNTS, PEOPLE, SECRET, Browser, _glb, _leaves, _people_in, _serving, _with_drawings,
+                       find_browser)
 
 GPS_PICTURE_TEXT = "Fotocamera di prova"
 
@@ -21,7 +23,8 @@ GPS_PICTURE_TEXT = "Fotocamera di prova"
 # ------------------------------------------------------------------------------------------------ the project
 def _section(ch, origin):
     """A section across the synthetic trench at x = 2 m, seen from the west, with a spot height and a unit drawn
-    on it, as the window stores them (``(u, v)`` of the section)."""
+    on it, as the window stores them (``(u, v)`` of the section), with the names of who drew, recorded and
+    compiled them and the accounts that wrote them."""
     from shapely.geometry import box
 
     from pyarchinit_photogrammetry.engine import elevation as E
@@ -35,8 +38,12 @@ def _section(ch, origin):
     frames = ch.meta.setdefault("drawings", {}).setdefault("frames", {})
     frames[entry["id"]] = {
         "units": [{"wkt": box(um - 0.2, vm - 0.1, um + 0.2, vm + 0.1).wkt, "us": "7", "tipo": "US",
-                   "note": str(Path.home() / SECRET)}],
-        "quote": [{"u": um, "v": vm, "quota_q": vm, "us_q": "7"}]}
+                   "note": str(Path.home() / SECRET), "disegnatore": PEOPLE["disegnatore"],
+                   "Compilatore": PEOPLE["compilatore"], "last_modified_by": ACCOUNTS["last_modified_by"],
+                   "attributes": {"schedatore": PEOPLE["schedatore"], "responsabile": PEOPLE["responsabile"],
+                                  "created_by": ACCOUNTS["created_by"], "periodo": "II"}}],
+        "quote": [{"u": um, "v": vm, "quota_q": vm, "us_q": "7", "disegnatore": PEOPLE["disegnatore"],
+                   "draa": PEOPLE["draa"], "editing_by": ACCOUNTS["editing_by"]}]}
     return entry
 
 
@@ -71,7 +78,8 @@ class Finds:
                  {"type": "Feature", "geometry": {"type": "Point", "coordinates": [cx + 0.1, cy, z]},
                   "properties": {"n": 1, "classe": "anfora", "_private": "x", "path": str(Path.home() / SECRET)}},
                  {"type": "Feature", "geometry": {"type": "Point", "coordinates": [cx - 0.1, cy, z]},
-                  "properties": {"n": 2, "classe": "moneta"}}]},
+                  "properties": {"n": 2, "classe": "moneta", "Disegnatore": PEOPLE["disegnatore"],
+                                 "lastModifi": ACCOUNTS["last_modified_by"]}}]},
              "colour": "#1f77b4",
              "legend": {"field": "classe", "items": [{"value": "anfora", "title": {"it": "Anfore", "en": "Amphorae"},
                                                       "colour": "#d62728"},
@@ -81,7 +89,8 @@ class Finds:
              "columns": [{"key": "n", "title": "N."}, {"key": "descrizione", "title": {"it": "Descrizione",
                                                                                       "en": "Description"}}],
              "rows": [{"n": 1, "descrizione": "Anfora", "image": str(self.picture)},
-                      {"n": 2, "descrizione": "Moneta"}]},
+                      {"n": 2, "descrizione": "Moneta", "nomeCompil": PEOPLE["nome_compilatore"],
+                       "scheda": {"team_members": [PEOPLE["team_members"]], "updated_by": ACCOUNTS["updated_by"]}}]},
             {"kind": "html", "id": "note", "title": "Note",
              "html": '<h3>Note di scavo</h3><p onclick="alert(1)">Testo <a href="javascript:alert(1)">x</a> '
                      '<a href="https://example.org/">y</a></p><script>alert(2)</script><style>p{}</style>'
@@ -93,7 +102,7 @@ class Finds:
 
 
 def _broken(chunk):
-    raise RuntimeError("the plugin fell")
+    raise RuntimeError(f"the plugin fell on the record of {PEOPLE['responsabile_scheda']}")
 
 
 class OnElevation:
@@ -328,7 +337,8 @@ def test_plugin_contributions_on_the_site(full_site):
         assert bad not in page, bad
     assert re.search(r'<img src="note-1\.jpg">', page) and (site / "data/plugins/finds-test/note-1.jpg").exists()
     notes = manifest["build"]["notes"]
-    assert any("rotto" in n and "the plugin fell" in n for n in notes)
+    assert any("rotto" in n and "RuntimeError" in n and "see the log" in n for n in notes)
+    assert not any("the plugin fell" in n for n in notes)  # what the error says stays on the computer
     assert any("finds-test" in n and "'map'" in n for n in notes)
 
 
@@ -461,6 +471,227 @@ def test_a_provider_of_the_first_form_is_called_with_the_chunk_alone(tmp_path):
     assert rows == [{"a": {"it": "uno", "en": "one"}}]
 
 
+def test_what_a_plugin_gives_goes_out_without_the_names_of_people(tmp_path):
+    """A plugin gives what it read of the units, the names of people and the accounts of who wrote the records
+    included: they are left out of the features of a layer, of its legend and of the titles of its fields, of the
+    columns and of the rows of a table - whatever the case of the name of the field - and the rest goes out as
+    given."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    def feature(**properties):
+        return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [1.0, 2.0]},
+                "properties": properties}
+
+    def provider(chunk):
+        return [
+            {"kind": "layer", "id": "persone", "title": "Unita'",
+             "features": [feature(us="4", Disegnatore=PEOPLE["disegnatore"], Compilatore=PEOPLE["compilatore"],
+                                  last_modified_by=ACCOUNTS["last_modified_by"],
+                                  scheda={"schedatore": PEOPLE["schedatore"], "Responsabile": PEOPLE["responsabile"],
+                                          "created_by": ACCOUNTS["created_by"], "anno": 2026})],
+             "legend": {"field": "Disegnatore", "items": [{"value": PEOPLE["disegnatore"], "colour": "#112233",
+                                                          "title": PEOPLE["disegnatore"]}]},
+             "fields": {"us": "US", "Disegnatore": "Disegnato da",
+                        "direttore_us": {"it": "Direttore", "en": "Director"},
+                        "nome_compilatore": "Compilato da", "updated_by": "Aggiornato da"}},
+            {"kind": "layer", "id": "periodi", "title": "Periodi",
+             "features": [feature(us="4", periodo="II")],
+             "legend": {"field": "periodo", "items": [{"value": "II", "title": "Secondo", "colour": "#445566"}]},
+             "fields": {"periodo": "Periodo"}},
+            {"kind": "table", "id": "schede", "title": "Schede",
+             "columns": ["us", {"key": "responsabile_us", "title": "Responsabile"}, " Schedatore",
+                         {"key": "responsabile_scheda", "title": "Curatore"}, "editing_by"],
+             "rows": [{"us": "4", "responsabile_us": PEOPLE["responsabile_us"],
+                       " Schedatore": {"it": PEOPLE["schedatore"], "en": PEOPLE["schedatore"]},
+                       "responsabile_scheda": PEOPLE["responsabile_scheda"],
+                       "editing_by": ACCOUNTS["editing_by"]}]},
+            {"kind": "table", "id": "elenco", "title": "Elenco",
+             "rows": [{"us": "4", "direttore_us": PEOPLE["direttore_us"],
+                       "team_members": [PEOPLE["team_members"]], "draa": PEOPLE["draa"],
+                       "updated_by": ACCOUNTS["updated_by"]}]},
+        ]
+
+    entry = site_plugins.register(provider, owner="prova-persone")
+    try:
+        notes = []
+        layers, listed, _ = site_plugins.write(SimpleNamespace(label="c"), tmp_path, "data", site_mod._Shift(),
+                                               lambda values: site_mod._attributes(values, []),
+                                               lambda text: site_mod._scrub(text, []), notes)
+    finally:
+        site_plugins.unregister(entry)
+    assert not notes
+    (tmp_path / "site.json").write_text(json.dumps({"layers": layers, "plugins": listed}, ensure_ascii=False),
+                                        encoding="utf-8")  # as export_site() writes them in the manifest
+    assert _people_in(tmp_path) == []
+
+    def read(name):
+        return json.loads((tmp_path / "plugins/prova-persone" / name).read_text(encoding="utf-8"))
+
+    people, periods = (next(x for x in layers if x["id"] == f"plugin:prova-persone:{n}") for n in ("persone",
+                                                                                                    "periodi"))
+    assert "groups" not in people and "group_by" not in people  # a legend of names: the layer in one colour
+    assert people["fields"] == {"us": {"it": "US", "en": "US"}}
+    assert [f["properties"] for f in read("persone.geojson")["features"]] == [{"us": "4", "scheda": {"anno": 2026}}]
+    assert periods["group_by"] == "periodo" and periods["fields"] == {"periodo": {"it": "Periodo", "en": "Periodo"}}
+    assert [(g["name"], g["count"], g["colour"]) for g in periods["groups"]] == [("II", 1, "#445566")]
+    assert [f["properties"] for f in read("periodi.geojson")["features"]] == [{"us": "4", "periodo": "II"}]
+    for name in ("schede.json", "elenco.json"):
+        table = read(name)
+        assert [c["key"] for c in table["columns"]] == ["us"] and table["rows"] == [{"us": "4"}], name
+
+
+def test_the_drawings_of_an_elevation_go_out_without_the_names_of_people(tmp_path):
+    """What is drawn on an elevation - units, spot heights, points, lines - is published without the names of
+    people and the accounts of who wrote it, wherever the record keeps them, and with its other attributes."""
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo import breaklines
+    from pyarchinit_photogrammetry.io import site as site_mod
+    from pyarchinit_photogrammetry.io import site_sections
+
+    ch = ppg.Document().add_chunk()
+    ch.meta["drawings"] = {"frames": {"e1": {
+        "units": [{"wkt": box(0, 0, 1, 1).wkt, "us": "7", "tipo": "USM", "disegnatore": PEOPLE["disegnatore"],
+                   "compilatore": PEOPLE["compilatore"],
+                   "attributes": {"schedatore": PEOPLE["schedatore"], "created_by": ACCOUNTS["created_by"],
+                                  "periodo": "II"}}],
+        "quote": [{"u": 0.5, "v": 0.5, "quota_q": 1.25, "us_q": "7", "Disegnatore": PEOPLE["disegnatore"],
+                   "draa": PEOPLE["draa"]}],
+        "points": [{"u": 0.2, "v": 0.3, "name": "p1", "RESPONSABILE_US": PEOPLE["responsabile_us"],
+                    "team_members": PEOPLE["team_members"]}],
+        "lines": [breaklines.new_record("breakline", [(0.0, 0.0), (1.0, 0.5)],
+                                        {"direttore_us": PEOPLE["direttore_us"],
+                                         "last_modified_by": ACCOUNTS["last_modified_by"], "nota": "bordo"})]}}}
+    feats = site_sections.drawing_features(ch, {"id": "e1", "kind": "elevation"}, 0.0, 0.0,
+                                           lambda values: site_mod._attributes(values, []))
+    (tmp_path / "drawings.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
+                                                          ensure_ascii=False), encoding="utf-8")
+    assert _people_in(tmp_path) == []
+    assert {f["properties"]["layer"]: f["properties"] for f in feats} == {
+        "USM": {"layer": "USM", "label": "USM 7", "us": "7", "tipo": "USM", "attributes": {"periodo": "II"}},
+        "quote": {"layer": "quote", "label": "1.250", "quota": 1.25, "us_q": "7"},
+        "points": {"layer": "points", "name": "p1"},
+        "lines": {"layer": "lines", "tipo": "Linea di rottura", "colour": "#ff7f0e", "nota": "bordo"}}
+
+
+def _written(provider, folder: Path, owner: str = "prova"):
+    """What ``provider``, registered as the plugin ``owner``, adds to a site written in ``folder``: the layers and
+    the entries of the manifest, with the notes of the build; the texts cleaned as export_site() cleans them."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    entry = site_plugins.register(provider, owner=owner)
+    notes = []
+    try:
+        layers, listed, _ = site_plugins.write(SimpleNamespace(label="c"), folder, "data", site_mod._Shift(),
+                                               lambda values: site_mod._attributes(values, []),
+                                               lambda text: site_mod._scrub(text, []), notes)
+    finally:
+        site_plugins.unregister(entry)
+    return layers, listed, notes
+
+
+def test_what_the_error_of_a_plugin_says_stays_on_the_computer(tmp_path, caplog):
+    """A plugin that falls is left out, and the notes of the site - public, in site.json - say which plugin and
+    which kind of error, not what the error says (the name of a person, here): that goes to the log."""
+    name = PEOPLE["disegnatore"]
+
+    def fallen(chunk):
+        raise KeyError(name)
+
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        layers, listed, notes = _written(fallen, tmp_path)
+    assert not layers and not listed
+    assert notes == ["c: plugin prova failed (KeyError, see the log); left out"]
+    assert name in caplog.text
+
+
+def test_a_contribution_left_out_is_said_without_what_its_error_holds(tmp_path, caplog):
+    """A contribution that cannot be written is left out and said in the notes: with the reason when it is the
+    site that refuses it (its kind, its identifier, no geometry - a path given for one of them cut to its last
+    name), with the kind of error alone when something fell while it was read, since what that error says may
+    name a person or a folder of this computer. The log holds it all."""
+    name, path = PEOPLE["compilatore"], Path.home() / "scavo" / SECRET
+
+    class Falling:
+        """The features of a layer, which fall while they are read."""
+
+        def __iter__(self):
+            raise ValueError(f"{name} in {path}")
+
+    def given(chunk):
+        return [{"kind": "layer", "id": "cade", "features": Falling()},
+                {"kind": "map", "id": "boh"},
+                {"kind": str(path), "id": "x"},
+                {"kind": "layer", "id": "vuoto", "features": []}]
+
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        layers, listed, notes = _written(given, tmp_path)
+    assert not layers and not listed and len(notes) == 4
+    assert notes[0] == "c: plugin prova: a contribution left out (ValueError, see the log)"
+    assert "'map'" in notes[1] and "'boh'" in notes[1]
+    assert SECRET in notes[2] and "no feature with a geometry" in notes[3]
+    assert not any(name in n or str(Path.home()) in n for n in notes)
+    assert name in caplog.text and str(path) in caplog.text
+
+
+def test_a_field_named_with_a_path_has_a_title_cut_as_its_name(tmp_path):
+    """A column or a field a plugin names with a path of this computer, without a title: the site cuts the name
+    to its last name as every text, and the title it makes of the name too (the title kept the whole path)."""
+    home = Path.home() / "scavo"
+
+    def provider(chunk):
+        return [{"kind": "table", "id": "quote", "columns": [{"key": str(home / "quota")}],
+                 "rows": [{str(home / "quota"): 1.5}]},
+                {"kind": "layer", "id": "fasi", "fields": {str(home / "fase"): ""},
+                 "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [1.0, 2.0]},
+                               "properties": {"us": "4"}}]}]
+
+    layers, listed, notes = _written(provider, tmp_path)
+    assert not notes
+    table = json.loads((tmp_path / "plugins/prova/quote.json").read_text(encoding="utf-8"))
+    assert table == {"columns": [{"key": "quota", "title": {"it": "quota", "en": "quota"}}], "rows": [{"quota": 1.5}]}
+    assert layers[0]["fields"] == {"fase": {"it": "fase", "en": "fase"}}
+    (tmp_path / "site.json").write_text(json.dumps({"layers": layers, "plugins": listed}), encoding="utf-8")
+    assert not [f.name for f in tmp_path.rglob("*.json") if str(Path.home()) in f.read_text(encoding="utf-8")]
+
+
+def test_a_published_picture_keeps_nothing_but_its_pixels(tmp_path):
+    """The pictures a plugin gives and the texture pages of the model are written again from their pixels alone:
+    what the file says beside them - its comment, where a camera or a program writes a name - stays out (the
+    comment followed the picture)."""
+    from PIL import Image
+
+    from pyarchinit_photogrammetry.io import web
+
+    name = PEOPLE["disegnatore"].encode()
+    src = tmp_path / "foto.jpg"
+    Image.new("RGB", (64, 48), (120, 80, 40)).save(src, "JPEG", comment=name)
+    assert name in src.read_bytes()
+
+    def provider(chunk):
+        return [{"kind": "table", "id": "reperti", "rows": [{"n": 1, "image": str(src)}]},
+                {"kind": "html", "id": "note", "html": '<p><img src="foto.jpg"></p>',
+                 "images": {"foto.jpg": str(src)}}]
+
+    site = tmp_path / "site"
+    _layers, listed, notes = _written(provider, site)
+    assert not notes and [x["id"] for x in listed] == ["reperti", "note"]
+    pages, _pixels = web._page_images([src], site / "model", 4096)
+    for picture in (site / "plugins/prova/reperti-1.jpg", site / "plugins/prova/note-1.jpg",
+                    site / "model" / pages[0]):
+        assert name not in picture.read_bytes(), picture.name
+        with Image.open(picture) as im:
+            assert im.format == "JPEG" and im.size == (64, 48) and not im.info.get("comment"), picture.name
+    assert _people_in(site) == []
+
+
 # ------------------------------------------------------------------------------------------------ what goes out
 def test_new_files_hold_no_place_and_no_path(full_site, tmp_path):
     import rasterio
@@ -492,6 +723,11 @@ def test_new_files_hold_no_place_and_no_path(full_site, tmp_path):
     data = (site / "data/cloud.copc.laz").read_bytes()
     for word in (b"EPSG", b"PROJCS", b"Monte Mario", b"GEOGCS"):
         assert word not in data
+
+
+def test_the_site_holds_no_name_of_people(full_site):
+    """The names the drawings of the section keep (``_section``) are in no file of the site, plugins included."""
+    assert _people_in(full_site[3]) == []
 
 
 # ------------------------------------------------------------------------------------------------ the budget
@@ -846,12 +1082,18 @@ def test_dates_in_a_browser(dated_site, tmp_path):
             browser.wait("ppgSite.state.view3d && ppgSite.state.view3d.ready()", 90)
             models = "ppgSite.state.view3d.models.map(m => m.holder.visible)"
             assert browser.js(models) == [True, False]
-            camera = browser.js("ppgSite.state.view3d.camera.position.toArray()")
+            position = "ppgSite.state.view3d.camera.position.toArray()"
+            first = browser.js(position)
+            # nearer than the view the page opens with: a date that framed the model again would put it back there
+            browser.js("ppgSite.state.view3d.camera.position.multiplyScalar(0.8).toArray()")
+            camera = browser.js(position)
+            assert camera != pytest.approx(first, rel=0.05)
             browser.js("(() => { const s = document.getElementById('date-slider'); s.value = '1';"
                        " s.dispatchEvent(new Event('input')); })()")
             browser.wait("document.documentElement.dataset.epoch === '1'", 10)
             assert browser.js(models) == [False, True]
-            assert browser.js("ppgSite.state.view3d.camera.position.toArray()") == camera
+            # the controls write the position again at every frame, from its angles: the same but for the last digits
+            assert browser.js(position) == pytest.approx(camera, rel=1e-9, abs=1e-9)
             assert not browser.errors, browser.errors
     finally:
         browser.close()

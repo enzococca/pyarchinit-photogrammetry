@@ -80,7 +80,9 @@ model; its texture pages follow the order of the MTL.
 *File > Export > Web site (Publish on the web)...* opens the pane **Publish on the web** (also from *View > Panes*,
 closable, movable and floatable as the other panes): the survey as a static web site - orthophoto, DEM with its
 shaded relief, stratigraphic units, drawings and 3D model on a page any hosting publishes, what `ppg web build` writes
-(see [A survey as a web site](../api.md#a-survey-as-a-web-site)). Four steps, each with its state beside its title
+(see [A survey as a web site](../api.md#a-survey-as-a-web-site)). Since 2.0.0 the names of people kept with the units
+and the drawings (who recorded, directed, was in charge, filled in, drew) and the accounts of whoever wrote a record
+are not published ([Names of people](web-publish.md#names-of-people)). Four steps, each with its state beside its title
 (*to do*, *done*, *to redo*, *running*, *failed*):
 
 1. **Choose the contents**: the chunks (by default every chunk with something to publish, the active one alone

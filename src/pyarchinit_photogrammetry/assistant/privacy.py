@@ -9,18 +9,31 @@ Names are matched without regard to case, accents (also decomposed ones), typogr
 between the words (space, ``_``, ``-``, ``.``), and a name glued to ``_`` or to digits (``Tell_Sultan_0001``) is a
 name.  One Filter is meant to live as long as a conversation: :meth:`Filter.update` adds the names that appeared
 since, and keeps the placeholders already sent.
+
+The people are those the records name in the attributes of :data:`PEOPLE_FIELDS`, wherever a record keeps them (a
+list, a record inside the record) and however the name of the attribute is written (:func:`is_people_field`).  The
+whole value is one name: where an attribute lists several people, each of them is not told alone.  The account of
+whoever wrote a record (:data:`ACCOUNT_FIELDS`) is no name of the project: it is left out of what a tool answers
+(:meth:`Filter.facts`) and of the site the program publishes (``io.site``).
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from pathlib import PurePath
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import unquote
 
 SITE_FIELDS = ("sito", "comune", "provincia", "regione", "toponimo", "soprintendenza")
-PEOPLE_FIELDS = ("schedatore", "direttore_us", "responsabile_us", "disegnatore")
+# the attributes that hold the name of a person: the four of a stratigraphic unit of PyArchInit, then those of its
+# other tables (who is in charge of a survey unit or of a record, who filled it in, the team, who made a drawing)
+PEOPLE_FIELDS = ("schedatore", "direttore_us", "responsabile_us", "disegnatore", "responsabile",
+                 "responsabile_scheda", "compilatore", "nome_compilatore", "team_members", "draa")
+# the attributes that hold the account of whoever wrote a record
+ACCOUNT_FIELDS = ("last_modified_by", "created_by", "updated_by", "editing_by")
 ABSOLUTE_KEYS = ("bounds", "origin", "center", "centre", "corners", "transform", "x", "y", "z", "lat", "lon",
                  "latitude", "longitude", "easting", "northing", "gps", "gnss", "reference", "references")
 WARNING = "Il filtro non riconosce coordinate o nomi scritti nella domanda: non scriverli."
@@ -120,6 +133,108 @@ _SYSTEMS = (
 _PLACEHOLDER = re.compile(
     r"(?<![^\W_])(?:(?i:sito)[\s_]+(?P<s>[A-Z]{1,3})|(?i:luogo)[\s_]+(?P<l>\d+)|(?i:persona)[\s_]+(?P<p>\d+)"
     r"|(?i:chunk)[\s_]+(?P<c>\d+))(?![^\W_])")
+
+
+_NUMBERED = re.compile(r".{8}_[1-9]")  # the name a shapefile gives a second field cut to the same ten characters
+_LEAVES = (int, float, bytes, bytearray, type(None))  # what holds neither a record nor a text
+_SCALARS = (str, *_LEAVES)  # what holds no record
+
+
+def _field_text(name: Any) -> str:
+    """The name of an attribute as it is compared: the compatibility forms folded (fullwidth letters), no
+    character nobody sees (a byte order mark, a zero-width space), no spaces around it, lower case."""
+    text = unicodedata.normalize("NFKC", str(name))
+    return "".join(c for c in text if c.isspace() or unicodedata.category(c) not in ("Cf", "Cc")).strip().lower()
+
+
+@functools.lru_cache(maxsize=4096)
+def _field_named(text: str, fields: tuple[str, ...]) -> str | None:
+    """The one of ``fields`` that ``text`` (:func:`_field_text`) names, or None.  A field is named by its letters
+    and digits, whatever stands between them (``direttore us``, ``direttore-us``, ``direttoreus``); by the ten
+    characters a shapefile keeps of a longer name (``responsabi``, ``nomeCompil``); by the eight characters and the
+    number a shapefile gives a second field cut to the same name (``responsa_1``, ``lastModi_1``) - in both, the
+    letters and digits of the cut name are compared, as the name was written.  A name that says more than the
+    field (``us_table_schedatore``, ``disegnatore2``) is another attribute."""
+    bare = "".join(c for c in text if c.isalnum())
+    for f in fields:
+        if bare == f.replace("_", ""):
+            return f
+    if len(text) == 10 and len(bare) >= 8:
+        for f in fields:
+            if len(f) > 10 and f.replace("_", "").startswith(bare):
+                return f
+    if _NUMBERED.fullmatch(text):
+        head = "".join(c for c in text[:8] if c.isalnum())
+        if len(head) >= 6:
+            for f in fields:
+                if len(f) >= 8 and f.replace("_", "").startswith(head):
+                    return f
+    return None
+
+
+def is_people_field(name: Any) -> bool:
+    """Whether ``name`` is one of :data:`PEOPLE_FIELDS` - an attribute that holds the name of a person - however
+    it is written (:func:`_field_named`): ``Disegnatore``, ``Direttore US``, ``nomeCompilatore``, the
+    ``responsabi`` and the ``responsa_1`` a shapefile makes of ``responsabile_us``."""
+    return _field_named(_field_text(name), PEOPLE_FIELDS) is not None
+
+
+def is_account_field(name: Any) -> bool:
+    """Whether ``name`` is one of :data:`ACCOUNT_FIELDS` - an attribute that holds the account of whoever wrote
+    the record - however it is written (as :func:`is_people_field`)."""
+    return _field_named(_field_text(name), ACCOUNT_FIELDS) is not None
+
+
+def _mappings(value: Any) -> Iterator[Mapping]:
+    """Every record ``value`` holds - itself, when it is one - at any depth of its records, lists, tuples and
+    sets: a record before those inside it, in the order they are kept (a set by the text of its items).  A
+    record met twice, or one that holds itself, is given once."""
+    seen: set[int] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            children = [c for c in item if not isinstance(c, _SCALARS)]
+        elif isinstance(item, _SCALARS):
+            continue
+        elif isinstance(item, Mapping):
+            children = [c for c in item.values() if not isinstance(c, _SCALARS)]
+        elif isinstance(item, (set, frozenset)):
+            children = [c for c in sorted(item, key=str) if not isinstance(c, _SCALARS)]
+        else:
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, Mapping):
+            yield item
+        stack.extend(reversed(children))
+
+
+def _strings(value: Any) -> Iterator[str]:
+    """The texts ``value`` holds: itself, or those of its lists, tuples, sets and records (their values) at any
+    depth, in the order they are kept."""
+    seen: set[int] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+            continue
+        if isinstance(item, (list, tuple)):
+            children = list(item)
+        elif isinstance(item, _LEAVES):
+            continue
+        elif isinstance(item, Mapping):
+            children = list(item.values())
+        elif isinstance(item, (set, frozenset)):
+            children = sorted(item, key=str)
+        else:
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        stack.extend(c for c in reversed(children) if not isinstance(c, _LEAVES))
 
 
 def _letters(n: int) -> str:
@@ -357,17 +472,25 @@ class Filter:
         self._names[k] = (re.sub(r"\s+", " ", name), self._placeholder(kind))
 
     def _add_record(self, rec: Any) -> None:
-        if not isinstance(rec, dict):
-            return
-        for source in (rec, rec.get("attributes")):
-            if not isinstance(source, dict):
-                continue
-            for f in _SITE_ONLY:
-                self._add("site", source.get(f))
-            for f in _PLACE_FIELDS:
-                self._add("place", source.get(f))
+        """The names a record of the drawings holds: in itself, in its ``attributes`` and in whatever record or
+        list these keep (the columns of an imported layer are kept as they came)."""
+        for source in _mappings(rec):
+            # the fields as their names are compared: a layer may write ``Sito``, ``COMUNE``, ``Disegnatore``
+            named: dict[str, list] = {}
+            people: dict[str, list] = {}
+            for key, value in source.items():
+                named.setdefault(str(key).strip().lower(), []).append(value)
+                field = _field_named(_field_text(key), PEOPLE_FIELDS)
+                if field is not None:
+                    people.setdefault(field, []).append(value)
+            for kind, fields in (("site", _SITE_ONLY), ("place", _PLACE_FIELDS)):
+                for f in fields:
+                    for value in named.get(f, ()):
+                        self._add(kind, value)
             for f in PEOPLE_FIELDS:
-                self._add("person", source.get(f))
+                for value in people.get(f, ()):
+                    for name in _strings(value):
+                        self._add("person", name)
 
     def _collect(self, doc: Any) -> None:
         meta = getattr(doc, "meta", None) or {}
@@ -601,9 +724,19 @@ class Filter:
     # ------------------------------------------------------------------ tool results
     def facts(self, data: Any) -> Any:
         """A copy of a tool result that is safe to send: no absolute coordinates, the system named by its kind,
-        the names as placeholders, the paths as file names."""
+        the names as placeholders, the paths as file names, no account of whoever wrote a record
+        (:data:`ACCOUNT_FIELDS`).  The people the result itself names in an attribute of :data:`PEOPLE_FIELDS`
+        are learned first: they leave as placeholders wherever the result holds them, and stay known after."""
         if not self.active:
             return data
+        known = len(self._names)
+        for source in _mappings(data):
+            for key, value in source.items():
+                if is_people_field(key):
+                    for name in _strings(value):
+                        self._add("person", name)
+        if len(self._names) != known:
+            self._compile()
         out = self._facts(data)
         return None if out is _DROP else out
 
@@ -633,7 +766,7 @@ class Filter:
 
     def _facts(self, data: Any) -> Any:
         data = self._plain(data)
-        if isinstance(data, dict):
+        if isinstance(data, Mapping):
             out: dict = {}
             for k, v in data.items():
                 v = self._plain(v)
@@ -644,7 +777,7 @@ class Filter:
                     new = _crs_label(v if v is not None else CRS_UNKNOWN)
                 elif toks & _CRS_TOKENS:
                     new = _crs_label(v)
-                elif self._drops(k, v):
+                elif is_account_field(k) or self._drops(k, v):
                     continue
                 else:
                     new = self._facts(v)

@@ -27,6 +27,15 @@ alone (a VRT), so no tag of the source files reaches the site, the photos and th
 text typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
 description - that holds the path of a computer is cut to its last name.
 
+The names of people are not published: an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew,
+who recorded, who filled in, who directed, who was in charge, the team) or the account of whoever wrote the record
+(``ACCOUNT_FIELDS``: who created it, who changed it last) is left out of every feature of the site - units, spot
+heights, lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of
+what the plugins give (:mod:`.site_plugins`), wherever the record keeps it and however its name is written
+(:func:`_attributes`; how a name is recognised: ``assistant.privacy.is_people_field``). Names are not looked for in
+the texts: one written elsewhere - a title, a description, a label, a note, another attribute - is published as
+written.
+
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
 parts - bound to this computer alone unless another host is asked for; :class:`Preview` runs it in a thread of its
 own and stops it (the window's pane *Pubblica sul web*).
@@ -49,6 +58,7 @@ import re
 import shutil
 import tempfile
 import threading
+from collections.abc import Mapping
 from datetime import date
 from functools import partial
 from http import HTTPStatus
@@ -58,6 +68,7 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
+from ..assistant.privacy import is_account_field, is_people_field
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
 
@@ -195,29 +206,54 @@ _PATH = re.compile(r"""(?:^|[\s"'(\[=:;,])(?:~[/\\]|/(?:Users|home|Volumes|priva
 
 def _scrub(value, roots: list[str]):
     """``value`` (JSON-like) without paths of this computer: a text that names one of ``roots``, or that holds
-    a path as computers write them, keeps its last name. The keys of a dictionary are texts as well."""
+    a path as computers write them, keeps its last name. The keys of a dictionary are texts as well. A mapping of
+    any kind is read as a dictionary, a set as a list (in the order of the texts of its items); what is none of
+    these - a ``Path``, a date, an object - goes out as its text, cleaned as every other text."""
     if isinstance(value, str):
         if any(r in value for r in roots) or _PATH.search(value):
             return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
         return value
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {_scrub(str(k), roots): _scrub(v, roots) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_scrub(v, roots) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return [_scrub(v, roots) for v in sorted(value, key=str)]
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return str(value)
+    return _scrub(str(value), roots)
+
+
+def _personal(name) -> bool:
+    """Whether an attribute named ``name`` holds the name of a person or the account of whoever wrote the record
+    (``assistant.privacy.PEOPLE_FIELDS``, ``ACCOUNT_FIELDS``), however the name is written."""
+    return is_people_field(name) or is_account_field(name)
+
+
+def _without_people(value):
+    """``value`` (JSON-like) without the attributes that hold the name of a person or an account, at any depth."""
+    if isinstance(value, Mapping):
+        return {k: _without_people(v) for k, v in value.items() if not _personal(k)}
+    if isinstance(value, (list, tuple)):
+        return [_without_people(v) for v in value]
+    return value
 
 
 def _attributes(values: dict, roots: list[str]) -> dict:
-    """The attributes of a feature as the page shows them: no private key, no identity, no empty value."""
+    """The attributes of a feature as the page shows them: no private key, no identity, no empty value, no name
+    of a person and no account of whoever wrote the record (``assistant.privacy.PEOPLE_FIELDS`` and
+    ``ACCOUNT_FIELDS``, also inside a value: the site is public and they are names of other people). Everything
+    the site publishes of a record passes through here. The names of the attributes are judged as they are
+    published - after the cleaning of the paths, which cuts one to its last name."""
     out = {}
     for k, v in (values or {}).items():
         if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
             continue
-        out[_scrub(str(k), roots)] = _scrub(v, roots)
+        key = _scrub(str(k), roots)
+        if not _personal(key):
+            out[key] = _without_people(_scrub(v, roots))
     return out
 
 

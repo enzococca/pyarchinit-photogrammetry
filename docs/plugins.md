@@ -262,13 +262,26 @@ goes in and returns a list of dicts, each with a `kind`:
   shows with `<img src="name.jpg">`).
 
 The site takes care of the rest: the coordinates go into the frame of the site (shifted in the local frame), every
-text is cleaned as the texts of the program (no path of the computer, no key starting with `_`), the pictures are
-written again as JPEG of at most 1600 pixels with nothing but their pixels (no EXIF, no GPS), and the HTML keeps
+text is cleaned as the texts of the program (no path of the computer, no key starting with `_`; a value that is
+neither a text, a number, a list nor a dictionary - a `Path`, a date - is published as its text, cleaned in the same
+way: give a record as a dictionary, since an object of another kind - a dataclass, a namespace - is published as
+its text, the names in it included), the pictures are made new from their pixels as JPEG of at most 1600 pixels (no EXIF, no GPS, no comment:
+nothing of the file but what it shows), and the HTML keeps
 only plain tags (paragraphs, headings, lists, tables, emphasis, links to `http(s)` and `mailto`, its own pictures):
 no script, no style, no event, no frame; the page cleans it again before showing it. The files go in
 `data/plugins/<plugin>/`, listed in `plugins` of the chunk in `site.json`. A provider that raises, or a contribution
-that is not understood, is left out and said in the notes of the build; the site is built all the same. The `id`
-is lowercase letters, digits, `-` and `_`, once per plugin.
+that is not understood, is left out and said in the notes of the build; the site is built all the same. The notes are
+published with the site (`build.notes` of `site.json`): since 2.0.0 they give the kind alone of an error of the
+plugin (`ValueError`), and its text goes to the log of the program, on the computer of whoever builds. Since 2.0.0
+the site publishes no name of people either: an attribute of `assistant.privacy.PEOPLE_FIELDS` (`schedatore`,
+`direttore_us`, `responsabile_us`, `disegnatore`, `responsabile`, `responsabile_scheda`, `compilatore`,
+`nome_compilatore`, `team_members`, `draa`) or of `ACCOUNT_FIELDS` (the account of whoever wrote a record:
+`last_modified_by`, `created_by`, `updated_by`, `editing_by`), told by its name as
+[Names of people](gui/web-publish.md#names-of-people) says, is left out of the properties of a feature and of the
+rows of a table, at any depth, and gets no column, no name in `fields` and no legend - a legend on such a field
+would write its values, the names, in `site.json`. What a plugin writes elsewhere is published as given - a name
+under another key, in a title, in the text of an `html` page, in the `id`, the `kind` or the `elevation` of a
+contribution (a refusal of the program quotes them in the notes): keep the names of people out of it. The `id` is lowercase letters, digits, `-` and `_`, once per plugin.
 
 ```python
 def activate(self, context):

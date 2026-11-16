@@ -107,6 +107,55 @@ The r2.dev address is meant for trying: for a site that stays online, connect a 
 dashboard (*R2 > the bucket > Settings > Custom Domains*; the domain must be on Cloudflare) and write its `https://`
 address in **Address of the data**: the program then leaves r2.dev alone.
 
+## Names of people
+
+Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps the name of a person:
+
+- `schedatore`, `direttore_us`, `responsabile_us`, `disegnatore`: who recorded a unit, who directed, who was in
+  charge, who drew;
+- `responsabile`, `responsabile_scheda`, `compilatore`, `nome_compilatore`: who is in charge of a survey unit or of
+  a record, who filled it in;
+- `team_members`, the team of a survey unit, and `draa`, the author of a drawing in the records of the materials.
+
+Nor those in which it keeps the account of whoever wrote a record: `last_modified_by`, `created_by`, `updated_by`,
+`editing_by`. They are left out of everything the site publishes - units, spot heights, drawings (a layer imported
+among them brings its columns), sections and elevations, what the plugins add (their layers, tables and legends).
+Nothing changes in the project or in PyArchInit: the names stay there.
+
+An attribute is recognised by its name, whatever the case of its letters and whatever stands between them
+(`Disegnatore`, `Direttore US`, `direttore-us`, `nomeCompilatore`), also as a shapefile cuts a long name: to its
+first ten characters (`responsabi`, `nomeCompil`) or to eight and a number (`responsa_1`, `lastModi_1`). What it
+holds is left out whole; so is a column whose cut name is the one of these fields, even when it held something else
+(`last_modified`, a date, cut to `last_modif`). What the program does not do:
+
+- a name that says more is another attribute and is published (`disegnatore2`, `us_disegnatore`), and so is a
+  column that is not in the list (`autore`, `rilevatore`), and so is a name a shapefile cut to a word of its own
+  (`Direttore US` cut to `Direttore`): take such a column out of the layer before importing it, or leave the
+  drawings out of the products of the site (step 1);
+- it does not look for names in the texts: a name written elsewhere - in the title or the description of the site,
+  in a label, in a note, in the name of a layer or of a drawing - is published as it is written.
+
+The sites built with versions 1.9.0 to 1.10.2 hold those attributes with the others: the panel of a click and the
+files under `data/` show, for instance, who drew a unit (1.9.0 built the site, to be put online by hand; since
+1.10.0 the program publishes it). To take the names off a site that is already online:
+
+1. Build the site again (step 2) and publish it again (step 4) with 2.0.0 or later: the main address and the data then
+   give the new files (the data within the hour of their cache).
+2. Delete the earlier deployments. Cloudflare Pages keeps them, each at an address of its own
+   (`<hash>.<name>.pages.dev`, the one wrangler prints): publishing again changes what `<name>.pages.dev` shows and
+   leaves them where they are, so the copy published before can still be opened at its address.
+   `npx wrangler pages deployment list --project-name <name>` lists them and
+   `npx wrangler pages deployment delete <id> --project-name <name>` deletes one (commands of Cloudflare, read on its
+   documentation on 15 November 2026).
+
+Or use **Remove from the web...** ([Deleting the site](#deleting-the-site)), which deletes the project with all its
+deployments, and publish again.
+
+A site put online in another way - its folder copied to a server, a repository behind GitHub Pages - is replaced
+there with the folder built again. Where the hosting keeps what was published before, the names stay in it: a Git
+repository, for instance, keeps the earlier files of `data/` in its history until the history is rewritten or the
+repository is made again.
+
 ## Restricting who can open the site: Cloudflare Access
 
 The program publishes a public site. To let only some people open it, set **Cloudflare Access** (Zero Trust) in the

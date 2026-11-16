@@ -48,11 +48,18 @@ chunk (a layer also among the ``layers`` of the chunk, drawn by the plan as the 
 
 What the site makes sure of, whatever the plugin gives: the coordinates of a layer are moved into the frame of the
 site (the local one: shifted, the heights ``z`` too); every text goes through the same cleaning as the texts of the
-program (no path of the computer, no private key ``_...``); the pictures are decoded and written again as JPEG of at
-most :data:`IMAGE_SIDE` pixels (no EXIF, no GPS, nothing but the pixels); the HTML keeps only the tags and attributes
-of :data:`TAGS` (no script, no style, no event, no link but ``http(s)``/``mailto``, pictures only among its
-``images``), and the page cleans it again when it shows it. A provider that fails, or a contribution that is not
-understood, is left out and said in the notes of the build; the site is built all the same.
+program (no path of the computer, no private key ``_...``) and holds no name of a person and no account of whoever
+wrote a record - an attribute of ``assistant.privacy.PEOPLE_FIELDS`` or ``ACCOUNT_FIELDS`` is left out of the
+properties of a feature and of the rows of a table, and has no column, no name among the ``fields`` and no legend
+(its values, the names, would be in ``site.json``); what a plugin writes under another key, in a title, in an
+``id`` or a ``kind``, or in the text of a page is its own; the pictures are decoded and written again as JPEG of at
+most :data:`IMAGE_SIDE` pixels, made new from the pixels (no EXIF, no GPS, no comment: nothing but the pixels); the
+HTML keeps only the tags and attributes of :data:`TAGS` (no script, no style, no event, no link but
+``http(s)``/``mailto``, pictures only among its ``images``), and the page cleans it again when it shows it. A
+provider that fails, or a contribution that is not understood, is left out and said in the notes of the build; the
+site is built all the same. The notes are published with the site (``site.json``): of what the site itself refuses
+they give the reason, of an error of the plugin the kind alone - what that error says is the plugin's, it may hold
+a value of the survey or a folder of the computer, and goes to the log of the program.
 """
 from __future__ import annotations
 
@@ -85,6 +92,11 @@ DROP = {"script", "style", "iframe", "object", "embed", "template", "noscript", 
         "textarea", "select", "button", "form", "frameset", "frame", "link", "meta", "base"}
 
 _providers: list[tuple[str, Callable]] = []
+
+
+class _Refused(ValueError):
+    """A contribution the site does not take, said in the words of the program: its text can go in the notes of
+    the build, which are published. The text of every other error stays in the log."""
 
 
 class _TakesSite:
@@ -272,7 +284,7 @@ def _title(value, scrub, fallback: str) -> dict:
         out = {k: scrub(str(v)) for k, v in value.items() if k in ("it", "en") and v}
         if out:
             return out
-    text = scrub(str(value)) if value else fallback
+    text = scrub(str(value) if value else fallback)
     return {"it": text, "en": text}
 
 
@@ -291,7 +303,9 @@ def _picture(src, dst: Path) -> bool:
             if max(im.size) > IMAGE_SIDE:
                 f = IMAGE_SIDE / max(im.size)
                 im = im.resize((max(1, round(im.width * f)), max(1, round(im.height * f))), Image.LANCZOS)
-            im.save(dst, "JPEG", quality=85, optimize=True)
+            bare = Image.new("RGB", im.size)  # ``im`` still holds what the file says beside its pixels (``info``)
+            bare.paste(im)                    # and a JPEG is saved with the comment found there
+            bare.save(dst, "JPEG", quality=85, optimize=True)
         return True
     except Exception as exc:  # noqa: BLE001 - a picture that cannot be read is left out
         log.warning("site: picture %s left out: %s", Path(str(src)).name, exc)
@@ -326,7 +340,7 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], fr
             given = (provider(chunk, site) if isinstance(provider, _TakesSite) else provider(chunk)) or []
         except Exception as exc:  # noqa: BLE001 - a plugin never stops the build
             log.exception("site: the plugin %s failed on %s", owner, chunk.label)
-            notes.append(f"{chunk.label}: plugin {owner} failed ({exc}); left out")
+            notes.append(f"{chunk.label}: plugin {owner} failed ({type(exc).__name__}, see the log); left out")
             continue
         if isinstance(given, dict):
             given = [given]
@@ -336,14 +350,14 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], fr
                 on = item.get("elevation") if kind == "layer" else None
                 key = (owner, cid, None if on is None else str(on))
                 if kind not in KINDS or not NAME.match(cid) or key in seen:
-                    raise ValueError(f"kind {kind!r}, id {cid!r}: kind one of {', '.join(KINDS)}, id lowercase "
-                                     "letters, digits, '-' and '_', once per plugin (once per elevation for a "
-                                     "layer on elevations)")
+                    raise _Refused(f"kind {scrub(str(kind))!r}, id {scrub(cid)!r}: kind one of "
+                                   f"{', '.join(KINDS)}, id lowercase letters, digits, '-' and '_', once per "
+                                   "plugin (once per elevation for a layer on elevations)")
                 target = None
                 if on is not None:
                     target = next(((e, r) for e, r in sections if str(e.get("id")) == str(on)), None)
                     if target is None:
-                        raise ValueError(f"layer {cid}: the elevation {scrub(str(on))!r} is not on the site")
+                        raise _Refused(f"layer {cid}: the elevation {scrub(str(on))!r} is not on the site")
                 seen.add(key)
                 folder = data / "plugins" / owner
                 folder.mkdir(parents=True, exist_ok=True)
@@ -372,8 +386,13 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], fr
                     entry.update(_page(item, folder, url, scrub))
                 size += sum(f.stat().st_size for f in folder.glob(f"{cid}*") if f.is_file())
                 listed.append(entry)
-            except Exception as exc:  # noqa: BLE001 - one contribution left out, the others go
+            except _Refused as exc:  # the reason is the program's: it can be published
+                log.warning("site: a contribution of the plugin %s left out on %s: %s", owner, chunk.label, exc)
                 notes.append(f"{chunk.label}: plugin {owner}: a contribution left out ({exc})")
+            except Exception as exc:  # noqa: BLE001 - one contribution left out, the others go
+                log.exception("site: a contribution of the plugin %s failed on %s", owner, chunk.label)
+                notes.append(f"{chunk.label}: plugin {owner}: a contribution left out "
+                             f"({type(exc).__name__}, see the log)")
     return layers, listed, size
 
 
@@ -399,6 +418,12 @@ def _values(values: dict, clean, scrub) -> dict:
     return {k: w for k, v in out.items() if (w := _words(v, scrub)) is not None}
 
 
+def _published(key, clean) -> bool:
+    """Whether the site publishes an attribute named ``key``: what ``clean`` leaves out of a feature or a row - a
+    private key, an identity of the program, the name of a person - gets no column, no title and no legend."""
+    return bool(clean({str(key): True}))
+
+
 def _texts(value) -> list[str]:
     """The texts a legend matches a value with: both, for a value in two languages."""
     if isinstance(value, dict):
@@ -415,13 +440,13 @@ def _layer(item: dict, folder: Path, url: str, move, name: str, clean, scrub) ->
         feats.append({"type": "Feature", "properties": _values(f.get("properties"), clean, scrub),
                       "geometry": {"type": g["type"], "coordinates": _move(g["coordinates"], move)}})
     if not feats:
-        raise ValueError(f"layer {item.get('id')}: no feature with a geometry")
+        raise _Refused(f"layer {item.get('id')}: no feature with a geometry")
     (folder / f"{name}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats},
                                                        ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     out = {"url": f"{url}/{name}.geojson", "count": len(feats), "colour": _colour(item.get("colour"), "#7b3fa0")}
     legend = item.get("legend") or {}
     field = scrub(str(legend.get("field") or "")) if isinstance(legend, dict) else ""
-    if field and legend.get("items"):
+    if field and legend.get("items") and _published(field, clean):  # else its values would be in the manifest
         groups = []
         for x in legend["items"]:
             value = scrub(str(x.get("value")))
@@ -431,7 +456,7 @@ def _layer(item: dict, folder: Path, url: str, move, name: str, clean, scrub) ->
         out.update(groups=groups, group_by=field)
     fields = item.get("fields")
     if isinstance(fields, dict):
-        out["fields"] = {scrub(str(k)): _title(v, scrub, str(k)) for k, v in fields.items()}
+        out["fields"] = {scrub(str(k)): _title(v, scrub, str(k)) for k, v in fields.items() if _published(k, clean)}
     return out
 
 
@@ -449,8 +474,8 @@ def _elevation_layer(item: dict, target, folder: Path, url: str, shift, clean, s
         u, v = float(c[0]), float(c[1])
         if not (math.isfinite(u) and math.isfinite(v)) or not (u0 - margin <= u <= u1 + margin) \
                 or not (v0 - margin <= v <= v1 + margin):
-            raise ValueError(f"layer {item.get('id')}: a feature off the elevation {record.get('name')!r} "
-                             "(the coordinates of a layer on an elevation are its (u, v) metres)")
+            raise _Refused(f"layer {item.get('id')}: a feature off the elevation {record.get('name')!r} "
+                           "(the coordinates of a layer on an elevation are its (u, v) metres)")
         return [round(u, DECIMALS), round(v - dv, DECIMALS)]
 
     return _layer(item, folder, url, move, f"{item['id']}.s{record['id']}", clean, scrub)
@@ -462,7 +487,9 @@ def _table(item: dict, folder: Path, url: str, clean, scrub) -> dict:
     columns = []
     for c in item.get("columns") or []:
         c = c if isinstance(c, dict) else {"key": c}
-        columns.append({"key": scrub(str(c.get("key"))), "title": _title(c.get("title"), scrub, str(c.get("key")))})
+        if _published(c.get("key"), clean):
+            columns.append({"key": scrub(str(c.get("key"))),
+                            "title": _title(c.get("title"), scrub, str(c.get("key")))})
     rows = []
     for n, row in enumerate(item.get("rows") or [], 1):
         if not isinstance(row, dict):
