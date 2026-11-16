@@ -58,33 +58,59 @@ REAL_TEXTS = [
     pytest.param(f"ValueError: no EXIF in {PureWindowsPath(WIN_FILE)!r}",
                  "ValueError: no EXIF in PureWindowsPath('<path>')", id="windows-repr"),
 ]
+# a photo folder with an apostrophe, as Italian place names have, and a photo of the set with one; the texts of the
+# re-review of the fix, with what the scrub must leave of them
+POGGIO = "/Volumes/Field Unit/Poggio d'Alto/foto"
+NAMES = ("IMG_0001.JPG", "Sant'Elmo_001.jpg")
+APOSTROPHE_TEXTS = [
+    pytest.param("RuntimeError: can't read " + POGGIO + "/IMG_0001.JPG", "RuntimeError: can't read <path>",
+                 id="cant-read"),
+    pytest.param("ValueError: 'IMG_0001.JPG' not found in " + POGGIO, "ValueError: '<photo>' not found in <path>",
+                 id="quoted-photo"),
+    pytest.param("ValueError: can't open \"" + POGGIO + "/IMG_0001.JPG\"", "ValueError: can't open '<path>'",
+                 id="cant-open"),
+    pytest.param("RuntimeError: cannot read " + PHOTOS + "/Sant'Elmo_001.jpg", "RuntimeError: cannot read <path>",
+                 id="photo-apostrophe"),
+    pytest.param("RuntimeError: cannot read " + HOME + "/Scavi/Poggio d'Alto/gcp.csv",
+                 "RuntimeError: cannot read <path>", id="home-apostrophe"),
+]
 
 # A stand-in for the child: reads the job, writes a result and ends. ``done`` writes two finished steps and a project
-# for extra_results; ``dies`` writes a step that has started and ends with code 9, as a child that crashed would.
+# for extra_results; ``dies`` writes a step that has started and ends with code 9, as a child that crashed would;
+# ``reference`` fails in import_reference with the path of the reference in its text; ``leaks`` writes a path into
+# the settings, as a child whose text slipped past the scrub would.
 STAND_IN = '''
 import json, os, sys, time
 from pathlib import Path
 job = json.loads(Path(sys.argv[1]).read_text())
 work, mode, now = Path(job["work"]), sys.argv[2], time.time()
-def entry(step, done=True):
+def entry(step, done=True, error=None):
     e = {"step": step, "start": now, "end": None, "seconds": None, "peak_memory_mb": 40.0, "stages": {}, "engine": None}
     if done:
         e.update(end=now + 0.01, seconds=0.01)
+    if error:
+        e["error"] = error
     return e
-result = work / "result.json"
+def write(steps, settings=None, results=None, error=None, done=True):
+    (work / "result.json").write_text(json.dumps({"steps": steps, "settings": settings or {},
+                                                  "results": results or {}, "error": error, "done": done}))
 if mode == "dies":
-    result.write_text(json.dumps({"steps": [entry("match_photos", done=False)], "settings": {}, "results": {},
-                                  "error": None, "done": False}))
+    write([entry("match_photos", done=False)], done=False)
     os._exit(9)
+if mode == "reference":
+    error = "import_reference: ValueError: cannot read " + str(job["reference"])
+    write([entry("match_photos"), entry("align_cameras"), entry("import_reference", error=error)], error=error,
+          done=False)
+    sys.exit(1)
 import pyarchinit_photogrammetry as ppg
 doc = ppg.Document()
 doc.add_chunk("Chunk 1")
 doc.save(work / "project.ppg")
-result.write_text(json.dumps({"steps": [entry("match_photos"), entry("align_cameras")],
-                              "settings": {"quality": "high", "pycolmap": "0.0"},
-                              "results": {"cameras": len(job["photos"]), "aligned": len(job["photos"])},
-                              "error": None, "done": True}))
+write([entry("match_photos"), entry("align_cameras")],
+      {"quality": "/leak/y" if mode == "leaks" else "high", "pycolmap": "0.0"},
+      {"cameras": len(job["photos"]), "aligned": len(job["photos"])})
 '''
+RUNNER_LOG = "pyarchinit_photogrammetry.bench.runner"
 
 
 def rec(**disk):
@@ -112,6 +138,12 @@ def strings_of(value, where: str = "record"):
     elif isinstance(value, list):
         for i, item in enumerate(value):
             yield from strings_of(item, f"{where}[{i}]")
+
+
+def said_by_name(caplog, folder: str, tmp_path: Path) -> bool:
+    """Whether a log line of the runner names ``folder`` and no line that names it holds a path."""
+    lines = [entry.getMessage() for entry in caplog.records if folder in entry.getMessage()]
+    return bool(lines) and not any(str(tmp_path) in line or "/" in line or "\\" in line for line in lines)
 
 
 def stub_chunk(calls: list, saves: list, gps: bool = False, scalebars: bool = False, report=None):
@@ -309,13 +341,14 @@ def test_scrub_replaces_what_a_record_must_not_hold(text, expected):
     assert record.scrub(text, private=(Path("/data/survey/photos"),), names=("IMG_0007.jpg",)) == expected
 
 
-def test_scrub_takes_the_private_paths_longest_first_a_quoted_path_whole_and_then_the_photo():
-    private = (Path("/data/survey"), Path("/data/survey/photos"))
-    assert record.scrub("in /data/survey/photos and /data/survey", private) == "in <path> and <path>"
-    out = record.scrub("'/data/survey/photos/IMG_0007.jpg' in /data/survey and IMG_0007 too", private,
-                       names=("IMG_0007.jpg",))
+def test_scrub_takes_the_private_paths_longest_first_a_quoted_path_whole_and_then_the_photo(tmp_path):
+    survey = tmp_path / "survey"  # private paths of this host: absolute whatever the system and its Python
+    photos = survey / "photos"
+    private = (survey, photos)
+    assert record.scrub(f"in {photos} and {survey}", private) == "in <path> and <path>"
+    out = record.scrub(f"'{photos}/IMG_0007.jpg' in {survey} and IMG_0007 too", private, names=("IMG_0007.jpg",))
     assert out == "'<path>' in <path> and <photo> too"
-    assert record.scrub("cannot open /data/survey/a b/c - try again: now", private) == \
+    assert record.scrub(f"cannot open {survey}/a b/c - try again: now", private) == \
         "cannot open <path> - try again: now"
 
 
@@ -324,16 +357,41 @@ def test_scrub_on_the_text_of_a_real_exception(text, expected):
     assert record.scrub(text, PRIVATE, names=("IMG_0001.JPG",)) == expected
 
 
+@pytest.mark.parametrize("text, expected", APOSTROPHE_TEXTS)
+def test_scrub_with_an_apostrophe_in_a_path_a_photo_or_a_word(text, expected):
+    """An apostrophe inside a word (can't, d'Alto, Sant'Elmo) is no quote: it neither opens nor closes a span and
+    does not stop the tail of a path."""
+    assert record.scrub(text, (Path(POGGIO),) + PRIVATE, names=NAMES) == expected
+
+
 @pytest.mark.parametrize("text, expected", [
     ("id" + WIN_HOME.replace("\\", "\\\\") + "\\\\x", "id<path>"),  # backslashes doubled, as an OSError text
     ("id" + WIN_HOME.replace("\\", "/") + "/x", "id<path>"),  # slashes for backslashes, as the repr of a Path
     ("id" + WIN_HOME.upper() + "\\x", "id<path>"),  # another case of the letters
-    ("id" + HOME + "/x: and id" + HOME.upper(), "id<path>: and id<path>"),  # what follows a separator is the path's
-    ("id" + HOME + " and id" + HOME.upper() + "'", "id<path> and id<path>'"),  # a space, a quote: boundaries
-    ("id" + HOME + "lovelace", "id" + HOME + "lovelace"),  # never into a longer name (a space before it: the path rule)
+    ("id{home}/x: and id{HOME}", "id<path>: and id<path>"),  # what follows a separator is the path's
+    ("id{home} and id{HOME}'", "id<path> and id<path>'"),  # a space, a quote: boundaries
+    ("cannot read {home}lovelace", "cannot read <path>"),  # a longer name is another path, taken whole
 ], ids=["doubled", "slashes", "case", "separator", "boundaries", "whole"])
-def test_scrub_finds_a_private_path_in_every_spelling_and_only_whole(text, expected):
-    assert record.scrub(text, (Path(HOME), WIN_HOME)) == expected
+def test_scrub_finds_a_private_path_in_every_spelling_and_only_whole(tmp_path, text, expected):
+    home = tmp_path / "fieldteam"  # absolute on this host, whatever the system and its Python
+    text = text.replace("{home}", str(home)).replace("{HOME}", str(home).upper())
+    assert record.scrub(text, (home, WIN_HOME)) == expected
+
+
+def test_scrub_leaves_no_token_with_a_separator_after_its_stops(tmp_path):
+    """What the stops of the path rules leave (a ' - ' inside a folder name, a private folder whose name is another
+    folder's up to a space, a home that is the start of another user's) is taken by the last pass, token by token; a
+    lone word of a folder name before ' - ' may remain."""
+    home, scavo = tmp_path / "fieldteam", tmp_path / "Scavo"
+    cases = [(f"{home}/Scavi/Nord - Sito Alfa/gcp.csv", (home,), "<path> - Sito <path>"),
+             (f"{scavo} Nord/x.jpg", (scavo,), "<path> <path>"),
+             (WIN_HOME + r"\Pictures\x.jpg", (r"C:\Users\Field",), "<path> <path>")]
+    for text, private, expected in cases:
+        out = record.scrub("cannot read " + text, private)
+        assert out == "cannot read " + expected, text
+        assert not any("/" in token or "\\" in token for token in out.split())
+    assert record.scrub("speed in m/s and a/b", ()) == "speed in <path> and <path>"
+    assert record.scrub("see https://example.org/guide and <path>", ()) == "see https://example.org/guide and <path>"
 
 
 def test_describe_keeps_the_strerror_of_an_os_error_never_its_file_name():
@@ -350,12 +408,14 @@ def test_describe_keeps_the_strerror_of_an_os_error_never_its_file_name():
 def test_a_record_written_after_each_real_text_holds_no_piece_of_a_private_path_nor_a_user_name(tmp_path):
     """Every word of every folder of the private paths (a piece of a path, as a scrub that cuts at a space leaves it)
     and the user names, case ignored, in no string of the written record."""
-    folders = {part for p in (PHOTOS, OUT, HOME) for part in Path(p).parts if part != "/"} | {"Users", "Field Team"}
+    private = (Path(POGGIO),) + PRIVATE
+    folders = {part for p in (PHOTOS, OUT, HOME, POGGIO) for part in Path(p).parts if part != "/"}
+    folders |= {"Users", "Field Team"}
     pieces = {word for folder in folders for word in folder.split()} | {"fieldteam", "Field Team"}
-    for index, case in enumerate(REAL_TEXTS, 1):
+    for index, case in enumerate(REAL_TEXTS + APOSTROPHE_TEXTS, 1):
         r = rec()
-        r["error"] = record.scrub(case.values[0], PRIVATE, names=("IMG_0001.JPG",))
-        path = record.write(record.judge(r), tmp_path / "records", PRIVATE, index=index)
+        r["error"] = record.scrub(case.values[0], private, names=NAMES)
+        path = record.write(record.judge(r), tmp_path / "records", private, index=index)
         for where, text in strings_of(json.loads(path.read_text(encoding="utf-8"))):
             low = text.casefold()
             assert not any(piece.casefold() in low for piece in pieces), (case.id, where, text)
@@ -528,6 +588,10 @@ def test_a_work_folder_inside_the_photos_a_bad_name_or_unknown_steps_are_refused
         runner.run(photos, tmp_path / "out", name="t", records=photos / "records")
     with pytest.raises(ValueError):
         runner.run(tmp_path / "missing", tmp_path / "out", name="t")
+    with pytest.raises(ValueError):  # the records inside a work folder would be removed with it
+        runner.run(photos, tmp_path / "out", name="t", records=tmp_path / "out" / "t-1")
+    with pytest.raises(ValueError):
+        runner.run(photos, tmp_path / "out", name="t", repeat=2, records=tmp_path / "out" / "t-2" / "sub")
     assert not (tmp_path / "out").exists()
     (tmp_path / "out" / "t-2").mkdir(parents=True)  # a stray work folder of a later repeat: refused before any child
     with pytest.raises(FileExistsError):
@@ -762,11 +826,9 @@ def test_a_work_folder_that_cannot_be_removed_is_said_without_its_path(tmp_path,
     monkeypatch.setattr(runner.shutil, "rmtree", busy)
     photos = noise_photos(tmp_path / "photos")
     out = tmp_path / "out"
-    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry.bench.runner"):
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG):
         r = the_record(out, runner.run(photos, out, name="t"))
-    assert r["valid"] is True and (out / "t-1").is_dir()
-    lines = [entry.getMessage() for entry in caplog.records if "t-1" in entry.getMessage()]
-    assert lines and not any(str(tmp_path) in line or "/" in line for line in lines)
+    assert r["valid"] is True and (out / "t-1").is_dir() and said_by_name(caplog, "t-1", tmp_path)
 
 
 def test_a_child_that_cannot_start_leaves_the_work_folder_and_says_so(tmp_path, monkeypatch, caplog):
@@ -778,8 +840,69 @@ def test_a_child_that_cannot_start_leaves_the_work_folder_and_says_so(tmp_path, 
     monkeypatch.setattr(runner.subprocess, "Popen", child_only(refused))
     photos = noise_photos(tmp_path / "photos")
     out = tmp_path / "out"
-    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry.bench.runner"), pytest.raises(OSError):
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG), pytest.raises(OSError):
         runner.run(photos, out, name="t")
     assert (out / "t-1" / "job.json").exists() and list(out.glob("*.json")) == []
-    lines = [entry.getMessage() for entry in caplog.records if "t-1" in entry.getMessage()]
-    assert lines and not any(str(tmp_path) in line or "/" in line for line in lines)
+    assert said_by_name(caplog, "t-1", tmp_path)
+
+
+def test_a_record_that_cannot_be_written_leaves_the_work_folder_and_says_so(tmp_path, stand_in, caplog):
+    (tmp_path / "records").write_text("a file, not a folder", encoding="utf-8")
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG), pytest.raises(OSError):
+        runner.run(photos, out, name="t", records=tmp_path / "records" / "sub")
+    assert (out / "t-1" / "result.json").exists() and said_by_name(caplog, "t-1", tmp_path)
+
+
+def test_a_record_that_is_refused_leaves_the_work_folder_and_says_so(tmp_path, stand_in, caplog):
+    stand_in.mode = "leaks"
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG), pytest.raises(ValueError):
+        runner.run(photos, out, name="t")
+    assert (out / "t-1" / "result.json").exists() and list(out.glob("*.json")) == []
+    assert said_by_name(caplog, "t-1", tmp_path)
+
+
+def test_a_job_that_cannot_be_written_leaves_the_work_folder_and_says_so(tmp_path, monkeypatch, caplog):
+    pytest.importorskip("psutil")
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
+    real = Path.write_text
+
+    def refuse(self, *args, **kwargs):
+        if self.name == runner.JOB:
+            raise OSError(28, "No space left on device", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG), pytest.raises(OSError):
+        runner.run(photos, out, name="t")
+    assert (out / "t-1").is_dir() and said_by_name(caplog, "t-1", tmp_path)
+
+
+def test_the_reference_is_private_and_a_text_that_holds_it_is_scrubbed(tmp_path, monkeypatch, stand_in):
+    stand_in.mode = "reference"
+    photos = noise_photos(tmp_path / "photos")
+    reference = tmp_path / "Riferimenti GCP" / "gcp.csv"
+    reference.parent.mkdir()
+    reference.write_text("# label,X,Y,Z\n", encoding="utf-8")
+    privates = []
+    real = record.write
+
+    def write(rec, folder, private=(), index=1):
+        privates.append(tuple(private))
+        return real(rec, folder, private, index)
+
+    monkeypatch.setattr(runner.record, "write", write)
+    out = tmp_path / "out"
+    r = the_record(out, runner.run(photos, out, name="t", reference=reference, crs="EPSG:3004", keep=True))
+    job = json.loads((out / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["reference"] == str(reference.resolve()) and job["crs"] == "EPSG:3004"
+    assert privates == [(photos.resolve(), out.resolve(), Path.home(), reference.resolve())]
+    assert r["error"] == "import_reference: ValueError: cannot read <path>" and r["valid"] is False
+    assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras", "import_reference"]
+    assert r["steps"][-1]["error"] == r["error"]
+    assert not any("Riferimenti" in text for _, text in strings_of(r))

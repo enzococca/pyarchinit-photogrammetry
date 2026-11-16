@@ -81,10 +81,10 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
 
     Refused, in this order and before anything runs: a name that is not one a file can take (ValueError), unknown
     steps or a repeat below 1 (ValueError), ``out`` or ``records`` inside ``photos`` (ValueError; by the identity of
-    the folders, whatever the case of the letters), a work folder of one of the repeats that exists already
-    (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), every photo
-    online-only (RuntimeError; no child is started). Photos that are online-only are left out of the run and make the
-    record not valid.
+    the folders, whatever the case of the letters), ``records`` inside a work folder (ValueError: it is removed after
+    its run), a work folder of one of the repeats that exists already (FileExistsError; nothing is deleted in
+    silence), psutil missing (RuntimeError naming the extra), every photo online-only (RuntimeError; no child is
+    started). Photos that are online-only are left out of the run and make the record not valid.
 
     ``targets``, ``reference`` and ``crs`` go to the child, which detects the markers and imports the reference when
     they are given; ``all`` detects :data:`.steps.DEFAULT_TARGETS` when no targets are given, as ``ppg process`` does,
@@ -105,8 +105,11 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     if _inside(out, photos) or _inside(records, photos):
         raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
     for index in range(1, int(repeat) + 1):
-        if (out / f"{name}-{index}").exists():
-            raise FileExistsError(f"the work folder {out / f'{name}-{index}'} exists: delete it or choose another name")
+        work = out / f"{name}-{index}"
+        if records == work or work in records.parents:
+            raise ValueError("the records folder must not be inside a work folder, which is removed after its run")
+        if work.exists():
+            raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
     _psutil()
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     if not files:
@@ -153,21 +156,30 @@ def _psutil():
 
 
 def _one_run(plan: _Plan, index: int) -> Path:
+    """One repeat in its work folder. Whatever stops the run once the folder is made (a job or a log that cannot be
+    written, a child that cannot start, a record that is refused or cannot be written, a cancel whose cleanup
+    failed) leaves the folder: that is said in the log, by the folder's name and the type of the exception, never a
+    path, before the exception goes on (a folder kept by request is not said)."""
     work = plan.out / f"{plan.name}-{index}"
     work.mkdir(parents=True)
+    try:
+        return _run_in(plan, index, work)
+    except BaseException as exc:
+        if work.exists() and not plan.keep:
+            log.warning("the run stopped (%s): the work folder %s is left in the output folder",
+                        type(exc).__name__, work.name)
+        raise
+
+
+def _run_in(plan: _Plan, index: int, work: Path) -> Path:
     job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "targets": plan.targets,
            "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
     rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}
     with open(work / LOG, "wb") as log_file:
-        try:
-            proc = subprocess.Popen(_command(work / JOB), stdin=subprocess.DEVNULL, stdout=log_file,
-                                    stderr=subprocess.STDOUT, env=plan.env, close_fds=False)
-        except OSError:
-            log.warning("the child of the run could not be started: the work folder %s is left in the output folder",
-                        work.name)
-            raise
+        proc = subprocess.Popen(_command(work / JOB), stdin=subprocess.DEVNULL, stdout=log_file,
+                                stderr=subprocess.STDOUT, env=plan.env, close_fds=False)
     try:
         while proc.poll() is None:
             time.sleep(SAMPLE_SECONDS)
@@ -303,14 +315,10 @@ def _extra(rec: dict, work: Path, plan: _Plan) -> None:
 
 def _finish(rec: dict, work: Path, plan: _Plan, index: int) -> Path:
     """The record judged and written, then the work folder removed unless kept. A record that is refused (a path in
-    it) leaves the work folder for inspection, and a work folder that cannot be removed stays: both are said in the
-    log, by the name of the folder."""
+    it) or cannot be written leaves the work folder for inspection (said by :func:`_one_run`); a work folder that
+    cannot be removed stays, said here, by its name."""
     record.judge(rec)
-    try:
-        path = record.write(rec, plan.records, plan.private, index=index)
-    except ValueError:
-        log.warning("the record of the run was refused: the work folder %s is left in the output folder", work.name)
-        raise
+    path = record.write(rec, plan.records, plan.private, index=index)
     if not plan.keep:
         try:
             shutil.rmtree(work)

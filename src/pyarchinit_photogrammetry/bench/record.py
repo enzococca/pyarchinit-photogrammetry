@@ -31,14 +31,23 @@ HIGH_LOAD = 2.0
 # the name of a run: it becomes part of the name of a file, never a path
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
-# a quoted span that holds a separator: a path as Python quotes it in the text of an OSError or the repr of a Path
-_QUOTED = re.compile(r"""'[^'\n]*[/\\][^'\n]*'|"[^"\n]*[/\\][^"\n]*\"""")
-# the tail of an unquoted path: to the end of the line, a quote, or the next " - " or ": " (a path with spaces is cut
-# there rather than at its first space: a piece of a path left in the text is the defect, a lost word is not)
-_TAIL = r"""(?:(?! - |: )[^'"\n])*"""
+# a quoted span that holds a separator: a path as Python quotes it in the text of an OSError or the repr of a Path.
+# A single quote opens or closes a span only at a word boundary: an apostrophe inside a word (can't, d'Alto,
+# Sant'Elmo) is part of the span, of a path or of a photo name, never a quote
+_IN_WORD = r"(?<=\w)'(?=\w)"
+_QUOTED = re.compile(r"""(?<!\w)'(?:[^'\n]|""" + _IN_WORD + r""")*[/\\](?:[^'\n]|""" + _IN_WORD + r""")*'(?!\w)"""
+                     r"""|"[^"\n]*[/\\][^"\n]*\"""")
+# the tail of an unquoted path: to the end of the line, a quote (not an apostrophe inside a word), or the next " - "
+# or ": " (a path with spaces is cut there rather than at its first space: a piece of a path left in the text is the
+# defect, a lost word is not)
+_TAIL = r"""(?:(?! - |: )(?:[^'"\n]|""" + _IN_WORD + r"""))*"""
+# the last pass: a token (between spaces) that still holds a separator, a URL excepted
+_TOKEN = re.compile(r"\S+")
+_URL = re.compile(r"https?://", re.IGNORECASE)
 # an unquoted absolute path: a token starting with / that has a second /, a token starting with ~, or one starting
-# with a drive letter, never starting inside a word, with its tail
-_ABSOLUTE = re.compile(r"""(?<![\w.~-])(?:/[^\s'"]*/|~[^\s'"]+|[A-Za-z]:[\\/])""" + _TAIL)
+# with a drive letter, never starting inside a word, after a colon or after a slash (the // of a URL is no path),
+# with its tail
+_ABSOLUTE = re.compile(r"""(?<![\w.~:/-])(?:/[^\s'"]*/|~[^\s'"]+|[A-Za-z]:[\\/])""" + _TAIL)
 # what may follow a private path: its end (the end of the text, a space, a quote) or a separator with the tail of
 # the path under it; a letter means a longer name (/Users/x is not /Users/xy)
 _PRIVATE_END = r"""(?:(?=$|[\s'"])|[/\\]""" + _TAIL + ")"
@@ -133,12 +142,15 @@ def _forms(private) -> list[str]:
 
 def scrub(text: str, private=(), names=()) -> str:
     """``text`` (of an exception) with what a record must not hold replaced, in this order: every quoted span that
-    holds a separator by ``'<path>'``; every path of ``private`` (in every spelling of :func:`_forms`, case ignored,
-    longest first, whole: at its end or with the rest of the path under it, never into a longer name) by ``<path>``;
-    every remaining unquoted absolute path, to the end of the line or the next `` - `` or ``: ``, by ``<path>``; every
-    photo file name of ``names`` and every stem of them, longest first and whole, by ``<photo>``; every
-    ``EPSG:<digits>``, case ignored, by ``<crs>``; every number with four or more digits before the point or five or
-    more after it (a coordinate in metres or in degrees) by ``<number>``."""
+    holds a separator by ``'<path>'`` (an apostrophe inside a word is no quote); every path of ``private`` (in every
+    spelling of :func:`_forms`, case ignored, longest first, whole: at its end or with the rest of the path under it,
+    never into a longer name) by ``<path>``; every remaining unquoted absolute path, to the end of the line or the
+    next `` - `` or ``: ``, by ``<path>``; every photo file name of ``names`` and every stem of them, longest first
+    and whole, by ``<photo>``; every ``EPSG:<digits>``, case ignored, by ``<crs>``; every number with four or more
+    digits before the point or five or more after it (a coordinate in metres or in degrees) by ``<number>``; last,
+    every token between spaces that still holds a separator (what a stop left of a path: a folder named with
+    `` - ``, a private folder whose name is another's up to a space; a relative path; a unit such as ``m/s``), a
+    URL excepted, by ``<path>``. A lone word of a folder name before `` - `` may remain: the one residual."""
     text = _QUOTED.sub("'<path>'", text)
     forms = _forms(private)
     if forms:
@@ -148,7 +160,15 @@ def scrub(text: str, private=(), names=()) -> str:
     for word in sorted((w for w in words if w), key=len, reverse=True):
         text = re.sub(rf"(?<![\w-]){re.escape(word)}(?![\w-])", "<photo>", text, flags=re.IGNORECASE)
     text = _EPSG.sub("<crs>", text)
-    return _NUMBER.sub("<number>", text)
+    text = _NUMBER.sub("<number>", text)
+    return _TOKEN.sub(_token_scrubbed, text)
+
+
+def _token_scrubbed(match: re.Match) -> str:
+    token = match.group(0)
+    if ("/" in token or "\\" in token) and not _URL.match(token):
+        return "<path>"
+    return token
 
 
 def _strings(value, where: str = "record"):
