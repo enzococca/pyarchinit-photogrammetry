@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import plistlib
+import posixpath
 import socket
 import subprocess
 import sys
@@ -243,14 +244,14 @@ def test_every_tool_is_started_by_an_absolute_program(monkeypatch, tmp_path):
     calls = _tools(monkeypatch)
     machine.disk_facts(tmp_path)
     machine.machine_facts()
-    assert calls and all(os.path.isabs(cmd[0]) for cmd, _ in calls)
+    assert calls and all(posixpath.isabs(cmd[0]) for cmd, _ in calls)  # POSIX programs, whatever the host
     assert set(_names(calls)) == {"diskutil", "ioreg", "sysctl", "pmset", "pgrep"}
     assert all("cwd" not in kwargs for _, kwargs in calls)
     calls.clear()
     monkeypatch.setattr(machine.platform, "system", lambda: "Linux")
     monkeypatch.setattr(machine.shutil, "which", lambda name: "/usr/bin/" + name)
     machine.machine_facts()
-    assert calls and all(os.path.isabs(cmd[0]) for cmd, _ in calls) and set(_names(calls)) == {"pgrep"}
+    assert calls and all(posixpath.isabs(cmd[0]) for cmd, _ in calls) and set(_names(calls)) == {"pgrep"}
     calls.clear()
     monkeypatch.setattr(machine.shutil, "which", lambda name: None)
     assert machine._dropbox_running("Linux") is None and calls == []
@@ -321,12 +322,26 @@ def test_the_chain_of_diskutil_stops_at_three_calls_or_at_an_identifier_already_
                    disk8={"MediaName": "", "ParentWholeDisk": "disk8"})
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": None, "solid_state": False}
     assert [cmd[-1] for cmd, _ in calls][:2] == [calls[0][0][-1], "disk8"] and _names(calls)[2:] == ["ioreg"]
-    # a diskutil that fails on the store keeps what the volume said
+    # a diskutil that fails on the store ends the chain and keeps what the volume said; the exact route still runs
+    # on the whole disk the volume named (its synthesized APFS disk, which sits in the device tree too)
+    def store_fails(calls, tools):
+        def run(cmd, **kwargs):
+            if cmd[-1] == "disk7s1":
+                calls.append((list(cmd), kwargs))
+                return _completed(cmd, 1, b"", b"Could not find disk")
+            return tools(cmd, **kwargs)
+
+        return run
+
     calls = _tools(monkeypatch)
-    real = machine.subprocess.run
-    monkeypatch.setattr(machine.subprocess, "run",
-                        lambda cmd, **k: _completed(cmd, 1, b"", b"") if cmd[-1] == "disk7s1" else real(cmd, **k))
+    monkeypatch.setattr(machine.subprocess, "run", store_fails(calls, machine.subprocess.run))
+    assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": 480, "solid_state": True}
+    assert _names(calls) == ["diskutil", "diskutil", "ioreg"] and calls[2][0][1:3] == ["-r", "-c"]
+    # the same failure with a tree that lacks that disk: the bus and the kind of disk, no link, no plain list
+    calls = _tools(monkeypatch, devices="")
+    monkeypatch.setattr(machine.subprocess, "run", store_fails(calls, machine.subprocess.run))
     assert machine.disk_facts(tmp_path) == {"bus": "USB", "link_mbps": None, "solid_state": True}
+    assert _names(calls) == ["diskutil", "diskutil", "ioreg"]
 
 
 def test_disk_facts_never_raise(monkeypatch, tmp_path):
@@ -372,6 +387,7 @@ def test_the_usb_link_of_a_linux_block_device_is_the_nearest_speed_file(tmp_path
     assert machine._linux_block_facts(8, 17, sys_root) == {"bus": None, "link_mbps": None, "solid_state": False}
 
 
+@pytest.mark.skipif(not hasattr(os, "major"), reason="os.major and os.minor of a POSIX system")
 def test_on_linux_the_block_device_is_the_one_of_the_path(monkeypatch, tmp_path):
     seen = []
 
@@ -590,7 +606,7 @@ def test_the_cpu_name_per_system(monkeypatch, tmp_path):
 
     monkeypatch.setattr(machine.subprocess, "run", sysctl)
     assert machine._cpu_name("Darwin") == "Example CPU 12-Core"
-    assert len(seen) == 1 and Path(seen[0][0]).name == "sysctl" and os.path.isabs(seen[0][0])
+    assert len(seen) == 1 and Path(seen[0][0]).name == "sysctl" and posixpath.isabs(seen[0][0])
     assert seen[0][1:] == ["-n", "machdep.cpu.brand_string"]
     cpuinfo = tmp_path / "cpuinfo"
     cpuinfo.write_text("processor\t: 0\nvendor_id\t: Example\nmodel name\t: Example CPU @ 3.0GHz\n"
@@ -685,7 +701,7 @@ def test_dropbox_running_per_system(monkeypatch):
         monkeypatch.setattr(machine.subprocess, "run", pgrep(code))
         assert machine._dropbox_running("Darwin") is expected
     assert [cmd[1:] for cmd in seen] == [["-ix", "dropbox"]] * 4
-    assert all(Path(cmd[0]).name == "pgrep" and os.path.isabs(cmd[0]) for cmd in seen)
+    assert all(Path(cmd[0]).name == "pgrep" and posixpath.isabs(cmd[0]) for cmd in seen)
     monkeypatch.setattr(machine.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(machine.subprocess, "run", _raising(FileNotFoundError("pgrep")))
     assert machine._dropbox_running("Linux") is None
@@ -709,9 +725,13 @@ def test_dropbox_running_per_system(monkeypatch):
 
 
 def test_the_machine_facts_never_raise(monkeypatch):
+    """Every reader fails: every fact is None. As a Darwin, whatever the host: there the cpu, the battery and Dropbox
+    are read through subprocess.run (Linux reads /proc and sysfs, Windows the registry and kernel32, which the
+    stand-in below would not reach)."""
     def failing(*args, **kwargs):
         raise RuntimeError("every tool fails")
 
+    monkeypatch.setattr(machine.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(machine.subprocess, "run", failing)
     monkeypatch.setattr(machine._native, "gpu_adapters", failing)
     monkeypatch.setattr(machine._env, "physical_memory", failing)

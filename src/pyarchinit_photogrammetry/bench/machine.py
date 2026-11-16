@@ -331,16 +331,20 @@ def _darwin_disk_facts(path: Path) -> dict:
     """``diskutil info -plist`` of the volume gives the bus and the kind of disk. For a USB disk the chain of
     ``diskutil`` reaches the whole disk: on an APFS volume of an external disk the media name is empty on the volume
     and on its physical store and sits on the whole disk, so the store (else the parent) of each answer is asked in
-    turn, at most three calls in all, never an identifier already asked. The link comes first by the exact route,
-    the ``UsbLinkSpeed`` of the USB device whose subtree holds the whole disk's BSD name (``ioreg -r``); when that
-    gives nothing, by name: the media name matched to the products of the plain USB list (``ioreg -p``)."""
+    turn, at most three calls in all, never an identifier already asked; a call that fails after the first answer
+    ends the chain. The link comes first by the exact route, the ``UsbLinkSpeed`` of the USB device whose subtree
+    holds the BSD name of the whole disk known so far (``ioreg -r``; the synthesized APFS disk a volume names sits
+    in that subtree too); when that gives nothing, by name: the media name matched to the products of the plain USB
+    list (``ioreg -p``)."""
     facts = {"bus": None, "link_mbps": None, "solid_state": None}
     target, asked, media, whole = _mount_point(path), set(), None, None
     for step in range(3):
         plist = _diskutil_info(target)
         asked.add(target)
         if plist is None:
-            return facts
+            if step == 0:
+                return facts
+            break
         info = parse_diskutil(plist)
         if step == 0:
             facts["bus"], facts["solid_state"] = info["bus"], info["solid_state"]
