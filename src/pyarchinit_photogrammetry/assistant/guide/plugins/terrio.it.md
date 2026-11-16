@@ -11,8 +11,9 @@ geoide; prende un raster di riferimento - un DEM regionale, un'ortofoto più vec
 Planetary Computer di Microsoft - sopra il rilievo; esporta la nuvola per i programmi di laser scanning e
 l'ortofoto come tasselli per le mappe web.
 
-Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 1.1.0 o
-successiva (1.3.4 o successiva per vedere nella vista 3D i punti trovati e i valori) e terrio 0.5. Un
+Questa pagina descrive la versione 0.3.0 del plugin, che richiede pyarchinit-photogrammetry 1.1.0 o
+successiva (1.3.4 o successiva per vedere nella vista 3D i punti trovati e i valori) e terrio dalla 0.5
+alle 0.9 (il programma scarica la 0.9.0). Un
 terrio più vecchio (la 0.3.2 e le versioni 0.4) fa ancora l'importazione, la classificazione del terreno, i
 raster di riferimento da un URL e le esportazioni; gli altri passi dicono che serve terrio 0.5 e propongono
 di scaricarlo. Il README e il codice sono nel
@@ -31,7 +32,7 @@ di scaricarlo. Il README e il codice sono nel
 ## In breve
 
 1. Installa il plugin; la prima volta che un passo ha bisogno di terrio, il programma propone di
-   scaricarlo (circa 20 MB), oppure *Plugin > terrio > Installa terrio...*.
+   scaricarlo (circa 30 MB), oppure *Plugin > terrio > Installa terrio...*.
 2. *Importa nuvola di punti...*: un file LAS, LAZ, COPC, EPT, PLY o E57, o un indirizzo web, in un nuovo
    chunk o al posto della nuvola densa di quello attivo.
 3. *Classifica il terreno (SMRF, CSF, PMF)...*: i punti senza un'altra classe diventano terreno (classe 2)
@@ -65,11 +66,13 @@ di scaricarlo. Il README e il codice sono nel
 * **Il plugin**, installato dal programma: vedi [Guide ai plugin](guides.md#install).
 * **terrio stesso.** Installato con pip, il plugin se lo porta dietro. L'applicazione desktop non ha
   pip: la prima volta che un passo ha bisogno di terrio, il programma chiede se scaricarlo da PyPI (circa
-  20 MB, controllato con il suo SHA-256) nella cartella propria del plugin; dopo lo scaricamento, rifai
+  30 MB, controllato con il suo SHA-256) nella cartella propria del plugin; dopo lo scaricamento, rifai
   il passo. *Plugin > terrio > Installa terrio...* fa lo stesso in ogni momento, `ppg plugin terrio
-  install` dalla riga di comando. terrio esiste per macOS (Apple Silicon e Intel), Windows (x64 e ARM64)
-  e Linux (x86-64 e ARM64). Se il terrio presente è più vecchio della 0.5, i passi che la richiedono lo
-  dicono e propongono di scaricarla: la nuova va accanto e da allora si usa quella.
+  install` dalla riga di comando, e propone anche di aggiornare un terrio più vecchio. terrio esiste per
+  macOS (Apple Silicon e Intel), Windows (x64 e ARM64) e Linux (x86-64 e ARM64). Se il terrio presente è
+  più vecchio della 0.5, i passi che la richiedono lo dicono e propongono di scaricarla. Un terrio che il
+  programma ha già caricato non viene mai sostituito mentre gira: il nuovo aspetta accanto e prende il suo
+  posto quando il programma si riapre (la finestra lo dice).
 * **Un progetto.** Un'importazione in un nuovo chunk non vuole altro; la classificazione e
   l'esportazione della nuvola vogliono un chunk con una nuvola densa; i tasselli un'ortofoto; il raster
   di riferimento un chunk con un sistema di riferimento (altrimenti *the chunk needs a reference system
@@ -178,7 +181,10 @@ EGM96 3 MB - e restano in `plugins/_data/terrio/grids/` dentro la cartella dei p
 plugin terrio version` la scrive), dove servono di nuovo anche senza rete; le griglie già sul computer (una
 cartella data nella finestra, le cartelle di PROJ) si usano per prime. Una quota che nessuna griglia ha
 spostato - la griglia manca e non c'è rete, o il rilievo è fuori dal modello - è un errore (*Nessun modello
-ha spostato le quote da ... a ...*), mai una copia delle quote com'erano.
+ha spostato le quote da ... a ...*, con il motivo dato da terrio), mai una copia delle quote com'erano. Con
+terrio 0.9 una nuvola che esce dalla griglia viene convertita per i punti che la griglia copre: gli altri
+restano fuori dalla nuova versione e vengono contati (nel riepilogo, nel log e nei parametri della
+versione); un DEM si converte tutto o viene rifiutato.
 
 ## Passo per passo nel programma { #program }
 
