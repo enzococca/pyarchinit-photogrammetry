@@ -271,37 +271,45 @@ dataset pubblici WorldView-3.
   mandati a PyArchInit come suoi media. Vedi
   [Disegni sui prospetti e sulle sezioni](gui/processing.md#disegni-sui-prospetti-e-sulle-sezioni).
 
+## Fatto nelle 1.7.1 - 1.10.2
+
+* **Chunk legati e raggruppati** (1.7.6 - 1.10.0): i chunk dello stesso sito legati in automatico e tenuti in
+  gruppi.
+* **GNSS per i droni costruiti da sé** (1.7.8): gli eventi di un ricevitore, i log di ArduPilot e PX4, i log grezzi
+  dei ricevitori u-blox, RTCM 3, NovAtel, Septentrio, Trimble e Unicore convertiti in RINEX nel nucleo nativo, le
+  basi delle stazioni permanenti; un `.DAT` di una base DJI D-RTK si legge quando i suoi byte sono RTCM 3.
+* **QGIS nei due sensi** (1.7.8, 1.7.9): i disegni modificati in QGIS tornano nel chunk, un layer QGIS per ogni
+  layer del programma, solo i layer spuntati inviati.
+* **Raw delle fotocamere** (1.8.0): DNG, CR2, CR3, NEF, ARW e gli altri raw aggiunti come foto e sviluppati in copie
+  tenute con il progetto.
+* **Misure in 3D** (1.9.0): distanze, aree e volumi sul modello, sulla nuvola densa o sui punti di legame; le unità
+  di un modello impostate a mano, la scala da una distanza nota.
+* **Un rilievo sul web** (1.9.0 - 1.10.2): `ppg web build` e il pannello *Pubblica sul web* - pianta, DEM, US,
+  modello, nuvola, sezioni e prospetti, più date con il selettore del tempo, schede e layer dei plugin -
+  pubblicato su Cloudflare Pages con l'accesso dell'utente e tolto con *Rimuovi dal web*.
+
 ## Prossimi passi
 
-* **1.8.0 - Verifiche su dati veri**: le parti mai provate su dati veri - l'import da WebODM, una scena satellitare
-  propria, `ppg remote` su una macchina remota, i nodi di rete su due computer veri, un volo MicaSense intero fino
-  all'ortofoto di riflettanza.
-* **1.9.0 - Confronto fra rilievi**: le distanze fra le nuvole e i modelli di due date lungo la superficie (M3C2),
-  significative dove superano la precisione di entrambi i rilievi; mappe di cambiamento per muri, sezioni e versanti,
-  per il monitoraggio dei siti e dei restauri, nel rapporto PDF.
-* **1.10.0 - Pubblicare un rilievo sul web**: un sito statico di un rilievo - ortofoto e DEM, modello, nuvola, US con
-  i loro attributi, sezioni - costruito dalle esportazioni che ci sono già (COG, COPC, 3D Tiles), per qualsiasi
-  hosting o GitHub Pages.
-* I **piani di volo**, come plugin, restano in programma.
+* **2.0.0 - Motore nativo e schede delle US dal sito** (in corso): il motore fotogrammetrico portato in Rust (GPU
+  e CPU, ogni sistema) un passo alla volta. La milestone 0 misura la 1.10 (scelta del motore, tempi delle fasi,
+  cache delle foto commisurata alla memoria, un volo sintetico ad anello, `ppg bench`); la milestone 1 il bundle
+  adjustment nativo; la milestone 2 punti, coppie e abbinamento nativi; la milestone 3 un mapper globale nativo con
+  il GPS delle foto. `auto` sceglie un passo nativo solo dopo che ha superato una soglia misurata rispetto alla
+  1.10; il motore classico (pycolmap, Open3D) resta dietro per tutta la 2.x. Con lei: la scheda di una US aperta
+  dal sito pubblicato, i proxy del plugin blender-em nel sito, nessun nome di persona in un sito pubblicato, i
+  binari dichiarati GPL-3.0-or-later.
+* **Verifiche su dati veri** (senza versione per ora): l'import da WebODM, una scena satellitare propria, `ppg
+  remote` su una macchina remota, i nodi di rete su due computer veri, un volo MicaSense intero fino all'ortofoto
+  di riflettanza.
+* **Confronto fra rilievi** (senza versione per ora): le distanze fra le nuvole e i modelli di due date lungo la
+  superficie (M3C2), significative dove superano la precisione di entrambi i rilievi; mappe di cambiamento per
+  muri, sezioni e versanti, nel rapporto PDF.
 
-Plugin nuovi, in quest'ordine (i primi tre sono pubblicati: paesaggio, geoarcheologia 0.2.0 e architettura):
-
-1. **Il paesaggio nel tempo** (Landlab): erosione e deposito simulati sul DEM - come si consuma un tell, dove si
-   raccolgono i colluvi, scenari del paesaggio antico legati alle fasi della timeline.
-2. **Modello geologico 3D** (LoopStructural, nel plugin di geoarcheologia): superfici e volumi impliciti dai
-   contatti dei carotaggi, dalle tracce nelle sezioni e dai contorni delle US, con la loro incertezza; tagli e
-   riempimenti trattati come li registra lo scavo, non come strati geologici.
-3. **Elementi architettonici parametrici** (CadQuery): colonne per rivoluzione, modanature e cornici estruse lungo
-   un tracciato, archi e volte da una sezione tagliata sul modello; solidi STEP e IFC accanto alla mesh
-   fotogrammetrica nel modello HBIM.
-4. **Tomografia elettrica** (pyGIMLi, nel plugin di geofisica): inversione dei dati grezzi di un georesistivimetro,
-   pseudosezioni e sezioni di resistività collocate nel rilievo, nella vista 3D con le US e i carotaggi.
+I plugin previsti prima sono pubblicati: paesaggio (Landlab), il modello geologico 3D in geoarcheologia
+(LoopStructural), gli elementi parametrici in architettura (CadQuery), la tomografia elettrica in geofisica
+(pyGIMLi) e i piani di volo (flightplan).
 
 Altri punti aperti, senza un ordine fisso:
-
-* **GNSS, il prossimo passo**: gli eventi di un ricevitore (i segnali di scatto che una camera lascia nelle
-  osservazioni di un ricevitore proprio), i log di ArduPilot e PX4 per i droni costruiti da sé, i file grezzi dei
-  ricevitori u-blox ed Emlid, i file `.DAT` di una base DJI D-RTK.
 
 * SpatiaLite su Windows ARM64: aspetta un QGIS per ARM64 (la sua libreria è x64).
 * geoai: confronto fra due date coregistrate e differenze di quota dei loro DEM, dopo la verifica su un
