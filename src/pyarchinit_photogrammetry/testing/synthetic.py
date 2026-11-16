@@ -3,7 +3,9 @@
 A textured height field (a small trench with a wall stub) with coded targets
 at known coordinates is rendered from a set of cameras by ray casting. The
 ground truth (surface, targets in a projected CRS) is returned so that the
-whole pipeline can be checked metrically.
+whole pipeline can be checked metrically. A larger scene, a mound with targets
+around it flown in a ring with noisy GPS in the EXIF, is made the same way
+(:func:`make_ring_scene`, :func:`write_ring_dataset`).
 """
 from __future__ import annotations
 
@@ -82,21 +84,57 @@ def make_scene(size=(4.0, 3.0), texel=0.002, crs="EPSG:3004", origin=(2480000.0,
     positions = [(0.4, 0.4), (3.6, 0.4), (3.6, 2.6), (0.4, 2.6), (2.0, 0.45), (2.0, 2.55), (0.45, 1.5), (3.55, 1.5)]
     tpx = int(round(target_size / texel))
     for code, (tx, ty) in enumerate(positions):
-        pat = target_image("aruco_4x4_50", code, tpx)
-        quiet = int(tpx * 0.25)
-        tile = np.full((tpx + 2 * quiet, tpx + 2 * quiet), 255, np.uint8)
-        tile[quiet:quiet + tpx, quiet:quiet + tpx] = pat
-        c, r = int(tx / texel), int((size[1] - ty) / texel)
-        r0, c0 = r - tile.shape[0] // 2, c - tile.shape[1] // 2
-        tex[r0:r0 + tile.shape[0], c0:c0 + tile.shape[1]] = tile[..., None]
-        # targets lie on flat plates: flatten the surface under them
-        zc = float(z[r, c])
-        z[r0:r0 + tile.shape[0], c0:c0 + tile.shape[1]] = zc
-        cx = (c0 + tile.shape[1] / 2) * texel
-        cy = size[1] - (r0 + tile.shape[0] / 2) * texel
+        cx, cy, zc = _stamp_target(tex, z, texel, size[1], code, tx, ty, tpx)
         targets[code] = (origin[0] + cx, origin[1] + cy, origin[2] + zc)
     return Scene(origin=origin, crs=crs, size=size, texel=texel, texture=tex, heights=z.astype(np.float32),
                  targets=targets)
+
+
+def _stamp_target(tex: np.ndarray, z: np.ndarray, texel: float, size_y: float, code: int, x_local: float,
+                  y_local: float, tpx: int) -> tuple[float, float, float]:
+    """Paint ArUco target ``code`` (``tpx`` texels across, a white quiet zone of a quarter of it around) on the
+    texture ``tex`` at a local point and flatten the heights ``z`` under its plate. Returns the local (x, y, z) of the
+    centre of the plate, which is where the target is."""
+    pat = target_image("aruco_4x4_50", code, tpx)
+    quiet = int(tpx * 0.25)
+    tile = np.full((tpx + 2 * quiet, tpx + 2 * quiet), 255, np.uint8)
+    tile[quiet:quiet + tpx, quiet:quiet + tpx] = pat
+    c, r = int(x_local / texel), int((size_y - y_local) / texel)
+    r0, c0 = r - tile.shape[0] // 2, c - tile.shape[1] // 2
+    tex[r0:r0 + tile.shape[0], c0:c0 + tile.shape[1]] = tile[..., None]
+    # targets lie on flat plates: flatten the surface under them
+    zc = float(z[r, c])
+    z[r0:r0 + tile.shape[0], c0:c0 + tile.shape[1]] = zc
+    cx = (c0 + tile.shape[1] / 2) * texel
+    cy = size_y - (r0 + tile.shape[0] / 2) * texel
+    return cx, cy, zc
+
+
+def make_ring_scene(seed: int = 0, texel: float = 0.04) -> Scene:
+    """A mound to fly a ring around: 80 m x 80 m of the ground of :func:`make_scene` (its noise texture and small
+    relief, its synthetic origin and CRS: no real place) without the trench, with a Gaussian mound 4 m high and 8 m
+    wide (sigma) at the centre, and 8 ArUco targets (codes 0-7) on flat plates, their centres on a circle of radius
+    16 m around the centre, one every 45 degrees from the +x direction. A target is 0.96 m across: 24 texels at the
+    default ``texel`` of 0.04 m, 4 for each of the 6 cells of the pattern with its border (texture 2000 x 2000
+    texels, 12 MB; heights 16 MB)."""
+    size, origin, crs = (80.0, 80.0), (2480000.0, 4500000.0, 100.0), "EPSG:3004"  # the defaults of make_scene
+    rng = np.random.default_rng(seed)
+    w, h = int(round(size[0] / texel)), int(round(size[1] / texel))
+    tex = _noise_texture(h, w, rng)
+    yy, xx = np.mgrid[0:h, 0:w]
+    x = (xx + 0.5) * texel
+    y = size[1] - (yy + 0.5) * texel
+    z = 0.08 * np.sin(x * 1.7) * np.cos(y * 2.1) + 0.04 * np.sin(x * 4.0 + 1.0)  # the small relief of make_scene
+    z = z + 4.0 * np.exp(-((x - size[0] / 2) ** 2 + (y - size[1] / 2) ** 2) / (2 * 8.0 ** 2))  # the mound
+    z = z.astype(np.float32)
+    targets = {}
+    tpx = int(round(0.96 / texel))
+    for code in range(8):
+        angle = np.radians(45.0 * code)
+        cx, cy, zc = _stamp_target(tex, z, texel, size[1], code, size[0] / 2 + 16.0 * np.cos(angle),
+                                   size[1] / 2 + 16.0 * np.sin(angle), tpx)
+        targets[code] = (origin[0] + cx, origin[1] + cy, origin[2] + zc)
+    return Scene(origin=origin, crs=crs, size=size, texel=texel, texture=tex, heights=z, targets=targets)
 
 
 def _texel_of(scene: Scene, x_local: float, y_local: float) -> tuple[float, float]:
@@ -185,6 +223,17 @@ def camera_poses(scene: Scene, height: float = 2.2, nx: int = 5, ny: int = 4, ti
     return poses
 
 
+def ring_poses(n: int = 72, diameter: float = 60.0, height: float = 12.0) -> list[np.ndarray]:
+    """``n`` cameras evenly spaced on a circle of ``diameter`` around (0, 0) at ``height``, the first on the +x
+    axis, each with its optical axis through (0, 0, 0): world_from_cam poses as :func:`camera_poses` gives them.
+    They are drawn around the origin; :func:`write_ring_dataset` moves them to the centre of its scene."""
+    poses = []
+    for a in np.linspace(0, 2 * np.pi, n, endpoint=False):
+        eye = np.array([diameter / 2 * np.cos(a), diameter / 2 * np.sin(a), height])
+        poses.append(look_at(eye, np.zeros(3), up=(0, 0, 1)))
+    return poses
+
+
 def render(scene: Scene, world_from_cam: np.ndarray, K: np.ndarray, size=(1200, 900), k1: float = -0.04) -> np.ndarray:
     """Ray-cast the textured height field (local frame). Applies radial distortion ``k1``."""
     import open3d as o3d
@@ -234,10 +283,48 @@ def write_dataset(out_dir: str | Path, scene: Scene | None = None, n_x: int = 5,
         world_pose = pose.copy()
         world_pose[:3, 3] += np.asarray(scene.origin)
         scene.cameras.append({"label": f"IMG_{i:04d}", "world_from_cam": world_pose})
-    with open(out / "gcp.csv", "w") as fh:
+    _write_gcp_csv(scene, out / "gcp.csv")
+    return scene
+
+
+def _write_gcp_csv(scene: Scene, path: Path) -> None:
+    """The targets of a scene as a control point file (code, X, Y, Z in the scene's CRS)."""
+    with open(path, "w") as fh:
         fh.write("# label,X,Y,Z (" + scene.crs + ")\n")
         for code, (x, y, z) in scene.targets.items():
             fh.write(f"{code},{x:.4f},{y:.4f},{z:.4f}\n")
+
+
+def write_ring_dataset(out_dir: str | Path, n: int = 72, diameter: float = 60.0, height: float = 12.0,
+                       size=(1200, 900), focal: float = 1000.0, k1: float = -0.04, gps_noise=(0.3, 0.5),
+                       seed: int = 0) -> Scene:
+    """Render a ring flight around the mound of :func:`make_ring_scene` to ``out_dir/photos`` and write
+    ``out_dir/gcp.csv`` (code, X, Y, Z), as :func:`write_dataset` does for the trench. The ``n`` cameras of
+    :func:`ring_poses` (``diameter``, ``height``) stand around the centre of the scene, with the lens of the trench
+    (``k1``). Every photo carries its focal length and a GPS position in the EXIF: the true centre plus Gaussian
+    noise of ``gps_noise`` metres (in plan, in height) from a generator seeded with ``seed`` (not the one that draws
+    the texture), converted to EPSG:4326 with pyproj, the height written as it is. ``scene.cameras`` holds the true
+    world poses. The origin and CRS are the synthetic ones of :func:`make_scene`: no real place."""
+    from pyproj import Transformer
+
+    out = Path(out_dir)
+    (out / "photos").mkdir(parents=True, exist_ok=True)
+    scene = make_ring_scene(seed=seed)
+    K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
+    to_wgs84 = Transformer.from_crs(scene.crs, "EPSG:4326", always_xy=True)
+    noise = np.random.default_rng(seed)
+    sigma = np.array([gps_noise[0], gps_noise[0], gps_noise[1]], float)
+    for i, pose in enumerate(ring_poses(n, diameter, height)):
+        pose[:2, 3] += np.asarray(scene.size) / 2  # drawn around (0, 0): stood around the centre of the scene
+        img = render(scene, pose, K, size, k1)
+        world_pose = pose.copy()
+        world_pose[:3, 3] += np.asarray(scene.origin)
+        gx, gy, gz = world_pose[:3, 3] + noise.normal(0.0, sigma)
+        lon, lat = to_wgs84.transform(gx, gy)
+        (out / "photos" / f"RING_{i:04d}.jpg").write_bytes(
+            _jpeg_with_focal(img, 36.0 * focal / max(size), gps=(lat, lon, gz)))
+        scene.cameras.append({"label": f"RING_{i:04d}", "world_from_cam": world_pose})
+    _write_gcp_csv(scene, out / "gcp.csv")
     return scene
 
 
@@ -508,8 +595,10 @@ def render_mesh(scene: MeshScene, world_from_cam: np.ndarray, K: np.ndarray, siz
     return img.reshape(H, W, 3)
 
 
-def _jpeg_with_focal(img: np.ndarray, focal_35mm: float, quality: int = 95) -> bytes:
-    """``img`` as a JPEG whose EXIF says the focal length (35 mm equivalent), as a camera writes it."""
+def _jpeg_with_focal(img: np.ndarray, focal_35mm: float, quality: int = 95,
+                     gps: tuple[float, float, float] | None = None) -> bytes:
+    """``img`` as a JPEG whose EXIF says the focal length (35 mm equivalent), as a camera writes it, and, with
+    ``gps`` = (latitude, longitude, height), the GPS position (see :func:`_gps_ifd`)."""
     from PIL import Image
 
     ok, data = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
@@ -517,9 +606,28 @@ def _jpeg_with_focal(img: np.ndarray, focal_35mm: float, quality: int = 95) -> b
         raise RuntimeError("JPEG encoding failed")
     exif = Image.Exif()
     exif[0x8769] = {0xA405: int(round(focal_35mm))}  # Exif IFD: FocalLengthIn35mmFilm
+    if gps is not None:
+        exif[0x8825] = _gps_ifd(*gps)  # GPS IFD
     payload = exif.tobytes()
     data = data.tobytes()
     return data[:2] + b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload + data[2:]
+
+
+def _gps_ifd(latitude: float, longitude: float, height: float) -> dict:
+    """The GPS IFD of a photo taken at ``latitude``, ``longitude`` (degrees) and ``height`` (metres): degrees,
+    minutes and seconds, the seconds as a count of millionths over 1 000 000 (a millionth of a second of arc is
+    0.03 mm on the ground), the height over 1 000 (half a millimetre at most) with the reference below sea level
+    when it is negative."""
+    from PIL.TiffImagePlugin import IFDRational
+
+    def dms(degrees: float):
+        total = round(abs(degrees) * 3600 * 10**6)
+        d, rest = divmod(total, 3600 * 10**6)
+        m, s = divmod(rest, 60 * 10**6)
+        return IFDRational(d, 1), IFDRational(m, 1), IFDRational(s, 10**6)
+
+    return {1: "N" if latitude >= 0 else "S", 2: dms(latitude), 3: "E" if longitude >= 0 else "W", 4: dms(longitude),
+            5: 0 if height >= 0 else 1, 6: IFDRational(round(abs(height) * 1000), 1000)}
 
 
 def write_pottery_dataset(out_dir: str | Path, scene: MeshScene | None = None, size=(1200, 900), focal: float = 1100.0,
