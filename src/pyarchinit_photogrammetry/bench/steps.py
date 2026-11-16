@@ -25,10 +25,17 @@ import numpy as np
 
 from .. import _native
 from ..core.document import Document
+from . import record
 
 # the steps of ``align`` and of ``all``: the methods of Chunk that ppg process calls, in its order; detect_markers,
 # import_reference and update_transform run when the job, or the chunk, gives them something to do
 ALIGN_STEPS = ("detect_markers", "match_photos", "align_cameras", "import_reference", "update_transform")
+# the targets ``all`` detects when the job names none: the default of ppg process, which is that of
+# Chunk.detect_markers (a test compares the three)
+DEFAULT_TARGETS = "aruco_4x4_50"
+# os.replace of the result is tried again on a PermissionError, with short sleeps: on Windows the parent, which
+# reads the file every half second, holds it for a moment (a few tries cover that moment; an estimate)
+_REPLACE_TRIES = 5
 ALL_STEPS = ALIGN_STEPS + ("build_depth_maps", "build_point_cloud", "build_model", "build_texture", "build_dem",
                            "build_orthomosaic")
 CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS}
@@ -146,7 +153,14 @@ class Result:
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        for attempt in range(_REPLACE_TRIES):
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_TRIES - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def start(self, step: str) -> tuple[dict, float]:
         """The entry of ``step``, written as it starts; with it the clock its seconds are measured from."""
@@ -170,7 +184,14 @@ class Result:
         if "photo_cache" in timing:
             entry["photo_cache"] = timing["photo_cache"]
         if error is not None:
-            entry["error"] = self.data["error"] = f"{step}: {type(error).__name__}: {error}"
+            self.failed(entry, error)
+        else:
+            self.save()
+
+    def failed(self, entry: dict, error: BaseException) -> None:
+        """``entry`` and the whole result marked failed by ``error`` (:func:`.record.describe`: the type and the
+        message, never the file name of an OSError; the parent scrubs the text)."""
+        entry["error"] = self.data["error"] = f"{entry['step']}: {record.describe(error)}"
         self.save()
 
     def note(self, step: str, chunk, value) -> None:
@@ -221,8 +242,12 @@ def run_chain(chunk, job: dict, result: Result) -> bool:
             return False
         result.end(entry, clock, chunk)
         imported = imported or step == "import_reference"
-        result.note(step, chunk, value)
-        chunk.document.save()
+        try:
+            result.note(step, chunk, value)
+            chunk.document.save()
+        except Exception as exc:  # the step is done, its record is not: said like an error of the step
+            result.failed(entry, exc)
+            return False
     result.data["done"] = True
     result.save()
     return True
@@ -244,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         doc.save(work / PROJECT)
         chunk.add_photos([Path(p) for p in job["photos"]])
     except Exception as exc:
-        result.data["error"] = f"add_photos: {type(exc).__name__}: {exc}"
+        result.data["error"] = f"add_photos: {record.describe(exc)}"
         result.save()
         return 1
     return 0 if run_chain(chunk, job, result) else 1

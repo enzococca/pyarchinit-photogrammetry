@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 import shutil
 import subprocess
 import sys
 import types
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pytest
@@ -27,7 +28,36 @@ REASONS = (r"slow disk link: \d+ Mb/s", r"slow disk: \d+ MB/s", r"online-only ph
 FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "max_ratio",
-            "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing"]
+            "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets"]
+
+# Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters on an
+# external disk, a work folder, and a home on Windows whose user name has two words
+HOME = "/Users/fieldteam"
+PHOTOS = "/Volumes/Field Unit/Scavo Nord/Données été"
+OUT = "/Volumes/Field Unit/bench-work"
+WIN_HOME = r"C:\Users\Field Team"
+WIN_FILE = WIN_HOME + r"\Pictures\scavo 2024\IMG_0001.JPG"
+PRIVATE = (Path(PHOTOS), Path(OUT), Path(HOME), WIN_HOME)
+ERRNO_2 = "FileNotFoundError: [Errno 2] No such file or directory: "
+# the texts real exceptions give (open(), pycolmap.Reconstruction, Chunk.import_reference; on Windows Python's own
+# OSError text, which doubles the backslashes, and the repr of a Path, which writes slashes), each with what the
+# scrub must leave of it
+REAL_TEXTS = [
+    pytest.param(ERRNO_2 + "'" + PHOTOS + "/IMG_0001.JPG'", ERRNO_2 + "'<path>'", id="open-private"),
+    pytest.param(ERRNO_2 + "'/Volumes/Other Disk/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'", id="open-outside"),
+    pytest.param(ERRNO_2 + "'" + HOME + "/Scavi/Site Alpha 2024/gcp.csv'", ERRNO_2 + "'<path>'", id="open-home"),
+    pytest.param("OSError: cannot read " + HOME + "lovelace/notes/x.txt", "OSError: cannot read <path>",
+                 id="prefix-of-home"),
+    pytest.param('ValueError: [reconstruction.cc:995] rigs, cameras, frames, images, points3D files do not exist '
+                 'at "' + PHOTOS + '/sparse 0"', "ValueError: [reconstruction.cc:995] rigs, cameras, frames, images, "
+                 "points3D files do not exist at '<path>'", id="pycolmap"),
+    pytest.param(ERRNO_2 + "'/Volumes/Other Disk/Site Alpha GCP/gcp.csv'", ERRNO_2 + "'<path>'",
+                 id="import-reference"),  # the same text as open-outside: Chunk.import_reference opens the file
+    pytest.param("FileNotFoundError: " + str(FileNotFoundError(2, "No such file or directory", WIN_FILE)),
+                 ERRNO_2 + "'<path>'", id="windows-oserror"),
+    pytest.param(f"ValueError: no EXIF in {PureWindowsPath(WIN_FILE)!r}",
+                 "ValueError: no EXIF in PureWindowsPath('<path>')", id="windows-repr"),
+]
 
 # A stand-in for the child: reads the job, writes a result and ends. ``done`` writes two finished steps and a project
 # for extra_results; ``dies`` writes a step that has started and ends with code 9, as a child that crashed would.
@@ -70,6 +100,45 @@ def the_record(out: Path, paths: list[Path]) -> dict:
     return json.loads(paths[0].read_text(encoding="utf-8"))
 
 
+def strings_of(value, where: str = "record"):
+    """Every string of a record read back, keys included, with where it sits (the JSON text would double the
+    backslashes and escape the non-ASCII letters of a path)."""
+    if isinstance(value, str):
+        yield where, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from strings_of(key, where + ".<key>")
+            yield from strings_of(item, f"{where}.{key}")
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            yield from strings_of(item, f"{where}[{i}]")
+
+
+def stub_chunk(calls: list, saves: list, gps: bool = False, scalebars: bool = False, report=None):
+    """A chunk whose methods only note their call: the chain of the child without an engine. ``report`` is what
+    ``update_transform`` returns."""
+    camera = types.SimpleNamespace(reference=types.SimpleNamespace(location=[1.0, 2.0, 3.0] if gps else None),
+                                   aligned=True)
+    chunk = types.SimpleNamespace(meta={}, cameras=[camera], aligned_cameras=[camera],
+                                  scalebars=[object()] if scalebars else [], product_path=lambda name: None,
+                                  document=types.SimpleNamespace(save=lambda: saves.append(1)))
+
+    def method(step):
+        def run(*args, **kwargs):
+            calls.append((step, args, kwargs))
+            return report if step == "update_transform" else None
+        return run
+
+    for step in steps.ALL_STEPS:
+        setattr(chunk, step, method(step))
+    return chunk
+
+
+REPORT = {"method": "markers", "crs": "EPSG:3004", "control_rmse": 0.002, "check_rmse": None, "scale": 1.0,
+          "markers": [{"label": "A", "type": "control", "error": 0.1}, {"label": "B", "type": "check", "error": None}],
+          "scalebars": [], "orientation_not_used": ["C"]}
+
+
 def child_only(popen):
     """``popen`` in the place of ``subprocess.Popen`` for the child of the bench alone (``python -m ...``): the
     system tools machine.py starts through ``subprocess.run`` keep the real one."""
@@ -110,7 +179,16 @@ def small_set(scene_dir, tmp_path) -> Path:
 
 
 @pytest.fixture
-def stand_in(monkeypatch):
+def fast_disk(monkeypatch):
+    """The disk under the test replaced by an internal SSD read at 250 MB/s: the exact reasons of a record must not
+    depend on the link of the disk the temporary folder is on."""
+    monkeypatch.setattr(machine, "disk_facts", lambda path: {"bus": "PCI-Express", "link_mbps": None,
+                                                              "solid_state": True})
+    monkeypatch.setattr(machine, "read_rate", lambda files, *a, **k: 250.0)
+
+
+@pytest.fixture
+def stand_in(monkeypatch, fast_disk):
     """The child replaced by the stand-in above (``mode`` chooses what it does); the command and the keywords the
     runner started it with are kept in ``calls``."""
     pytest.importorskip("psutil")
@@ -215,7 +293,7 @@ def test_the_file_is_named_by_the_run_its_start_and_its_index_and_is_never_overw
 
 @pytest.mark.parametrize("text, expected", [
     ("no such file: '/data/survey/photos'", "no such file: '<path>'"),  # a path of private
-    ("database /other/place/sfm/database.db is locked", "database <path> is locked"),  # another absolute path
+    ("database /other/place/sfm/database.db is locked", "database <path>"),  # an unquoted path runs to the line's end
     ("cannot read ~/photos/IMG_0007.jpg", "cannot read <path>"),  # a home path, whole
     ("cannot read C:\\survey\\photos\\IMG_0007.jpg", "cannot read <path>"),  # a drive letter
     ("IMG_0007.jpg has no EXIF", "<photo> has no EXIF"),  # a photo name
@@ -231,10 +309,56 @@ def test_scrub_replaces_what_a_record_must_not_hold(text, expected):
     assert record.scrub(text, private=(Path("/data/survey/photos"),), names=("IMG_0007.jpg",)) == expected
 
 
-def test_scrub_takes_the_private_paths_longest_first_and_then_the_photo():
+def test_scrub_takes_the_private_paths_longest_first_a_quoted_path_whole_and_then_the_photo():
     private = (Path("/data/survey"), Path("/data/survey/photos"))
-    out = record.scrub("'/data/survey/photos/IMG_0007.jpg' in /data/survey", private, names=("IMG_0007.jpg",))
-    assert out == "'<path>/<photo>' in <path>"
+    assert record.scrub("in /data/survey/photos and /data/survey", private) == "in <path> and <path>"
+    out = record.scrub("'/data/survey/photos/IMG_0007.jpg' in /data/survey and IMG_0007 too", private,
+                       names=("IMG_0007.jpg",))
+    assert out == "'<path>' in <path> and <photo> too"
+    assert record.scrub("cannot open /data/survey/a b/c - try again: now", private) == \
+        "cannot open <path> - try again: now"
+
+
+@pytest.mark.parametrize("text, expected", REAL_TEXTS)
+def test_scrub_on_the_text_of_a_real_exception(text, expected):
+    assert record.scrub(text, PRIVATE, names=("IMG_0001.JPG",)) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("id" + WIN_HOME.replace("\\", "\\\\") + "\\\\x", "id<path>"),  # backslashes doubled, as an OSError text
+    ("id" + WIN_HOME.replace("\\", "/") + "/x", "id<path>"),  # slashes for backslashes, as the repr of a Path
+    ("id" + WIN_HOME.upper() + "\\x", "id<path>"),  # another case of the letters
+    ("id" + HOME + "/x: and id" + HOME.upper(), "id<path>: and id<path>"),  # what follows a separator is the path's
+    ("id" + HOME + " and id" + HOME.upper() + "'", "id<path> and id<path>'"),  # a space, a quote: boundaries
+    ("id" + HOME + "lovelace", "id" + HOME + "lovelace"),  # never into a longer name (a space before it: the path rule)
+], ids=["doubled", "slashes", "case", "separator", "boundaries", "whole"])
+def test_scrub_finds_a_private_path_in_every_spelling_and_only_whole(text, expected):
+    assert record.scrub(text, (Path(HOME), WIN_HOME)) == expected
+
+
+def test_describe_keeps_the_strerror_of_an_os_error_never_its_file_name():
+    exc = FileNotFoundError(2, "No such file or directory", PHOTOS + "/IMG_0001.JPG")
+    assert record.describe(exc) == "FileNotFoundError: No such file or directory"
+    assert record.describe(PermissionError(13, "Permission denied", PHOTOS, None, OUT)) == "PermissionError: " \
+                                                                                           "Permission denied"
+    assert record.describe(FileNotFoundError(PHOTOS + "/p.ppg")) == "FileNotFoundError"  # Document.open: the path alone
+    assert record.describe(RuntimeError("alignment failed: no reconstruction could be initialised")) == \
+        "RuntimeError: alignment failed: no reconstruction could be initialised"
+    assert record.describe(KeyboardInterrupt()) == "KeyboardInterrupt"
+
+
+def test_a_record_written_after_each_real_text_holds_no_piece_of_a_private_path_nor_a_user_name(tmp_path):
+    """Every word of every folder of the private paths (a piece of a path, as a scrub that cuts at a space leaves it)
+    and the user names, case ignored, in no string of the written record."""
+    folders = {part for p in (PHOTOS, OUT, HOME) for part in Path(p).parts if part != "/"} | {"Users", "Field Team"}
+    pieces = {word for folder in folders for word in folder.split()} | {"fieldteam", "Field Team"}
+    for index, case in enumerate(REAL_TEXTS, 1):
+        r = rec()
+        r["error"] = record.scrub(case.values[0], PRIVATE, names=("IMG_0001.JPG",))
+        path = record.write(record.judge(r), tmp_path / "records", PRIVATE, index=index)
+        for where, text in strings_of(json.loads(path.read_text(encoding="utf-8"))):
+            low = text.casefold()
+            assert not any(piece.casefold() in low for piece in pieces), (case.id, where, text)
 
 
 # --- the chain of the child -------------------------------------------------------------------------------------------
@@ -267,6 +391,9 @@ def test_the_arguments_of_the_steps_are_the_defaults_of_today():
     params = inspect.signature(_native.gpu_match).parameters
     assert steps.match_settings() == {k: params[k].default for k in ("max_ratio", "max_distance", "cross_check")}
     assert steps.match_settings() == {"max_ratio": 0.8, "max_distance": 0.7, "cross_check": True}
+    # the targets ``all`` detects by default are those ppg process detects, which are those of Chunk.detect_markers
+    assert steps.DEFAULT_TARGETS == process["targets"].default == "aruco_4x4_50"
+    assert steps.DEFAULT_TARGETS == inspect.signature(Chunk.detect_markers).parameters["target_type"].default
 
 
 def test_the_reprojection_rms_lives_in_the_package_and_the_script_imports_it():
@@ -284,6 +411,106 @@ def test_photo_cache_mb_is_the_variable_as_a_whole_number_or_none():
     assert runner.photo_cache_mb({"PPG_PHOTO_CACHE_MB": "1.5"}) is None
 
 
+def test_wanted_decides_the_conditional_steps_as_ppg_process_does():
+    plain = stub_chunk([], [])
+    assert steps.wanted("detect_markers", {"targets": "aruco_4x4_50"}, plain, False)
+    assert not steps.wanted("detect_markers", {"targets": None}, plain, False)
+    assert steps.wanted("import_reference", {"reference": "/data/gcp.csv"}, plain, False)
+    assert not steps.wanted("import_reference", {"reference": None}, plain, False)
+    assert not steps.wanted("update_transform", {}, plain, False)
+    assert steps.wanted("update_transform", {}, plain, True)  # a reference was imported
+    assert steps.wanted("update_transform", {}, stub_chunk([], [], gps=True), False)  # a camera has a position
+    assert steps.wanted("update_transform", {}, stub_chunk([], [], scalebars=True), False)  # scale bars
+    assert all(steps.wanted(step, {}, plain, False) for step in steps.ALL_STEPS
+               if step not in ("detect_markers", "import_reference", "update_transform"))
+
+
+def test_georeferencing_results_keeps_numbers_only(monkeypatch):
+    from pyarchinit_photogrammetry.markers import gcp
+
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {1: {"error": 0.3}, 2: {"error": None}, 3: {}})
+    out = steps.georeferencing_results(stub_chunk([], []), REPORT)
+    assert out == {"control_rmse": 0.002, "camera_rmse": pytest.approx(0.3), "markers": 1}  # no CRS, no label
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {})
+    assert steps.georeferencing_results(stub_chunk([], []), {**REPORT, "control_rmse": None, "check_rmse": 0.01}) == \
+        {"check_rmse": 0.01, "markers": 1}
+
+
+def test_the_child_runs_the_chain_of_all_with_the_arguments_written_out(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.markers import gcp
+
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {})
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    calls, saves = [], []
+    chunk = stub_chunk(calls, saves, report=REPORT)
+    result = steps.Result(tmp_path / "result.json")
+    job = {"steps": "all", "targets": "aruco_4x4_50", "reference": "/data/gcp.csv", "crs": "EPSG:3004"}
+    assert steps.run_chain(chunk, job, result) is True
+    assert calls == [("detect_markers", ("aruco_4x4_50",), {}), ("match_photos", (), steps.ARGUMENTS["match_photos"]),
+                     ("align_cameras", (), {}), ("import_reference", ("/data/gcp.csv",), {"crs": "EPSG:3004"}),
+                     ("update_transform", (), {}), ("build_depth_maps", (), {"quality": "medium"}),
+                     ("build_point_cloud", (), {}), ("build_model", (), {"surface": "arbitrary"}),
+                     ("build_texture", (), {}), ("build_dem", (), {}), ("build_orthomosaic", (), {})]
+    assert len(saves) == len(steps.ALL_STEPS)  # the project saved after every step
+    data = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert data == result.data and data["done"] is True and data["error"] is None
+    assert [e["step"] for e in data["steps"]] == list(steps.ALL_STEPS)
+    assert all(e["end"] and e["seconds"] >= 0 and e["peak_memory_mb"] == 50.0 and "error" not in e
+               for e in data["steps"])
+    assert data["settings"]["georeferencing"] == "markers" and data["settings"]["quality"] is None
+    assert data["results"] == {"cameras": 1, "aligned": 1, "control_rmse": 0.002, "markers": 1}
+    # align: the matching and the alignment alone without targets, reference, positions or scale bars
+    align = {"steps": "align", "targets": None, "reference": None, "crs": None}
+    calls, saves = [], []
+    assert steps.run_chain(stub_chunk(calls, saves), align, steps.Result(tmp_path / "align.json")) is True
+    assert [c[0] for c in calls] == ["match_photos", "align_cameras"]
+    calls = []
+    steps.run_chain(stub_chunk(calls, [], gps=True, report=REPORT), align, steps.Result(tmp_path / "gps.json"))
+    assert [c[0] for c in calls] == ["match_photos", "align_cameras", "update_transform"]
+
+
+def test_an_error_after_a_step_is_recorded_like_an_error_of_the_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    calls = []
+    result = steps.Result(tmp_path / "result.json")
+    job = {"steps": "all", "targets": None, "reference": "/data/gcp.csv", "crs": None}
+    assert steps.run_chain(stub_chunk(calls, [], report=None), job, result) is False  # the report is not a dict
+    data = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert [e["step"] for e in data["steps"]] == ["match_photos", "align_cameras", "import_reference",
+                                                  "update_transform"]
+    last = data["steps"][-1]
+    assert last["end"] and last["error"] == data["error"]
+    assert last["error"].startswith("update_transform: AttributeError")
+    assert data["done"] is False and [c[0] for c in calls][-1] == "update_transform"
+
+
+def test_the_result_is_written_again_while_a_reader_holds_it(tmp_path, monkeypatch):
+    real, held = steps.os.replace, []
+
+    def replace(src, dst):
+        if len(held) < 2:  # Windows: the parent reads the file every half second and holds it for a moment
+            held.append(dst)
+            raise PermissionError(13, "The process cannot access the file")
+        return real(src, dst)
+
+    monkeypatch.setattr(steps.os, "replace", replace)
+    monkeypatch.setattr(steps.time, "sleep", lambda seconds: None)
+    result = steps.Result(tmp_path / "result.json")
+    result.data["done"] = True
+    result.save()
+    assert len(held) == 2 and json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))["done"] is True
+    always = []
+
+    def never(src, dst):
+        always.append(dst)
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(steps.os, "replace", never)
+    with pytest.raises(PermissionError):
+        result.save()
+    assert 2 <= len(always) <= 10  # a few tries, then the error
+
+
 # --- the run: what is refused before a child starts -------------------------------------------------------------------
 
 def test_a_work_folder_inside_the_photos_a_bad_name_or_unknown_steps_are_refused(tmp_path, monkeypatch):
@@ -297,7 +524,26 @@ def test_a_work_folder_inside_the_photos_a_bad_name_or_unknown_steps_are_refused
         runner.run(photos, tmp_path / "out", name="t", steps="dense")
     with pytest.raises(ValueError):
         runner.run(photos, tmp_path / "out", name="t", repeat=0)
+    with pytest.raises(ValueError):  # the one way the bench could write beside the photos
+        runner.run(photos, tmp_path / "out", name="t", records=photos / "records")
+    with pytest.raises(ValueError):
+        runner.run(tmp_path / "missing", tmp_path / "out", name="t")
     assert not (tmp_path / "out").exists()
+    (tmp_path / "out" / "t-2").mkdir(parents=True)  # a stray work folder of a later repeat: refused before any child
+    with pytest.raises(FileExistsError):
+        runner.run(photos, tmp_path / "out", name="t", repeat=2)
+    assert not (tmp_path / "out" / "t-1").exists()
+
+
+def test_the_work_folder_inside_the_photos_is_refused_whatever_the_case_of_the_letters(tmp_path, monkeypatch):
+    photos = noise_photos(tmp_path / "Photos")
+    if not (tmp_path / "photos").exists():
+        pytest.skip("this file system does not fold the case of names")
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
+    with pytest.raises(ValueError):
+        runner.run(photos, tmp_path / "photos" / "out", name="t")
+    with pytest.raises(ValueError):
+        runner.run(photos, tmp_path / "out", name="t", records=tmp_path / "photos" / "records")
 
 
 def test_without_psutil_the_run_names_the_extra(tmp_path, monkeypatch):
@@ -339,13 +585,15 @@ def test_a_small_run_writes_one_record(small_set, tmp_path):
     assert r["settings"]["max_ratio"] == 0.8 and r["settings"]["cross_check"] is True
     assert isinstance(r["settings"]["pycolmap"], str) and r["settings"]["pycolmap"]
     assert r["settings"]["photo_cache_mb"] is None and r["settings"]["georeferencing"] is None
+    assert r["settings"]["targets"] is None  # align detects no markers
     assert "image_root" not in r["settings"] and "names" not in r["settings"]
     assert isinstance(r["machine"]["adapters"], list) and "read_mb_s" in r["disk"]
     assert r["valid"] in (True, False) and r["error"] is None
     assert all(any(re.fullmatch(p, reason) for p in REASONS) for reason in r["invalid_reasons"])
     assert r["valid"] == (r["invalid_reasons"] == [])
-    text = paths[0].read_text(encoding="utf-8")
-    assert str(tmp_path) not in text and not any(p.name in text or p.stem in text for p in small_set.iterdir())
+    for where, text in strings_of(r):
+        assert str(tmp_path) not in text, where
+        assert not any(p.name in text or p.stem in text for p in small_set.iterdir()), where
     assert not (out / "t-1").exists()
 
 
@@ -365,9 +613,9 @@ def test_a_failed_run_leaves_a_record_with_the_error(tmp_path):
     assert all("error" not in s for s in r["steps"][:-1])  # the steps before it are complete
     assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras"][:len(r["steps"])]
     assert r["results"].get("aligned", 0) < 3 and r["set"]["photos"] == 3
-    text = paths[0].read_text(encoding="utf-8")
-    assert str(tmp_path) not in text and "NOISE_" not in text and "/" not in r["error"]
-    assert not (out / "t-1").exists()
+    for where, text in strings_of(r):
+        assert str(tmp_path) not in text and "NOISE_" not in text, where
+    assert "/" not in r["error"] and not (out / "t-1").exists()
 
 
 def test_a_cancelled_run_leaves_a_record_and_no_work_folder(small_set, tmp_path, monkeypatch):
@@ -393,7 +641,7 @@ def test_a_cancelled_run_leaves_a_record_and_no_work_folder(small_set, tmp_path,
         runner.run(small_set, out, name="t")
     assert len(started) == 1 and started[0].poll() is not None  # terminated
     r = the_record(out, list(out.glob("*.json")))
-    assert r["error"] == "cancelled" and r["valid"] is False and r["invalid_reasons"] == ["failed: cancelled"]
+    assert r["error"] == "cancelled" and r["valid"] is False and "failed: cancelled" in r["invalid_reasons"]
     assert not (out / "t-1").exists()
 
 
@@ -406,7 +654,9 @@ def test_a_slow_link_marks_the_run_and_does_not_stop_it(small_set, tmp_path, mon
     assert r["disk"]["link_mbps"] == 480 and r["disk"]["bus"] == "USB" and "read_mb_s" in r["disk"]
 
 
-def test_a_run_without_a_gpu_ends_and_says_so(small_set, tmp_path, monkeypatch):
+def test_a_run_whose_parent_lists_no_gpu_ends_and_records_an_empty_list(small_set, tmp_path, monkeypatch):
+    """The list of adapters is patched in the parent alone (the child matches as the machine allows): the run ends
+    and the record says ``adapters == []``, as a record made on a runner without a GPU would."""
     monkeypatch.setattr(machine._native, "gpu_adapters", lambda: [])
     out = tmp_path / "out"
     r = the_record(out, runner.run(small_set, out, name="t"))
@@ -461,6 +711,75 @@ def test_a_child_that_dies_leaves_the_step_it_died_in(tmp_path, stand_in):
     out = tmp_path / "out"
     r = the_record(out, runner.run(photos, out, name="t"))
     assert r["error"] == "match_photos: child ended with code 9" and r["valid"] is False
+    assert r["invalid_reasons"] == ["failed: match_photos: child ended with code 9"]
     assert [s["step"] for s in r["steps"]] == ["match_photos"]
     assert r["steps"][0]["error"] == r["error"] and r["steps"][0]["seconds"] > 0
     assert not (out / "t-1").exists()
+
+
+def test_the_texts_of_the_runner_are_not_scrubbed(tmp_path, stand_in):
+    """A crash code with many digits and a photo whose stem is a digit of it stay as they are: only the text of an
+    exception goes through the scrub."""
+    stand_in.mode = "dies"
+    photos = noise_photos(tmp_path / "photos")
+    shutil.copy(photos / "NOISE_00.jpg", photos / "9.jpg")
+    out = tmp_path / "out"
+    r = the_record(out, runner.run(photos, out, name="t"))
+    assert r["error"] == "match_photos: child ended with code 9" and r["steps"][0]["error"] == r["error"]
+
+
+def test_all_detects_the_targets_of_ppg_process_by_default_and_align_does_not(tmp_path, stand_in):
+    photos = noise_photos(tmp_path / "photos")
+    r = the_record(tmp_path / "all", runner.run(photos, tmp_path / "all", name="t", steps="all", keep=True))
+    job = json.loads((tmp_path / "all" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["steps"] == "all" and job["targets"] == r["settings"]["targets"] == steps.DEFAULT_TARGETS
+    r = the_record(tmp_path / "align", runner.run(photos, tmp_path / "align", name="t", keep=True))
+    job = json.loads((tmp_path / "align" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["targets"] is None and r["settings"]["targets"] is None
+    r = the_record(tmp_path / "given", runner.run(photos, tmp_path / "given", name="t", targets="apriltag_36h11"))
+    assert r["settings"]["targets"] == "apriltag_36h11" and list(r["settings"]) == SETTINGS
+
+
+def test_the_machine_is_read_again_for_every_repeat(tmp_path, monkeypatch, stand_in):
+    reads = []
+
+    def facts():
+        reads.append(1)
+        return {"system": "Test", "cores": 4, "load": float(len(reads)), "adapters": [], "on_battery": None,
+                "dropbox_running": None}
+
+    monkeypatch.setattr(machine, "machine_facts", facts)
+    photos = noise_photos(tmp_path / "photos")
+    paths = runner.run(photos, tmp_path / "out", name="t", repeat=2)
+    assert len(paths) == 2 and len(reads) == 2 and [p.name[-7:] for p in paths] == ["-1.json", "-2.json"]
+    assert [json.loads(p.read_text(encoding="utf-8"))["machine"]["load"] for p in paths] == [1.0, 2.0]
+
+
+def test_a_work_folder_that_cannot_be_removed_is_said_without_its_path(tmp_path, monkeypatch, stand_in, caplog):
+    def busy(path, *args, **kwargs):
+        raise OSError(16, "Resource busy", str(path))
+
+    monkeypatch.setattr(runner.shutil, "rmtree", busy)
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry.bench.runner"):
+        r = the_record(out, runner.run(photos, out, name="t"))
+    assert r["valid"] is True and (out / "t-1").is_dir()
+    lines = [entry.getMessage() for entry in caplog.records if "t-1" in entry.getMessage()]
+    assert lines and not any(str(tmp_path) in line or "/" in line for line in lines)
+
+
+def test_a_child_that_cannot_start_leaves_the_work_folder_and_says_so(tmp_path, monkeypatch, caplog):
+    pytest.importorskip("psutil")
+
+    def refused(cmd, **kwargs):
+        raise OSError(8, "Exec format error", cmd[0])
+
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(refused))
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry.bench.runner"), pytest.raises(OSError):
+        runner.run(photos, out, name="t")
+    assert (out / "t-1" / "job.json").exists() and list(out.glob("*.json")) == []
+    lines = [entry.getMessage() for entry in caplog.records if "t-1" in entry.getMessage()]
+    assert lines and not any(str(tmp_path) in line or "/" in line for line in lines)

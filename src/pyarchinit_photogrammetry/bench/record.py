@@ -5,8 +5,8 @@ A record (:func:`new`) holds exactly the keys of :data:`KEYS`. :func:`judge` say
 - not when the disk is on a slow link, reads slowly, when photos were online-only or when the run failed - and warns of
 what does not invalidate it (a running Dropbox, a busy machine, a laptop on its battery). :func:`write` puts the record
 in a folder, named by the run, its start and its index, and refuses a record that holds a path. Records may be shared:
-they hold no path, no photo name, no coordinate and no CRS, and the text of an error goes through :func:`scrub` before
-it is kept.
+they hold no path, no photo name, no coordinate and no CRS; the text a record keeps of an exception is
+:func:`describe` (an ``OSError`` gives its type and ``strerror``, never its file name) passed through :func:`scrub`.
 """
 from __future__ import annotations
 
@@ -31,9 +31,17 @@ HIGH_LOAD = 2.0
 # the name of a run: it becomes part of the name of a file, never a path
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
-# an absolute path in a text: a token starting with / that has a second /, a token starting with ~, or one starting
-# with a drive letter; a token runs to a space or a quote and never starts inside a word
-_ABSOLUTE = re.compile(r"""(?<![\w.~-])(?:/[^\s'"]*/[^\s'"]*|~[^\s'"]+|[A-Za-z]:[\\/][^\s'"]*)""")
+# a quoted span that holds a separator: a path as Python quotes it in the text of an OSError or the repr of a Path
+_QUOTED = re.compile(r"""'[^'\n]*[/\\][^'\n]*'|"[^"\n]*[/\\][^"\n]*\"""")
+# the tail of an unquoted path: to the end of the line, a quote, or the next " - " or ": " (a path with spaces is cut
+# there rather than at its first space: a piece of a path left in the text is the defect, a lost word is not)
+_TAIL = r"""(?:(?! - |: )[^'"\n])*"""
+# an unquoted absolute path: a token starting with / that has a second /, a token starting with ~, or one starting
+# with a drive letter, never starting inside a word, with its tail
+_ABSOLUTE = re.compile(r"""(?<![\w.~-])(?:/[^\s'"]*/|~[^\s'"]+|[A-Za-z]:[\\/])""" + _TAIL)
+# what may follow a private path: its end (the end of the text, a space, a quote) or a separator with the tail of
+# the path under it; a letter means a longer name (/Users/x is not /Users/xy)
+_PRIVATE_END = r"""(?:(?=$|[\s'"])|[/\\]""" + _TAIL + ")"
 _EPSG = re.compile(r"EPSG:\d+", re.IGNORECASE)
 # a coordinate: four or more digits before the point (metres), or five or more after it (degrees)
 _NUMBER = re.compile(r"(?<![\d.])(?:\d{4,}(?:\.\d+)?|\d*\.\d{5,})")
@@ -91,27 +99,50 @@ def judge(rec: dict) -> dict:
     return rec
 
 
+def describe(exc: BaseException) -> str:
+    """The text a record keeps of an exception, to be passed through :func:`scrub`: its type and its message; for an
+    ``OSError`` (and its subclasses) its type and ``strerror`` alone, never ``filename``, ``filename2`` or
+    ``str(exc)``, which name the file (the type alone when there is no ``strerror``: a ``FileNotFoundError`` raised
+    with the path as its message loses the path)."""
+    name = type(exc).__name__
+    if isinstance(exc, OSError):
+        return f"{name}: {exc.strerror}" if exc.strerror else name
+    text = str(exc)
+    return f"{name}: {text}" if text else name
+
+
 def _forms(private) -> list[str]:
-    """The spellings of the private paths to look for, longest first: each as given when it is absolute (or starts
-    with ``~``) and as resolved (``/var`` and ``/private/var`` are one folder on macOS); never a relative spelling,
-    which would match words."""
+    """The spellings of the private paths to look for, longest first: each as given when it is absolute (by a
+    slash, a drive letter or ``~``) and, for a path of this system, as resolved (``/var`` and ``/private/var`` are one
+    folder on macOS); each of them also with every backslash doubled (as the text of an ``OSError`` on Windows
+    writes it), with slashes for backslashes (as the repr of a ``Path`` does) and as ``os.path.normcase`` folds it.
+    Never a relative spelling, which would match words."""
     forms = set()
     for path in private:
         given = str(path)
-        if os.path.isabs(given) or given.startswith("~"):
+        own = os.path.isabs(given) or given.startswith("~")
+        if own or _DRIVE.match(given):
             forms.add(given)
-        forms.add(str(Path(path).expanduser().resolve()))
-    return sorted((f for f in forms if f and f != os.sep), key=len, reverse=True)
+        if own:
+            forms.add(str(Path(path).expanduser().resolve()))
+    spellings = set()
+    for form in forms:
+        spellings.update((form, form.replace("\\", "\\\\"), form.replace("\\", "/"), os.path.normcase(form)))
+    return sorted((f for f in spellings if f and f != os.sep), key=len, reverse=True)
 
 
 def scrub(text: str, private=(), names=()) -> str:
-    """``text`` (of an exception) with what a record must not hold replaced, in this order: every path of ``private``
-    (as given and resolved, longest first) and then every remaining absolute path by ``<path>``; every photo file name
-    of ``names`` and every stem of them, longest first and whole, by ``<photo>``; every ``EPSG:<digits>``, case
-    ignored, by ``<crs>``; every number with four or more digits before the point or five or more after it (a
-    coordinate in metres or in degrees) by ``<number>``."""
-    for form in _forms(private):
-        text = text.replace(form, "<path>")
+    """``text`` (of an exception) with what a record must not hold replaced, in this order: every quoted span that
+    holds a separator by ``'<path>'``; every path of ``private`` (in every spelling of :func:`_forms`, case ignored,
+    longest first, whole: at its end or with the rest of the path under it, never into a longer name) by ``<path>``;
+    every remaining unquoted absolute path, to the end of the line or the next `` - `` or ``: ``, by ``<path>``; every
+    photo file name of ``names`` and every stem of them, longest first and whole, by ``<photo>``; every
+    ``EPSG:<digits>``, case ignored, by ``<crs>``; every number with four or more digits before the point or five or
+    more after it (a coordinate in metres or in degrees) by ``<number>``."""
+    text = _QUOTED.sub("'<path>'", text)
+    forms = _forms(private)
+    if forms:
+        text = re.sub("(?:" + "|".join(map(re.escape, forms)) + ")" + _PRIVATE_END, "<path>", text, flags=re.IGNORECASE)
     text = _ABSOLUTE.sub("<path>", text)
     words = {str(n) for n in names} | {Path(str(n)).stem for n in names}
     for word in sorted((w for w in words if w), key=len, reverse=True):
@@ -137,10 +168,12 @@ def write(rec: dict, folder: Path, private=(), index: int = 1) -> Path:
     """``rec`` written as ``<name>-<digits of started>-<index>.json`` in ``folder`` (made when missing), never over an
     existing file (a FileExistsError goes to the caller). A ValueError, and no file, when any string of the record - a
     key or a value, the error among them - starts with ``/``, ``~`` or a drive letter, or holds one of the ``private``
-    paths (as given or resolved): the ValueError names where the string sits, never the string."""
-    forms = _forms(private)
+    paths in any spelling of :func:`_forms`, case ignored: the ValueError names where the string sits, never the
+    string."""
+    forms = [form.casefold() for form in _forms(private)]
     for where, text in _strings(rec):
-        if text.startswith(("/", "~")) or _DRIVE.match(text) or any(form in text for form in forms):
+        low = text.casefold()
+        if text.startswith(("/", "~")) or _DRIVE.match(text) or any(form in low for form in forms):
             raise ValueError(f"the record holds a path ({where}): not written")
     name = check_name(rec["name"])
     folder = Path(folder)

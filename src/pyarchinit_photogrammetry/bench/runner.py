@@ -4,11 +4,14 @@
 starts the child (:mod:`.steps`, the same interpreter, with the environment the timing of the stages needs) in a work
 folder of its own, samples every :data:`SAMPLE_SECONDS` the memory of the child and of its children, and when the child
 ends builds the record (:mod:`.record`), judges it and writes it. A run that fails, dies or is cancelled leaves a record
-too, with its error and the steps done; photos that are online-only are left out and make the record not valid.
+too, with its error and the steps done; photos that are online-only are left out and make the record not valid. What
+the run writes beside the records (a work folder it could not remove, one left by a child that could not start) is
+said in the log by the name of the folder, never by its path.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -24,6 +27,8 @@ from ..engine.timing import LIVE_LOG_ENV
 from ..io import raw as rawio
 from . import machine, record
 from . import steps as child
+
+log = logging.getLogger(__name__)
 
 # the memory of the child and of its children is sampled every half second: an estimate (a step shorter than that
 # keeps the peak the child reads itself at its start and at its end)
@@ -44,7 +49,6 @@ class _Plan:
     records: Path
     keep: bool
     env: dict
-    machine: dict
     disk: dict
     set: dict
     settings: dict
@@ -76,15 +80,18 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     ``records`` (default ``out``). Returned: the path of each record.
 
     Refused, in this order and before anything runs: a name that is not one a file can take (ValueError), unknown
-    steps or a repeat below 1 (ValueError), ``out`` inside ``photos`` (ValueError), psutil missing (RuntimeError naming
-    the extra), every photo online-only (RuntimeError; no child is started). Photos that are online-only are left
-    out of the run and make the record not valid.
+    steps or a repeat below 1 (ValueError), ``out`` or ``records`` inside ``photos`` (ValueError; by the identity of
+    the folders, whatever the case of the letters), a work folder of one of the repeats that exists already
+    (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), every photo
+    online-only (RuntimeError; no child is started). Photos that are online-only are left out of the run and make the
+    record not valid.
 
     ``targets``, ``reference`` and ``crs`` go to the child, which detects the markers and imports the reference when
-    they are given. ``extra_results``, called with the finished project (a :class:`..core.document.Document`) after
-    the last step of a run that did not fail, returns a dict of numbers merged into the results; an exception in it,
-    or a value that is not a number, is kept as ``results["error"]`` and makes the record not valid, the times stay.
-    A KeyboardInterrupt while the child runs terminates it and its children, writes the record with the error
+    they are given; ``all`` detects :data:`.steps.DEFAULT_TARGETS` when no targets are given, as ``ppg process`` does,
+    ``align`` detects none. ``extra_results``, called with the finished project (a :class:`..core.document.Document`)
+    after the last step of a run that did not fail, returns a dict of numbers merged into the results; an exception
+    in it, or a value that is not a number, is kept as ``results["error"]`` and makes the record not valid, the times
+    stay. A KeyboardInterrupt while the child runs terminates it and its children, writes the record with the error
     ``cancelled``, removes the work folder unless ``keep`` and is raised again."""
     record.check_name(name)
     if steps not in child.CHAINS:
@@ -92,8 +99,14 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     if int(repeat) < 1:
         raise ValueError("repeat must be 1 or more")
     photos, out = Path(photos).resolve(), Path(out).resolve()
-    if out == photos or photos in out.parents:
-        raise ValueError("the work folder must not be inside the folder of the photos")
+    records = Path(records).resolve() if records else out
+    if not photos.is_dir():
+        raise ValueError(f"{photos} is not a folder of photos")
+    if _inside(out, photos) or _inside(records, photos):
+        raise ValueError("the work folder and the records folder must not be inside the folder of the photos")
+    for index in range(1, int(repeat) + 1):
+        if (out / f"{name}-{index}").exists():
+            raise FileExistsError(f"the work folder {out / f'{name}-{index}'} exists: delete it or choose another name")
     _psutil()
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     if not files:
@@ -106,13 +119,29 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     disk["read_mb_s"] = machine.read_rate(list(local))
     env = dict(os.environ)
     env.update(LIVE_LOG_ENV)
+    if targets is None and steps == "all":
+        targets = child.DEFAULT_TARGETS
+    reference = Path(reference).resolve() if reference else None
     settings = {**{key: None for key in child.SFM_SETTINGS}, **child.match_settings(), "pycolmap": None,
-                "photo_cache_mb": photo_cache_mb(env), "georeferencing": None}
-    plan = _Plan(name=name, steps=steps, local=local, out=out, records=Path(records).resolve() if records else out,
-                 keep=keep, env=env, machine=machine.machine_facts(), disk=disk, set=set_, settings=settings,
-                 private=(photos, out, Path.home()), names=tuple(p.name for p in files), extra_results=extra_results,
-                 targets=targets, reference=Path(reference).resolve() if reference else None, crs=crs)
+                "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets}
+    private = (photos, out, Path.home()) + ((reference,) if reference else ())
+    plan = _Plan(name=name, steps=steps, local=local, out=out, records=records, keep=keep, env=env, disk=disk,
+                 set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
+                 extra_results=extra_results, targets=targets, reference=reference, crs=crs)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
+
+
+def _inside(folder: Path, photos: Path) -> bool:
+    """Whether ``folder`` is ``photos`` or lies under it: by the identity the file system gives the folders of its
+    path that exist (``os.path.samefile``), since a file system that folds the case of names, or a link, would let
+    another spelling of the same folder through a comparison of the paths."""
+    for ancestor in (folder, *folder.parents):
+        try:
+            if ancestor.exists() and os.path.samefile(ancestor, photos):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _psutil():
@@ -125,17 +154,20 @@ def _psutil():
 
 def _one_run(plan: _Plan, index: int) -> Path:
     work = plan.out / f"{plan.name}-{index}"
-    if work.exists():
-        raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
     work.mkdir(parents=True)
     job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "targets": plan.targets,
            "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
-    rec = record.new(plan.name, plan.machine, plan.disk, plan.set, dict(plan.settings))
+    rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}
-    with open(work / LOG, "wb") as log:
-        proc = subprocess.Popen(_command(work / JOB), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                env=plan.env, close_fds=False)
+    with open(work / LOG, "wb") as log_file:
+        try:
+            proc = subprocess.Popen(_command(work / JOB), stdin=subprocess.DEVNULL, stdout=log_file,
+                                    stderr=subprocess.STDOUT, env=plan.env, close_fds=False)
+        except OSError:
+            log.warning("the child of the run could not be started: the work folder %s is left in the output folder",
+                        work.name)
+            raise
     try:
         while proc.poll() is None:
             time.sleep(SAMPLE_SECONDS)
@@ -219,11 +251,17 @@ def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: f
              cancelled: bool = False) -> None:
     """The steps, the settings, the results and the error of the record from what the child wrote. A step the child
     did not end (it died in it, or was cancelled) gets the seconds up to ``ended`` and says so; a child that ended
-    without finishing the chain and without an error gives ``<step>: child ended with code N``. Every error text is
-    scrubbed of paths, photo names, CRS codes and coordinates."""
+    without finishing the chain and without an error gives ``<step>: child ended with code N``. The texts of the
+    exceptions the child wrote are scrubbed of paths, photo names, CRS codes and coordinates; the texts of the runner
+    itself (the codes, ``cancelled``) are not."""
     data = _read(work / child.RESULT) or {}
     entries = [e for e in data.get("steps") or [] if isinstance(e, dict) and e.get("step")]
-    error, running, steps = data.get("error"), None, []
+
+    def scrubbed(text) -> str:
+        return record.scrub(str(text), plan.private, plan.names)
+
+    error = scrubbed(data["error"]) if data.get("error") else None
+    running, steps = None, []
     for e in entries:
         step = str(e["step"])
         entry = {"step": step, "seconds": e.get("seconds"), "peak_memory_mb": 0.0, "stages": e.get("stages") or {},
@@ -235,22 +273,19 @@ def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: f
             entry["seconds"] = round(max(ended - float(e.get("start") or ended), 0.0), 3)
             entry["error"] = f"{step}: cancelled" if cancelled else f"{step}: child ended with code {code}"
         elif e.get("error"):
-            entry["error"] = str(e["error"])
+            entry["error"] = scrubbed(e["error"])
         own = float(e.get("peak_memory_mb") or 0.0)
         entry["peak_memory_mb"] = round(max(own, peaks.get(step, 0) / 2**20), 1)
         steps.append(entry)
     if cancelled:
         error = "cancelled"
-    elif not error and not data.get("done"):
+    elif error is None and not data.get("done"):
         where = running or (steps[-1]["step"] if steps else "setup")
         error = f"{where}: child ended with code {code}"
-    for entry in steps:
-        if "error" in entry:
-            entry["error"] = record.scrub(entry["error"], plan.private, plan.names)
     rec["steps"] = steps
     rec["settings"].update(data.get("settings") or {})
     rec["results"] = dict(data.get("results") or {})
-    rec["error"] = record.scrub(str(error), plan.private, plan.names) if error else None
+    rec["error"] = error
 
 
 def _extra(rec: dict, work: Path, plan: _Plan) -> None:
@@ -263,13 +298,23 @@ def _extra(rec: dict, work: Path, plan: _Plan) -> None:
                 raise TypeError(f"extra_results gave {key!r} that is not a number")
         rec["results"].update(extra)
     except Exception as exc:
-        rec["results"]["error"] = record.scrub(f"extra_results: {type(exc).__name__}: {exc}", plan.private, plan.names)
+        rec["results"]["error"] = record.scrub(f"extra_results: {record.describe(exc)}", plan.private, plan.names)
 
 
 def _finish(rec: dict, work: Path, plan: _Plan, index: int) -> Path:
-    """The record judged and written, the work folder removed unless kept."""
+    """The record judged and written, then the work folder removed unless kept. A record that is refused (a path in
+    it) leaves the work folder for inspection, and a work folder that cannot be removed stays: both are said in the
+    log, by the name of the folder."""
     record.judge(rec)
-    path = record.write(rec, plan.records, plan.private, index=index)
+    try:
+        path = record.write(rec, plan.records, plan.private, index=index)
+    except ValueError:
+        log.warning("the record of the run was refused: the work folder %s is left in the output folder", work.name)
+        raise
     if not plan.keep:
-        shutil.rmtree(work, ignore_errors=True)
+        try:
+            shutil.rmtree(work)
+        except OSError as exc:
+            log.warning("the work folder %s could not be removed (%s): it is left in the output folder", work.name,
+                        type(exc).__name__)
     return path
