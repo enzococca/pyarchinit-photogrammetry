@@ -23,29 +23,47 @@ photos, the surface and its grid, never on the tiles around it.
 Patches (:mod:`.patches`) are polygons whose cells take their colours from photos chosen by
 hand (or from every photo but some): every build applies them, and an update redraws only the
 cells of the patches that changed.
+
+The photos a tile needs are decoded once and kept for the tiles that need them again
+(:class:`_PhotoCache`) within a share of the memory of the computer (:func:`photo_cache_budget`;
+``PPG_PHOTO_CACHE_MB`` sets it, 0 for the cache of version 1.10). The orthomosaic that becomes
+the product of the chunk records its time and what its cache did - how often a photo was read,
+read again or given without a read - in ``chunk.meta["timings"]["build_orthomosaic"]``
+(:mod:`.timing`), the counts of the nodes' caches added.
 """
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
 
-from .. import _native
+from .. import _env, _native
 from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 from ..io.files import replace_file
+from . import timing
 from .dem import NODATA, ensure_level, estimate_gsd
 from .visibility import project_valid, raycaster_for_chunk, read_photo, readable_cameras, sample
 
+log = logging.getLogger("pyarchinit_photogrammetry")
 
 BLENDINGS = ("mosaic", "disabled", "average")
 BLEND_SIGMA = 8.0  # cells: width of the transition between two photos (Gaussian sigma) in "mosaic"
+PHOTO_CACHE_ENV = "PPG_PHOTO_CACHE_MB"
+PHOTO_CACHE_SHARE = 0.35
+"""The share of the physical memory the photo cache of a context may hold by default: an estimate (about a third,
+the rest for the tiles being written and the system), judged by the photos read again (``rereads`` in the record of
+the orthomosaic). ``PPG_PHOTO_CACHE_MB`` replaces it with a number of megabytes; 0 leaves the floor of photos alone,
+which is the cache of version 1.10."""
+_ignored: set[str] = set()  # the values of the variable already said to be ignored (once each in a process)
 
 
 def correction_for(chunk: Chunk, enabled: bool | None = None, progress: Progress | None = None):
@@ -305,15 +323,57 @@ class _Footprints:
         return np.nonzero(ok)[0]
 
 
-class _PhotoCache:
-    """Decoded photos shared by the tile workers (least recently used ones dropped), with the
-    colour correction applied (:class:`.colour.Correction`) when there is one."""
+def photo_cache_budget(workers: int, memory: int | None) -> tuple[int, int | None]:
+    """How many photos the cache of a context keeps at least (``max(12, 3 * workers)``) and the most bytes it may
+    hold beyond them: :data:`PHOTO_CACHE_SHARE` of ``memory`` (bytes, :func:`.._env.physical_memory`), None - no
+    budget, the floor alone - when the memory is unknown. ``PPG_PHOTO_CACHE_MB``, a whole number of megabytes (0
+    allowed), takes the place of the share; any other value is ignored for the default, said once in the log: a
+    typing mistake must not stop an orthomosaic."""
+    floor = max(12, 3 * int(workers))
+    value = os.environ.get(PHOTO_CACHE_ENV)
+    if value is not None:
+        text = value.strip()
+        if text.isascii() and text.isdigit():
+            return floor, int(text) * 2**20
+        if value not in _ignored:
+            _ignored.add(value)
+            log.warning("%s=%r is not a whole number of megabytes: ignored", PHOTO_CACHE_ENV, value)
+    if not memory:
+        return floor, None
+    return floor, int(PHOTO_CACHE_SHARE * memory)
 
-    def __init__(self, max_items: int, correction=None, loader=None):
-        self.max_items = max_items
+
+def _held_bytes(img) -> int:
+    """The bytes a photo keeps in memory: those of the array that owns its data (a view of a larger array - a band
+    on a reduced grid of the photo - keeps the whole of it alive)."""
+    while isinstance(getattr(img, "base", None), np.ndarray):
+        img = img.base
+    return int(getattr(img, "nbytes", 0))
+
+
+_COUNTS = ("hits", "reads", "rereads")
+
+
+class _PhotoCache:
+    """Decoded photos shared by the tile workers, with the colour correction applied
+    (:class:`.colour.Correction`) when there is one. ``max_items`` photos are always kept; with a
+    budget of ``max_bytes`` more are kept while their bytes fit (:func:`photo_cache_budget`), and
+    the least recently used goes first either way. The cache counts what it does (:meth:`stats`):
+    ``hits`` (a photo given without decoding it), ``reads`` (a photo decoded) and, among the reads,
+    ``rereads`` (a photo that had been held and dropped): how well the budget fits the photos a
+    build asks for."""
+
+    def __init__(self, max_items: int, correction=None, loader=None, max_bytes: int | None = None):
+        self.max_items = int(max_items)
+        self.max_bytes = None if max_bytes is None else int(max_bytes)
         self.correction = correction or None
         self.loader = loader  # the image of a camera (any dtype and channels); the photo itself by default
+        self.hits = self.reads = self.rereads = 0
+        self.peak_bytes = 0  # the most the photos held took at once (after the trimming)
+        self._bytes = 0
         self._items: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._dropped: set = set()  # the keys of the photos held once and dropped
+        self._sent = (0, 0, 0)  # the counts last given by new_counts
         self._lock = threading.Lock()
 
     def get(self, cam) -> np.ndarray:
@@ -321,16 +381,55 @@ class _PhotoCache:
             img = self._items.get(cam.key)
             if img is not None:
                 self._items.move_to_end(cam.key)
+                self.hits += 1
                 return img
+            again = cam.key in self._dropped
         img = self.loader(cam) if self.loader is not None else read_photo(cam)  # decoded outside the lock
         if self.correction is not None:
             img = self.correction.correct(cam, img)
         with self._lock:
+            self.reads += 1
+            if again:
+                self.rereads += 1
+            twice = self._items.pop(cam.key, None)  # decoded by two workers at once: the last one stays
+            if twice is not None:
+                self._bytes -= _held_bytes(twice)
             self._items[cam.key] = img
-            self._items.move_to_end(cam.key)
-            while len(self._items) > self.max_items:
-                self._items.popitem(last=False)
+            self._bytes += _held_bytes(img)
+            while len(self._items) > self.max_items and (self.max_bytes is None or self._bytes > self.max_bytes):
+                key, dropped = self._items.popitem(last=False)
+                self._bytes -= _held_bytes(dropped)
+                self._dropped.add(key)
+            self.peak_bytes = max(self.peak_bytes, self._bytes)
         return img
+
+    def stats(self) -> dict:
+        """What the cache did and how it was sized, for the record of the orthomosaic: ``hits``, ``reads``,
+        ``rereads``, ``max_items``, ``max_bytes``, ``peak_bytes``."""
+        with self._lock:
+            return {"hits": self.hits, "reads": self.reads, "rereads": self.rereads, "max_items": self.max_items,
+                    "max_bytes": self.max_bytes, "peak_bytes": self.peak_bytes}
+
+    def new_counts(self) -> dict:
+        """``hits``, ``reads`` and ``rereads`` since this was last asked: what a node sends the main program with
+        each unit of tiles (:func:`node_tiles`), its cache living on from one unit to the next."""
+        with self._lock:
+            now = (self.hits, self.reads, self.rereads)
+            out = {name: n - sent for name, n, sent in zip(_COUNTS, now, self._sent)}
+            self._sent = now
+        return out
+
+    def add_counts(self, counts) -> bool:
+        """The counts of a cache in another process (:meth:`new_counts`) added to this one's; False, and nothing
+        added, unless ``counts`` holds the three whole, non-negative numbers (a node that runs a version without
+        the counts sends none). The sizes stay this cache's own."""
+        if not isinstance(counts, dict) or any(type(counts.get(n)) is not int or counts[n] < 0 for n in _COUNTS):
+            return False
+        with self._lock:
+            self.hits += counts["hits"]
+            self.reads += counts["reads"]
+            self.rereads += counts["rereads"]
+        return True
 
 
 # ---------------------------------------------------------------- classes left out
@@ -1072,10 +1171,13 @@ def _blend(ctx, pts, rr, cc, shape, colors, got, keys, seen, group, tcams, cams_
 def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending: str = "mosaic",
              max_angle: float = 70.0, max_cameras: int = 8, workers: int | None = None, hide_classes=None,
              patches=None, tile: int = 512, lock=None, blend_sigma: float = BLEND_SIGMA, correction=None,
-             ghosting: bool = False, fill_holes: bool = False, source=None, float_output: bool = False):
+             ghosting: bool = False, fill_holes: bool = False, source=None, float_output: bool = False,
+             caches: int = 1):
     """Everything a tile needs: ``surface`` gives the grid (its ``origin`` and ``shape``). ``source``:
     the image of a camera instead of its photo (three channels of any dtype, e.g. reflectance
-    bands); ``float_output``: tiles of float32 values as they are, NaN where nothing."""
+    bands); ``float_output``: tiles of float32 values as they are, NaN where nothing. ``caches``:
+    how many contexts the caller keeps at once, in this process or others: their photo caches
+    share the budget of the memory (:func:`photo_cache_budget`)."""
     if blending not in BLENDINGS:
         raise ValueError(f"blending: one of {', '.join(BLENDINGS)}")
     ctx = _Context()
@@ -1098,7 +1200,11 @@ def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending
     ctx.up_int = up_int / np.linalg.norm(up_int)
     ctx.footprints = _Footprints(chunk, ctx.cams)
     ctx.workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers), correction, loader=source)
+    max_items, max_bytes = photo_cache_budget(ctx.workers, _env.physical_memory())
+    if max_bytes is not None:
+        max_bytes //= max(1, int(caches))
+    ctx.cache = _PhotoCache(max_items, correction, loader=source, max_bytes=max_bytes)
+    ctx.uncounted = set()  # the nodes whose tiles came without the counts of their cache (_share_tiles)
     ctx.float_output = bool(float_output)
     ctx.hidden = _ClassGrid(chunk, ctx.origin, resolution, hide_classes) if hide_classes else None
     from .patches import prepare
@@ -1147,23 +1253,29 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     ``texture``: the orthophoto from the texture of the model instead of the photos (:mod:`.texture_ortho`,
     ``supersample`` rays per cell side there): None (the default) chooses it when the chunk has no aligned photo
     (an imported or merged model; the log says so), True asks for it, False never; ``blending`` "texture" (an
-    orthophoto made so, built again) is the same as True. The photo options do not apply to it."""
+    orthophoto made so, built again) is the same as True. The photo options do not apply to it.
+
+    The orthomosaic that becomes the product of the chunk (no ``out_path``) records its seconds and what its photo
+    cache did in ``chunk.meta["timings"]["build_orthomosaic"]`` (:mod:`.timing`, :meth:`_PhotoCache.stats`; the
+    one from the texture its seconds alone); a build to a file of its own, or cancelled, records nothing."""
     from rasterio.transform import from_origin
 
     from ..core import crs as crs_mod
     from . import texture_ortho
 
+    started = time.perf_counter()
     progress = as_progress(progress)
     if blending == "texture":
         texture = True if texture is None else texture
     if source is None and texture_ortho.use_texture(chunk, texture):
         if texture is None:
-            import logging
-
-            logging.getLogger("pyarchinit_photogrammetry").info("%s", texture_ortho.MESSAGE_IT)
+            log.info("%s", texture_ortho.MESSAGE_IT)
             progress(0.0, texture_ortho.MESSAGE_EN)
-        return texture_ortho.build_orthomosaic(chunk, resolution, progress=progress, supersample=supersample,
+        path = texture_ortho.build_orthomosaic(chunk, resolution, progress=progress, supersample=supersample,
                                                out_path=out_path)
+        if out_path is None:  # the product: its time, no photo read
+            timing.store(chunk, "build_orthomosaic", time.perf_counter() - started, {})
+        return path
     progress(0.0, "Checking the photos")
     cams, bad = readable_cameras(chunk, skip_unreadable)
     ensure_level(chunk)
@@ -1234,8 +1346,22 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
         chunk.meta["orthomosaic"]["applied_patches"] = [dict(p) for p in patches]
     if bad:
         chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
+    _keep_timing(chunk, ctx, started)
     progress(1.0, f"Orthomosaic {w}x{h} px")
     return out_path
+
+
+def _keep_timing(chunk: Chunk, ctx, started: float) -> None:
+    """The record of the orthomosaic that became the product (:func:`.timing.store`): its seconds and what its
+    photo cache did, the counts of the caches of the nodes added (:func:`node_tiles`); without the counts of a node
+    that sent none (a version without them), the seconds alone, said in the log."""
+    extra = {}
+    if ctx.uncounted:
+        log.warning("The tiles made by %s came without the counts of their photo cache: the record of the "
+                    "orthomosaic keeps its time only", ", ".join(sorted(ctx.uncounted)))
+    else:
+        extra["photo_cache"] = ctx.cache.stats()
+    timing.store(chunk, "build_orthomosaic", time.perf_counter() - started, {}, **extra)
 
 
 def _one_blas_thread():
@@ -1358,6 +1484,8 @@ def _share_tiles(ctx, tiles, put, progress: Progress, shared, start: float = 0.0
                 r0, c0 = (int(v) for v in key.split("_"))
                 put(r0, c0, data[key])
         path.unlink(missing_ok=True)
+        if not ctx.cache.add_counts(res.get("photo_cache")):  # a node of a version without the counts
+            ctx.uncounted.add(str(got.get("by")))
 
     progress(start, f"{what}: {len(units)} units of work shared with {len(nodes.wanted(files_dir))} other computer(s)")
     try:
@@ -1374,7 +1502,8 @@ _NODE_LOCK = threading.Lock()
 
 def node_tiles(payload: dict, mapping, out_dir) -> dict:
     """A unit of :func:`_share_tiles` on a node: its tiles made from the chunk and the options the
-    main program shared, saved as ``<unit>.npz`` for it."""
+    main program shared, saved as ``<unit>.npz`` for it, with what the photo cache of the node
+    counted for them (``photo_cache``: :meth:`_PhotoCache.new_counts`)."""
     out_dir = Path(out_dir)
     with _NODE_LOCK:
         if _NODE.get("state") != payload["state"]:
@@ -1386,7 +1515,7 @@ def node_tiles(payload: dict, mapping, out_dir) -> dict:
                lambda r0, c0, block: blocks.__setitem__(f"{r0}_{c0}", block))
     out = out_dir / f"{payload['name']}.npz"
     np.savez_compressed(out, **blocks)
-    return {"file": out.name, "tiles": sorted(blocks)}
+    return {"file": out.name, "tiles": sorted(blocks), "photo_cache": ctx.cache.new_counts()}
 
 
 def _node_context(root: Path, state: str, mapping):
@@ -1467,5 +1596,5 @@ def render_area(chunk: Chunk, origin, shape, resolution: float, cams=None, surfa
     return np.zeros((4, int(shape[0]), int(shape[1])), np.uint8) if block is None else block
 
 
-__all__ = ["build_orthomosaic", "correction_for", "hidden_cells", "render_area", "render_surface",
-           "stored_blending", "BLENDINGS", "NODATA"]
+__all__ = ["build_orthomosaic", "correction_for", "hidden_cells", "photo_cache_budget", "render_area",
+           "render_surface", "stored_blending", "BLENDINGS", "NODATA"]

@@ -1,8 +1,11 @@
-"""PROJ data: EPSG lookups work in worker threads even when Anaconda/QGIS export PROJ_DATA."""
+"""PROJ data: EPSG lookups work in worker threads even when Anaconda/QGIS export PROJ_DATA; the memory of the
+computer, read without psutil."""
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -143,3 +146,60 @@ def test_a_hard_exit_leaves_no_folder_of_a_document_never_saved(tmp_path):
     assert done.returncode == 0, done.stderr
     folder = done.stdout.strip().splitlines()[-1]
     assert folder and not os.path.exists(folder) and not list(tmp_path.glob("ppg_*"))
+
+
+def test_physical_memory_is_read_here():
+    """Bytes of RAM, or None where they cannot be read; 2**28 (256 MiB) is a floor below which no computer that runs
+    the program is expected. POSIX reads them from ``sysconf``: an int here."""
+    from pyarchinit_photogrammetry import _env
+
+    memory = _env.physical_memory()
+    assert memory is None or memory > 2**28
+    if os.name == "posix":
+        assert isinstance(memory, int)
+
+
+def test_physical_memory_is_none_when_sysconf_cannot_tell(monkeypatch):
+    from pyarchinit_photogrammetry import _env
+
+    monkeypatch.setattr(_env, "sys", types.SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(os, "sysconf", lambda name: -1, raising=False)  # a name the system has no value for
+    assert _env.physical_memory() is None
+
+    def unknown(name):
+        raise ValueError(f"unrecognized configuration name {name!r}")
+
+    monkeypatch.setattr(os, "sysconf", unknown, raising=False)
+    assert _env.physical_memory() is None
+    monkeypatch.delattr(os, "sysconf", raising=False)
+    assert _env.physical_memory() is None
+
+
+def test_physical_memory_on_windows_from_kernel32(monkeypatch):
+    """Windows has no ``sysconf``: ``GlobalMemoryStatusEx`` of kernel32, here a stand-in that fills the structure
+    as Windows does (and gets its length, which Windows checks)."""
+    import ctypes
+
+    from pyarchinit_photogrammetry import _env
+
+    if sys.platform == "win32":  # the real call
+        assert _env._windows_physical_memory() > 2**28
+        return
+    calls = []
+
+    def status_ex(ref):
+        status = ref._obj
+        calls.append(status.dwLength)
+        status.ullTotalPhys = 16 * 2**30
+        return 1
+
+    def kernel32(call):
+        return types.SimpleNamespace(kernel32=types.SimpleNamespace(GlobalMemoryStatusEx=call))
+
+    monkeypatch.setattr(_env, "sys", types.SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(ctypes, "windll", kernel32(status_ex), raising=False)
+    assert _env.physical_memory() == 16 * 2**30 and calls == [64]  # dwLength = sizeof(MEMORYSTATUSEX)
+    monkeypatch.setattr(ctypes, "windll", kernel32(lambda ref: 0), raising=False)  # the call failed
+    assert _env.physical_memory() is None
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    assert _env.physical_memory() is None

@@ -22,7 +22,45 @@ through pyproj; rasterio's GDAL needs no grid of the geoid.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+
+def physical_memory() -> int | None:
+    """Bytes of physical memory of this computer, None when they cannot be read: ``os.sysconf`` on POSIX,
+    ``GlobalMemoryStatusEx`` of kernel32 (through ctypes) on Windows, no psutil (optional, without a wheel for every
+    platform the program runs on). What is sized on it - the photo cache of the orthomosaic
+    (:func:`..engine.ortho.photo_cache_budget`) - takes None as unknown."""
+    if sys.platform == "win32":
+        return _windows_physical_memory()
+    try:
+        pages, size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if pages > 0 and size > 0:
+        return int(pages) * int(size)
+    return None
+
+
+def _windows_physical_memory() -> int | None:
+    """``ullTotalPhys`` of ``kernel32.GlobalMemoryStatusEx`` (Windows has no ``sysconf``)."""
+    import ctypes
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),  # DWORD
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    try:
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullTotalPhys) or None
+    except (AttributeError, OSError):
+        return None
 
 
 def proj_offline() -> None:
