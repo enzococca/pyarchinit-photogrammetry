@@ -178,7 +178,10 @@ def relay(progress: Progress | None, folder: Path | str, total: int | None = Non
     ``stages``: each stage COLMAP announces (``=== Running rotation averaging ===``) is marked there
     (:meth:`~pyarchinit_photogrammetry.engine.timing.Stages.mark`) by its name in small letters, spaces
     to underscores (``rotation_averaging``), and the last one is closed when the block ends. The log is
-    read every 0.25 s: the boundaries of a stage are known to that."""
+    read every 0.25 s, and a boundary is known to that only when glog writes out each line
+    (:data:`~pyarchinit_photogrammetry.engine.timing.LIVE_LOG_ENV`, which the package also asks for when
+    it is imported before pycolmap); otherwise it is known to glog's buffer - a stage can be marked late,
+    and stages whose lines come out together get 0.0 s. The seconds of the step are exact either way."""
     progress = as_progress(progress)
     try:
         import pycolmap

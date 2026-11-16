@@ -1,12 +1,16 @@
 """COLMAP's log relayed as progress (engine/colmap_log.py)."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from pyarchinit_photogrammetry.core.progress import Progress
-from pyarchinit_photogrammetry.engine import colmap_log
+from pyarchinit_photogrammetry.engine import colmap_log, timing
 
 PREFIX = "I20261022 14:42:11.123456 19286 "
 
@@ -100,6 +104,41 @@ def test_a_relay_marks_the_stages_of_its_log_and_closes_the_last_one(tmp_path):
     stages.close()
     assert stages.as_dict() == {"rotation_averaging": 0.0, "view_graph_calibration": 0.0}
     assert list(work.glob("colmap_log.*")) == []
+
+
+# two stages logged through glog, as COLMAP logs them, one second apart; the relay goes on for another second
+_LOGGED_STAGES = """
+import json, sys, time
+import pycolmap
+from pyarchinit_photogrammetry.engine import colmap_log
+from pyarchinit_photogrammetry.engine.timing import Stages
+
+stages = Stages()
+with colmap_log.relay(None, sys.argv[1], stages=stages):
+    pycolmap.logging.info("=== Running a ===")
+    time.sleep(1.0)
+    pycolmap.logging.info("=== Running b ===")
+    time.sleep(1.0)
+stages.close()
+print(json.dumps(stages.as_dict()))
+"""
+
+
+def test_with_the_live_log_a_stage_is_marked_when_colmap_logs_it(tmp_path):
+    """In a process started with ``LIVE_LOG_ENV`` glog writes out every line at once, and a stage is marked within
+    the polling interval of the tail of the moment COLMAP logs it: ``a``, one second long, is measured as one
+    second. Without it glog keeps ``b`` in its buffer until the relay closes the file, a second later, and ``a``
+    takes that second too. The child loads pycolmap before the package (which would ask glog for the same), and
+    the ``GLOG_logbufsecs`` the package put in the environment of the tests is left out: only ``LIVE_LOG_ENV``
+    can give it."""
+    pytest.importorskip("pycolmap")
+    env = {k: v for k, v in os.environ.items() if k != "GLOG_logbufsecs"}
+    env.update(timing.LIVE_LOG_ENV)
+    done = subprocess.run([sys.executable, "-c", _LOGGED_STAGES, str(tmp_path / "work")], capture_output=True,
+                          text=True, env=env, timeout=300, close_fds=False)
+    assert done.returncode == 0, done.stderr[-3000:]
+    stages = json.loads(done.stdout.strip().splitlines()[-1])
+    assert 0.7 <= stages["a"] <= 1.6, stages
 
 
 def test_relay_reports_colmaps_feature_extraction(scene_dir: Path, tmp_path):

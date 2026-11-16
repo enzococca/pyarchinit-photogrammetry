@@ -1460,9 +1460,10 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     The seconds of the step, every attempt included, and those of each stage COLMAP announces (the
     global mapper's: ``rotation_averaging``, ``global_positioning``, ...) are kept in
     ``chunk.meta["timings"]["align_cameras"]`` (:mod:`.timing`), also when the alignment fails or is
-    cancelled."""
+    cancelled: then with the name of the type of the error under ``failed`` (never its text)."""
     progress = as_progress(progress)
     stages, started = timing.Stages(), time.perf_counter()  # the step, and the stages COLMAP announces
+    failed = None  # the type of the error that stops the step, if one does
     try:
         kwargs = dict(mapper=mapper, reset=reset, use_gps=use_gps, adaptive_fitting=adaptive_fitting,
                       tiepoint_limit=tiepoint_limit, ba_global_ratio=ba_global_ratio,
@@ -1505,9 +1506,13 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
         if best[1] == 0:
             raise RuntimeError("alignment failed: no reconstruction could be initialised")
         return best[1]
-    finally:  # also when the alignment fails or is cancelled: the times measured so far
+    except BaseException as exc:
+        failed = type(exc).__name__
+        raise
+    finally:  # also when the alignment fails or is cancelled: the times measured so far, and the type of the error
         stages.close()
-        timing.store(chunk, "align_cameras", time.perf_counter() - started, stages.as_dict())
+        timing.store(chunk, "align_cameras", time.perf_counter() - started, stages.as_dict(),
+                     **({"failed": failed} if failed else {}))
 
 
 def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,

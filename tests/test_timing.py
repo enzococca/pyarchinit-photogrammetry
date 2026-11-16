@@ -81,7 +81,7 @@ def test_matching_and_alignment_leave_their_timings(scene_dir, tmp_path):
     t = ch.meta["timings"]
     assert {"features", "pairs"} <= set(t["match_photos"]["stages"])
     assert sum(t["match_photos"]["stages"].values()) <= t["match_photos"]["seconds"] + 0.01
-    assert t["align_cameras"]["seconds"] > 0
+    assert t["align_cameras"]["seconds"] > 0 and "failed" not in t["align_cameras"]
     assert set(t) == set(ch.meta["engine"]) == {"match_photos", "align_cameras"}  # two keys side by side
     text = json.dumps(t)
     assert ch.meta["sfm"]["image_root"] not in text
@@ -125,6 +125,7 @@ def test_both_mappers_hand_the_stages_of_the_step_to_their_relay(tmp_path, monke
         sfm.align_cameras(ch, mapper="global", use_gps=False)
     assert len(handed) == 2 and isinstance(handed[0], Stages) and handed[1] is handed[0]
     assert list(ch.meta["timings"]["align_cameras"]["stages"]) == ["global_mapper", "incremental_mapper"]
+    assert ch.meta["timings"]["align_cameras"]["failed"] == "RuntimeError"
     # photos that say no focal length: aligned again from other focal lengths, every attempt in the same stages
     handed.clear()
     ch.sensors[0] = Sensor(0, "camera", 1000, 750, params=[850.0, 850.0, 500.0, 375.0, 0, 0, 0, 0],
@@ -134,3 +135,28 @@ def test_both_mappers_hand_the_stages_of_the_step_to_their_relay(tmp_path, monke
         sfm.align_cameras(ch, mapper="global", use_gps=False)
     assert len(handed) > 2 and isinstance(handed[0], Stages) and all(s is handed[0] for s in handed)
     assert list(ch.meta["timings"]["align_cameras"]["stages"]) == ["global_mapper", "incremental_mapper"]
+    assert ch.meta["timings"]["align_cameras"]["failed"] == "RuntimeError"
+
+
+def test_a_failed_alignment_says_so_by_the_type_of_its_error(tmp_path):
+    """The record of an alignment that stops on an error names the type of the error, never its text: one refused
+    before any work (no matching yet) and one cancelled once it has started. One that succeeds has no ``failed``
+    (test_matching_and_alignment_leave_their_timings)."""
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+    from pyarchinit_photogrammetry.engine import sfm
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("c")
+    doc.save(tmp_path / "p.ppg")
+    with pytest.raises(RuntimeError, match="run match_photos"):
+        ch.align_cameras()
+    record = ch.meta["timings"]["align_cameras"]
+    assert set(record) == {"seconds", "stages", "failed"} and record["failed"] == "RuntimeError"
+    assert record["stages"] == {} and "match_photos" not in json.dumps(record)
+    (sfm._sfm_dir(ch) / "database.db").touch()
+    ch.meta["sfm"] = {"image_root": str(tmp_path), "names": {"0": "a.jpg"}, "tiepoint_limit": 0}
+    progress = Progress()
+    progress.cancel()
+    with pytest.raises(Cancelled):
+        ch.align_cameras(progress=progress, mapper="incremental", use_gps=False)
+    assert ch.meta["timings"]["align_cameras"]["failed"] == "Cancelled"

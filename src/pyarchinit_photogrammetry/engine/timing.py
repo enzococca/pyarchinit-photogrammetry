@@ -5,8 +5,9 @@ Matching and alignment (:mod:`.sfm`) measure themselves and keep what they measu
 step and those of each of its stages - the parts of the matching (``features``, ``preselection``, ``pairs``), the
 stages COLMAP announces in its log during the alignment (``rotation_averaging``, ``global_positioning``, ...) - so
 that one engine can be compared with another stage by stage. What no stage covers is the difference between the
-seconds of the step and the sum of its stages; it is not stored. The record holds times and the names of stages only:
-no path, no name of a photo, no coordinate.
+seconds of the step and the sum of its stages; it is not stored. The record holds times, the names of stages and, for
+an alignment that failed, the name of the type of its error (``failed``): no path, no name of a photo, no coordinate,
+no text of an error.
 """
 from __future__ import annotations
 
@@ -17,6 +18,13 @@ import time
 from collections.abc import Callable, Iterator
 
 log = logging.getLogger(__name__)
+
+LIVE_LOG_ENV = {"GLOG_logbufsecs": "0"}
+"""The environment a process needs, before pycolmap is first imported, for the stages of the alignment to be marked
+when COLMAP logs them: glog keeps INFO lines in a 4 KB buffer that it writes out when it is full, every 30 s on a
+later line, or when the file is closed, and it reads this setting once, when it loads. The package asks glog for the
+same when it is imported (``_env.glog_flushes_each_line``), but only if the environment holds no value of its own and
+pycolmap is not loaded yet: a process that measures the engines is started with this, whatever its parent says."""
 
 
 class Stages:
@@ -48,8 +56,11 @@ class Stages:
 
     def mark(self, name: str) -> None:
         """Close the stage a mark opened, if one is open, and open ``name``: for the stages a log announces as they
-        begin. A stage read from COLMAP's log begins when the tail reads its line, which is within its polling
-        interval (0.25 s) of the moment COLMAP wrote it: its boundaries are known to that."""
+        begin. A stage read from COLMAP's log (:func:`.colmap_log.relay`) begins when the tail reads its line: its
+        boundaries are known to the polling interval of the tail (0.25 s) only when glog writes out each line
+        (:data:`LIVE_LOG_ENV`, which the package also asks for when it is imported before pycolmap); otherwise they
+        are known to glog's buffer - a stage can be marked late, and stages whose lines come out together get
+        0.0 s. The seconds of the step are exact either way."""
         with self._lock:
             now = self._clock()
             self._close(now)
