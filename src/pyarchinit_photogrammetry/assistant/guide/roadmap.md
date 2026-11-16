@@ -269,38 +269,43 @@ on the public WorldView-3 datasets.
   elevation kept with it in its (u, v), exported with it unfolded and in 3D on the survey, opened in QGIS, sent to
   PyArchInit as its media. See [Drawings on elevations and sections](gui/processing.md#drawings-on-elevations-and-sections).
 
+## Done in 1.7.1 - 1.10.2
+
+* **Chunks tied and grouped** (1.7.6 - 1.10.0): chunks of the same site tied automatically and kept in groups.
+* **GNSS for self-built drones** (1.7.8): the events of a receiver, the logs of ArduPilot and PX4, the raw logs of
+  u-blox, RTCM 3, NovAtel, Septentrio, Trimble and Unicore receivers converted to RINEX in the native core, the
+  bases of the permanent stations; a DJI D-RTK `.DAT` is read when its bytes are RTCM 3.
+* **QGIS both ways** (1.7.8, 1.7.9): drawings edited in QGIS come back into the chunk, one QGIS layer for each layer
+  of the program, only the ticked layers sent.
+* **Camera raw** (1.8.0): DNG, CR2, CR3, NEF, ARW and the other raw files added as photos and developed into copies
+  kept with the project.
+* **Measuring in 3D** (1.9.0): distances, areas and volumes on the model, the dense cloud or the tie points; the
+  units of a model set by hand, scale from a known distance.
+* **A survey on the web** (1.9.0 - 1.10.2): `ppg web build` and the pane *Pubblica sul web* - plan, DEM, units,
+  model, point cloud, sections and elevations, several dates with a time selector, plugin tabs and layers -
+  published on Cloudflare Pages with the user's own login and taken down with *Rimuovi dal web*.
+
 ## Next
 
-* **1.8.0 - Checks on real data**: the parts never tried on real data - the import from WebODM, a satellite scene
-  of one's own, `ppg remote` on a remote machine, network nodes on two real computers, a whole MicaSense flight to
-  the reflectance orthomosaic.
-* **1.9.0 - Change detection between surveys**: distances between the clouds and models of two dates along the
-  surface (M3C2), significant where they exceed the precision of both surveys; maps of change for walls, sections
-  and slopes, for the monitoring of sites and restorations, in the PDF report.
-* **1.10.0 - Publishing a survey on the web**: a static website of a survey - orthomosaic and DEM, model, cloud,
-  units with their attributes, sections - built from the exports already there (COG, COPC, 3D Tiles), for any web
-  host or GitHub Pages.
-* **Flight plans**, as a plugin, stay planned.
+* **2.0.0 - Native engine and unit records from the site** (in progress): the photogrammetry engine moved to Rust
+  (GPU and CPU, every system) step by step. Milestone 0 measures 1.10 (engine switch, stage timings, photo cache
+  sized on the memory, a synthetic ring flight, `ppg bench`); milestone 1 the native bundle adjustment; milestone 2
+  native features, pairs and matching; milestone 3 a native global mapper with the GPS of the photos. A native
+  step is chosen by `auto` only after it passes a measured gate against 1.10; the classic engine (pycolmap,
+  Open3D) stays behind it through 2.x. With it: the record of a stratigraphic unit opened from the published
+  site, the proxies of the blender-em plugin in the site, no names of people on a published site, the binaries
+  stated GPL-3.0-or-later.
+* **Checks on real data** (no version yet): the import from WebODM, a satellite scene of one's own, `ppg remote` on
+  a remote machine, network nodes on two real computers, a whole MicaSense flight to the reflectance orthomosaic.
+* **Change detection between surveys** (no version yet): distances between the clouds and models of two dates
+  along the surface (M3C2), significant where they exceed the precision of both surveys; maps of change for
+  walls, sections and slopes, in the PDF report.
 
-New plugins, in this order (the first three are released: landscape, geoarchaeology 0.2.0 and architecture):
-
-1. **Landscape through time** (Landlab): erosion and deposition simulated on the DEM - how a tell wears down,
-   where colluvium gathers, scenarios of the ancient landscape tied to the phases of the timeline.
-2. **3D geological model** (LoopStructural, in the geoarchaeology plugin): implicit surfaces and volumes from the
-   contacts of the cores, the traces in the sections and the outlines of the units, with their uncertainty; cuts
-   and fills handled as the excavation records them, not as geological layers.
-3. **Parametric architectural elements** (CadQuery): columns by revolution, mouldings and cornices extruded along
-   a path, arches and vaults from a section cut on the model; STEP and IFC solids beside the photogrammetric mesh in
-   the HBIM model.
-4. **Electrical resistivity tomography** (pyGIMLi, in the geophysics plugin): inversion of the raw data of a
-   resistivity meter, pseudosections and resistivity sections placed in the survey, in the 3D view with the units
-   and the cores.
+The plugins planned earlier are released: landscape (Landlab), the 3D geological model in geoarchaeology
+(LoopStructural), the parametric elements in architecture (CadQuery), resistivity tomography in geophysics
+(pyGIMLi), and the flight plans (flightplan).
 
 Other open points, in no fixed order:
-
-* **GNSS, the next step**: the events of a receiver (the time marks a camera leaves in the observations of a
-  receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid
-  receivers, the `.DAT` files of a DJI D-RTK base.
 
 * SpatiaLite on Windows ARM64: it waits for an ARM64 build of QGIS (its library is x64).
 * geoai: the comparison of two coregistered dates and the height differences of their DEMs, after the
