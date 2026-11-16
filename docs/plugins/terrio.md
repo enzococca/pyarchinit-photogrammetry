@@ -11,8 +11,9 @@ and heights above a geoid; it fetches a reference raster - a regional DEM, an ol
 Copernicus DEM of Microsoft's Planetary Computer - over the survey; it exports the cloud for
 laser-scanning software and the orthophoto as tiles for web maps.
 
-This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 1.1.0 or later
-(1.3.4 or later to see the points found and the values in the 3D view) and terrio 0.5. An older terrio
+This page describes version 0.3.0 of the plugin, which needs pyarchinit-photogrammetry 1.1.0 or later
+(1.3.4 or later to see the points found and the values in the 3D view) and terrio 0.5 up to the 0.9
+releases (0.9.0 is the one the program downloads). An older terrio
 (0.3.2 and the 0.4 releases) still runs the import, the ground classification, the reference rasters
 from a URL and the exports; the other steps say that they need terrio 0.5 and offer to download it. Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/terrio).
@@ -29,7 +30,7 @@ from a URL and the exports; the other steps say that they need terrio 0.5 and of
 ## In short
 
 1. Install the plugin; the first time a step needs terrio, the program offers to download it (about
-   20 MB), or *Plugins > terrio > Install terrio...*.
+   30 MB), or *Plugins > terrio > Install terrio...*.
 2. *Import point cloud...*: a LAS, LAZ, COPC, EPT, PLY or E57 file, or a web address, into a new chunk
    or in place of the dense cloud of the active one.
 3. *Classify the ground (SMRF, CSF, PMF)...*: the points without another class become ground (class 2) or
@@ -62,12 +63,14 @@ from a URL and the exports; the other steps say that they need terrio 0.5 and of
 
 * **The plugin**, installed from the program: see [Plugin guides](guides.md#install).
 * **terrio itself.** Installed with pip, the plugin brings it along. The desktop application has no pip:
-  the first time a step needs terrio, the program asks whether to download it from PyPI (about 20 MB,
+  the first time a step needs terrio, the program asks whether to download it from PyPI (about 30 MB,
   its SHA-256 checked) into the plugin's own folder; after the download, start the step again.
   *Plugins > terrio > Install terrio...* does the same at any time, `ppg plugin terrio install` from the
-  command line. terrio exists for macOS (Apple Silicon and Intel), Windows (x64 and ARM64) and Linux
-  (x86-64 and ARM64). When the terrio there is older than 0.5, the steps that need 0.5 say so and offer
-  the download: the new one goes beside it and is used from then on.
+  command line, and also offers to update an older terrio. terrio exists for macOS (Apple Silicon and
+  Intel), Windows (x64 and ARM64) and Linux (x86-64 and ARM64). When the terrio there is older than 0.5,
+  the steps that need 0.5 say so and offer the download. A terrio the program has already loaded is never
+  replaced while it runs: the new one waits beside it and takes its place when the program is opened
+  again (the window says so).
 * **A project.** An import into a new chunk needs nothing else; the classification and the export of
   the cloud need a chunk with a dense cloud; the tiles need an orthophoto; the reference raster needs a
   chunk with a reference system (*the chunk needs a reference system (align it with GPS or markers
@@ -173,7 +176,10 @@ The grids come from the PROJ CDN (`https://cdn.proj.org`) the first time they ar
 (`ppg plugin terrio version` prints it), where they serve again without the network; grids already on
 the computer (a folder given in the window, PROJ's own folders) are used first. A height that no grid
 moved - the grid missing and no network, or a survey outside the model - is an error (*No model moved
-the heights from ... to ...*), never a copy of the heights as they were.
+the heights from ... to ...*, with terrio's own reason), never a copy of the heights as they were. With
+terrio 0.9 a cloud that crosses the edge of the grid is converted for the points the grid covers: the
+others are left out of the new version and counted (in the summary, the log and the parameters of the
+version); a DEM is converted whole or refused.
 
 ## Step by step in the program { #program }
 
