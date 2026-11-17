@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import pyarchinit_photogrammetry as ppg
-from pyarchinit_photogrammetry.core.camera import Reference
+from pyarchinit_photogrammetry.core.camera import Camera, Reference
 from pyarchinit_photogrammetry.engine import sfm
 
 
@@ -86,11 +86,80 @@ def test_auto_choices(scene_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(sfm, "GLOBAL_FROM", 10)
     ch.align_cameras()
     assert ch.meta["sfm"]["mapper"] == "incremental"  # a trench without GPS over a site: not from the air
-    monkeypatch.setattr(dense, "aerial_survey", lambda chunk: True)
+    monkeypatch.setattr(dense, "aerial_survey", lambda chunk, aligned=True: True)
     ch.align_cameras()
     assert ch.meta["sfm"]["mapper"] == "global"
     with pytest.raises(ValueError):
         ch.align_cameras(mapper="somehow")
+
+
+def test_auto_mapper_looks_at_the_photos_to_align_before_the_alignment(tmp_path):
+    """On a fresh alignment nothing is aligned yet: the automatic mapper judges the survey from the air on the
+    enabled photos with a reference position switched on, aligned or not. The choices made after an alignment
+    (the dense cloud, the precision) still look at the aligned cameras."""
+    from pyarchinit_photogrammetry.engine import dense
+    from pyarchinit_photogrammetry.markers import gcp
+
+    def flight(spacing: float, n: int = 40, accuracy=(5.0, 5.0, 10.0)):
+        """``n`` photos on a grid of 8 columns ``spacing`` metres apart, a position known to ``accuracy`` on
+        each, none aligned."""
+        ch = ppg.Document().add_chunk("Volo")
+        for i in range(n):
+            cam = Camera(key=i, label=f"c{i}", path=str(tmp_path / f"c{i}.jpg"), sensor_key=0)
+            cam.reference = Reference(location=[500000.0 + spacing * (i % 8), 4500000.0 + spacing * (i // 8), 100.0],
+                                      accuracy=list(accuracy), enabled=True)
+            cam.meta["reference_crs"] = "EPSG:32633"
+            ch.cameras.append(cam)
+        return ch
+
+    ch = flight(25.0)  # 40 photos over 175 m x 100 m, their positions known to 5 m: a survey from the air
+    assert not ch.aligned_cameras
+    assert sfm.auto_mapper(ch, 40) == "global"
+    assert sfm.auto_mapper(ch, 39) == "incremental"  # fewer than GLOBAL_FROM photos
+    assert sfm.auto_mapper(ch, 40, rigs=True) == "incremental"
+    assert sfm.auto_mapper(ch, 40, fixed=True) == "incremental"
+    # after an alignment the aligned cameras are asked, and there is none yet
+    assert not dense.aerial_survey(ch) and not gcp.cameras_span_their_accuracy(ch)
+    assert dense.aerial_survey(ch, aligned=False) and gcp.cameras_span_their_accuracy(ch, aligned=False)
+    assert sfm.auto_mapper(flight(0.3), 40) == "incremental"  # the same photos over 2 m: a trench, an object
+    switched_off = flight(25.0)
+    for cam in switched_off.cameras:
+        cam.reference.enabled = False
+    assert sfm.auto_mapper(switched_off, 40) == "incremental"  # positions switched off do not count
+    left_out = flight(25.0)
+    for cam in left_out.cameras[2:]:
+        cam.enabled = False
+    assert sfm.auto_mapper(left_out, 40) == "incremental"  # nor the photos left out of the alignment
+
+
+def test_auto_takes_the_global_mapper_for_a_ring_flight_with_gps(tmp_path):
+    """The synthetic ring flight (72 photos around a mound, a GPS position in the EXIF of each) is a survey from
+    the air of more than ``GLOBAL_FROM`` photos: the automatic choice aligns all the cameras at once - on the
+    fresh alignment, when nothing is aligned yet - and records it. Photos of 640 x 480: on 320 x 240 the global
+    mapper finds no tracks and the alignment goes back to one photo at a time, as it should."""
+    from pyarchinit_photogrammetry.core import geometry
+    from pyarchinit_photogrammetry.testing.synthetic import write_ring_dataset
+
+    scene = write_ring_dataset(tmp_path / "ring", n=72, size=(640, 480))
+    doc = ppg.Document()
+    ch = doc.add_chunk("Anello")
+    doc.save(tmp_path / "ring.ppg")
+    ch.add_photos([tmp_path / "ring" / "photos"])
+    assert sum(1 for c in ch.cameras if c.reference.enabled and c.reference.location) == 72
+    assert not ch.aligned_cameras
+    ch.match_photos(quality="highest")  # small photos: every pixel of them
+    n = ch.align_cameras()  # mapper="auto"
+    info = ch.meta["sfm"]
+    assert info["mapper"] == "global", info.get("global_fallback")
+    assert "global_fallback" not in info
+    assert n >= 0.9 * len(ch.cameras)  # as many as keep the global block (all 72 here)
+    # the block is sound: the camera centres sit on the true ones once a similarity places it (6 cm here)
+    truth = {c["label"]: c["world_from_cam"][:3, 3] for c in scene.cameras}
+    src = np.array([cam.center for cam in ch.aligned_cameras])
+    dst = np.array([truth[cam.label] for cam in ch.aligned_cameras])
+    m = geometry.umeyama(src, dst, with_scale=True)
+    err = np.linalg.norm((m[:3, :3] @ src.T).T + m[:3, 3] - dst, axis=1)
+    assert float(np.sqrt(np.mean(err ** 2))) < 0.5
 
 
 def test_reference_preselections_pick_the_pairs(scene_dir, scene, tmp_path):
