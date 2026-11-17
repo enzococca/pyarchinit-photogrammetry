@@ -203,3 +203,23 @@ def test_physical_memory_on_windows_from_kernel32(monkeypatch):
     assert _env.physical_memory() is None
     monkeypatch.delattr(ctypes, "windll", raising=False)
     assert _env.physical_memory() is None
+
+
+def test_glog_is_asked_for_each_line_from_the_one_constant_and_a_value_set_already_stays(monkeypatch):
+    """``glog_flushes_each_line`` (run when the package is imported, before pycolmap loads) puts
+    ``engine.timing.LIVE_LOG_ENV`` - the one place the setting is spelled, the one the bench starts its child with -
+    into the environment with ``setdefault``: a value the environment holds already is left alone."""
+    from pyarchinit_photogrammetry import _env
+    from pyarchinit_photogrammetry.engine import timing
+
+    assert timing.LIVE_LOG_ENV == {"GLOG_logbufsecs": "0"}
+    monkeypatch.delenv("GLOG_logbufsecs", raising=False)
+    _env.glog_flushes_each_line()
+    assert os.environ["GLOG_logbufsecs"] == "0"
+    monkeypatch.setenv("GLOG_logbufsecs", "30")
+    _env.glog_flushes_each_line()
+    assert os.environ["GLOG_logbufsecs"] == "30"  # setdefault: what the environment says is not overwritten
+    monkeypatch.delenv("GLOG_logbufsecs")
+    monkeypatch.setattr(timing, "LIVE_LOG_ENV", {"GLOG_logbufsecs": "7"})  # one constant: _env reads this one
+    _env.glog_flushes_each_line()
+    assert os.environ["GLOG_logbufsecs"] == "7"

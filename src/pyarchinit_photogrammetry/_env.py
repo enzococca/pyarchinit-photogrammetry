@@ -162,5 +162,10 @@ def skip_open3d_extras() -> None:
 def glog_flushes_each_line() -> None:
     """COLMAP's log (glog) written to a file line by line: by default glog keeps 30 seconds of
     lines in a buffer, and :mod:`engine.colmap_log` tails that file to show the progress of a
-    step while COLMAP runs it. Read when the library loads: call before importing pycolmap."""
-    os.environ.setdefault("GLOG_logbufsecs", "0")
+    step while COLMAP runs it. Read when the library loads: call before importing pycolmap. The
+    setting is :data:`engine.timing.LIVE_LOG_ENV`, the one the bench starts its child with; a
+    value the environment holds already is left alone."""
+    from .engine.timing import LIVE_LOG_ENV  # imports the standard library only: safe before load_open3d_first
+
+    for key, value in LIVE_LOG_ENV.items():
+        os.environ.setdefault(key, value)

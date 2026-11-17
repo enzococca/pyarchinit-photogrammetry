@@ -22,9 +22,10 @@ log = logging.getLogger(__name__)
 LIVE_LOG_ENV = {"GLOG_logbufsecs": "0"}
 """The environment a process needs, before pycolmap is first imported, for the stages of the alignment to be marked
 when COLMAP logs them: glog keeps INFO lines in a 4 KB buffer that it writes out when it is full, every 30 s on a
-later line, or when the file is closed, and it reads this setting once, when it loads. The package asks glog for the
-same when it is imported (``_env.glog_flushes_each_line``), but only if the environment holds no value of its own and
-pycolmap is not loaded yet: a process that measures the engines is started with this, whatever its parent says."""
+later line, or when the file is closed, and it reads this setting once, when it loads. The package puts the same into
+its environment when it is imported (``_env.glog_flushes_each_line``, which reads this constant), but only if the
+environment holds no value of its own and pycolmap is not loaded yet: a process that measures the engines is started
+with this, whatever its parent says."""
 
 
 class Stages:
