@@ -160,3 +160,41 @@ def test_a_failed_alignment_says_so_by_the_type_of_its_error(tmp_path):
     with pytest.raises(Cancelled):
         ch.align_cameras(progress=progress, mapper="incremental", use_gps=False)
     assert ch.meta["timings"]["align_cameras"]["failed"] == "Cancelled"
+
+
+def test_a_failed_matching_keeps_the_seconds_measured_so_far_and_the_type_of_its_error(tmp_path, monkeypatch):
+    """The record of a matching that stops on an error keeps the stages measured up to it and names the type of the
+    error, never its text: one refused before any work, and one that fails in the ``pairs`` stage once the points of
+    the photos are found (``features`` has its seconds). One that succeeds has no ``failed``
+    (test_matching_and_alignment_leave_their_timings)."""
+    import cv2
+    import numpy as np
+
+    pycolmap = pytest.importorskip("pycolmap")
+    from pyarchinit_photogrammetry.engine import sfm
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("c")
+    doc.save(tmp_path / "p.ppg")
+    with pytest.raises(ValueError, match="apply_masks"):
+        ch.match_photos(apply_masks="nonsense")
+    record = ch.meta["timings"]["match_photos"]
+    assert set(record) == {"seconds", "stages", "failed"} and record["failed"] == "ValueError"
+    assert record["stages"] == {}
+    rng = np.random.default_rng(0)
+    (tmp_path / "photos").mkdir()
+    for i in range(3):
+        cv2.imwrite(str(tmp_path / "photos" / f"NOISE_{i}.jpg"), rng.integers(0, 256, (240, 320, 3), dtype=np.uint8))
+    ch.add_photos(sorted((tmp_path / "photos").glob("*.jpg")))
+
+    def no_pairs(*args, **kwargs):
+        raise RuntimeError("the pairs stage failed in " + str(tmp_path))
+
+    monkeypatch.setattr(sfm._native, "gpu_devices", lambda setting=None: [])  # the CPU alone: COLMAP matches
+    monkeypatch.setattr(pycolmap, "match_exhaustive", no_pairs)
+    with pytest.raises(RuntimeError, match="pairs stage"):
+        ch.match_photos()
+    record = ch.meta["timings"]["match_photos"]
+    assert record["failed"] == "RuntimeError" and list(record["stages"]) == ["features", "pairs"]
+    assert record["stages"]["features"] > 0 and record["seconds"] >= record["stages"]["features"]
+    assert str(tmp_path) not in json.dumps(record) and "NOISE" not in json.dumps(record)

@@ -814,7 +814,32 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     ``matcher``: ``sift`` (COLMAP's SIFT, on the GPU when there is one), or learned key points
     matched by LightGlue (:mod:`.learned`): ``disk`` or ``aliked`` - more matches on thermal
     frames and on surfaces with little texture, slower. Not for rigs (SIFT is used) nor with the
-    guided matching, which is COLMAP's."""
+    guided matching, which is COLMAP's.
+
+    The seconds of the step and those of each of its stages (``features``, ``preselection``, ``pairs``) are
+    kept in ``chunk.meta["timings"]["match_photos"]`` (:mod:`.timing`), also when the matching fails or is
+    cancelled: then with the stages measured so far and the name of the type of the error under ``failed``
+    (never its text)."""
+    stages, started = timing.Stages(), time.perf_counter()  # the time of the step and of its parts
+    failed = None  # the type of the error that stops the step, if one does
+    try:
+        _match_photos(chunk, stages, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
+                      pair_selection=pair_selection, progress=progress, exclude_stationary=exclude_stationary,
+                      generic=generic, reference=reference, neighbours=neighbours, apply_masks=apply_masks,
+                      guided_matching=guided_matching, reset=reset, gpu=gpu, matcher=matcher)
+    except BaseException as exc:
+        failed = type(exc).__name__
+        raise
+    finally:  # also when the matching fails or is cancelled: the times measured so far, and the type of the error
+        timing.store(chunk, "match_photos", time.perf_counter() - started, stages.as_dict(),
+                     **({"failed": failed} if failed else {}))
+
+
+def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint_limit: int, tiepoint_limit: int,
+                  pair_selection: str, progress: Progress | None, exclude_stationary: bool, generic: bool | None,
+                  reference: str | None, neighbours: int, apply_masks: str, guided_matching: bool, reset: bool,
+                  gpu: str | None, matcher: str) -> None:
+    """The matching of :func:`match_photos`, each of its parts timed as a stage of ``stages``."""
     import pycolmap
 
     from ..markers import gcp
@@ -823,7 +848,6 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     from .panorama import panorama_cameras, rig_configs
 
     progress = as_progress(progress)
-    stages, started = timing.Stages(), time.perf_counter()  # the time of the step and of its parts
     if apply_masks not in MASK_MODES:
         raise ValueError(f"apply_masks: one of {', '.join(MASK_MODES)}")
     if matcher not in learned.MATCHERS:
@@ -1051,7 +1075,6 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                          "cpu_pairs": shares["cpu_pairs"] if shares else (len(pairs) if pairs else None)}
     if keep and old.get("gps_priors"):
         chunk.meta["sfm"]["gps_priors"] = old["gps_priors"]  # the priors already in the database: same axes
-    timing.store(chunk, "match_photos", time.perf_counter() - started, stages.as_dict())
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
 
 
