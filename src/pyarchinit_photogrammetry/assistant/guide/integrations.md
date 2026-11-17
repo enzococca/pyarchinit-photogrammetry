@@ -293,8 +293,8 @@ From the command line: `ppg append progetto.ppg altro.ppg scavo.psx all.zip [--c
 * **`.ppg`**: every chunk comes with a copy of its data folder (depth maps, clouds, model and texture, DEM,
   orthophoto, versions, elevations; one file at a time, a copy-on-write clone on APFS: instant and taking no space),
   and with its photos, sensors, cameras, markers, scale bars, references, coordinate system, transform, drawings and
-  settings. The photos stay where they are: they are stored relative to this project when they are inside its folder,
-  absolute otherwise. A DEM or an orthophoto of another program the chunk points to stays where it is too.
+  settings. The photos stay where they are: they are stored relative to this project when they are on its disk (inside its
+  folder or beside it), absolute otherwise. A DEM or an orthophoto of another program the chunk points to stays where it is too.
 * **`.psx`** and **WebODM**: what [the Metashape import](#metashape-psx) and [the WebODM import](#webodm-odm) bring,
   in new chunks of the open project. An `all.zip` is extracted inside the folder of its new chunk.
 

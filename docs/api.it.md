@@ -945,9 +945,16 @@ meno prima = profondità scavata.
 (`chunk.unreadable_photos()`: mancanti, segnaposto vuoti di file tenuti solo online, non immagini);
 senza, sollevano `engine.visibility.UnreadablePhotos` (importabile anche da `engine.dense`).
 `build_texture` e `build_orthomosaic` prendono la stessa opzione;
-`chunk.relink_photos(folder, only_unreadable=False)` fa puntare le foto ai file con gli stessi nomi
-in un'altra cartella (COLMAP poi le legge dalla loro cartella comune, o da una cartella di link quando
-sono sparse in più cartelle, `engine.sfm.photo_folder`). Il modello COLMAP scritto da pose importate
+`chunk.relink_photos(folder, only_unreadable=False, cameras=None)` fa puntare le foto (tutte, o `cameras`) ai
+file con gli stessi nomi in un'altra cartella (COLMAP poi le legge dalla loro cartella comune, o da una cartella di
+link quando sono sparse in più cartelle, `engine.sfm.photo_folder`); `chunk.set_photo_path(camera, path)` legge una
+foto da un altro file con qualsiasi nome (FileNotFoundError se manca o è vuoto, ValueError se la dimensione non è
+quella del suo sensore; per un raw sviluppato `path` è il file raw). `chunk.missing_photos(cameras=None)`: le camere
+attive il cui file manca o è vuoto, guardato senza leggere le foto (quello che dice un progetto appena aperto).
+`camera.path` è assoluto in memoria; il file del progetto lo salva relativo al file del progetto quando la foto sta
+sullo stesso volume (`./foto/...`, `./../foto/...`, separatori POSIX) e assoluto altrimenti
+(`core.paths.portable`, `core.paths.resolve`; decide `core.paths.same_volume`, `windows_same_volume` per unità e
+condivisioni). Il modello COLMAP scritto da pose importate
 fa riferimento solo a punti con due osservazioni; `engine.sfm.repair_reconstruction(chunk)` ripara i
 modelli scritti dalle versioni precedenti (fatto prima delle mappe di profondità e
 dell'ottimizzazione delle camere).

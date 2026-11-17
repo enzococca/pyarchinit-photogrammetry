@@ -114,6 +114,7 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Add video...** | the sharpest frames of a video, with the GPS when the `.SRT` of a DJI drone is there |
 | **Add 360° photos...** | every spherical photo becomes the six faces of a cube, aligned together |
 | **Relink photos (another folder)...** | finds the photos with the same names in another folder (moved, on another disk, "online only" on Dropbox) |
+| **Change path of the selected photos...** | the photos selected in the *Photos* pane read from another file (one photo) or from the files with the same names in a folder (several); also *Change path...* in the pane's right-click menu |
 | **Add chunk** | an empty chunk |
 | **Align chunks...** | brings other chunks into the frame of a reference chunk: markers with the same name, photos in common or overlapping clouds; the summary gives, for each chunk, the share of its points on the reference and their median distance ([several chunks together](view3d.md#several-chunks-together)) |
 | **Tie chunks together...** | several chunks solved together from points in common (ties) and known points, with the unknowns chosen for each chunk and a report that shows the wrong ties before applying ([ties between chunks](ties.md)) |
