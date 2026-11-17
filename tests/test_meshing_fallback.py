@@ -96,11 +96,14 @@ def test_physical_memory_is_known_here():
 
 
 def test_physical_memory_on_windows_from_kernel32(monkeypatch):
-    """Windows has no ``sysconf`` and psutil is optional: ``GlobalMemoryStatusEx`` of kernel32
-    (here a stand-in that fills the structure as Windows does)."""
+    """Windows has no ``sysconf`` and psutil is optional: without psutil the memory comes from the one reader of
+    the package, ``_env.physical_memory`` - ``GlobalMemoryStatusEx`` of kernel32 there (here a stand-in that fills
+    the structure as Windows does)."""
     import ctypes
     import sys
     import types
+
+    from pyarchinit_photogrammetry import _env
 
     calls = []
 
@@ -110,15 +113,15 @@ def test_physical_memory_on_windows_from_kernel32(monkeypatch):
         status.ullTotalPhys = 32 * 1024 ** 3
         return 1
 
+    monkeypatch.setitem(sys.modules, "psutil", None)  # not installed
     if sys.platform != "win32":
         fake = types.SimpleNamespace(kernel32=types.SimpleNamespace(GlobalMemoryStatusEx=status_ex))
         monkeypatch.setattr(ctypes, "windll", fake, raising=False)
-        monkeypatch.setattr(meshing, "sys", types.SimpleNamespace(platform="win32"))
-        monkeypatch.setitem(sys.modules, "psutil", None)  # not installed
+        monkeypatch.setattr(_env, "sys", types.SimpleNamespace(platform="win32"))
         assert meshing.physical_memory() == 32 * 1024 ** 3
         assert calls == [64]  # dwLength = sizeof(MEMORYSTATUSEX)
     else:  # the real call
-        assert meshing._windows_physical_memory() > 1 << 28
+        assert meshing.physical_memory() > 1 << 28
 
 
 def test_poisson_budget_ignores_a_malformed_override(monkeypatch, caplog):

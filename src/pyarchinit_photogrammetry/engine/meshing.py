@@ -22,6 +22,7 @@ import sys
 
 import numpy as np
 
+from .. import _env
 from ..core import geometry
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
@@ -65,23 +66,18 @@ def poisson_depth(target_faces: int) -> int:
 
 
 def physical_memory() -> int | None:
-    """Bytes of physical memory, None when it cannot be told."""
+    """Bytes of physical memory, None when it cannot be told: psutil when it is installed (optional, without a
+    wheel for every platform the program runs on), else the reader of the package (:func:`.._env.physical_memory`:
+    ``sysconf``, kernel32 on Windows), else ``sysctl`` on macOS."""
     try:
         import psutil
 
         return int(psutil.virtual_memory().total)
     except Exception:  # noqa: BLE001 - not installed or not working here
         pass
-    if sys.platform == "win32":
-        total = _windows_physical_memory()
-        if total:
-            return total
-    try:
-        pages, size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and size > 0:
-            return int(pages) * int(size)
-    except (AttributeError, OSError, ValueError):
-        pass
+    total = _env.physical_memory()
+    if total:
+        return total
     if sys.platform == "darwin":
         try:
             out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
@@ -90,28 +86,6 @@ def physical_memory() -> int | None:
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
     return None
-
-
-def _windows_physical_memory() -> int | None:
-    """``ullTotalPhys`` of ``kernel32.GlobalMemoryStatusEx`` (Windows: no ``sysconf``; psutil is
-    optional and has no wheel for every platform the program runs on)."""
-    import ctypes
-
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),  # DWORD
-                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-    try:
-        status = MEMORYSTATUSEX()
-        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return None
-        return int(status.ullTotalPhys) or None
-    except (AttributeError, OSError):
-        return None
 
 
 def poisson_point_budget() -> int | None:
