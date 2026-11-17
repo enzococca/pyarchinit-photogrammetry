@@ -570,6 +570,29 @@ def test_an_error_after_a_step_is_recorded_like_an_error_of_the_step(tmp_path, m
     assert data["done"] is False and [c[0] for c in calls][-1] == "update_transform"
 
 
+def test_a_job_the_child_cannot_read_or_parse_leaves_a_result_with_the_error(tmp_path):
+    """A job file missing, not JSON or without the work folder: the child writes ``result.json`` beside it with the
+    error (the type and the message, never the file name: :func:`record.describe`), ends with 1 and prints no
+    traceback; the parent reads that error as it reads the one of a step."""
+    job, result = tmp_path / "job.json", tmp_path / "result.json"
+    job.write_text("{not json", encoding="utf-8")
+    assert steps.main([str(job)]) == 1
+    data = json.loads(result.read_text(encoding="utf-8"))
+    assert data["error"].startswith("job: JSONDecodeError: ") and data["steps"] == [] and data["done"] is False
+    result.unlink()
+    job.write_text(json.dumps({"photos": [], "steps": "align"}), encoding="utf-8")  # no work folder in it
+    assert steps.main([str(job)]) == 1
+    assert json.loads(result.read_text(encoding="utf-8"))["error"] == "job: KeyError: 'work'"
+    result.unlink()
+    assert steps.main([str(tmp_path / "missing.json")]) == 1
+    data = json.loads(result.read_text(encoding="utf-8"))
+    assert data["error"].startswith("job: FileNotFoundError") and str(tmp_path) not in json.dumps(data)
+    result.unlink()
+    done = subprocess.run([sys.executable, "-m", "pyarchinit_photogrammetry.bench.steps", str(job)],
+                          capture_output=True, text=True, timeout=300, close_fds=False)
+    assert done.returncode == 1 and "Traceback" not in done.stderr and result.is_file(), done.stderr[-2000:]
+
+
 def test_the_result_is_written_again_while_a_reader_holds_it(tmp_path, monkeypatch):
     real, held = steps.os.replace, []
 

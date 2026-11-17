@@ -264,13 +264,21 @@ def run_chain(chunk, job: dict, result: Result) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     """The child: the job of ``argv[0]`` run, ``result.json`` in its work folder; 0 when the chain ran to its end, 1
-    when a step or the setup failed, 2 without a job."""
+    when the job cannot be read, a step or the setup failed, 2 without a job. A job file that cannot be read or
+    parsed, or that names no work folder, leaves ``result.json`` beside it, with the error (no traceback)."""
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 1:
         print("usage: python -m pyarchinit_photogrammetry.bench.steps <job.json>", file=sys.stderr)
         return 2
-    job = json.loads(Path(args[0]).read_text(encoding="utf-8"))
-    work = Path(job["work"])
+    job_file = Path(args[0])
+    try:
+        job = json.loads(job_file.read_text(encoding="utf-8"))
+        work = Path(job["work"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:  # missing or unreadable, not JSON, not a job
+        result = Result(job_file.parent / RESULT)  # beside the job, where the parent wrote it: its work folder
+        result.data["error"] = f"job: {record.describe(exc)}"
+        result.save()
+        return 1
     result = Result(work / RESULT)
     try:
         doc = Document()
