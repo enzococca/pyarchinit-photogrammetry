@@ -664,7 +664,10 @@ def test_a_small_run_writes_one_record(small_set, tmp_path):
     assert r["results"]["aligned"] == r["set"]["photos"] == r["results"]["cameras"] == 14
     assert r["results"]["reprojection_rms_px"] > 0 and r["results"]["chunks"] == 1
     assert list(r["settings"]) == SETTINGS
-    assert r["settings"]["quality"] == "high" and r["settings"]["pairs"] > 0 and r["settings"]["mapper"]
+    # pairs: None when every pair of a small set is matched on the CPU alone (no GPU, as on the CI runners): the
+    # exhaustive matching of COLMAP lists no pairs (engine/sfm.py, the pair step of match_photos)
+    pairs = r["settings"]["pairs"]
+    assert r["settings"]["quality"] == "high" and (pairs is None or pairs > 0) and r["settings"]["mapper"]
     assert r["settings"]["max_ratio"] == 0.8 and r["settings"]["cross_check"] is True
     assert isinstance(r["settings"]["pycolmap"], str) and r["settings"]["pycolmap"]
     assert r["settings"]["photo_cache_mb"] is None and r["settings"]["georeferencing"] is None
