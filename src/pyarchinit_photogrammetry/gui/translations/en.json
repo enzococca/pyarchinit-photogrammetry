@@ -5234,7 +5234,7 @@
   "{0} foto su {1} collegate a {2}": "{0} photos of {1} linked to {2}",
   "Nuovo file della foto {0}": "New file of photo {0}",
   "Cartella con le {0} foto selezionate (anche nelle sottocartelle)": "Folder with the {0} selected photos (subfolders too)",
-  "Foto mancante (o file vuoto), cercata in:\n{0}\n(Cambia percorso... nel menu del tasto destro)": "Photo missing (or empty file), looked for in:\n{0}\n(Change path... in the right-click menu)"
+  "Foto mancante o non leggibile (file vuoto), cercata in:\n{0}\n(Cambia percorso... nel menu del tasto destro)": "Photo missing or unreadable (empty file), looked for in:\n{0}\n(Change path... in the right-click menu)"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",
