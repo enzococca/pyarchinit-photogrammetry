@@ -504,11 +504,15 @@ def preflight(chunk, use_gps: bool | None = None) -> None:
     camera_references(chunk, list(first.values()), None if crs_mod.is_local(chunk.crs) else chunk.crs)
 
 
-def cameras_span_their_accuracy(chunk, factor: float = 10.0) -> bool:
+def cameras_span_their_accuracy(chunk, factor: float = 10.0, aligned: bool = True) -> bool:
     """The camera references (the GPS of the photos) cover an area at least ``factor`` times
     their accuracy: they can place and turn the survey (a flight over a site), not an object
-    on a table or a trench of a few metres, where they are only noise."""
-    cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
+    on a table or a trench of a few metres, where they are only noise. The references of the
+    aligned cameras; with ``aligned`` False those of every enabled photo, aligned or not - the
+    photos an alignment is about to place, when nothing is aligned yet
+    (:func:`..engine.sfm.auto_mapper`)."""
+    cams = [cam for cam in (chunk.aligned_cameras if aligned else chunk.cameras)
+            if cam.enabled and cam.reference.enabled and cam.reference.location]
     positions, _crs = camera_references(chunk, cams, relative=True)  # a span: no geoid needed
     if len(positions) < 3:
         return False

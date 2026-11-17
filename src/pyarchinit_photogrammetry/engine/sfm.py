@@ -1433,13 +1433,16 @@ def _continuation_model(model_dir: Path, db_path: Path, out: Path) -> Path:
 
 def auto_mapper(chunk: Chunk, photos: int, fixed: bool = False, rigs: bool = False) -> str:
     """The mapper ``auto`` picks: global (all at once) from ``GLOBAL_FROM`` photos of a survey from the
-    air - their GPS spread over the site (:func:`engine.dense.aerial_survey`) - without rigs or
-    calibrations held fixed; incremental otherwise. On a room photographed from a few stations (four
-    views each) the global one failed 1.5 % of the runs, 24 % with the stations 5 cm apart, and all
-    the cameras were placed, so nothing noticed; the incremental one failed 0 of 300."""
+    air - their GPS spread over the site (:func:`engine.dense.aerial_survey`), judged on the enabled
+    photos whether aligned or not, since the choice comes before the alignment and on a fresh one
+    nothing is aligned yet - without rigs or calibrations held fixed; incremental otherwise. On a room
+    photographed from a few stations (four views each) the global one failed 1.5 % of the runs, 24 %
+    with the stations 5 cm apart, and all the cameras were placed, so nothing noticed; the incremental
+    one failed 0 of 300."""
     from .dense import aerial_survey
 
-    return "global" if photos >= GLOBAL_FROM and not fixed and not rigs and aerial_survey(chunk) else "incremental"
+    return ("global" if photos >= GLOBAL_FROM and not fixed and not rigs and aerial_survey(chunk, aligned=False)
+            else "incremental")
 
 
 def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
