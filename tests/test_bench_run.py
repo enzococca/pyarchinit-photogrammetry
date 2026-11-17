@@ -710,11 +710,12 @@ def test_a_small_run_writes_one_record(small_set, tmp_path):
     assert not (out / "t-1").exists()
 
 
-def test_a_failed_run_leaves_a_record_with_the_error(tmp_path):
+def test_a_failed_run_leaves_a_record_with_the_error(tmp_path, caplog):
     pytest.importorskip("psutil")
     photos = noise_photos(tmp_path / "photos")
     out = tmp_path / "out"
-    paths = runner.run(photos, out, name="t")
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG):
+        paths = runner.run(photos, out, name="t")
     r = the_record(out, paths)
     assert r["error"] and r["valid"] is False
     assert any(reason.startswith("failed") for reason in r["invalid_reasons"])
@@ -728,7 +729,10 @@ def test_a_failed_run_leaves_a_record_with_the_error(tmp_path):
     assert r["results"].get("aligned", 0) < 3 and r["set"]["photos"] == 3
     for where, text in strings_of(r):
         assert str(tmp_path) not in text and "NOISE_" not in text, where
-    assert "/" not in r["error"] and not (out / "t-1").exists()
+    assert "/" not in r["error"]
+    # the work folder of a run that failed stays, with the child's log and its result, said in the log by its name
+    assert (out / "t-1" / runner.LOG).is_file() and (out / "t-1" / steps.RESULT).is_file()
+    assert said_by_name(caplog, "t-1", tmp_path)
 
 
 def test_a_cancelled_run_leaves_a_record_and_no_work_folder(small_set, tmp_path, monkeypatch):
@@ -818,16 +822,42 @@ def test_extra_results_that_raise_are_recorded_and_the_times_are_kept(tmp_path, 
     assert r["results"]["error"].startswith("extra_results: TypeError: ") and "label" in r["results"]["error"]
 
 
-def test_a_child_that_dies_leaves_the_step_it_died_in(tmp_path, stand_in):
+def test_a_child_that_dies_leaves_the_step_it_died_in(tmp_path, stand_in, caplog):
     stand_in.mode = "dies"
     photos = noise_photos(tmp_path / "photos")
     out = tmp_path / "out"
-    r = the_record(out, runner.run(photos, out, name="t"))
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG):
+        r = the_record(out, runner.run(photos, out, name="t"))
     assert r["error"] == "match_photos: child ended with code 9" and r["valid"] is False
     assert r["invalid_reasons"] == ["failed: match_photos: child ended with code 9"]
     assert [s["step"] for s in r["steps"]] == ["match_photos"]
     assert r["steps"][0]["error"] == r["error"] and r["steps"][0]["seconds"] > 0
-    assert not (out / "t-1").exists()
+    assert (out / "t-1" / runner.LOG).is_file() and said_by_name(caplog, "t-1", tmp_path)  # kept: the run failed
+
+
+def test_finish_keeps_the_work_folder_of_a_failed_run_and_removes_the_one_of_a_cancelled_run(tmp_path, caplog):
+    """After the record is written: the folder of a run that failed stays with the child's log, said in the log by
+    its name; a cancelled run (its error is ``cancelled``) and a successful one remove it, as before; a folder kept
+    by request (``--keep``) is not said."""
+    def finish(name: str, error: str | None, keep: bool = False, cancelled: bool = False) -> Path:
+        work = tmp_path / "out" / f"{name}-1"
+        work.mkdir(parents=True)
+        (work / runner.LOG).write_text("the child's log\n", encoding="utf-8")
+        plan = runner._Plan(name=name, steps="align", mapper="auto", local=(), out=tmp_path / "out",
+                            records=tmp_path / "out", keep=keep, env={}, disk={}, set={}, settings={},
+                            private=(tmp_path,), names=(), extra_results=None, targets=None, reference=None, crs=None)
+        r = rec()
+        r["name"], r["error"] = name, error
+        runner._finish(r, work, plan, 1, cancelled=cancelled)
+        return work
+
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOG):
+        assert (finish("failed", "match_photos: RuntimeError: no matches") / runner.LOG).is_file()
+        assert not finish("cancelled", "cancelled", cancelled=True).exists()
+        assert not finish("done", None).exists()
+        assert (finish("kept", "match_photos: RuntimeError: no matches", keep=True) / runner.LOG).is_file()
+    assert said_by_name(caplog, "failed-1", tmp_path)
+    assert not any(name in e.getMessage() for e in caplog.records for name in ("cancelled-1", "done-1", "kept-1"))
 
 
 def test_the_texts_of_the_runner_are_not_scrubbed(tmp_path, stand_in):

@@ -5,9 +5,10 @@ starts the child (:mod:`.steps`, the same interpreter, with the environment the 
 folder of its own, samples every :data:`SAMPLE_SECONDS` the memory of the child and of its children, and when the child
 ends builds the record (:mod:`.record`), judges it and writes it. A run that fails, dies or is cancelled leaves a record
 too, with its error and the steps done; photos that are online-only are left out and make the record not valid. What
-a run leaves beside the records - a work folder it could not remove, or one left by any stop after the folder was
-made (a job or a log that cannot be written, a child that cannot start, a record that is refused or cannot be
-written, a cancel whose cleanup failed) - is said in the log by the name of the folder, never by its path.
+a run leaves beside the records - the work folder of a run that failed (kept with the child's log, its result and its
+project, for the reason to be read without running again), one it could not remove, or one left by any stop after
+the folder was made (a job or a log that cannot be written, a child that cannot start, a record that is refused or
+cannot be written, a cancel whose cleanup failed) - is said in the log by the name of the folder, never by its path.
 """
 from __future__ import annotations
 
@@ -78,8 +79,9 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
         records: Path | None = None, *, mapper: str = "auto", extra_results: Callable | None = None,
         targets: str | None = None, reference: Path | None = None, crs: str | None = None) -> list[Path]:
     """``repeat`` runs of the chain ``steps`` (``align`` or ``all``, :data:`.steps.CHAINS`) on the photos of the folder
-    ``photos``, each in the work folder ``out/<name>-<i>`` (deleted after unless ``keep``), the records written to
-    ``records`` (default ``out``). Returned: the path of each record.
+    ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run failed: then it
+    stays with the child's log, said in the log by its name), the records written to ``records`` (default ``out``).
+    Returned: the path of each record.
 
     Refused, in this order and before anything runs: a name that is not one a file can take (ValueError), unknown
     steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError), ``out`` or ``records``
@@ -220,7 +222,7 @@ def _run_in(plan: _Plan, index: int, work: Path) -> Path:
     except KeyboardInterrupt:
         _terminate(proc)
         _collect(rec, work, peaks, plan, ended=time.time(), cancelled=True)
-        _finish(rec, work, plan, index)
+        _finish(rec, work, plan, index, cancelled=True)
         raise
     _collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
     if rec["error"] is None and plan.extra_results is not None:
@@ -346,16 +348,22 @@ def _extra(rec: dict, work: Path, plan: _Plan) -> None:
         rec["results"]["error"] = record.scrub(f"extra_results: {record.describe(exc)}", plan.private, plan.names)
 
 
-def _finish(rec: dict, work: Path, plan: _Plan, index: int) -> Path:
-    """The record judged and written, then the work folder removed unless kept. A record that is refused (a path in
-    it) or cannot be written leaves the work folder for inspection (said by :func:`_one_run`); a work folder that
-    cannot be removed stays, said here, by its name."""
+def _finish(rec: dict, work: Path, plan: _Plan, index: int, cancelled: bool = False) -> Path:
+    """The record judged and written, then the work folder removed - unless kept by request, or the run failed
+    (``rec["error"]`` set and not ``cancelled``): then it stays with the child's log and its result, said here by its
+    name, so that the reason of a failure after an hour can be read without running the hour again. A record that
+    is refused (a path in it) or cannot be written leaves the work folder for inspection (said by :func:`_one_run`);
+    a work folder that cannot be removed stays, said here, by its name."""
     record.judge(rec)
     path = record.write(rec, plan.records, plan.private, index=index)
-    if not plan.keep:
-        try:
-            shutil.rmtree(work)
-        except OSError as exc:
-            log.warning("the work folder %s could not be removed (%s): it is left in the output folder", work.name,
-                        type(exc).__name__)
+    if plan.keep:
+        return path
+    if rec["error"] is not None and not cancelled:
+        log.warning("the run failed: the work folder %s is kept in the output folder with the child's log", work.name)
+        return path
+    try:
+        shutil.rmtree(work)
+    except OSError as exc:
+        log.warning("the work folder %s could not be removed (%s): it is left in the output folder", work.name,
+                    type(exc).__name__)
     return path
