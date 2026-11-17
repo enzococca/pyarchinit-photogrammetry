@@ -140,6 +140,16 @@ jobs:
           python -m pytest tests/test_native.py -k "gpu and not fusion_agrees_with_colmaps" -q -rs --durations=0 \
             2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
+          # pytest's summary counts what ran ("3 passed, 2 skipped in 12.3s"): a green pytest that passed nothing -
+          # every selected test skipped, or none selected - tried no kernel and must not read as a trial that went well
+          count='[0-9]+ (passed|failed|skipped|errors?|deselected|xfailed|xpassed|warnings?)'
+          summary="$(grep -E "^(=+ )?(($count(, )?)+ in [0-9.]+s|no tests ran)" pytest.log | tail -1)"
+          passed="$(printf '%s\n' "$summary" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
+          if [ "$status" -eq 0 ] && [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::no kernel test passed on the software adapter" \
+              "(${summary:-no summary in pytest.log}): every selected test was skipped"
+            status=1
+          fi
           {
             echo 'pytest tests/test_native.py -k "gpu and not fusion_agrees_with_colmaps"'
             echo '```'; tail -60 pytest.log; echo '```'
