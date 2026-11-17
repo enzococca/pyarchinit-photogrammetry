@@ -1199,17 +1199,41 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
         cc = 0.0
         if not ECC:  # an OpenCV without the video module: the shift alone
             return h, float(response)
+        starts = [h]  # the shift of the phase correlation, and what the affine at the reduced size makes of it
         try:
             if scale > 1:
                 s = np.diag([1.0 / scale, 1.0 / scale, 1.0])
                 warp = (s @ h @ np.linalg.inv(s))[:2].astype(np.float32)
-                cc, warp = cv2.findTransformECC(thalf, pimg_half, warp, MOTION_AFFINE, criteria, None, 5)
-                h = np.linalg.inv(s) @ np.vstack([warp.astype(np.float64), [0.0, 0.0, 1.0]]) @ s
-            cc, warp3 = cv2.findTransformECC(tfull, pimg_full, h.astype(np.float32), MOTION_HOMOGRAPHY, criteria, None, 5)
-            h = warp3.astype(np.float64)
+                _cc, warp = cv2.findTransformECC(thalf, pimg_half, warp, MOTION_AFFINE, criteria, None, 5)
+                starts.insert(0, np.linalg.inv(s) @ np.vstack([warp.astype(np.float64), [0.0, 0.0, 1.0]]) @ s)
         except cv2.error:
-            pass  # the shift alone, or what the affine gave
-        return h, float(cc)
+            pass  # the shift alone is the start
+        # the homography at full size from each start, the best correlation kept: where the affine wanders off the
+        # shift (gradients of bands that look different), ECC from it may not come back - OpenCV 5.1 does not, 5.0 did
+        candidates = [h]
+        for start in starts:
+            try:
+                _cc, warp3 = cv2.findTransformECC(tfull, pimg_full, start.astype(np.float32), MOTION_HOMOGRAPHY,
+                                                  criteria, None, 5)
+                candidates.append(warp3.astype(np.float64))
+            except cv2.error:
+                pass
+        # every candidate judged alike: the correlation of the target with the band brought back by it, both blurred as
+        # ECC blurs them (5 x 5, so the figure keeps the meaning of ECC's own and the thresholds below hold), away from
+        # the borders. On gradients ECC's solution is ill-conditioned: a start 1e-7 apart ends pixels apart (OpenCV
+        # 5.0 and 5.1 differ so), and the shift of the phase correlation may be the best of them
+        best = (h, 0.0)
+        inner = (slice(h0 // 16, -(h0 // 16) or None), slice(w0 // 16, -(w0 // 16) or None))
+        target_blur = cv2.GaussianBlur(tfull, (5, 5), 0)
+        for cand in candidates:
+            back = cv2.warpPerspective(pimg_full, cand.astype(np.float32), (tfull.shape[1], tfull.shape[0]),
+                                       flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+            a, b = target_blur[inner].ravel(), cv2.GaussianBlur(back, (5, 5), 0)[inner].ravel()
+            a, b = a - a.mean(), b - b.mean()
+            cc = float(a @ b / (np.sqrt((a @ a) * (b @ b)) + 1e-12))
+            if cc > best[1]:
+                best = (cand, cc)
+        return best
 
     def finish(band: str, size: np.ndarray, g: np.ndarray, band_cam):
         """The registration of a band from its correction ``g`` in the frame."""
