@@ -653,7 +653,8 @@ def test_every_photo_online_only_starts_no_child(tmp_path, monkeypatch):
     photos = noise_photos(tmp_path / "photos")
     monkeypatch.setattr(machine, "is_online_only", lambda path: True)
     monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
-    with pytest.raises(RuntimeError, match="online-only"):
+    offline = "online-only: make them available offline first or copy them to a local disk"
+    with pytest.raises(RuntimeError, match=offline):
         runner.run(photos, tmp_path / "out", name="t")
     assert not (tmp_path / "out").exists()
 

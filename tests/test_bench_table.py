@@ -312,8 +312,8 @@ def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_reco
     assert result.exit_code == 1, result.output
     assert "error: the record holds a path (results.error): not written" in result.output
     assert "-1.json: 1 steps, 1.5 s, valid" in result.output
-    for exc in (RuntimeError("every photo is online-only: make them available offline first"),
-                FileExistsError("the work folder exists")):
+    offline = "every photo is online-only: make them available offline first or copy them to a local disk"
+    for exc in (RuntimeError(offline), FileExistsError("the work folder exists")):
         monkeypatch.setattr(runner, "run", raising(exc))
         result = invoke(["run", str(photos), str(out), "--name", "n"])
         assert result.exit_code == 1 and f"error: {exc}" in result.output

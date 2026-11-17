@@ -106,7 +106,7 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     local = tuple(p for p in files if not machine.is_online_only(p))
     if not local:
-        raise RuntimeError("every photo is online-only: make them available offline first")
+        raise RuntimeError("every photo is online-only: make them available offline first or copy them to a local disk")
     set_ = machine.photo_set_facts(files)
     disk = machine.disk_facts(photos)
     disk["read_mb_s"] = machine.read_rate(list(local))
