@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ntpath
+import os
 import shutil
 from pathlib import Path
 
@@ -112,6 +113,7 @@ def test_a_relative_path_that_does_not_resolve_opens_and_keeps_its_form(tmp_path
         (tmp_path / "foto" / "IMG_0.jpg").resolve()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows tells the volume by the drive letter, folder or not")
 def test_a_missing_photo_stored_absolute_stays_absolute(tmp_path):
     """A photo on a disk not plugged in (its folder gone): the volume cannot be told, the path stays as it was."""
     import pyarchinit_photogrammetry as ppg
