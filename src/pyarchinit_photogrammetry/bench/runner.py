@@ -45,6 +45,7 @@ class _Plan:
 
     name: str
     steps: str
+    mapper: str
     local: tuple[Path, ...]
     out: Path
     records: Path
@@ -74,28 +75,32 @@ def photo_cache_mb(env: dict) -> int | None:
 
 
 def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 1, keep: bool = False,
-        records: Path | None = None, *, extra_results: Callable | None = None, targets: str | None = None,
-        reference: Path | None = None, crs: str | None = None) -> list[Path]:
+        records: Path | None = None, *, mapper: str = "auto", extra_results: Callable | None = None,
+        targets: str | None = None, reference: Path | None = None, crs: str | None = None) -> list[Path]:
     """``repeat`` runs of the chain ``steps`` (``align`` or ``all``, :data:`.steps.CHAINS`) on the photos of the folder
     ``photos``, each in the work folder ``out/<name>-<i>`` (deleted after unless ``keep``), the records written to
     ``records`` (default ``out``). Returned: the path of each record.
 
     Refused, in this order and before anything runs: a name that is not one a file can take (ValueError), unknown
-    steps or a repeat below 1 (ValueError), ``out`` or ``records`` inside ``photos`` (ValueError; by the identity of
-    the folders, whatever the case of the letters), ``records`` inside a work folder (ValueError: it is removed after
-    its run), a work folder of one of the repeats that exists already (FileExistsError; nothing is deleted in
-    silence), psutil missing (RuntimeError naming the extra), every photo online-only (RuntimeError; no child is
-    started). Photos that are online-only are left out of the run and make the record not valid.
+    steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError), ``out`` or ``records``
+    inside ``photos`` (ValueError; by the identity of the folders, whatever the case of the letters), ``records``
+    inside a work folder (ValueError: it is removed after its run), a work folder of one of the repeats that exists
+    already (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), every
+    photo online-only (RuntimeError; no child is started). Photos that are online-only are left out of the run and
+    make the record not valid.
 
     ``targets``, ``reference`` and ``crs`` go to the child, which detects the markers and imports the reference when
     they are given; ``all`` detects :data:`.steps.DEFAULT_TARGETS` when no targets are given, as ``ppg process`` does,
-    ``align`` detects none. ``extra_results``, called with the finished project (a :class:`..core.document.Document`)
-    after the last step of a run that did not fail, returns a dict of numbers merged into the results; an exception
-    in it, or a value that is not a number, is kept as ``results["error"]`` and makes the record not valid, the times
-    stay. A KeyboardInterrupt while the child runs terminates it and its children, writes the record with the error
-    ``cancelled``, removes the work folder unless ``keep`` and is raised again."""
+    ``align`` detects none. ``mapper`` (``auto``, the default, ``incremental`` or ``global``) goes to the child, which
+    aligns with it; the record keeps it as ``settings["mapper_requested"]``, while ``settings["mapper"]`` stays the
+    mapper the run used (the one ``auto`` picked, or the one a global alignment fell back to). ``extra_results``,
+    called with the finished project (a :class:`..core.document.Document`) after the last step of a run that did not
+    fail, returns a dict of numbers merged into the results; an exception in it, or a value that is not a number, is
+    kept as ``results["error"]`` and makes the record not valid, the times stay. A KeyboardInterrupt while the child
+    runs terminates it and its children, writes the record with the error ``cancelled``, removes the work folder
+    unless ``keep`` and is raised again."""
     photos = Path(photos).resolve()
-    out, records = check(out, name, steps, repeat, records, photos=photos)
+    out, records = check(out, name, steps, repeat, records, photos=photos, mapper=mapper)
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     local = tuple(p for p in files if not machine.is_online_only(p))
     if not local:
@@ -109,26 +114,29 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
         targets = child.DEFAULT_TARGETS
     reference = Path(reference).resolve() if reference else None
     settings = {**{key: None for key in child.SFM_SETTINGS}, **child.match_settings(), "pycolmap": None,
-                "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets}
+                "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets,
+                "mapper_requested": mapper}
     private = (photos, out, Path.home()) + ((reference,) if reference else ())
-    plan = _Plan(name=name, steps=steps, local=local, out=out, records=records, keep=keep, env=env, disk=disk,
-                 set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
+    plan = _Plan(name=name, steps=steps, mapper=mapper, local=local, out=out, records=records, keep=keep, env=env,
+                 disk=disk, set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
                  extra_results=extra_results, targets=targets, reference=reference, crs=crs)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
 
 
 def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: Path | None = None, *,
-          photos: Path | None = None) -> tuple[Path, Path]:
+          photos: Path | None = None, mapper: str = "auto") -> tuple[Path, Path]:
     """What :func:`run` refuses before anything runs, in its order, for a caller that must know before it makes its
     set (``ppg bench synthetic`` renders its photos after this): a name that is not one a file can take
-    (ValueError), unknown steps or a repeat below 1 (ValueError), ``photos`` - when given - that is not a folder or
-    holds ``out`` or ``records`` (ValueError), ``records`` inside a work folder (ValueError), a work folder of one of
-    the repeats that exists already (FileExistsError), psutil missing (RuntimeError), ``photos`` - when given -
-    without a photo (ValueError). Returned: ``out`` and ``records`` resolved (``records`` is ``out`` when not
-    given)."""
+    (ValueError), unknown steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError),
+    ``photos`` - when given - that is not a folder or holds ``out`` or ``records`` (ValueError), ``records`` inside a
+    work folder (ValueError), a work folder of one of the repeats that exists already (FileExistsError), psutil
+    missing (RuntimeError), ``photos`` - when given - without a photo (ValueError). Returned: ``out`` and ``records``
+    resolved (``records`` is ``out`` when not given)."""
     record.check_name(name)
     if steps not in child.CHAINS:
         raise ValueError(f"steps must be {' or '.join(child.CHAINS)}, not {steps!r}")
+    if mapper not in child.MAPPERS:
+        raise ValueError(f"mapper must be {', '.join(child.MAPPERS[:-1])} or {child.MAPPERS[-1]}, not {mapper!r}")
     if int(repeat) < 1:
         raise ValueError("repeat must be 1 or more")
     out = Path(out).resolve()
@@ -197,8 +205,8 @@ def _one_run(plan: _Plan, index: int) -> Path:
 
 
 def _run_in(plan: _Plan, index: int, work: Path) -> Path:
-    job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "targets": plan.targets,
-           "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
+    job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "mapper": plan.mapper,
+           "targets": plan.targets, "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
     rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}

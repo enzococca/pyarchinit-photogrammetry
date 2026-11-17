@@ -66,7 +66,7 @@ and writes one record, a JSON file. A folder of records gives the table of a ver
 by side.
 
 ```bash
-ppg bench run PHOTOS OUT --name NAME [--steps align|all] [--repeat N] [--keep] [--records DIR]
+ppg bench run PHOTOS OUT --name NAME [--steps align|all] [--mapper auto|incremental|global] [--repeat N] [--keep] [--records DIR]
 ppg bench synthetic trench|ring OUT [--repeat 3] [--records DIR]
 ppg bench table DIR
 ```
@@ -80,7 +80,9 @@ ppg bench table DIR
   pass them; a real set is measured as its photos come). Each of the `--repeat` runs works in
   `OUT/NAME-<i>`, removed after unless `--keep`; the records go to `OUT`, or to `--records DIR`. The
   run needs the `bench` extra (`pip install "pyarchinit-photogrammetry[bench]"`: psutil, for the
-  memory of the child).
+  memory of the child). `--mapper incremental|global` asks the alignment for that mapper (`auto`,
+  the default, picks as `ppg process` does); the record keeps it as `mapper_requested` beside the
+  `mapper` the run used, and the table compares it.
 * `synthetic trench|ring`: writes the set in a folder of its own, `OUT/synthetic-trench-set/` or
   `OUT/synthetic-ring-set/` (its photos and `gcp.csv`), which must not exist yet, and runs it as
   `synthetic-trench` (28 photos, all the steps of `ppg process` with its defaults - the depth maps at

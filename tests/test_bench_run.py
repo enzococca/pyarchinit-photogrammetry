@@ -28,7 +28,8 @@ REASONS = (r"slow disk link: \d+ Mb/s", r"slow disk: \d+ MB/s", r"online-only ph
 FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "max_ratio",
-            "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets"]
+            "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets",
+            "mapper_requested"]
 
 # Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters under a
 # made-up root (never the mount point of the external disks: a private path is resolved, and no test makes the
@@ -76,8 +77,9 @@ APOSTROPHE_TEXTS = [
                  "RuntimeError: cannot read <path>", id="home-apostrophe"),
 ]
 
-# A stand-in for the child: reads the job, writes a result and ends. ``done`` writes two finished steps and a project
-# for extra_results; ``dies`` writes a step that has started and ends with code 9, as a child that crashed would;
+# A stand-in for the child: reads the job, writes a result and ends. ``done`` writes two finished steps, the mapper it
+# used (incremental, whatever the job asked for: a global alignment that fell back) and a project for extra_results;
+# ``dies`` writes a step that has started and ends with code 9, as a child that crashed would;
 # ``reference`` fails in import_reference with the path of the reference in its text; ``leaks`` writes a path into
 # the settings, as a child whose text slipped past the scrub would.
 STAND_IN = '''
@@ -108,7 +110,7 @@ doc = ppg.Document()
 doc.add_chunk("Chunk 1")
 doc.save(work / "project.ppg")
 write([entry("match_photos"), entry("align_cameras")],
-      {"quality": "/leak/y" if mode == "leaks" else "high", "pycolmap": "0.0"},
+      {"quality": "/leak/y" if mode == "leaks" else "high", "pycolmap": "0.0", "mapper": "incremental"},
       {"cameras": len(job["photos"]), "aligned": len(job["photos"])})
 '''
 RUNNER_LOG = "pyarchinit_photogrammetry.bench.runner"
@@ -469,6 +471,12 @@ def test_the_arguments_of_the_steps_are_the_defaults_of_today():
     # the targets ``all`` detects by default are those ppg process detects, which are those of Chunk.detect_markers
     assert steps.DEFAULT_TARGETS == process["targets"].default == "aruco_4x4_50"
     assert steps.DEFAULT_TARGETS == inspect.signature(Chunk.detect_markers).parameters["target_type"].default
+    # the mappers ``run`` chooses from (--mapper), the first its default: that of Chunk.align_cameras, which ppg
+    # process aligns with (it passes none), and of --mapper of ppg align; hierarchical is no choice of the bench
+    assert steps.MAPPERS == ("auto", "incremental", "global")
+    assert steps.MAPPERS[0] == inspect.signature(Chunk.align_cameras).parameters["mapper"].default == "auto"
+    assert steps.MAPPERS[0] == inspect.signature(cli.align).parameters["mapper"].default.default  # a typer option
+    assert "mapper" not in process
 
 
 def test_the_reprojection_rms_lives_in_the_package_and_the_script_imports_it():
@@ -519,10 +527,12 @@ def test_the_child_runs_the_chain_of_all_with_the_arguments_written_out(tmp_path
     calls, saves = [], []
     chunk = stub_chunk(calls, saves, report=REPORT)
     result = steps.Result(tmp_path / "result.json")
-    job = {"steps": "all", "targets": "aruco_4x4_50", "reference": "/data/gcp.csv", "crs": "EPSG:3004"}
+    job = {"steps": "all", "targets": "aruco_4x4_50", "reference": "/data/gcp.csv", "crs": "EPSG:3004",
+           "mapper": "global"}
     assert steps.run_chain(chunk, job, result) is True
     assert calls == [("detect_markers", ("aruco_4x4_50",), {}), ("match_photos", (), steps.ARGUMENTS["match_photos"]),
-                     ("align_cameras", (), {}), ("import_reference", ("/data/gcp.csv",), {"crs": "EPSG:3004"}),
+                     ("align_cameras", (), {"mapper": "global"}),
+                     ("import_reference", ("/data/gcp.csv",), {"crs": "EPSG:3004"}),
                      ("update_transform", (), {}), ("build_depth_maps", (), {"quality": "medium"}),
                      ("build_point_cloud", (), {}), ("build_model", (), {"surface": "arbitrary"}),
                      ("build_texture", (), {}), ("build_dem", (), {}), ("build_orthomosaic", (), {})]
@@ -539,6 +549,7 @@ def test_the_child_runs_the_chain_of_all_with_the_arguments_written_out(tmp_path
     calls, saves = [], []
     assert steps.run_chain(stub_chunk(calls, saves), align, steps.Result(tmp_path / "align.json")) is True
     assert [c[0] for c in calls] == ["match_photos", "align_cameras"]
+    assert calls[1] == ("align_cameras", (), {"mapper": "auto"})  # a job that names no mapper: the default
     calls = []
     steps.run_chain(stub_chunk(calls, [], gps=True, report=REPORT), align, steps.Result(tmp_path / "gps.json"))
     assert [c[0] for c in calls] == ["match_photos", "align_cameras", "update_transform"]
@@ -647,6 +658,20 @@ def test_every_photo_online_only_starts_no_child(tmp_path, monkeypatch):
     assert not (tmp_path / "out").exists()
 
 
+def test_an_unknown_mapper_is_refused_before_any_child(tmp_path, monkeypatch):
+    pytest.importorskip("psutil")
+    photos = noise_photos(tmp_path / "photos")
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
+    for mapper in ("hierarchical", "Global", "", None):
+        with pytest.raises(ValueError, match="mapper must be"):
+            runner.run(photos, tmp_path / "out", name="t", mapper=mapper)
+        with pytest.raises(ValueError, match="mapper must be"):
+            runner.check(tmp_path / "out", "t", mapper=mapper)
+    assert not (tmp_path / "out").exists()
+    for mapper in steps.MAPPERS:
+        runner.check(tmp_path / "out", "t", mapper=mapper)  # the three choices pass the checks
+
+
 # --- the run on the small set -----------------------------------------------------------------------------------------
 
 def test_a_small_run_writes_one_record(small_set, tmp_path):
@@ -668,6 +693,8 @@ def test_a_small_run_writes_one_record(small_set, tmp_path):
     # exhaustive matching of COLMAP lists no pairs (engine/sfm.py, the pair step of match_photos)
     pairs = r["settings"]["pairs"]
     assert r["settings"]["quality"] == "high" and (pairs is None or pairs > 0) and r["settings"]["mapper"]
+    # the mapper asked for (the default) beside the one the run used: auto picks incremental on 14 photos without GPS
+    assert r["settings"]["mapper_requested"] == "auto" and r["settings"]["mapper"] == "incremental"
     assert r["settings"]["max_ratio"] == 0.8 and r["settings"]["cross_check"] is True
     assert isinstance(r["settings"]["pycolmap"], str) and r["settings"]["pycolmap"]
     assert r["settings"]["photo_cache_mb"] is None and r["settings"]["georeferencing"] is None
@@ -824,6 +851,17 @@ def test_all_detects_the_targets_of_ppg_process_by_default_and_align_does_not(tm
     assert job["targets"] is None and r["settings"]["targets"] is None
     r = the_record(tmp_path / "given", runner.run(photos, tmp_path / "given", name="t", targets="apriltag_36h11"))
     assert r["settings"]["targets"] == "apriltag_36h11" and list(r["settings"]) == SETTINGS
+
+
+def test_the_mapper_asked_for_goes_to_the_child_and_is_kept_beside_the_one_the_run_used(tmp_path, stand_in):
+    photos = noise_photos(tmp_path / "photos")
+    r = the_record(tmp_path / "global", runner.run(photos, tmp_path / "global", name="t", mapper="global", keep=True))
+    job = json.loads((tmp_path / "global" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["mapper"] == "global" and r["settings"]["mapper_requested"] == "global"
+    assert r["settings"]["mapper"] == "incremental" and list(r["settings"]) == SETTINGS  # what the run used
+    r = the_record(tmp_path / "auto", runner.run(photos, tmp_path / "auto", name="t", keep=True))
+    job = json.loads((tmp_path / "auto" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["mapper"] == "auto" and r["settings"]["mapper_requested"] == "auto"
 
 
 def test_the_machine_is_read_again_for_every_repeat(tmp_path, monkeypatch, stand_in):

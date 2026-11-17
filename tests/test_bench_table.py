@@ -32,7 +32,7 @@ SET = {"photos": 28, "bytes": 1, "online_only": 0, "gps": 0}
 SETTINGS = {"pairs": 378, "matcher": "sift", "quality": "high", "gpu": "GPU A", "gpu_pairs": 100, "cpu_pairs": 278,
             "mapper": "incremental", "global_fallback": None, "max_ratio": 0.8, "max_distance": 0.7,
             "cross_check": True, "pycolmap": "4.2.1", "photo_cache_mb": None, "georeferencing": "markers",
-            "targets": "aruco_4x4_50"}
+            "targets": "aruco_4x4_50", "mapper_requested": "auto"}
 ENGINE = {"requested": "auto", "used": "classic", "fallback": None}
 TABLE_LOG = "pyarchinit_photogrammetry.bench.table"
 
@@ -190,6 +190,20 @@ def test_runs_that_differ_in_their_settings_or_their_machine_are_marked_and_are_
     assert "| not a baseline (n < 3, mixed settings, mixed machines, mixed sets) |" in table.render(rows, {})
 
 
+def test_runs_that_differ_in_the_mapper_asked_for_are_a_mix_under_one_name_and_two_rows_under_two():
+    # the mapper a run was asked for (--mapper of ppg bench run) is a setting of the run and is compared, unlike the
+    # mapper the run used, which is what the alignment did (auto picks one, a global one falls back)
+    assert "mapper_requested" not in table.RUN_FACTS and "mapper" in table.RUN_FACTS
+    asked = {"mapper_requested": "global", "mapper": "global"}
+    rows, _ = table.summarise([a_record(10.0), a_record(12.0), a_record(30.0, settings=asked)])
+    assert [(r["name"], r["mixed_settings"], r["baseline"]) for r in rows] == [("t", True, False)]
+    assert "| not a baseline (mixed settings) |" in table.render(rows, {})
+    rows, _ = table.summarise([a_record(s, name="t-auto") for s in (10.0, 12.0, 30.0)]
+                              + [a_record(s, name="t-global", settings=asked) for s in (5.0, 6.0, 7.0)])
+    assert [(r["name"], r["seconds"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t-auto", 12.0, False, True), ("t-global", 6.0, False, True)]
+
+
 def test_every_reason_of_a_record_left_out_is_counted_before_its_colon():
     failed = a_record(2.0, link=480)
     failed["error"] = "align_cameras: RuntimeError: no model"
@@ -246,6 +260,8 @@ def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch
     assert result.exit_code == 2 and "repeat must be 1 or more" in plain(result)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--steps", "some"])
     assert result.exit_code == 2 and "--steps" in plain(result)
+    result = invoke(["run", str(photos), str(out), "--name", "n", "--mapper", "hierarchical"])
+    assert result.exit_code == 2 and "--mapper" in plain(result) and "not 'hierarchical'" in plain(result)
     result = invoke(["run", str(photos), str(photos / "out"), "--name", "n"])
     assert result.exit_code == 2 and "must not be inside the folder of the photos" in plain(result)
     (out / "n-1").mkdir(parents=True)
@@ -276,8 +292,11 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
                      "--keep", "--records", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
     assert calls == [(photos, tmp_path / "o", "n", {"steps": "all", "repeat": 2, "keep": True,
-                                                   "records": tmp_path / "r"})]
+                                                   "records": tmp_path / "r", "mapper": "auto"})]
     assert "not valid (slow disk link: 480 Mb/s)" in result.output and "1.5 s" in result.output
+    result = invoke(["run", str(photos), str(tmp_path / "o2"), "--name", "n", "--mapper", "global"])
+    assert result.exit_code == 0, result.output
+    assert calls[1][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "global"}
 
 
 def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_records_written(tmp_path, monkeypatch):
@@ -341,6 +360,7 @@ def test_synthetic_writes_each_set_in_a_folder_of_its_own_and_runs_its_own_photo
     assert (photos, out_, name) == (out / "synthetic-trench-set" / "photos", out, "synthetic-trench")
     assert seen == ["IMG_0000.jpg"]
     assert kwargs["steps"] == "all" and kwargs["repeat"] == 3 and kwargs["records"] is None
+    assert "mapper" not in kwargs  # the synthetic sets keep the default mapper, auto
     assert kwargs["targets"] == child.DEFAULT_TARGETS == "aruco_4x4_50"
     assert kwargs["reference"] == out / "synthetic-trench-set" / "gcp.csv" and kwargs["crs"] == "EPSG:3004"
     assert kwargs["extra_results"] is truth.trench_truth
@@ -351,7 +371,7 @@ def test_synthetic_writes_each_set_in_a_folder_of_its_own_and_runs_its_own_photo
     assert seen == ["RING_0000.jpg"]  # its own photos, not the trench's
     assert kwargs["steps"] == "align" and kwargs["repeat"] == 1 and kwargs["records"] == tmp_path / "rec"
     assert kwargs["targets"] == child.DEFAULT_TARGETS and "reference" not in kwargs and "crs" not in kwargs
-    assert callable(kwargs["extra_results"]) and len(stand_ins) == 2
+    assert "mapper" not in kwargs and callable(kwargs["extra_results"]) and len(stand_ins) == 2
     assert (out / "synthetic-trench-set" / "photos" / "IMG_0000.jpg").exists()  # the set stays after the runs
 
 

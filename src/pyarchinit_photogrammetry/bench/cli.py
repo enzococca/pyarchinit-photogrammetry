@@ -26,6 +26,8 @@ bench_app = typer.Typer(help="The bench: a version of the program measured on a 
 SETS = ("trench", "ring")
 STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the photos carry a GPS position) or all "
               "(the default targets detected first; then depth maps, dense cloud, model, texture, DEM, orthophoto)")
+MAPPER_HELP = ("the mapper of the alignment: auto (the one ppg process picks for the set), incremental or global; the "
+               "record keeps it as mapper_requested beside the mapper the run used")
 RECORDS_HELP = "the folder of the records (default: OUT)"
 
 
@@ -36,6 +38,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
               name: str = typer.Option(..., "--name", help="the name of the run (letters, digits, '.', '_', '-'): "
                                                            "say the set and what is measured, e.g. trench-28-align"),
               steps: str = typer.Option("align", "--steps", help=STEPS_HELP),
+              mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
               records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
@@ -47,9 +50,12 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
 
     if steps not in child.CHAINS:
         raise typer.BadParameter(f"{' or '.join(child.CHAINS)}, not {steps!r}", param_hint="--steps")
-    _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos)
+    if mapper not in child.MAPPERS:
+        raise typer.BadParameter(f"{', '.join(child.MAPPERS[:-1])} or {child.MAPPERS[-1]}, not {mapper!r}",
+                                 param_hint="--mapper")
+    _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records))
+              records=records, mapper=mapper))
 
 
 @bench_app.command("synthetic")

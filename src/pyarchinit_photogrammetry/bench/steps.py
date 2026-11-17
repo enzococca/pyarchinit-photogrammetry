@@ -2,15 +2,16 @@
 
     python -m pyarchinit_photogrammetry.bench.steps <job.json>
 
-The job names the local photos, the work folder, the chain (``align`` or ``all``) and, when the set has them, the
-targets to detect and the reference to import. The child makes a project in the work folder, adds the photos and runs
-public methods of :class:`..core.chunk.Chunk` only, in the order ``ppg process`` runs them (:data:`ALL_STEPS`; a test
-keeps the two equal) with the defaults of today written out (:data:`ARGUMENTS`), so that a record says what ran. It
-rewrites ``result.json`` when a step starts and when it ends, so that a child that dies leaves the step it died in: the
-seconds of each step as the child measures them around it, the higher of its resident memory at the start and at the
-end (the parent's samples can only raise it), the stages and the engine the chunk recorded, the counts of the photo
-cache when the step has them; a step that fails is listed with its seconds up to the failure and its error, and the
-steps after it are not run. The settings of the engine and the results (numbers only) follow the steps.
+The job names the local photos, the work folder, the chain (``align`` or ``all``), the mapper of the alignment (one of
+:data:`MAPPERS`) and, when the set has them, the targets to detect and the reference to import. The child makes a
+project in the work folder, adds the photos and runs public methods of :class:`..core.chunk.Chunk` only, in the order
+``ppg process`` runs them (:data:`ALL_STEPS`; a test keeps the two equal) with the defaults of today written out
+(:data:`ARGUMENTS`), so that a record says what ran. It rewrites ``result.json`` when a step starts and when it ends,
+so that a child that dies leaves the step it died in: the seconds of each step as the child measures them around it,
+the higher of its resident memory at the start and at the end (the parent's samples can only raise it), the stages and
+the engine the chunk recorded, the counts of the photo cache when the step has them; a step that fails is listed with
+its seconds up to the failure and its error, and the steps after it are not run. The settings of the engine and the
+results (numbers only) follow the steps.
 """
 from __future__ import annotations
 
@@ -33,15 +34,20 @@ ALIGN_STEPS = ("detect_markers", "match_photos", "align_cameras", "import_refere
 # the targets ``all`` detects when the job names none: the default of ppg process, which is that of
 # Chunk.detect_markers (a test compares the three)
 DEFAULT_TARGETS = "aruco_4x4_50"
+# the mappers of the alignment ``ppg bench run`` chooses from (--mapper), the first its default: that of
+# Chunk.align_cameras, which ppg process aligns with, and of ppg align (a test compares them); auto picks one for the
+# set. The job carries the choice to align_cameras; the record keeps it as settings["mapper_requested"] beside the
+# mapper the run used
+MAPPERS = ("auto", "incremental", "global")
 # os.replace of the result is tried again on a PermissionError, with short sleeps: on Windows the parent, which
 # reads the file every half second, holds it for a moment (a few tries cover that moment; an estimate)
 _REPLACE_TRIES = 5
 ALL_STEPS = ALIGN_STEPS + ("build_depth_maps", "build_point_cloud", "build_model", "build_texture", "build_dem",
                            "build_orthomosaic")
 CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS}
-# the arguments of the steps that take none from the job: the defaults of ppg process and of the methods of Chunk
-# today, written out so that a record says what ran even after a default changes (a test compares them with the
-# signatures)
+# the arguments of the steps beside what the job gives (the targets, the reference, the mapper): the defaults of ppg
+# process and of the methods of Chunk today, written out so that a record says what ran even after a default changes
+# (a test compares them with the signatures)
 ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000,
                               "pair_selection": "auto"},
              "align_cameras": {}, "update_transform": {}, "build_depth_maps": {"quality": "medium"},
@@ -219,11 +225,14 @@ def wanted(step: str, job: dict, chunk, imported: bool) -> bool:
 
 
 def call(chunk, step: str, job: dict):
-    """``step`` run on ``chunk``: the targets and the reference from the job, the rest with :data:`ARGUMENTS`."""
+    """``step`` run on ``chunk``: the targets, the reference and the mapper (the first of :data:`MAPPERS` when the job
+    names none) from the job, the rest with :data:`ARGUMENTS`."""
     if step == "detect_markers":
         return chunk.detect_markers(job["targets"])
     if step == "import_reference":
         return chunk.import_reference(job["reference"], crs=job.get("crs"))
+    if step == "align_cameras":
+        return chunk.align_cameras(mapper=job.get("mapper", MAPPERS[0]), **ARGUMENTS[step])
     return getattr(chunk, step)(**ARGUMENTS[step])
 
 

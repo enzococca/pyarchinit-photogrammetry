@@ -24,7 +24,8 @@ BASELINE_RUNS = 3
 # the entries of a record's settings that record what the run did, not what it was asked for: the version of pycolmap,
 # the count of pairs (above 40 photos the preselection's RANSAC has a random seed, so it moves between repeats) and
 # their split between the GPU and the CPU (the GPU threads take pairs as they go), the mapper and its fallback (a
-# global alignment that falls back in some runs); runs that differ in any other setting are not one measurement
+# global alignment that falls back in some runs; the mapper asked for, mapper_requested, is compared); runs that
+# differ in any other setting are not one measurement
 RUN_FACTS = ("pycolmap", "pairs", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback")
 # the facts of the machine that two runs of one measurement share
 MACHINE_KEYS = ("system", "arch", "cpu", "memory_gb")
