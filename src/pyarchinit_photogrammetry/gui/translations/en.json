@@ -3935,7 +3935,15 @@
   "non tutto è stato cancellato": "not everything was deleted",
   "Si cancella da Cloudflare:": "Deleted from Cloudflare:",
   "il suo indirizzo pages.dev": "its pages.dev address",
-  "il loro indirizzo": "their address"
+  "il loro indirizzo": "their address",
+  "Cambia percorso delle foto selezionate...": "Change path of the selected photos...",
+  "Le foto selezionate nel pannello Foto lette da un altro file (una foto) o dai file con lo stesso nome in un'altra cartella (più foto)": "The photos selected in the Photos pane read from another file (one photo) or from the files with the same names in another folder (several photos)",
+  "Foto non trovate": "Photos not found",
+  "Cambia percorso...": "Change path...",
+  "Cambia percorso delle foto": "Change the path of the photos",
+  "Ricollega foto...": "Relink photos...",
+  "Seleziona nel pannello Foto le foto di cui cambiare il percorso.": "Select in the Photos pane the photos whose path is to be changed.",
+  "Cambio del percorso delle foto non riuscito": "Changing the path of the photos failed"
  },
  "formats": {
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
@@ -5219,7 +5227,14 @@
   "non tutto è stato rimosso da Cloudflare ({0}); premi di nuovo Rimuovi dal web per continuare": "not everything was removed from Cloudflare ({0}); press Remove from the web again to go on",
   "il bucket R2 {0} non è stato trovato nell'account Cloudflare da una rimozione precedente: di suo non resta nulla da cancellare": "the R2 bucket {0} was not found in the Cloudflare account by an earlier removal: nothing of it is left to delete",
   "Il progetto Pages {0} non è stato trovato nell'account Cloudflare a cui wrangler è collegato: è contato come rimosso. Se il sito risponde ancora a {1}, è in un altro account: cancellalo dalla dashboard di quell'account (Workers & Pages).": "The Pages project {0} was not found in the Cloudflare account wrangler is logged in to: it counts as removed. If the site still answers at {1}, it is in another account: delete it from the dashboard of that account (Workers & Pages).",
-  "Il bucket R2 {0} non è stato trovato nell'account Cloudflare a cui wrangler è collegato: è contato come rimosso, con i suoi file. Se i dati rispondono ancora a {1}, il bucket è in un altro account: svuotalo o cancellalo dalla dashboard di quell'account (R2).": "The R2 bucket {0} was not found in the Cloudflare account wrangler is logged in to: it counts as removed, with its files. If the data still answer at {1}, the bucket is in another account: empty or delete it from the dashboard of that account (R2)."
+  "Il bucket R2 {0} non è stato trovato nell'account Cloudflare a cui wrangler è collegato: è contato come rimosso, con i suoi file. Se i dati rispondono ancora a {1}, il bucket è in un altro account: svuotalo o cancellalo dalla dashboard di quell'account (R2).": "The R2 bucket {0} was not found in the Cloudflare account wrangler is logged in to: it counts as removed, with its files. If the data still answer at {1}, the bucket is in another account: empty or delete it from the dashboard of that account (R2).",
+  "{0} foto del progetto non si trovano (cartella spostata, disco non collegato) o sono vuote (file tenuti «solo online» da Dropbox, iCloud o OneDrive):\n{1}\n\nRicollega foto... le cerca per nome in una cartella e nelle sue sottocartelle.": "{0} photos of the project cannot be found (folder moved, disk not plugged in) or are empty (files kept «online only» by Dropbox, iCloud or OneDrive):\n{1}\n\nRelink photos... looks for them by name in a folder and its subfolders.",
+  "{0} foto non trovate o vuote ({1}): Flusso di lavoro > Ricollega foto, o Cambia percorso... sulle foto del pannello Foto": "{0} photos not found or empty ({1}): Workflow > Relink photos, or Change path... on the photos of the Photos pane",
+  "Foto {0} letta da {1}": "Photo {0} read from {1}",
+  "{0} foto su {1} collegate a {2}": "{0} photos of {1} linked to {2}",
+  "Nuovo file della foto {0}": "New file of photo {0}",
+  "Cartella con le {0} foto selezionate (anche nelle sottocartelle)": "Folder with the {0} selected photos (subfolders too)",
+  "Foto mancante o non leggibile (file vuoto), cercata in:\n{0}\n(Cambia percorso... nel menu del tasto destro)": "Photo missing or unreadable (empty file), looked for in:\n{0}\n(Change path... in the right-click menu)"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

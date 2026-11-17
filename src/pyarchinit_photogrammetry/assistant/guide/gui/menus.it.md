@@ -114,6 +114,7 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Aggiungi video...** | i fotogrammi più nitidi di un video, con il GPS se c'è il file `.SRT` di un drone DJI |
 | **Aggiungi foto 360°...** | ogni foto sferica diventa le sei facce di un cubo, allineate insieme |
 | **Ricollega foto (altra cartella)...** | ritrova le foto con lo stesso nome in un'altra cartella (spostata, su un altro disco, «solo online» su Dropbox) |
+| **Cambia percorso delle foto selezionate...** | le foto selezionate nel pannello *Foto* lette da un altro file (una foto) o dai file con lo stesso nome in una cartella (più foto); anche *Cambia percorso...* nel menu del tasto destro del pannello |
 | **Aggiungi chunk** | un chunk vuoto |
 | **Allinea chunk...** | porta altri chunk nel sistema di uno di riferimento: marker con lo stesso nome, foto in comune o nuvole sovrapposte; il riepilogo dà, per ogni chunk, la quota dei suoi punti sul riferimento e la loro distanza mediana ([più chunk insieme](view3d.md#piu-chunk-insieme)) |
 | **Aggancia chunk con legami...** | più chunk stimati insieme da punti in comune (legami) e punti noti, con le incognite scelte per ogni chunk e un rapporto che mostra i legami sbagliati prima di applicare ([legami fra chunk](ties.md)) |

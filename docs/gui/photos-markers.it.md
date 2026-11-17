@@ -11,6 +11,7 @@ scala tra i marker.
 | *Flusso di lavoro > Aggiungi video...* | i fotogrammi scelti quando la vista si è spostata di una parte della sua larghezza (il più nitido attorno a quel momento) o uno ogni pochi secondi, scritti in una cartella accanto al video; con il `.SRT` di un drone DJI accanto al video ogni fotogramma ha la sua posizione GPS |
 | *Flusso di lavoro > Aggiungi foto 360°...* | ogni foto equirettangolare diventa le sei facce di un cubo (le facce da tenere - *Sotto* spesso mostra solo il treppiede - la loro ampiezza in gradi e la dimensione), scritte in `facce_360` accanto alle foto; nell'allineamento le facce di una foto restano insieme come un rig |
 | *Flusso di lavoro > Ricollega foto (altra cartella)...* | le foto con lo stesso nome in un'altra cartella e nelle sue sottocartelle: una copia su disco esterno di una cartella Dropbox tenuta solo online, una cartella spostata |
+| *Cambia percorso...* (clic destro nel pannello *Foto*) · *Flusso di lavoro > Cambia percorso delle foto selezionate...* | le foto selezionate lette da altri file: una foto dal file che scegli (con qualsiasi nome), più foto dai file con lo stesso nome nella cartella che scegli e nelle sue sottocartelle; *Modifica > Annulla* lo toglie |
 
 I file di una **camera multispettrale** vengono riconosciuti quando si aggiungono le foto: la finestra propone di
 aggiungerli come riprese e apre il pannello *Multispettrale*, così le bande non vengono allineate come se fossero
@@ -24,6 +25,25 @@ Il suggerimento di una faccia di una foto 360° dice da quale foto viene.
     Clic destro nel pannello *Foto*: *Qualità delle immagini* dà la nitidezza di ogni foto confrontata con le più
     nitide (nel suggerimento; *sfocata* sotto 0,5), e *Disattiva le foto sfocate* le lascia fuori dal prossimo
     allineamento.
+
+### Dove stanno le foto: spostare un progetto
+
+Il file del progetto conserva il percorso di ogni foto **relativo al file del progetto** quando la foto sta sullo
+stesso disco del progetto, nella sua cartella o accanto (`./../foto/IMG_0001.JPG`, come fa Metashape): un progetto
+spostato o copiato **insieme alle sue foto** - l'intera cartella del rilievo su un altro disco, su un altro computer,
+a un collega - si apre con tutte le foto trovate. Una foto su un altro disco (un SSD esterno, un'altra unità o
+condivisione di rete di Windows) resta con il percorso completo. Accanto a ogni percorso relativo il file conserva
+l'ultimo percorso completo, usato quando il relativo non porta alla foto: anche un progetto spostato **senza** le sue
+foto (solo la cartella del progetto, sullo stesso computer) le ritrova. I progetti delle versioni precedenti si aprono come
+sono e vengono scritti così al salvataggio successivo; *File > Salva con nome* in un'altra cartella mantiene tutte
+le foto.
+
+Quando un progetto si apre e alcune sue foto non si trovano (una cartella spostata, un disco non collegato, file
+tenuti solo online da Dropbox, iCloud o OneDrive), il registro dice quante sono e una finestra propone *Ricollega
+foto...* (ritrovate per nome in una cartella che scegli) o *Più tardi*. Nel pannello *Foto* una foto mancante ha il
+nome in rosso e il suggerimento dice dove è stata cercata; *Cambia percorso...* la sistema. Da riga di comando
+`ppg info` conta le foto mancanti e `ppg relink progetto.ppg cartella [--only IMG_0001 --only IMG_0002]` le collega
+(solo le foto nominate con `--only`).
 
 ## Posizioni GNSS delle foto
 

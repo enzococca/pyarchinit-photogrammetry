@@ -303,7 +303,7 @@ chunk da prendere. Dalla riga di comando: `ppg append progetto.ppg altro.ppg sca
   texture, DEM, ortofoto, versioni, prospetti; un file alla volta, su APFS un clone copy-on-write: istantaneo e senza
   occupare spazio), con le foto, i sensori, le camere, i marker, le barre di scala, i riferimenti, il sistema di
   coordinate, la trasformazione, i disegni e le impostazioni. Le foto restano dove sono: vengono salvate relative a
-  questo progetto quando stanno nella sua cartella, assolute altrimenti. Anche un DEM o un'ortofoto di un altro
+  questo progetto quando stanno sul suo disco (nella sua cartella o accanto), assolute altrimenti. Anche un DEM o un'ortofoto di un altro
   programma a cui il chunk rimanda resta dov'è.
 * **`.psx`** e **WebODM**: quello che portano [l'importazione da Metashape](#metashape-psx) e [quella da
   WebODM](#webodm-odm), in chunk nuovi del progetto aperto. Un `all.zip` viene estratto nella cartella del suo chunk

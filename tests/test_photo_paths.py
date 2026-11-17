@@ -1,0 +1,375 @@
+"""Photo paths stored relative to the project file (also outside its folder), the photos missing when a project is
+opened and the path of chosen photos changed (issue #30)."""
+from __future__ import annotations
+
+import json
+import ntpath
+import os
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+def _photo(path: Path, value: int, size=(48, 64)) -> Path:
+    import cv2
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = np.full((*size, 3), value, np.uint8)
+    img[10:20, 10:30] = 255 - value
+    cv2.imwrite(str(path), img)
+    return path
+
+
+def _project(root: Path, n: int = 3):
+    """``root/progetto/scavo.ppg`` with its photos in the sibling folder ``root/foto``."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio")
+    doc.save(root / "progetto" / "scavo.ppg")
+    ch.add_photos([_photo(root / "foto" / f"IMG_{i}.jpg", 40 + 30 * i) for i in range(n)])
+    doc.save()
+    return doc, ch
+
+
+def _stored(ppg_file: Path, chunk: int = 0) -> list[str]:
+    return [c["path"] for c in json.loads(Path(ppg_file).read_text())["chunks"][chunk]["cameras"]]
+
+
+# ------------------------------------------------------------------ item 1: relative outside the project folder
+def test_photos_in_a_sibling_folder_are_stored_relative_and_move_with_the_project(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _ch = _project(tmp_path / "lavoro")
+    stored = _stored(doc.path)
+    assert stored == [f"./../foto/IMG_{i}.jpg" for i in range(3)]  # POSIX separators, read by older versions too
+    shutil.move(str(tmp_path / "lavoro"), str(tmp_path / "altrove"))  # project and photos moved together
+    again = ppg.Document.open(tmp_path / "altrove" / "progetto" / "scavo.ppg")
+    cams = again.chunk.cameras
+    assert all(Path(c.path).is_file() for c in cams)
+    assert Path(cams[0].path) == (tmp_path / "altrove" / "foto" / "IMG_0.jpg").resolve()
+    assert again.chunk.missing_photos() == []
+
+
+def test_a_photo_on_another_volume_stays_absolute(tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.core import paths
+
+    monkeypatch.setattr(paths, "same_volume", lambda path, base, cache=None: False)
+    doc, ch = _project(tmp_path)
+    assert _stored(doc.path) == [str(Path(c.path)) for c in ch.cameras]
+    assert all(Path(p).is_absolute() for p in _stored(doc.path))
+
+
+def test_an_old_project_with_absolute_paths_opens_and_is_saved_relative(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path)
+    data = json.loads(doc.path.read_text())
+    for c, cam in zip(data["chunks"][0]["cameras"], ch.cameras):  # as 1.10 wrote a photo outside the folder
+        c["path"] = str(Path(cam.path).resolve())
+    doc.path.write_text(json.dumps(data))
+    old = ppg.Document.open(doc.path)
+    assert [Path(c.path) for c in old.chunk.cameras] == [Path(c.path).resolve() for c in ch.cameras]
+    old.save()
+    assert _stored(doc.path) == [f"./../foto/IMG_{i}.jpg" for i in range(3)]
+
+
+def test_relative_paths_without_the_dot_prefix_are_read_too(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path)
+    data = json.loads(doc.path.read_text())
+    for c in data["chunks"][0]["cameras"]:
+        c["path"] = c["path"].removeprefix("./")  # "../foto/IMG_0.jpg", as Metashape writes them
+    doc.path.write_text(json.dumps(data))
+    again = ppg.Document.open(doc.path)
+    assert [Path(c.path) for c in again.chunk.cameras] == [Path(c.path) for c in ch.cameras]
+
+
+def test_save_as_into_another_folder_keeps_every_photo(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path)
+    doc.save(tmp_path / "copie" / "2026" / "scavo_bis.ppg")
+    assert _stored(doc.path) == [f"./../../foto/IMG_{i}.jpg" for i in range(3)]
+    again = ppg.Document.open(tmp_path / "copie" / "2026" / "scavo_bis.ppg")
+    assert all(Path(c.path).is_file() for c in again.chunk.cameras)
+
+
+def test_a_relative_path_that_does_not_resolve_opens_and_keeps_its_form(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _ch = _project(tmp_path)
+    shutil.rmtree(tmp_path / "foto")  # the photos not there (a disk not plugged in, a folder not copied yet)
+    again = ppg.Document.open(doc.path)
+    assert len(again.chunk.missing_photos()) == 3
+    again.save()
+    assert _stored(doc.path) == [f"./../foto/IMG_{i}.jpg" for i in range(3)]  # not made absolute
+    again.save(tmp_path / "altro" / "scavo.ppg")  # rebased with the project
+    assert _stored(tmp_path / "altro" / "scavo.ppg") == [f"./../foto/IMG_{i}.jpg" for i in range(3)]
+    assert Path(ppg.Document.open(tmp_path / "altro" / "scavo.ppg").chunk.cameras[0].path) == \
+        (tmp_path / "foto" / "IMG_0.jpg").resolve()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows tells the volume by the drive letter, folder or not")
+def test_a_missing_photo_stored_absolute_stays_absolute(tmp_path):
+    """A photo on a disk not plugged in (its folder gone): the volume cannot be told, the path stays as it was."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path)
+    gone = tmp_path / "disco_esterno" / "foto" / "IMG_0.jpg"
+    ch.cameras[0].path = str(gone)
+    doc.save()
+    assert _stored(doc.path)[0] == str(gone)
+    ppg.Document.open(doc.path).save()
+    assert _stored(doc.path)[0] == str(gone)
+
+
+def test_windows_volume_rules():
+    from pyarchinit_photogrammetry.core.paths import relative_text, windows_same_volume
+
+    assert windows_same_volume(r"C:\scavi\foto\IMG_1.JPG", r"C:\scavi\progetto")
+    assert windows_same_volume(r"c:\scavi\foto\IMG_1.JPG", r"C:\Scavi")  # case does not count
+    assert not windows_same_volume(r"D:\foto\IMG_1.JPG", r"C:\scavi\progetto")
+    assert windows_same_volume(r"\\server\scavi\foto\IMG_1.JPG", r"\\SERVER\scavi\progetto")
+    assert not windows_same_volume(r"\\server\altro\foto\IMG_1.JPG", r"\\server\scavi\progetto")
+    assert not windows_same_volume(r"\\server\scavi\foto\IMG_1.JPG", r"C:\scavi")
+    assert not windows_same_volume("foto/IMG_1.JPG", r"C:\scavi")  # not absolute: never relative
+    assert relative_text(r"C:\scavi\foto\IMG_1.JPG", r"C:\scavi\progetto", ntpath) == "./../foto/IMG_1.JPG"
+    assert relative_text(r"C:\scavi\progetto\foto\IMG_1.JPG", r"C:\scavi\progetto", ntpath) == "./foto/IMG_1.JPG"
+    assert relative_text(r"D:\foto\IMG_1.JPG", r"C:\scavi\progetto", ntpath) is None
+
+
+def test_the_raw_file_and_the_photo_folder_of_the_model_are_relative_too(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path)
+    ch.meta["sfm"] = {"image_root": str((tmp_path / "foto").resolve()), "names": {}}
+    ch.cameras[0].meta["raw"] = {"path": str((tmp_path / "raw" / "IMG_0.dng").resolve()), "size": 1}
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "IMG_0.dng").write_bytes(b"x")
+    doc.save()
+    data = json.loads(doc.path.read_text())["chunks"][0]
+    assert data["meta"]["sfm"]["image_root"] == "./../foto"
+    assert data["cameras"][0]["meta"]["raw"]["path"] == "./../raw/IMG_0.dng"
+    again = ppg.Document.open(doc.path).chunk
+    assert Path(again.meta["sfm"]["image_root"]) == (tmp_path / "foto").resolve()
+    assert Path(again.cameras[0].meta["raw"]["path"]) == (tmp_path / "raw" / "IMG_0.dng").resolve()
+
+
+# ------------------------------------------------------------------ item 2: missing photos counted
+def test_missing_photos_are_the_enabled_ones_missing_or_empty(tmp_path):
+    doc, ch = _project(tmp_path, n=4)
+    Path(ch.cameras[0].path).unlink()
+    Path(ch.cameras[1].path).write_bytes(b"")  # kept online only by Dropbox
+    ch.cameras[2].enabled = False
+    Path(ch.cameras[2].path).unlink()  # disabled: not counted
+    assert [c.label for c in ch.missing_photos()] == ["IMG_0", "IMG_1"]
+
+
+def test_info_says_the_photos_missing(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _project(tmp_path)
+    Path(ch.cameras[1].path).unlink()
+    r = CliRunner().invoke(app, ["info", str(doc.path)])
+    assert r.exit_code == 0, r.output
+    assert "1 photo missing" in r.output
+
+
+# ------------------------------------------------------------------ item 3: relink of chosen photos
+def test_relink_only_the_cameras_chosen(tmp_path):
+    doc, ch = _project(tmp_path)
+    copy = tmp_path / "ssd" / "foto"
+    copy.mkdir(parents=True)
+    for cam in ch.cameras:
+        shutil.copy2(cam.path, copy / Path(cam.path).name)
+    before = [c.path for c in ch.cameras]
+    r = ch.relink_photos(tmp_path / "ssd", cameras=[ch.cameras[1]])
+    assert r["relinked"] == 1 and not r["not_found"]
+    assert ch.cameras[1].path == str((copy / "IMG_1.jpg").resolve())
+    assert [ch.cameras[0].path, ch.cameras[2].path] == [before[0], before[2]]
+
+
+def test_cli_relink_only(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _project(tmp_path)
+    copy = tmp_path / "ssd"
+    copy.mkdir()
+    for cam in ch.cameras:
+        shutil.copy2(cam.path, copy / Path(cam.path).name)
+    r = CliRunner().invoke(app, ["relink", str(doc.path), str(copy), "--only", "IMG_0", "--only", "IMG_2"])
+    assert r.exit_code == 0, r.output
+    again = ppg.Document.open(doc.path).chunk
+    assert [Path(c.path).parent.name for c in again.cameras] == ["ssd", "foto", "ssd"]
+    r = CliRunner().invoke(app, ["relink", str(doc.path), str(copy), "--only", "NESSUNA"])
+    assert r.exit_code != 0 and "NESSUNA" in r.output
+
+
+def test_set_photo_path_of_one_camera(tmp_path):
+    doc, ch = _project(tmp_path)
+    other = _photo(tmp_path / "rinominata" / "scatto_bis.jpg", 90)
+    cam = ch.cameras[0]
+    ch.set_photo_path(cam, other)
+    assert cam.path == str(other.resolve())
+    with pytest.raises(FileNotFoundError):
+        ch.set_photo_path(cam, tmp_path / "nessuna.jpg")
+    with pytest.raises(ValueError, match="32 x 16"):
+        ch.set_photo_path(cam, _photo(tmp_path / "piccola.jpg", 90, size=(16, 32)))
+    assert cam.path == str(other.resolve())
+
+
+def test_chunks_handed_to_processing_nodes_keep_the_photos_outside_the_project_absolute(tmp_path):
+    """The nodes map the paths outside the project folder by prefix: only those inside it are relative there."""
+    from pyarchinit_photogrammetry.engine import nodes
+
+    doc, ch = _project(tmp_path)
+    assert [c["path"] for c in ch.to_dict()["cameras"]] == [f"./../foto/IMG_{i}.jpg" for i in range(3)]
+    name = nodes.share_chunk(doc.files_dir, ch)
+    shared = json.loads((nodes.folder(doc.files_dir) / "state" / f"{name}.json").read_text())
+    assert [c["path"] for c in shared["chunk"]["cameras"]] == [c.path for c in ch.cameras]
+
+
+# ------------------------------------------------------------------ fix round 1: the absolute path kept beside
+def test_the_last_absolute_path_is_kept_beside_the_relative_one(tmp_path):
+    doc, ch = _project(tmp_path)
+    cams = json.loads(doc.path.read_text())["chunks"][0]["cameras"]
+    assert [c["path"] for c in cams] == [f"./../foto/IMG_{i}.jpg" for i in range(3)]
+    assert [c["path_abs"] for c in cams] == [c.path for c in ch.cameras]
+
+
+def test_a_project_moved_without_its_photos_finds_them_by_the_absolute_path(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path / "a")
+    before = [c.path for c in ch.cameras]
+    shutil.move(str(tmp_path / "a" / "progetto"), str(tmp_path / "b"))  # only the project folder, same disk
+    again = ppg.Document.open(tmp_path / "b" / "scavo.ppg")
+    assert [c.path for c in again.chunk.cameras] == before
+    assert again.chunk.missing_photos() == []
+    again.save()  # relative from where the project is now
+    assert _stored(again.path) == [f"./../a/foto/IMG_{i}.jpg" for i in range(3)]
+
+
+def test_project_and_photos_moved_together_use_the_relative_path(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _ch = _project(tmp_path / "lavoro")
+    shutil.move(str(tmp_path / "lavoro"), str(tmp_path / "altrove"))  # the absolute paths are gone
+    cams = ppg.Document.open(tmp_path / "altrove" / "progetto" / "scavo.ppg").chunk.cameras
+    assert [Path(c.path) for c in cams] == [(tmp_path / "altrove" / "foto" / f"IMG_{i}.jpg").resolve()
+                                            for i in range(3)]
+
+
+def test_neither_path_found_counts_the_photos_missing(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _ch = _project(tmp_path / "a")
+    shutil.rmtree(tmp_path / "a" / "foto")
+    shutil.move(str(tmp_path / "a" / "progetto"), str(tmp_path / "b"))
+    again = ppg.Document.open(tmp_path / "b" / "scavo.ppg")
+    assert len(again.chunk.missing_photos()) == 3
+    assert Path(again.chunk.cameras[0].path) == (tmp_path / "foto" / "IMG_0.jpg").resolve()  # the relative one
+
+
+def test_raw_and_photo_folder_fall_back_on_their_absolute_paths(tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path / "a")
+    raw = tmp_path / "a" / "raw" / "IMG_0.dng"
+    raw.parent.mkdir()
+    raw.write_bytes(b"x")
+    ch.meta["sfm"] = {"image_root": str((tmp_path / "a" / "foto").resolve()), "names": {}}
+    ch.cameras[0].meta["raw"] = {"path": str(raw.resolve()), "size": 1}
+    doc.save()
+    data = json.loads(doc.path.read_text())["chunks"][0]
+    assert data["image_root_abs"] == str((tmp_path / "a" / "foto").resolve())
+    assert data["cameras"][0]["raw_path_abs"] == str(raw.resolve())
+    assert "path_abs" not in data["cameras"][0]["meta"]["raw"]  # an older version would carry it on stale
+    shutil.move(str(tmp_path / "a" / "progetto"), str(tmp_path / "b"))
+    again = ppg.Document.open(tmp_path / "b" / "scavo.ppg").chunk
+    assert again.meta["sfm"]["image_root"] == str((tmp_path / "a" / "foto").resolve())
+    assert again.cameras[0].meta["raw"]["path"] == str(raw.resolve())
+
+
+def test_an_older_loader_reads_the_new_file(tmp_path):
+    """What 1.10 does with the file: ``Camera.from_dict`` takes only the keys it knows, its ``_resolve`` reads
+    ``./<rest>`` from the project folder (copied here as it was)."""
+    from pyarchinit_photogrammetry.core.camera import Camera
+
+    def old_resolve(path, base):  # core/chunk.py of 1.10.2
+        if base is not None and path.startswith("./"):
+            return str((base / path[2:]).resolve())
+        return path
+
+    doc, ch = _project(tmp_path)
+    data = json.loads(doc.path.read_text())["chunks"][0]
+    for stored, cam in zip(data["cameras"], ch.cameras):
+        stored = {**stored, "path": old_resolve(stored["path"], doc.path.parent)}
+        old = Camera.from_dict(stored)
+        assert old.path == cam.path and Path(old.path).is_file()
+
+
+# ------------------------------------------------------------------ fix round 1: disk access per folder
+def _count(monkeypatch, folder: Path):
+    """Calls of os.stat / os.lstat / os.scandir on ``folder`` or the files in it, from this thread."""
+    import threading
+
+    calls = []
+    main = threading.current_thread()
+    for name in ("stat", "lstat", "scandir"):
+        real = getattr(os, name)
+
+        def wrapped(p=".", *a, _real=real, _name=name, **k):
+            if threading.current_thread() is main and str(p).startswith(str(folder)):
+                calls.append((_name, str(p)))
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(os, name, wrapped)
+    return calls
+
+
+def test_saving_looks_at_each_folder_of_photos_once(tmp_path, monkeypatch):
+    doc, ch = _project(tmp_path, n=6)
+    folder = Path(ch.cameras[0].path).parent
+    calls = _count(monkeypatch, folder)
+    ch.to_dict()
+    assert not [c for c in calls if c[1] != str(folder)]  # no file of the folder looked at
+    assert len(calls) <= 3, calls
+
+
+def test_opening_looks_at_each_folder_of_photos_once(tmp_path, monkeypatch):
+    import pyarchinit_photogrammetry as ppg
+
+    doc, ch = _project(tmp_path, n=6)
+    folder = Path(ch.cameras[0].path).parent
+    calls = _count(monkeypatch, folder)
+    ppg.Document.open(doc.path)
+    assert not [c for c in calls if c[1] != str(folder)], calls
+    assert len(calls) <= 2, calls
+
+
+
+def test_set_photo_path_reads_the_size_with_opencv_when_pillow_cannot(tmp_path, monkeypatch):
+    import PIL.Image
+
+    doc, ch = _project(tmp_path, n=1)
+    small = _photo(tmp_path / "piccola.jpg", 90, size=(16, 32))
+    same = _photo(tmp_path / "uguale.jpg", 90)
+
+    def refuse(*a, **k):
+        raise PIL.UnidentifiedImageError("not for Pillow")
+
+    monkeypatch.setattr(PIL.Image, "open", refuse)
+    with pytest.raises(ValueError, match="32 x 16"):
+        ch.set_photo_path(ch.cameras[0], small)
+    ch.set_photo_path(ch.cameras[0], same)
+    assert ch.cameras[0].path == str(same.resolve())

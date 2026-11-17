@@ -300,7 +300,7 @@ def share_chunk(files_dir: str | os.PathLike, chunk, **extra) -> str:
     name = f"{int(now * 1000):x}-{next(_SEQ)}-chunk{chunk.key}"
     doc = chunk.document
     data = {"project": str(doc.path) if doc is not None and doc.path is not None else None,
-            "chunk": chunk.to_dict(), **extra}
+            "chunk": chunk.to_dict(inside_only=True), **extra}  # the photos outside the project mapped by prefix
     tmp = root / "state" / f".{name}.json.part"
     tmp.write_text(json.dumps(data), encoding="utf-8")
     tmp.replace(root / "state" / f"{name}.json")

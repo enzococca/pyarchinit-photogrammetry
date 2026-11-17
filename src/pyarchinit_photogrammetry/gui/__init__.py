@@ -273,6 +273,8 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     times = ", ".join(f"{k} {v:.1f} s" for k, v in (import_times or {}).items() if v >= 0.1)
     logging.getLogger("pyarchinit_photogrammetry.gui").info(
         "Avvio in %.1f s%s", time.perf_counter() - started, f" ({times})" if times else "")
+    if project and not open_error and "--check" not in argv:  # photos not found: said once the window is up
+        QTimer.singleShot(0, win, win.check_photos_on_open)
     if open_error:
         from .dialogs import ErrorDialog
 

@@ -11,6 +11,7 @@ bars between markers.
 | *Workflow > Add video...* | frames chosen when the view has moved by a share of its width (the sharpest around that moment) or one every few seconds, written in a folder beside the video; with the `.SRT` of a DJI drone beside the video every frame gets its GPS position |
 | *Workflow > Add 360° photos...* | every equirectangular photo becomes the six faces of a cube (the faces to keep - *Down* often shows only the tripod - their width in degrees and size), written in `facce_360` beside the photos; in the alignment the faces of one photo stay together as a rig |
 | *Workflow > Relink photos (another folder)...* | the photos with the same names in another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online only, a moved folder |
+| *Change path...* (right click in the *Photos* pane) · *Workflow > Change path of the selected photos...* | the selected photos read from other files: one photo from the file you choose (any name), several from the files with the same names in the folder you choose and its subfolders; *Edit > Undo* takes it back |
 
 The files of a **multispectral camera** are recognised when you add photos: the window offers to add them as
 captures and opens the *Multispectral* pane, so the bands are not aligned as if they were different views
@@ -24,6 +25,23 @@ face of a 360° photo names its photo.
     Right click in the *Photos* pane: *Image quality* gives the sharpness of every photo compared with the
     sharpest ones (in the tooltip; *blurred* under 0.5), and *Disable the blurred photos* leaves them out of
     the next alignment.
+
+### Where the photos are: moving a project
+
+The project file keeps the path of every photo **relative to the project file** whenever the photo is on the same
+disk as the project, inside the project's folder or beside it (`./../foto/IMG_0001.JPG`, as Metashape does): a
+project moved or copied **together with its photos** - the whole survey folder to another disk, another computer, a
+colleague - opens with every photo found. A photo on another disk (an external SSD, another Windows drive or network
+share) is kept with its full path. Beside every relative path the file keeps the last full one, read when the
+relative one leads nowhere: a project moved **without** its photos (only the project folder, on the same computer)
+finds them too. Projects of earlier versions open as they are and are written this way at the next
+save; *File > Save as* into another folder keeps every photo.
+
+When a project opens and some of its photos cannot be found (a folder moved, a disk not plugged in, files kept
+online only by Dropbox, iCloud or OneDrive), the log says how many and a box offers *Relink photos...* (found by name
+in a folder you choose) or *Later*. In the *Photos* pane a missing photo has its name in red and its tooltip says
+where it was looked for; *Change path...* fixes it. From the command line, `ppg info` counts the missing photos and
+`ppg relink project.ppg folder [--only IMG_0001 --only IMG_0002]` links them (only the photos named with `--only`).
 
 ## GNSS positions of the photos
 
