@@ -58,18 +58,21 @@ def _tool(name: str) -> str:
     return shutil.which(name) or name
 
 
-def aerial_survey(chunk: Chunk | None) -> bool:
+def aerial_survey(chunk: Chunk | None, aligned: bool = True) -> bool:
     """The photos are a survey from the air: their GPS positions spread over the site (at least ten
-    times their accuracy), not an object, a turntable or a trench of a few metres. Their heights do not
-    matter here (no grid of a geoid is needed); a refusal of the grid of a geoid is never taken for an
-    answer, which would change the settings of the alignment and of the dense cloud without a word."""
+    times their accuracy), not an object, a turntable or a trench of a few metres. The positions of
+    the aligned cameras, as the choices made after an alignment need; ``aligned`` False asks those of
+    every enabled photo, aligned or not: the choice of the mapper comes before the alignment, when
+    nothing is aligned yet (:func:`.sfm.auto_mapper`). Their heights do not matter here (no grid of a
+    geoid is needed); a refusal of the grid of a geoid is never taken for an answer, which would change
+    the settings of the alignment and of the dense cloud without a word."""
     if chunk is None:
         return False
     from ..gnss.heights import GridMissing
     from ..markers.gcp import cameras_span_their_accuracy
 
     try:
-        return bool(cameras_span_their_accuracy(chunk))
+        return bool(cameras_span_their_accuracy(chunk, aligned=aligned))
     except GridMissing:
         raise
     except Exception:  # pragma: no cover - references in a CRS that cannot be read
