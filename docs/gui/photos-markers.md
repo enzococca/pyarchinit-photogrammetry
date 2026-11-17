@@ -32,7 +32,9 @@ The project file keeps the path of every photo **relative to the project file** 
 disk as the project, inside the project's folder or beside it (`./../foto/IMG_0001.JPG`, as Metashape does): a
 project moved or copied **together with its photos** - the whole survey folder to another disk, another computer, a
 colleague - opens with every photo found. A photo on another disk (an external SSD, another Windows drive or network
-share) is kept with its full path. Projects of earlier versions open as they are and are written this way at the next
+share) is kept with its full path. Beside every relative path the file keeps the last full one, read when the
+relative one leads nowhere: a project moved **without** its photos (only the project folder, on the same computer)
+finds them too. Projects of earlier versions open as they are and are written this way at the next
 save; *File > Save as* into another folder keeps every photo.
 
 When a project opens and some of its photos cannot be found (a folder moved, a disk not plugged in, files kept

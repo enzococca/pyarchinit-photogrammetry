@@ -32,7 +32,9 @@ Il file del progetto conserva il percorso di ogni foto **relativo al file del pr
 stesso disco del progetto, nella sua cartella o accanto (`./../foto/IMG_0001.JPG`, come fa Metashape): un progetto
 spostato o copiato **insieme alle sue foto** - l'intera cartella del rilievo su un altro disco, su un altro computer,
 a un collega - si apre con tutte le foto trovate. Una foto su un altro disco (un SSD esterno, un'altra unità o
-condivisione di rete di Windows) resta con il percorso completo. I progetti delle versioni precedenti si aprono come
+condivisione di rete di Windows) resta con il percorso completo. Accanto a ogni percorso relativo il file conserva
+l'ultimo percorso completo, usato quando il relativo non porta alla foto: anche un progetto spostato **senza** le sue
+foto (solo la cartella del progetto, sullo stesso computer) le ritrova. I progetti delle versioni precedenti si aprono come
 sono e vengono scritti così al salvataggio successivo; *File > Salva con nome* in un'altra cartella mantiene tutte
 le foto.
 

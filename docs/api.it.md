@@ -952,7 +952,8 @@ foto da un altro file con qualsiasi nome (FileNotFoundError se manca o è vuoto,
 quella del suo sensore; per un raw sviluppato `path` è il file raw). `chunk.missing_photos(cameras=None)`: le camere
 attive il cui file manca o è vuoto, guardato senza leggere le foto (quello che dice un progetto appena aperto).
 `camera.path` è assoluto in memoria; il file del progetto lo salva relativo al file del progetto quando la foto sta
-sullo stesso volume (`./foto/...`, `./../foto/...`, separatori POSIX) e assoluto altrimenti
+sullo stesso volume (`./foto/...`, `./../foto/...`, separatori POSIX, con accanto il percorso assoluto in `path_abs`, `raw_path_abs` e
+`image_root_abs` del chunk, letto quando il relativo non porta al file) e assoluto altrimenti
 (`core.paths.portable`, `core.paths.resolve`; decide `core.paths.same_volume`, `windows_same_volume` per unità e
 condivisioni). Il modello COLMAP scritto da pose importate
 fa riferimento solo a punti con due osservazioni; `engine.sfm.repair_reconstruction(chunk)` ripara i
