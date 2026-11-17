@@ -60,6 +60,7 @@ raw = ["rawpy>=0.24; sys_platform != 'win32' or platform_machine != 'ARM64' or p
 scans = ["pye57>=0.4"]  # laser scans in E57 (io.scans; PTX needs nothing)
 munsell = ["colour-science>=0.4.4"]  # Munsell notation of the colours (archaeo.munsell)
 coreg = ["xdem>=0.2"]  # DEM coregistration with xdem (archaeo.coreg, method="xdem"): never in "all" nor in the app
+bench = ["psutil>=5.9"]  # the bench (bench/): the memory of the child process that runs the steps; never in "all"
 assistant = ["anthropic>=0.60", "keyring>=25"]  # the assistant (assistant/): Claude through its SDK, keys in the keychain
 gui = ["PySide6>=6.6", "pyvista>=0.43", "pyvistaqt>=0.13", "qtawesome>=1.3", "scikit-learn>=1.3",
        "colour-science>=0.4.4", "anthropic>=0.60", "keyring>=25"]
@@ -69,7 +70,7 @@ all = ["open3d>=0.18,!=0.20.0,<0.21", "ifcopenshell>=0.8",
        "pyvista>=0.43", "pyvistaqt>=0.13", "qtawesome>=1.3", "pye57>=0.4", "colour-science>=0.4.4",
        "anthropic>=0.60", "keyring>=25",
        "rawpy>=0.24; sys_platform != 'win32' or platform_machine != 'ARM64' or python_version >= '3.11'"]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "psutil>=5.9"]  # psutil: the tests of the bench that start its child process
 build = ["pyinstaller>=6.10", "pyinstaller-hooks-contrib>=2024.8", "pillow>=9.1"]
 
 [project.scripts]

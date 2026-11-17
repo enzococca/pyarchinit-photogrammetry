@@ -186,6 +186,12 @@ Ogni cella sceglie tra tutte le foto che la inquadrano, così nessuna cucitura s
 sintetico con metà delle foto più scure del 30 % e ogni foto vignettata, il mosaico corretto differisce da quello
 delle foto intatte di 0,3 livelli nelle basse frequenze (25 senza correzione).
 
+**Memoria.** Le foto che l'ortofoto rilegge sono tenute in una cache dimensionata sulla memoria del computer (una
+sua quota, oltre a un minimo di qualche foto per worker). `PPG_PHOTO_CACHE_MB` nell'ambiente, un numero intero di
+megabyte, fissa quella dimensione a mano: più piccola su un computer con poca memoria, più grande quando le foto
+vengono rilette troppo spesso; `PPG_PHOTO_CACHE_MB=0` lascia il solo minimo, che è la cache della versione 1.10. Ogni
+altro valore è ignorato, con una riga nel log.
+
 Un chunk **senza foto allineate** (un modello importato o unito) ha l'ortofoto dalla texture del modello: vedi
 [Ortofoto di un chunk senza foto](multi-survey.md#ortofoto-di-un-chunk-senza-foto).
 

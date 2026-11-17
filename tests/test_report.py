@@ -279,6 +279,51 @@ def test_local_chunks_in_metres_have_units():
     assert rc._metric(ch)
 
 
+def test_the_parameters_name_the_engine_of_a_step_that_fell_back():
+    """A step asked of an engine that does not do it ran on another one: the parameters say which, and why, in a row
+    of their own - one for each method that fell back, the matching and the alignment under the alignment of the
+    photos, the depth maps under theirs. The classic engine doing what was asked, or what ``auto`` gives, is no row."""
+
+    def rows(ch, language, step):
+        w = rc.Words(language)
+        return [(label, value) for title, label, value in rc.parameter_rows(ch, w) if title == w(step)]
+
+    def fell_back(method):
+        return {"requested": "native", "used": "classic", "fallback": f"the native engine does not do '{method}' yet"}
+
+    ch = ppg.Document().add_chunk()
+    assert rc.parameter_rows(ch, rc.Words("it")) == []
+    ch.meta["engine"] = {"align_cameras": fell_back("align_cameras")}
+    said = "classic (the native engine does not do 'align_cameras' yet)"
+    assert rows(ch, "it", "step_sfm") == [("Motore usato", said)]
+    assert rows(ch, "en", "step_sfm") == [("Engine used", said)]
+    assert len(rc.parameter_rows(ch, rc.Words("it"))) == 1  # under the alignment only
+    for requested in ("auto", "classic", "native"):  # the classic engine and no fallback: nothing to say
+        ch.meta["engine"] = {"align_cameras": {"requested": requested, "used": "classic", "fallback": None}}
+        assert rc.parameter_rows(ch, rc.Words("it")) == []
+
+    # one row for each method, before the parameters of its step: the matching, then the alignment
+    ch.meta["engine"] = {m: fell_back(m) for m in ("build_depth_maps", "align_cameras", "match_photos")}
+    ch.meta["sfm"] = {"quality": "high"}
+    ch.meta["dense"] = {"quality": "medium"}
+    assert rows(ch, "it", "step_sfm") == [
+        ("Motore usato", "classic (the native engine does not do 'match_photos' yet)"), ("Motore usato", said),
+        ("Qualità", "high")]
+    assert rows(ch, "it", "step_dense") == [
+        ("Motore usato", "classic (the native engine does not do 'build_depth_maps' yet)"), ("Qualità", "medium")]
+    assert len(rc.parameter_rows(ch, rc.Words("it"))) == 5
+    ch.meta["engine"]["match_photos"] = {"requested": "classic", "used": "classic", "fallback": None}
+    assert rows(ch, "en", "step_sfm") == [("Engine used", said), ("Quality", "high")]  # only the one that fell back
+
+    # an engine that is not the classic one is named too, with no reason to give
+    ch.meta["engine"] = {"build_depth_maps": {"requested": "native", "used": "native", "fallback": None}}
+    assert rows(ch, "it", "step_dense") == [("Motore usato", "native"), ("Qualità", "medium")]
+    assert rows(ch, "it", "step_sfm") == [("Qualità", "high")]
+    # in the table of the report the rows of a step follow one another under its title, written once
+    assert rc._parameters(ch, rc.Words("en")).blocks[0].rows == [
+        ["Photo alignment", "Quality", "high"], ["Depth maps", "Engine used", "native"], ["", "Quality", "medium"]]
+
+
 def test_multispectral_and_thermal_parts(tmp_path):
     """A chunk with a reflectance orthomosaic, an index and its zones gets the multispectral part
     (bands, calibration, balance, false colour, the index on its ramp with its statistics, the

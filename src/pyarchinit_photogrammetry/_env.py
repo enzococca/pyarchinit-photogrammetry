@@ -22,7 +22,45 @@ through pyproj; rasterio's GDAL needs no grid of the geoid.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+
+def physical_memory() -> int | None:
+    """Bytes of physical memory of this computer, None when they cannot be read: ``os.sysconf`` on POSIX,
+    ``GlobalMemoryStatusEx`` of kernel32 (through ctypes) on Windows, no psutil (optional, without a wheel for every
+    platform the program runs on). What is sized on it - the photo cache of the orthomosaic
+    (:func:`..engine.ortho.photo_cache_budget`) - takes None as unknown."""
+    if sys.platform == "win32":
+        return _windows_physical_memory()
+    try:
+        pages, size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if pages > 0 and size > 0:
+        return int(pages) * int(size)
+    return None
+
+
+def _windows_physical_memory() -> int | None:
+    """``ullTotalPhys`` of ``kernel32.GlobalMemoryStatusEx`` (Windows has no ``sysconf``)."""
+    import ctypes
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),  # DWORD
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    try:
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullTotalPhys) or None
+    except (AttributeError, OSError):
+        return None
 
 
 def proj_offline() -> None:
@@ -124,5 +162,10 @@ def skip_open3d_extras() -> None:
 def glog_flushes_each_line() -> None:
     """COLMAP's log (glog) written to a file line by line: by default glog keeps 30 seconds of
     lines in a buffer, and :mod:`engine.colmap_log` tails that file to show the progress of a
-    step while COLMAP runs it. Read when the library loads: call before importing pycolmap."""
-    os.environ.setdefault("GLOG_logbufsecs", "0")
+    step while COLMAP runs it. Read when the library loads: call before importing pycolmap. The
+    setting is :data:`engine.timing.LIVE_LOG_ENV`, the one the bench starts its child with; a
+    value the environment holds already is left alone."""
+    from .engine.timing import LIVE_LOG_ENV  # imports the standard library only: safe before load_open3d_first
+
+    for key, value in LIVE_LOG_ENV.items():
+        os.environ.setdefault(key, value)

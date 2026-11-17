@@ -14,6 +14,7 @@ from typing import NoReturn, Optional
 import typer
 
 from . import __version__
+from .bench.cli import bench_app
 from .core.document import Document
 from .core.progress import print_progress
 
@@ -29,6 +30,7 @@ app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
 photos_app = typer.Typer(help="Enable or disable photos: a disabled photo keeps its pose, the next steps leave it out")
 app.add_typer(gnss_app, name="gnss")
+app.add_typer(bench_app, name="bench")
 app.add_typer(photos_app, name="photos")
 assistant_app = typer.Typer(help="The assistant from the command line: a question about a project, the models of a "
                                  "server or service, the evaluation of a model on the evaluation set")
@@ -62,6 +64,18 @@ def _open(project: Path, chunk: Optional[str] = None):
         names = ", ".join(f"{c.label!r} (key {c.key})" for c in doc.chunks)
         raise typer.BadParameter(f"no chunk {chunk!r} in the project; its chunks: {names}", param_hint="--chunk")
     return doc, ch
+
+
+def _engine(engine: Optional[str]) -> str:
+    """The word of ``--engine`` (None: of ``PPG_ENGINE``, else ``auto``; :mod:`.engine.switch`), checked before a
+    command opens its project: an unknown one is a usage error that names the accepted ones. The option is hidden:
+    the native engine does none of the steps yet, and every word runs the classic one."""
+    from .engine import switch
+
+    try:
+        return switch.check(engine)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--engine" if engine is not None else None) from exc
 
 
 @app.command()
@@ -1223,12 +1237,14 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
           matcher: str = typer.Option("sift", help="the points: sift (COLMAP), or learned key points matched by "
                                                    "LightGlue, disk or aliked (thermal frames, surfaces with little "
                                                    "texture; need PyTorch and kornia, the [learned] extra)"),
-          chunk: Optional[str] = None):
+          chunk: Optional[str] = None,
+          engine: Optional[str] = typer.Option(None, "--engine", hidden=True)):
     """Match photos and align cameras, with the choices of Metashape's Align Photos. What would keep the alignment
     from placing the chunk by the positions of the photos (the grid of a geoid missing) stops it before the
     matching."""
     from .markers import gcp
 
+    engine = _engine(engine)
     doc, ch = _open(project, chunk)
     try:
         gcp.preflight(ch, gps)
@@ -1237,9 +1253,9 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
     ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, tiepoint_limit=tiepoints,
                     generic=generic, reference=None if reference == "none" else reference, neighbours=neighbours,
                     apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
-                    gpu=gpu, matcher=matcher, progress=print_progress)
+                    gpu=gpu, matcher=matcher, progress=print_progress, engine=engine)
     n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive,
-                         ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements)
+                         ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements, engine=engine)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
     _say_stale_ends(doc)
@@ -1450,11 +1466,13 @@ def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate",
           skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
           gpu: Optional[str] = typer.Option(None, help="the GPU for the PatchMatch depth maps: auto, off, an adapter "
                                                        "index or part of its name (default: PPG_GPU, else auto)"),
-          chunk: Optional[str] = None):
+          chunk: Optional[str] = None,
+          engine: Optional[str] = typer.Option(None, "--engine", hidden=True)):
     """Depth maps and dense point cloud (with the confidence of every point)."""
+    engine = _engine(engine)
     doc, ch = _open(project, chunk)
     ch.build_depth_maps(quality=quality, filter_mode=filter_mode, backend=backend, progress=print_progress,
-                        skip_unreadable=skip_unreadable, gpu=gpu)
+                        skip_unreadable=skip_unreadable, gpu=gpu, engine=engine)
     pc = ch.build_point_cloud(progress=print_progress, gpu=gpu)
     doc.save()
     typer.echo(f"{len(pc):,} points")
@@ -1563,10 +1581,12 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
                                                                   "this gap between measured points, in metres "
                                                                   "(interpolated surface; default: none); the voids "
                                                                   "of the DEM: ppg dem --fill-voids"),
-            texture: bool = True):
+            texture: bool = True,
+            engine: Optional[str] = typer.Option(None, "--engine", hidden=True)):
     """Whole pipeline: photos -> alignment -> georeferencing -> cloud -> mesh -> DEM -> orthomosaic -> report."""
     from .markers import gcp as references  # not `gcp`: the option of the file
 
+    engine = _engine(engine)
     doc = Document.open(project) if project.exists() else Document()
     ch = doc.chunk or doc.add_chunk("Chunk 1")
     doc.save(project)
@@ -1577,15 +1597,15 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
         references.preflight(ch)  # what would keep the alignment from placing the chunk: before the matching
     except ValueError as exc:
         _gnss_failed(exc)
-    ch.match_photos(quality=quality, progress=print_progress)
-    ch.align_cameras(progress=print_progress)
+    ch.match_photos(quality=quality, progress=print_progress, engine=engine)
+    ch.align_cameras(progress=print_progress, engine=engine)
     if gcp:
         ch.import_reference(gcp, crs=crs)
     if gcp or any(c.reference.location for c in ch.cameras) or ch.scalebars:
         rep = ch.update_transform()
         typer.echo(f"georeferencing: {rep['method']} control RMSE {rep['control_rmse']}")
     doc.save()
-    ch.build_depth_maps(quality=dense_quality, progress=print_progress)
+    ch.build_depth_maps(quality=dense_quality, progress=print_progress, engine=engine)
     ch.build_point_cloud(progress=print_progress)
     if fill_holes and surface != "height_field":
         typer.echo("--fill-holes closes the holes of the height field only: add --surface height_field", err=True)

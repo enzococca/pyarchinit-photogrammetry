@@ -3,18 +3,10 @@
 //! Every function mirrors a numpy function of the Python package (named in its docstring), which
 //! stays the fallback and the reference of the tests. The work runs without the GIL on all cores.
 
-mod camera;
 mod convert;
 mod crinex;
-mod depth;
-mod gpu;
-mod gpu_fuse;
-mod gpu_patchmatch;
-mod gpu_sift;
-mod patchmatch;
 mod ppk;
 mod rtklib;
-mod tin;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -27,7 +19,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-use camera::{Camera, Pose};
+// the kernels are in the crate ppg_engine (folder engine), which knows nothing of Python
+use ppg_engine::camera::{Camera, Pose};
+use ppg_engine::{camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, tin};
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
 /// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel).

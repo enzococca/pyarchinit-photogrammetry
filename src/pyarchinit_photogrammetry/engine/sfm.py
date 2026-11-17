@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -25,7 +26,7 @@ from ..core.camera import SINGLE_FOCAL as SINGLE_FOCAL_MODELS
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
-from . import colmap_log
+from . import colmap_log, timing
 
 log = logging.getLogger(__name__)
 
@@ -813,7 +814,32 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     ``matcher``: ``sift`` (COLMAP's SIFT, on the GPU when there is one), or learned key points
     matched by LightGlue (:mod:`.learned`): ``disk`` or ``aliked`` - more matches on thermal
     frames and on surfaces with little texture, slower. Not for rigs (SIFT is used) nor with the
-    guided matching, which is COLMAP's."""
+    guided matching, which is COLMAP's.
+
+    The seconds of the step and those of each of its stages (``features``, ``preselection``, ``pairs``) are
+    kept in ``chunk.meta["timings"]["match_photos"]`` (:mod:`.timing`), also when the matching fails or is
+    cancelled: then with the stages measured so far and the name of the type of the error under ``failed``
+    (never its text)."""
+    stages, started = timing.Stages(), time.perf_counter()  # the time of the step and of its parts
+    failed = None  # the type of the error that stops the step, if one does
+    try:
+        _match_photos(chunk, stages, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
+                      pair_selection=pair_selection, progress=progress, exclude_stationary=exclude_stationary,
+                      generic=generic, reference=reference, neighbours=neighbours, apply_masks=apply_masks,
+                      guided_matching=guided_matching, reset=reset, gpu=gpu, matcher=matcher)
+    except BaseException as exc:
+        failed = type(exc).__name__
+        raise
+    finally:  # also when the matching fails or is cancelled: the times measured so far, and the type of the error
+        timing.store(chunk, "match_photos", time.perf_counter() - started, stages.as_dict(),
+                     **({"failed": failed} if failed else {}))
+
+
+def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint_limit: int, tiepoint_limit: int,
+                  pair_selection: str, progress: Progress | None, exclude_stationary: bool, generic: bool | None,
+                  reference: str | None, neighbours: int, apply_masks: str, guided_matching: bool, reset: bool,
+                  gpu: str | None, matcher: str) -> None:
+    """The matching of :func:`match_photos`, each of its parts timed as a stage of ``stages``."""
     import pycolmap
 
     from ..markers import gcp
@@ -861,105 +887,106 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
             by_sensor.setdefault(c.sensor_key, []).append(names[c.key])
     new = [n for group in by_sensor.values() for n in group if n not in existing]
 
-    masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
-    faces = {c.sensor_key for c in panorama_cameras(chunk) if c.enabled} if rigs else set()
-    progress(0.0, f"Detecting points in {len(new)} photos" + (" (with masks)" if masks else ""))
-    from . import nodes
+    with stages.stage("features"):  # the points of the photos
+        masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
+        faces = {c.sensor_key for c in panorama_cameras(chunk) if c.enabled} if rigs else set()
+        progress(0.0, f"Detecting points in {len(new)} photos" + (" (with masks)" if masks else ""))
+        from . import nodes
 
-    files_dir = chunk.data_dir.parent
-    others = nodes.wanted(files_dir) if not rigs and matcher == "sift" else []
-    chunk_nodes: list[str] = []
-    nodes_active = bool(others) and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS
-    sift_device = None
-    features = "cpu"
-    if matcher != "sift":
-        # learned key points, in a worker process of their own (the GPU is free again for the preselection)
-        groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
-        groups = [(k, n) for k, n in groups if n]
-        turns = learned.quarter_turns(chunk, names)  # the networks are not invariant to rotation
-        with learned.open_features(matcher) as feats:
-            progress(0.0, f"Detecting points with {learned.NAMES[matcher]} on {feats.device.upper()}"
-                     + (f", {sum(1 for k in turns.values() if k)} photos turned to the heading of the others"
-                        if turns else ""))
-            learned.extract_to_database(db_path, root, chunk, groups, lambda s: int(max(s.width, s.height) / downscale),
-                                        feats, masks, progress.sub(0.0, 0.5), turns=turns)
-        features = matcher
-    elif nodes_active:
-        # the photos in units of work for the other computers and this one (its own worker): COLMAP's
-        # extractor runs there into a database of its own, the points come back and go into ours
-        units, cameras = [], {}
-        for skey, image_names in by_sensor.items():
-            image_names = [n for n in image_names if n not in existing]
-            if not image_names:
-                continue
-            sensor = chunk.sensors[skey]
-            model, params = mapping_camera(sensor)
-            cameras[skey] = {"model": model, "params": ",".join(f"{p:.10g}" for p in params),
-                             "width": sensor.width, "height": sensor.height, "names": image_names}
-            for k in range(0, len(image_names), nodes.FEATURE_UNIT_PHOTOS):
-                units.append({"kind": "features", "root": str(root), "names": image_names[k:k + nodes.FEATURE_UNIT_PHOTOS],
-                              "camera": {"model": model, "params": cameras[skey]["params"]},
-                              "max_image_size": int(max(sensor.width, sensor.height) / downscale),
-                              "max_num_features": int(keypoint_limit),
-                              "mask_path": str(masks) if masks is not None else None})
-        project = files_dir.parent / files_dir.name[:-len(".files")] if files_dir.name.endswith(".files") else None
-        progress(0.0, f"Detecting points: {len(units)} units of work shared with {len(others)} other computer(s)")
-        results = nodes.run(files_dir, units, progress.sub(0.0, 0.5), "units of photos", project_path=project)
-        db = pycolmap.Database.open(str(db_path))
-        try:
-            camera_ids = {}
-            for cam in cameras.values():
-                camera = pycolmap.Camera(model=cam["model"], width=int(cam["width"]), height=int(cam["height"]),
-                                         params=[float(v) for v in cam["params"].split(",")])
-                camera.has_prior_focal_length = True
-                cid = db.write_camera(camera)
-                for n in cam["names"]:
-                    camera_ids[n] = cid
-        finally:
-            db.close()
-        nodes.import_features(db_path, nodes.folder(files_dir) / "done", [r["result"] for r in results], camera_ids)
-        chunk_nodes = sorted({r.get("by") for r in results if r.get("by")})
-        nodes.forget(files_dir, [r["name"] for r in results])
-    elif (sift_device := (gpu_sift_device(gpu) if not rigs else None)) is not None:
-        # the SIFT kernel of the GPU: the same points and descriptors as COLMAP's extractor, 15x faster
-        groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
-        groups = [(k, n) for k, n in groups if n]
-        try:
-            _extract_features_gpu(db_path, root, chunk, groups,
-                                  lambda s: int(max(s.width, s.height) / downscale), int(keypoint_limit), masks,
-                                  sift_device, progress.sub(0.0, 0.5))
-            features = "gpu"
-        except Exception as exc:  # noqa: BLE001 - the GPU failed on these photos: COLMAP's extractor instead
-            log.warning("GPU SIFT failed (%s): COLMAP's extractor on the CPU", exc)
-            sift_device = None
-    if sift_device is None and not nodes_active and matcher == "sift":
-        for i, (skey, image_names) in enumerate(by_sensor.items()):
-            image_names = [n for n in image_names if n not in existing]
-            if not image_names:
-                continue
-            sensor = chunk.sensors[skey]
-            ext = pycolmap.FeatureExtractionOptions()
-            ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
-            ext.sift.max_num_features = int(keypoint_limit)
-            reader = pycolmap.ImageReaderOptions()
-            model, params = mapping_camera(sensor)
-            reader.camera_model = model
-            reader.camera_params = ",".join(f"{p:.10g}" for p in params)
-            if masks is not None:
-                reader.mask_path = str(masks)
-            # a rig needs a camera per face: the faces of the panoramas are in a folder each
-            mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
-            with colmap_log.relay(progress.sub(0.5 * i / len(by_sensor), 0.5 / len(by_sensor)), work,
-                                  phases={"features": (0.0, 1.0)}):
-                pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
-                                          camera_mode=mode, reader_options=reader, extraction_options=ext)
-            progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
-    if rigs:
-        db = pycolmap.Database.open(str(db_path))
-        try:
-            pycolmap.apply_rig_config(rigs, db)
-        finally:
-            db.close()
+        files_dir = chunk.data_dir.parent
+        others = nodes.wanted(files_dir) if not rigs and matcher == "sift" else []
+        chunk_nodes: list[str] = []
+        nodes_active = bool(others) and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS
+        sift_device = None
+        features = "cpu"
+        if matcher != "sift":
+            # learned key points, in a worker process of their own (the GPU is free again for the preselection)
+            groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
+            groups = [(k, n) for k, n in groups if n]
+            turns = learned.quarter_turns(chunk, names)  # the networks are not invariant to rotation
+            with learned.open_features(matcher) as feats:
+                progress(0.0, f"Detecting points with {learned.NAMES[matcher]} on {feats.device.upper()}"
+                         + (f", {sum(1 for k in turns.values() if k)} photos turned to the heading of the others"
+                            if turns else ""))
+                learned.extract_to_database(db_path, root, chunk, groups, lambda s: int(max(s.width, s.height) / downscale),
+                                            feats, masks, progress.sub(0.0, 0.5), turns=turns)
+            features = matcher
+        elif nodes_active:
+            # the photos in units of work for the other computers and this one (its own worker): COLMAP's
+            # extractor runs there into a database of its own, the points come back and go into ours
+            units, cameras = [], {}
+            for skey, image_names in by_sensor.items():
+                image_names = [n for n in image_names if n not in existing]
+                if not image_names:
+                    continue
+                sensor = chunk.sensors[skey]
+                model, params = mapping_camera(sensor)
+                cameras[skey] = {"model": model, "params": ",".join(f"{p:.10g}" for p in params),
+                                 "width": sensor.width, "height": sensor.height, "names": image_names}
+                for k in range(0, len(image_names), nodes.FEATURE_UNIT_PHOTOS):
+                    units.append({"kind": "features", "root": str(root), "names": image_names[k:k + nodes.FEATURE_UNIT_PHOTOS],
+                                  "camera": {"model": model, "params": cameras[skey]["params"]},
+                                  "max_image_size": int(max(sensor.width, sensor.height) / downscale),
+                                  "max_num_features": int(keypoint_limit),
+                                  "mask_path": str(masks) if masks is not None else None})
+            project = files_dir.parent / files_dir.name[:-len(".files")] if files_dir.name.endswith(".files") else None
+            progress(0.0, f"Detecting points: {len(units)} units of work shared with {len(others)} other computer(s)")
+            results = nodes.run(files_dir, units, progress.sub(0.0, 0.5), "units of photos", project_path=project)
+            db = pycolmap.Database.open(str(db_path))
+            try:
+                camera_ids = {}
+                for cam in cameras.values():
+                    camera = pycolmap.Camera(model=cam["model"], width=int(cam["width"]), height=int(cam["height"]),
+                                             params=[float(v) for v in cam["params"].split(",")])
+                    camera.has_prior_focal_length = True
+                    cid = db.write_camera(camera)
+                    for n in cam["names"]:
+                        camera_ids[n] = cid
+            finally:
+                db.close()
+            nodes.import_features(db_path, nodes.folder(files_dir) / "done", [r["result"] for r in results], camera_ids)
+            chunk_nodes = sorted({r.get("by") for r in results if r.get("by")})
+            nodes.forget(files_dir, [r["name"] for r in results])
+        elif (sift_device := (gpu_sift_device(gpu) if not rigs else None)) is not None:
+            # the SIFT kernel of the GPU: the same points and descriptors as COLMAP's extractor, 15x faster
+            groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
+            groups = [(k, n) for k, n in groups if n]
+            try:
+                _extract_features_gpu(db_path, root, chunk, groups,
+                                      lambda s: int(max(s.width, s.height) / downscale), int(keypoint_limit), masks,
+                                      sift_device, progress.sub(0.0, 0.5))
+                features = "gpu"
+            except Exception as exc:  # noqa: BLE001 - the GPU failed on these photos: COLMAP's extractor instead
+                log.warning("GPU SIFT failed (%s): COLMAP's extractor on the CPU", exc)
+                sift_device = None
+        if sift_device is None and not nodes_active and matcher == "sift":
+            for i, (skey, image_names) in enumerate(by_sensor.items()):
+                image_names = [n for n in image_names if n not in existing]
+                if not image_names:
+                    continue
+                sensor = chunk.sensors[skey]
+                ext = pycolmap.FeatureExtractionOptions()
+                ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
+                ext.sift.max_num_features = int(keypoint_limit)
+                reader = pycolmap.ImageReaderOptions()
+                model, params = mapping_camera(sensor)
+                reader.camera_model = model
+                reader.camera_params = ",".join(f"{p:.10g}" for p in params)
+                if masks is not None:
+                    reader.mask_path = str(masks)
+                # a rig needs a camera per face: the faces of the panoramas are in a folder each
+                mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
+                with colmap_log.relay(progress.sub(0.5 * i / len(by_sensor), 0.5 / len(by_sensor)), work,
+                                      phases={"features": (0.0, 1.0)}):
+                    pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
+                                              camera_mode=mode, reader_options=reader, extraction_options=ext)
+                progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
+        if rigs:
+            db = pycolmap.Database.open(str(db_path))
+            try:
+                pycolmap.apply_rig_config(rigs, db)
+            finally:
+                db.close()
 
     mopts = pycolmap.FeatureMatchingOptions()
     mopts.max_num_matches = max(int(tiepoint_limit) * 4, 8192)
@@ -972,14 +999,16 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     parts = []
     if generic:
         progress(0.5, "Finding the pairs of photos that overlap")
-        found = _preselected_pairs(chunk, work, root, by_sensor, masks, names,
-                                   gpu_device=gpu_sift_device(gpu) if not rigs else None,
-                                   progress=progress.sub(0.5, 0.05))
+        with stages.stage("preselection"):
+            found = _preselected_pairs(chunk, work, root, by_sensor, masks, names,
+                                       gpu_device=gpu_sift_device(gpu) if not rigs else None,
+                                       progress=progress.sub(0.5, 0.05))
         if found:  # nothing found on the small images: every pair
             pairs, parts = set(found), ["generic"]
     if reference:
         finder = {"source": _reference_pairs, "estimated": _estimated_pairs, "sequential": _sequential_pairs}[reference]
-        found = finder(chunk, names, max(int(neighbours), 1))
+        with stages.stage("preselection"):
+            found = finder(chunk, names, max(int(neighbours), 1))
         if found:
             pairs = (pairs or set()) | set(found)
             parts.append(reference)
@@ -993,42 +1022,43 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
             pairs = {tuple(sorted((a, b))) for a in added for b in everyone if a != b}
         else:
             pairs = {p for p in pairs if p[0] in added or p[1] in added}
-    # the GPUs: the pairs shared with the CPU (not for rigs, nor with the guided matching, which is COLMAP's)
-    devices, gpu_names = [], []
-    if not rigs and not guided_matching and matcher == "sift":
-        for d in _native.gpu_devices(gpu):
-            try:
-                gpu_names.append(_native.kernel("gpu_device_name")(d))
-                devices.append(d)
-            except Exception as exc:  # noqa: BLE001 - a GPU that does not work: the others, or the CPU alone
-                log.warning("GPU %s unavailable for the matching (%s)", d, exc)
-    gpu_name = ", ".join(gpu_names) if devices else None
-    if devices and pairs is None:
-        everyone = sorted(names.values())
-        pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
-    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")")
-             + (f" on {gpu_name} and the CPU" if devices else "")
-             + (f" with {learned.NAMES[matcher]}" if matcher != "sift" else ""))
-    shares = None
-    blocks = {"blocks": (0.0, 1.0), "blocks2": (0.0, 1.0)}  # COLMAP's blocks of pairs as the progress
-    if matcher != "sift":
-        if pairs is None:
+    with stages.stage("pairs"):  # the matching on the GPUs too (_match_with_gpu)
+        # the GPUs: the pairs shared with the CPU (not for rigs, nor with the guided matching, which is COLMAP's)
+        devices, gpu_names = [], []
+        if not rigs and not guided_matching and matcher == "sift":
+            for d in _native.gpu_devices(gpu):
+                try:
+                    gpu_names.append(_native.kernel("gpu_device_name")(d))
+                    devices.append(d)
+                except Exception as exc:  # noqa: BLE001 - a GPU that does not work: the others, or the CPU alone
+                    log.warning("GPU %s unavailable for the matching (%s)", d, exc)
+        gpu_name = ", ".join(gpu_names) if devices else None
+        if devices and pairs is None:
             everyone = sorted(names.values())
             pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
-        with learned.open_features(matcher) as feats:
-            learned.match_pairs(db_path, pairs, feats, progress.sub(0.55, 0.4))
-    elif pairs is None:
-        with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-            pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
-    elif pairs and devices:
-        shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
-    elif pairs:
-        list_path = work / "pairs.txt"
-        list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
-        popts = pycolmap.ImportedPairingOptions()
-        popts.match_list_path = str(list_path)
-        with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+        progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")")
+                 + (f" on {gpu_name} and the CPU" if devices else "")
+                 + (f" with {learned.NAMES[matcher]}" if matcher != "sift" else ""))
+        shares = None
+        blocks = {"blocks": (0.0, 1.0), "blocks2": (0.0, 1.0)}  # COLMAP's blocks of pairs as the progress
+        if matcher != "sift":
+            if pairs is None:
+                everyone = sorted(names.values())
+                pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
+            with learned.open_features(matcher) as feats:
+                learned.match_pairs(db_path, pairs, feats, progress.sub(0.55, 0.4))
+        elif pairs is None:
+            with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
+                pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
+        elif pairs and devices:
+            shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
+        elif pairs:
+            list_path = work / "pairs.txt"
+            list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
+            popts = pycolmap.ImportedPairingOptions()
+            popts.match_list_path = str(list_path)
+            with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
+                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
@@ -1451,54 +1481,70 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     """Align the photos (see :func:`_align_cameras`). Photos whose sensor has a guessed focal length
     (:attr:`Sensor.focal_guessed`: the photos say none) that the alignment leaves out are aligned
     again from other focal lengths (:data:`GUESSED_FOCAL_STARTS`); the alignment that places the
-    most photos is kept and ``chunk.meta["sfm"]["focal_guess"]`` says what was tried."""
+    most photos is kept and ``chunk.meta["sfm"]["focal_guess"]`` says what was tried.
+
+    The seconds of the step, every attempt included, and those of each stage COLMAP announces (the
+    global mapper's: ``rotation_averaging``, ``global_positioning``, ...) are kept in
+    ``chunk.meta["timings"]["align_cameras"]`` (:mod:`.timing`), also when the alignment fails or is
+    cancelled: then with the name of the type of the error under ``failed`` (never its text)."""
     progress = as_progress(progress)
-    kwargs = dict(mapper=mapper, reset=reset, use_gps=use_gps, adaptive_fitting=adaptive_fitting,
-                  tiepoint_limit=tiepoint_limit, ba_global_ratio=ba_global_ratio,
-                  ba_global_refinements=ba_global_refinements)
-    guessed = {k: s.focal_px for k, s in chunk.sensors.items() if s.focal_guessed}
-    if not guessed or not reset:
-        n = _align_cameras(chunk, progress=progress, **kwargs)
-        chunk.meta["sfm"].pop("focal_guess", None)
-        return n
-    saved = {k: (s.model, list(s.params)) for k, s in chunk.sensors.items() if k in guessed}
-    total = len((chunk.meta.get("sfm") or {}).get("names") or {})
-    db_path = _sfm_dir(chunk) / "database.db"
-
-    def attempt(factor: float) -> int:
-        for k, (model, params) in saved.items():  # every attempt starts from the sensors as they were
-            s = chunk.sensors[k]
-            s.model, s.params, s.focal_source = model, list(params), "guess"
-        _set_db_focals(db_path, chunk, {k: f * factor for k, f in guessed.items()})
-        try:
-            return _align_cameras(chunk, progress=progress, **kwargs)
-        except RuntimeError as exc:
-            if "no reconstruction" not in str(exc):
-                raise
-            return 0
-
-    tried = [(1.0, attempt(1.0))]
+    stages, started = timing.Stages(), time.perf_counter()  # the step, and the stages COLMAP announces
+    failed = None  # the type of the error that stops the step, if one does
     try:
-        for factor in GUESSED_FOCAL_STARTS:
-            if max(n for _, n in tried) >= GUESSED_FOCAL_ENOUGH * total:
-                break
-            progress(0.0, f"Only {max(n for _, n in tried)} of {total} photos aligned with the guessed focal length: "
-                          f"again from {factor:g} times it")
-            tried.append((factor, attempt(factor)))
-        best = max(tried, key=lambda t: t[1])  # the first of the best: the guess when nothing places more
-        if best[0] != tried[-1][0]:
-            attempt(best[0])
-    finally:
-        _set_db_focals(db_path, chunk, guessed)  # the database keeps the guess: aligning again tries the same
-    chunk.meta["sfm"]["focal_guess"] = {"tried": [{"factor": f, "aligned": n} for f, n in tried], "kept": best[0]}
-    if best[1] == 0:
-        raise RuntimeError("alignment failed: no reconstruction could be initialised")
-    return best[1]
+        kwargs = dict(mapper=mapper, reset=reset, use_gps=use_gps, adaptive_fitting=adaptive_fitting,
+                      tiepoint_limit=tiepoint_limit, ba_global_ratio=ba_global_ratio,
+                      ba_global_refinements=ba_global_refinements, stages=stages)
+        guessed = {k: s.focal_px for k, s in chunk.sensors.items() if s.focal_guessed}
+        if not guessed or not reset:
+            n = _align_cameras(chunk, progress=progress, **kwargs)
+            chunk.meta["sfm"].pop("focal_guess", None)
+            return n
+        saved = {k: (s.model, list(s.params)) for k, s in chunk.sensors.items() if k in guessed}
+        total = len((chunk.meta.get("sfm") or {}).get("names") or {})
+        db_path = _sfm_dir(chunk) / "database.db"
+
+        def attempt(factor: float) -> int:
+            for k, (model, params) in saved.items():  # every attempt starts from the sensors as they were
+                s = chunk.sensors[k]
+                s.model, s.params, s.focal_source = model, list(params), "guess"
+            _set_db_focals(db_path, chunk, {k: f * factor for k, f in guessed.items()})
+            try:
+                return _align_cameras(chunk, progress=progress, **kwargs)
+            except RuntimeError as exc:
+                if "no reconstruction" not in str(exc):
+                    raise
+                return 0
+
+        tried = [(1.0, attempt(1.0))]
+        try:
+            for factor in GUESSED_FOCAL_STARTS:
+                if max(n for _, n in tried) >= GUESSED_FOCAL_ENOUGH * total:
+                    break
+                progress(0.0, f"Only {max(n for _, n in tried)} of {total} photos aligned with the guessed focal length: "
+                              f"again from {factor:g} times it")
+                tried.append((factor, attempt(factor)))
+            best = max(tried, key=lambda t: t[1])  # the first of the best: the guess when nothing places more
+            if best[0] != tried[-1][0]:
+                attempt(best[0])
+        finally:
+            _set_db_focals(db_path, chunk, guessed)  # the database keeps the guess: aligning again tries the same
+        chunk.meta["sfm"]["focal_guess"] = {"tried": [{"factor": f, "aligned": n} for f, n in tried], "kept": best[0]}
+        if best[1] == 0:
+            raise RuntimeError("alignment failed: no reconstruction could be initialised")
+        return best[1]
+    except BaseException as exc:
+        failed = type(exc).__name__
+        raise
+    finally:  # also when the alignment fails or is cancelled: the times measured so far, and the type of the error
+        stages.close()
+        timing.store(chunk, "align_cameras", time.perf_counter() - started, stages.as_dict(),
+                     **({"failed": failed} if failed else {}))
 
 
 def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
                    use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
-                   ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
+                   ba_global_ratio: float | None = None, ba_global_refinements: int | None = None, *,
+                   stages: timing.Stages | None = None) -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
     photos), ``hierarchical`` (the photos in overlapping clusters of up to 500, each reconstructed
@@ -1524,7 +1570,10 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     ``ba_global_refinements`` (None: :data:`BA_GLOBAL_RATIO`, :data:`BA_GLOBAL_REFINEMENTS`): the
     incremental mapper adjusts the whole block every time it grows by this ratio of photos or of
     points, with up to so many refinements each; with 1.1 and 5 COLMAP adjusted a block of a
-    thousand photos sixty times."""
+    thousand photos sixty times.
+
+    ``stages`` (:class:`.timing.Stages`, those of the step, :func:`align_cameras`): the stages COLMAP
+    announces in its log while a mapper runs are marked there (:func:`.colmap_log.relay`)."""
     import pycolmap
 
     from ..markers import gcp
@@ -1565,7 +1614,7 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     if mapper == "global":
         progress(0.0, f"Aligning {n} cameras at once (global)")
         try:
-            with colmap_log.relay(progress.sub(0.0, 0.8), work, total=n, phases={"stage": (0.0, 1.0)}):
+            with colmap_log.relay(progress.sub(0.0, 0.8), work, total=n, phases={"stage": (0.0, 1.0)}, stages=stages):
                 recs = _global_mapping(chunk, db_path, root, out, n)
         except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
             progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
@@ -1617,7 +1666,8 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
                  + (f" (adding {len(info.get('added') or [])} photos)" if continuing else "")
                  + (" in clusters" if mapper == "hierarchical" else ""))
         # COLMAP's log as the progress: the photos placed so far over all of them
-        with colmap_log.relay(progress.sub(0.05, 0.8), work, total=n, phases={"register": (0.0, 1.0)}):
+        with colmap_log.relay(progress.sub(0.05, 0.8), work, total=n, phases={"register": (0.0, 1.0)},
+                              stages=stages):
             if mapper == "hierarchical":
                 hopts = pycolmap.HierarchicalPipelineOptions()
                 hopts.incremental_options = opts

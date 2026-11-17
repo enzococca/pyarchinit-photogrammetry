@@ -230,14 +230,14 @@ MOVED_KEYS = ("drawings", "stones", "orthomosaic", "texture", "colour_chart", "r
 # the keys of chunk.meta the program knows; the others are the data of plugins
 PROGRAM_KEYS = frozenset((
     "active_versions", "alignment_id", "built_in", "calculator", "chunk_alignment", "classes", "colour", "colour_chart", "confidence", "coverage",
-    "date", "dem", "dem_edits", "dem_precision", "dense", "drawings", "elevations", "field_check", "gnss",
+    "date", "dem", "dem_edits", "dem_precision", "dense", "drawings", "elevations", "engine", "field_check", "gnss",
     "gnss_only_fix", "import", "layer_labels", "layers_hidden", "levelled", "live_links", "marker_excluded", "marker_frames", "merge",
     "merge_models",
     "metric", "model", "multispectral", "normal_map", "optimize", "orientation", "orthomosaic", "panorama",
     "plan_edits", "point_cloud_cleaning", "point_cloud_source", "pottery", "precision", "proxies", "quality", "region",
     "relief",
-    "satellite", "scans", "section_options", "sfm", "sharpness", "stones", "texture", "thermal", "tin", "versions",
-    "video", "view", "water",
+    "satellite", "scans", "section_options", "sfm", "sharpness", "stones", "texture", "thermal", "timings", "tin",
+    "versions", "video", "view", "water",
 ))
 _LISTENERS: list[tuple] = []  # (callback, keys)
 

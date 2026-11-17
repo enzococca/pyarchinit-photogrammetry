@@ -409,6 +409,22 @@ def rng():
     return np.random.default_rng(0)
 
 
+@pytest.fixture
+def gpu_test_device() -> int:
+    """The adapter a test of the GPU kernels runs on, to be passed as ``device=``: the best GPU of the computer
+    (-1) or, with ``PPG_TEST_SOFTWARE_GPU=1``, its first software rasteriser (lavapipe, WARP), which the program
+    never takes by itself. The test skips where there is none."""
+    from pyarchinit_photogrammetry import _native
+    from pyarchinit_photogrammetry.testing.gpu import pick_test_device
+
+    software = os.environ.get("PPG_TEST_SOFTWARE_GPU") == "1"
+    device = pick_test_device(_native.gpu_adapters(), _native.gpu_device("auto"), software)
+    if device is None:
+        pytest.skip("no software GPU adapter (lavapipe, WARP) on this computer" if software
+                    else "no GPU (wgpu adapter) on this computer")
+    return device
+
+
 def load_spatialite(con) -> bool:
     """Load mod_spatialite into a sqlite3 connection from the known locations; False if none works."""
     from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths, pin_spatialite

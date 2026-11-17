@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "engine", "bench"]
+resolver = "2"
+
 [package]
 name = "ppg_core"
 version = "0.8.0"
@@ -12,14 +16,11 @@ name = "ppg_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+# the kernels, without Python (folder engine)
+ppg_engine = { path = "engine" }
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 numpy = "0.22"
 rayon = "1.10"
-wgpu = "24"
-pollster = "0.4"
-bytemuck = { version = "1", features = ["derive"] }
-# constrained Delaunay triangulation of the TIN (MIT OR Apache-2.0)
-spade = "=2.15.1"
 
 [build-dependencies]
 # RTKLIB (vendor/rtklib, C) for the post-processing of GNSS observations; build.rs needs

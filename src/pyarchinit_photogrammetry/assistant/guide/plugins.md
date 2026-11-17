@@ -222,7 +222,11 @@ the function given to `run` (it runs in another thread). `deactivate()` releases
 took beyond its registrations (open files, timers).
 
 **Undo of the plugin's data.** Since 1.7.3 the keys of `chunk.meta` that are not the program's are a part of the
-snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. Since 1.7.4:
+snapshots of *Edit > Undo* ("Plugin data"): `mark_modified()` after a change of them makes one step. The program's
+keys are those of `PROGRAM_KEYS` in `engine/orient.py` - its products and their settings (`sfm`, `dense`, `model`,
+`dem`, `orthomosaic`, `drawings`, ...) and two the native engine added: `engine` (which engine did each step,
+`classic` or `native`) and `timings` (the seconds of each step and of its stages); a plugin keeps its data under a
+key of its own, never under one of them. Since 1.7.4:
 
 - **A mark joins the step of its turn.** A change of the plugins' data marked in the same turn of the event loop as
   the last step joins that step, whatever made it: the step the plugin pushed

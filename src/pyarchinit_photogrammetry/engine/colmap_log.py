@@ -7,7 +7,8 @@ and tails the file in a thread, turning the lines that measure progress into cal
 (``Processed file [12/57]``, ``Registering image #3 (num_reg_frames=120)``), a message otherwise -
 so the window shows how the step goes on inside COLMAP, as Metashape's progress window does,
 instead of one message for an hour. The lines are COLMAP 3.12's (pycolmap 4.2); a line nobody
-recognises is simply not shown.
+recognises is simply not shown. The stages COLMAP announces (``=== Running rotation averaging ===``)
+can also be timed (:class:`~pyarchinit_photogrammetry.engine.timing.Stages`).
 """
 from __future__ import annotations
 
@@ -16,15 +17,19 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from ..core.progress import Progress, as_progress
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .timing import Stages
 
 _LINE = re.compile(r"^[IWEF]\d{8} \d\d:\d\d:\d\d\.\d+\s+\d+\s+\S+\]\s?(.*)$")  # glog's prefix
 STAGES = {  # the stages of the global mapper, with the fraction of the alignment they start at
     "rotation averaging": 0.1, "track establishment": 0.25, "global positioning": 0.4,
     "iterative bundle adjustment": 0.6, "iterative retriangulation and refinement": 0.8,
 }
+_RUNNING = re.compile(r"=== Running (.+?) ===")  # COLMAP announces a stage (the global mapper's), by its name
 _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     # (regex, kind, message template with {a}, {b}, {c}, {name}); the fraction is a / b when the kind counts
     (re.compile(r"Processed file \[(\d+)/(\d+)\]"), "features", "Key points of photo {a} of {b}"),
@@ -37,7 +42,7 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"Fusing image \[(\d+)/(\d+)\]"), "fusing", "Fusing depth map {a} of {b}"),
     (re.compile(r"=== Reconstructing component (\d+) / (\d+) with (\d+) images ==="), "note",
      "Component {a} of {b}: {c} photos"),
-    (re.compile(r"=== Running (.+?) ==="), "stage", "Global alignment: {name}"),
+    (_RUNNING, "stage", "Global alignment: {name}"),
     (re.compile(r"Global bundle adjustment iteration (\d+) / (\d+) finished"), "note", "Adjustment iteration {a} of {b}"),
     (re.compile(r"^Retriangulation and Global bundle adjustment"), "note", "Retriangulation and adjustment of the whole block"),
     (re.compile(r"^Global bundle adjustment$"), "note", "Adjustment of the whole block"),
@@ -88,16 +93,19 @@ def parse(line: str) -> Line | None:
 
 
 class _Tail(threading.Thread):
-    """Reads the log file as COLMAP writes it and reports its lines to ``progress``."""
+    """Reads the log file as COLMAP writes it, every ``interval`` seconds, and reports its lines to
+    ``progress``; with ``stages`` each stage COLMAP announces is marked there as it is read."""
 
     def __init__(self, prefix: Path, progress: Progress, total: int | None,
-                 phases: dict[str, tuple[float, float]] | None, interval: float = 0.25):
+                 phases: dict[str, tuple[float, float]] | None, interval: float = 0.25,
+                 stages: Stages | None = None):
         super().__init__(name="ppg-colmap-log", daemon=True)
         self.prefix = prefix
         self.progress = progress
         self.total = total
         self.phases = phases or {}
         self.interval = interval
+        self.stages = stages
         self.stop = threading.Event()
         self.last_sees = 0.0
         self.lines = 0
@@ -137,6 +145,8 @@ class _Tail(threading.Thread):
         if parsed is None:
             return
         self.lines += 1
+        if parsed.kind == "stage" and self.stages is not None:  # rotation averaging -> rotation_averaging
+            self.stages.mark(_RUNNING.search(text).group(1).lower().replace(" ", "_"))
         fraction = parsed.fraction
         if parsed.kind == "register" and self.total and parsed.b is not None:
             fraction = min(1.0, parsed.b / self.total)
@@ -158,12 +168,20 @@ class _Tail(threading.Thread):
 
 @contextlib.contextmanager
 def relay(progress: Progress | None, folder: Path | str, total: int | None = None,
-          phases: dict[str, tuple[float, float]] | None = None):
+          phases: dict[str, tuple[float, float]] | None = None, stages: Stages | None = None):
     """COLMAP's log of the ``with`` block relayed to ``progress``: ``phases`` maps a kind of line
     (``features``, ``blocks``, ``blocks2``, ``register``, ``stage``, ``undistort``, ``fusing``) to the
     ``(start, span)`` of the step's fraction it fills; ``total`` is the number of photos a mapper can
     place. Lines of other kinds reach the progress as messages only. The log file lives in ``folder``
-    for the duration of the block. Nothing happens without pycolmap or inside another relay."""
+    for the duration of the block. Nothing happens without pycolmap or inside another relay.
+
+    ``stages``: each stage COLMAP announces (``=== Running rotation averaging ===``) is marked there
+    (:meth:`~pyarchinit_photogrammetry.engine.timing.Stages.mark`) by its name in small letters, spaces
+    to underscores (``rotation_averaging``), and the last one is closed when the block ends. The log is
+    read every 0.25 s, and a boundary is known to that only when glog writes out each line
+    (:data:`~pyarchinit_photogrammetry.engine.timing.LIVE_LOG_ENV`, which the package also asks for when
+    it is imported before pycolmap); otherwise it is known to glog's buffer - a stage can be marked late,
+    and stages whose lines come out together get 0.0 s. The seconds of the step are exact either way."""
     progress = as_progress(progress)
     try:
         import pycolmap
@@ -185,7 +203,7 @@ def relay(progress: Progress | None, folder: Path | str, total: int | None = Non
             old.unlink()
     lg = pycolmap.logging
     saved = (lg.minloglevel, lg.stderrthreshold, lg.alsologtostderr)
-    tail = _Tail(prefix, progress, total, phases)
+    tail = _Tail(prefix, progress, total, phases, stages=stages)
     try:
         lg.set_log_destination(lg.Level.INFO, str(prefix))
         lg.minloglevel = 0
@@ -198,6 +216,8 @@ def relay(progress: Progress | None, folder: Path | str, total: int | None = Non
         lg.minloglevel, lg.stderrthreshold, lg.alsologtostderr = saved
         tail.stop.set()
         tail.join(5.0)
+        if stages is not None:  # the last stage of the log ends with it, not with whatever the step does next
+            stages.close()
         with _LOCK:
             if _ACTIVE:
                 _ACTIVE.pop()

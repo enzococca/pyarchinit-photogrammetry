@@ -46,6 +46,7 @@ from typing import Sequence
 
 import numpy as np
 
+from .. import _env
 from ..core import crs as crs_mod
 from ..core.progress import ProgressCallback, as_progress
 from ..core.stamps import stamp_entry
@@ -734,26 +735,9 @@ MIN_SPLIT_TILE = 64
 
 
 def _physical_memory() -> float:
-    """Bytes of RAM of the computer (16 GB when it cannot be read)."""
-    try:
-        if os.name == "nt":
-            import ctypes
-
-            class _Status(ctypes.Structure):
-                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-            status = _Status()
-            status.dwLength = ctypes.sizeof(_Status)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return float(status.ullTotalPhys)
-            return 16.0e9
-        return float(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
-    except (AttributeError, OSError, ValueError):
-        return 16.0e9
+    """Bytes of RAM of the computer, from the reader of the package (:func:`.._env.physical_memory`); 16 GB when
+    they cannot be read."""
+    return float(_env.physical_memory() or 16.0e9)
 
 
 def sgbm_memory() -> float:
