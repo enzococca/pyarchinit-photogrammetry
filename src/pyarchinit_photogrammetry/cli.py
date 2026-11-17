@@ -1961,10 +1961,21 @@ def _region(polygon: Optional[str], bbox: Optional[str], wkt: Optional[str], geo
 
 @app.command()
 def relink(project: Path, folder: Path, only_unreadable: bool = typer.Option(
-               False, help="only the photos that cannot be read now"), chunk: Optional[str] = None):
+               False, help="only the photos that cannot be read now"),
+           only: Optional[list[str]] = typer.Option(
+               None, "--only", help="only these photos (labels; repeat the option or separate them with commas)"),
+           chunk: Optional[str] = None):
     """Point the photos to the files with the same names in FOLDER (and its subfolders)."""
     doc, ch = _open(project, chunk)
-    r = ch.relink_photos(folder, only_unreadable=only_unreadable)
+    cameras = None
+    if only:
+        labels = [x.strip() for item in only for x in item.split(",") if x.strip()]
+        by_label = {c.label: c for c in ch.cameras}
+        unknown = [x for x in labels if x not in by_label]
+        if unknown:
+            raise typer.BadParameter(f"no photo {', '.join(unknown)} in chunk {ch.label!r}", param_hint="--only")
+        cameras = [by_label[x] for x in labels]
+    r = ch.relink_photos(folder, only_unreadable=only_unreadable, cameras=cameras)
     doc.save()
     typer.echo(f"{r['relinked']} photos linked, {len(r['not_found'])} not found, {r['unreadable']} still unreadable; "
                f"photo folder {r['image_root']}")
@@ -2211,7 +2222,9 @@ def info(project: Path):
     """Summary of the project."""
     doc = Document.open(project)
     for ch in doc.chunks:
-        typer.echo(f"[{ch.key}] {ch.label}: {len(ch.cameras)} photos, {len(ch.aligned_cameras)} aligned, "
+        missing = len(ch.missing_photos())
+        gone = f", {missing} photo{'s' if missing != 1 else ''} missing (ppg relink)" if missing else ""
+        typer.echo(f"[{ch.key}] {ch.label}: {len(ch.cameras)} photos, {len(ch.aligned_cameras)} aligned{gone}, "
                    f"{len(ch.markers)} markers, CRS {ch.crs}, products: {', '.join(ch.products) or '-'}")
 
 

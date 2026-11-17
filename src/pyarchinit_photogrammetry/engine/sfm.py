@@ -180,12 +180,13 @@ def photo_folder(chunk: Chunk) -> str:
     return str(links)
 
 
-def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
-    """Point the cameras to the photos with the same file name in ``folder`` and its
+def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False, cameras=None) -> dict:
+    """Point the cameras (all, or ``cameras``) to the photos with the same file name in ``folder`` and its
     subfolders (empty files are not taken). When a name is found more than once, the copy
     whose parent folders match the old path best wins. The common folder of the photos
     (``meta["sfm"]["image_root"]``) follows when every photo of the model is now under one
-    folder with the same relative names; otherwise :func:`photo_folder` links them."""
+    folder with the same relative names; otherwise :func:`photo_folder` links them.
+    ``only_unreadable``: of those, only the photos that cannot be read now."""
     from ..core.chunk import IMAGE_EXTENSIONS
     from ..io.raw import RAW_EXTENSIONS
     from .visibility import unreadable_photos
@@ -199,7 +200,9 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
             path = Path(dirpath) / f
             if path.suffix.lower() in IMAGE_EXTENSIONS or path.suffix.lower() in RAW_EXTENSIONS:
                 index.setdefault(f.lower(), []).append(path)
-    cams = chunk.unreadable_photos(chunk.cameras) if only_unreadable else list(chunk.cameras)
+    cams = list(chunk.cameras) if cameras is None else list(cameras)
+    if only_unreadable:
+        cams = chunk.unreadable_photos(cams)
     relinked, not_found = 0, []
     again = []  # developed raw files: the raw is what was moved, the copy in the project is made again from it
     for cam in cams:
@@ -236,6 +239,49 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
             relinked += 1
     if again:
         chunk.develop_raw_photos(cameras=again)
+    _follow_image_root(chunk)
+    left = unreadable_photos(chunk)
+    return {"relinked": relinked, "not_found": not_found, "unreadable": len(left),
+            "image_root": (chunk.meta.get("sfm") or {}).get("image_root")}
+
+
+def set_photo_path(chunk: Chunk, cam, path):
+    """The photo of ``cam`` read from ``path`` (any name, any folder); for a developed raw, ``path`` is the raw
+    file, developed again when the copy the camera reads is missing. FileNotFoundError for a missing or empty file,
+    ValueError when the photo is not of the size of the camera's sensor (another photo would not fit its pose and
+    calibration). The common folder of the photos follows as with :func:`relink_photos`."""
+    from PIL import Image
+
+    from ..io.raw import is_raw
+
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        raise FileNotFoundError(str(path))
+    source = cam.meta.get("raw") if isinstance(cam.meta.get("raw"), dict) else None
+    if source is not None and is_raw(path):
+        source["path"] = str(path.resolve())
+        if not Path(cam.path).is_file():
+            chunk.develop_raw_photos(cameras=[cam])
+    else:
+        sensor = chunk.sensors.get(cam.sensor_key)
+        try:
+            with Image.open(path) as im:
+                size = im.size
+        except Exception as exc:  # noqa: BLE001 - not an image
+            raise ValueError(f"{path.name} is not an image the program reads: {exc}") from exc
+        if sensor is not None and tuple(size) != (sensor.width, sensor.height):
+            raise ValueError(f"{path.name} is {size[0]} x {size[1]} pixels, the photos of {cam.label}'s sensor "
+                             f"{sensor.width} x {sensor.height}")
+        cam.path = str(path.resolve())
+        if source is not None:  # an image in place of a developed raw: the raw is not the source any more
+            cam.meta.pop("raw", None)
+    _follow_image_root(chunk)
+    return cam
+
+
+def _follow_image_root(chunk: Chunk) -> None:
+    """``meta["sfm"]["image_root"]`` set to the folder all the photos of the model are under now, with the names the
+    model has; left as it is when there is no such folder (:func:`photo_folder` links them)."""
     sfm = chunk.meta.get("sfm")
     if sfm and sfm.get("names"):
         by_key = {str(c.key): Path(c.path).resolve() for c in chunk.cameras}
@@ -249,9 +295,6 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
                 roots.add(Path(*path.parts[:-len(parts)]))
         if len(roots) == 1:
             sfm["image_root"] = str(roots.pop())
-    left = unreadable_photos(chunk)
-    return {"relinked": relinked, "not_found": not_found, "unreadable": len(left),
-            "image_root": (chunk.meta.get("sfm") or {}).get("image_root")}
 
 
 REFERENCE_NEIGHBOURS = 20  # the pairs of every photo with its nearest ones (by position) or the ones around it (in sequence)
