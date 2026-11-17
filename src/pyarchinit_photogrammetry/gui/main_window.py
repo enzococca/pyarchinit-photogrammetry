@@ -8031,13 +8031,15 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         try:
             if len(cams) == 1:
                 cam = cams[0]
-                old = Path(cam.path).parent
+                from ..core.chunk import IMAGE_EXTENSIONS
                 from ..io.raw import RAW_EXTENSIONS
 
-                raws = " ".join(f"*{e} *{e.upper()}" for e in sorted(RAW_EXTENSIONS))
+                source = cam.meta.get("raw") if isinstance(cam.meta.get("raw"), dict) else None
+                old = Path(source["path"] if source and source.get("path") else cam.path).parent  # a raw: its folder
+                kinds = " ".join(f"*{e} *{e.upper()}" for e in sorted(IMAGE_EXTENSIONS | set(RAW_EXTENSIONS)))
                 path, _ = QFileDialog.getOpenFileName(
                     self, tr("Nuovo file della foto {0}", cam.label), str(old) if old.is_dir() else self._last_dir(),
-                    tr("Immagini e file raw") + f" (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF {raws})")
+                    tr("Immagini e file raw") + f" ({kinds})")
                 if not path:
                     return False
                 ch.set_photo_path(cam, path)

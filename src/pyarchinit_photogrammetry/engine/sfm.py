@@ -267,8 +267,13 @@ def set_photo_path(chunk: Chunk, cam, path):
         try:
             with Image.open(path) as im:
                 size = im.size
-        except Exception as exc:  # noqa: BLE001 - not an image
-            raise ValueError(f"{path.name} is not an image the program reads: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - not for Pillow: OpenCV, which reads the photos, may
+            import cv2
+
+            img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError(f"{path.name} is not an image the program reads: {exc}") from exc
+            size = (img.shape[1], img.shape[0])
         if sensor is not None and tuple(size) != (sensor.width, sensor.height):
             raise ValueError(f"{path.name} is {size[0]} x {size[1]} pixels, the photos of {cam.label}'s sensor "
                              f"{sensor.width} x {sensor.height}")

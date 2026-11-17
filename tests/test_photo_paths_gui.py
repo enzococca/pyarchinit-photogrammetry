@@ -155,3 +155,62 @@ def test_change_path_is_in_the_context_menu_and_the_workflow_menu(gui, tmp_path)
     menu = w._photos_menu_for(w.chunk.cameras)
     assert "Cambia percorso..." in [a.text() for a in menu.actions()]
     menu.deleteLater()
+
+
+def test_a_missing_folder_costs_one_look_in_the_photos_pane(gui, tmp_path, monkeypatch):
+    import pyarchinit_photogrammetry as ppg
+    from test_photo_paths import _count
+
+    mw, window = gui
+    doc, ch = _project(tmp_path, n=5)
+    folder = tmp_path / "foto"
+    shutil.rmtree(folder)
+    w = window(ppg.Document.open(doc.path))
+    calls = _count(monkeypatch, folder)
+    w.photos.set_chunk(w.chunk)
+    assert len(calls) == 1, calls  # one listing of the folder, no file looked at
+    assert all("mancante" in w.photos.item(i).toolTip() for i in range(5))
+
+
+def test_photos_of_a_folder_there_cost_one_listing_in_the_photos_pane(gui, tmp_path, monkeypatch):
+    import pyarchinit_photogrammetry as ppg
+    from test_photo_paths import _count
+
+    mw, window = gui
+    doc, ch = _project(tmp_path, n=5)
+    Path(ch.cameras[3].path).unlink()
+    w = window(ppg.Document.open(doc.path))
+    calls = _count(monkeypatch, tmp_path / "foto")
+    w.photos.set_chunk(w.chunk)
+    assert calls == [("scandir", str(Path(ch.cameras[0].path).parent))], calls
+    assert ["mancante" in w.photos.item(i).toolTip() for i in range(5)] == [False, False, False, True, False]
+
+
+def test_the_tooltip_of_a_photo_without_markers(gui, tmp_path):
+    import pyarchinit_photogrammetry as ppg
+
+    mw, window = gui
+    doc, ch = _project(tmp_path, n=1)
+    Path(ch.cameras[0].path).unlink()
+    w = window(ppg.Document.open(doc.path))
+    w.photos._flags[w.chunk.cameras[0].key] = (0, 0, [])
+    assert "Marker" not in w.photos._tooltip(w.chunk.cameras[0])
+
+
+def test_change_path_dialog_lists_every_image_kind_and_opens_in_the_raw_folder(gui, tmp_path, monkeypatch):
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.chunk import IMAGE_EXTENSIONS
+
+    mw, window = gui
+    doc, ch = _project(tmp_path, n=1)
+    raws = tmp_path / "raw_originali"
+    raws.mkdir()
+    ch.cameras[0].meta["raw"] = {"path": str(raws / "IMG_0.dng"), "size": 1}
+    doc.save()
+    w = window(ppg.Document.open(doc.path))
+    asked = []
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: asked.append(a) or ("", ""))
+    assert not w.change_photo_paths([w.chunk.cameras[0]])
+    _parent, _title, start, filters = asked[0]
+    assert Path(start) == raws.resolve()
+    assert all(f"*{e}" in filters for e in IMAGE_EXTENSIONS) and "*.dng" in filters
