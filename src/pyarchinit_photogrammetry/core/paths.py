@@ -63,12 +63,16 @@ def _real(path: str | os.PathLike) -> str:
     return os.path.join(os.path.realpath(p.parent), p.name)
 
 
-def portable(path: str, base: Path | None, was_relative: bool = False) -> str:
+def portable(path: str, base: Path | None, was_relative: bool = False, inside_only: bool = False) -> str:
     """What the project file stores for the photo ``path`` (absolute in memory) of a project in the folder ``base``:
     relative when on the same volume, else absolute. When the volume cannot be told (:func:`same_volume` None), the
-    form it had when the project was read: ``was_relative``."""
+    form it had when the project was read: ``was_relative``. ``inside_only``: relative only inside ``base`` (the
+    rule before 2.0, kept for the chunks handed to processing nodes, whose other paths are mapped by prefix)."""
     if base is None or not path or not Path(path).is_absolute():
         return path
+    if inside_only:
+        rel = relative_text(_real(path), os.path.realpath(base))
+        return rel if rel is not None and not rel.startswith("./../") else path
     same = same_volume(path, base)
     if same is None:
         same = was_relative

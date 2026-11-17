@@ -1237,20 +1237,24 @@ class Chunk:
         doc = self.document
         return None if doc is None or doc.path is None else doc.path.parent
 
-    def to_dict(self) -> dict:
+    def to_dict(self, inside_only: bool = False) -> dict:
+        """The chunk as the project file stores it. The photo paths are relative to the folder of the project file
+        when on its volume (:func:`.paths.portable`); ``inside_only``: only those inside that folder."""
         base = self._base_dir()
         rel = self._stored_relative
         cams = []
         for c in self.cameras:
             d = c.to_dict()
-            d["path"] = _portable(d["path"], base, rel)
+            d["path"] = _portable(d["path"], base, rel, inside_only)
             if (d.get("meta") or {}).get("raw", {}).get("path"):  # the raw of a developed photo, beside the project
                 d["meta"] = {**d["meta"], "raw": {**d["meta"]["raw"],
-                                                  "path": _portable(d["meta"]["raw"]["path"], base, rel)}}
+                                                  "path": _portable(d["meta"]["raw"]["path"], base, rel,
+                                                                    inside_only)}}
             cams.append(d)
         meta = dict(self.meta)
         if "sfm" in meta and meta["sfm"].get("image_root"):
-            meta["sfm"] = {**meta["sfm"], "image_root": _portable_folder(meta["sfm"]["image_root"], base, rel)}
+            meta["sfm"] = {**meta["sfm"], "image_root": _portable_folder(meta["sfm"]["image_root"], base, rel,
+                                                                              inside_only)}
         return {
             "key": self.key, "label": self.label, "enabled": self.enabled, "crs": self.crs,
             "transform": np.asarray(self.transform).tolist(),
@@ -1288,20 +1292,20 @@ class Chunk:
         return chunk
 
 
-def _portable_folder(path: str, base: Path | None, relative: set | None = None) -> str:
+def _portable_folder(path: str, base: Path | None, relative: set | None = None, inside_only: bool = False) -> str:
     """The stored form of a folder of photos: as a photo in it would be (:func:`_portable`)."""
     if not path:
         return path
-    probe = _portable(os.path.join(path, "_"), base, {os.path.join(p, "_") for p in relative or ()})
+    probe = _portable(os.path.join(path, "_"), base, {os.path.join(p, "_") for p in relative or ()}, inside_only)
     if not probe.endswith("/_"):
         return path
     return probe[:-2] if probe != "./_" else "./"  # the folder of the project itself: "./"
 
 
-def _portable(path: str, base: Path | None, relative: set | None = None) -> str:
+def _portable(path: str, base: Path | None, relative: set | None = None, inside_only: bool = False) -> str:
     """The stored form of a photo path (:func:`.paths.portable`): relative to the folder of the project file when the
     photo is on its volume. ``relative``: the paths that were stored relative when the project was read."""
-    return paths_mod.portable(path, base, was_relative=bool(relative) and path in relative)
+    return paths_mod.portable(path, base, was_relative=bool(relative) and path in relative, inside_only=inside_only)
 
 
 def _resolve(path: str, base: Path | None, relative: set | None = None) -> str:

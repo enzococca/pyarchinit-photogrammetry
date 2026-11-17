@@ -223,3 +223,14 @@ def test_set_photo_path_of_one_camera(tmp_path):
     with pytest.raises(ValueError, match="32 x 16"):
         ch.set_photo_path(cam, _photo(tmp_path / "piccola.jpg", 90, size=(16, 32)))
     assert cam.path == str(other.resolve())
+
+
+def test_chunks_handed_to_processing_nodes_keep_the_photos_outside_the_project_absolute(tmp_path):
+    """The nodes map the paths outside the project folder by prefix: only those inside it are relative there."""
+    from pyarchinit_photogrammetry.engine import nodes
+
+    doc, ch = _project(tmp_path)
+    assert [c["path"] for c in ch.to_dict()["cameras"]] == [f"./../foto/IMG_{i}.jpg" for i in range(3)]
+    name = nodes.share_chunk(doc.files_dir, ch)
+    shared = json.loads((nodes.folder(doc.files_dir) / "state" / f"{name}.json").read_text())
+    assert [c["path"] for c in shared["chunk"]["cameras"]] == [c.path for c in ch.cameras]
