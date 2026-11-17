@@ -91,11 +91,15 @@ class UnreadablePhotos(RuntimeError):
 def missing_photos(chunk: Chunk, cameras=None) -> list:
     """Enabled cameras (or ``cameras``) whose photo is missing or empty (a Dropbox / iCloud / OneDrive file kept
     online only): the file is only looked at, not read, so it is quick enough for every photo of a project being
-    opened. A developed raw counts by the copy the camera reads."""
+    opened. A developed raw counts by the copy the camera reads. A folder that is not there is looked at once
+    (:class:`..core.paths.Folders`), its photos are not."""
+    from ..core.paths import Folders
+
+    folders = Folders()
     bad = []
     for cam in [c for c in chunk.cameras if c.enabled] if cameras is None else cameras:
         try:
-            if os.stat(cam.path).st_size > 0:
+            if folders.exists(cam.path) and os.stat(cam.path).st_size > 0:
                 continue
         except (OSError, TypeError, ValueError):
             pass
