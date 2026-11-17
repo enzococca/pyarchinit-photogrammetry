@@ -853,6 +853,7 @@ class PhotosPane(QListWidget):
         self._filter: set | None = None
         self.filter_title = ""
         self.focus = None  # the marker (or internal point) the filtered photos are about
+        self._missing: set[int] = set()  # keys of the cameras whose photo file is missing or empty
 
     @staticmethod
     def _placeholder(broken: bool = False) -> QPixmap:
@@ -901,8 +902,39 @@ class PhotosPane(QListWidget):
                 f[2].append(m.label + ("" if pr.measured else tr(" (da confermare)")))
         return {k: tuple(v) for k, v in flags.items()}
 
+    @staticmethod
+    def _is_missing(cam) -> bool:
+        """The photo file is not there or is empty (looked at, not read)."""
+        try:
+            return os.stat(cam.path).st_size == 0
+        except (OSError, TypeError, ValueError):
+            return True
+
+    def _mark_missing(self, it, cam) -> None:
+        """The name of a photo that cannot be found in red (its tooltip says where it was looked for)."""
+        missing = getattr(cam, "key", None) in self._missing
+        it.setForeground(QBrush(QColor(PALETTE["red"])) if missing else QBrush())
+
+    def refresh_missing(self) -> int:
+        """Look again at which photos are missing (after their paths changed): their names and tooltips. Returns how
+        many are missing."""
+        if self.chunk is None:
+            self._missing = set()
+            return 0
+        self._missing = {c.key for c in self.chunk.cameras if self._is_missing(c)}
+        for i in range(self.count()):
+            it = self.item(i)
+            cam = it.data(Qt.ItemDataRole.UserRole)
+            self._mark_missing(it, cam)
+            it.setToolTip(self._tooltip(cam))
+        return len(self._missing)
+
     def _tooltip(self, cam) -> str:
         f = self._flags.get(getattr(cam, "key", None))
+        if getattr(cam, "key", None) in self._missing:
+            text = tr("Foto mancante (o file vuoto), cercata in:\n{0}\n(Cambia percorso... nel menu del tasto "
+                      "destro)", cam.path)
+            return text + (f"\nMarker: {', '.join(f[2])}" if f else "")
         text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
         if not getattr(cam, "enabled", True):
             text += tr(" (disattivata: le prossime elaborazioni la lasciano fuori)")
@@ -968,6 +1000,7 @@ class PhotosPane(QListWidget):
             return
         todo = []
         self._flags = self._marker_flags()
+        self._missing = {c.key for c in chunk.cameras if self._is_missing(c)}
         for cam in chunk.cameras:
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
@@ -976,6 +1009,7 @@ class PhotosPane(QListWidget):
                                  cam.label)
             it.setData(Qt.ItemDataRole.UserRole, cam)
             it.setToolTip(self._tooltip(cam))
+            self._mark_missing(it, cam)
             self.addItem(it)
             self._items.setdefault(cam.path, []).append(it)
             if pm is None and cam.path not in todo:
@@ -1000,7 +1034,7 @@ class PhotosPane(QListWidget):
             cam = it.data(Qt.ItemDataRole.UserRole)
             it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2],
                                   getattr(cam, "enabled", True)))
-            if img.isNull():
+            if img.isNull() and getattr(cam, "key", None) not in self._missing:
                 it.setToolTip(tr("{0}\nfoto non leggibile (file vuoto o mancante)", cam.path))
         self._done += 1
         self.thumbs_progress.emit(self._done, self._total)

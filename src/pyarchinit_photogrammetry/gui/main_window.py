@@ -1039,6 +1039,10 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self._act(m, tr("Ricollega foto (altra cartella)..."), lambda: self.relink_photos(), icon_name="relink",
                   tip=tr("Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                          "cartella spostata o tenuta «solo online» da Dropbox)"))
+        self._act(m, tr("Cambia percorso delle foto selezionate..."), lambda: self.change_photo_paths(),
+                  icon_name="relink",
+                  tip=tr("Le foto selezionate nel pannello Foto lette da un altro file (una foto) o dai file con lo "
+                         "stesso nome in un'altra cartella (più foto)"))
         self._act(m, tr("Aggiungi chunk"), self.add_chunk, processing=True, icon_name="chunk_add")
         self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
         self._act(m, tr("Aggancia chunk con legami..."), self.tie_chunks, processing=True, icon_name="chunk",
@@ -3463,6 +3467,39 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             if card is not None:
                 card.close()
         self.statusBar().showMessage(tr("Aperto {0}", path), 5000)
+        QTimer.singleShot(0, self, self.check_photos_on_open)  # once the project is shown
+
+    def check_photos_on_open(self) -> int:
+        """The enabled photos of the project whose file is missing or empty (only looked at, not read): said in the log
+        and, when there are some, a box offers *Ricollega foto...* (the photos found by name in a folder) or *Più
+        tardi*. Returns how many photos are missing."""
+        doc = self.doc
+        if doc is None:
+            return 0
+        found = []
+        for ch in doc.chunks:
+            try:
+                gone = ch.missing_photos()
+            except Exception as exc:  # noqa: BLE001 - the project is open anyway
+                log.warning("Foto di %s non controllate: %s", ch.label, exc)
+                continue
+            if gone:
+                found.append((ch, gone))
+        total = sum(len(g) for _c, g in found)
+        if not total:
+            return 0
+        where = ", ".join(f"{c.label} {len(g)}" for c, g in found)
+        self.log_pane.warning(tr("{0} foto non trovate o vuote ({1}): Flusso di lavoro > Ricollega foto, o Cambia "
+                                 "percorso... sulle foto del pannello Foto", total, where))
+        names = [Path(c.path).name for _ch, g in found for c in g]
+        listed = "\n".join(names[:5]) + ("\n..." if len(names) > 5 else "")
+        text = tr("{0} foto del progetto non si trovano (cartella spostata, disco non collegato) o sono vuote (file "
+                  "tenuti «solo online» da Dropbox, iCloud o OneDrive):\n{1}\n\nRicollega foto... le cerca per nome "
+                  "in una cartella e nelle sue sottocartelle.", total, listed)
+        r = choice(self, "warning", tr("Foto non trovate"), text, ["Ricollega foto...", "Più tardi"], cancel=None)
+        if r == 0:
+            self.relink_photos(only_unreadable=True, chunks=[c for c, _g in found])
+        return total
 
     def _progress_card(self, title: str, subtitle: str = ""):
         """The splash card over the window, for a long step that is not a background task."""
@@ -6672,7 +6709,12 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         """Right click in the Photos pane: quality, enable/disable, masks of the selected photos."""
         if self.chunk is None:
             return
-        cams = self.photos.selected_cameras()
+        menu = self._photos_menu_for(self.photos.selected_cameras())
+        menu.exec(self.photos.mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _photos_menu_for(self, cams) -> QMenu:
+        """The menu of the Photos pane for the photos ``cams`` selected."""
         menu = QMenu(self)
         if len(cams) == 1:
             menu.addAction(icon("photos"), tr("Apri"), lambda: self.open_photo(cams[0]))
@@ -6697,7 +6739,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             menu.addAction(icon("mask"), tr("Maschere dal modello (foto selezionate)"), self.masks_from_model)
             menu.addAction(icon("mask"), tr("Maschere con SAM 2.1 (foto selezionate)"), self.masks_with_sam)
             menu.addAction(tr("Rimuovi le maschere delle foto selezionate"), lambda: self.masks_remove(selected=True))
-        menu.exec(self.photos.mapToGlobal(pos))
+            menu.addSeparator()
+            menu.addAction(icon("relink"), tr("Cambia percorso..."), lambda: self.change_photo_paths(cams))
+        return menu
 
     def estimate_quality(self) -> None:
         if not self._need_chunk():
@@ -7933,17 +7977,23 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             if not self.relink_photos():  # every photo found there: a complete copy replaces the folder
                 return None
 
-    def relink_photos(self, only_unreadable: bool = False) -> bool:
+    def relink_photos(self, only_unreadable: bool = False, chunks=None) -> bool:
         """Point the photos to the files with the same names in another folder (and its
-        subfolders): a copy on another disk, a folder moved or renamed."""
-        if not self._need_chunk():
+        subfolders): a copy on another disk, a folder moved or renamed. ``chunks``: those chunks (default: the
+        active one)."""
+        if not chunks and not self._need_chunk():
             return False
         folder = QFileDialog.getExistingDirectory(self, tr("Cartella con le foto (anche nelle sottocartelle)"),
                                                   self._last_dir())
         if not folder:
             return False
+        r = {"relinked": 0, "not_found": [], "unreadable": 0}
         try:
-            r = self.chunk.relink_photos(folder, only_unreadable=only_unreadable)
+            for ch in chunks or [self.chunk]:
+                one = ch.relink_photos(folder, only_unreadable=only_unreadable)
+                r["relinked"] += one["relinked"]
+                r["not_found"] += one["not_found"]
+                r["unreadable"] += one["unreadable"]
         except Exception as exc:
             self._exc("Ricollegamento delle foto non riuscito", exc)
             return False
@@ -7962,6 +8012,58 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             except Exception as exc:
                 log.error("Salvataggio non riuscito: %s", exc)
         self.photos.set_chunk(self.chunk)
+        return True
+
+    def change_photo_paths(self, cams=None) -> bool:
+        """*Cambia percorso...* (Metashape's *Change Path*) of the photos selected in the Photos pane (or ``cams``):
+        one photo is read from the file chosen, of any name; several from the files of the same names in the folder
+        chosen (and its subfolders). One step of Modifica > Annulla."""
+        from .photo_paths import PhotoPathsStep, state
+
+        if not self._need_chunk():
+            return False
+        cams = list(self.photos.selected_cameras() if cams is None else cams)
+        if not cams:
+            self._warn("Seleziona nel pannello Foto le foto di cui cambiare il percorso.")
+            return False
+        ch = self.chunk
+        before = state(ch)
+        try:
+            if len(cams) == 1:
+                cam = cams[0]
+                old = Path(cam.path).parent
+                from ..io.raw import RAW_EXTENSIONS
+
+                raws = " ".join(f"*{e} *{e.upper()}" for e in sorted(RAW_EXTENSIONS))
+                path, _ = QFileDialog.getOpenFileName(
+                    self, tr("Nuovo file della foto {0}", cam.label), str(old) if old.is_dir() else self._last_dir(),
+                    tr("Immagini e file raw") + f" (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF {raws})")
+                if not path:
+                    return False
+                ch.set_photo_path(cam, path)
+                text = tr("Foto {0} letta da {1}", cam.label, path)
+            else:
+                folder = QFileDialog.getExistingDirectory(
+                    self, tr("Cartella con le {0} foto selezionate (anche nelle sottocartelle)", len(cams)),
+                    self._last_dir())
+                if not folder:
+                    return False
+                r = ch.relink_photos(folder, cameras=cams)
+                text = tr("{0} foto su {1} collegate a {2}", r["relinked"], len(cams), folder)
+                if r["not_found"]:
+                    text += tr("; {0} non trovate ({1}", len(r['not_found']), ', '.join(r['not_found'][:3])) + \
+                        ("...)" if len(r["not_found"]) > 3 else ")")
+        except Exception as exc:
+            self._exc("Cambio del percorso delle foto non riuscito", exc)
+            return False
+        after = state(ch)
+        if after != before:
+            if self.history is not None:
+                self.history.push(tr("Cambia percorso delle foto"), PhotoPathsStep(self, ch, before, after))
+            self.setWindowModified(True)
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 15000)
+        self.photos.set_chunk(ch)
         return True
 
     def crop_cloud(self) -> None:
