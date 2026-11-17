@@ -847,14 +847,14 @@ def _write_copy(source: Path, target: Path, progress=None) -> None:
 @dataclass
 class LinkedRaster:
     """A raster :meth:`RustGisLink.start` gave RustGIS: its own layer there (``layer``: loaded from the file, or
-    downloaded whole), or a tile layer RustGIS reads in place from the link's server (``url``: of the raster, or of
-    its ``copy``)."""
+    downloaded whole), or what RustGIS reads in place from the link's server (``url``: of the raster, or of its
+    ``copy``) - a tile layer up to RustGIS 0.5 (no ``layer``), a raster layer from RustGIS 0.6 on (``layer`` too)."""
     name: str  # as RustGIS shows it (two rasters may have the same)
     path: Path  # the raster given
     hidden: bool = False  # given hidden: shown when the user ticks it in RustGIS
     opacity: float | None = None  # 0-1 as given; None: RustGIS's own
     layer: str | None = None  # the id of RustGIS's layer of it
-    url: str | None = None  # the address RustGIS reads it from in place: a tile layer, in no group
+    url: str | None = None  # the address RustGIS reads it from in place: a tile layer (in no group) when no layer
     copy: Path | None = None  # what is served in its place, a copy RustGIS reads (:func:`raster_route` "copy")
     version: tuple | None = None  # its file when it was given (:func:`_file_version`): another one is given again
 
@@ -1189,6 +1189,9 @@ class RasterServer(ThreadingHTTPServer):
     TIMEOUT = 300.0  # seconds a connection waits for its next request, or an answer for a reader that takes none
     STEP = 0.5  # seconds a thread waits at a time, between which it sees the server close
     CONNECTIONS = 32  # connections served at once: each holds a thread
+    # connections waiting to be taken: RustGIS 0.6 and later open up to 16 to one server at once, for the tiles a view
+    # needs; past Python's own queue of 5, macOS refuses them (the tiles are not read) and Linux waits a second
+    request_queue_size = 64
     CLOSE_WAIT = 5.0  # seconds close() waits for the threads of the connections (they end within STEP)
 
     def __init__(self) -> None:
@@ -2517,8 +2520,8 @@ class RustGisLink:
 
     def stop(self, withdraw: bool = False) -> None:
         """Forgets RustGIS's layers: after it nothing is sent or asked. RustGIS keeps them, with what they have - all
-        but the tile layers it reads from the link's raster server, which would draw nothing once the server stops:
-        those are taken away first, as far as RustGIS answers (:meth:`_remove_tiles`, never raised: its lists read with
+        but the tile layers it reads from the link's raster server, and the raster layers RustGIS 0.6 and later read in
+        place from it, which would draw nothing once the server stops: those are taken away first, as far as RustGIS answers (:meth:`_remove_tiles`, never raised: its lists read with
         a wait of :data:`STOP_WAIT` seconds, its scripts with the transport's own), then the server stops
         (:attr:`server`). ``withdraw``: the link's layers go from RustGIS too, and its group once empty
         (:meth:`_withdraw`) - for when RustGIS is to show another chunk, or the chunk in another system: call it right
@@ -2570,10 +2573,13 @@ class RustGisLink:
     def _raster_ours(layer, entry: LinkedRaster) -> bool:
         """Whether a layer ``list_layers`` lists is RustGIS's layer of ``entry``: a raster read from the file given (or
         from its copy), or one RustGIS downloaded whole from the address given - named as it was given, no file of
-        this computer at its source: another project open there gives its own layers the same ids."""
+        this computer at its source: another project open there gives its own layers the same ids. One RustGIS 0.6 or
+        later reads in place from the link's server is the raster read from the address given."""
         if not isinstance(layer, dict) or layer.get("type") != "Raster":
             return False
         source = layer.get("source")
+        if entry.url is not None:  # read in place from the link's server (RustGIS 0.6 and later): by that address
+            return source == entry.url
         if _same_file(source, entry.copy or entry.path):
             return True
         return (entry.layer is not None and entry.url is None and layer.get("name") == entry.name
@@ -2590,7 +2596,7 @@ class RustGisLink:
                 self._command("layer.remove", {"layer": ids})
             except RustGisRefused as exc:
                 log.warning("RustGIS link: %d raster layers stay in RustGIS: %s", len(ids), exc)
-        addresses = {r.url for r in entries if r.url}
+        addresses = {r.url for r in entries if r.url and not r.layer}
         if addresses:
             self._take_tiles_away(lambda url: url in addresses)
 
@@ -2831,6 +2837,26 @@ class RustGisLink:
             except RustGisError as exc:
                 log.warning("RustGIS link: tile layers keep the names %s: %s", ", ".join(marks), exc)
 
+    def _remove_served_layers(self, wanted, listing: dict | None = None) -> None:
+        """The raster layers RustGIS 0.6 and later read in place from an address ``wanted`` accepts (their ``source``)
+        taken away by their ids, in one command: once the server of that address is gone they would draw nothing.
+        ``listing``: RustGIS's list already read, else read with a wait of :data:`STOP_WAIT` seconds. Never raised:
+        what stays is said in the log."""
+        try:
+            if listing is None:
+                with _waiting_at_most(self.transport, STOP_WAIT):
+                    listing = self.transport.call("list_layers", {})
+            raw = listing.get("layers") if isinstance(listing, dict) else None
+            ids = [layer["id"] for layer in (raw if isinstance(raw, list) else [])
+                   if isinstance(layer, dict) and layer.get("type") == "Raster" and isinstance(layer.get("source"), str)
+                   and isinstance(layer.get("id"), int) and not isinstance(layer.get("id"), bool)
+                   and wanted(layer["source"])]
+            if ids:
+                self._command("layer.remove", {"layer": ids})
+        except RustGisError as exc:
+            log.warning("RustGIS link: the raster layers read from a raster server of the program stay in RustGIS: %s",
+                        exc)
+
     def _remove_tiles(self, base: str) -> None:
         """Takes out of RustGIS the tile layers it reads from the link's raster server - those whose address starts
         with ``base`` - and nothing else, whatever happens meanwhile: each is marked first with a name of its own
@@ -2838,7 +2864,11 @@ class RustGisLink:
         those found marked on an address of the server are removed by their marks, in one script. A tile layer of the
         user's, whatever its name or place, is never removed. One of the link's that moved meanwhile, or each when
         RustGIS refuses, stays, said in the log (refused, it gets its name back). A removal whose answer was lost is
-        not sent again: run later, it still removes only the marked ones. Never raised."""
+        not sent again: run later, it still removes only the marked ones. Never raised. The raster layers RustGIS 0.6
+        and later read in place from the server go too, by their ids (:meth:`_remove_served_layers`), when the link
+        has any (a start that failed takes its own away)."""
+        if any(r.url and r.layer for r in self.rasters):
+            self._remove_served_layers(lambda url: url.startswith(base))
         self._take_tiles_away(lambda url: url.startswith(base))
 
     def _take_tiles_away(self, wanted) -> None:
@@ -2865,7 +2895,8 @@ class RustGisLink:
         RustGIS busy then, or the program closed without stopping it - which draw nothing any more: those at an address
         a raster server gives (:data:`SERVED_ADDRESS`) where nothing listens now (:func:`_listening`). A server that
         listens is this link's or another window's: their tile layers stay, as do the user's. Taken away by their marks
-        (:meth:`_take_tiles_away`). Never raised."""
+        (:meth:`_take_tiles_away`); the raster layers RustGIS 0.6 and later read in place from such an address, by
+        their ids (:meth:`_remove_served_layers`). Never raised."""
         try:
             with _waiting_at_most(self.transport, STOP_WAIT):
                 listing = self.transport.call("list_layers", {})
@@ -2875,6 +2906,14 @@ class RustGisLink:
         raw = listing.get("tileLayers") if isinstance(listing, dict) else None
         addresses = {t["url"] for t in (raw if isinstance(raw, list) else [])
                      if isinstance(t, dict) and isinstance(t.get("url"), str) and SERVED_ADDRESS.fullmatch(t["url"])}
+        raw = listing.get("layers") if isinstance(listing, dict) else None
+        sources = {layer["source"] for layer in (raw if isinstance(raw, list) else [])
+                   if isinstance(layer, dict) and layer.get("type") == "Raster" and isinstance(layer.get("source"), str)
+                   and SERVED_ADDRESS.fullmatch(layer["source"])}
+        gone = {url for url in sources if not _listening(url)}
+        if gone:  # RustGIS 0.6 and later: raster layers read in place
+            log.info("RustGIS link: %d raster layers of a raster server no longer there are taken away", len(gone))
+            self._remove_served_layers(lambda url: url in gone, listing)
         stale = {url for url in addresses if not _listening(url)}
         if stale:
             log.info("RustGIS link: %d tile layers of a raster server no longer there are taken away", len(stale))
@@ -2958,7 +2997,8 @@ class RustGisLink:
         place of one RustGIS cannot read a copy it reads (:meth:`_copy_for`, ``progress`` following it; ``copies``
         False: a copy to write is :class:`_CopyWanted`, for :meth:`write_copies`), itself given as any raster is: as a
         file when small or a palette, else by its address - and what RustGIS made of it written into ``entry``: its
-        layer, or the address of its tile layer, and the version of its file given (:attr:`LinkedRaster.version`)."""
+        layer (and the address it reads it from in place, RustGIS 0.6 and later), or the address of its tile layer (up
+        to RustGIS 0.5), and the version of its file given (:attr:`LinkedRaster.version`)."""
         entry.version = _file_version(entry.path)
         route, given = raster_route(entry.path), entry.path
         if route == "refused":
@@ -2972,10 +3012,13 @@ class RustGisLink:
             return
         address = self._address(given)
         answer = self._command("layer.addUrl", {"url": address, "name": entry.name})
-        if isinstance(answer, dict) and answer.get("inPlace") is True:
+        if isinstance(answer, dict) and answer.get("inPlace") is True:  # up to RustGIS 0.5: a tile layer
             entry.url = address
             return
         entry.layer = str(_added_layer(answer))
+        if answer["result"].get("inPlace") is True:  # RustGIS 0.6 and later: a raster layer read in place
+            entry.url = address
+            return
         log.info("RustGIS downloaded the raster %s whole instead of reading it in place: it shows it from an overview",
                  entry.name)
 
@@ -2997,7 +3040,7 @@ class RustGisLink:
                  for r in rasters if r.layer and r.opacity is not None]
         props = {r.url: {**({"visible": False} if r.hidden else {}),
                          **({"opacity": r.opacity} if r.opacity is not None else {})}
-                 for r in rasters if r.url and (r.hidden or r.opacity is not None)}
+                 for r in rasters if r.url and not r.layer and (r.hidden or r.opacity is not None)}
         marks: dict = {}
         if props:
             try:

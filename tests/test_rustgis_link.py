@@ -1678,7 +1678,9 @@ class FakeEngine:
     unless ``layer.addData`` says ``"stream": false``, and then refuses every edit, as RustGIS does past 100,000.
     ``layer.addUrl`` reads the first 64 KiB of the address by range, as RustGIS does, and adds a TIFF as a tile layer
     read in place (kind ``cog``, ``tile_layers``, top first: not a layer, in no group), or, with ``whole``, downloads it
-    whole as a raster layer, as RustGIS does a GeoTIFF in strips; what it read is in ``fetched``. A tile layer is named
+    whole as a raster layer, as RustGIS does a GeoTIFF in strips; what it read is in ``fetched``. As RustGIS 0.6 and
+    later (``version``), it adds the TIFF instead as a raster layer read in place from the address (``inPlace`` in its
+    ``result``, the address its ``source``), as it does a layer of a file. A tile layer is named
     by its place or by its name (the first of that name, in any case); ``map.setTiles`` (visible, opacity, rename)
     answers with no object (refused as a command, as the transport refuses it; it works in a script), and a removal of
     tile layers by an empty or missing place, which in RustGIS takes away the top tile layer or all of them, fails the
@@ -1705,6 +1707,8 @@ class FakeEngine:
         self.tile_layers: list[dict] = []  # top first: name, url, kind (what layer.addUrl reads in place)
         self.fetched: list = []  # (url, range, status) of each first read of an address
         self.whole = False  # layer.addUrl downloads the file whole, as a raster layer
+        # layer.addUrl reads a GeoTIFF in place as a raster layer, not as a tile layer: RustGIS 0.6.0 and later
+        self.cog_layers = tuple(int(n) for n in version.split(".")[:2]) >= (0, 6)
         self.removed: list[dict] = []  # each tile layer map.removeTiles took away
 
     def initialize(self) -> str:
@@ -1946,6 +1950,15 @@ class FakeEngine:
                          "kind": "Raster", "srs": None, "fields": {}, "features": [], "selection": set()}
                 self.layers.insert(0, layer)
                 return {"layersAdded": [name], "result": {"bands": 3, "layer": layer["id"]}}
+            if self.cog_layers:  # as RustGIS 0.6 and 0.7 answer
+                layer = {"id": self._new_id(), "name": name, "source": url, "table": None, "kind": "Raster",
+                         "srs": None, "fields": {}, "features": [], "selection": set()}
+                self.layers.insert(0, layer)
+                return {"layersAdded": [name], "notices": [f"{name}: read in place: the map draws its pixels as it "
+                                                           "needs them"],
+                        "result": {"bands": 3, "bounds": [0.0, 0.0, 0.0, 0.0], "height": 512, "inPlace": True,
+                                   "kind": "raster", "layer": layer["id"], "name": name, "overviewOf": [8000, 6000],
+                                   "width": 512}}
             self.tile_layers.insert(0, {"name": name, "url": url, "kind": "cog"})
             return {"bounds": [0.0, 0.0, 0.0, 0.0], "inPlace": True, "index": 0, "kind": "cog", "name": name}
         if command == "map.removeTiles":
@@ -2872,6 +2885,47 @@ def test_raster_route(tmp_path):
     assert link.raster_route(_two_tables(tmp_path / "due.gpkg")) == "refused"
 
 
+def test_the_server_takes_the_connections_rustgis_opens_at_once(tmp_path):
+    """RustGIS 0.6 and later read a raster in place as a layer, the tiles a view needs asked for at once on up to 16
+    connections to one server: all are taken (a listening queue of 5, Python's own, refused those past it on macOS -
+    "some of its tiles couldn't be read" - and made Linux try again a second later), each answered."""
+    raster = tmp_path / "orto.tif"
+    raster.write_bytes(bytes(range(256)) * 64)
+    server = link.RasterServer()
+    assert server.request_queue_size >= 16
+    path = urllib.parse.urlsplit(server.url(raster)).path
+    port = server.server_address[1]
+    many = 24
+    ready, answers = threading.Barrier(many), []
+
+    def read(n: int) -> None:
+        connection = socket.socket()
+        connection.settimeout(10)
+        try:
+            ready.wait()
+            connection.connect(("127.0.0.1", port))
+            connection.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes={n}-{n}\r\n"
+                               "Connection: close\r\n\r\n".encode())
+            data = b""
+            while chunk := connection.recv(65536):
+                data += chunk
+            answers.append((n, data.split(b" ", 2)[1], data.rsplit(b"\r\n\r\n", 1)[-1]))
+        except OSError as exc:
+            answers.append((n, type(exc).__name__, b""))
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=read, args=(n,)) for n in range(many)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+    finally:
+        server.close()
+    assert sorted(answers) == [(n, b"206", bytes([n])) for n in range(many)]
+
+
 def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
     """The raster server listens on 127.0.0.1 only, its files under a random prefix of 32 hexadecimal characters and a
     random name each: a file given to url() whole or by one byte range (206, Content-Range), its last bytes, 416 past
@@ -3090,6 +3144,85 @@ def test_start_sends_large_rasters_by_address(tmp_path):
     with pytest.raises(OSError):
         _http(port, urllib.parse.urlsplit(by_address["url"]).path)
     assert fake.tile_layers == [] and len(fake.layers) == 9
+
+
+def test_rustgis_0_6_reads_a_large_raster_in_place_as_a_layer(tmp_path, caplog):
+    """RustGIS 0.6 and later answer layer.addUrl with a raster layer read in place from the address (``inPlace`` in its
+    ``result``), no tile layer: the link keeps both, its layer and its address, puts it in the chunk's group, hides it
+    and makes it transparent as a layer (no map.setTiles), and does not say it was downloaded whole. stop() takes that
+    layer away before the server closes - it would draw nothing after - and nothing else: the link's tables and the
+    DEM given as a file stay, and so does a layer of the user's of the same name read from another address."""
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    small = _small_dem(tmp_path / "dem.tif")
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine(version="0.7.0")
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    try:
+        with caplog.at_level(logging.INFO, logger=link.__name__):
+            rl.start([{"path": large, "name": "Ortofoto", "hidden": True, "opacity": 0.4},
+                      {"path": small, "name": "DEM"}])
+        assert "whole" not in caplog.text
+        ortho, dem = rl.rasters
+        layer = next(l for l in fake.layers if l["source"] == ortho.url)
+        assert ortho.url.startswith(rl.server.base) and ortho.layer == str(layer["id"]) and dem.url is None
+        assert fake.tile_layers == [] and not [s for s in fake.scripts if "Tiles" in s]
+        (group,) = fake.groups
+        assert {int(ortho.layer), int(dem.layer)} <= set(group["layers"])
+        assert (layer.get("visible"), layer.get("transparency")) == (False, 60)
+        theirs = {"id": fake._new_id(), "name": "Ortofoto", "source": f"http://127.0.0.1:9/{'c' * 32}/{'d' * 32}.tif",
+                  "table": None, "kind": "Raster", "srs": None, "fields": {}, "features": [], "selection": set()}
+        fake.layers.append(theirs)
+        before = [l["id"] for l in fake.layers]
+    finally:
+        rl.stop()
+    assert rl.server is None and [l["id"] for l in fake.layers] == [i for i in before if i != layer["id"]]
+
+
+def test_rasters_read_in_place_as_layers_go_with_their_raster(tmp_path):
+    """With RustGIS 0.6 and later, a raster read in place is a layer: update_rasters takes it away as a layer when its
+    raster is no longer given, and stop(withdraw=True) with the link's other layers."""
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine(version="0.7.0")
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    try:
+        rl.start([{"path": large, "name": "Ortofoto"}])
+        address = rl.rasters[0].url
+        assert rl.update_rasters([]) == {"given": [], "taken": ["Ortofoto"], "refused": {}, "copies": []}
+        assert not [l for l in fake.layers if l["source"] == address]
+        rl.update_rasters([{"path": large, "name": "Ortofoto"}])
+        (again,) = rl.rasters
+        assert [l["id"] for l in fake.layers if l["source"] == again.url] == [int(again.layer)]
+        rl.stop(withdraw=True)
+        assert fake.layers == [] and fake.groups == []
+    finally:
+        rl.stop()
+
+
+def test_start_takes_away_layers_read_from_a_raster_server_no_longer_there(tmp_path):
+    """With RustGIS 0.6 and later, what an earlier link left read in place is a layer: the start takes away a raster
+    layer read from a raster server where nothing listens now, never one whose server still answers (another window's
+    link) nor one of the user's."""
+    small = _small_dem(tmp_path / "dem.tif")
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    other_window = link.RasterServer()
+    dead = f"http://127.0.0.1:{_free_port()}/{'a' * 32}/{'b' * 32}.tif"
+    alive = other_window.url(small)
+    mine = "https://example.org/mia.tif"
+    fake = FakeEngine(version="0.7.0")
+    for source in (dead, alive, mine):
+        fake.layers.append({"id": fake._new_id(), "name": "Ortofoto", "source": source, "table": None,
+                            "kind": "Raster", "srs": None, "fields": {}, "features": [], "selection": set()})
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    try:
+        rl.start([])
+        assert [l["source"] for l in fake.layers if l["kind"] == "Raster"] == [alive, mine]
+    finally:
+        rl.stop()
+        other_window.close()
 
 
 def _marked(script: str) -> list:
@@ -3842,12 +3975,30 @@ def _drawn_colour(engine, png: Path, fx: float = 0.5) -> tuple:
     return tuple(pixels[h // 2 - 2:h // 2 + 3, x - 2:x + 3].reshape(-1, 3).mean(0).round().astype(int).tolist())
 
 
+def _served(engine) -> list:
+    """What RustGIS reads in place from an address, as ``(name, address)``: the raster layers read from one (RustGIS 0.6
+    and later), then the tile layers (up to 0.5), each list top first."""
+    listing = engine.call("list_layers", {})
+    return ([(l["name"], l["source"]) for l in listing["layers"]
+             if l.get("type") == "Raster" and str(l.get("source")).startswith("http")]
+            + [(t["name"], t["url"]) for t in listing["tileLayers"]])
+
+
+def _zoom_to(engine, given) -> None:
+    """RustGIS's map zoomed to a raster the link gave it: its layer, or its tile layer (by its name)."""
+    if given.layer:
+        engine.call("run_command", {"command": "layer.zoomTo", "params": {"layer": int(given.layer)}})
+    else:
+        engine.call("run_command", {"command": "map.zoomToTiles", "params": {"name": given.name}})
+
+
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
 def test_rustgis_reads_our_orthophoto_by_range(tmp_path, monkeypatch):
     """RustGIS's own engine and an orthophoto written as engine/ortho.py writes one: the link serves it, layer.addUrl
-    takes it in place as a tile layer (kind cog) after reading its header by range, and a map drawn where the full
-    resolution is needed reads full-resolution tiles only, each request one range of whole tiles - never the whole
-    file. stop() takes the tile layer away. The pixels are 50 cm: the engine's map goes no closer than 1:399."""
+    takes it in place after reading its header by range - a tile layer (kind cog) up to RustGIS 0.5, a raster layer
+    read from the address from 0.6 on -, and a map drawn where the full resolution is needed reads full-resolution
+    tiles only, each request one range of whole tiles - never the whole file. stop() takes it away. The pixels are 50
+    cm: the engine's map goes no closer than 1:399."""
     import rasterio
 
     x0, y0, side, crs = 291000.0, 4640000.0, 2048, "EPSG:32633"
@@ -3872,12 +4023,13 @@ def test_rustgis_reads_our_orthophoto_by_range(tmp_path, monkeypatch):
         try:
             assert rl.start([{"path": ortho, "name": "Ortofoto"}])["rasters"] == 1
             (given,) = rl.rasters
-            assert given.url and given.layer is None
-            (tile,) = engine.call("list_layers", {})["tileLayers"]
-            assert (tile["name"], tile["kind"], tile["url"]) == ("Ortofoto", "cog", given.url)
+            assert given.url and _served(engine) == [("Ortofoto", given.url)]
+            if given.layer is None:  # up to RustGIS 0.5
+                (tile,) = engine.call("list_layers", {})["tileLayers"]
+                assert tile["kind"] == "cog"
             assert asked and all(method == "GET" and spec for method, spec in asked)  # its header, by range
-            for command, params in (("map.zoomToTiles", {"name": "Ortofoto"}), ("map.setScale", {"scale": 800})):
-                engine.call("run_command", {"command": command, "params": params})
+            _zoom_to(engine, given)
+            engine.call("run_command", {"command": "map.setScale", "params": {"scale": 800}})
             asked.clear()
             engine.call("run_command", {"command": "share.exportMap", "params": {
                 "path": str(tmp_path / "mappa.png"), "width": 1024, "height": 1024}})
@@ -3887,7 +4039,7 @@ def test_rustgis_reads_our_orthophoto_by_range(tmp_path, monkeypatch):
             address = given.url
         finally:
             rl.stop()
-        assert engine.call("list_layers", {})["tileLayers"] == []  # taken away by stop()
+        assert _served(engine) == []  # taken away by stop()
     with pytest.raises(OSError):
         _http(urllib.parse.urlsplit(address).port, urllib.parse.urlsplit(address).path)
 
@@ -3913,7 +4065,7 @@ def test_hidden_dems_leave_the_orthophoto_on_top_with_the_real_engine(tmp_path, 
             assert ortho_r.url and shaded.layer and plain.layer
             visible = {str(l["id"]): l.get("visible") for l in engine.call("list_layers", {})["layers"]}
             assert (visible[shaded.layer], visible[plain.layer]) == (False, False)
-            engine.call("run_command", {"command": "map.zoomToTiles", "params": {"name": "Ortofoto"}})
+            _zoom_to(engine, ortho_r)
             seen = _drawn_colour(engine, tmp_path / "mappa.png")
             assert max(abs(a - b) for a, b in zip(seen, (220, 20, 20))) <= 3, seen
             engine.call("run_command", {"command": "layer.visibility", "params": {"layer": [int(plain.layer)],
@@ -3926,9 +4078,10 @@ def test_hidden_dems_leave_the_orthophoto_on_top_with_the_real_engine(tmp_path, 
 
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
 def test_stop_takes_away_only_our_tile_layers_with_the_real_engine(tmp_path, monkeypatch):
-    """RustGIS's own engine: the link's orthophoto read in place, given hidden and half transparent (set through its
-    mark, its name given back), then a tile layer of the user's (XYZ) and a COG of the user's read from another server,
-    both named as the link's: stop() takes away only the link's, the user's keep their names."""
+    """RustGIS's own engine: the link's orthophoto read in place, given hidden and half transparent (up to RustGIS 0.5
+    a tile layer, set through its mark, its name given back; from 0.6 on a layer), then a tile layer of the user's
+    (XYZ) and a COG of the user's read from another server, both named as the link's: stop() takes away only the
+    link's, the user's keep their names."""
     x0, y0, crs = 291000.0, 4640000.0, "EPSG:32633"
     ortho = _orthophoto(tmp_path / "orthomosaic.tif", 512, 0.5, crs, x0, y0)
     monkeypatch.setattr(link, "RASTER_SAMPLES", 500_000)
@@ -3940,26 +4093,36 @@ def test_stop_takes_away_only_our_tile_layers_with_the_real_engine(tmp_path, mon
             rl = link.RustGisLink(live, engine, "Saggio 1", crs)
             try:
                 rl.start([{"path": ortho, "name": "Ortofoto", "hidden": True, "opacity": 0.4}])
-                (tile,) = engine.call("list_layers", {})["tileLayers"]
-                assert (tile["name"], tile["visible"], round(tile["opacity"], 3)) == ("Ortofoto", False, 0.4)
+                (given,) = rl.rasters
+                listing = engine.call("list_layers", {})
+                if given.layer is None:  # up to RustGIS 0.5: a tile layer
+                    (tile,) = listing["tileLayers"]
+                    assert (tile["name"], tile["visible"], round(tile["opacity"], 3)) == ("Ortofoto", False, 0.4)
+                else:  # RustGIS 0.6 and later: a layer, made transparent as a layer is
+                    (layer,) = [l for l in listing["layers"] if str(l["id"]) == given.layer]
+                    assert (layer["name"], layer["visible"], layer["source"]) == ("Ortofoto", False, given.url)
+                    assert round(layer.get("transparency", 60)) == 60 and listing["tileLayers"] == []  # 0.6: unlisted
                 xyz = "http://127.0.0.1:9/{z}/{x}/{y}.png"
                 engine.call("run_command", {"command": "map.addTiles", "params": {"url": xyz, "name": "Ortofoto"}})
                 cog = theirs.url(ortho)
                 engine.call("run_command", {"command": "layer.addUrl", "params": {"url": cog, "name": "Ortofoto"}})
-                assert len(engine.call("list_layers", {})["tileLayers"]) == 3
+                served = _served(engine)
+                assert len(served) == 3
             finally:
                 rl.stop()
-            left = engine.call("list_layers", {})["tileLayers"]
-            assert sorted((t["url"], t["name"]) for t in left) == sorted([(cog, "Ortofoto"), (xyz, "Ortofoto")])
+            # the user's as they were (RustGIS 0.6 and later name a second layer "Ortofoto" "Ortofoto (2)" itself)
+            assert sorted(_served(engine)) == sorted(item for item in served if item[1] in (cog, xyz))
+            assert sorted(url for _, url in _served(engine)) == sorted([cog, xyz])
     finally:
         theirs.close()
 
 
 class Hooked:
-    """A transport that calls ``before`` once, right before the next script it is asked to run (armed by setting it)."""
+    """A transport that calls ``before`` once, right before the next script it is asked to run (armed by setting it),
+    or the next call of the tool ``on`` names."""
 
     def __init__(self, transport):
-        self.transport, self.before = transport, None
+        self.transport, self.before, self.on = transport, None, "run"
 
     @property
     def timeout(self):
@@ -3973,7 +4136,7 @@ class Hooked:
         return self.transport.initialize()
 
     def call(self, tool: str, args: dict) -> dict:
-        if tool == "run" and self.before is not None:
+        if tool == self.on and self.before is not None:
             before, self.before = self.before, None
             before()
         return self.transport.call(tool, args)
@@ -3984,7 +4147,9 @@ def test_tile_layers_go_by_their_marks_with_the_real_engine(tmp_path, monkeypatc
     """RustGIS's own engine and the reviewer's sequences: two links whose stops interleave (the second reads the
     list, the first stops whole, the second renames), and a basemap the user adds between a link's reading and its
     renaming. The user's tile layers always stay, with their names (but one added meanwhile, which keeps the mark);
-    nothing but a link's tile layer is removed; a link's that moved meanwhile stays."""
+    nothing but a link's tile layer is removed; a link's that moved meanwhile stays. From RustGIS 0.6 on the rasters
+    read in place are layers, taken away by their ids: the stops that interleave still leave the user's alone, and
+    there is no renaming to come between."""
     x0, y0, crs = 291000.0, 4640000.0, "EPSG:32633"
     ortho = _orthophoto(tmp_path / "orthomosaic.tif", 512, 0.5, crs, x0, y0)
     monkeypatch.setattr(link, "RASTER_SAMPLES", 500_000)
@@ -3992,8 +4157,7 @@ def test_tile_layers_go_by_their_marks_with_the_real_engine(tmp_path, monkeypatc
     live.write(_drawings([_unit(1, x0 + 50, y0 - 50)]))
     user = "http://127.0.0.1:9/user/{z}/{x}/{y}.png"
 
-    def tiles(engine):
-        return [(t["name"], t["url"]) for t in engine.call("list_layers", {})["tileLayers"]]
+    tiles = _served
 
     with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
         hooked = Hooked(engine)
@@ -4004,6 +4168,9 @@ def test_tile_layers_go_by_their_marks_with_the_real_engine(tmp_path, monkeypatc
             second.start([{"path": ortho, "name": "Ortofoto (B)"}])
             first.start([{"path": ortho, "name": "Ortofoto (A)"}])
             a, b = first.rasters[0].url, second.rasters[0].url
+            as_layers = first.rasters[0].layer is not None  # RustGIS 0.6 and later
+            if as_layers:  # the second's layers go by a command: the first stops right before it
+                hooked.on = "run_command"
             assert [url for _, url in tiles(engine)] == [a, b, user]
             hooked.before = first.stop
             second.stop()
@@ -4013,6 +4180,8 @@ def test_tile_layers_go_by_their_marks_with_the_real_engine(tmp_path, monkeypatc
         finally:
             first.stop()
             second.stop()
+        if as_layers:  # no tile layer of the link's to rename
+            return
         for _ in tiles(engine):  # an empty map for the next sequence
             engine.call("run", {"script": 'map.removeTiles {"index":0}'})
         # a basemap the user adds between the link's reading and its renaming
@@ -4053,10 +4222,7 @@ def test_a_copy_for_a_codec_rustgis_cannot_read_with_the_real_engine(tmp_path, m
                 rl.start([{"path": raster, "name": name}])
                 (given,) = rl.rasters
                 assert given.copy.parent == data_dir / "rustgis" and getattr(given, how)
-                if how == "url":
-                    engine.call("run_command", {"command": "map.zoomToTiles", "params": {"name": name}})
-                else:
-                    engine.call("run_command", {"command": "layer.zoomTo", "params": {"layer": int(given.layer)}})
+                _zoom_to(engine, given)
                 left = _drawn_colour(engine, tmp_path / "mappa.png", 0.4)
                 right = _drawn_colour(engine, tmp_path / "mappa.png", 0.6)
                 assert max(abs(a - b) for a, b in zip(left, (200, 60, 30))) <= 4, (name, left)
@@ -4146,16 +4312,56 @@ def test_push_and_pull_with_the_real_engine(tmp_path, crs, x0, y0):
         assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
 
 
+def _version_of(text: str) -> tuple:
+    """A version such as ``"0.7.0"`` as numbers, to compare."""
+    return tuple(int(n) for n in re.findall(r"\d+", text)[:3])
+
+
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
 def test_a_system_the_real_engine_misplaces_is_refused(tmp_path):
-    """RustGIS 0.4.0 takes the Soldner (Cassini) system of Berlin without converting it: the link refuses it, naming
-    it, and leaves nothing in RustGIS."""
-    live = LiveLink(tmp_path / "qgis", "EPSG:3068")
-    live.write(_drawings([_unit(1, 25000.0, 21000.0)]))
+    """RustGIS (0.4 to 0.7 at least) puts the South African Lo25 system (EPSG:22275, Cape datum) about 107 m from
+    where it is - a datum shift it does not convert: the link refuses it, naming it, and leaves nothing in RustGIS."""
+    from pyproj import Transformer
+
+    x, y = Transformer.from_crs("EPSG:4326", "EPSG:22275", always_xy=True).transform(25.0, -30.0)
+    live = LiveLink(tmp_path / "qgis", "EPSG:22275")
+    live.write(_drawings([_unit(1, x, y)]))
     with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
-        with pytest.raises(link.RustGisRefused, match="EPSG:3068"):
-            link.RustGisLink(live, engine, "Saggio 1", "EPSG:3068").start([])
+        with pytest.raises(link.RustGisRefused, match="EPSG:22275"):
+            link.RustGisLink(live, engine, "Saggio 1", "EPSG:22275").start([])
         assert engine.call("list_layers", {})["layers"] == []
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_the_soldner_system_of_berlin_follows_what_the_real_engine_does(tmp_path):
+    """The Soldner (Cassini) system of Berlin (EPSG:3068): RustGIS up to 0.6 places it wrong (0.4 without converting
+    it, 0.6 some 66 cm away), so the link refuses it, naming it, and leaves nothing in RustGIS; RustGIS 0.7 places it
+    right, so the link takes it - and RustGIS's own export of the units, in longitude and latitude, lies where pyproj
+    puts them."""
+    from pyproj import Transformer
+
+    unit = _unit(1, 25000.0, 21000.0)  # a square of 50 cm: its middle at 25000.25, 21000.25
+    live = LiveLink(tmp_path / "qgis", "EPSG:3068")
+    live.write(_drawings([unit]))
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", "EPSG:3068")
+        if _version_of(engine.initialize()) < (0, 7):
+            with pytest.raises(link.RustGisRefused, match="EPSG:3068"):
+                rl.start([])
+            assert engine.call("list_layers", {})["layers"] == []
+            return
+        try:
+            rl.start([])
+            out = tmp_path / "unita.geojson"
+            engine.call("run_command", {"command": "share.exportLayer", "params": {
+                "layer": int(rl.layers["unita"]), "path": str(out)}})
+            (feature,) = json.loads(out.read_text(encoding="utf-8"))["features"]
+            seen = shapely.geometry.shape(feature["geometry"]).centroid
+            lon, lat = Transformer.from_crs("EPSG:3068", "EPSG:4326", always_xy=True).transform(
+                25000.25, 21000.25)
+            assert link._distance(lon, lat, seen.x, seen.y) <= 0.01
+        finally:
+            rl.stop(withdraw=True)
 
 
 # ---- fix round 1 of the push: copies, the status, foreign layers, adoption, leftovers, set aside
