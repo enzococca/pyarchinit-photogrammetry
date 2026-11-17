@@ -78,8 +78,13 @@ ppg bench table DIR
   the texture, the DEM and the orthophoto: the chain of `ppg process` with its defaults, which the
   record writes out. A reference file or other targets are not options of `run` (the synthetic sets
   pass them; a real set is measured as its photos come). Each of the `--repeat` runs works in
-  `OUT/NAME-<i>`, removed after unless `--keep`; the records go to `OUT`, or to `--records DIR`. The
-  run needs the `bench` extra (`pip install "pyarchinit-photogrammetry[bench]"`: psutil, for the
+  `OUT/NAME-<i>`: `ppg bench` prints nothing while a run lasts; the step that is running and those
+  done are in `result.json` there, rewritten as each step starts and ends, and what the child prints
+  (the warnings of the program and of COLMAP) in `child.log` - both readable meanwhile. The folder
+  is removed after unless `--keep`, or the run failed: then it stays with its log, its result (the
+  error of the step as the child wrote it, before the scrub of the record) and its project, and
+  `ppg bench` says so by the folder's name; the records go to `OUT`, or to `--records DIR`. The run
+  needs the `bench` extra (`pip install "pyarchinit-photogrammetry[bench]"`: psutil, for the
   memory of the child). `--mapper incremental|global` asks the alignment for that mapper (`auto`,
   the default, picks as `ppg process` does); the record keeps it as `mapper_requested` beside the
   `mapper` the run used, and the table compares it.

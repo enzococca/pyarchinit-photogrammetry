@@ -181,6 +181,12 @@ Every cell picks among all the photos that frame it, so no seam follows the tile
 half of the photos 30 % darker and every photo vignetted, the corrected mosaic differs from the one of the
 untouched photos by 0.3 levels in the low frequencies (25 without correction).
 
+**Memory.** The photos the orthophoto reads again are kept in a cache sized on the memory of the computer (a share
+of it, beyond a floor of a few photos per worker). `PPG_PHOTO_CACHE_MB` in the environment, a whole number of
+megabytes, sets that size by hand: smaller on a computer short of memory, larger when the photos are read again too
+often; `PPG_PHOTO_CACHE_MB=0` keeps the floor alone, which is the cache of version 1.10. Any other value is ignored,
+with a line in the log.
+
 A chunk **without aligned photos** (an imported or merged model) gets its orthophoto from the texture of the model:
 see [Orthophoto of a chunk without photos](multi-survey.md#orthophoto-of-a-chunk-without-photos).
 

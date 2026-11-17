@@ -223,7 +223,11 @@ nella funzione data a `run` (gira in un altro thread). `deactivate()` rilascia q
 ha preso oltre alle sue registrazioni (file aperti, timer).
 
 **Annullare i dati del plugin.** Dalla 1.7.3 le chiavi di `chunk.meta` che non sono del programma fanno parte delle
-istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Dalla 1.7.4:
+istantanee di *Modifica > Annulla* ("Dati dei plugin"): `mark_modified()` dopo averle cambiate fa un passo. Le chiavi
+del programma sono quelle di `PROGRAM_KEYS` in `engine/orient.py` - i suoi prodotti e le loro impostazioni (`sfm`,
+`dense`, `model`, `dem`, `orthomosaic`, `drawings`, ...) e due aggiunte dal motore nativo: `engine` (quale motore ha
+fatto ogni passo, `classic` o `native`) e `timings` (i secondi di ogni passo e delle sue fasi); un plugin tiene i suoi
+dati sotto una chiave propria, mai sotto una di quelle. Dalla 1.7.4:
 
 - **Un segno entra nel passo del suo giro.** Un cambiamento dei dati dei plugin segnato nello stesso giro del ciclo
   degli eventi dell'ultimo passo entra in quel passo, chiunque l'abbia fatto: il passo spinto dal plugin
