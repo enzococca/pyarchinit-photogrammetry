@@ -384,6 +384,13 @@ def listing(url: str, progress=None) -> list[str]:
     return list(names)
 
 
+def forget(prefix: str) -> None:
+    """The listings kept for the folders whose address begins with ``prefix`` are dropped: for a site that gave a
+    listing and then did not give its files, so that the next listing asks it again rather than trusting the copy."""
+    for url in [kept for kept in _LISTINGS if kept.startswith(prefix)]:
+        del _LISTINGS[url]
+
+
 def _read_listing(url: str, progress=None) -> list[str]:
     if urllib.parse.urlsplit(url).scheme.lower() == "file":
         path = _local_path(url)

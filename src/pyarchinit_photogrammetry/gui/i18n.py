@@ -247,7 +247,12 @@ def _engine_value(value: str) -> str:
     """A value of a message of the engine in Italian: a text or a message of the section itself (the reason inside
     another message), or a list of them between commas - or between semicolons, as the notes of a warning are; else
     as it is. A list is tried first when every item is of the section, last (between commas) when only some are: a
-    message has commas of its own."""
+    message has commas of its own. A value that is indented (a note under a line) keeps its indent."""
+    core = value.lstrip()
+    return value[:len(value) - len(core)] + _engine_item(core)
+
+
+def _engine_item(value: str) -> str:
     listed = []
     for separator in ("; ", ", "):
         parts = value.split(separator)

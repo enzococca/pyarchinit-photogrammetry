@@ -284,7 +284,78 @@ STATION_NOTES = (
     "its observations",
     "Joining the 4 files of AQUI00ITA",
     "Contacting igs.bkg.bund.de (attempt 2 of 3)",
+    # BKG down and the archives that stand in for it (the EPN Historical Data Centre, SOPAC)
+    "KRAW00POL: no observation files can be had for 2026-10-26 10:20 to 10:35 (GPS time).\n"
+    "BKG could not be reached: https://igs.bkg.bund.de/root_ftp/EUREF/highrate/2026/299/k/: could not connect "
+    "(timed out) (after 3 attempts)\n"
+    "The 30 s files for these hours are not there either.\n"
+    "  EPN Historical Data Centre, daily 30 s files: KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in "
+    "https://epncb.oma.be/pub/RINEX/2026/299/ - not published yet: the EPN Historical Data Centre has the daily files "
+    "a few days after the day (its notice says a week)",
+    "BSHM00ISR: no observation files can be had for 2026-10-26 10:20 to 10:35 (GPS time).\n"
+    "BKG could not be reached: https://igs.bkg.bund.de/root_ftp/IGS/obs/2026/299/: could not connect (timed out) "
+    "(after 3 attempts)\n"
+    "SOPAC could not be reached: https://garner.ucsd.edu/pub/rinex/2026/299/: could not connect (timed out) (after 3 "
+    "attempts) (SOPAC, the data centre of Scripps, asked in BKG's place)",
+    "No broadcast navigation file for 2026-10-26:\n"
+    "BKG could not be reached: https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/299/: could not connect (timed out) "
+    "(after 3 attempts)\n"
+    "EPN Central Bureau could not be reached: https://epncb.oma.be/pub/RINEX/BRDC/2026/: could not connect (timed "
+    "out) (after 3 attempts) (the EPN Historical Data Centre, asked in BKG's place)\n"
+    "BRDC00IGS_[RSU]_20262990000_01D_MN.rnx.gz is not in https://garner.ucsd.edu/pub/rinex/2026/299/ - not published "
+    "yet: SOPAC has the navigation file of a day a day or two after it",
+    "BKG could not be reached: KRAW00POL_R_20262990000_01D_30S_MO.crx.gz could not be downloaded: "
+    "https://igs.bkg.bund.de/root_ftp/EUREF/obs/2026/299/KRAW00POL_R_20262990000_01D_30S_MO.crx.gz: could not connect "
+    "(timed out) (after 3 attempts)",
+    "EPN Historical Data Centre is asked instead of BKG",
+    "2026-10-28: the broadcast navigation file is BRDC00GOP_R_20263010000_01D_MN.rnx.gz (EPN Historical Data Centre)",
 )
+
+#: the lines of the archives that stand in for BKG, and the Italian they are shown in: whole, the names of the data
+#: centres included, and a note that is indented keeps its indent
+STAND_IN_NOTES = {
+    "KRAW00POL: 1 files with an epoch every 30 s (EPN Historical Data Centre)":
+        "KRAW00POL: 1 file con un'epoca ogni 30 s (Centro dati storico dell'EPN)",
+    "BSHM00ISR: 1 files with an epoch every 30 s (SOPAC)": "BSHM00ISR: 1 file con un'epoca ogni 30 s (SOPAC)",
+    "EPN Historical Data Centre is asked instead of BKG": "Centro dati storico dell'EPN si chiede al posto di BKG",
+    "SOPAC is asked instead of BKG": "SOPAC si chiede al posto di BKG",
+    "EPN Central Bureau could not be reached: https://epncb.oma.be/pub/RINEX/2026/299/: could not connect (timed out) "
+    "(after 3 attempts) (the EPN Historical Data Centre, asked in BKG's place)":
+        "EPN Central Bureau non si è potuto raggiungere: https://epncb.oma.be/pub/RINEX/2026/299/: connessione non "
+        "riuscita (timed out) (dopo 3 tentativi) (il Centro dati storico dell'EPN, chiesto al posto del BKG)",
+    "SOPAC could not be reached: https://garner.ucsd.edu/pub/rinex/2026/299/: could not connect (timed out) (after 3 "
+    "attempts) (SOPAC, the data centre of Scripps, asked in BKG's place)":
+        "SOPAC non si è potuto raggiungere: https://garner.ucsd.edu/pub/rinex/2026/299/: connessione non riuscita "
+        "(timed out) (dopo 3 tentativi) (SOPAC, il centro dati di Scripps, chiesto al posto del BKG)",
+    "  EPN Historical Data Centre, daily 30 s files: KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in "
+    "https://epncb.oma.be/pub/RINEX/2026/299/ - not published yet: the EPN Historical Data Centre has the daily files "
+    "a few days after the day (its notice says a week)":
+        "  Centro dati storico dell'EPN, file giornalieri a 30 s: KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz non è "
+        "in https://epncb.oma.be/pub/RINEX/2026/299/ - non ancora pubblicato: il Centro dati storico dell'EPN ha i "
+        "file giornalieri qualche giorno dopo la giornata (il suo avviso dice una settimana)",
+    "  SOPAC, daily 30 s files: BSHM00ISR_[RSU]_20262990000_01D_30S_MO.crx.gz is not in "
+    "https://garner.ucsd.edu/pub/rinex/2026/299/ - not published yet: SOPAC has the daily files of the IGS the day "
+    "after":
+        "  SOPAC, file giornalieri a 30 s: BSHM00ISR_[RSU]_20262990000_01D_30S_MO.crx.gz non è in "
+        "https://garner.ucsd.edu/pub/rinex/2026/299/ - non ancora pubblicato: SOPAC ha i file giornalieri dell'IGS il "
+        "giorno dopo",
+    "2026-10-28: the broadcast navigation file is BRDC00GOP_R_20263010000_01D_MN.rnx.gz (EPN Historical Data Centre)":
+        "2026-10-28: il file di navigazione trasmesso è BRDC00GOP_R_20263010000_01D_MN.rnx.gz (Centro dati storico "
+        "dell'EPN)",
+    "No broadcast navigation file for 2026-10-26:": "Nessun file di navigazione trasmesso per il 2026-10-26:",
+    "BRDC00GOP_[RSU]_20262990000_01D_MN.rnx.gz is not in https://epncb.oma.be/pub/RINEX/BRDC/2026/ - not published "
+    "yet: the EPN Historical Data Centre has the navigation file of a day a day or two after it":
+        "BRDC00GOP_[RSU]_20262990000_01D_MN.rnx.gz non è in https://epncb.oma.be/pub/RINEX/BRDC/2026/ - non ancora "
+        "pubblicato: il Centro dati storico dell'EPN ha il file di navigazione di un giorno uno o due giorni dopo",
+    "BRDC00IGS_[RSU]_20262990000_01D_MN.rnx.gz is not in https://garner.ucsd.edu/pub/rinex/2026/299/":
+        "BRDC00IGS_[RSU]_20262990000_01D_MN.rnx.gz non è in https://garner.ucsd.edu/pub/rinex/2026/299/",
+    "BKG could not be reached: KRAW00POL_R_20262990000_01D_30S_MO.crx.gz could not be downloaded: "
+    "https://igs.bkg.bund.de/root_ftp/EUREF/obs/2026/299/KRAW00POL_R_20262990000_01D_30S_MO.crx.gz: could not connect "
+    "(timed out) (after 3 attempts)":
+        "Il BKG non si è potuto raggiungere: KRAW00POL_R_20262990000_01D_30S_MO.crx.gz non si è potuto scaricare: "
+        "https://igs.bkg.bund.de/root_ftp/EUREF/obs/2026/299/KRAW00POL_R_20262990000_01D_30S_MO.crx.gz: connessione "
+        "non riuscita (timed out) (dopo 3 tentativi)",
+}
 
 
 def test_station_and_download_notes_in_italian():
@@ -307,6 +378,15 @@ def test_station_and_download_notes_in_italian():
         assert all(i18n.engine(message) == message for message in STATION_NOTES)
     finally:
         i18n.set_current("it")
+
+
+def test_stand_in_notes_in_italian():
+    """What the archives that stand in for BKG make the program say is shown whole in Italian: the notice that one is
+    asked, the files it lacks and the sites that did not answer (the names of the data centres too), the navigation
+    file it gave; a note that is indented keeps its indent."""
+    i18n.set_current("it")
+    for text, expected in STAND_IN_NOTES.items():
+        assert i18n.engine(text) == expected
 
 
 def _converter_notes() -> tuple:
