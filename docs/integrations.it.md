@@ -354,7 +354,8 @@ che il progetto salvato non elenca (l'aggiunta scrive l'elenco dei chunk che cre
 *File > Importa > Progetto Metashape* o `ppg import-metashape progetto.psx nuovo.ppg` (un progetto nuovo; per aggiungere i suoi chunk a quello aperto, [*File > Aggiungi progetti...*](#aggiungere-progetti)).
 Il progetto viene letto direttamente (Metashape non serve): i sensori con la loro calibrazione
 (convertita nel modello COLMAP `FULL_OPENCV`: `f`, `cx/cy` dal centro, `b1`, `k1..k3`, `p1/p2`
-scambiati nell'ordine di OpenCV), le camere allineate, i marker con riferimenti, accuratezze e
+scambiati nell'ordine di OpenCV; `k4`, `p3/p4` e lo skew `b2`, che quel modello non ha, vengono
+adattati: vedi sotto), le camere allineate, i marker con riferimenti, accuratezze e
 proiezioni, le barre di scala, i punti di legame con i colori, il modello (`model.zip`) e i GeoTIFF
 di DEM e ortofoto esportati accanto al progetto (cartelle o nomi che contengono *dem/dsm* e
 *orto/ortho*). Senza un DEM esportato utilizzabile (nessuno, o un file vuoto lasciato da
@@ -417,7 +418,25 @@ in 6 s (punti di legame +3 mm e vertici della mesh +4 mm dal DEM di Metashape, m
 progetto di 425 foto con un gruppo di camere, un progetto di 3.265 foto con una componente
 cancellata (+13 mm). Non letti: il formato interno dell'ortofoto di Metashape (blocchi di immagine
 e linee di cucitura: esportala come GeoTIFF), le nuvole dense nel formato octree di Metashape, le
-maschere, lo skew `b2`, `k4`.
+maschere.
+
+**Calibrazioni con `k4`, `p3/p4` o lo skew `b2`.** Il modello `FULL_OPENCV` di COLMAP non ha
+questi termini. Quando una calibrazione li ha, l'importazione adatta la parte radiale razionale
+del modello (`k1..k3` su `k4..k6`), i termini tangenziali e una scala della focale alla
+proiezione di Metashape su una griglia che copre l'intera foto, angoli compresi (`cx/cy` e il
+rapporto di `b1` restano esatti), cercando l'errore massimo più piccolo; una calibrazione senza
+quei termini viene convertita come prima, senza ritocchi. I residui massimo e RMS rispetto alla
+proiezione di Metashape vengono riportati a fine importazione e conservati nel chunk
+(`meta["import"]["calibrations"]`). Entro 0,5 px (i punti di legame di Metashape stanno a
+0,3-1 px) il messaggio è informativo: un `k4` di qualche centesimo, `p3/p4` e uno skew sotto
+il pixel vengono assorbiti entro 0,2 px. Oltre, il messaggio dice che la proiezione non è
+riprodotta e di quanti pixel: un `k4` dell'ordine di 1 (un obiettivo da drone a 48 MP calibrato
+con tutti i termini) lascia 1-6 px agli angoli, uno skew di 25 px circa 14 px. Allora esegui
+*Ottimizza camere* qui, che ristima la calibrazione sui punti di legame, oppure ricalibra in
+Metashape senza quei termini (*Optimize Cameras* con `k4` e `b2` deselezionati) ed esporta di
+nuovo. Le versioni precedenti scartavano `k4` e `b2` con un semplice avviso: su un obiettivo
+così la proiezione sbagliava di migliaia di pixel agli angoli e di decine a metà fotogramma
+(marker a 10-45 px), e i bordi delle foto non si potevano nemmeno riproiettare.
 
 ## WebODM / ODM
 

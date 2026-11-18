@@ -343,7 +343,8 @@ list of the chunks it makes before copying their folders).
 *File > Importa > Progetto Metashape* or `ppg import-metashape progetto.psx nuovo.ppg` (a new project; to add its chunks to the open one, [*File > Append projects...*](#appending-projects)).
 The project is read directly (no Metashape needed): sensors with their calibration
 (converted to COLMAP `FULL_OPENCV`: `f`, `cx/cy` from the centre, `b1`, `k1..k3`, `p1/p2`
-swapped to OpenCV order), aligned cameras, markers with references, accuracies and
+swapped to OpenCV order; `k4`, `p3/p4` and the skew `b2`, which that model has no place for,
+are fitted in: see below), aligned cameras, markers with references, accuracies and
 projections, scale bars, tie points with colours, the model (`model.zip`), and the DEM/orthomosaic GeoTIFFs exported next
 to the project (folders or names containing *dem/dsm* and *orto/ortho*). Without a usable
 exported DEM (none, or an empty file left by a failed export, which is reported), the DEM
@@ -402,7 +403,25 @@ Checked on the drone projects of a survey season (29-3265 photos): Tell Dlamah i
 6 s (tie points +3 mm and mesh vertices +4 mm from Metashape's DEM, median), a 425-photo
 project with a camera group, a 3265-photo project with a deleted component (+13 mm). Not
 read: Metashape's own orthomosaic storage (image blocks and seamlines: export it as
-GeoTIFF), dense clouds in Metashape's octree format, masks, skew `b2`, `k4`.
+GeoTIFF), dense clouds in Metashape's octree format, masks.
+
+**Calibrations with `k4`, `p3/p4` or the skew `b2`.** COLMAP's `FULL_OPENCV` has no such
+terms. When a calibration sets them, the import fits the model's rational radial part
+(`k1..k3` over `k4..k6`), its tangential terms and one scale of the focal length to
+Metashape's own projection on a grid over the whole photo, corners included (`cx/cy` and the
+ratio of `b1` stay exact), favouring the smallest worst error; a calibration without those
+terms is mapped as before, untouched. The worst and RMS residuals against Metashape's
+projection are reported after the import and kept in the chunk
+(`meta["import"]["calibrations"]`). Within 0.5 px (Metashape's own tie points sit at
+0.3-1 px) the message is information: a `k4` of a few hundredths, `p3/p4` and a skew under a
+pixel are absorbed to 0.2 px. Beyond it the message says that the projection is not
+reproduced and by how many pixels: a `k4` of the order of 1 (a 48 MP drone lens calibrated
+with every term ticked) leaves 1-6 px at the corners, a skew of 25 px about 14 px. Then run
+*Ottimizza camere* here, which re-estimates the calibration on the tie points, or
+recalibrate in Metashape without those terms (*Optimize Cameras* with `k4` and `b2`
+unticked) and export again. Earlier versions dropped `k4` and `b2` with a bare warning: on
+such a lens the projection was off by thousands of pixels at the corners and by tens
+mid-frame (markers 10-45 px), and the borders of the photos could not even be unprojected.
 
 ## WebODM / ODM
 
