@@ -203,6 +203,142 @@ def test_metashape_calibration_mapping():
     assert model == "FULL_OPENCV" and not warn
     assert p[:4] == [3002.0, 3000.0, 1995.0, 1507.0]
     assert p[4:9] == [0.1, -0.2, -0.002, 0.001, 0.05]  # Metashape p1/p2 are OpenCV's p2/p1
+    assert p[9:] == [0.0, 0.0, 0.0]  # nothing to fit: the direct mapping, as it always was
+
+
+def _metashape_uv(c: dict, w: int, h: int, xy: np.ndarray) -> np.ndarray:
+    """Metashape's frame camera model (Agisoft manual, appendix *Camera models*), written out
+    independently of the importer: ideal directions (X/Z, Y/Z) -> pixels."""
+    x, y = xy[:, 0], xy[:, 1]
+    r2 = x * x + y * y
+    radial = 1 + c.get("k1", 0.0) * r2 + c.get("k2", 0.0) * r2 ** 2 + c.get("k3", 0.0) * r2 ** 3 + c.get("k4", 0.0) * r2 ** 4
+    tang = 1 + c.get("p3", 0.0) * r2 + c.get("p4", 0.0) * r2 ** 2
+    p1, p2 = c.get("p1", 0.0), c.get("p2", 0.0)
+    xd = x * radial + (p1 * (r2 + 2 * x * x) + 2 * p2 * x * y) * tang
+    yd = y * radial + (p2 * (r2 + 2 * y * y) + 2 * p1 * x * y) * tang
+    u = w * 0.5 + c.get("cx", 0.0) + xd * c["f"] + xd * c.get("b1", 0.0) + yd * c.get("b2", 0.0)
+    v = h * 0.5 + c.get("cy", 0.0) + yd * c["f"]
+    return np.column_stack([u, v])
+
+
+# a 48 MP DJI Mini 4 Pro-like calibration adjusted by Metashape with k4 and b2 ticked: the radial
+# coefficients compensate one another (k4 = +1.87 alone is 1.1 at the corner) and b2 shears the columns
+DJI_CALIB = {"f": 5370.5, "cx": 14.2, "cy": -22.7, "b1": 0.6, "b2": -0.35, "k1": -0.12, "k2": 0.55,
+             "k3": -2.12, "k4": 1.87, "p1": 0.00031, "p2": -0.00012}
+DJI_SIZE = (8064, 6048)
+
+
+def _directions_over_the_photo(c: dict, w: int, h: int, n: int = 160) -> np.ndarray:
+    """Ideal directions whose Metashape projections fall inside the photo (within the radius
+    where the radial distortion still grows: beyond it the polynomial folds back)."""
+    f = c["f"]
+    gx = np.linspace(-1.4 * w / 2 / f, 1.4 * w / 2 / f, n)
+    gy = np.linspace(-1.4 * h / 2 / f, 1.4 * h / 2 / f, int(n * h / w))
+    xy = np.column_stack([a.ravel() for a in np.meshgrid(gx, gy)])
+    r = np.linspace(0.0, 2.0, 4001)
+    rd = r * (1 + c["k1"] * r ** 2 + c["k2"] * r ** 4 + c["k3"] * r ** 6 + c["k4"] * r ** 8)
+    grows = np.diff(rd) > 0
+    r_max = r[int(np.argmin(grows))] if not grows.all() else np.inf
+    uv = _metashape_uv(c, w, h, xy)
+    ok = (uv[:, 0] >= 0) & (uv[:, 0] <= w) & (uv[:, 1] >= 0) & (uv[:, 1] <= h) & (np.hypot(*xy.T) < r_max)
+    return xy[ok]
+
+
+def _fitted_sensor(calib: dict):
+    from pyarchinit_photogrammetry.core.camera import Sensor
+    from pyarchinit_photogrammetry.integrations.metashape import MsSensor, sensor_params
+
+    w, h = DJI_SIZE
+    model, params, warn = sensor_params(MsSensor(0, "DJI", w, h, dict(calib)))
+    return Sensor(key=0, label="DJI", width=w, height=h, model=model, params=params), params, warn
+
+
+def _errors_over_the_photo(sensor, calib: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Pixel errors of the fitted sensor (pycolmap, not the importer's formula) against Metashape's
+    model over the photo, and at the exact corners through the round trip unproject -> Metashape."""
+    w, h = DJI_SIZE
+    xy = _directions_over_the_photo(calib, w, h)
+    assert len(xy) > 9_000 and np.hypot(*xy.T).max() > 0.9  # the corners of the photo are in
+    uv_col = sensor.project(np.column_stack([xy, np.ones(len(xy))]))
+    err = np.hypot(*(uv_col - _metashape_uv(calib, w, h, xy)).T)
+    corners = np.array([[0.5, 0.5], [w - 0.5, 0.5], [0.5, h - 0.5], [w - 0.5, h - 0.5], [w / 2, 0.5], [0.5, h / 2]])
+    back = sensor.unproject(corners)
+    assert np.isfinite(back).all()  # the k4-less polynomial gave NaN there
+    return err, np.hypot(*(_metashape_uv(calib, w, h, back) - corners).T)
+
+
+def test_metashape_calibration_with_k4_and_b2_is_fitted():
+    """k4 and b2 have no place in COLMAP's models: the importer fits FULL_OPENCV (rational radial
+    part, one focal scale, minimax reweighting) to Metashape's projection over the whole photo and
+    reports the residual, instead of dropping them (thousands of pixels at the corners of this
+    photo, markers 10-45 px off mid-frame). A k4 of 1.87 is beyond what the rational part can hold
+    within half a pixel: the best fit stays about a pixel off at the corners and the import says so."""
+    w, h = DJI_SIZE
+    sensor, params, warn = _fitted_sensor(DJI_CALIB)
+    assert params[2:4] == [w / 2 + 14.2, h / 2 - 22.7]  # the principal point exact
+    assert abs(params[0] / (5370.5 + 0.6) - 1) < 0.01  # the focal length scaled by the fit, within 1 %
+    assert params[0] / params[1] == pytest.approx((5370.5 + 0.6) / 5370.5)  # b1 kept in the ratio fx/fy
+    err, corner_err = _errors_over_the_photo(sensor, DJI_CALIB)
+    worst = max(err.max(), corner_err.max())
+    assert worst < 2.0 and np.sqrt(np.mean(err ** 2)) < 1.0, (worst, np.sqrt(np.mean(err ** 2)))
+    # the pixel convention is unchanged: the optical axis lands at the centre of the photo plus cx, cy
+    assert np.allclose(sensor.project(np.array([[0.0, 0.0, 1.0]])), [[w / 2 + 14.2, h / 2 - 22.7]])
+    # the import says that the projection is not reproduced within half a pixel, and by how much
+    assert len(warn) == 1 and "k4/b2" in warn[0] and "non è riproducibile entro 0.5 px" in warn[0], warn
+    assert "Ottimizza camere" in warn[0] and "Metashape senza k4/b2" in warn[0]
+    m = re.search(r"fino a (\d+\.\d) px", warn[0])
+    assert m and 0.5 < float(m.group(1)) < 2.0 and abs(float(m.group(1)) - worst) < 0.5, warn[0]
+
+
+# the usual calibration with every term ticked: a k4 of a few hundredths, p3/p4 and a skew under a pixel
+MILD_CALIB = {"f": 5370.5, "cx": 14.2, "cy": -22.7, "b1": 0.6, "b2": 0.3, "k1": -0.05, "k2": 0.08, "k3": -0.1,
+              "k4": 0.05, "p1": 0.00031, "p2": -0.00012, "p3": 0.01, "p4": -0.02}
+
+
+def test_metashape_calibration_with_small_k4_and_b2_is_reproduced():
+    """The usual case: the extra terms are absorbed within half a pixel over the whole photo and
+    the import reports the residual as information, not as a warning of a difference."""
+    sensor, params, warn = _fitted_sensor(MILD_CALIB)
+    err, corner_err = _errors_over_the_photo(sensor, MILD_CALIB)
+    assert max(err.max(), corner_err.max()) < 0.5 and np.sqrt(np.mean(err ** 2)) < 0.2
+    assert len(warn) == 1 and "k4/p3/p4/b2" in warn[0] and "FULL_OPENCV" in warn[0], warn
+    assert "non è riproducibile" not in warn[0]
+    assert re.search(r"residuo massimo 0\.\d+ px", warn[0]), warn[0]
+
+
+def test_metashape_calibration_beyond_the_model_is_reported():
+    """A skew no COLMAP model can hold (b2 of 25 px shears the top and bottom rows by 14 px): the
+    import keeps the best fit and says by how many pixels it misses Metashape's projection."""
+    from pyarchinit_photogrammetry.integrations.metashape import FIT_TOLERANCE_PX
+
+    w, h = DJI_SIZE
+    calib = dict(MILD_CALIB, b2=25.0)
+    sensor, params, warn = _fitted_sensor(calib)
+    assert np.isfinite(params).all() and params[2:4] == [w / 2 + 14.2, h / 2 - 22.7]
+    err, corner_err = _errors_over_the_photo(sensor, calib)
+    worst = max(err.max(), corner_err.max())
+    assert 5.0 < worst < 20.0  # the irreducible shear, nothing worse
+    assert len(warn) == 1 and "non è riproducibile" in warn[0] and f"entro {FIT_TOLERANCE_PX:g} px" in warn[0]
+    m = re.search(r"fino a (\d+\.\d) px", warn[0])
+    assert m and abs(float(m.group(1)) - worst) < 0.5, warn[0]
+
+
+def test_metashape_import_reports_the_calibration_fit(tmp_path):
+    """Through the project: the warning reaches the chunk (the GUI shows it after the import) and
+    the residuals are kept in the import metadata."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    calibration = ("<f>3000</f><cx>3.5</cx><cy>-2</cy><b1>0.2</b1><b2>0.4</b2><k1>-0.05</k1><k2>0.08</k2>"
+                   "<k3>-0.1</k3><k4>0.05</k4><p1>0.0002</p1><p2>-0.0001</p2>")
+    psx, _, _ = make_psx(tmp_path / "src", calibration=calibration)
+    doc = ms.import_psx(psx, tmp_path / "out" / "p.ppg")
+    ch = doc.chunk
+    s = ch.sensors[0]
+    assert s.model == "FULL_OPENCV" and s.params[2:4] == [2003.5, 1498.0]
+    assert abs(s.params[0] / 3000.2 - 1) < 0.01 and any(k != 0.0 for k in s.params[9:])  # the rational part carries k4
+    fit = ch.meta["import"]["calibrations"]["cam"]
+    assert fit["max_px"] < 0.5 and fit["rms_px"] <= fit["max_px"] and fit["fitted"] == ["k4", "b2"]
+    assert any("k4/b2" in w and "px" in w for w in ch.meta["import"]["warnings"])
 
 
 def test_metashape_ply_reader():
@@ -506,12 +642,14 @@ def _zip(path, members):
             z.writestr(name, data)
 
 
-def make_psx(root: Path, n_grid: int = 41, texture: bool = False, pages: int = 1):
+def make_psx(root: Path, n_grid: int = 41, texture: bool = False, pages: int = 1,
+             calibration: str = "<f>3000</f><cx>0</cx><cy>0</cy>"):
     """A Metashape 2.x-like project near Tell Tuqan: chunk transform internal -> geocentric
     (ENU axes, 0.5 m per internal unit), 4 nadir cameras inside a camera group, tie points of
     the live component 0 plus stale points of a deleted component 1, and a model with
     texture coordinates (``pages`` 2: the left half of the model on a red page, the right half on
-    a blue one). Returns (psx path, site geocentric origin, east/north/up axes)."""
+    a blue one). ``calibration``: the elements of the sensor's ``<calibration>``.
+    Returns (psx path, site geocentric origin, east/north/up axes)."""
     from pyproj import CRS, Transformer
 
     lon, lat, h = 36.8, 35.8, 300.0
@@ -537,7 +675,7 @@ def make_psx(root: Path, n_grid: int = 41, texture: bool = False, pages: int = 1
     wkt = CRS.from_epsg(4326).to_wkt("WKT1_GDAL")
     chunk = (f'<chunk version="1.2.0" label="Chunk 1"><sensors><sensor id="0" label="cam" type="frame">'
              f'<resolution width="4000" height="3000"/><calibration type="frame" class="adjusted">'
-             f'<resolution width="4000" height="3000"/><f>3000</f><cx>0</cx><cy>0</cy></calibration></sensor></sensors>'
+             f'<resolution width="4000" height="3000"/>{calibration}</calibration></sensor></sensors>'
              f'<components next_id="2" active_id="0"><component id="0" label="Component 1">{tr_xml}</component></components>'
              f'<cameras><group label="DJI_001">{cams}</group></cameras>'
              f'<frames><frame id="0" path="0/frame.zip"/></frames>{tr_xml}<reference>{wkt}</reference></chunk>')

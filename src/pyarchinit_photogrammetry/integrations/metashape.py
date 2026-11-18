@@ -13,7 +13,10 @@ Conventions (Metashape 1.x/2.x):
 * camera ``transform`` = camera -> chunk internal frame (x right, y down, z forward, as here);
 * chunk ``transform`` = internal -> geocentric (for geographic/projected CRSs) or -> local;
 * calibration: ``f`` (px), ``cx, cy`` offsets from the image centre, ``b1`` affinity,
-  ``k1..k4`` radial, ``p1, p2`` tangential with Metashape's order (OpenCV's p2, p1).
+  ``k1..k4`` radial, ``p1, p2`` tangential with Metashape's order (OpenCV's p2, p1), ``p3, p4``
+  and the skew ``b2``; what COLMAP's FULL_OPENCV cannot carry as it is (k4, p3/p4, b2) is fitted
+  to Metashape's projection over the whole photo and the residual is reported
+  (:func:`fit_calibration`).
 
 Exported products (DEM and orthomosaic GeoTIFFs) found next to the project are linked
 as well. When no exported DEM is usable (none, or an empty file left by a failed export),
@@ -242,20 +245,211 @@ def read_psx(psx: str | os.PathLike) -> list[MsChunk]:
     return chunks
 
 
-def sensor_params(s: MsSensor) -> tuple[str, list[float], list[str]]:
-    """COLMAP FULL_OPENCV parameters of a Metashape calibration, plus warnings."""
+# A Metashape calibration carries terms COLMAP's models do not have: k4 (a fourth radial coefficient),
+# p3/p4 (a radial correction of the tangential part) and b2 (a skew). Dropping them is not an option:
+# on a 48 MP drone photo with k4 = 1.87 the k4 term alone is 1.1 at the corner, the projection moves by
+# hundreds of pixels at the borders and the k4-less polynomial cannot even be inverted there. When they
+# are set, FULL_OPENCV (a rational radial part, k1..k3 over k4..k6) is fitted to Metashape's projection
+# on a grid of pixels over the whole photo and the worst residual is reported. Over this residual the
+# import says the projection is not reproduced: Metashape's own tie points sit at 0.3-1 px and a marker
+# is placed to about half a pixel, so a calibration within half a pixel at the far corners is
+# indistinguishable in markers and products; beyond it, markers and orthophoto move.
+FIT_TOLERANCE_PX = 0.5
+FIT_GRID = (48, 36)  # pixels per side of the photo the fit and its residual are evaluated on, corners included
+FITTED_TERMS = ("k4", "p3", "p4", "b2")  # what the direct mapping cannot carry
+
+
+@dataclass
+class CalibrationFit:
+    """A Metashape calibration in a COLMAP camera model: ``fitted`` names the Metashape terms the
+    direct mapping cannot carry (empty: the direct mapping, as it always was); ``max_px`` and
+    ``rms_px`` are the residuals of the fitted projection against Metashape's over the photo."""
+
+    model: str
+    params: list[float]
+    fitted: list[str] = field(default_factory=list)
+    max_px: float = 0.0
+    rms_px: float = 0.0
+    warnings: list[str] = field(default_factory=list)
+
+
+def metashape_pixels(calib: dict, width: int, height: int, xy) -> np.ndarray:
+    """Metashape's frame camera model (Agisoft manual, appendix *Camera models*): ideal directions
+    ``(x, y) = (X/Z, Y/Z)`` of the camera frame -> pixels ``(u, v)``, the centre of the first pixel at
+    (0.5, 0.5) as in COLMAP. Metashape's p1 multiplies ``r² + 2x²`` in u (OpenCV's p2)."""
+    c = calib
+    xy = np.asarray(xy, float).reshape(-1, 2)
+    x, y = xy[:, 0], xy[:, 1]
+    r2 = x * x + y * y
+    radial = 1 + r2 * (c.get("k1", 0.0) + r2 * (c.get("k2", 0.0) + r2 * (c.get("k3", 0.0) + r2 * c.get("k4", 0.0))))
+    tang = 1 + r2 * (c.get("p3", 0.0) + r2 * c.get("p4", 0.0))
+    p1, p2 = c.get("p1", 0.0), c.get("p2", 0.0)
+    xd = x * radial + (p1 * (r2 + 2 * x * x) + 2 * p2 * x * y) * tang
+    yd = y * radial + (p2 * (r2 + 2 * y * y) + 2 * p1 * x * y) * tang
+    f = c.get("f", 1.2 * max(width, height))
+    u = width / 2.0 + c.get("cx", 0.0) + xd * f + xd * c.get("b1", 0.0) + yd * c.get("b2", 0.0)
+    v = height / 2.0 + c.get("cy", 0.0) + yd * f
+    return np.column_stack([u, v])
+
+
+def full_opencv_pixels(params, xy) -> np.ndarray:
+    """COLMAP's FULL_OPENCV model (``fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6``) on ideal
+    directions, as ``Sensor.project`` computes it through pycolmap."""
+    fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6 = [float(v) for v in params]
+    xy = np.asarray(xy, float).reshape(-1, 2)
+    x, y = xy[:, 0], xy[:, 1]
+    r2 = x * x + y * y
+    radial = (1 + r2 * (k1 + r2 * (k2 + r2 * k3))) / (1 + r2 * (k4 + r2 * (k5 + r2 * k6)))
+    xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    yd = y * radial + 2 * p2 * x * y + p1 * (r2 + 2 * y * y)
+    return np.column_stack([fx * xd + cx, fy * yd + cy])
+
+
+def _direct_params(s: MsSensor) -> list[float]:
+    """The terms FULL_OPENCV holds as they are: f and b1 in fx/fy, cx/cy from the centre, k1..k3,
+    p1/p2 swapped to OpenCV's order; the rational part k4..k6 zero."""
     c = s.calib
-    warnings = []
     f = c.get("f", 1.2 * max(s.width, s.height))
-    fx, fy = f + c.get("b1", 0.0), f
-    cx, cy = s.width / 2.0 + c.get("cx", 0.0), s.height / 2.0 + c.get("cy", 0.0)
-    if abs(c.get("b2", 0.0)) > 1e-9:
-        warnings.append(f"{s.label}: skew b2 ignorato")
-    if abs(c.get("k4", 0.0)) > 1e-12:
-        warnings.append(f"{s.label}: k4 radiale ignorato")
-    params = [fx, fy, cx, cy, c.get("k1", 0.0), c.get("k2", 0.0), c.get("p2", 0.0), c.get("p1", 0.0),
-              c.get("k3", 0.0), 0.0, 0.0, 0.0]
-    return "FULL_OPENCV", params, warnings
+    return [f + c.get("b1", 0.0), f, s.width / 2.0 + c.get("cx", 0.0), s.height / 2.0 + c.get("cy", 0.0),
+            c.get("k1", 0.0), c.get("k2", 0.0), c.get("p2", 0.0), c.get("p1", 0.0), c.get("k3", 0.0), 0.0, 0.0, 0.0]
+
+
+def _valid_radius(calib: dict, r_max: float) -> float:
+    """The ideal radius up to which Metashape's radial distortion still grows: beyond it the
+    polynomial folds back and a pixel has no single direction."""
+    r = np.linspace(0.0, r_max, 4001)
+    s = r * r
+    rd = r * (1 + s * (calib.get("k1", 0.0) + s * (calib.get("k2", 0.0) + s * (calib.get("k3", 0.0)
+                                                                                + s * calib.get("k4", 0.0)))))
+    grows = np.diff(rd) > 0
+    return float(r[int(np.argmin(grows))]) if not grows.all() else np.inf
+
+
+def _ideal_directions(calib: dict, width: int, height: int, uv: np.ndarray, iterations: int = 40) -> np.ndarray:
+    """Ideal directions of pixels under Metashape's model (Newton on the forward model from the
+    pinhole start); NaN where no direction projects there."""
+    uv = np.asarray(uv, float).reshape(-1, 2)
+    f = calib.get("f", 1.2 * max(width, height))
+    centre = np.array([width / 2.0 + calib.get("cx", 0.0), height / 2.0 + calib.get("cy", 0.0)])
+    xy = (uv - centre) / f
+    limit = _valid_radius(calib, np.hypot(width, height) / f)  # twice the pinhole corner radius
+    e = 1e-7
+    for _ in range(iterations):
+        err = metashape_pixels(calib, width, height, xy) - uv
+        if np.nanmax(np.abs(err)) < 1e-9:
+            break
+        jx = (metashape_pixels(calib, width, height, xy + [e, 0.0]) - uv - err) / e
+        jy = (metashape_pixels(calib, width, height, xy + [0.0, e]) - uv - err) / e
+        det = jx[:, 0] * jy[:, 1] - jx[:, 1] * jy[:, 0]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            step = np.column_stack([(jy[:, 1] * err[:, 0] - jy[:, 0] * err[:, 1]) / det,
+                                    (jx[:, 0] * err[:, 1] - jx[:, 1] * err[:, 0]) / det])
+            n = np.linalg.norm(step, axis=1)
+            far = n > 0.2  # a step that would jump past the fold: shortened
+            step[far] *= (0.2 / n[far])[:, None]
+        xy = xy - np.nan_to_num(step)
+    err = metashape_pixels(calib, width, height, xy) - uv
+    ok = np.isfinite(err).all(axis=1) & (np.abs(err).max(axis=1) < 1e-3) & (np.hypot(xy[:, 0], xy[:, 1]) <= limit)
+    xy[~ok] = np.nan
+    return xy
+
+
+def fit_calibration(s: MsSensor, lawson_rounds: int = 10) -> CalibrationFit:
+    """COLMAP FULL_OPENCV parameters of a Metashape calibration. Without k4, p3/p4 and b2 the
+    direct mapping (:func:`_direct_params`), untouched. With them, the rational radial part, the
+    tangential terms and one scale of the focal length (cx, cy and the ratio fx/fy of b1 kept exact)
+    are fitted to Metashape's projection on ``FIT_GRID`` pixels over the whole photo, the corners
+    included: a least squares first, then Lawson's reweighting (``lawson_rounds``) towards the fit
+    with the smallest worst error, since a marker at the border is what suffers. The residual is
+    reported: the warning says by how many pixels the projection differs, against
+    ``FIT_TOLERANCE_PX``. A k4 of the order of 1 (a 48 MP drone lens calibrated with every term) is
+    beyond what the rational part can absorb: the best fit stays a few pixels off at the corners
+    and the warning says so."""
+    c = s.calib
+    direct = _direct_params(s)
+    fitted = [k for k in FITTED_TERMS if abs(c.get(k, 0.0)) > (1e-9 if k == "b2" else 1e-12)]
+    if not fitted:
+        return CalibrationFit("FULL_OPENCV", direct)
+    from scipy.optimize import least_squares
+
+    terms = "/".join(fitted)
+    w, h = s.width, s.height
+    nx, ny = FIT_GRID
+    uv = np.column_stack([a.ravel() for a in np.meshgrid(np.linspace(0.5, w - 0.5, nx),
+                                                          np.linspace(0.5, h - 0.5, ny))])
+    xy = _ideal_directions(c, w, h, uv)
+    ok = np.isfinite(xy).all(axis=1)
+    if ok.sum() < 24:
+        return CalibrationFit("FULL_OPENCV", direct, fitted, np.nan, np.nan, [
+            f"{s.label}: la calibrazione Metashape ({terms}) non si inverte sulla foto: {terms} ignorati"])
+    xy, uv = xy[ok], uv[ok]
+    fx, fy, cx, cy = direct[:4]
+
+    def params_of(d):  # d: the focal scale, then k1, k2, p1, p2, k3, k4, k5, k6
+        return [fx * d[0], fy * d[0], cx, cy] + [float(v) for v in d[1:]]
+
+    def errors(p):
+        return np.hypot(*(full_opencv_pixels(p, xy) - uv).T)
+
+    def solve(start, weights):
+        def residual(d):
+            return ((full_opencv_pixels(params_of(d), xy) - uv) * weights[:, None]).ravel()
+
+        return least_squares(residual, start, method="lm", max_nfev=5000).x
+
+    # the start of the rational radial part from a linear least squares: N(s) = P(s) D(s) on the radii
+    # of the grid (s = r²), each row weighted by r as the pixel error is
+    s2 = np.einsum("ij,ij->i", xy, xy)
+    poly = 1 + s2 * (c.get("k1", 0.0) + s2 * (c.get("k2", 0.0) + s2 * (c.get("k3", 0.0) + s2 * c.get("k4", 0.0))))
+    r = np.sqrt(s2)
+    rows = np.column_stack([s2, s2 ** 2, s2 ** 3, -poly * s2, -poly * s2 ** 2, -poly * s2 ** 3]) * r[:, None]
+    sol = np.linalg.lstsq(rows, (poly - 1) * r, rcond=None)[0]
+    linear = np.array(direct[4:])
+    linear[[0, 1, 4]], linear[5:] = sol[:3], sol[3:]
+    uniform = np.ones(len(xy))
+    best = None  # (worst px, rms px, d)
+    for start in (np.array(direct[4:]), linear):
+        try:
+            d = solve(np.concatenate([[1.0], start]), uniform)
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        e = errors(params_of(d))
+        if np.isfinite(e).all() and (best is None or e.max() < best[0]):
+            best = (float(e.max()), float(np.sqrt(np.mean(e ** 2))), d)
+    if best is None:
+        return CalibrationFit("FULL_OPENCV", direct, fitted, np.nan, np.nan, [
+            f"{s.label}: adattamento della calibrazione Metashape ({terms}) non riuscito: {terms} ignorati"])
+    weights, d, stale = uniform, best[2], 0
+    for _ in range(lawson_rounds):  # Lawson: the pixels with the worst errors weigh more each round
+        e = errors(params_of(d))
+        weights = weights * (0.2 + e / max(float(e.max()), 1e-12))
+        weights = weights / weights.mean()
+        try:
+            d = solve(d, weights)
+        except (ValueError, np.linalg.LinAlgError):
+            break
+        e = errors(params_of(d))
+        if np.isfinite(e).all() and e.max() < best[0] - 1e-4:
+            best, stale = (float(e.max()), float(np.sqrt(np.mean(e ** 2))), d), 0
+        elif (stale := stale + 1) >= 3:
+            break
+    worst, rms, d = best
+    params = params_of(d)
+    if worst > FIT_TOLERANCE_PX:
+        text = (f"{s.label}: la calibrazione Metashape ({terms}) non è riproducibile entro {FIT_TOLERANCE_PX:g} px "
+                f"nel modello FULL_OPENCV: la proiezione differisce fino a {worst:.1f} px (RMS {rms:.2f} px) verso i "
+                f"bordi delle foto, marker e prodotti ne risentono. Ottimizza camere qui, oppure ricalibra in "
+                f"Metashape senza {terms} (Optimize Cameras) ed esporta di nuovo")
+    else:
+        text = (f"{s.label}: {terms} della calibrazione Metashape approssimati nel modello FULL_OPENCV "
+                f"(residuo massimo {worst:.2f} px, RMS {rms:.3f} px sull'intera foto)")
+    return CalibrationFit("FULL_OPENCV", params, fitted, worst, rms, [text])
+
+
+def sensor_params(s: MsSensor) -> tuple[str, list[float], list[str]]:
+    """COLMAP model, parameters and warnings of a Metashape calibration (:func:`fit_calibration`)."""
+    fit = fit_calibration(s)
+    return fit.model, fit.params, fit.warnings
 
 
 def _target_crs(ch: MsChunk, prefer: str | None) -> str:
@@ -1006,11 +1200,18 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
         if on_chunk is not None:
             on_chunk(ch)
         sub(0.05, f"{mc.label}: sensori e camere")
+        fits = {}  # the calibrations with terms fitted (k4, p3/p4, b2) and their residuals, for the metadata
         for s in mc.sensors.values():
-            model, params, w = sensor_params(s)
-            warnings += w
-            ch.sensors[s.id] = Sensor(key=s.id, label=s.label, width=s.width, height=s.height, model=model,
-                                      params=params)
+            fit = fit_calibration(s)
+            warnings += fit.warnings
+            if fit.fitted:
+                name = s.label or f"sensor {s.id}"
+                fits[name if name not in fits else f"{name} ({s.id})"] = {
+                    "fitted": list(fit.fitted),
+                    "max_px": round(float(fit.max_px), 3) if np.isfinite(fit.max_px) else None,
+                    "rms_px": round(float(fit.rms_px), 3) if np.isfinite(fit.rms_px) else None}
+            ch.sensors[s.id] = Sensor(key=s.id, label=s.label, width=s.width, height=s.height, model=fit.model,
+                                      params=fit.params)
         base = mc.frame_dir or psx.parent
         for c in mc.cameras:
             if c.path is None:
@@ -1243,7 +1444,10 @@ def _import_chunks(doc, psx: Path, chunks, dem, orthomosaic, with_model, progres
             ch.meta["import"]["dem"] = dem_source
         if broken and ref_crs:
             ch.meta["import"]["references_crs"] = ref_crs
+        if fits:
+            ch.meta["import"]["calibrations"] = fits
 
 
-__all__ = ["read_psx", "import_psx", "import_psx_into", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
+__all__ = ["read_psx", "import_psx", "import_psx_into", "sensor_params", "fit_calibration", "CalibrationFit",
+           "metashape_pixels", "FIT_TOLERANCE_PX", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
            "MsChunk", "MsScaleBar"]
