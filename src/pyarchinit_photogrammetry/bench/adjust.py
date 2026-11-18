@@ -6,8 +6,8 @@ in one record per run (:mod:`.record`, as ``ppg bench run`` records the steps of
     ppg bench adjust PROJECT --name NAME [--solvers native,colmap,scipy] [--repeat 3] [--records DIR]
     python -m pyarchinit_photogrammetry.bench.adjust <job.json>      # the child
 
-:func:`run` is the parent: per repeat it starts the child in a work folder under the records folder, samples its
-memory as the runner does (:func:`.runner._sample`) and builds the record. :func:`main` is the child: it opens the
+:func:`run` is the parent: per repeat it starts the child in a work folder under the records folder and, with the
+runner's own functions, samples its memory, collects and judges the record. :func:`main` is the child: it opens the
 project and never saves it, reads the reconstruction from disk once per solver, builds the plain problem and solves
 it. The costs of the three are compared by one evaluator, the native :func:`..engine.bundle.evaluate` of the problem
 at each solver's end point (for COLMAP, the problem read again from the reconstruction it adjusted in memory), so
@@ -17,9 +17,7 @@ above :data:`SCIPY_MAX_PHOTOS` photos (hours on a large block), with a warning i
 from __future__ import annotations
 
 import json
-import logging
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -31,8 +29,6 @@ import numpy as np
 from ..core.document import Document
 from ..engine import bundle
 from . import machine, record, runner, steps
-
-log = logging.getLogger(__name__)
 
 SOLVERS = ("native", "colmap", "scipy")
 # scipy adjusts a block of this many photos in minutes; above it, hours: it is left out, with a warning in the record
@@ -128,11 +124,14 @@ def camera_sigmas(pb: bundle.Problem, at: bundle.Result) -> np.ndarray:
 # ---------------------------------------------------------------- the parent
 @dataclass(frozen=True)
 class _Plan:
-    """What every repeat of a run shares."""
+    """What every repeat of a run shares: the job's own facts and what the runner's :func:`.runner._one_run`,
+    :func:`.runner._collect` and :func:`.runner._finish` read of a plan (``name``, ``out``, ``records``, ``keep``,
+    ``private``, ``names``); the work folders go under the records folder and are never kept by request."""
 
     project: Path
     name: str
     solvers: tuple[str, ...]
+    out: Path
     records: Path
     env: dict
     disk: dict
@@ -140,6 +139,7 @@ class _Plan:
     settings: dict
     private: tuple[Path, ...]
     names: tuple[str, ...]
+    keep: bool = False
 
 
 def check(project: Path, name: str, solvers: tuple[str, ...] = SOLVERS, repeat: int = 1,
@@ -207,10 +207,10 @@ def run(project: Path, name: str, solvers: tuple[str, ...] = SOLVERS, repeat: in
     settings = {"solvers": list(solvers), "linear_solver": None, "linear_solver_colmap": None,
                 "max_iterations": MAX_ITERATIONS, "scipy_max_photos": SCIPY_MAX_PHOTOS,
                 "pycolmap": steps._pycolmap_version()}
-    plan = _Plan(project=project, name=name, solvers=tuple(solvers), records=records, env=dict(os.environ), disk=disk,
-                 set=_set_facts(files, cameras), settings=settings,
+    plan = _Plan(project=project, name=name, solvers=tuple(solvers), out=records, records=records, env=dict(os.environ),
+                 disk=disk, set=_set_facts(files, cameras), settings=settings,
                  private=(project.parent, records, Path.home()), names=tuple(p.name for p in files))
-    return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
+    return [runner._one_run(plan, index, _run_in) for index in range(1, int(repeat) + 1)]
 
 
 def _set_facts(files: list[Path], cameras) -> dict:
@@ -225,21 +225,12 @@ def _set_facts(files: list[Path], cameras) -> dict:
             "gps": sum(1 for c in cameras if c.reference.location is not None)}
 
 
-def _one_run(plan: _Plan, index: int) -> Path:
-    """One repeat in its work folder, left in place and said by its name (never its path) when anything stops the
-    run once the folder is made, as :func:`.runner._one_run` does."""
-    work = plan.records / f"{plan.name}-{index}"
-    work.mkdir(parents=True)
-    try:
-        return _run_in(plan, index, work)
-    except BaseException as exc:
-        if work.exists():
-            log.warning("the run stopped (%s): the work folder %s is left in the records folder",
-                        type(exc).__name__, work.name)
-        raise
-
-
 def _run_in(plan: _Plan, index: int, work: Path) -> Path:
+    """One repeat in ``work`` (made by :func:`.runner._one_run`): the job, the child - this interpreter on this
+    module -, its memory sampled every :data:`.runner.SAMPLE_SECONDS`, the record collected, judged and written by
+    the runner's own functions (a step the child did not end, a child that died, the scrub of the texts, the work
+    folder kept with the child's log when the run failed), the child's warnings after the judge's. A
+    KeyboardInterrupt terminates the child and leaves a record saying ``cancelled``."""
     job = {"project": str(plan.project), "work": str(work), "solvers": list(plan.solvers),
            "max_iterations": MAX_ITERATIONS, "scipy_max_photos": SCIPY_MAX_PHOTOS}
     (work / runner.JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
@@ -254,74 +245,16 @@ def _run_in(plan: _Plan, index: int, work: Path) -> Path:
             runner._sample(proc.pid, work / steps.RESULT, peaks)
     except KeyboardInterrupt:
         runner._terminate(proc)
-        warnings = _collect(rec, work, peaks, plan, ended=time.time(), cancelled=True)
-        _finish(rec, warnings, work, plan, index, cancelled=True)
+        warnings = runner._collect(rec, work, peaks, plan, ended=time.time(), cancelled=True)
+        runner._finish(rec, work, plan, index, cancelled=True, warnings=warnings)
         raise
-    warnings = _collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
-    return _finish(rec, warnings, work, plan, index)
+    warnings = runner._collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
+    return runner._finish(rec, work, plan, index, warnings=warnings)
 
 
 def _command(job: Path) -> list[str]:
     """The child: this interpreter, by its absolute path, running this module."""
     return [os.path.abspath(sys.executable), "-m", "pyarchinit_photogrammetry.bench.adjust", str(job)]
-
-
-def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: float, code: int | None = None,
-             cancelled: bool = False) -> list[str]:
-    """The steps, the settings, the results and the error of the record from what the child wrote, as
-    :func:`.runner._collect` reads them: a step the child did not end gets the seconds up to ``ended`` and says so;
-    a child that ended without finishing and without an error gives ``<step>: child ended with code N``; the texts
-    are scrubbed of paths and photo names. Returned: the child's warnings, scrubbed, for :func:`_finish` (the judge
-    of a record resets its warnings)."""
-    data = runner._read(work / steps.RESULT) or {}
-
-    def scrubbed(text) -> str:
-        return record.scrub(str(text), plan.private, plan.names)
-
-    running, entries = None, []
-    for e in data.get("steps") or []:
-        if not isinstance(e, dict) or not e.get("step"):
-            continue
-        step = str(e["step"])
-        entry = {"step": step, "seconds": e.get("seconds"), "peak_memory_mb": 0.0, "stages": {},
-                 "engine": e.get("engine")}
-        if e.get("end") is None:
-            running = step
-            entry["seconds"] = round(max(ended - float(e.get("start") or ended), 0.0), 3)
-            entry["error"] = f"{step}: cancelled" if cancelled else f"{step}: child ended with code {code}"
-        elif e.get("error"):
-            entry["error"] = scrubbed(e["error"])
-        own = float(e.get("peak_memory_mb") or 0.0)
-        entry["peak_memory_mb"] = round(max(own, peaks.get(step, 0) / 2**20), 1)
-        entries.append(entry)
-    error = scrubbed(data["error"]) if data.get("error") else None
-    if cancelled:
-        error = "cancelled"
-    elif error is None and not data.get("done"):
-        where = running or (entries[-1]["step"] if entries else "setup")
-        error = f"{where}: child ended with code {code}"
-    rec["steps"] = entries
-    rec["settings"].update(data.get("settings") or {})
-    rec["results"] = dict(data.get("results") or {})
-    rec["error"] = error
-    return [scrubbed(w) for w in data.get("warnings") or []]
-
-
-def _finish(rec: dict, warnings: list[str], work: Path, plan: _Plan, index: int, cancelled: bool = False) -> Path:
-    """The record judged, the child's warnings added after the judge's, written; then the work folder removed,
-    unless the run failed: then it stays with the child's log, said by its name."""
-    record.judge(rec)
-    rec["warnings"].extend(warnings)
-    path = record.write(rec, plan.records, plan.private, index=index)
-    if rec["error"] is not None and not cancelled:
-        log.warning("the run failed: the work folder %s is kept in the records folder with the child's log", work.name)
-        return path
-    try:
-        shutil.rmtree(work)
-    except OSError as exc:
-        log.warning("the work folder %s could not be removed (%s): it is left in the records folder", work.name,
-                    type(exc).__name__)
-    return path
 
 
 # ---------------------------------------------------------------- the child

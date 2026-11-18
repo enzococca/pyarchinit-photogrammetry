@@ -204,15 +204,17 @@ def _psutil():
     return psutil
 
 
-def _one_run(plan: _Plan, index: int) -> Path:
-    """One repeat in its work folder. Whatever stops the run once the folder is made (a job or a log that cannot be
-    written, a child that cannot start, a record that is refused or cannot be written, a cancel whose cleanup
-    failed) leaves the folder: that is said in the log, by the folder's name and the type of the exception, never a
-    path, before the exception goes on (a folder kept by request is not said)."""
+def _one_run(plan: _Plan, index: int, run_in: Callable | None = None) -> Path:
+    """One repeat in its work folder, run by ``run_in`` (:func:`_run_in`, the child of the steps; ``ppg bench
+    adjust`` gives its own, with a plan that has what the functions here read). Whatever stops the run once the
+    folder is made (a job or a log that cannot be written, a child that cannot start, a record that is refused or
+    cannot be written, a cancel whose cleanup failed) leaves the folder: that is said in the log, by the folder's
+    name and the type of the exception, never a path, before the exception goes on (a folder kept by request is
+    not said)."""
     work = plan.out / f"{plan.name}-{index}"
     work.mkdir(parents=True)
     try:
-        return _run_in(plan, index, work)
+        return (run_in or _run_in)(plan, index, work)
     except BaseException as exc:
         if work.exists() and not plan.keep:
             log.warning("the run stopped (%s): the work folder %s is left in the output folder",
@@ -235,13 +237,13 @@ def _run_in(plan: _Plan, index: int, work: Path) -> Path:
             _sample(proc.pid, work / child.RESULT, peaks)
     except KeyboardInterrupt:
         _terminate(proc)
-        _collect(rec, work, peaks, plan, ended=time.time(), cancelled=True)
-        _finish(rec, work, plan, index, cancelled=True)
+        warnings = _collect(rec, work, peaks, plan, ended=time.time(), cancelled=True)
+        _finish(rec, work, plan, index, cancelled=True, warnings=warnings)
         raise
-    _collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
+    warnings = _collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
     if rec["error"] is None and plan.extra_results is not None:
         _extra(rec, work, plan)
-    return _finish(rec, work, plan, index)
+    return _finish(rec, work, plan, index, warnings=warnings)
 
 
 def _command(job: Path) -> list[str]:
@@ -309,12 +311,14 @@ def _running_step(data: dict | None) -> str | None:
 
 
 def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: float, code: int | None = None,
-             cancelled: bool = False) -> None:
+             cancelled: bool = False) -> list[str]:
     """The steps, the settings, the results and the error of the record from what the child wrote. A step the child
     did not end (it died in it, or was cancelled) gets the seconds up to ``ended`` and says so; a child that ended
     without finishing the chain and without an error gives ``<step>: child ended with code N``. The texts of the
     exceptions the child wrote are scrubbed of paths, photo names, CRS codes and coordinates; the texts of the runner
-    itself (the codes, ``cancelled``) are not."""
+    itself (the codes, ``cancelled``) are not. Returned: the warnings the child wrote (``warnings`` of its result;
+    none from the child of the steps, those of ``ppg bench adjust``), scrubbed the same way, for :func:`_finish`:
+    the judge of a record resets its warnings, so they are added after it."""
     data = _read(work / child.RESULT) or {}
     entries = [e for e in data.get("steps") or [] if isinstance(e, dict) and e.get("step")]
 
@@ -347,6 +351,7 @@ def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: f
     rec["settings"].update(data.get("settings") or {})
     rec["results"] = dict(data.get("results") or {})
     rec["error"] = error
+    return [scrubbed(w) for w in data.get("warnings") or []]
 
 
 def _extra(rec: dict, work: Path, plan: _Plan) -> None:
@@ -362,13 +367,15 @@ def _extra(rec: dict, work: Path, plan: _Plan) -> None:
         rec["results"]["error"] = record.scrub(f"extra_results: {record.describe(exc)}", plan.private, plan.names)
 
 
-def _finish(rec: dict, work: Path, plan: _Plan, index: int, cancelled: bool = False) -> Path:
-    """The record judged and written, then the work folder removed - unless kept by request, or the run failed
-    (``rec["error"]`` set and not ``cancelled``): then it stays with the child's log and its result, said here by its
-    name, so that the reason of a failure after an hour can be read without running the hour again. A record that
-    is refused (a path in it) or cannot be written leaves the work folder for inspection (said by :func:`_one_run`);
-    a work folder that cannot be removed stays, said here, by its name."""
+def _finish(rec: dict, work: Path, plan: _Plan, index: int, cancelled: bool = False, warnings=()) -> Path:
+    """The record judged, the child's ``warnings`` (of :func:`_collect`) added after the judge's, and written; then
+    the work folder removed - unless kept by request, or the run failed (``rec["error"]`` set and not
+    ``cancelled``): then it stays with the child's log and its result, said here by its name, so that the reason of
+    a failure after an hour can be read without running the hour again. A record that is refused (a path in it) or
+    cannot be written leaves the work folder for inspection (said by :func:`_one_run`); a work folder that cannot be
+    removed stays, said here, by its name."""
     record.judge(rec)
+    rec["warnings"].extend(warnings)
     path = record.write(rec, plan.records, plan.private, index=index)
     if plan.keep:
         return path
