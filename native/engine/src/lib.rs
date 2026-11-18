@@ -4,6 +4,7 @@
 //! The Python extension `ppg_core`, the root package of the workspace, turns numpy arrays into
 //! their arguments.
 
+pub mod bundle;
 pub mod camera;
 pub mod depth;
 pub mod gpu;
