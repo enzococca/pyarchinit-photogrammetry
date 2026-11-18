@@ -216,6 +216,7 @@ def test_the_solver_is_chosen_and_said(monkeypatch, caplog):
     plain = bundle.Problem(**{**pb.__dict__, **tie_only})
     pb.gcps = _gcps(truth)
     monkeypatch.delenv("PPG_ENGINE", raising=False)
+    monkeypatch.delenv("PPG_NATIVE", raising=False)
     monkeypatch.setattr(_native, "has", lambda feature: False)
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         res = bundle.adjust(pb, max_iterations=2, solver="native")
@@ -236,6 +237,25 @@ def test_the_solver_is_chosen_and_said(monkeypatch, caplog):
     assert robust.solver == "scipy" and np.isfinite(robust.cost)  # tie points only: scipy's loss is the same
     monkeypatch.setenv("PPG_NATIVE", "0")
     assert "PPG_NATIVE=0" in bundle.native_ready(pb)
+
+
+def test_the_fallback_keeps_the_squared_loss_on_a_block_with_references(monkeypatch, caplog):
+    """``solver="native", loss="huber"`` on a block with control points where the native solver cannot run:
+    scipy adjusts it with the squared loss, the result and the one warning say so, nothing is raised (a
+    fallback is never an error); asked for by name, scipy still refuses a robust loss on such a block."""
+    rng = np.random.default_rng(11)
+    pb, truth = _block(rng, n_points=40)
+    pb.gcps = _gcps(truth)
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        res = bundle.adjust(pb, max_iterations=2, solver="native", loss="huber", loss_scale=2.0)
+    assert res.solver == "scipy" and "PPG_NATIVE=0" in res.fallback and "squared loss" in res.fallback
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "PPG_NATIVE=0" in warnings[0] and "squared loss" in warnings[0]
+    assert res.cost == bundle.adjust(pb, max_iterations=2, solver="scipy").cost  # the same squared-loss solve
+    with pytest.raises(ValueError, match="control point"):
+        bundle.adjust(pb, max_iterations=2, solver="scipy", loss="huber")
 
 
 @needs_native

@@ -371,20 +371,36 @@ def _native_function(name: str):
     return _native.kernel(name)
 
 
-def _choose(solver: str, pb: Problem) -> tuple[str, str | None]:
-    """The solver that runs for the word ``solver`` and, when the native one was wanted and cannot run,
-    the reason: a warning in the log when it was asked for (``"native"``, or ``PPG_ENGINE=native``), a
-    line when ``"auto"`` had turned to it on its own."""
+def _referenced(pb: Problem) -> bool:
+    """``pb`` has residuals besides the tie points: measured markers, control points, scale bars, GNSS
+    positions or the rolling shutter. scipy would weigh them by a robust loss too (the native solver weighs
+    the tie points only), so a robust loss on such a block needs the native solver."""
+    return bool(len(pb.mobs_image) or pb.gcps or pb.bars or pb.gnss or pb.rolling_shutter)
+
+
+def _choose(solver: str, pb: Problem, loss: str) -> tuple[str, str, str | None]:
+    """The solver that runs for the word ``solver``, the loss it runs with, and, when the native one was
+    wanted and cannot run, the reason: a warning in the log when it was asked for (``"native"``, or
+    ``PPG_ENGINE=native``), a line when ``"auto"`` had turned to it on its own. A fallback is never an
+    error: a robust loss on a block with references (:func:`_referenced`) is dropped for the squared loss,
+    and the reason says so."""
     asked = os.environ.get("PPG_ENGINE", "").strip().lower() == "native"
     wanted = solver if solver != "auto" else ("native" if NATIVE_BY_DEFAULT or asked else "scipy")
     if wanted == "scipy":
-        return "scipy", None
+        return "scipy", loss, None
     reason = native_ready(pb)
     if reason is None:
-        return "native", None
+        return "native", loss, None
+    if loss != "none" and _referenced(pb):
+        reason += (f"; scipy adjusts the block with the squared loss instead of {loss} (a robust loss on a block "
+                   "with references needs the native core)")
+        loss = "none"
+        line = reason
+    else:
+        line = f"{reason}; scipy adjusts the block instead"
     level = logging.WARNING if solver == "native" or asked else logging.INFO
-    log.log(level, "Bundle adjustment: %s; scipy adjusts the block instead", reason)
-    return "scipy", reason
+    log.log(level, "Bundle adjustment: %s", line)
+    return "scipy", loss, reason
 
 
 def _adjustable(pb: Problem) -> np.ndarray:
@@ -426,7 +442,7 @@ def _adjust_scipy(pb: Problem, max_iterations: int, progress: Progress, loss: st
     loss where the native solver weighs the tie points only: a loss is taken on a problem of tie points alone."""
     from scipy.optimize import least_squares
 
-    if loss != "none" and (len(pb.mobs_image) or pb.gcps or pb.bars or pb.gnss or pb.rolling_shutter):
+    if loss != "none" and _referenced(pb):
         raise ValueError(f"loss {loss!r} with the scipy solver: scipy would weigh the measured markers, control "
                          "points, scale bars, GNSS positions or rolling shutter by the loss too; it takes a robust "
                          "loss on tie points alone, the native solver on any problem")
@@ -542,10 +558,11 @@ def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = N
     otherwise scipy. Where the native solver cannot run (:func:`native_ready`) scipy adjusts the block,
     ``Result.fallback`` says why and the log has a line: never an error. ``loss`` ``"huber"`` or
     ``"cauchy"`` with ``loss_scale`` (in the units of the residuals: pixels over ``pixel_sigma``) weighs the
-    tie points robustly; scipy applies a loss to every residual, so on its path a robust loss is taken on
-    a problem of tie points alone (ValueError otherwise). Tie points with fewer than two observations in
-    front of a camera cannot be adjusted: they are left out of the adjustment and stay where they start
-    (the RMS figures of the result are of the rest)."""
+    tie points robustly; scipy applies a loss to every residual, so asked for by name it takes a robust
+    loss on a problem of tie points alone (ValueError otherwise), and on the fallback from the native
+    solver a block with references is adjusted with the squared loss, ``fallback`` saying so. Tie points
+    with fewer than two observations in front of a camera cannot be adjusted: they are left out of the
+    adjustment and stay where they start (the RMS figures of the result are of the rest)."""
     if solver not in SOLVERS:
         raise ValueError(f"solver {solver!r}: auto, native or scipy")
     if loss not in LOSSES:
@@ -553,7 +570,7 @@ def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = N
     if not loss_scale > 0:
         raise ValueError(f"loss_scale must be positive, not {loss_scale}")
     progress = as_progress(progress)
-    chosen, fallback = _choose(solver, pb)
+    chosen, loss, fallback = _choose(solver, pb, loss)
     keep = _adjustable(pb)
     held = int(len(keep) - keep.sum())
     solved = pb if held == 0 else _without_held(pb, keep)
@@ -571,7 +588,9 @@ def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evalua
     """``pb`` evaluated at the parameters it holds by the native engine (API 12; RuntimeError without
     it): the cost, the residual vector of the reference (:meth:`_Model.residuals`), the gradient of the
     cost in the columns of :class:`_Layout` and the Jacobian of the residuals on the structure of
-    :meth:`_Model.sparsity`; ``loss`` with ``loss_scale`` on the tie points, as :func:`adjust` takes them."""
+    :meth:`_Model.sparsity`; ``loss`` with ``loss_scale`` on the tie points, as :func:`adjust` takes them.
+    The problem is evaluated as given: the tie points :func:`adjust` leaves out (seen by fewer than two
+    photos) count here, so on a problem with such points the cost is not that of a :class:`Result`."""
     from scipy.sparse import csr_matrix
 
     if loss not in LOSSES:
@@ -592,7 +611,8 @@ def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers)
 def problem_at(pb: Problem, res: Result) -> Problem:
     """``pb`` started where ``res`` ended: its rotations, centres, intrinsics, points and markers replaced
     by those of ``res`` and nothing else (the other fields are shared with ``pb``; the rolling-shutter
-    velocities and the GNSS biases of a result have no place in a problem, which starts them at zero)."""
+    velocities and the GNSS biases of a result have no place in a problem, which starts them at zero; the
+    tie points :func:`adjust` left out are kept, where they started)."""
     return _problem_at(pb, res.rotations, res.centres, res.camera_params, res.points, res.markers)
 
 

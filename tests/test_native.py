@@ -859,7 +859,7 @@ def test_the_bundle_bindings_refuse_what_is_not_a_problem():
     with pytest.raises(ValueError, match="linear_solver"):
         ppg_core.bundle_adjust(problem, {"linear_solver": "cholmod"})
     with pytest.raises(ValueError, match="observation"):
-        ppg_core.bundle_evaluate({**problem, "obs_point": np.array([0, 7])}, "none", 1.0)
+        ppg_core.bundle_evaluate({**problem, "obs_point": np.array([0, 7], dtype=np.int64)}, "none", 1.0)
     out = ppg_core.bundle_adjust(problem, {"max_iterations": 5}, None)
     assert out["linear_solver"] == "dense" and out["iterations"] <= 5 and out["cost"] <= out["cost_initial"]
     assert out["rolling_shutter"] is None and out["bias"] == {} and out["points"].shape == (1, 3)
