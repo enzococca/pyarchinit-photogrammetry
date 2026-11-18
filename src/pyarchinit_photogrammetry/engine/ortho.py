@@ -292,11 +292,11 @@ class _Footprints:
             s = chunk.sensor(cam)
             px = np.array([[0.0, 0.0], [s.width, 0.0], [s.width, s.height], [0.0, s.height],
                            [s.width / 2, s.height / 2]])
-            try:
-                xy = s.unproject(px)
-            except Exception:  # pragma: no cover - a calibration that cannot be inverted at the corners
+            xy = s.unproject(px)
+            bad = ~np.isfinite(xy).all(axis=1)
+            if bad.any():  # a calibration that cannot be inverted at the corners (NaN rows): pinhole directions there
                 k = s.K
-                xy = (px - k[:2, 2]) / np.diag(k)[:2]
+                xy[bad] = (px[bad] - k[:2, 2]) / np.diag(k)[:2]
             d_cam = np.column_stack([xy, np.ones(len(xy))])
             d = (d_cam @ cam.transform[:3, :3].T) @ rot.T
             rays.append(d / np.linalg.norm(d, axis=1, keepdims=True))

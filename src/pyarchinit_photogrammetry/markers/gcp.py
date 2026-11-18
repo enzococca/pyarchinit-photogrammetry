@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,8 @@ from ..core import geometry
 from ..core.camera import Reference
 from ..core.marker import Marker
 from ..gnss import frames
+
+log = logging.getLogger(__name__)
 
 # what is converted that carries no frame and epoch, as the warning of frames.legacy_warning names it
 CAMERA_REFERENCES = "the positions of the photos"
@@ -32,7 +35,7 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
         if not m.projections:  # placed in 3D where no photo sees it (or given a position): kept
             continue
         measured = {k: p for k, p in m.projections.items() if p.measured}
-        views, obs, first = [], [], None
+        views, obs, first, dropped = [], [], None, []
         for cam_key, proj in (measured or m.projections).items():  # estimates count only without measures
             try:
                 cam = chunk.camera(cam_key)
@@ -41,6 +44,9 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
             if not (cam.enabled and cam.aligned):
                 continue
             norm = chunk.sensor(cam).unproject([[proj.x, proj.y]])[0]
+            if not np.isfinite(norm).all():  # a pixel the lens model cannot invert (the border of a strong calibration)
+                dropped.append(cam.label)
+                continue
             views.append(geometry.PinholeView(cam.transform))
             obs.append(norm)
             first = first or (cam, proj)
@@ -49,6 +55,17 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
         elif measured:
             m.position = surface_point(chunk, first[0], first[1].x, first[1].y, points) if first else None
         # estimated projections only, fewer than two photos (placed in 3D): the position stays
+        if dropped:  # one line per marker, naming the photos: a strong lens may drop many rays near its borders
+            names = ", ".join(dropped)
+            if first is None and measured:
+                log.warning("marker %s: nessuna misura utilizzabile (%d non proiettabili: %s), non triangolato",
+                            m.label, len(dropped), names)
+            elif len(dropped) == 1:
+                log.warning("marker %s: misura non proiettabile in %s (la calibrazione non si inverte in quel punto), "
+                            "ignorata", m.label, names)
+            else:
+                log.warning("marker %s: %d misure non proiettabili in %s (la calibrazione non si inverte in quei "
+                            "punti), ignorate", m.label, len(dropped), names)
 
 
 def views_of(chunk, marker, estimated: bool = False) -> int:
@@ -205,9 +222,9 @@ def surface_point(chunk, cam, x: float, y: float, points: _SurfacePoints | None 
     if key in cache:
         return None if cache[key] is None else cache[key].copy()
     xyz = points.xyz()
+    origin, direction = camera_ray(chunk, cam, x, y)
     found = None
-    if xyz is not None:
-        origin, direction = camera_ray(chunk, cam, x, y)
+    if xyz is not None and np.isfinite(direction).all():  # a pixel the lens model cannot invert has no ray
         diag = points.diag()
         v = xyz - origin
         t = v @ direction
