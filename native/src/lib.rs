@@ -78,8 +78,8 @@ fn patchmatcher_for(device: i64) -> Result<Arc<gpu_patchmatch::PatchMatcher>, St
 #[pyfunction]
 fn gpu_adapters(py: Python<'_>) -> PyResult<Vec<Bound<'_, PyDict>>> {
     let mut out = Vec::new();
-    for a in py.allow_threads(gpu::adapters) {
-        let d = PyDict::new_bound(py);
+    for a in py.detach(gpu::adapters) {
+        let d = PyDict::new(py);
         d.set_item("index", a.index)?;
         d.set_item("name", a.name)?;
         d.set_item("backend", a.backend)?;
@@ -110,7 +110,7 @@ fn gpu_match<'py>(py: Python<'py>, a: PyReadonlyArray2<'py, u8>, b: PyReadonlyAr
                   -> PyResult<Bound<'py, PyArray2<u32>>> {
     let av = descriptor_bytes(&a, "a")?;
     let bv = descriptor_bytes(&b, "b")?;
-    let matches = py.allow_threads(|| -> Result<Vec<[u32; 2]>, String> {
+    let matches = py.detach(|| -> Result<Vec<[u32; 2]>, String> {
         let m = matcher_for(device)?;
         let mut g = m.lock().map_err(|e| e.to_string())?;
         g.matches(a_key, &av, b_key, &bv, max_ratio as f32, max_distance as f32, cross_check)
@@ -120,14 +120,14 @@ fn gpu_match<'py>(py: Python<'py>, a: PyReadonlyArray2<'py, u8>, b: PyReadonlyAr
         out[[k, 0]] = m[0];
         out[[k, 1]] = m[1];
     }
-    Ok(out.into_pyarray_bound(py))
+    Ok(out.into_pyarray(py))
 }
 
 /// The name of the GPU a :func:`gpu_match` ``device`` resolves to (the matcher is created).
 #[pyfunction]
 #[pyo3(signature = (device=-1))]
 fn gpu_device_name(py: Python<'_>, device: i64) -> PyResult<String> {
-    py.allow_threads(|| -> Result<String, String> {
+    py.detach(|| -> Result<String, String> {
         let m = matcher_for(device)?;
         let g = m.lock().map_err(|e| e.to_string())?;
         Ok(g.info.name.clone())
@@ -137,7 +137,7 @@ fn gpu_device_name(py: Python<'_>, device: i64) -> PyResult<String> {
 /// Drop the descriptors kept on the GPUs (and the matchers).
 #[pyfunction]
 fn gpu_forget(py: Python<'_>) -> PyResult<()> {
-    py.allow_threads(|| {
+    py.detach(|| {
         if let Ok(mut all) = matchers().lock() {
             for (_, m) in all.iter() {
                 if let Ok(mut g) = m.lock() {
@@ -203,8 +203,8 @@ fn combine_depths<'py>(py: Python<'py>, stack: PyReadonlyArray3<'py, f32>, min_a
     let (k, h, w) = a.dim();
     let c = a.as_standard_layout();
     let data = c.as_slice().unwrap();
-    let out = py.allow_threads(|| depth::combine(data, k, h, w, min_agree, tol));
-    Array2::from_shape_vec((h, w), out).unwrap().into_pyarray_bound(py)
+    let out = py.detach(|| depth::combine(data, k, h, w, min_agree, tol));
+    Array2::from_shape_vec((h, w), out).unwrap().into_pyarray(py)
 }
 
 /// Depth map of camera i from the disparities of a rectified pair (end of `engine.dense._pair_depth`).
@@ -220,8 +220,8 @@ fn disparity_to_depth<'py>(py: Python<'py>, disp: PyReadonlyArray2<'py, f32>, mi
     let c = a.as_standard_layout();
     let data = c.as_slice().unwrap();
     let (oh, ow) = out_shape;
-    let out = py.allow_threads(|| depth::disparity_to_depth(data, h, w, min_valid, f, baseline, cx, cy, &r1, k, oh, ow));
-    Ok(Array2::from_shape_vec((oh, ow), out).unwrap().into_pyarray_bound(py))
+    let out = py.detach(|| depth::disparity_to_depth(data, h, w, min_valid, f, baseline, cx, cy, &r1, k, oh, ow));
+    Ok(Array2::from_shape_vec((oh, ow), out).unwrap().into_pyarray(py))
 }
 
 /// Normals of a depth map (`engine.dense._normals_from_depth`), h x w x 3 float32.
@@ -232,8 +232,8 @@ fn depth_normals<'py>(py: Python<'py>, depth: PyReadonlyArray2<'py, f32>, k: (f6
     let (h, w) = a.dim();
     let c = a.as_standard_layout();
     let data = c.as_slice().unwrap();
-    let out = py.allow_threads(|| depth::normals(data, h, w, k));
-    Array3::from_shape_vec((h, w, 3), out).unwrap().into_pyarray_bound(py)
+    let out = py.detach(|| depth::normals(data, h, w, k));
+    Array3::from_shape_vec((h, w, 3), out).unwrap().into_pyarray(py)
 }
 
 /// Candidate points (`cand`, indices into `points`) a depth map agrees with
@@ -274,8 +274,8 @@ fn depth_agree<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cand: P
     let (h, w) = d.dim();
     let dc = d.as_standard_layout();
     let dmap = dc.as_slice().unwrap();
-    let out = py.allow_threads(|| depth::agree(pts, cand, dmap, h, w, k, &rot, &t, tol, tol_slice));
-    Ok(Array1::from_vec(out).into_pyarray_bound(py))
+    let out = py.detach(|| depth::agree(pts, cand, dmap, h, w, k, &rot, &t, tol, tol_slice));
+    Ok(Array1::from_vec(out).into_pyarray(py))
 }
 
 /// Pixels, depth and in-frame flag of points in a camera (`engine.visibility.project_valid`).
@@ -295,7 +295,7 @@ fn project_points<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cam_
     let mut px = vec![f64::NAN; 2 * n];
     let mut depth = vec![0f64; n];
     let mut ok = vec![false; n];
-    py.allow_threads(|| {
+    py.detach(|| {
         px.par_chunks_mut(2 * 4096)
             .zip(depth.par_chunks_mut(4096))
             .zip(ok.par_chunks_mut(4096))
@@ -311,8 +311,8 @@ fn project_points<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cam_
                 }
             });
     });
-    Ok((Array2::from_shape_vec((n, 2), px).unwrap().into_pyarray_bound(py), Array1::from_vec(depth).into_pyarray_bound(py),
-        Array1::from_vec(ok).into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((n, 2), px).unwrap().into_pyarray(py), Array1::from_vec(depth).into_pyarray(py),
+        Array1::from_vec(ok).into_pyarray(py)))
 }
 
 /// Pixels and score of points in one photo of an orthomosaic tile (`engine.ortho._scores`): -inf
@@ -333,7 +333,7 @@ fn ortho_scores<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cam_fr
     let focal = cam.focal();
     let mut px = vec![f64::NAN; 2 * n];
     let mut score = vec![f32::NEG_INFINITY; n];
-    py.allow_threads(|| {
+    py.detach(|| {
         px.par_chunks_mut(2 * 4096).zip(score.par_chunks_mut(4096)).enumerate().for_each(|(b, (pb, sb))| {
             for j in 0..sb.len() {
                 let i = b * 4096 + j;
@@ -355,7 +355,7 @@ fn ortho_scores<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cam_fr
             }
         });
     });
-    Ok((Array2::from_shape_vec((n, 2), px).unwrap().into_pyarray_bound(py), Array1::from_vec(score).into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((n, 2), px).unwrap().into_pyarray(py), Array1::from_vec(score).into_pyarray(py)))
 }
 
 /// The `k` best photos of every point of an orthomosaic tile among all the photos given, as
@@ -399,7 +399,7 @@ fn ortho_candidates<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, po
     let mut index = vec![-1i32; k * n];
     let mut score = vec![f32::NEG_INFINITY; k * n];
     let mut pix = vec![f32::NAN; 2 * k * n];
-    py.allow_threads(|| {
+    py.detach(|| {
         let block = 2048;
         let results: Vec<(usize, Vec<i32>, Vec<f32>, Vec<f32>)> = (0..n.div_ceil(block))
             .into_par_iter()
@@ -471,9 +471,9 @@ fn ortho_candidates<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, po
             }
         }
     });
-    Ok((Array2::from_shape_vec((k, n), index).unwrap().into_pyarray_bound(py),
-        Array2::from_shape_vec((k, n), score).unwrap().into_pyarray_bound(py),
-        Array3::from_shape_vec((k, n, 2), pix).unwrap().into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((k, n), index).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((k, n), score).unwrap().into_pyarray(py),
+        Array3::from_shape_vec((k, n, 2), pix).unwrap().into_pyarray(py)))
 }
 
 type SourceArgs<'py> = (PyReadonlyArray2<'py, f32>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
@@ -530,11 +530,11 @@ fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>,
     let init_n = normal_layout.as_ref().map(|l| l.as_slice().unwrap());
     let params = patchmatch::Params { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
                                       step, top_k, min_views, max_cost, seed };
-    let out = py.allow_threads(|| patchmatch::patchmatch(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, params, init,
+    let out = py.detach(|| patchmatch::patchmatch(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, params, init,
                                                          init_n));
-    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray_bound(py),
-        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray_bound(py),
-        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray(py),
+        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray(py)))
 }
 
 /// :func:`patchmatch_depth` on the GPU (:mod:`gpu_patchmatch`): the same arguments and results,
@@ -586,13 +586,13 @@ fn gpu_patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f
     let init_n = normal_layout.as_ref().map(|l| l.as_slice().unwrap());
     let opts = gpu_patchmatch::Options { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
                                          step, top_k, min_views, max_cost, seed };
-    let out = py.allow_threads(|| -> Result<gpu_patchmatch::Output, String> {
+    let out = py.detach(|| -> Result<gpu_patchmatch::Output, String> {
         let m = patchmatcher_for(device)?;
         m.run(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, opts, init, init_n)
     }).map_err(PyRuntimeError::new_err)?;
-    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray_bound(py),
-        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray_bound(py),
-        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray(py),
+        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray(py)))
 }
 
 /// SIFT key points and descriptors of a grey image (``h x w`` float32 in [0, 1]) on the GPU, as
@@ -613,14 +613,14 @@ fn gpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, ma
     let data: Vec<f32> = a.iter().copied().collect();
     let o = gpu_sift::Options { first_octave, num_octaves, octave_resolution, peak_threshold, edge_threshold,
                                 max_orientations, upright, max_features };
-    let (kp, desc) = py.allow_threads(|| -> Result<(Vec<[f32; 4]>, Vec<u8>), String> {
+    let (kp, desc) = py.detach(|| -> Result<(Vec<[f32; 4]>, Vec<u8>), String> {
         let s = gpu_sift::sift_for(device)?;
         s.extract(&data, w, h, &o)
     }).map_err(PyRuntimeError::new_err)?;
     let n = kp.len();
     let flat: Vec<f32> = kp.iter().flat_map(|k| k.iter().copied()).collect();
-    Ok((Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray_bound(py),
-        Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray(py)))
 }
 
 type FuseMapArgs<'py> = (i64, Option<PyReadonlyArray2<'py, f32>>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
@@ -658,7 +658,7 @@ fn gpu_fuse_depth_maps<'py>(py: Python<'py>, reference: FuseMapArgs<'py>, neighb
                                   t: [t[0], t[1], t[2]], order: *order });
     }
     let o = gpu_fuse::Options { min_pixels, max_reproj, max_depth_rel, max_normal_deg, support_tol };
-    let points = py.allow_threads(|| -> Result<Vec<gpu_fuse::Fused>, String> {
+    let points = py.detach(|| -> Result<Vec<gpu_fuse::Fused>, String> {
         let f = fuser_for(device)?;
         let mut g = f.lock().map_err(|e| e.to_string())?;
         g.fuse(&maps[0], &maps[1..], &o)
@@ -669,17 +669,17 @@ fn gpu_fuse_depth_maps<'py>(py: Python<'py>, reference: FuseMapArgs<'py>, neighb
     let pixel: Vec<u32> = points.iter().map(|p| p.pixel).collect();
     let pixels: Vec<u32> = points.iter().map(|p| p.counts >> 16).collect();
     let support: Vec<u32> = points.iter().map(|p| p.counts & 0xffff).collect();
-    Ok((Array2::from_shape_vec((n, 3), xyz).unwrap().into_pyarray_bound(py),
-        Array2::from_shape_vec((n, 3), nrm).unwrap().into_pyarray_bound(py),
-        Array1::from_vec(pixel).into_pyarray_bound(py), Array1::from_vec(pixels).into_pyarray_bound(py),
-        Array1::from_vec(support).into_pyarray_bound(py)))
+    Ok((Array2::from_shape_vec((n, 3), xyz).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, 3), nrm).unwrap().into_pyarray(py),
+        Array1::from_vec(pixel).into_pyarray(py), Array1::from_vec(pixels).into_pyarray(py),
+        Array1::from_vec(support).into_pyarray(py)))
 }
 
 /// Drop the depth maps a GPU holds for the fusion (their keys are unique within one workspace).
 #[pyfunction]
 #[pyo3(signature = (device=-1))]
 fn gpu_fuse_forget(py: Python<'_>, device: i64) -> PyResult<()> {
-    py.allow_threads(|| -> Result<(), String> {
+    py.detach(|| -> Result<(), String> {
         let f = fuser_for(device)?;
         let mut g = f.lock().map_err(|e| e.to_string())?;
         g.clear();
@@ -691,7 +691,7 @@ fn gpu_fuse_forget(py: Python<'_>, device: i64) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (device=-1))]
 fn gpu_fuse_cached(py: Python<'_>, device: i64) -> PyResult<Vec<i64>> {
-    py.allow_threads(|| -> Result<Vec<i64>, String> {
+    py.detach(|| -> Result<Vec<i64>, String> {
         let f = fuser_for(device)?;
         let g = f.lock().map_err(|e| e.to_string())?;
         Ok(g.cached())
@@ -755,13 +755,13 @@ fn tin_triangulate<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, constra
         }
         cons.push([a as usize, b as usize]);
     }
-    let r = py.allow_threads(|| tin::triangulate(&pts, &cons)).map_err(PyValueError::new_err)?;
+    let r = py.detach(|| tin::triangulate(&pts, &cons)).map_err(PyValueError::new_err)?;
     let tri = Array2::from_shape_vec((r.triangles.len(), 3), r.triangles.concat()).unwrap();
     let con = Array2::from_shape_vec((r.constrained.len(), 2), r.constrained.concat()).unwrap();
     let nxy = Array2::from_shape_vec((r.new_xy.len(), 2), r.new_xy.concat()).unwrap();
     let non = Array2::from_shape_vec((r.new_on.len(), 2), r.new_on.concat()).unwrap();
-    Ok((tri.into_pyarray_bound(py), con.into_pyarray_bound(py), nxy.into_pyarray_bound(py),
-        non.into_pyarray_bound(py)))
+    Ok((tri.into_pyarray(py), con.into_pyarray(py), nxy.into_pyarray(py),
+        non.into_pyarray(py)))
 }
 
 /// The TIN on a grid (`engine.tin.rasterize`): ``height`` x ``width`` float32 cells of side
@@ -780,8 +780,8 @@ fn tin_rasterize<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, z: PyRead
     let pts = xy_rows(&xy)?;
     let h = heights(&z, pts.len())?;
     let tri = triangle_rows(&triangles, pts.len())?;
-    let grid = py.allow_threads(|| tin::rasterize(&pts, &h, &tri, x0, y0, cell, width, height));
-    Ok(Array2::from_shape_vec((height, width), grid).unwrap().into_pyarray_bound(py))
+    let grid = py.detach(|| tin::rasterize(&pts, &h, &tri, x0, y0, cell, width, height));
+    Ok(Array2::from_shape_vec((height, width), grid).unwrap().into_pyarray(py))
 }
 
 /// Contour segments of a TIN (`engine.tin.contour_segments`): (s x 2 x 2) segments and the
@@ -794,10 +794,10 @@ fn tin_contours<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, z: PyReado
     let h = heights(&z, pts.len())?;
     let tri = triangle_rows(&triangles, pts.len())?;
     let lv: Vec<f64> = levels.as_array().iter().copied().collect();
-    let (segs, idx) = py.allow_threads(|| tin::contours(&pts, &h, &tri, &lv));
+    let (segs, idx) = py.detach(|| tin::contours(&pts, &h, &tri, &lv));
     let flat: Vec<f64> = segs.iter().flat_map(|s| [s[0][0], s[0][1], s[1][0], s[1][1]]).collect();
     let s = Array3::from_shape_vec((segs.len(), 2, 2), flat).unwrap();
-    Ok((s.into_pyarray_bound(py), Array1::from_vec(idx).into_pyarray_bound(py)))
+    Ok((s.into_pyarray(py), Array1::from_vec(idx).into_pyarray(py)))
 }
 
 /// Exact volumes of a TIN against the plane z = a x + b y + c (`engine.tin.prism_volume`):
@@ -808,7 +808,7 @@ fn tin_volume(py: Python<'_>, xy: PyReadonlyArray2<'_, f64>, z: PyReadonlyArray1
     let pts = xy_rows(&xy)?;
     let h = heights(&z, pts.len())?;
     let tri = triangle_rows(&triangles, pts.len())?;
-    Ok(py.allow_threads(|| tin::volume(&pts, &h, &tri, [plane.0, plane.1, plane.2])))
+    Ok(py.detach(|| tin::volume(&pts, &h, &tri, [plane.0, plane.1, plane.2])))
 }
 
 /// Camera models the projection kernels know.

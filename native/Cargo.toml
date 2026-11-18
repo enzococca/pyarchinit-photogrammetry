@@ -18,8 +18,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # the kernels, without Python (folder engine)
 ppg_engine = { path = "engine" }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
-numpy = "0.22"
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+numpy = "0.30"
 rayon = "1.10"
 
 [build-dependencies]

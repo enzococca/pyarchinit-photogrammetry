@@ -36,7 +36,7 @@ pub fn ppk_solve(py: Python<'_>, conf: &str, infiles: Vec<String>, outfile: &str
     let outfile = c_text(outfile, "the output file")?;
     let files = infiles.iter().map(|f| c_text(f, "an input file")).collect::<PyResult<Vec<CString>>>()?;
     let n = c_int::try_from(files.len()).map_err(|_| PyValueError::new_err("too many input files"))?;
-    let (code, msg) = py.allow_threads(move || {
+    let (code, msg) = py.detach(move || {
         let pointers: Vec<*const c_char> = files.iter().map(|f| f.as_ptr()).collect();
         let mut msg = vec![0u8; MSGLEN];
         let _guard = rtklib::lock(); // shared with raw_to_rinex (convert.rs)
