@@ -5,8 +5,8 @@
 //! preconditioner is the block-Jacobi of `S`: the diagonal blocks of the photos and of the
 //! markers and the border block, assembled with the assemblers of `schur` and factorised dense.
 //! The iteration stops when the decrease of the quadratic model stagnates (the Q-criterion of
-//! Nash and Sofer, with Ceres's forcing of a tenth), on an exact solution, or after
-//! `PCG_MAX_ITERATIONS`.
+//! Nash and Sofer as Ceres applies it, with the forcing `PCG_FORCING`), on an exact solution, or
+//! after `PCG_MAX_ITERATIONS`.
 
 use rayon::prelude::*;
 
@@ -71,8 +71,7 @@ fn cholesky_solve(l: &[f64], n: usize, x: &mut [f64]) {
 }
 
 /// A diagonal block of the preconditioner: its rows and its Cholesky factor (lower,
-/// column-major); when the block is not positive definite beyond round-off, the factor of its
-/// diagonal alone.
+/// column-major); when a pivot of the block is not positive, the factor of its diagonal alone.
 struct DiagonalBlock {
     start: usize,
     len: usize,

@@ -23,8 +23,9 @@ pub const DENSE_MAX_COLUMNS: usize = 6 * DENSE_MAX_PHOTOS;
 /// wrong track is a plateau along which the adjustment gains 1e-8 to 1e-7 of the cost per iteration
 /// for ever, long after the rest of the block has converged.
 pub const ROBUST_FUNCTION_TOLERANCE: f64 = 1e-6;
-/// A sparse factor that would take more bytes than this (a quarter of the memory budget of 16 GB)
-/// is replaced by the conjugate gradients.
+/// A sparse factor whose values would take more bytes than this (a quarter of the memory budget of
+/// 16 GB) is replaced by the conjugate gradients; the pattern of the matrix and faer's workspace
+/// are not counted.
 pub const PCG_ABOVE_BYTES: u64 = 4 << 30;
 
 /// The damping starts here (a trust region of 1e4 of Marquardt's scaled units) ...
@@ -148,17 +149,12 @@ enum Stepper {
 }
 
 impl Stepper {
-    /// The solver asked for, or the one `Auto` stands for on this problem within the limits of
-    /// the solver (`DENSE_MAX_COLUMNS`, `PCG_ABOVE_BYTES`).
-    fn new(pb: &Problem, st: &Structure, red: &Reduced, asked: LinearSolver) -> Result<Stepper, String> {
-        Stepper::choose(pb, st, red, asked, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES)
-    }
-
-    /// `new` with the limits as arguments: `Auto` is `choose_linear_solver` on the columns of the
-    /// reduced system and the bytes of its sparse factor; the symbolic factorisation, which the
-    /// choice between the sparse Cholesky and the conjugate gradients needs, is computed only
-    /// above the dense limit, and when it cannot be built (memory) the conjugate gradients are
-    /// taken.
+    /// The solver asked for, or the one `Auto` stands for on this problem within the limits
+    /// given (`solve` passes `DENSE_MAX_COLUMNS` and `PCG_ABOVE_BYTES`): `choose_linear_solver` on
+    /// the columns of the reduced system and the bytes of its sparse factor. The pattern and the
+    /// symbolic factorisation, which say how big the factor would be, are built only above the
+    /// dense limit; the values are allocated only once the sparse Cholesky is chosen; when either
+    /// cannot be built (memory) the conjugate gradients are taken.
     fn choose(
         pb: &Problem,
         st: &Structure,
@@ -169,17 +165,22 @@ impl Stepper {
     ) -> Result<Stepper, String> {
         match asked {
             LinearSolver::Dense => Ok(Stepper::Dense),
-            LinearSolver::Sparse => Ok(Stepper::Sparse(SparseSystem::new(pb, st, red)?)),
+            LinearSolver::Sparse => {
+                let mut system = SparseSystem::new(pb, st, red)?;
+                system.allocate()?;
+                Ok(Stepper::Sparse(system))
+            }
             LinearSolver::Pcg => Ok(Stepper::Pcg),
             LinearSolver::Auto => {
                 if choose_linear_solver(red.size, 0, dense_max_columns, pcg_above) == LinearSolver::Dense {
                     return Ok(Stepper::Dense);
                 }
-                let Ok(system) = SparseSystem::new(pb, st, red) else { return Ok(Stepper::Pcg) };
-                match choose_linear_solver(red.size, system.factor_bytes(), dense_max_columns, pcg_above) {
-                    LinearSolver::Pcg => Ok(Stepper::Pcg),
-                    _ => Ok(Stepper::Sparse(system)),
+                let Ok(mut system) = SparseSystem::new(pb, st, red) else { return Ok(Stepper::Pcg) };
+                let chosen = choose_linear_solver(red.size, system.factor_bytes(), dense_max_columns, pcg_above);
+                if chosen == LinearSolver::Pcg || system.allocate().is_err() {
+                    return Ok(Stepper::Pcg);
                 }
+                Ok(Stepper::Sparse(system))
             }
         }
     }
@@ -227,11 +228,22 @@ fn max_abs(values: &[f64]) -> f64 {
 /// Adjusts `pb` from the parameters it holds. `observe(iteration, cost)` is called after every
 /// iteration with the cost reached; `false` stops the adjustment with `Err("cancelled")`.
 pub fn solve(pb: &Problem, opts: &Options, observe: &mut dyn FnMut(usize, f64) -> bool) -> Result<Solution, String> {
+    solve_with_limits(pb, opts, observe, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES)
+}
+
+/// `solve` with the limits of `Auto` as arguments (the tests lower them to small blocks).
+pub(crate) fn solve_with_limits(
+    pb: &Problem,
+    opts: &Options,
+    observe: &mut dyn FnMut(usize, f64) -> bool,
+    dense_max_columns: usize,
+    pcg_above: u64,
+) -> Result<Solution, String> {
     pb.check()?;
     let lay = Layout::new(pb);
     let st = Structure::new(pb);
     let red = Reduced::new(pb, &lay);
-    let mut stepper = Stepper::new(pb, &st, &red, opts.linear_solver)?;
+    let mut stepper = Stepper::choose(pb, &st, &red, opts.linear_solver, dense_max_columns, pcg_above)?;
     let linear_solver = stepper.solver();
 
     let function_tolerance = effective_function_tolerance(opts.loss, opts.function_tolerance);
@@ -374,6 +386,17 @@ mod tests {
             assert_eq!(choose(asked, 0, 0), asked);
             assert_eq!(choose(asked, usize::MAX, u64::MAX), asked);
         }
+        // the sparse system `Auto` keeps has its values; through `solve`, the solution says which
+        // solver `Auto` took
+        let kept = Stepper::choose(&pb, &st, &red, LinearSolver::Auto, 47, u64::MAX).unwrap();
+        assert!(matches!(kept, Stepper::Sparse(ref system) if system.allocated_bytes() > 0));
+        let through = |dense_max_columns, pcg_above| {
+            let sol = solve_with_limits(&pb, &Options::default(), &mut |_, _| true, dense_max_columns, pcg_above);
+            sol.unwrap().linear_solver
+        };
+        assert_eq!(through(48, u64::MAX), LinearSolver::Dense);
+        assert_eq!(through(47, u64::MAX), LinearSolver::Sparse);
+        assert_eq!(through(47, factor_bytes - 1), LinearSolver::Pcg);
     }
 
     /// The small block of `schur::tests` (every kind of residual: two cameras, a fixed photo,
@@ -384,11 +407,7 @@ mod tests {
     fn every_solver_of_the_reduced_system_solves_the_small_block() {
         use crate::bundle::problem::{compose, exp_rotation};
         use crate::bundle::schur::tests::small_block;
-        let mut exact = small_block();
-        // the block was made for single steps: its bar does not measure the distance of its
-        // markers; with the true distance the exact block is where the cost is zero
-        let (a, b) = (exact.markers[0], exact.markers[1]);
-        exact.bars[0].2 = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let exact = small_block();
         let mut pb = exact.clone();
         // the free photos moved (the fixed one could not come back)
         for k in 0..pb.centres.len() {
@@ -417,7 +436,6 @@ mod tests {
             assert!((sol.camera_params[0][0] - 1000.0).abs() < 1e-6, "{solver:?}: f {}", sol.camera_params[0][0]);
         }
     }
-
 
     #[test]
     fn the_function_tolerance_is_scipys_and_the_robust_losses_floor_it() {

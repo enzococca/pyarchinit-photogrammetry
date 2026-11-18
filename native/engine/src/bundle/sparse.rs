@@ -119,8 +119,9 @@ fn marker_rows(pb: &Problem, st: &Structure, red: &Reduced, m: usize) -> Vec<usi
 }
 
 /// The pattern of the lower triangle (with the whole diagonal block of every column block, of
-/// which faer reads the lower part), in compressed columns.
-fn pattern(pb: &Problem, st: &Structure, red: &Reduced) -> SymbolicSparseColMat<usize> {
+/// which faer reads the lower part), in compressed columns; an error when there is no memory for
+/// its arrays (the row lists of the blocks, one per block, are small and not reserved that way).
+fn pattern(pb: &Problem, st: &Structure, red: &Reduced) -> Result<SymbolicSparseColMat<usize>, String> {
     let n = red.size;
     let photos: Vec<Vec<usize>> = (0..pb.centres.len())
         .into_par_iter()
@@ -128,23 +129,28 @@ fn pattern(pb: &Problem, st: &Structure, red: &Reduced) -> SymbolicSparseColMat<
         .collect();
     let markers: Vec<Vec<usize>> = (0..pb.markers.len()).into_par_iter().map(|m| marker_rows(pb, st, red, m)).collect();
     let border: Vec<usize> = (red.border_start..n).collect();
-    let blocks = photos
-        .iter()
-        .zip(&red.photo_len)
-        .map(|(rows, &len)| (rows, len))
-        .chain(markers.iter().map(|rows| (rows, 3)))
-        .chain(std::iter::once((&border, n - red.border_start)));
-    let mut col_ptr = Vec::with_capacity(n + 1);
+    let blocks = || {
+        photos
+            .iter()
+            .zip(&red.photo_len)
+            .map(|(rows, &len)| (rows, len))
+            .chain(markers.iter().map(|rows| (rows, 3)))
+            .chain(std::iter::once((&border, n - red.border_start)))
+    };
+    let entries: usize = blocks().map(|(rows, len)| rows.len() * len).sum();
+    let mut col_ptr = Vec::new();
+    col_ptr.try_reserve_exact(n + 1).map_err(out_of_memory)?;
     let mut row_idx = Vec::new();
+    row_idx.try_reserve_exact(entries).map_err(out_of_memory)?;
     col_ptr.push(0);
-    for (rows, len) in blocks {
+    for (rows, len) in blocks() {
         for _ in 0..len {
             row_idx.extend_from_slice(rows);
             col_ptr.push(row_idx.len());
         }
     }
-    debug_assert_eq!(col_ptr.len(), n + 1);
-    SymbolicSparseColMat::new_checked(n, n, col_ptr, None, row_idx)
+    debug_assert_eq!((col_ptr.len(), row_idx.len()), (n + 1, entries));
+    Ok(SymbolicSparseColMat::new_checked(n, n, col_ptr, None, row_idx))
 }
 
 /// Splits `values` and `rhs` into the slabs of the column blocks of `lengths` columns each
@@ -170,33 +176,27 @@ fn split_blocks<'a>(
 }
 
 impl SparseSystem {
-    /// The pattern of `red` and its symbolic factorisation.
+    /// The pattern of `red` and its symbolic factorisation, and nothing more: what `Auto` builds
+    /// to judge the size of the factor (`factor_bytes`) before a value is allocated (`allocate`).
     pub(crate) fn new(pb: &Problem, st: &Structure, red: &Reduced) -> Result<SparseSystem, String> {
-        let pattern = pattern(pb, st, red);
-        let par = faer::get_global_parallelism();
-        let mut system = SparseSystem {
-            values: vec![0.0; pattern.row_idx().len()],
+        let pattern = pattern(pb, st, red)?;
+        let symbolic = if red.size == 0 {
+            None
+        } else {
+            let ordering = SymmetricOrdering::Amd;
+            let params = CholeskySymbolicParams::default();
+            let symbolic = factorize_symbolic_cholesky(pattern.as_ref(), Side::Lower, ordering, params)
+                .map_err(|e| format!("the symbolic factorisation of the reduced system failed: {e:?}"))?;
+            Some(symbolic)
+        };
+        Ok(SparseSystem {
             pattern,
-            symbolic: None,
+            symbolic,
+            values: Vec::new(),
             factor: Vec::new(),
             factor_scratch: MemBuffer::try_new(StackReq::empty()).map_err(out_of_memory)?,
             solve_scratch: MemBuffer::try_new(StackReq::empty()).map_err(out_of_memory)?,
-        };
-        if red.size == 0 {
-            return Ok(system);
-        }
-        let ordering = SymmetricOrdering::Amd;
-        let params = CholeskySymbolicParams::default();
-        let symbolic = factorize_symbolic_cholesky(system.pattern.as_ref(), Side::Lower, ordering, params)
-            .map_err(|e| format!("the symbolic factorisation of the reduced system failed: {e:?}"))?;
-        system.factor.try_reserve_exact(symbolic.len_val()).map_err(out_of_memory)?;
-        system.factor.resize(symbolic.len_val(), 0.0);
-        let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f64>(par, Default::default());
-        system.factor_scratch = MemBuffer::try_new(factor_scratch).map_err(out_of_memory)?;
-        let solve_scratch = symbolic.solve_in_place_scratch::<f64>(1, par);
-        system.solve_scratch = MemBuffer::try_new(solve_scratch).map_err(out_of_memory)?;
-        system.symbolic = Some(symbolic);
-        Ok(system)
+        })
     }
 
     /// The bytes of the values of the factor, what the symbolic factorisation says the numeric
@@ -205,11 +205,38 @@ impl SparseSystem {
         self.symbolic.as_ref().map_or(0, |s| s.len_val() as u64 * std::mem::size_of::<f64>() as u64)
     }
 
+    /// Allocates the values of the matrix, the factor and faer's workspace, once (`step` calls it
+    /// too); an error when there is no memory for them.
+    pub(crate) fn allocate(&mut self) -> Result<(), String> {
+        let Some(symbolic) = &self.symbolic else { return Ok(()) };
+        if !self.factor.is_empty() {
+            return Ok(());
+        }
+        let par = faer::get_global_parallelism();
+        let entries = self.pattern.row_idx().len();
+        self.values.try_reserve_exact(entries).map_err(out_of_memory)?;
+        self.values.resize(entries, 0.0);
+        self.factor.try_reserve_exact(symbolic.len_val()).map_err(out_of_memory)?;
+        self.factor.resize(symbolic.len_val(), 0.0);
+        let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f64>(par, Default::default());
+        self.factor_scratch = MemBuffer::try_new(factor_scratch).map_err(out_of_memory)?;
+        let solve_scratch = symbolic.solve_in_place_scratch::<f64>(1, par);
+        self.solve_scratch = MemBuffer::try_new(solve_scratch).map_err(out_of_memory)?;
+        Ok(())
+    }
+
     /// The nonzeros of the pattern of the reduced system (the lower triangle with whole diagonal
     /// blocks).
     #[cfg(test)]
     pub(crate) fn pattern_entries(&self) -> usize {
-        self.values.len()
+        self.pattern.row_idx().len()
+    }
+
+    /// The bytes of the value buffers: the values of the matrix, the factor, faer's workspace.
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        let f64s = self.values.capacity() + self.factor.capacity();
+        f64s * std::mem::size_of::<f64>() + self.factor_scratch.len() + self.solve_scratch.len()
     }
 
     /// One step of the damped normal equations, as `schur::dense_step`: the reduced system
@@ -225,6 +252,7 @@ impl SparseSystem {
         g: &[f64],
         damping: &[f64],
     ) -> Result<Vec<f64>, String> {
+        self.allocate()?;
         let points = point_blocks(pb, lay, st, ev, g, damping);
         let cx = Context { pb, lay, st, red, ev, g, damping, points: &points };
         let n = red.size;
@@ -307,7 +335,7 @@ mod tests {
         // photos of 12, 6 and 12 columns, two markers, a border of 6 intrinsics and 6 biases
         assert_eq!(red.photo_len, vec![12, 6, 12]);
         assert_eq!((red.marker_start, red.border_start, red.size), (30, 36, 48));
-        let pat = pattern(&pb, &st, &red);
+        let pat = pattern(&pb, &st, &red).unwrap();
         let (_, _, col_ptr, _, row_idx) = pat.parts();
         let rows_of = |col: usize| &row_idx[col_ptr[col]..col_ptr[col + 1]];
         let range = |from: usize, to: usize| (from..to).collect::<Vec<_>>();
@@ -352,13 +380,31 @@ mod tests {
         apart.check().unwrap();
         let st = Structure::new(&apart);
         let red = Reduced::new(&apart, &Layout::new(&apart));
-        let pat = pattern(&apart, &st, &red);
+        let pat = pattern(&apart, &st, &red).unwrap();
         let (_, _, col_ptr, _, row_idx) = pat.parts();
         let rows_of = |col: usize| &row_idx[col_ptr[col]..col_ptr[col + 1]];
         let first: Vec<usize> = (0..18).chain(30..48).collect();
         assert_eq!(rows_of(0), &first[..]);
         let third: Vec<usize> = (18..30).chain(36..48).collect();
         assert_eq!(rows_of(18), &third[..], "the third photo sees no marker and shares no point");
+    }
+
+    /// What `Auto` builds to judge the size of the factor must not be the factor: `new` allocates
+    /// no value buffer; `allocate` allocates them, once.
+    #[test]
+    fn the_system_is_built_without_its_values_and_allocates_them_once() {
+        let pb = small_block();
+        let st = Structure::new(&pb);
+        let red = Reduced::new(&pb, &Layout::new(&pb));
+        let mut system = SparseSystem::new(&pb, &st, &red).unwrap();
+        assert!(system.factor_bytes() > 0 && system.pattern_entries() > 0);
+        assert_eq!(system.allocated_bytes(), 0, "{} bytes of values allocated by new", system.allocated_bytes());
+        system.allocate().unwrap();
+        let allocated = system.allocated_bytes();
+        let least = system.factor_bytes() as usize + 8 * system.pattern_entries();
+        assert!(allocated >= least, "{allocated} bytes for a factor and a pattern of {least}");
+        system.allocate().unwrap();
+        assert_eq!(system.allocated_bytes(), allocated, "allocated twice");
     }
 
     fn sparse_step_equals_the_dense_step(loss: Loss, lambda: f64) {

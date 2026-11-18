@@ -812,7 +812,8 @@ pub(crate) mod tests {
             markers: markers.clone(),
             mobs,
             gcps: vec![(0, markers[0], [0.01; 3])],
-            bars: vec![(0, 1, 3.5, 0.002)],
+            // the bar measures the distance of its markers, so that the exact block costs nothing
+            bars: vec![(0, 1, 10.04f64.sqrt(), 0.002)],
             gnss: vec![(0, centres[0], [0.02; 3], 7), (1, centres[1], [0.02; 3], 2), (2, centres[2], [0.02; 3], 7)],
             fixed_images: vec![false, true, false],
             rolling_shutter: true,

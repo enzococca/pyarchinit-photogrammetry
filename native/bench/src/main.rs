@@ -300,8 +300,8 @@ fn main() -> ExitCode {
             eprintln!("usage: ppg-bench adapters");
             eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N]");
             eprintln!(
-                "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS}] \
-                 [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
+                "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS} (in all, rounded \
+                 up to a multiple of the photos)] [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
             );
             return ExitCode::from(2);
         }
