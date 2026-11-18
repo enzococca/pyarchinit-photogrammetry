@@ -114,8 +114,9 @@ ppg bench table DIR
   reconstruction of a kept project (one of `run` or `synthetic` with `--keep`, or any aligned
   project), on the same plain problem - the tie points, every calibration free but the principal
   point, the first photo and the farthest from it held -, each solver in a child process of its own:
-  the steps `bundle_native`, `bundle_colmap`, `bundle_scipy` with the seconds of the solve alone and
-  the peak memory of the child. The project is opened and never written: each solver reads the
+  the steps `bundle_native`, `bundle_colmap`, `bundle_scipy` with the seconds of the solve alone
+  (COLMAP's with Ceres' set-up of its problem, as the native solver's hold the core's) and the peak
+  memory of the child. The project is opened and never written: each solver reads the
   reconstruction from disk for itself, COLMAP adjusts its copy in memory. The results: `photos`,
   `points`, `observations`, `bundle_cost_initial`; per solver `bundle_cost_<s>`, by one evaluator
   for the three (the native evaluation of the problem at the solver's end point), `bundle_iterations_<s>`,

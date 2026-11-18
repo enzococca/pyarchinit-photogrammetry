@@ -41,7 +41,8 @@ CONVERGED = ("function", "gradient", "parameters", "function_and_parameters", "c
 
 @dataclass(frozen=True)
 class ColmapResult:
-    """What :func:`colmap_adjust` reports of COLMAP's solve: the ``seconds`` of the solve alone, the ``residuals``
+    """What :func:`colmap_adjust` reports of COLMAP's solve: the ``seconds`` of the solve (with Ceres' set-up of its
+    problem), the ``residuals``
     Ceres had (two per observation), its ``iterations`` (what Ceres' report calls the minimizer iterations: the
     successful and the unsuccessful steps), its ``termination`` as a word (``convergence``, ``no_convergence``,
     ``failure``, ``user_success``, ``user_failure``) and the ``linear_solver`` it used (``dense_schur``,
@@ -60,7 +61,8 @@ def colmap_adjust(rec, held: tuple[int, int], max_iterations: int) -> ColmapResu
     ``held`` image ids constant (one photo per frame, as that problem requires), the focal lengths and the
     distortion refined and the principal points held, the squared loss, every point of ``rec`` in
     (``min_track_length`` 0), at most ``max_iterations`` iterations of Ceres. The reconstruction is changed in
-    memory only."""
+    memory only. The seconds are those of the solve with Ceres' set-up of its problem (the residual blocks and
+    the parameterisation), as the native solver's seconds hold the core's set-up from the problem given to it."""
     import pycolmap
 
     config = pycolmap.BundleAdjustmentConfig()
@@ -78,8 +80,8 @@ def colmap_adjust(rec, held: tuple[int, int], max_iterations: int) -> ColmapResu
     options.print_summary = False
     options.ceres.loss_function_type = pycolmap.LossFunctionType.TRIVIAL
     options.ceres.solver_options.max_num_iterations = int(max_iterations)
+    started = time.perf_counter()  # with Ceres' set-up of its problem, as the native seconds hold the core's
     adjuster = pycolmap.create_default_bundle_adjuster(options, config, rec)
-    started = time.perf_counter()
     summary = adjuster.solve()
     seconds = time.perf_counter() - started
     ceres = summary.ceres_summary
@@ -96,7 +98,9 @@ def camera_sigmas(pb: bundle.Problem, at: bundle.Result) -> np.ndarray:
     :func:`..testing.bundle_problems.sigmas` without the points: that one inverts the whole normal matrix, dense,
     which a block of thousands of points cannot afford; here each point goes through its 3 x 3 block (a tie residual
     sees one point, so the point part of the normal matrix is block diagonal) and only the camera system is
-    inverted dense. The problem must be one of tie points alone (ValueError otherwise)."""
+    inverted dense. The columns of the problem must be photos, intrinsics and points alone - no markers, rolling
+    shutter or biases (ValueError otherwise) - and every point seen by two photos or more
+    (:func:`..engine.bundle._adjustable`: a point seen once has a singular block)."""
     from scipy.sparse import csc_matrix
 
     lay = bundle._Layout(pb)
@@ -108,6 +112,7 @@ def camera_sigmas(pb: bundle.Problem, at: bundle.Result) -> np.ndarray:
     a = (cameras.T @ cameras).toarray()
     b = cameras.T @ points
     c = (points.T @ points).tocoo()
+    c.sum_duplicates()  # one entry per cell for the assignment below (the product is canonical already)
     if not np.array_equal(c.row // 3, c.col // 3):  # a residual that saw two points: not a problem of tie points
         raise ValueError("camera_sigmas takes a problem of tie points alone")
     blocks = np.zeros((len(pb.points), 3, 3))
@@ -320,6 +325,9 @@ class _Block:
                 raise RuntimeError(f"COLMAP adjusted {out.residuals} residuals where the problem has "
                                    f"{2 * len(pb.obs_image)}")
             after, _ids = bundle.problem_from_reconstruction(rec)
+            # the photos held are those of the problem solved (judged again on the adjusted centres, the farthest
+            # could be another photo): the gradient is read over the same columns as the other solvers'
+            after.fixed_images = pb.fixed_images
             ev = bundle.evaluate(after)
             return _End("colmap", "colmap", None, out.seconds, ev.cost, float(np.abs(ev.gradient).max()),
                         out.iterations, out.termination, out.linear_solver)
