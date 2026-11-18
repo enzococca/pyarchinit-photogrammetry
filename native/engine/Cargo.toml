@@ -14,3 +14,6 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 # constrained Delaunay triangulation of the TIN (MIT OR Apache-2.0)
 spade = "=2.15.1"
+# dense linear algebra of the bundle adjustment: the Cholesky factorisation of the reduced camera
+# system (MIT); without its random, file and sparse features
+faer = { version = "0.24", default-features = false, features = ["std", "rayon", "linalg"] }

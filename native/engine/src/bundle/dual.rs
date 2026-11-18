@@ -22,12 +22,13 @@ impl<const N: usize> Dual<N> {
 
     /// The variable number `i` (below `N`), at the value `v`.
     pub fn variable(v: f64, i: usize) -> Self {
+        assert!(i < N, "variable {i} of a dual number with {N} variables");
         let mut d = [0.0; N];
         d[i] = 1.0;
         Dual { v, d }
     }
 
-    /// The square root; its derivative is infinite at zero.
+    /// The square root; at zero its derivatives are not a number (a division by zero).
     pub fn sqrt(self) -> Self {
         let v = self.v.sqrt();
         let mut d = self.d;

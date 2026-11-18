@@ -19,15 +19,27 @@ pub enum Model {
 impl Model {
     /// The model of a COLMAP name and the number of its parameters.
     pub fn from_name(name: &str) -> Result<(Model, usize), String> {
-        Ok(match name {
-            "SIMPLE_PINHOLE" => (Model::SimplePinhole, 3),
-            "PINHOLE" => (Model::Pinhole, 4),
-            "SIMPLE_RADIAL" => (Model::SimpleRadial, 4),
-            "RADIAL" => (Model::Radial, 5),
-            "OPENCV" => (Model::OpenCv, 8),
-            "FULL_OPENCV" => (Model::FullOpenCv, 12),
+        let model = match name {
+            "SIMPLE_PINHOLE" => Model::SimplePinhole,
+            "PINHOLE" => Model::Pinhole,
+            "SIMPLE_RADIAL" => Model::SimpleRadial,
+            "RADIAL" => Model::Radial,
+            "OPENCV" => Model::OpenCv,
+            "FULL_OPENCV" => Model::FullOpenCv,
             other => return Err(format!("camera model {other} is not supported by the native kernels")),
-        })
+        };
+        Ok((model, model.parameter_count()))
+    }
+
+    /// The number of parameters of the model (COLMAP's).
+    pub fn parameter_count(&self) -> usize {
+        match self {
+            Model::SimplePinhole => 3,
+            Model::Pinhole | Model::SimpleRadial => 4,
+            Model::Radial => 5,
+            Model::OpenCv => 8,
+            Model::FullOpenCv => 12,
+        }
     }
 
     /// Indices of the principal point in the parameter vector: after the one focal length of the
@@ -74,6 +86,12 @@ impl Real for f64 {
 /// of milestone 0, so that `f64` gives the pixels it gave then, bit for bit.
 #[inline]
 pub fn project<T: Real>(model: Model, p: &[T], u: T, v: T) -> (T, T) {
+    debug_assert!(
+        p.len() >= model.parameter_count(),
+        "{model:?} has {} parameters, {} given",
+        model.parameter_count(),
+        p.len()
+    );
     let two = T::from_f64(2.0);
     match model {
         Model::SimplePinhole => (p[0] * u + p[1], p[0] * v + p[2]),
@@ -354,6 +372,7 @@ mod tests {
         ];
         for (name, model, count, principal_point) in expected {
             assert_eq!(Model::from_name(name), Ok((model, count)), "{name}");
+            assert_eq!(model.parameter_count(), count, "{name}");
             assert_eq!(model.principal_point(), principal_point, "{name}");
         }
         assert_eq!(MODELS, expected.map(|(name, ..)| name));
