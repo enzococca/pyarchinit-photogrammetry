@@ -17,10 +17,11 @@ downloaded are kept in ``stations`` in the GNSS folder (:func:`download.gnss_dir
 
 A station can also be the base of a survey: :func:`observation_files` says which files of the archives hold its
 observations for the hours of a flight (at 1 s or at 30 s, BKG's data centre for the stations of the EPN and of the IGS,
-RING's for those of RING), :func:`download_observations` brings them, one at a time, into ``stations/<id>`` and joins
-them into one RINEX file, and :func:`download_navigation` brings the broadcast navigation messages of the days of the
-flight. The names of the files are never made up: the folder of the archive is listed and the names that are the
-station's are taken."""
+RING's for those of RING, and the EPN Historical Data Centre of the EPN Central Bureau in BKG's place when BKG cannot
+be reached), :func:`download_observations` brings them, one at a time, into ``stations/<id>`` and joins them into one
+RINEX file, and :func:`download_navigation` brings the broadcast navigation messages of the days of the flight. The
+names of the files are never made up: the folder of the archive is listed and the names that are the station's are
+taken."""
 from __future__ import annotations
 
 import calendar
@@ -888,9 +889,13 @@ def coordinates(station: Station, epoch: float, progress=None) -> StationCoordin
 # --- the observations and the navigation of a station, for the hours of a flight ---------------------------------
 
 # The archives. BKG's data centre keeps the stations of the EPN (EUREF) and of the IGS (IGS); RING keeps its own, on a
-# port that some firewalls close. Both are read with no account.
+# port that some firewalls close. The EPN Historical Data Centre, at the EPN Central Bureau (ROB), keeps the daily
+# files at 30 s of the stations of the EPN under the same names as BKG, a few days behind, and the navigation messages
+# of each day merged by GOP: it is asked only when BKG cannot be reached (igs.bkg.bund.de could not be, from GitHub's
+# runners, in November 2026, while it answered from elsewhere). All three are read with no account.
 BKG_ROOT = "https://igs.bkg.bund.de/root_ftp/"
 RING_RINEX = "https://webring.gm.ingv.it:44324/rinex/RING/"
+EPN_HDC_ROOT = "https://epncb.oma.be/pub/RINEX/"
 RING_PORT = 44324
 # the seconds RING has to answer a download (its series, its files): a firewall that closes its port would otherwise
 # hold a run for three minutes at the 60 s of other downloads; three attempts and their waits are half a minute
@@ -902,7 +907,13 @@ NAV_SETTLE = timedelta(hours=1)  # the navigation file of a day is final this lo
 # A hole in the base during the flight is accepted up to this long: RTKLIB takes base observations up to pos2-maxage =
 # 30 s old, and interpolates between epochs (misc-timeinterp). A longer one is not.
 MAX_HOLE = timedelta(seconds=30)
+# How long after a day the EPN Historical Data Centre is still to get its files: its notice says a week for the
+# observations (they were there after three days in November 2026); the navigation file was there the day after.
+HDC_LATE = timedelta(days=8)
+HDC_NAV_LATE = timedelta(days=3)
 _BKG_DAILY = "BKG daily files are online about 30 minutes after midnight UTC"
+_HDC_DAILY = "the EPN Historical Data Centre has the daily files a few days after the day (its notice says a week)"
+_HDC_NAV = "the EPN Historical Data Centre has the navigation file of a day a day or two after it"
 
 # The names of the files of observations (RINEX 3, "long" names): station, source (R receiver, S stream, U unknown),
 # the start of the file, its length, the interval of its epochs, MO (the observations of several constellations; GO,
@@ -915,8 +926,9 @@ _OBS_NAME = re.compile(r"(?P<id>[A-Z0-9]{9})_(?P<source>[RSU])_(?P<year>[0-9]{4}
 _SYSTEMS = {"M": "mixed", "G": "GPS", "E": "Galileo", "R": "GLONASS", "C": "BeiDou", "J": "QZSS", "I": "NavIC",
             "S": "SBAS"}
 _PIECE_LAYERS = (("gzip", "hatanaka"), ("gzip",))  # how the archives pack a file of observations
-_NAV_PRODUCT = "BRDC00WRD"  # the broadcast messages of all constellations, merged for the world
-_NAV_NAME = re.compile(rf"{_NAV_PRODUCT}_[RSU]_[0-9]{{11}}_01D_MN\.rnx(?:\.gz)?")
+_NAV_PRODUCT = "BRDC00WRD"  # the broadcast messages of all constellations, merged for the world (BKG)
+_HDC_NAV_PRODUCT = "BRDC00GOP"  # the same, merged by GOP (the EPN Historical Data Centre)
+_NAV_NAME = re.compile(rf"(?:{_NAV_PRODUCT}|{_HDC_NAV_PRODUCT})_[RSU]_[0-9]{{11}}_01D_MN\.rnx(?:\.gz)?")
 _UNITS = {"S": 1, "M": 60, "H": 3600, "D": 86400}
 _RATES = {"1s": 1.0, "30s": 30.0}
 _RATE_TEXT = {1.0: "1 s", 30.0: "30 s"}
@@ -956,14 +968,15 @@ class RemoteFile:
 @dataclass(frozen=True)
 class _Kind:
     """A kind of file that an archive keeps: how long a file is and the interval of its epochs (as the names write
-    them, ``01D`` and ``30S``), the address of the folder of the files that begin at a time, and when they come
-    online."""
+    them, ``01D`` and ``30S``), the address of the folder of the files that begin at a time, when they come online,
+    and for how long after a file was due it is "not published yet" rather than missing."""
 
     label: str
     period_code: str
     rate_code: str
     folder: Callable[[datetime], str]
     when: str
+    late: timedelta = LATE
 
     @property
     def period(self) -> timedelta:
@@ -977,13 +990,15 @@ class _Kind:
 @dataclass(frozen=True)
 class _Archive:
     """A place that keeps observations: its name, the site it is reached at (``"BKG"``, ``"RING"``: if one archive of a
-    site cannot be reached the others cannot either), its kinds of file in the order they are tried, and what to add to
-    the complaint that it cannot be reached."""
+    site cannot be reached the others cannot either), its kinds of file in the order they are tried, what to add to
+    the complaint that it cannot be reached, and the site it stands in for (``"BKG"``): an archive that stands in for
+    a site is asked only when that site cannot be reached, not when a file is merely missing there."""
 
     label: str
     site: str
     kinds: tuple[_Kind, ...]
     hint: str = ""
+    instead_of: str = ""
 
 
 def _bkg(tree: str) -> _Archive:
@@ -1016,13 +1031,25 @@ def _ring() -> _Archive:
               "RING hourly files are online after the hour")), _ring_hint())
 
 
+def _epn_hdc() -> _Archive:
+    """The EPN Historical Data Centre, in BKG's place: files of a day at 30 s in ``<yyyy>/<ddd>/`` (nothing of an hour,
+    nothing at 1 s), the same files under the same names as BKG's ``EUREF/obs``, a few days later."""
+    root = _slash(EPN_HDC_ROOT)
+    return _Archive("EPN Historical Data Centre", "EPN CB", (
+        _Kind("daily 30 s", "01D", "30S", lambda t: f"{root}{t:%Y}/{_doy(t)}/", _HDC_DAILY, HDC_LATE),),
+        "the EPN Historical Data Centre, asked in BKG's place", instead_of="BKG")
+
+
 def _archives(station: Station) -> list[_Archive]:
-    """The archives that keep the station, in the order they are tried: BKG's before RING's."""
+    """The archives that keep the station, in the order they are tried: BKG's, the EPN Historical Data Centre (only
+    when BKG cannot be reached), RING's."""
     found = []
     if "EPN" in station.networks:
         found.append(_bkg("EUREF"))
     if "IGS" in station.networks:
         found.append(_bkg("IGS"))
+    if "EPN" in station.networks:
+        found.append(_epn_hdc())
     if "RING" in station.networks:
         found.append(_ring())
     return found
@@ -1125,9 +1152,17 @@ def _missing(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -
     usually comes online. The name has its source as ``[RSU]``: it says what is missing, no file is asked for by it."""
     name = f"{station.id}_[RSU]_{slot:%Y}{_doy(slot)}{slot:%H%M}_{kind.period_code}_{kind.rate_code}_MO.crx.gz"
     text = f"{archive.label}, {kind.label} files: {name} is not in {kind.folder(slot)}"
-    if _gps_now() < slot + kind.period + LATE:
+    if _gps_now() < slot + kind.period + kind.late:
         text += f" - not published yet: {kind.when}"
     return text
+
+
+def _down(down: dict[str, str], site: str, message: str, spares: list[str]) -> None:
+    """``site`` did not answer: remembered in ``down`` with the ``message`` that says so, and the log says who is asked
+    instead, if anyone (``spares``, the names of the archives that stand in for it)."""
+    down[site] = message
+    if spares:
+        log.warning("%s; %s is asked instead", message, " and ".join(spares))
 
 
 def _cover(station: Station, archive: _Archive, interval: float, start: datetime, end: datetime,
@@ -1159,17 +1194,21 @@ def _cover(station: Station, archive: _Archive, interval: float, start: datetime
 def _choose(station: Station, interval: float, start: datetime, end: datetime, whole: bool,
             down: dict[str, str], progress=None) -> tuple[list[RemoteFile] | None, list[str]]:
     """The files of the first archive that holds the flight (:func:`_cover`), or None and what the archives lack. A site
-    that cannot be reached is put in ``down`` with the reason and is not asked again."""
+    that cannot be reached is put in ``down`` with the reason and is not asked again; an archive that stands in for a
+    site is asked only once that site is in ``down``. The log says which archive gave the files."""
     notes: list[str] = []
-    for archive in _archives(station):
-        if archive.site in down:
+    archives = _archives(station)
+    for archive in archives:
+        if archive.site in down or (archive.instead_of and archive.instead_of not in down):
             continue
         try:
             files, complete, why = _cover(station, archive, interval, start, end, whole, progress)
         except _Unreachable as exc:
-            down[exc.site] = str(exc)
+            _down(down, exc.site, str(exc), [a.label for a in archives if a.instead_of == exc.site])
             continue
         if complete:
+            log.info("%s: %d files with an epoch every %s (%s)", station.id, len(files), _RATE_TEXT[interval],
+                     archive.label)
             return files, notes
         notes += why
     return None, notes
@@ -1212,11 +1251,15 @@ def observation_files(station: Station, start: datetime, end: datetime, rate: st
     files that hold the flight. With a rate asked for, the files that hold the flight, and the margins as far as the
     archive has files for them.
 
+    When BKG cannot be reached, a station of the EPN is looked for in the EPN Historical Data Centre of the EPN Central
+    Bureau, which has the same daily files at 30 s under the same names a few days after the day (never when BKG
+    answers and merely lacks a file); the log says which archive gave the files.
+
     A ``ValueError`` when there are none: it names the files that are missing and where they are not, says when such
-    files usually come online if the time is recent, whether the other rate is there, and that BKG or RING could not be
-    reached (RING is on the port 44324, which some firewalls close). ``progress`` hears which site is contacted, and a
-    cancel stops between two attempts: a site that does not answer is given up after half a minute
-    (:data:`download.LISTING_TIMEOUT`)."""
+    files usually come online if the time is recent, whether the other rate is there, and that BKG, the EPN Central
+    Bureau or RING could not be reached (RING is on the port 44324, which some firewalls close). ``progress`` hears
+    which site is contacted, and a cancel stops between two attempts: a site that does not answer is given up after
+    half a minute (:data:`download.LISTING_TIMEOUT`)."""
     return _observation_files(station, start, end, rate, progress=progress)
 
 
@@ -1238,7 +1281,6 @@ def _observation_files(station: Station, start: datetime, end: datetime, rate: s
     for interval, whole in plan:
         files, why = _choose(station, interval, start, end, whole, down, progress)
         if files is not None:
-            log.info("%s: %d files with an epoch every %s", station.id, len(files), _RATE_TEXT[interval])
             return files
         if not whole:
             notes[interval] = why
@@ -1421,27 +1463,65 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     return out
 
 
-def _navigation_name(day: date, progress=None) -> tuple[str, str]:
-    """The name of the navigation file of a day and its address, from the listing of BKG's folder
-    ``IGS/BRDC/<yyyy>/<ddd>/``: of ``BRDC00WRD`` the S copy, else R, else U. A ``ValueError`` when it is not there,
-    which says when it comes if the day is recent."""
-    where = f"{_slash(BKG_ROOT)}IGS/BRDC/{day:%Y}/{_doy(day)}/"
+@dataclass(frozen=True)
+class _Broadcast:
+    """A place that keeps the broadcast navigation messages of a day in one file: its name and its site (as
+    :class:`_Archive`), the product (``BRDC00WRD``), the address of the folder that holds the file of a day, when it
+    comes online, for how long after the day it is "not published yet", and the site it stands in for."""
+
+    label: str
+    site: str
+    product: str
+    folder: Callable[[date], str]
+    when: str
+    late: timedelta = LATE
+    instead_of: str = ""
+
+
+def _broadcasts() -> tuple[_Broadcast, ...]:
+    """Where the navigation file of a day is looked for, in order: BKG's ``IGS/BRDC/<yyyy>/<ddd>/`` (``BRDC00WRD``)
+    and, only when BKG cannot be reached, the EPN Historical Data Centre's ``BRDC/<yyyy>/`` (``BRDC00GOP``, the
+    messages of all constellations merged by GOP, in RINEX 3.04)."""
+    return (_Broadcast("BKG", "BKG", _NAV_PRODUCT, lambda d: f"{_slash(BKG_ROOT)}IGS/BRDC/{d:%Y}/{_doy(d)}/",
+                       _BKG_DAILY),
+            _Broadcast("EPN Historical Data Centre", "EPN CB", _HDC_NAV_PRODUCT,
+                       lambda d: f"{_slash(EPN_HDC_ROOT)}BRDC/{d:%Y}/", _HDC_NAV, HDC_NAV_LATE, "BKG"))
+
+
+def _navigation_name(day: date, progress=None, down: dict[str, str] | None = None) -> tuple[str, str]:
+    """The name of the navigation file of a day and its address, from the listing of the folder of the first of
+    :func:`_broadcasts` that has it: of its product the S copy, else R, else U. ``down`` holds the sites that could not
+    be reached, with the reason, and is filled here: for the days of one flight it is shared, so a site is asked once.
+    A ``ValueError`` when the file is nowhere, which says when it comes if the day is recent and names the sites that
+    could not be reached."""
+    down = {} if down is None else down
     stamp = f"{day:%Y}{_doy(day)}0000"
-    pattern = re.compile(rf"{_NAV_PRODUCT}_(?P<source>[RSU])_{stamp}_01D_MN\.rnx\.gz")
-    try:
-        names = download.listing(where, progress)
-    except download.NotPublished:
-        names = []
-    except download.DownloadError as exc:
-        raise ValueError(f"BKG could not be reached: {exc}") from exc
-    found = sorted((m for m in map(pattern.fullmatch, names) if m), key=lambda m: ("SRU".index(m["source"]), m.string))
-    if found:
-        return found[0].string, where + found[0].string
-    name = f"{_NAV_PRODUCT}_[RSU]_{stamp}_01D_MN.rnx.gz"
-    text = f"No broadcast navigation file for {day:%Y-%m-%d}: {name} is not in {where}"
-    if _gps_now() < datetime(day.year, day.month, day.day) + timedelta(days=1) + LATE:
-        text += f" - not published yet: {_BKG_DAILY}"
-    raise ValueError(text)
+    sources = _broadcasts()
+    reasons: list[str] = []
+    for source in sources:
+        if source.site in down or (source.instead_of and source.instead_of not in down):
+            continue
+        where = source.folder(day)
+        pattern = re.compile(rf"{source.product}_(?P<source>[RSU])_{stamp}_01D_MN\.rnx\.gz")
+        try:
+            names = download.listing(where, progress)
+        except download.NotPublished:
+            names = []
+        except download.DownloadError as exc:
+            place = f" ({source.label}, asked in {source.instead_of}'s place)" if source.instead_of else ""
+            _down(down, source.site, f"{source.site} could not be reached: {exc}{place}",
+                  [s.label for s in sources if s.instead_of == source.site])
+            continue
+        found = sorted((m for m in map(pattern.fullmatch, names) if m),
+                       key=lambda m: ("SRU".index(m["source"]), m.string))
+        if found:
+            log.info("%s: the broadcast navigation file is %s (%s)", f"{day:%Y-%m-%d}", found[0].string, source.label)
+            return found[0].string, where + found[0].string
+        text = f"{source.product}_[RSU]_{stamp}_01D_MN.rnx.gz is not in {where}"
+        if _gps_now() < datetime(day.year, day.month, day.day) + timedelta(days=1) + source.late:
+            text += f" - not published yet: {source.when}"
+        reasons.append(text)
+    raise ValueError(f"No broadcast navigation file for {day:%Y-%m-%d}: " + "; ".join([*down.values(), *reasons]))
 
 
 def _unpack_navigation(packed: Path, plain: Path, name: str) -> None:
@@ -1475,16 +1555,18 @@ def _navigation_file(day: date, name: str, url: str, folder: Path, progress) -> 
 
 def download_navigation(start: datetime, end: datetime, folder: str | Path, progress=None) -> list[Path]:
     """The broadcast navigation messages for the days of a flight from ``start`` to ``end`` (GPS time without a zone):
-    of each day the file ``BRDC00WRD_<S|R|U>_<yyyy><ddd>0000_01D_MN.rnx.gz`` of BKG's ``IGS/BRDC/<yyyy>/<ddd>/``,
-    decompressed into ``folder`` without its ``.gz``, in the order of the days (a flight over midnight takes two). All
-    the days are looked up in the archive before any is fetched; a day that is not there is a ``ValueError`` that names
-    the file and says when it comes if the day is recent. A file that is no good - damaged, empty, a page of HTML, not
-    navigation messages - is fetched again once, then refused, and is never kept."""
+    of each day the file ``BRDC00WRD_<S|R|U>_<yyyy><ddd>0000_01D_MN.rnx.gz`` of BKG's ``IGS/BRDC/<yyyy>/<ddd>/`` -
+    or, when BKG cannot be reached, ``BRDC00GOP_..._01D_MN.rnx.gz`` of the EPN Historical Data Centre's
+    ``BRDC/<yyyy>/`` - decompressed into ``folder`` without its ``.gz``, in the order of the days (a flight over
+    midnight takes two). All the days are looked up in the archive before any is fetched; a day that is not there is a
+    ``ValueError`` that names the file and says when it comes if the day is recent. A file that is no good - damaged,
+    empty, a page of HTML, not navigation messages - is fetched again once, then refused, and is never kept."""
     progress = as_progress(progress)
     start, end = _gps_span(start, end)
     folder = Path(folder)
     days = [start.date() + timedelta(days=n) for n in range((end.date() - start.date()).days + 1)]
-    chosen = [_navigation_name(day, progress) for day in days]
+    down: dict[str, str] = {}  # a site that did not answer for one day is not asked for the next
+    chosen = [_navigation_name(day, progress, down) for day in days]
     folder.mkdir(parents=True, exist_ok=True)
     return [_navigation_file(day, name, url, folder, progress.sub(n / len(days), 1 / len(days)))
             for n, (day, (name, url)) in enumerate(zip(days, chosen))]

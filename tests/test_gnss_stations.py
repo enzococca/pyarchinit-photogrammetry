@@ -1272,6 +1272,8 @@ def test_a_site_that_does_not_answer_is_given_up_within_half_a_minute(web, tmp_p
 #         EUREF|IGS/highrate/<yyyy>/<ddd>/<a-x>/     pieces of 15 minutes at 1 s (IGS/highrate_permanent/ the same)
 #         IGS/BRDC/<yyyy>/<ddd>/                     the navigation messages of the day
 #   RING  <yyyy>/<ddd>/                              daily files at 30 s;   <yyyy>/<ddd>/<hh>/   hourly files at 1 s
+#   EPN HDC  <yyyy>/<ddd>/                           daily files at 30 s (the EPN Historical Data Centre, epncb.oma.be/pub/RINEX/,
+#            BRDC/<yyyy>/                            looked at on 2026-11-18); the navigation messages of the day, BRDC00GOP
 # The files hold the observations of the hour of the EPN station KRAW00POL in tests/data/crinex with the times changed
 # to those of their name. The epochs are 30 s apart whatever the interval in the name (a name is what is chosen, and a
 # day at 1 s would be 100 MB); only the tests of the Hatanaka decoder use the file as BKG distributes it.
@@ -1390,16 +1392,39 @@ def _ring_day(ring: Path, sid: str, day: datetime, first: datetime, last: dateti
     return name
 
 
+def _hdc_day(hdc: Path, sid: str, day: datetime, first: datetime, last: datetime) -> str:
+    """The file of a day at 30 s of the EPN Historical Data Centre: <yyyy>/<ddd>/, the name BKG gives it."""
+    name = f"{sid}_R_{day:%Y}{_doy(day)}0000_01D_30S_MO.crx.gz"
+    _put(hdc, f"{day:%Y}/{_doy(day)}/{name}", _rinex_gz(first, last))
+    return name
+
+
+def _hdc_brdc(hdc: Path, day: datetime, content, source: str = "R") -> str:
+    """The navigation file of a day of the EPN Historical Data Centre (BRDC00GOP), in the folder of its year."""
+    data = content.read_bytes() if isinstance(content, Path) else content
+    name = f"BRDC00GOP_{source}_{day:%Y}{_doy(day)}0000_01D_MN.rnx.gz"
+    _put(hdc, f"BRDC/{day:%Y}/{name}", gzip.compress(data))
+    return name
+
+
+BKG_WEB = "https://igs.bkg.bund.de/root_ftp/"  # the real addresses: with the web fixture, sites that answer from a plan
+HDC_WEB = "https://epncb.oma.be/pub/RINEX/"
+
+
 @pytest.fixture
 def trees(tmp_path, monkeypatch):
-    """Empty archives of BKG and RING, and a clock two days after the sample hour: everything of the 26th is old."""
-    bkg, ring = tmp_path / "bkg", tmp_path / "ring-rinex"
+    """Empty archives of BKG, RING and the EPN Historical Data Centre, and a clock two days after the sample hour:
+    everything of the 26th is old."""
+    bkg, ring, hdc = tmp_path / "bkg", tmp_path / "ring-rinex", tmp_path / "epn-hdc"
     bkg.mkdir()
     ring.mkdir()
+    hdc.mkdir()
     monkeypatch.setattr(stations, "BKG_ROOT", _uri(bkg) + "/")
     monkeypatch.setattr(stations, "RING_RINEX", _uri(ring) + "/")
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", _uri(hdc) + "/")
     monkeypatch.setattr(stations, "_now", lambda: datetime(2026, 10, 28, 9, 0, tzinfo=timezone.utc))
-    return SimpleNamespace(bkg=bkg, ring=ring, url=_uri(bkg) + "/", ring_url=_uri(ring) + "/")
+    return SimpleNamespace(bkg=bkg, ring=ring, hdc=hdc, url=_uri(bkg) + "/", ring_url=_uri(ring) + "/",
+                           hdc_url=_uri(hdc) + "/")
 
 
 def _remote(url: str, name: str, start: datetime, hours: float, interval: float) -> stations.RemoteFile:
@@ -1771,6 +1796,86 @@ def test_bkg_alone_is_enough_for_an_epn_station_and_ring_is_not_asked(trees, web
     with pytest.raises(ValueError) as error:
         stations.observation_files(both, _t(26, 10, 20), _t(26, 10, 35))
     assert "M0SE00ITA_[RSU]_20262991000_01H_30S_MO.crx.gz is not in" in str(error.value) and "44324" in str(error.value)
+
+
+# --- the EPN Historical Data Centre in BKG's place ------------------------------------------------------------------
+
+
+def _refused(times: int = 40) -> list:
+    return [urllib.error.URLError(ConnectionRefusedError())] * times
+
+
+def test_the_epn_hdc_serves_a_station_of_the_epn_when_bkg_cannot_be_reached(trees, web, monkeypatch, caplog, tmp_path):
+    """BKG does not answer (as igs.bkg.bund.de did not from GitHub's runners in November 2026): the file of the day at
+    30 s comes from the EPN Historical Data Centre, which keeps the same files under the same names, and the log says
+    which data centre gave the files. BKG is asked once, not again for every rate."""
+    monkeypatch.setattr(stations, "BKG_ROOT", BKG_WEB)
+    web.plan = _refused()
+    kraw = _made("KRAW00POL", "EPN")
+    name = _hdc_day(trees.hdc, kraw.id, _t(26), _t(26, 9), _t(26, 13))
+    caplog.set_level(logging.INFO, logger=stations.log.name)
+    got = stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35))
+    assert [f.url for f in got] == [trees.hdc_url + "2026/299/" + name]
+    assert len(web.requests) == 3 and web.sleeps == [2, 4]
+    said = _warnings(caplog)
+    assert any("BKG could not be reached" in text and "EPN Historical Data Centre" in text and "instead" in text
+               for text in said), said
+    told = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "every 30 s" in r.getMessage()]
+    assert told and "EPN Historical Data Centre" in told[-1], told
+    # the same with the rate asked for; and the file is fetched, decoded and joined like one of BKG
+    web.plan = _refused()
+    assert _names(stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")) == [name]
+    web.plan = _refused()
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert _epochs(out) == 480 and (download.gnss_dir() / "stations" / kraw.id / name).is_file()
+
+
+def test_the_epn_hdc_is_not_asked_for_a_file_that_bkg_lacks(trees, web, monkeypatch):
+    """BKG answers and has no file: the message is BKG's, as before, and the EPN Historical Data Centre is not
+    contacted (any request to it would fail the test) - it is behind BKG by days and would only add a second
+    "not there"."""
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", HDC_WEB)
+    web.plan = []
+    kraw = _made("KRAW00POL", "EPN")
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")
+    message = str(error.value)
+    assert "KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in " + trees.url + "EUREF/obs/2026/299/" in message
+    assert "epncb" not in message and "Historical" not in message and web.requests == []
+
+
+def test_bkg_and_the_epn_hdc_both_unreachable_are_both_named(trees, web, monkeypatch):
+    monkeypatch.setattr(stations, "BKG_ROOT", BKG_WEB)
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", HDC_WEB)
+    web.plan = _refused()
+    kraw = _made("KRAW00POL", "EPN")
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35))
+    message = str(error.value)
+    assert "BKG could not be reached" in message and "igs.bkg.bund.de" in message
+    assert "EPN CB could not be reached" in message and "epncb.oma.be" in message and "in BKG's place" in message
+    assert len(web.requests) == 6 and web.sleeps == [2, 4, 2, 4]  # each asked once, three attempts
+    assert "files:" not in message and "not there either" not in message  # nothing was looked at: nothing is claimed
+
+
+def test_a_file_the_epn_hdc_does_not_have_yet(trees, web, monkeypatch):
+    """The Centre gets the files of a day a few days after it (its notice says a week): a file it lacks is "not
+    published yet" for that long, and only missing after."""
+    monkeypatch.setattr(stations, "BKG_ROOT", BKG_WEB)
+    web.plan = _refused()
+    kraw = _made("KRAW00POL", "EPN")
+    with pytest.raises(ValueError) as error:  # the clock of the trees: two days after the day
+        stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")
+    message = str(error.value)
+    assert ("EPN Historical Data Centre, daily 30 s files: KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in "
+            + trees.hdc_url + "2026/299/") in message
+    assert "not published yet: the EPN Historical Data Centre has the daily files a few days after the day" in message
+    assert "BKG could not be reached" in message
+    _clock(monkeypatch, 11, 10, 9, 0)
+    web.plan = _refused()
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")
+    assert "is not in " + trees.hdc_url in str(error.value) and "not published yet" not in str(error.value)
 
 
 # --- download, decode and join --------------------------------------------------------------------------------------
@@ -2325,6 +2430,60 @@ def test_navigation_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch
     web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 6
     with pytest.raises(ValueError, match="BKG could not be reached.*igs.bkg.bund.de"):
         stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+
+
+def test_navigation_from_the_epn_hdc_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch, caplog):
+    """BKG does not answer: the navigation file of each day is the EPN Historical Data Centre's BRDC00GOP, from the
+    folder of the year; BKG is asked once for all the days of the flight; the files are kept like BKG's."""
+    monkeypatch.setattr(stations, "BKG_ROOT", BKG_WEB)
+    web.plan = _refused()
+    _hdc_brdc(trees.hdc, _t(26), NAV_A)
+    _hdc_brdc(trees.hdc, _t(27), NAV_B)
+    calls = _fetches(monkeypatch)
+    folder = tmp_path / "nav"
+    files = stations.download_navigation(_t(26, 23, 50), _t(27, 0, 20), folder)
+    assert files == [folder / "BRDC00GOP_R_20262990000_01D_MN.rnx", folder / "BRDC00GOP_R_20263000000_01D_MN.rnx"]
+    assert files[0].read_bytes() == NAV_A.read_bytes() and files[1].read_bytes() == NAV_B.read_bytes()
+    assert len(web.requests) == 3 and web.sleeps == [2, 4]
+    assert [c.rsplit("/", 1)[1] for c in calls] == ["BRDC00GOP_R_20262990000_01D_MN.rnx.gz",
+                                                    "BRDC00GOP_R_20263000000_01D_MN.rnx.gz"]
+    assert any("BKG could not be reached" in text and "EPN Historical Data Centre" in text for text in _warnings(caplog))
+    assert sorted(p.name for p in (download.gnss_dir() / "navigation").iterdir()) == [
+        "BRDC00GOP_R_20262990000_01D_MN.rnx.gz", "BRDC00GOP_R_20263000000_01D_MN.rnx.gz"]
+    web.plan = _refused()
+    assert stations.download_navigation(_t(26, 23, 50), _t(27, 0, 20), folder) == files and len(calls) == 2
+
+
+def test_the_epn_hdc_is_not_asked_for_navigation_that_bkg_lacks(trees, tmp_path, web, monkeypatch):
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", HDC_WEB)
+    web.plan = []
+    _clock(monkeypatch, 10, 27, 0, 10)
+    with pytest.raises(ValueError) as error:
+        stations.download_navigation(_t(27, 0), _t(27, 0, 5), tmp_path / "nav")
+    message = str(error.value)
+    assert "BRDC00WRD_[RSU]_20263000000_01D_MN.rnx.gz is not in " + trees.url + "IGS/BRDC/2026/300/" in message
+    assert "not published yet" in message and "epncb" not in message and web.requests == []
+
+
+def test_navigation_when_bkg_and_the_epn_hdc_cannot_be_reached(trees, tmp_path, web, monkeypatch):
+    monkeypatch.setattr(stations, "BKG_ROOT", BKG_WEB)
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", HDC_WEB)
+    web.plan = _refused()
+    with pytest.raises(ValueError) as error:
+        stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+    message = str(error.value)
+    assert "BKG could not be reached" in message and "igs.bkg.bund.de" in message
+    assert "EPN CB could not be reached" in message and "epncb.oma.be" in message and "in BKG's place" in message
+    assert len(web.requests) == 6
+    # BKG down and the Centre without the file of a recent day: the message says when it comes
+    web.plan = _refused()
+    monkeypatch.setattr(stations, "EPN_HDC_ROOT", trees.hdc_url)
+    _clock(monkeypatch, 10, 27, 9, 0)
+    with pytest.raises(ValueError) as error:
+        stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+    message = str(error.value)
+    assert "BRDC00GOP_[RSU]_20262990000_01D_MN.rnx.gz is not in " + trees.hdc_url + "BRDC/2026/" in message
+    assert "not published yet: the EPN Historical Data Centre" in message and "BKG could not be reached" in message
 
 
 # --- the parked items of phase 3 (design/gnss-phase3-reviews/parked-items.md) --------------------------------------
