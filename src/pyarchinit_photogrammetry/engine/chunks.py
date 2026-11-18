@@ -209,8 +209,11 @@ def marker_position(chunk: "Chunk", marker: Marker) -> np.ndarray | None:
         cam = cams.get(key)
         if cam is None or not (cam.enabled and cam.aligned):
             continue
+        norm = chunk.sensor(cam).unproject([[proj.x, proj.y]])[0]
+        if not np.isfinite(norm).all():  # a pixel the lens model cannot invert: no ray
+            continue
         views.append(geometry.PinholeView(cam.transform))
-        obs.append(chunk.sensor(cam).unproject([[proj.x, proj.y]])[0])
+        obs.append(norm)
     if len(views) < 2:
         return None
     return geometry.triangulate(views, np.asarray(obs))

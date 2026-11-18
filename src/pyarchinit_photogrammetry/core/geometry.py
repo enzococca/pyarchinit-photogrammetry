@@ -90,12 +90,22 @@ class PinholeView:
 def triangulate(views: list[PinholeView], normalized: np.ndarray, refine: bool = True) -> np.ndarray:
     """Triangulate one point from >= 2 normalised observations.
 
-    Linear DLT followed by a Gauss-Newton refinement of the angular error.
+    Linear DLT followed by a Gauss-Newton refinement of the angular error. An observation that is
+    not finite (``Sensor.unproject`` gives NaN for a pixel its lens model cannot invert) is left
+    out with its view instead of stopping the SVD; fewer than two finite observations raise
+    ``ValueError``.
     """
+    normalized = np.asarray(normalized, dtype=float).reshape(-1, 2)
+    if len(normalized) != len(views):
+        raise ValueError("one observation per view is needed to triangulate")
+    finite = np.isfinite(normalized).all(axis=1)
+    if not finite.all():
+        views = [v for v, ok in zip(views, finite) if ok]
+        normalized = normalized[finite]
     if len(views) < 2:
-        raise ValueError("at least two views are needed to triangulate")
+        raise ValueError("at least two views with finite observations are needed to triangulate")
     rows = []
-    for view, (x, y) in zip(views, np.asarray(normalized, dtype=float)):
+    for view, (x, y) in zip(views, normalized):
         p = view.cam_from_world[:3, :]
         rows.append(x * p[2] - p[0])
         rows.append(y * p[2] - p[1])

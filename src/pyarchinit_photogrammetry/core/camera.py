@@ -140,7 +140,10 @@ class Sensor:
         return np.asarray(self.to_pycolmap().img_from_cam(pts))
 
     def unproject(self, pixels: np.ndarray) -> np.ndarray:
-        """Pixels ``(N,2)`` -> normalised undistorted coordinates ``(N,2)``."""
+        """Pixels ``(N,2)`` -> normalised undistorted coordinates ``(N,2)``. A row is NaN where the
+        lens model cannot be inverted (a pixel beyond the radius where a strong polynomial stops
+        growing: pycolmap's iterative undistortion gives up there instead of raising); whoever
+        builds rays from the result must leave those rows out (``geometry.triangulate`` does)."""
         px = np.atleast_2d(np.asarray(pixels, dtype=float))
         out = np.asarray(self.to_pycolmap().cam_from_img(px))
         return out[:, :2] if out.shape[1] == 3 else out
