@@ -67,8 +67,9 @@ impl Reduced {
 }
 
 /// The 3 x 3 block of a point after the elimination: the inverse of its damped `J^T W J` and
-/// `y = V^-1 g`; `held` when the block is singular (no usable observation): the point keeps its
-/// place in this step.
+/// `y = V^-1 g`; `held` when the block is singular beyond round-off (no usable observation, or a
+/// single view): the point keeps its place in this step. Damping alone would not do: along the
+/// null direction the step would be round-off divided by the damping.
 struct PointBlock {
     vinv: [f64; 9],
     y: [f64; 3],
@@ -110,6 +111,19 @@ impl Context<'_> {
         let c = self.pb.image_camera[i];
         (self.pb.cameras[c].free.len(), self.red.camera_start[c])
     }
+}
+
+pub(crate) fn det3(m: &[[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// Whether a symmetric 3 x 3 matrix (row-major) is positive definite beyond round-off: its
+/// determinant above `1e-9` of the product of its diagonal (a block of rank two, the two rows of a
+/// single view, has a determinant of round-off that is positive half of the time).
+pub(crate) fn well_conditioned(v: &[f64; 9]) -> bool {
+    let m = [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+    det3(&m) > 1e-9 * v[0] * v[4] * v[8]
 }
 
 /// Inverse of a symmetric positive-definite 3 x 3 matrix (row-major) through its Cholesky
@@ -175,6 +189,9 @@ fn point_blocks(
                         }
                     }
                 }
+            }
+            if !well_conditioned(&v) {
+                return PointBlock { vinv: [0.0; 9], y: [0.0; 3], held: true };
             }
             let c0 = lay.point_col + 3 * p;
             for k in 0..3 {
@@ -635,6 +652,18 @@ mod tests {
         assert_eq!(sym3_inverse(&[0.0; 9]), None);
         assert_eq!(sym3_inverse(&[1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]), None);
         assert_eq!(sym3_inverse(&[f64::NAN, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]), None);
+        // the two rows of one view, awkwardly turned: rank two, a determinant of round-off
+        let (a, b) = ([0.6, 0.8, 0.3], [-0.8, 0.6, 0.1]);
+        let mut rank2 = [0.0; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                rank2[3 * i + j] = a[i] * a[j] + b[i] * b[j];
+            }
+        }
+        assert!(!well_conditioned(&rank2));
+        assert!(well_conditioned(&v));
+        assert!(!well_conditioned(&[0.0; 9]));
+        assert!(det3(&[[1.0, 2.0, 3.0], [0.0, 4.0, 5.0], [0.0, 0.0, 6.0]]) == 24.0);
     }
 
     #[test]

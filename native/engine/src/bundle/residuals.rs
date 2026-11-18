@@ -9,7 +9,7 @@ use rayon::prelude::*;
 
 use super::dual::Dual;
 use super::problem::{Layout, Obs, Parameters, Problem};
-use super::schur::sym3_inverse;
+use super::schur::{det3, sym3_inverse, well_conditioned};
 use super::Scalar;
 use crate::camera::{project, Model};
 
@@ -392,8 +392,9 @@ fn held_by_inliers(loss: Loss, rows: impl Iterator<Item = (f64, [f64; 3])>) -> b
         return false;
     }
     let difference: [f64; 9] = std::array::from_fn(|k| quadratic_info[k] - HELD_SHARE * linear_info[k]);
-    sym3_inverse(&difference).is_some()
+    well_conditioned(&difference) && sym3_inverse(&difference).is_some()
 }
+
 
 /// Above this share of the points with observations not held by their inliers, the block is far
 /// from converged: a point's optimum against wrong cameras means nothing, and jumping to it would
@@ -460,11 +461,6 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
-fn det3(m: &[[f64; 3]; 3]) -> f64 {
-    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
-}
-
 /// The step that zeroes three rows of the linearised model, `None` when they do not hold a point.
 fn zeroing_step(rows: [&(f64, [f64; 3]); 3]) -> Option<[f64; 3]> {
     let j = [rows[0].1, rows[1].1, rows[2].1];
@@ -515,7 +511,7 @@ fn vertex_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
 }
 
 /// The first-order (Gauss-Newton with the slope weights) step of a point, `None` when its rows
-/// do not hold it.
+/// do not hold it beyond round-off (the two rows of a single view say nothing along the ray).
 fn first_order_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
     let (mut v, mut g) = ([0.0; 9], [0.0; 3]);
     for (r, j) in rows {
@@ -527,6 +523,9 @@ fn first_order_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
             }
         }
     }
+    if !well_conditioned(&v) {
+        return None;
+    }
     let vinv = sym3_inverse(&v)?;
     Some(std::array::from_fn(|a| -(vinv[3 * a] * g[0] + vinv[3 * a + 1] * g[1] + vinv[3 * a + 2] * g[2])))
 }
@@ -537,9 +536,10 @@ fn first_order_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
 /// Ceres's `inner_iterations`): the vertex of the linearised cost, or else the first-order step,
 /// each capped at `INNER_REACH` of the distance to the nearest camera and halved while the
 /// point's own cost does not fall, until the point is held or `INNER_ITERATIONS` are done. The
-/// cost of the problem never rises. Nothing is done while more than `INNER_MAX_UNHELD` of the
-/// points are unheld. The points are independent, so they are refined in parallel. Returns how
-/// many points moved.
+/// cost of the problem never rises. A point with fewer than `HELD_ROWS` live rows (one view) can
+/// never be held and has no vertex: it is left alone, as is every point while more than
+/// `INNER_MAX_UNHELD` of them are unheld. The points are independent, so they are refined in
+/// parallel. Returns how many points moved.
 pub(crate) fn refine_unheld_points(pb: &Problem, st: &Structure, params: &mut Parameters, loss: Loss) -> usize {
     if loss == Loss::None {
         return 0;
@@ -559,7 +559,7 @@ pub(crate) fn refine_unheld_points(pb: &Problem, st: &Structure, params: &mut Pa
         .enumerate()
         .map(|(p, x)| {
             let state = point_state(pb, st, &fixed, loss, p, *x);
-            (!state.rows.is_empty() && !state.held).then_some(state)
+            (state.rows.len() >= HELD_ROWS && !state.held).then_some(state)
         })
         .collect();
     let observed = (0..pb.points.len()).filter(|&p| !st.point_obs.of(p).is_empty()).count();
@@ -591,7 +591,9 @@ pub(crate) fn refine_unheld_points(pb: &Problem, st: &Structure, params: &mut Pa
                     for _ in 0..4 {
                         let trial = [x[0] + alpha * delta[0], x[1] + alpha * delta[1], x[2] + alpha * delta[2]];
                         let next = point_state(pb, st, &fixed, loss, p, trial);
-                        if next.cost < state.cost && distance(trial, start) <= reach * 1.001 {
+                        // a decrease above round-off: along a ray the cost does not change
+                        let lower = state.cost - next.cost > 1e-9 * state.cost;
+                        if lower && distance(trial, start) <= reach * 1.001 {
                             accepted = Some((trial, next));
                             break 'candidates;
                         }

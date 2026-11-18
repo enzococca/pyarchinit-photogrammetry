@@ -21,6 +21,7 @@ pub use problem::{
 pub use residuals::{evaluate, evaluate_at, Evaluation, Loss, BEHIND_CAMERA_RESIDUAL};
 pub use solve::{
     choose_linear_solver, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_PHOTOS, PCG_ABOVE_BYTES,
+    ROBUST_FUNCTION_TOLERANCE,
 };
 
 /// The scalar the residuals are written for: `f64` for the values alone (the cost of a trial

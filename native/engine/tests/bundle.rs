@@ -685,3 +685,36 @@ fn wrong_tracks_do_not_stall_the_robust_losses() {
         assert!((sol.camera_params[0][0] - F).abs() < 5.0, "{loss:?}: f {}", sol.camera_params[0][0]);
     }
 }
+
+#[test]
+fn a_point_seen_once_stays_on_its_ray_under_a_robust_loss() {
+    // the exact block with control points and a calibrated camera, plus six points each seen by one
+    // photo only, with 0.3 px on their observation: nothing in the problem can place such a point
+    // along its ray, so the adjustment leaves it where it is, under every loss, and the rest of the
+    // block stays exact
+    let mut rng = Rng(8);
+    let (mut pb, truth) = block(&mut rng, 600, None);
+    pb.gcps = gcps(&truth, 0.002, &[0, 1, 2, 3]);
+    pb.cameras[0].free.clear();
+    let mut once = Vec::new();
+    for (k, i) in [1usize, 4, 7, 10, 13, 16].into_iter().enumerate() {
+        let c = pb.centres[i];
+        let world = [c[0] + 0.8 - 0.3 * k as f64, c[1] - 0.6 + 0.2 * k as f64, c[2] - 30.0 + 0.4 * (k % 3) as f64];
+        let xy = pixel(&pb.rotations[i], c, [0.0; 3], world).unwrap();
+        once.push((pb.points.len(), i));
+        pb.points.push(world);
+        pb.obs.push(Obs { image: i, point: pb.points.len() - 1, xy: [xy[0] + 0.3, xy[1] - 0.2] });
+    }
+    pb.check().unwrap();
+    for loss in [Loss::None, Loss::Huber(1.0), Loss::Cauchy(1.0)] {
+        let sol = solve(&pb, &Options { loss, ..Options::default() }, &mut |_, _| true).unwrap();
+        for &(p, i) in &once {
+            let (before, after) = (distance(pb.points[p], pb.centres[i]), distance(sol.points[p], sol.centres[i]));
+            let moved = format!("{loss:?}: point {p} moved from {before} m to {after} m from its camera");
+            assert_eq!(sol.points[p], pb.points[p], "{moved}");
+        }
+        // the six residuals that remain bend the block by millimetres: the least-squares answer
+        assert!(max_distance(&sol.centres, &truth.centres) < 1e-2, "{loss:?}");
+        assert!(max_distance(&sol.points[..600], &truth.points) < 1e-2, "{loss:?}");
+    }
+}

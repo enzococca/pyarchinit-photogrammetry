@@ -11,6 +11,10 @@ use super::schur::{dense_step, Reduced};
 
 /// Up to this many free photos the reduced system is factorised dense (spec 8.1).
 pub const DENSE_MAX_PHOTOS: usize = 2500;
+/// Under Huber and Cauchy the function tolerance is at least this, Ceres's default: the cost of a
+/// wrong track is a plateau along which the adjustment gains 1e-8 to 1e-7 of the cost per iteration
+/// for ever, long after the rest of the block has converged.
+pub const ROBUST_FUNCTION_TOLERANCE: f64 = 1e-6;
 /// A sparse factor that would take more bytes than this is replaced by the conjugate gradients.
 pub const PCG_ABOVE_BYTES: u64 = 4 << 30;
 
@@ -53,21 +57,21 @@ pub struct Options {
     pub max_iterations: usize,
     pub loss: Loss,
     pub linear_solver: LinearSolver,
+    /// Relative decrease of the cost below which an undamped step ends the adjustment; under Huber
+    /// and Cauchy at least `ROBUST_FUNCTION_TOLERANCE`.
     pub function_tolerance: f64,
     pub gradient_tolerance: f64,
     pub parameter_tolerance: f64,
 }
 
 impl Default for Options {
-    /// Ceres's function tolerance (1e-6: a plateau of a robust loss, where wrong tracks crawl by
-    /// 1e-7 of the cost per iteration, would otherwise run to the limit), the parameter tolerance of
-    /// the Python adjustment (`xtol` 1e-9), the gradient at 1e-10.
+    /// The tolerances of the Python adjustment (`ftol`, `xtol` 1e-9), the gradient at 1e-10.
     fn default() -> Self {
         Options {
             max_iterations: 100,
             loss: Loss::None,
             linear_solver: LinearSolver::Auto,
-            function_tolerance: 1e-6,
+            function_tolerance: 1e-9,
             gradient_tolerance: 1e-10,
             parameter_tolerance: 1e-9,
         }
@@ -126,6 +130,15 @@ pub fn choose_linear_solver(
     }
 }
 
+/// The function tolerance `solve` applies: the option's, floored at `ROBUST_FUNCTION_TOLERANCE`
+/// under a robust loss.
+pub(crate) fn effective_function_tolerance(loss: Loss, function_tolerance: f64) -> f64 {
+    match loss {
+        Loss::None => function_tolerance,
+        Loss::Huber(_) | Loss::Cauchy(_) => function_tolerance.max(ROBUST_FUNCTION_TOLERANCE),
+    }
+}
+
 fn max_abs(values: &[f64]) -> f64 {
     values.iter().fold(0.0, |a: f64, x| a.max(x.abs()))
 }
@@ -148,6 +161,7 @@ pub fn solve(pb: &Problem, opts: &Options, observe: &mut dyn FnMut(usize, f64) -
         LinearSolver::Sparse | LinearSolver::Pcg => return Err("not built yet".into()),
     };
 
+    let function_tolerance = effective_function_tolerance(opts.loss, opts.function_tolerance);
     let mut params = Parameters::initial(pb);
     let mut ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
     if !ev.cost.is_finite() {
@@ -190,7 +204,7 @@ pub fn solve(pb: &Problem, opts: &Options, observe: &mut dyn FnMut(usize, f64) -
                 let live_cost = ev.cost - ev.behind_cost;
                 let undamped = lambda <= INITIAL_DAMPING;
                 let tiny_change =
-                    undamped && trial.cost.is_finite() && decrease.abs() <= opts.function_tolerance * live_cost;
+                    undamped && trial.cost.is_finite() && decrease.abs() <= function_tolerance * live_cost;
                 if trial.cost.is_finite() && decrease > 0.0 {
                     accepted = true;
                     let rho = if model_decrease > 0.0 { decrease / model_decrease } else { 1.0 };
@@ -260,11 +274,21 @@ mod tests {
     }
 
     #[test]
+    fn the_function_tolerance_is_scipys_and_the_robust_losses_floor_it() {
+        assert_eq!(Options::default().function_tolerance, 1e-9);
+        assert_eq!(effective_function_tolerance(Loss::None, 1e-9), 1e-9);
+        assert_eq!(effective_function_tolerance(Loss::Huber(1.0), 1e-9), ROBUST_FUNCTION_TOLERANCE);
+        assert_eq!(effective_function_tolerance(Loss::Cauchy(2.0), 1e-9), 1e-6);
+        assert_eq!(effective_function_tolerance(Loss::Huber(1.0), 1e-3), 1e-3);
+        assert_eq!(effective_function_tolerance(Loss::None, 1e-3), 1e-3);
+    }
+
+    #[test]
     fn the_defaults_and_the_solvers_not_built_yet() {
         let opts = Options::default();
         assert_eq!(opts.max_iterations, 100);
         assert_eq!((opts.loss, opts.linear_solver), (Loss::None, LinearSolver::Auto));
-        assert_eq!((opts.function_tolerance, opts.gradient_tolerance, opts.parameter_tolerance), (1e-6, 1e-10, 1e-9));
+        assert_eq!((opts.function_tolerance, opts.gradient_tolerance, opts.parameter_tolerance), (1e-9, 1e-10, 1e-9));
         // one fixed photo and a point on its axis: a problem that is solved before it starts
         let pb = Problem {
             rotations: vec![[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]],
