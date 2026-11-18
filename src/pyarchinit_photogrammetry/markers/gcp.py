@@ -35,7 +35,7 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
         if not m.projections:  # placed in 3D where no photo sees it (or given a position): kept
             continue
         measured = {k: p for k, p in m.projections.items() if p.measured}
-        views, obs, first, dropped = [], [], None, 0
+        views, obs, first, dropped = [], [], None, []
         for cam_key, proj in (measured or m.projections).items():  # estimates count only without measures
             try:
                 cam = chunk.camera(cam_key)
@@ -45,9 +45,7 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
                 continue
             norm = chunk.sensor(cam).unproject([[proj.x, proj.y]])[0]
             if not np.isfinite(norm).all():  # a pixel the lens model cannot invert (the border of a strong calibration)
-                log.warning("marker %s: la misura nella foto %s non si proietta (la calibrazione non si inverte in "
-                            "quel punto), ignorata", m.label, cam.label)
-                dropped += 1
+                dropped.append(cam.label)
                 continue
             views.append(geometry.PinholeView(cam.transform))
             obs.append(norm)
@@ -55,11 +53,19 @@ def triangulate_markers(chunk, min_views: int = 2, only=None) -> None:
         if len(views) >= min_views:
             m.position = geometry.triangulate(views, np.asarray(obs))
         elif measured:
-            if first is None and dropped:
-                log.warning("marker %s: nessuna misura utilizzabile (%d non proiettabili), non triangolato",
-                            m.label, dropped)
             m.position = surface_point(chunk, first[0], first[1].x, first[1].y, points) if first else None
         # estimated projections only, fewer than two photos (placed in 3D): the position stays
+        if dropped:  # one line per marker, naming the photos: a strong lens may drop many rays near its borders
+            names = ", ".join(dropped)
+            if first is None and measured:
+                log.warning("marker %s: nessuna misura utilizzabile (%d non proiettabili: %s), non triangolato",
+                            m.label, len(dropped), names)
+            elif len(dropped) == 1:
+                log.warning("marker %s: misura non proiettabile in %s (la calibrazione non si inverte in quel punto), "
+                            "ignorata", m.label, names)
+            else:
+                log.warning("marker %s: %d misure non proiettabili in %s (la calibrazione non si inverte in quei "
+                            "punti), ignorate", m.label, len(dropped), names)
 
 
 def views_of(chunk, marker, estimated: bool = False) -> int:
