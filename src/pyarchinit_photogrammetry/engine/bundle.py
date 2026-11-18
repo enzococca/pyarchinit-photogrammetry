@@ -730,15 +730,15 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
         pb.rs_sigma = ROLLING_SHUTTER_SIGMA_PX * depth / focal
         pb.rs_sigma_angular = ROLLING_SHUTTER_SIGMA_PX / focal
     # what stays as it is (in place of the gauge and the free calibration of the plain problem)
-    fixed = _rec_fixed_cameras(chunk, rec)
-    pb.fixed_images = {index[i] for i in image_ids if i in fixed}
+    fixed = _rec_fixed_cameras(chunk, rec)  # the COLMAP camera ids whose calibration is held
+    pb.fixed_images = set()  # no pose is held here: the gauge is decided below, from the references of the block
     pb.free_intrinsics = []
     for c in cam_ids:
         model_name = rec.cameras[c].model.name
         n = len(rec.cameras[c].params)
         held = {chunk.sensors[chunk.camera(key_of[rec.images[i].name]).sensor_key].fixed
                 for i in image_ids if rec.images[i].camera_id == c and rec.images[i].name in key_of}
-        if True in held:
+        if True in held or c in fixed:
             pb.free_intrinsics.append([])
             continue
         principal = _principal_point(model_name)

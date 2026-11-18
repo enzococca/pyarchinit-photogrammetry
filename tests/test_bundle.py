@@ -430,6 +430,30 @@ def test_the_plain_problem_of_a_reconstruction_is_the_tie_part_of_the_chunks(pro
     assert len(plain.points) == rec.num_points3D() and len(plain.centres) == len(posed) == len(ch.aligned_cameras)
 
 
+def test_a_fixed_sensor_holds_its_calibration_and_no_photo(processed):
+    """A sensor marked ``fixed`` holds its calibration and nothing else: the poses held are the gauge rule's alone -
+    none on a block placed by three control points, the first photo and the farthest from it on a block without
+    references. The held cameras of ``_rec_fixed_cameras`` are COLMAP camera ids, never image ids: on the trench
+    the one sensor's id is also an image id, the coincidence that once froze that photo's pose."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine.sfm import _rec_fixed_cameras, load_reconstruction
+
+    doc, _, _ = processed
+    ch = ppg.Document.open(doc.path).chunk  # a copy in memory: nothing is written
+    for sensor in ch.sensors.values():
+        sensor.fixed = True
+    rec = load_reconstruction(ch)
+    held = _rec_fixed_cameras(ch, rec)
+    assert held == set(rec.cameras) and held & set(rec.images)  # a held camera id that is an image id too
+    pb, _ids = bundle.problem_from_chunk(ch, rec)  # the control points of the trench place the block
+    assert len(pb.gcps) >= 3 and pb.fixed_images == set() and pb.free_intrinsics == [[]]
+    plain, _ids = bundle.problem_from_chunk(ch, rec, use_markers=False)
+    far = int(np.argmax(np.linalg.norm(plain.centres - plain.centres[0], axis=1)))
+    assert far != 0 and plain.fixed_images == {0, far} and plain.free_intrinsics == [[]]
+    lay = bundle._Layout(plain)
+    assert lay.size == 6 * (len(plain.centres) - 2) + 3 * len(plain.points)  # no intrinsic column, two photos held
+
+
 def test_gnss_positions_in_the_coordinate_system_of_the_chunk(processed):
     """The GNSS term pulls each camera towards its position in the coordinate system of the chunk: a position read in
     longitude and latitude (EXIF, XMP, MRK) is converted first, never taken as metres; on a chunk still in local
