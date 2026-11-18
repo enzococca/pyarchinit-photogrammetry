@@ -2705,10 +2705,11 @@ def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: P
 
 
 def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gnss: str, rolling_shutter: bool,
-                  progress: Progress, hold_focal: bool = False) -> float:
+                  progress: Progress, hold_focal: bool = False, *, solver: str = "auto") -> float:
     """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
     their accuracy, scale bars as distances, GNSS positions of the photos (with a bias per flight),
-    rolling shutter; ``hold_focal``: the focal length of the alignment kept."""
+    rolling shutter; ``hold_focal``: the focal length of the alignment kept; ``solver``: the one of
+    :func:`bundle.adjust` (``report["solver"]`` says which ran)."""
     from ..markers import gcp
     from . import bundle
 
@@ -2723,7 +2724,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
                                         rolling_shutter=rolling_shutter, fit_principal_point=fit_principal_point,
                                         hold_focal=hold_focal)
-    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85))
+    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
     chunk._before_product_write("reconstruction")
@@ -2738,6 +2739,8 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     key_of = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
     held = [chunk.camera(key_of[rec.images[ids["images"][i]].name]) for i, *_ in pb.gnss]
     report = {"engine": "ppg", "reprojection_error": err, "iterations": res.iterations, "converged": res.success,
+              "solver": {"requested": solver, "used": res.solver, "fallback": res.fallback,
+                         "seconds": float(res.seconds), "linear_solver": res.linear_solver},
               "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
               "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()},
               "gnss": {"mode": gnss, "photos": len(held), "states": _gnss_states(held)},
@@ -2755,7 +2758,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
 
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
                      marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
-                     gnss: str = "auto", rolling_shutter: bool = False) -> float:
+                     gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto") -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
     With ``use_markers`` the control points and the control scale bars take part in it, as in
@@ -2800,7 +2803,14 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     markers, the GNSS positions of the photos (``gnss`` "plain", or "bias" with a bias per
     flight, the focal length refined; "auto" is "plain" with the focal length of the alignment
     kept when the positions can hold the block and no fixed points do, else "off") and the
-    ``rolling_shutter`` of the camera (a velocity per photo)."""
+    ``rolling_shutter`` of the camera (a velocity per photo). ``solver`` (an option of ``engine="ppg"``,
+    :data:`bundle.SOLVERS`): ``"auto"`` the solver of the program (scipy until the native one has
+    passed its gate, or ``PPG_ENGINE=native``), ``"native"`` the Levenberg-Marquardt of the core,
+    ``"scipy"`` the reference; where the native one cannot run scipy adjusts the block and
+    ``report["solver"]`` says so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``).
+    With ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
+    from .bundle import SOLVERS
+
     progress = as_progress(progress)
     if engine not in ("colmap", "ppg"):
         raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
@@ -2808,6 +2818,10 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         raise ValueError(f"gnss: one of {', '.join(GNSS_MODES)}, not {gnss!r}")
     if engine == "colmap" and gnss in ("plain", "bias"):
         raise ValueError(f"gnss={gnss!r} is an option of engine='ppg': COLMAP's adjustment takes 'auto' or 'off'")
+    if solver not in SOLVERS:
+        raise ValueError(f"solver {solver!r}: auto, native or scipy")
+    if engine == "colmap" and solver != "auto":
+        raise ValueError(f"solver={solver!r} is an option of engine='ppg': COLMAP's adjustment has no solver to choose")
     before = {False: _gnss_offsets(chunk), True: _gnss_offsets(chunk, placed=True)}
     kept = None
     try:
@@ -2820,7 +2834,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                         _held_positions(chunk, chunk.aligned_cameras)[0])
                     mode, hold_focal = ("plain", True) if held else ("off", False)
                 err = _optimize_own(chunk, fit_principal_point, use_markers, mode, rolling_shutter, progress,
-                                    hold_focal=hold_focal)
+                                    hold_focal=hold_focal, solver=solver)
             else:
                 err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
             if kept is not None:

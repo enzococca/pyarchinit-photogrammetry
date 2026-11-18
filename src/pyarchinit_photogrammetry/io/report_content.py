@@ -179,6 +179,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "p_reprojection_error": ("Errore di riproiezione (px)", "Reprojection error (px)"),
     "p_engine": ("Motore", "Engine"),
     "p_engine_used": ("Motore usato", "Engine used"),
+    "p_solver_used": ("Risolutore", "Solver"),
     "p_iterations": ("Iterazioni", "Iterations"),
     "p_converged": ("Convergenza", "Converged"),
     "p_control_points": ("Punti di controllo", "Control points"),
@@ -1105,7 +1106,7 @@ PARAM_STEPS = [  # (key in chunk.meta, title, parameters in order)
                          "generic", "reference", "neighbours", "pairs", "guided_matching", "apply_masks",
                          "stationary_removed", "mapper", "global_fallback", "masked_tie_points", "gpu", "gpu_pairs",
                          "cpu_pairs", "reprojection_error"]),
-    ("optimize", "step_optimize", ["engine", "reprojection_error", "reverted", "iterations", "converged",
+    ("optimize", "step_optimize", ["engine", "solver", "reprojection_error", "reverted", "iterations", "converged",
                                    "control_points", "scale_bars", "steps", "gnss_positions", "focal_held"]),
     ("dense", "step_dense", ["backend", "quality", "filter", "fusion", "skipped_photos"]),
     ("point_cloud_source", "step_point_cloud", []),
@@ -1168,9 +1169,22 @@ def _engine_rows(chunk, w: Words, key: str, title: str) -> list[tuple[str, str, 
     return out
 
 
+def _solver_value(solver) -> str | None:
+    """The value of the solver row of our own adjustment (``meta["sfm"]["optimize"]["solver"]``, kept by
+    :func:`..engine.sfm._optimize_own`): the native solver when it ran; the one used and the reason when the native
+    one was wanted and could not run; scipy doing what was asked is no row (None)."""
+    if not isinstance(solver, dict):
+        return None
+    used, fallback = solver.get("used"), solver.get("fallback")
+    if fallback:
+        return f"{used} ({fallback})"
+    return str(used) if used == "native" else None
+
+
 def parameter_rows(chunk, w: Words) -> list[tuple[str, str, str]]:
     """``(step, parameter, value)`` of the processing parameters kept in ``chunk.meta``, each step after the engine
-    it ran on when that is worth a row (:func:`_engine_rows`)."""
+    it ran on when that is worth a row (:func:`_engine_rows`); the solver of our own adjustment after its engine
+    when that is (:func:`_solver_value`)."""
     out = []
     for key, title, keys in PARAM_STEPS:
         out.extend(_engine_rows(chunk, w, key, title))
@@ -1189,10 +1203,12 @@ def parameter_rows(chunk, w: Words) -> list[tuple[str, str, str]]:
         for k in shown:
             if key == "sfm" and k == "reprojection_error" and meta.get("optimize"):
                 continue  # in the optimisation's rows
-            text = _param_value(w, k, meta[k])
+            if key == "optimize" and k == "solver":
+                text, label = _solver_value(meta[k]), w("p_solver_used")
+            else:
+                text, label = _param_value(w, k, meta[k]), (w(f"p_{k}") if f"p_{k}" in TEXT else k)
             if text is None:
                 continue
-            label = w(f"p_{k}") if f"p_{k}" in TEXT else k
             out.append((w(title), label, text))
     return out
 

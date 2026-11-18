@@ -383,7 +383,7 @@ def _choose(solver: str, pb: Problem, loss: str) -> tuple[str, str, str | None]:
     wanted and cannot run, the reason: a warning in the log when it was asked for (``"native"``, or
     ``PPG_ENGINE=native``), a line when ``"auto"`` had turned to it on its own. A fallback is never an
     error: a robust loss on a block with references (:func:`_referenced`) is dropped for the squared loss,
-    and the reason says so."""
+    and the reason says so - a warning whichever way the native solver was wanted."""
     asked = os.environ.get("PPG_ENGINE", "").strip().lower() == "native"
     wanted = solver if solver != "auto" else ("native" if NATIVE_BY_DEFAULT or asked else "scipy")
     if wanted == "scipy":
@@ -391,14 +391,15 @@ def _choose(solver: str, pb: Problem, loss: str) -> tuple[str, str, str | None]:
     reason = native_ready(pb)
     if reason is None:
         return "native", loss, None
-    if loss != "none" and _referenced(pb):
+    dropped = loss != "none" and _referenced(pb)
+    if dropped:
         reason += (f"; scipy adjusts the block with the squared loss instead of {loss} (a robust loss on a block "
                    "with references needs the native core)")
         loss = "none"
         line = reason
     else:
         line = f"{reason}; scipy adjusts the block instead"
-    level = logging.WARNING if solver == "native" or asked else logging.INFO
+    level = logging.WARNING if solver == "native" or asked or dropped else logging.INFO
     log.log(level, "Bundle adjustment: %s", line)
     return "scipy", loss, reason
 

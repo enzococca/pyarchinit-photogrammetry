@@ -358,6 +358,44 @@ def test_cli_optimize_gnss_option(tmp_path, monkeypatch):
     assert len(seen) == count  # refused before the adjustment
 
 
+def test_cli_optimize_solver_option(tmp_path, monkeypatch):
+    """``ppg optimize --engine ppg --solver auto|native|scipy`` (hidden): the solver of our own adjustment, auto by
+    default, refused with COLMAP's adjustment and when it is not a solver; the line printed names the solver that
+    ran when it is the native one or when scipy stood in for it."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    doc, ch = _rtk_block(tmp_path)
+    run = CliRunner().invoke
+    assert "--solver" not in run(app, ["optimize", "--help"]).output
+    seen = []
+
+    def optimise(self, **kwargs):
+        seen.append(kwargs)
+        self.meta.setdefault("sfm", {})["optimize"] = {"engine": kwargs["engine"], "reprojection_error": 0.5}
+        if kwargs["engine"] == "ppg":
+            self.meta["sfm"]["optimize"]["solver"] = {"requested": kwargs["solver"], "used": "native",
+                                                      "fallback": None, "seconds": 0.1, "linear_solver": "dense"}
+        return 0.5
+
+    monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
+    for args, solver in (([], "auto"), (["--engine", "ppg"], "auto"),
+                         (["--engine", "ppg", "--solver", "native"], "native"),
+                         (["--engine", "ppg", "--solver", "scipy"], "scipy")):
+        result = run(app, ["optimize", str(doc.path), *args])
+        assert result.exit_code == 0, result.output
+        assert seen[-1]["solver"] == solver
+        assert (", solver native" in result.output) == ("ppg" in args)
+    count = len(seen)
+    for args in (["--solver", "native"], ["--solver", "scipy"], ["--engine", "ppg", "--solver", "ceres"]):
+        result = run(app, ["optimize", str(doc.path), *args])
+        assert result.exit_code != 0, args
+    assert "--engine ppg" in run(app, ["optimize", str(doc.path), "--solver", "native"]).output
+    assert len(seen) == count  # refused before the adjustment
+
+
 def test_dialog_says_how_many_photos_hold_the_block(tmp_path, monkeypatch):
     """*Ottimizza camere* says before the run how many photos hold the block and with which RTK state, the log
     says it after; an optimisation that bends the block is undone and the window warns."""
@@ -578,7 +616,7 @@ def test_bias_mode_judges_each_position_less_the_bias_of_its_flight(tmp_path, mo
     assert len(set(flights.values())) == 2
     bias = {1: np.array([0.0, 0.0, 0.6]), 2: np.array([0.0, 0.0, -0.6])}
 
-    def adjust(pb, max_iterations=100, progress=None):  # measured = true + bias: the cameras move by -bias
+    def adjust(pb, max_iterations=100, progress=None, solver="auto"):  # measured = true + bias: cameras move by -bias
         return _unchanged(pb, {i: -bias[flight] for i, _target, _sigma, flight in pb.gnss}, bias)
 
     monkeypatch.setattr(bundle, "adjust", adjust)
@@ -604,7 +642,7 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
 
     seen = []
 
-    def adjust(pb, max_iterations=100, progress=None):
+    def adjust(pb, max_iterations=100, progress=None, solver="auto"):
         seen.append(pb)
         return _unchanged(pb)
 
