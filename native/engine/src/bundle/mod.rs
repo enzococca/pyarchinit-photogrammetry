@@ -1,17 +1,22 @@
 //! The bundle adjustment of the native engine: the problem of `engine/bundle.py` and the columns
 //! of its unknowns (`problem`), its residuals and their Jacobian by forward dual numbers
 //! (`residuals`, `dual`), the normal equations reduced to the cameras by eliminating the points
-//! (`schur`) and the Levenberg-Marquardt iteration over them (`solve`).
+//! (`schur`, dense; `sparse`, faer's sparse Cholesky; `pcg`, the conjugate gradients without
+//! forming them), the Levenberg-Marquardt iteration over them (`solve`) and the synthetic blocks
+//! of the tests and of `ppg-bench adjust` (`synthetic`).
 
 use std::ops::Neg;
 
 use crate::camera::Real;
 
 pub mod dual;
+mod pcg;
 pub mod problem;
 pub mod residuals;
 mod schur;
 pub mod solve;
+mod sparse;
+pub mod synthetic;
 
 pub use dual::Dual;
 pub use problem::{
@@ -20,8 +25,8 @@ pub use problem::{
 };
 pub use residuals::{evaluate, evaluate_at, Evaluation, Loss, BEHIND_CAMERA_RESIDUAL};
 pub use solve::{
-    choose_linear_solver, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_PHOTOS, PCG_ABOVE_BYTES,
-    ROBUST_FUNCTION_TOLERANCE,
+    choose_linear_solver, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_COLUMNS, DENSE_MAX_PHOTOS,
+    PCG_ABOVE_BYTES, ROBUST_FUNCTION_TOLERANCE,
 };
 
 /// The scalar the residuals are written for: `f64` for the values alone (the cost of a trial

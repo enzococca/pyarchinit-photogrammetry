@@ -3,15 +3,20 @@
 //! 1200 x 900 pixels, every observation exact. The residuals and their Jacobian are checked
 //! against central differences and the structure of `_Model.sparsity`; the solver against the
 //! closed-form triangulation, the recovered block, a point behind the cameras, a block without
-//! a gauge, the robust losses, the same bits twice and the cancellation.
+//! a gauge, the robust losses, the same bits twice and the cancellation. The three linear
+//! solvers of the reduced system are checked against each other on the grid block of
+//! `bundle::synthetic`.
 
 use std::collections::HashSet;
 
+use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{
-    evaluate, evaluate_at, solve, CameraBlock, Layout, Loss, Obs, Options, Parameters, Problem, Solution,
-    Termination,
+    evaluate, evaluate_at, solve, CameraBlock, Layout, LinearSolver, Loss, Obs, Options, Parameters, Problem,
+    Solution, Termination,
 };
 use ppg_engine::camera::{project, Model};
+
+const SOLVERS: [LinearSolver; 3] = [LinearSolver::Dense, LinearSolver::Sparse, LinearSolver::Pcg];
 
 const W: f64 = 1200.0;
 const H: f64 = 900.0;
@@ -616,6 +621,53 @@ fn two_runs_give_the_same_bits() {
     let second = solve(&pb, &Options::default(), &mut |_, _| true).unwrap();
     assert_eq!(every_number(&first), every_number(&second));
     assert_eq!((first.termination, first.linear_solver), (second.termination, second.linear_solver));
+    assert_eq!(first.linear_solver, LinearSolver::Dense);
+    // each of the three solvers of the reduced system, asked by name, gives the same bits twice
+    for solver in SOLVERS {
+        let opts = Options { linear_solver: solver, ..Options::default() };
+        let first = solve(&pb, &opts, &mut |_, _| true).unwrap();
+        let second = solve(&pb, &opts, &mut |_, _| true).unwrap();
+        assert_eq!(every_number(&first), every_number(&second), "{solver:?}");
+        assert_eq!((first.linear_solver, first.termination), (solver, second.termination));
+        assert!(sol_converged(&first), "{solver:?}: {} iterations, {:?}", first.iterations, first.termination);
+    }
+}
+
+fn sol_converged(sol: &Solution) -> bool {
+    matches!(sol.termination, Termination::Function | Termination::Gradient | Termination::Parameters)
+}
+
+/// The grid block of 60 photos and 24 000 points of `bundle::synthetic`, with 0.3 px of noise on
+/// its tie observations so that the minimum of the cost is not zero: the dense Cholesky, the sparse
+/// Cholesky and the conjugate gradients must reach the same minimum, to 1e-9 of the cost and 1e-6 m
+/// of the centres, each stopped by its own tolerance.
+#[test]
+fn the_three_linear_solvers_reach_the_same_cost() {
+    let (mut pb, truth) = grid_block(60, 400, 3);
+    assert_eq!((pb.centres.len(), pb.points.len()), (60, 24_000));
+    let mut rng = Rng(30);
+    for o in pb.obs.iter_mut() {
+        o.xy = [o.xy[0] + 0.3 * rng.normal(), o.xy[1] + 0.3 * rng.normal()];
+    }
+    let mut solutions = Vec::new();
+    for solver in SOLVERS {
+        let opts = Options { linear_solver: solver, ..Options::default() };
+        let sol = solve(&pb, &opts, &mut |_, _| true).unwrap();
+        assert_eq!(sol.linear_solver, solver);
+        assert!(sol_converged(&sol), "{solver:?}: {} iterations, {:?}", sol.iterations, sol.termination);
+        assert!(sol.cost < 0.01 * sol.cost_initial, "{solver:?}: cost {} from {}", sol.cost, sol.cost_initial);
+        // 0.3 px at 30 m through a focal length of 1000 px is 9 mm on the ground
+        let off = max_distance(&sol.centres, &truth.centres);
+        assert!(off < 0.05, "{solver:?}: the centres are {off} m from the truth");
+        solutions.push(sol);
+    }
+    let dense = &solutions[0];
+    for other in &solutions[1..] {
+        let (a, b) = (dense.cost, other.cost);
+        assert!((a - b).abs() <= 1e-9 * a, "{:?}: cost {b} against {a} of the dense solver", other.linear_solver);
+        let apart = max_distance(&other.centres, &dense.centres);
+        assert!(apart < 1e-6, "{:?}: centres {apart} m from the dense solver's", other.linear_solver);
+    }
 }
 
 #[test]

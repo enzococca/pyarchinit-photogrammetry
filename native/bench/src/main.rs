@@ -12,15 +12,28 @@
 //!   the first adapter that is no software rasteriser is taken; when there is none the answer
 //!   is `{"skipped": "no adapter"}`, with exit code 0. `n` is 46336 at most (`MAX_N`): more is
 //!   a command line the binary refuses, before a device is opened.
+//! - `ppg-bench adjust [--photos 200] [--points 2000] [--solver auto|dense|sparse|pcg] [--seed 1]`:
+//!   the bundle adjustment of the synthetic grid block of `bundle::synthetic::grid_block`
+//!   (`photos` photos, `points` points - `points / photos` per photo, rounded up - perturbed from
+//!   exact observations), timed; it prints `photos`, `points`, `observations`, `solver` (the one
+//!   used: what `auto` chose), `iterations`, `cost_initial`, `cost` and `seconds` (the time of
+//!   `solve` alone, the block made before the clock starts).
 
 use std::process::ExitCode;
 use std::time::Instant;
 
+use ppg_engine::bundle::synthetic::grid_block;
+use ppg_engine::bundle::{solve, LinearSolver, Options};
 use ppg_engine::gpu;
 use serde_json::{json, Value};
 
 /// The descriptors of each set when `--n` is not given: a choice, not a measured figure.
 const DEFAULT_N: usize = 4096;
+
+/// The block `adjust` makes when it is not told otherwise: choices, not measured figures.
+const DEFAULT_PHOTOS: usize = 200;
+const DEFAULT_POINTS: usize = 2000;
+const DEFAULT_SEED: u64 = 1;
 
 /// The most descriptors `--n` takes: derived, not measured. The buffer of the matching kernel
 /// that grows fastest holds its partial results, 8 bytes for every tile of the first set (128
@@ -171,9 +184,40 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
               "correct": correct, "seconds": seconds}))
 }
 
+/// The name of a solver of the reduced system on the command line and in the record.
+fn solver_name(solver: LinearSolver) -> &'static str {
+    match solver {
+        LinearSolver::Auto => "auto",
+        LinearSolver::Dense => "dense",
+        LinearSolver::Sparse => "sparse",
+        LinearSolver::Pcg => "pcg",
+    }
+}
+
+fn solver_named(word: &str) -> Option<LinearSolver> {
+    [LinearSolver::Auto, LinearSolver::Dense, LinearSolver::Sparse, LinearSolver::Pcg]
+        .into_iter()
+        .find(|s| solver_name(*s) == word)
+}
+
+/// The adjustment of the grid block of `photos` photos and about `points` points with `solver`,
+/// timed: the record to print.
+fn time_adjustment(photos: usize, points: usize, solver: LinearSolver, seed: u64) -> Result<Value, String> {
+    let (pb, _) = grid_block(photos, points.div_ceil(photos), seed);
+    let opts = Options { linear_solver: solver, ..Options::default() };
+    // what is timed is `solve` alone: the block is made and the clock starts
+    let start = Instant::now();
+    let sol = solve(&pb, &opts, &mut |_, _| true)?;
+    let seconds = start.elapsed().as_secs_f64();
+    Ok(json!({"photos": pb.centres.len(), "points": pb.points.len(), "observations": pb.obs.len(),
+              "solver": solver_name(sol.linear_solver), "iterations": sol.iterations,
+              "cost_initial": sol.cost_initial, "cost": sol.cost, "seconds": seconds}))
+}
+
 enum Command {
     Adapters,
     Match { n: usize, device: Option<usize> },
+    Adjust { photos: usize, points: usize, solver: LinearSolver, seed: u64 },
 }
 
 /// The command of a command line, or what is wrong with it.
@@ -207,6 +251,34 @@ fn command(words: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Match { n, device })
         }
+        Some("adjust") => {
+            let (mut photos, mut points) = (DEFAULT_PHOTOS, DEFAULT_POINTS);
+            let (mut solver, mut seed) = (LinearSolver::Auto, DEFAULT_SEED);
+            while let Some(option) = words.next() {
+                match option {
+                    "--photos" => {
+                        photos = whole_number(option, words.next())?;
+                        if photos == 0 {
+                            return Err("--photos takes 1 or more: there is nothing to adjust without a photo".into());
+                        }
+                    }
+                    "--points" => {
+                        points = whole_number(option, words.next())?;
+                        if points == 0 {
+                            return Err("--points takes 1 or more: there is nothing to adjust without a point".into());
+                        }
+                    }
+                    "--solver" => {
+                        let word = words.next().ok_or("--solver takes auto, dense, sparse or pcg")?;
+                        solver = solver_named(word)
+                            .ok_or_else(|| format!("--solver takes auto, dense, sparse or pcg, not {word}"))?;
+                    }
+                    "--seed" => seed = whole_number(option, words.next())? as u64,
+                    _ => return Err(format!("adjust has no option {option}")),
+                }
+            }
+            Ok(Command::Adjust { photos, points, solver, seed })
+        }
         Some(word) => Err(format!("no command {word}")),
     }
 }
@@ -222,10 +294,15 @@ fn main() -> ExitCode {
     let answer = match command(&words) {
         Ok(Command::Adapters) => Ok(adapters()),
         Ok(Command::Match { n, device }) => time_matching(n, device),
+        Ok(Command::Adjust { photos, points, solver, seed }) => time_adjustment(photos, points, solver, seed),
         Err(problem) => {
             eprintln!("ppg-bench: {problem}");
             eprintln!("usage: ppg-bench adapters");
             eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N]");
+            eprintln!(
+                "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS}] \
+                 [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -276,6 +353,25 @@ mod tests {
         // the refusal says how many are taken, with or without an adapter named
         let refused = command(&words(&["match", "--n", &more, "--device", "0"])).err();
         assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{more} descriptors: {refused:?}");
+    }
+
+    #[test]
+    fn adjust_reads_its_options_and_has_its_defaults() {
+        let Ok(Command::Adjust { photos, points, solver, seed }) = command(&words(&["adjust"])) else {
+            panic!("adjust without options is refused")
+        };
+        assert_eq!((photos, points, solver, seed), (200, 2000, LinearSolver::Auto, 1));
+        let line = ["adjust", "--solver", "pcg", "--points", "30", "--photos", "3", "--seed", "9"];
+        let Ok(Command::Adjust { photos, points, solver, seed }) = command(&words(&line)) else {
+            panic!("the options of adjust are refused")
+        };
+        assert_eq!((photos, points, solver, seed), (3, 30, LinearSolver::Pcg, 9));
+        for word in ["auto", "dense", "sparse", "pcg"] {
+            assert_eq!(solver_named(word).map(solver_name), Some(word));
+        }
+        assert_eq!(solver_named("cholesky"), None);
+        let refused = command(&words(&["adjust", "--solver", "cholesky"])).err();
+        assert!(refused.as_ref().is_some_and(|problem| problem.contains("auto, dense, sparse or pcg")), "{refused:?}");
     }
 
     #[test]

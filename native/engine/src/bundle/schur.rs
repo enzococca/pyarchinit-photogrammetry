@@ -4,7 +4,9 @@
 //! flight biases; the dense Cholesky factorisation of faer on it; the points back-substituted.
 //! Forming the reduced system is parallel over its column blocks, each written by one thread in
 //! a fixed order, and the sums that end in the border are folded chunk by chunk in a fixed order,
-//! so that two runs give the same bits.
+//! so that two runs give the same bits. The assemblers of the column blocks write through a
+//! `Slab`, so that the same code fills the dense matrix, the pattern of the sparse one (`sparse`)
+//! and the diagonal blocks of the preconditioner of the conjugate gradients (`pcg`).
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt::{factor, solve as llt_solve};
@@ -70,29 +72,29 @@ impl Reduced {
 /// `y = V^-1 g`; `held` when the block is singular beyond round-off (no usable observation, or a
 /// single view): the point keeps its place in this step. Damping alone would not do: along the
 /// null direction the step would be round-off divided by the damping.
-struct PointBlock {
-    vinv: [f64; 9],
-    y: [f64; 3],
-    held: bool,
+pub(crate) struct PointBlock {
+    pub vinv: [f64; 9],
+    pub y: [f64; 3],
+    pub held: bool,
 }
 
 /// What every column block reads.
-struct Context<'a> {
-    pb: &'a Problem,
-    lay: &'a Layout,
-    st: &'a Structure,
-    red: &'a Reduced,
-    ev: &'a Evaluated,
-    g: &'a [f64],
-    damping: &'a [f64],
-    points: &'a [PointBlock],
+pub(crate) struct Context<'a> {
+    pub pb: &'a Problem,
+    pub lay: &'a Layout,
+    pub st: &'a Structure,
+    pub red: &'a Reduced,
+    pub ev: &'a Evaluated,
+    pub g: &'a [f64],
+    pub damping: &'a [f64],
+    pub points: &'a [PointBlock],
 }
 
 impl Context<'_> {
     /// Entries of a Jacobian row for the block of the photo `i` (the pose, then the rolling
     /// shutter), into `out`; the length of the block.
     #[inline]
-    fn camera_entries(&self, i: usize, row: &[f64], out: &mut [f64; 12]) -> usize {
+    pub(crate) fn camera_entries(&self, i: usize, row: &[f64], out: &mut [f64; 12]) -> usize {
         let mut len = 0;
         if self.lay.image_col[i].is_some() {
             out[..6].copy_from_slice(&row[OFF_DELTA..OFF_DELTA + 6]);
@@ -107,9 +109,55 @@ impl Context<'_> {
 
     /// The number and the first border column of the free intrinsics of the camera of photo `i`.
     #[inline]
-    fn intrinsics(&self, i: usize) -> (usize, usize) {
+    pub(crate) fn intrinsics(&self, i: usize) -> (usize, usize) {
         let c = self.pb.image_camera[i];
         (self.pb.cameras[c].free.len(), self.red.camera_start[c])
+    }
+}
+
+/// Where the entries of a column block of the reduced system go: `at` is the position of the
+/// entry of the column `a` of the block at the reduced row `row`, `keeps` says whether the rows
+/// of the block that starts at `start` are stored at all. The dense matrix keeps every row, the
+/// pattern of the sparse matrix every row its blocks couple with, a block on its own only its
+/// rows: the assemblers skip what a slab does not keep.
+pub(crate) trait Slab {
+    fn keeps(&self, start: usize) -> bool;
+    fn at(&self, a: usize, row: usize) -> usize;
+}
+
+/// The dense reduced matrix, column-major with `n` rows per column; a column block is the slab
+/// of its columns.
+pub(crate) struct Full(pub usize);
+
+impl Slab for Full {
+    #[inline]
+    fn keeps(&self, _: usize) -> bool {
+        true
+    }
+
+    #[inline]
+    fn at(&self, a: usize, row: usize) -> usize {
+        a * self.0 + row
+    }
+}
+
+/// The `len` columns of one block with their own rows only, from `start`: the border of the
+/// sparse matrix, the diagonal blocks of the preconditioner.
+pub(crate) struct Block {
+    pub start: usize,
+    pub len: usize,
+}
+
+impl Slab for Block {
+    #[inline]
+    fn keeps(&self, start: usize) -> bool {
+        (self.start..self.start + self.len).contains(&start)
+    }
+
+    #[inline]
+    fn at(&self, a: usize, row: usize) -> usize {
+        debug_assert!(self.keeps(row), "row {row} outside the block at {}", self.start);
+        a * self.len + row - self.start
     }
 }
 
@@ -167,7 +215,7 @@ pub(crate) fn sym3_inverse(v: &[f64; 9]) -> Option<[f64; 9]> {
     ])
 }
 
-fn point_blocks(
+pub(crate) fn point_blocks(
     pb: &Problem,
     lay: &Layout,
     st: &Structure,
@@ -215,20 +263,21 @@ fn point_blocks(
 
 /// The column block of the photo `i`: its diagonal block, the blocks of the photos after it that
 /// share a point with it (the Schur terms), the markers it observes, the border; and its part of
-/// the right-hand side. `block` holds the `photo_len[i]` columns, column-major, `size` rows each.
-fn photo_column(cx: &Context, i: usize, block: &mut [f64], rhs: &mut [f64]) {
+/// the right-hand side. `block` holds the `photo_len[i]` columns as `slab` lays them out.
+pub(crate) fn photo_column<S: Slab>(cx: &Context, i: usize, slab: &S, block: &mut [f64], rhs: &mut [f64]) {
     let (red, lay, st, ev, pb) = (cx.red, cx.lay, cx.st, cx.ev, cx.pb);
     let c_i = red.photo_len[i];
     if c_i == 0 {
         return;
     }
-    let (n, s_i) = (red.size, red.photo_start[i]);
+    let s_i = red.photo_start[i];
     for k in 0..c_i {
         let lc = red.layout_col[s_i + k];
-        block[k * n + s_i + k] += cx.damping[lc];
+        block[slab.at(k, s_i + k)] += cx.damping[lc];
         rhs[k] = -cx.g[lc];
     }
     let (k_c, intr) = cx.intrinsics(i);
+    let keep_intr = k_c > 0 && slab.keeps(intr);
     let mut jc = [0.0; 12];
     for &j in st.image_obs.of(i) {
         let p = pb.obs[j].point;
@@ -239,10 +288,12 @@ fn photo_column(cx: &Context, i: usize, block: &mut [f64], rhs: &mut [f64]) {
             for a in 0..c_i {
                 let wa = w * jc[a];
                 for b in 0..c_i {
-                    block[b * n + s_i + a] += wa * jc[b];
+                    block[slab.at(b, s_i + a)] += wa * jc[b];
                 }
-                for q in 0..k_c {
-                    block[a * n + intr + q] += wa * jr[OFF_INTR + q];
+                if keep_intr {
+                    for q in 0..k_c {
+                        block[slab.at(a, intr + q)] += wa * jr[OFF_INTR + q];
+                    }
                 }
                 for k in 0..3 {
                     w_ip[a][k] += wa * jr[OFF_POINT + k];
@@ -265,6 +316,11 @@ fn photo_column(cx: &Context, i: usize, block: &mut [f64], rhs: &mut [f64]) {
             let i2 = pb.obs[j2].image;
             let (c2, s2) = (red.photo_len[i2], red.photo_start[i2]);
             let (k2, intr2) = cx.intrinsics(i2);
+            let photo_rows = c2 > 0 && s2 >= s_i && slab.keeps(s2);
+            let intr_rows = k2 > 0 && slab.keeps(intr2);
+            if !photo_rows && !intr_rows {
+                continue;
+            }
             let mut w2 = [[0.0; 3]; 12];
             let mut f2 = [[0.0; 3]; 12];
             for row in 2 * j2..2 * j2 + 2 {
@@ -283,47 +339,58 @@ fn photo_column(cx: &Context, i: usize, block: &mut [f64], rhs: &mut [f64]) {
                     }
                 }
             }
-            if c2 > 0 && s2 >= s_i {
+            if photo_rows {
                 for a2 in 0..c2 {
                     for a in 0..c_i {
-                        block[a * n + s2 + a2] -= w2[a2][0] * y[a][0] + w2[a2][1] * y[a][1] + w2[a2][2] * y[a][2];
+                        let term = w2[a2][0] * y[a][0] + w2[a2][1] * y[a][1] + w2[a2][2] * y[a][2];
+                        block[slab.at(a, s2 + a2)] -= term;
                     }
                 }
             }
-            for q in 0..k2 {
-                for a in 0..c_i {
-                    block[a * n + intr2 + q] -= f2[q][0] * y[a][0] + f2[q][1] * y[a][1] + f2[q][2] * y[a][2];
+            if intr_rows {
+                for q in 0..k2 {
+                    for a in 0..c_i {
+                        let term = f2[q][0] * y[a][0] + f2[q][1] * y[a][1] + f2[q][2] * y[a][2];
+                        block[slab.at(a, intr2 + q)] -= term;
+                    }
                 }
             }
         }
     }
     for &j in st.image_mobs.of(i) {
         let m0 = red.marker_start + 3 * pb.mobs[j].point;
+        let keep_marker = slab.keeps(m0);
         for row in 2 * j..2 * j + 2 {
             let jr = ev.mobs_row(st, row);
             cx.camera_entries(i, jr, &mut jc);
             for a in 0..c_i {
                 let ja = jc[a];
                 for b in 0..c_i {
-                    block[b * n + s_i + a] += ja * jc[b];
+                    block[slab.at(b, s_i + a)] += ja * jc[b];
                 }
-                for k in 0..3 {
-                    block[a * n + m0 + k] += ja * jr[OFF_POINT + k];
+                if keep_marker {
+                    for k in 0..3 {
+                        block[slab.at(a, m0 + k)] += ja * jr[OFF_POINT + k];
+                    }
                 }
-                for q in 0..k_c {
-                    block[a * n + intr + q] += ja * jr[OFF_INTR + q];
+                if keep_intr {
+                    for q in 0..k_c {
+                        block[slab.at(a, intr + q)] += ja * jr[OFF_INTR + q];
+                    }
                 }
             }
         }
     }
     if lay.image_col[i].is_some() {
         for &j in st.image_gnss.of(i) {
-            let f = lay.flight_index(pb.gnss[j].3);
+            let bias = lay.flight_index(pb.gnss[j].3).map(|f| red.bias_start + 3 * f);
             for k in 0..3 {
                 let jc = ev.gnss_jac[j][k];
-                block[(OFF_CENTRE + k) * n + s_i + OFF_CENTRE + k] += jc * jc;
-                if let Some(f) = f {
-                    block[(OFF_CENTRE + k) * n + red.bias_start + 3 * f + k] += ev.gnss_jac[j][3 + k] * jc;
+                block[slab.at(OFF_CENTRE + k, s_i + OFF_CENTRE + k)] += jc * jc;
+                if let Some(b0) = bias {
+                    if slab.keeps(b0) {
+                        block[slab.at(OFF_CENTRE + k, b0 + k)] += ev.gnss_jac[j][3 + k] * jc;
+                    }
                 }
             }
         }
@@ -332,32 +399,35 @@ fn photo_column(cx: &Context, i: usize, block: &mut [f64], rhs: &mut [f64]) {
         let off = c_i - 6;
         for k in 0..6 {
             let jr = ev.rs_jac[i][k];
-            block[(off + k) * n + s_i + off + k] += jr * jr;
+            block[slab.at(off + k, s_i + off + k)] += jr * jr;
         }
     }
 }
 
 /// The three columns of the marker `m`: its observations, its control point, its bars (the
 /// other marker of a bar after it, and the border), and its right-hand side.
-fn marker_column(cx: &Context, m: usize, block: &mut [f64], rhs: &mut [f64]) {
+pub(crate) fn marker_column<S: Slab>(cx: &Context, m: usize, slab: &S, block: &mut [f64], rhs: &mut [f64]) {
     let (red, lay, st, ev, pb) = (cx.red, cx.lay, cx.st, cx.ev, cx.pb);
-    let (n, s_m) = (red.size, red.marker_start + 3 * m);
+    let s_m = red.marker_start + 3 * m;
     for k in 0..3 {
         let lc = lay.marker_col + 3 * m + k;
-        block[k * n + s_m + k] += cx.damping[lc];
+        block[slab.at(k, s_m + k)] += cx.damping[lc];
         rhs[k] = -cx.g[lc];
     }
     for &j in st.marker_mobs.of(m) {
         let (k_c, intr) = cx.intrinsics(pb.mobs[j].image);
+        let keep_intr = k_c > 0 && slab.keeps(intr);
         for row in 2 * j..2 * j + 2 {
             let jr = ev.mobs_row(st, row);
             for a in 0..3 {
                 let ja = jr[OFF_POINT + a];
                 for b in 0..3 {
-                    block[b * n + s_m + a] += ja * jr[OFF_POINT + b];
+                    block[slab.at(b, s_m + a)] += ja * jr[OFF_POINT + b];
                 }
-                for q in 0..k_c {
-                    block[a * n + intr + q] += ja * jr[OFF_INTR + q];
+                if keep_intr {
+                    for q in 0..k_c {
+                        block[slab.at(a, intr + q)] += ja * jr[OFF_INTR + q];
+                    }
                 }
             }
         }
@@ -365,7 +435,7 @@ fn marker_column(cx: &Context, m: usize, block: &mut [f64], rhs: &mut [f64]) {
     for &j in st.marker_gcps.of(m) {
         for k in 0..3 {
             let jv = ev.gcp_jac[j][k];
-            block[k * n + s_m + k] += jv * jv;
+            block[slab.at(k, s_m + k)] += jv * jv;
         }
     }
     for &end in st.marker_bars.of(m) {
@@ -375,14 +445,14 @@ fn marker_column(cx: &Context, m: usize, block: &mut [f64], rhs: &mut [f64]) {
         let jo = &ev.bar_jac[j][3 - mine..6 - mine];
         for k in 0..3 {
             for l in 0..3 {
-                block[l * n + s_m + k] += jm[k] * jm[l];
+                block[slab.at(l, s_m + k)] += jm[k] * jm[l];
             }
         }
-        if other > m {
-            let s_o = red.marker_start + 3 * other;
+        let s_o = red.marker_start + 3 * other;
+        if other > m && slab.keeps(s_o) {
             for k in 0..3 {
                 for l in 0..3 {
-                    block[l * n + s_o + k] += jo[k] * jm[l];
+                    block[slab.at(l, s_o + k)] += jo[k] * jm[l];
                 }
             }
         }
@@ -391,7 +461,7 @@ fn marker_column(cx: &Context, m: usize, block: &mut [f64], rhs: &mut [f64]) {
 
 /// The columns of the border: the free intrinsics (their own terms photo by photo, the Schur
 /// terms of the points chunk by chunk, both folded in a fixed order) and the biases.
-fn border_columns(cx: &Context, block: &mut [f64], rhs: &mut [f64]) {
+pub(crate) fn border_columns<S: Slab>(cx: &Context, slab: &S, block: &mut [f64], rhs: &mut [f64]) {
     let (red, lay, st, ev, pb) = (cx.red, cx.lay, cx.st, cx.ev, cx.pb);
     let (n, s_b) = (red.size, red.border_start);
     let nb = n - s_b;
@@ -401,7 +471,7 @@ fn border_columns(cx: &Context, block: &mut [f64], rhs: &mut [f64]) {
     let kt = red.bias_start - s_b;
     for k in 0..nb {
         let lc = red.layout_col[s_b + k];
-        block[k * n + s_b + k] += cx.damping[lc];
+        block[slab.at(k, s_b + k)] += cx.damping[lc];
         rhs[k] = -cx.g[lc];
     }
     let n_photos = pb.centres.len();
@@ -436,7 +506,7 @@ fn border_columns(cx: &Context, block: &mut [f64], rhs: &mut [f64]) {
         let off = intr - s_b;
         for q in 0..k_c {
             for q2 in 0..k_c {
-                block[(off + q2) * n + s_b + off + q] += h[q * k_c + q2];
+                block[slab.at(off + q2, intr + q)] += h[q * k_c + q2];
             }
         }
     }
@@ -498,7 +568,7 @@ fn border_columns(cx: &Context, block: &mut [f64], rhs: &mut [f64]) {
             for q in 0..kt {
                 rhs[q] += r[q];
                 for q2 in 0..kt {
-                    block[q2 * n + s_b + q] += h[q * kt + q2];
+                    block[slab.at(q2, s_b + q)] += h[q * kt + q2];
                 }
             }
         }
@@ -508,7 +578,7 @@ fn border_columns(cx: &Context, block: &mut [f64], rhs: &mut [f64]) {
             let off = red.bias_start - s_b + 3 * f;
             for k in 0..3 {
                 let jb = ev.gnss_jac[j][3 + k];
-                block[(off + k) * n + s_b + off + k] += jb * jb;
+                block[slab.at(off + k, s_b + off + k)] += jb * jb;
             }
         }
     }
@@ -538,7 +608,7 @@ pub(crate) fn cholesky_solve_in_place(matrix: &mut [f64], rhs: &mut [f64]) -> Re
 
 /// The points from the step of the cameras: `delta_p = -V^-1 (g_p + sum_j w_j J_X^T J_cam delta_cam)`
 /// over the observations `j` of each point; a held point does not move.
-fn back_substitute(cx: &Context, delta: &mut [f64]) {
+pub(crate) fn back_substitute(cx: &Context, delta: &mut [f64]) {
     let (lay, st, ev, pb) = (cx.lay, cx.st, cx.ev, cx.pb);
     let n_point_cols = 3 * pb.points.len();
     let (head, rest) = delta.split_at_mut(lay.point_col);
@@ -582,6 +652,38 @@ fn back_substitute(cx: &Context, delta: &mut [f64]) {
     });
 }
 
+/// The dense reduced system: its matrix (`size` x `size`, column-major; the lower triangle and
+/// the whole diagonal blocks are written) and its right-hand side, assembled in parallel by
+/// column block.
+pub(crate) fn dense_system(cx: &Context) -> (Vec<f64>, Vec<f64>) {
+    let (pb, red) = (cx.pb, cx.red);
+    let n = red.size;
+    let mut s = vec![0.0; n * n];
+    let mut b = vec![0.0; n];
+    let slab = Full(n);
+    let (photo_s, rest_s) = s.split_at_mut(red.marker_start * n);
+    let (marker_s, border_s) = rest_s.split_at_mut((red.border_start - red.marker_start) * n);
+    let (photo_b, rest_b) = b.split_at_mut(red.marker_start);
+    let (marker_b, border_b) = rest_b.split_at_mut(red.border_start - red.marker_start);
+    let mut photo_blocks = Vec::with_capacity(pb.centres.len());
+    let (mut rest_s, mut rest_b) = (photo_s, photo_b);
+    for &len in &red.photo_len {
+        let (head_s, tail_s) = rest_s.split_at_mut(len * n);
+        let (head_b, tail_b) = rest_b.split_at_mut(len);
+        photo_blocks.push((head_s, head_b));
+        rest_s = tail_s;
+        rest_b = tail_b;
+    }
+    photo_blocks.into_par_iter().enumerate().for_each(|(i, (block, rhs))| photo_column(cx, i, &slab, block, rhs));
+    marker_s
+        .par_chunks_mut(3 * n)
+        .zip_eq(marker_b.par_chunks_mut(3))
+        .enumerate()
+        .for_each(|(m, (block, rhs))| marker_column(cx, m, &slab, block, rhs));
+    border_columns(cx, &slab, border_s, border_b);
+    (s, b)
+}
+
 /// One step of the damped normal equations `(J^T W J + diag(damping)) delta = -g`, in the columns
 /// of `lay`: the points eliminated, the reduced system solved by a dense Cholesky, the points
 /// back-substituted. An error when the reduced system is not positive definite.
@@ -596,33 +698,9 @@ pub(crate) fn dense_step(
 ) -> Result<Vec<f64>, String> {
     let points = point_blocks(pb, lay, st, ev, g, damping);
     let cx = Context { pb, lay, st, red, ev, g, damping, points: &points };
-    let n = red.size;
     let mut delta = vec![0.0; lay.size];
-    if n > 0 {
-        let mut s = vec![0.0; n * n];
-        let mut b = vec![0.0; n];
-        {
-            let (photo_s, rest_s) = s.split_at_mut(red.marker_start * n);
-            let (marker_s, border_s) = rest_s.split_at_mut((red.border_start - red.marker_start) * n);
-            let (photo_b, rest_b) = b.split_at_mut(red.marker_start);
-            let (marker_b, border_b) = rest_b.split_at_mut(red.border_start - red.marker_start);
-            let mut photo_blocks = Vec::with_capacity(pb.centres.len());
-            let (mut rest_s, mut rest_b) = (photo_s, photo_b);
-            for &len in &red.photo_len {
-                let (head_s, tail_s) = rest_s.split_at_mut(len * n);
-                let (head_b, tail_b) = rest_b.split_at_mut(len);
-                photo_blocks.push((head_s, head_b));
-                rest_s = tail_s;
-                rest_b = tail_b;
-            }
-            photo_blocks.into_par_iter().enumerate().for_each(|(i, (block, rhs))| photo_column(&cx, i, block, rhs));
-            marker_s
-                .par_chunks_mut(3 * n)
-                .zip_eq(marker_b.par_chunks_mut(3))
-                .enumerate()
-                .for_each(|(m, (block, rhs))| marker_column(&cx, m, block, rhs));
-            border_columns(&cx, border_s, border_b);
-        }
+    if red.size > 0 {
+        let (mut s, mut b) = dense_system(&cx);
         cholesky_solve_in_place(&mut s, &mut b)?;
         for (col, &lc) in red.layout_col.iter().enumerate() {
             delta[lc] = b[col];
@@ -632,8 +710,10 @@ pub(crate) fn dense_step(
     Ok(delta)
 }
 
+/// The block of every residual (`small_block`) and its moved parameters (`moved`), shared with
+/// the tests of the sparse Cholesky and of the conjugate gradients.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::bundle::problem::{compose, exp_rotation, CameraBlock, Obs, Parameters};
     use crate::bundle::residuals::{evaluate_blocks, gradient_and_diagonal, triplets, Loss};
@@ -689,7 +769,7 @@ mod tests {
     /// Three photos looking down from 10 m (the second of another camera and fixed), nine points
     /// on the ground, two markers with a control point and a bar, GNSS positions of two flights,
     /// the rolling shutter: every residual of the problem, with exact observations.
-    fn small_block() -> Problem {
+    pub(crate) fn small_block() -> Problem {
         let r = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
         let centres = vec![[0.0, 0.0, 10.0], [1.0, 0.5, 10.0], [2.0, 0.0, 10.0]];
         let cameras = vec![
@@ -742,7 +822,7 @@ mod tests {
     }
 
     /// The parameters of the block moved away from the truth, with velocities and biases.
-    fn moved(pb: &Problem) -> Parameters {
+    pub(crate) fn moved(pb: &Problem) -> Parameters {
         let mut params = Parameters::initial(pb);
         for (k, c) in params.centres.iter_mut().enumerate() {
             c[0] += 0.05 * (k as f64 + 1.0);
