@@ -262,8 +262,10 @@ def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch
     assert result.exit_code == 2 and "--steps" in plain(result)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--mapper", "hierarchical"])
     assert result.exit_code == 2 and "--mapper" in plain(result) and "not 'hierarchical'" in plain(result)
+    # the wording of the range error is Click's and changes between versions: the exit code and the option named
+    # are what matter (that --seed exists and reaches the runner is shown by test_run_passes_its_options...)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--seed", "-1"])
-    assert result.exit_code == 2 and "--seed" in plain(result) and "not in the range" in plain(result)
+    assert result.exit_code == 2 and "--seed" in plain(result)
     result = invoke(["run", str(photos), str(photos / "out"), "--name", "n"])
     assert result.exit_code == 2 and "must not be inside the folder of the photos" in plain(result)
     (out / "n-1").mkdir(parents=True)
