@@ -90,7 +90,9 @@ ppg bench table DIR
   `mapper` the run used, and the table compares it. `--seed N` (0 or more) fixes the seed of the
   RANSAC of the geometric verification of the matches (`PPG_RANSAC_SEED` in the child): runs with
   the same seed verify the same pairs, so repeats compare like with like; the record keeps it as
-  `ransac_seed`, `-1` without it (a seed from the clock).
+  `ransac_seed`, `-1` without it (a seed from the clock). The seed fixes the verification only: on a
+  computer that shares the pairs between the GPU and the CPU, and since COLMAP's threaded extractor
+  numbers the photos in the order it finishes them, repeated runs can still differ in their pairs.
 * `synthetic trench|ring`: writes the set in a folder of its own, `OUT/synthetic-trench-set/` or
   `OUT/synthetic-ring-set/` (its photos and `gcp.csv`), which must not exist yet, and runs it as
   `synthetic-trench` (28 photos, all the steps of `ppg process` with its defaults - the depth maps at

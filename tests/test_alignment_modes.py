@@ -434,28 +434,54 @@ def test_tie_point_limit_and_hierarchical_mapper(scene_dir, tmp_path):
 
 
 def test_a_fixed_ransac_seed_gives_the_same_pairs(scene_dir, tmp_path, monkeypatch):
-    """With the seed of the geometric verification fixed (``PPG_RANSAC_SEED``), two matchings of the
-    same photos leave the same verified pairs, inliers and geometries: the repeats of ``ppg bench``
-    compare like with like."""
+    """With the seed of the geometric verification fixed (``PPG_RANSAC_SEED``), the verification of the
+    same matches on two copies of the project's database leaves ``two_view_geometries`` equal row by
+    row, on every core; without the seed it differs. Two separate matchings are not compared pair by
+    pair: COLMAP's threaded extractor numbers the photos in the order it finishes them, and a GPU
+    shares the pairs with the CPU by speed (the seed fixes the verification only)."""
+    import shutil
     import sqlite3
 
-    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "7")
+    import pycolmap
+
+    _doc, ch = _matched(scene_dir, tmp_path, "exhaustive")
+    db = ch.data_dir / "sfm" / "database.db"
     columns = ("pair_id", "rows", "config", "data", "F", "E", "H")
-    tables = []
-    for copy in ("one", "two"):
-        (tmp_path / copy).mkdir()
-        _doc, ch = _matched(scene_dir, tmp_path / copy, "exhaustive")
-        con = sqlite3.connect(str(ch.data_dir / "sfm" / "database.db"))
+
+    def verified_again(label, seed):
+        """``two_view_geometries`` of a copy of the database, verified again from its matches with ``seed``."""
+        copy = tmp_path / f"{label}.db"
+        shutil.copy(db, copy)
+        con = sqlite3.connect(str(copy))
         try:
-            tables.append(con.execute(f"SELECT {', '.join(columns)} FROM two_view_geometries ORDER BY pair_id")
-                          .fetchall())
+            ids = dict(con.execute("SELECT image_id, name FROM images"))
+            pairs = [pycolmap.pair_id_to_image_pair(int(p))
+                     for (p,) in con.execute("SELECT pair_id FROM matches WHERE rows > 0")]
+            con.execute("DELETE FROM two_view_geometries")
+            con.commit()
         finally:
             con.close()
-    first, second = tables
-    assert len(first) > 0
-    differing = {name: sum(1 for a, b in zip(first, second) if a[i] != b[i]) for i, name in enumerate(columns)}
-    differing = {name: n for name, n in differing.items() if n}
-    assert len(first) == len(second) and not differing, (len(first), len(second), differing)
+        lst = tmp_path / f"{label}.txt"
+        lst.write_text("\n".join(f"{ids[a]} {ids[b]}" for a, b in pairs))
+        if seed is None:
+            monkeypatch.delenv(sfm.RANSAC_SEED_ENV, raising=False)
+        else:
+            monkeypatch.setenv(sfm.RANSAC_SEED_ENV, str(seed))
+        pycolmap.verify_matches(str(copy), str(lst), sfm.verification_options())
+        con = sqlite3.connect(str(copy))
+        try:
+            return con.execute(f"SELECT {', '.join(columns)} FROM two_view_geometries ORDER BY pair_id").fetchall()
+        finally:
+            con.close()
+
+    def differing(first, second):
+        counts = {name: sum(1 for a, b in zip(first, second) if a[i] != b[i]) for i, name in enumerate(columns)}
+        return {name: n for name, n in counts.items() if n}
+
+    one, two = verified_again("seven-one", 7), verified_again("seven-two", 7)
+    assert len(one) == len(two) > 0 and not differing(one, two), (len(one), len(two), differing(one, two))
+    # without the seed the same verification differs: the equality above is the seed's doing
+    assert differing(verified_again("clock-one", None), verified_again("clock-two", None))
 
 
 def test_the_ransac_seed_is_checked(scene_dir, tmp_path, monkeypatch):
