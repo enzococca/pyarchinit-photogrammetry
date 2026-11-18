@@ -9,6 +9,7 @@ use rayon::prelude::*;
 
 use super::dual::Dual;
 use super::problem::{Layout, Obs, Parameters, Problem};
+use super::schur::sym3_inverse;
 use super::Scalar;
 use crate::camera::{project, Model};
 
@@ -20,7 +21,7 @@ pub const BEHIND_CAMERA_RESIDUAL: f64 = 1e3;
 const MIN_DEPTH: f64 = 1e-9;
 
 /// The least weight of a residual in the normal matrix, as a fraction of its weight in the
-/// gradient (`Loss::curvature`).
+/// gradient, where the curvature of the loss is the weight (`Loss::curvature`, `evaluate_blocks`).
 const CURVATURE_FLOOR: f64 = 0.01;
 
 /// Where the derivatives of an observation sit in its two Jacobian rows (`Structure::row_len`
@@ -72,13 +73,14 @@ impl Loss {
         }
     }
 
-    /// `rho' + 2 s rho''`, the curvature of `rho(r^2) / 2` in `r`: the weight of the residual in
-    /// the normal matrix (the Triggs correction of a scalar residual, as scipy applies it). Where
-    /// the loss is linear or concave in `r` it is floored at `CURVATURE_FLOOR` of the slope, so that
-    /// a point whose observations are all in that regime still takes a bounded step.
+    /// `rho' + 2 s rho''`, the curvature of `rho(r^2) / 2` in `r`: zero where Huber is linear,
+    /// negative where Cauchy is concave. Floored at `CURVATURE_FLOOR` of the slope, it is the
+    /// weight of the residual in the normal matrix (the Triggs correction of a scalar residual, as
+    /// scipy applies it) for a point its inliers hold (`held_by_inliers`); a point they do not hold
+    /// takes the slope (Ceres's first-order weight) on all its rows, so that its step stays
+    /// bounded (`evaluate_blocks`).
     pub fn curvature(self, s: f64) -> f64 {
-        let slope = self.slope(s);
-        let curvature = match self {
+        match self {
             Loss::None => 1.0,
             Loss::Huber(a) => {
                 if s <= a * a {
@@ -87,9 +89,8 @@ impl Loss {
                     0.0
                 }
             }
-            Loss::Cauchy(a) => slope * (a * a - s) / (a * a + s),
-        };
-        curvature.max(CURVATURE_FLOOR * slope)
+            Loss::Cauchy(a) => self.slope(s) * (a * a - s) / (a * a + s),
+        }
     }
 }
 
@@ -348,6 +349,267 @@ fn view_dual<const N: usize>(pb: &Problem, params: &Parameters, i: usize, x: [f6
     }
 }
 
+/// Rows in the quadratic regime of the loss that can hold a point: three, from at least two
+/// observations.
+const HELD_ROWS: usize = 3;
+
+/// The information of the quadratic rows of a point must be at least this share of the
+/// first-order information of its other rows, in every direction, for the point to be held: then
+/// the curvature weights give it a step at most about twice the first-order one.
+const HELD_SHARE: f64 = 1.0;
+
+/// How many times a point not held by its inliers is re-solved on its own per outer iteration.
+const INNER_ITERATIONS: usize = 20;
+
+/// Whether a tie row with the residual `r` is in the quadratic regime of `loss`: its curvature
+/// above the floor.
+fn quadratic(loss: Loss, r: f64) -> bool {
+    loss.curvature(r * r) > CURVATURE_FLOOR * loss.slope(r * r)
+}
+
+/// Whether the rows `(r, J_X)` of a point hold it: at least `HELD_ROWS` of them in the quadratic
+/// regime of `loss`, carrying at least `HELD_SHARE` of the first-order information of the other
+/// rows in every direction (their difference positive definite). Two rows of nadir photos are
+/// nearly parallel, so three quadratic rows alone may leave a direction to the floor, along which
+/// the Newton step would be `1 / CURVATURE_FLOOR` too long.
+fn held_by_inliers(loss: Loss, rows: impl Iterator<Item = (f64, [f64; 3])>) -> bool {
+    let (mut quadratic_info, mut linear_info, mut count) = ([0.0; 9], [0.0; 9], 0);
+    for (r, j) in rows {
+        let s = r * r;
+        let (weight, info) = if quadratic(loss, r) {
+            count += 1;
+            (loss.curvature(s), &mut quadratic_info)
+        } else {
+            (loss.slope(s), &mut linear_info)
+        };
+        for a in 0..3 {
+            for b in 0..3 {
+                info[3 * a + b] += weight * j[a] * j[b];
+            }
+        }
+    }
+    if count < HELD_ROWS {
+        return false;
+    }
+    let difference: [f64; 9] = std::array::from_fn(|k| quadratic_info[k] - HELD_SHARE * linear_info[k]);
+    sym3_inverse(&difference).is_some()
+}
+
+/// Above this share of the points with observations not held by their inliers, the block is far
+/// from converged: a point's optimum against wrong cameras means nothing, and jumping to it would
+/// scramble the block, so no point is refined on its own.
+const INNER_MAX_UNHELD: f64 = 0.25;
+
+/// A point's whole move in one refinement is capped at this fraction of its distance to the
+/// nearest of its cameras.
+const INNER_REACH: f64 = 0.25;
+
+/// Rows of the linearised model among which the vertex step chooses: the ones with the smallest
+/// residuals when a point has more (220 triples).
+const VERTEX_ROWS: usize = 12;
+
+/// A point on its own: its cost, whether its rows hold it, and its usable scalar rows with their
+/// derivatives with respect to the point.
+struct PointState {
+    cost: f64,
+    held: bool,
+    rows: Vec<(f64, [f64; 3])>,
+}
+
+/// The two residuals of the tie observation `j` for its point at `x`, the cameras as in `fixed`,
+/// and their derivatives with respect to the point; `None` behind the camera.
+fn point_rows(pb: &Problem, fixed: &Parameters, j: usize, x: [f64; 3]) -> Option<([f64; 2], [[f64; 3]; 2])> {
+    let o = &pb.obs[j];
+    let (i, c) = (o.image, pb.image_camera[o.image]);
+    let cam = &pb.cameras[c];
+    let constant = |v: [f64; 3]| [Dual::<3>::constant(v[0]), Dual::constant(v[1]), Dual::constant(v[2])];
+    let mut p = [Dual::<3>::constant(0.0); 12];
+    for (k, v) in fixed.camera_params[c].iter().take(12).enumerate() {
+        p[k] = Dual::constant(*v);
+    }
+    let velocity = pb.rolling_shutter.then(|| {
+        let rs = fixed.rolling_shutter[i];
+        (constant([rs[0], rs[1], rs[2]]), constant([rs[3], rs[4], rs[5]]))
+    });
+    let (delta, centre, point) = (constant([0.0; 3]), constant(fixed.centres[i]), variables(x, 0));
+    let view = View { delta, centre, point, params: p, velocity };
+    let tau = o.xy[1] / cam.height - 0.5;
+    let r = reprojection(cam.model, &fixed.rotations[i], &view, o.xy, tau, pb.pixel_sigma)?;
+    Some(([r[0].v, r[1].v], [r[0].d, r[1].d]))
+}
+
+fn point_state(pb: &Problem, st: &Structure, fixed: &Parameters, loss: Loss, p: usize, x: [f64; 3]) -> PointState {
+    let mut state = PointState { cost: 0.0, held: false, rows: Vec::new() };
+    for &j in st.point_obs.of(p) {
+        match point_rows(pb, fixed, j, x) {
+            Some((r, jac)) => {
+                for k in 0..2 {
+                    state.cost += loss.rho(r[k] * r[k]);
+                    state.rows.push((r[k], jac[k]));
+                }
+            }
+            None => state.cost += 2.0 * loss.rho(BEHIND_CAMERA_RESIDUAL * BEHIND_CAMERA_RESIDUAL),
+        }
+    }
+    state.cost *= 0.5;
+    state.held = held_by_inliers(loss, state.rows.iter().copied());
+    state
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn det3(m: &[[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// The step that zeroes three rows of the linearised model, `None` when they do not hold a point.
+fn zeroing_step(rows: [&(f64, [f64; 3]); 3]) -> Option<[f64; 3]> {
+    let j = [rows[0].1, rows[1].1, rows[2].1];
+    let scale: f64 = j.iter().map(|v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).product();
+    let det = det3(&j);
+    if !(det.abs() > 1e-9 * scale) {
+        return None;
+    }
+    let r = [-rows[0].0, -rows[1].0, -rows[2].0];
+    let mut delta = [0.0; 3];
+    for (k, d) in delta.iter_mut().enumerate() {
+        let mut m = j;
+        for (row, value) in m.iter_mut().zip(r) {
+            row[k] = value;
+        }
+        *d = det3(&m) / det;
+    }
+    Some(delta)
+}
+
+/// The vertex of the linearised robust cost of a point: among the triples of its rows (the
+/// `VERTEX_ROWS` nearest to zero), the step zeroing three of them that gives the lowest model
+/// cost. A piecewise-linear cost (the rows beyond the kink) has its minimum at such a vertex,
+/// which the first-order step only crawls towards along a flat face.
+fn vertex_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|a, b| rows[*a].0.abs().total_cmp(&rows[*b].0.abs()));
+    order.truncate(VERTEX_ROWS);
+    let model = |delta: [f64; 3]| {
+        rows.iter()
+            .map(|(r, j)| loss.rho((r + j[0] * delta[0] + j[1] * delta[1] + j[2] * delta[2]).powi(2)))
+            .sum::<f64>()
+    };
+    let mut best: Option<(f64, [f64; 3])> = None;
+    for a in 0..order.len() {
+        for b in a + 1..order.len() {
+            for c in b + 1..order.len() {
+                if let Some(delta) = zeroing_step([&rows[order[a]], &rows[order[b]], &rows[order[c]]]) {
+                    let cost = model(delta);
+                    if best.is_none_or(|(lowest, _)| cost < lowest) {
+                        best = Some((cost, delta));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, delta)| delta)
+}
+
+/// The first-order (Gauss-Newton with the slope weights) step of a point, `None` when its rows
+/// do not hold it.
+fn first_order_step(loss: Loss, rows: &[(f64, [f64; 3])]) -> Option<[f64; 3]> {
+    let (mut v, mut g) = ([0.0; 9], [0.0; 3]);
+    for (r, j) in rows {
+        let w = loss.slope(r * r);
+        for a in 0..3 {
+            g[a] += w * r * j[a];
+            for b in 0..3 {
+                v[3 * a + b] += w * j[a] * j[b];
+            }
+        }
+    }
+    let vinv = sym3_inverse(&v)?;
+    Some(std::array::from_fn(|a| -(vinv[3 * a] * g[0] + vinv[3 * a + 1] * g[1] + vinv[3 * a + 2] * g[2])))
+}
+
+/// The points their inliers do not hold (`held_by_inliers`) - typically the wrong tracks, whose
+/// cost is piecewise linear until three of their rows reach the kink - re-solved on their own
+/// with the cameras fixed (inner iterations, as Jeong et al. 2010 and
+/// Ceres's `inner_iterations`): the vertex of the linearised cost, or else the first-order step,
+/// each capped at `INNER_REACH` of the distance to the nearest camera and halved while the
+/// point's own cost does not fall, until the point is held or `INNER_ITERATIONS` are done. The
+/// cost of the problem never rises. Nothing is done while more than `INNER_MAX_UNHELD` of the
+/// points are unheld. The points are independent, so they are refined in parallel. Returns how
+/// many points moved.
+pub(crate) fn refine_unheld_points(pb: &Problem, st: &Structure, params: &mut Parameters, loss: Loss) -> usize {
+    if loss == Loss::None {
+        return 0;
+    }
+    let fixed = Parameters {
+        rotations: params.rotations.clone(),
+        centres: params.centres.clone(),
+        camera_params: params.camera_params.clone(),
+        points: Vec::new(),
+        markers: Vec::new(),
+        rolling_shutter: params.rolling_shutter.clone(),
+        bias: Vec::new(),
+    };
+    let states: Vec<Option<PointState>> = params
+        .points
+        .par_iter()
+        .enumerate()
+        .map(|(p, x)| {
+            let state = point_state(pb, st, &fixed, loss, p, *x);
+            (!state.rows.is_empty() && !state.held).then_some(state)
+        })
+        .collect();
+    let observed = (0..pb.points.len()).filter(|&p| !st.point_obs.of(p).is_empty()).count();
+    let unheld = states.iter().filter(|s| s.is_some()).count();
+    if unheld == 0 || unheld as f64 > INNER_MAX_UNHELD * observed as f64 {
+        return 0;
+    }
+    params
+        .points
+        .par_iter_mut()
+        .zip(states)
+        .enumerate()
+        .map(|(p, (x, state))| {
+            let Some(mut state) = state else { return 0 };
+            let start = *x;
+            let nearest = st.point_obs.of(p).iter().map(|&j| distance(start, fixed.centres[pb.obs[j].image]));
+            let reach = INNER_REACH * nearest.fold(f64::INFINITY, f64::min);
+            let mut moved = 0;
+            for _ in 0..INNER_ITERATIONS {
+                let candidates = [vertex_step(loss, &state.rows), first_order_step(loss, &state.rows)];
+                let mut accepted = None;
+                'candidates: for delta in candidates.into_iter().flatten() {
+                    // the whole move of this outer iteration stays within the reach
+                    let mut alpha: f64 = 1.0;
+                    let length = distance([x[0] + delta[0], x[1] + delta[1], x[2] + delta[2]], start);
+                    if length > reach {
+                        alpha = (reach / length).min(1.0);
+                    }
+                    for _ in 0..4 {
+                        let trial = [x[0] + alpha * delta[0], x[1] + alpha * delta[1], x[2] + alpha * delta[2]];
+                        let next = point_state(pb, st, &fixed, loss, p, trial);
+                        if next.cost < state.cost && distance(trial, start) <= reach * 1.001 {
+                            accepted = Some((trial, next));
+                            break 'candidates;
+                        }
+                        alpha *= 0.5;
+                    }
+                }
+                let Some((trial, next)) = accepted else { break };
+                let decrease = state.cost - next.cost;
+                (*x, state, moved) = (trial, next, 1);
+                if state.held || decrease <= 1e-6 * state.cost {
+                    break;
+                }
+            }
+            moved
+        })
+        .sum()
+}
+
 /// Residuals and Jacobian rows of one observation through `Dual<N>`, `N` at least the number of
 /// its unknowns; `true` when the point is behind the camera.
 fn observation_rows<const N: usize>(
@@ -525,8 +787,35 @@ pub(crate) fn evaluate_blocks(
         let s = r * r;
         cost += if k < st.mobs_row { loss.rho(s) } else { s };
     }
-    let weights = residuals[..st.mobs_row].iter().map(|r| loss.curvature(r * r)).collect();
-    let slopes = residuals[..st.mobs_row].iter().map(|r| loss.slope(r * r)).collect();
+    // the weight of a tie row in the normal matrix: the curvature of its loss floored at
+    // CURVATURE_FLOOR of its slope; but a point its inliers do not hold would take a Newton step
+    // up to 1 / CURVATURE_FLOOR too long: it takes the slope (the first-order weight) on all its rows
+    let (mut weights, mut slopes) = (Vec::new(), Vec::new());
+    if with_jacobian {
+        slopes = residuals[..st.mobs_row].iter().map(|r| loss.slope(r * r)).collect();
+        let floored = |(r, s): (&f64, &f64)| loss.curvature(r * r).max(CURVATURE_FLOOR * s);
+        weights = residuals[..st.mobs_row].iter().zip(&slopes).map(floored).collect();
+        if loss != Loss::None {
+            let point_row = |row: usize| {
+                let jr = &obs_jac[row * st.row_len..(row + 1) * st.row_len];
+                (residuals[row], [jr[OFF_POINT], jr[OFF_POINT + 1], jr[OFF_POINT + 2]])
+            };
+            let held: Vec<bool> = (0..pb.points.len())
+                .into_par_iter()
+                .map(|p| {
+                    let rows = st.point_obs.of(p).iter().flat_map(|&j| 2 * j..2 * j + 2).map(point_row);
+                    held_by_inliers(loss, rows)
+                })
+                .collect();
+            for (p, held) in held.iter().enumerate() {
+                if !held {
+                    for row in st.point_obs.of(p).iter().flat_map(|&j| 2 * j..2 * j + 2) {
+                        weights[row] = slopes[row];
+                    }
+                }
+            }
+        }
+    }
     let behind = BEHIND_CAMERA_RESIDUAL * BEHIND_CAMERA_RESIDUAL;
     let behind_cost = behind_obs.iter().filter(|b| **b).count() as f64 * loss.rho(behind)
         + behind_mobs.iter().filter(|b| **b).count() as f64 * behind;
@@ -809,14 +1098,14 @@ mod tests {
                 let h = 1e-5;
                 let (plus, minus) = (loss.rho((r + h) * (r + h)), loss.rho((r - h) * (r - h)));
                 let second = (plus - 2.0 * loss.rho(s) + minus) / (2.0 * h * h);
-                let want = second.max(CURVATURE_FLOOR * loss.slope(s));
-                assert!((loss.curvature(s) - want).abs() < 1e-4, "{loss:?} at {s}: {} vs {want}", loss.curvature(s));
+                let got = loss.curvature(s);
+                assert!((got - second).abs() < 1e-4, "{loss:?} at {s}: {got} vs {second}");
             }
         }
         assert_eq!((Loss::None.slope(40.0), Loss::None.curvature(40.0)), (1.0, 1.0));
-        // Huber outliers have no curvature, Cauchy's is negative beyond the scale: the floor
-        assert_eq!(Loss::Huber(1.0).curvature(16.0), CURVATURE_FLOOR * 0.25);
-        assert_eq!(Loss::Cauchy(1.0).curvature(9.0), CURVATURE_FLOOR * 0.1);
+        // Huber outliers have no curvature, Cauchy's is negative beyond the scale
+        assert_eq!(Loss::Huber(1.0).curvature(16.0), 0.0);
+        assert!((Loss::Cauchy(1.0).curvature(9.0) + 0.08).abs() < 1e-15);
         assert!((Loss::Cauchy(1.0).curvature(0.25) - 0.8 * 0.6).abs() < 1e-15);
     }
 
@@ -853,5 +1142,62 @@ mod tests {
         // two markers at the same place: a bar without a direction, not NaN
         let same = bar(variables::<6>([1.0, 2.0, 3.0], 0), variables::<6>([1.0, 2.0, 3.0], 3), 2.0, 0.5);
         assert_eq!((same.v, same.d), (-4.0, [0.0; 6]));
+    }
+
+    /// Four photos looking down from 10 m at six points, the first with its four observations
+    /// moved 40 px: the inner iterations move it, within its reach, to a lower cost of its own;
+    /// the points whose observations are right are held already and do not move.
+    #[test]
+    fn a_point_held_by_no_inlier_is_refined_on_its_own() {
+        use crate::bundle::problem::CameraBlock;
+
+        let r = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+        let centres = vec![[-1.0, -1.0, 10.0], [1.0, -1.0, 10.0], [1.0, 1.0, 10.0], [-1.0, 1.0, 10.0]];
+        let params = vec![1000.0, 1000.0, 600.0, 450.0, -0.02, 0.01, 0.0, 0.0];
+        let camera = CameraBlock { model: Model::OpenCv, params, width: 1200.0, height: 900.0, free: vec![] };
+        let points = vec![
+            [0.2, -0.3, 0.5],
+            [-0.4, 0.1, 0.2],
+            [0.7, 0.4, -0.1],
+            [-0.6, -0.5, 0.3],
+            [0.1, 0.8, 0.0],
+            [-0.2, -0.9, 0.4],
+        ];
+        let mut pb = Problem {
+            rotations: vec![r; 4],
+            centres,
+            image_camera: vec![0; 4],
+            cameras: vec![camera],
+            points: points.clone(),
+            fixed_images: vec![true; 4],
+            ..Problem::default()
+        };
+        let start = Parameters::initial(&pb);
+        for (p, point) in points.iter().enumerate() {
+            for i in 0..4 {
+                let view = view_f64(&pb, &start, i, *point);
+                let pixel = reprojection(Model::OpenCv, &r, &view, [0.0, 0.0], 0.0, 1.0).unwrap();
+                let shift = if p == 0 { 40.0 } else { 0.0 };
+                let (s, c) = (i as f64 * 1.9).sin_cos();
+                pb.obs.push(Obs { image: i, point: p, xy: [pixel[0] + shift * c, pixel[1] + shift * s] });
+            }
+        }
+        pb.check().unwrap();
+        let lay = Layout::new(&pb);
+        let st = Structure::new(&pb);
+        let loss = Loss::Huber(1.0);
+        let before = evaluate_blocks(&pb, &lay, &st, &start, loss, false).cost;
+        let mut moved = start.clone();
+        assert_eq!(refine_unheld_points(&pb, &st, &mut moved, loss), 1);
+        assert_eq!(&moved.points[1..], &points[1..]);
+        assert_ne!(moved.points[0], points[0]);
+        let after = evaluate_blocks(&pb, &lay, &st, &moved, loss, false);
+        assert!(after.cost < before, "cost {before} -> {}", after.cost);
+        let travelled = (0..3).map(|k| (moved.points[0][k] - points[0][k]).powi(2)).sum::<f64>().sqrt();
+        assert!(travelled > 0.01 && travelled <= INNER_REACH * 10.1, "the point travelled {travelled} m");
+        // the squared loss holds every point: nothing to refine
+        let mut plain = start.clone();
+        assert_eq!(refine_unheld_points(&pb, &st, &mut plain, Loss::None), 0);
+        assert_eq!(plain, start);
     }
 }

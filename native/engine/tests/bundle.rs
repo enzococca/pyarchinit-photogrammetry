@@ -631,3 +631,57 @@ fn observe_false_cancels() {
     assert_eq!((seen[0].0, seen[1].0), (1, 2));
     assert!(seen.iter().all(|(_, cost)| cost.is_finite()));
 }
+
+/// The control-point block with 0.3 px of noise on every tie observation and `wrong` wrong tracks:
+/// points whose every observation is moved 40 px in a random direction.
+fn wrong_track_block(seed: u64, wrong: usize) -> (Problem, Truth, Vec<usize>) {
+    let mut rng = Rng(seed);
+    let (mut pb, truth) = block(&mut rng, 600, None);
+    pb.gcps = gcps(&truth, 0.002, &[0, 1, 2, 3]);
+    for o in pb.obs.iter_mut() {
+        o.xy = [o.xy[0] + 0.3 * rng.normal(), o.xy[1] + 0.3 * rng.normal()];
+    }
+    let mut seen = vec![0usize; pb.points.len()];
+    for o in &pb.obs {
+        seen[o.point] += 1;
+    }
+    let wrong: Vec<usize> = (0..pb.points.len()).filter(|&p| seen[p] >= 4).step_by(23).take(wrong).collect();
+    for o in pb.obs.iter_mut().filter(|o| wrong.contains(&o.point)) {
+        let angle = rng.uniform_in(0.0, std::f64::consts::TAU);
+        o.xy = [o.xy[0] + 40.0 * angle.cos(), o.xy[1] + 40.0 * angle.sin()];
+    }
+    (pb, truth, wrong)
+}
+
+#[test]
+fn wrong_tracks_do_not_stall_the_robust_losses() {
+    // twelve points whose observations are all wrong: the robust losses must still converge in a
+    // bounded number of iterations and rejected steps, and leave the other points where they belong
+    let (pb, truth, wrong) = wrong_track_block(7, 12);
+    assert_eq!(wrong.len(), 12);
+    for loss in [Loss::Huber(1.0), Loss::Cauchy(1.0)] {
+        let mut costs = Vec::new();
+        let sol = solve(&pb, &Options { loss, ..Options::default() }, &mut |_, cost| {
+            costs.push(cost);
+            true
+        })
+        .unwrap();
+        // with the first-order weights and without the inner iterations, Huber ran to the limit
+        // (100 iterations, 29 rejected) and Cauchy took 73 (20 rejected); now 3 / 0 and 25 / 5
+        let rejected = costs.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(
+            sol.iterations <= 40 && rejected <= 8,
+            "{loss:?}: {} iterations, {rejected} rejected steps, {:?}",
+            sol.iterations,
+            sol.termination
+        );
+        assert_ne!(sol.termination, Termination::MaxIterations);
+        let rest = (0..pb.points.len())
+            .filter(|p| !wrong.contains(p))
+            .map(|p| distance(sol.points[p], truth.points[p]))
+            .fold(0.0, f64::max);
+        assert!(rest < 0.3, "{loss:?}: the right points are {rest} m from the truth");
+        assert!(max_distance(&sol.centres, &truth.centres) < 0.3);
+        assert!((sol.camera_params[0][0] - F).abs() < 5.0, "{loss:?}: f {}", sol.camera_params[0][0]);
+    }
+}

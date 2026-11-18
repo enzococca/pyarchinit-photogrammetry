@@ -114,7 +114,7 @@ impl Context<'_> {
 
 /// Inverse of a symmetric positive-definite 3 x 3 matrix (row-major) through its Cholesky
 /// factor; `None` when a pivot is not positive (or not a number).
-fn sym3_inverse(v: &[f64; 9]) -> Option<[f64; 9]> {
+pub(crate) fn sym3_inverse(v: &[f64; 9]) -> Option<[f64; 9]> {
     if !(v[0] > 0.0) {
         return None;
     }

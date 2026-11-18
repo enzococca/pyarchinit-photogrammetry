@@ -6,7 +6,7 @@
 //! gives a step that lowers the cost.
 
 use super::problem::{Layout, Parameters, Problem};
-use super::residuals::{evaluate_blocks, gradient_and_diagonal, Loss, Structure};
+use super::residuals::{evaluate_blocks, gradient_and_diagonal, refine_unheld_points, Loss, Structure};
 use super::schur::{dense_step, Reduced};
 
 /// Up to this many free photos the reduced system is factorised dense (spec 8.1).
@@ -59,13 +59,15 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// The tolerances of the Python adjustment (`ftol`, `xtol` 1e-9), the gradient at 1e-10.
+    /// Ceres's function tolerance (1e-6: a plateau of a robust loss, where wrong tracks crawl by
+    /// 1e-7 of the cost per iteration, would otherwise run to the limit), the parameter tolerance of
+    /// the Python adjustment (`xtol` 1e-9), the gradient at 1e-10.
     fn default() -> Self {
         Options {
             max_iterations: 100,
             loss: Loss::None,
             linear_solver: LinearSolver::Auto,
-            function_tolerance: 1e-9,
+            function_tolerance: 1e-6,
             gradient_tolerance: 1e-10,
             parameter_tolerance: 1e-9,
         }
@@ -152,6 +154,10 @@ pub fn solve(pb: &Problem, opts: &Options, observe: &mut dyn FnMut(usize, f64) -
         return Err(format!("the cost of the problem as given is {}", ev.cost));
     }
     let cost_initial = ev.cost;
+    // the points that their inliers do not hold (wrong tracks) are settled on their own first
+    if refine_unheld_points(pb, &st, &mut params, opts.loss) > 0 {
+        ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
+    }
     let (mut g, mut diag) = gradient_and_diagonal(pb, &lay, &st, &ev);
     let mut gradient_max = max_abs(&g);
     let mut lambda = INITIAL_DAMPING;
@@ -178,13 +184,18 @@ pub fn solve(pb: &Problem, opts: &Options, observe: &mut dyn FnMut(usize, f64) -
                 let ptol = opts.parameter_tolerance;
                 let tiny_step = step_norm <= ptol * (params.norm(pb, &lay) + ptol);
                 // measured against the cost a step can change: not the constant of the observations
-                // behind their camera, which would loosen the tolerance by orders of magnitude
+                // behind their camera, which would loosen the tolerance by orders of magnitude; and
+                // only on a step that is not damped (after rejections, a damped step is small by
+                // construction, not because the cost has converged)
                 let live_cost = ev.cost - ev.behind_cost;
-                let tiny_change = trial.cost.is_finite() && decrease.abs() <= opts.function_tolerance * live_cost;
+                let undamped = lambda <= INITIAL_DAMPING;
+                let tiny_change =
+                    undamped && trial.cost.is_finite() && decrease.abs() <= opts.function_tolerance * live_cost;
                 if trial.cost.is_finite() && decrease > 0.0 {
                     accepted = true;
                     let rho = if model_decrease > 0.0 { decrease / model_decrease } else { 1.0 };
                     params = candidate;
+                    refine_unheld_points(pb, &st, &mut params, opts.loss);
                     ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
                     (g, diag) = gradient_and_diagonal(pb, &lay, &st, &ev);
                     gradient_max = max_abs(&g);
@@ -253,7 +264,7 @@ mod tests {
         let opts = Options::default();
         assert_eq!(opts.max_iterations, 100);
         assert_eq!((opts.loss, opts.linear_solver), (Loss::None, LinearSolver::Auto));
-        assert_eq!((opts.function_tolerance, opts.gradient_tolerance, opts.parameter_tolerance), (1e-9, 1e-10, 1e-9));
+        assert_eq!((opts.function_tolerance, opts.gradient_tolerance, opts.parameter_tolerance), (1e-6, 1e-10, 1e-9));
         // one fixed photo and a point on its axis: a problem that is solved before it starts
         let pb = Problem {
             rotations: vec![[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]],
