@@ -378,6 +378,46 @@ def test_synthetic_writes_each_set_in_a_folder_of_its_own_and_runs_its_own_photo
     assert kwargs["targets"] == child.DEFAULT_TARGETS and "reference" not in kwargs and "crs" not in kwargs
     assert "mapper" not in kwargs and callable(kwargs["extra_results"]) and len(stand_ins) == 2
     assert (out / "synthetic-trench-set" / "photos" / "IMG_0000.jpg").exists()  # the set stays after the runs
+    # the work folders (the projects) go unless --keep asks for them: the project of a kept run is what
+    # ppg bench adjust takes
+    assert all(call[3]["keep"] is False for call in stand_ins)
+    result = invoke(["synthetic", "trench", str(tmp_path / "kept"), "--keep"])
+    assert result.exit_code == 0, result.output
+    assert stand_ins[-1][3]["keep"] is True and stand_ins[-1][2] == "synthetic-trench"
+
+
+def test_adjust_takes_a_project_its_solvers_and_the_repeats(tmp_path, monkeypatch):
+    """``ppg bench adjust PROJECT --name NAME``: the project, the name, the solvers (all three unless ``--solvers``
+    names some), the repeats (three unless ``--repeat``) and the records folder go to ``adjust.run``; a solver it
+    does not know or named twice, a repeat below 1, a bad name or a project that is not there are usage errors
+    before any run."""
+    pytest.importorskip("psutil")
+    from pyarchinit_photogrammetry.bench import adjust
+
+    calls = []
+
+    def fake_run(project, name, **kwargs):
+        calls.append((project, name, kwargs))
+        return []
+
+    monkeypatch.setattr(adjust, "run", fake_run)
+    project = tmp_path / "kept" / "project.ppg"
+    project.parent.mkdir()
+    project.write_text("{}", encoding="utf-8")
+    result = invoke(["adjust", str(project), "--name", "t"])
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == (project, "t", {"solvers": adjust.SOLVERS, "repeat": 3, "records": None})
+    result = invoke(["adjust", str(project), "--name", "t", "--solvers", "native,scipy", "--repeat", "1",
+                     "--records", str(tmp_path / "rec")])
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == (project, "t", {"solvers": ("native", "scipy"), "repeat": 1, "records": tmp_path / "rec"})
+    result = invoke(["adjust", str(project), "--name", "t", "--solvers", "native,ceres"])
+    assert result.exit_code == 2 and "native, colmap or scipy" in plain(result)
+    for args in (["--solvers", "native,native"], ["--repeat", "0"]):
+        assert invoke(["adjust", str(project), "--name", "t", *args]).exit_code == 2
+    assert invoke(["adjust", str(project), "--name", "../t"]).exit_code == 2
+    assert invoke(["adjust", str(tmp_path / "none.ppg"), "--name", "t"]).exit_code == 2
+    assert len(calls) == 2
 
 
 def test_a_second_synthetic_set_into_the_same_out_is_refused_before_anything_is_written(tmp_path, stand_ins):

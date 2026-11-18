@@ -400,6 +400,36 @@ def test_cancelling_the_native_optimisation_leaves_the_model_as_it_was(processed
     assert not model.with_name(model.name + ".before_optimize").exists()
 
 
+def test_the_plain_problem_of_a_reconstruction_is_the_tie_part_of_the_chunks(processed):
+    """``problem_from_reconstruction`` is what ``problem_from_chunk`` starts from: on the trench without its markers
+    the two give the same tie points, poses, calibrations and ids; the plain problem holds the first photo and the
+    farthest from it, frees every calibration but the principal point, has no reference of any kind, and one
+    observation per element of the tracks of the posed images."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine.sfm import load_reconstruction
+
+    doc, _, _ = processed
+    ch = ppg.Document.open(doc.path).chunk  # a copy in memory: nothing is written
+    rec = load_reconstruction(ch)
+    plain, ids = bundle.problem_from_reconstruction(rec)
+    pb, ids_chunk = bundle.problem_from_chunk(ch, rec, use_markers=False)
+    for name in ("rotations", "centres", "image_camera", "points", "obs_image", "obs_point", "obs_xy"):
+        assert np.array_equal(getattr(plain, name), getattr(pb, name)), name
+    assert plain.cameras == pb.cameras and plain.fixed_images == pb.fixed_images
+    assert plain.free_intrinsics == pb.free_intrinsics
+    assert ids == {**ids_chunk, "markers": []} and ids_chunk["markers"] == []
+    far = int(np.argmax(np.linalg.norm(plain.centres - plain.centres[0], axis=1)))
+    assert far != 0 and plain.fixed_images == {0, far}
+    assert [c[0] for c in plain.cameras] == ["OPENCV"] and plain.free_intrinsics == [[0, 1, 4, 5, 6, 7]]
+    assert len(plain.markers) == 0 and len(plain.mobs_image) == 0 and plain.gcps == plain.bars == plain.gnss == []
+    assert not plain.rolling_shutter and not plain.gnss_bias and plain.pixel_sigma == 1.0
+    posed = {iid for iid, im in rec.images.items() if im.has_pose}
+    assert len(plain.obs_image) == sum(sum(1 for el in p.track.elements if el.image_id in posed)
+                                       for p in rec.points3D.values())
+    assert len(plain.obs_image) == sum(rec.images[iid].num_points3D for iid in posed)
+    assert len(plain.points) == rec.num_points3D() and len(plain.centres) == len(posed) == len(ch.aligned_cameras)
+
+
 def test_gnss_positions_in_the_coordinate_system_of_the_chunk(processed):
     """The GNSS term pulls each camera towards its position in the coordinate system of the chunk: a position read in
     longitude and latitude (EXIF, XMP, MRK) is converted first, never taken as metres; on a chunk still in local

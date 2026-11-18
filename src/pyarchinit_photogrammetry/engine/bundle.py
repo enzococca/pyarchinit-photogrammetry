@@ -645,23 +645,25 @@ def flights(cameras) -> dict:
     return out
 
 
-def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", rolling_shutter: bool = False,
-                       fit_principal_point: bool = False, hold_focal: bool = False) -> tuple[Problem, dict]:
-    """The adjustment of ``chunk`` (its reconstruction ``rec``, internal frame): tie points; with
-    ``use_markers`` the measured projections of the markers, the control points (enabled
-    reference, not check points) with their accuracy and the enabled control scale bars; with
-    ``gnss`` "plain" or "bias" the camera references (with a bias per flight); rolling shutter.
-    ``hold_focal``: the focal lengths are not refined (photos looking down from one height cannot
-    tell them from the distance to the ground). Returns the problem and the ids that
-    :func:`write_back` needs."""
-    from ..markers import gcp
-    from .sfm import _rec_fixed_cameras
+# the COLMAP camera models with one focal length (f, cx, cy, ...): the others have two (fx, fy, cx, cy, ...)
+_SINGLE_FOCAL = ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
 
+
+def _principal_point(model_name: str) -> tuple[int, int]:
+    """The indices of the principal point among the parameters of a COLMAP camera model."""
+    return (1, 2) if model_name in _SINGLE_FOCAL else (2, 3)
+
+
+def problem_from_reconstruction(rec) -> tuple[Problem, dict]:
+    """The plain adjustment of a reconstruction (its internal frame): the tie points of its posed images and
+    nothing else - no markers, no references -, every camera with its focal length and distortion free and
+    its principal point held, the first posed image and the one farthest from it held as the place and the
+    size of the block. It is the tie part of :func:`problem_from_chunk`, which starts from it, and the
+    problem ``ppg bench adjust`` gives COLMAP, the native solver and scipy alike. Returns the problem and
+    the ids :func:`write_back` needs (``markers`` empty). A reconstruction with rigs (faces of 360-degree
+    photos) is refused (ValueError)."""
     if any(len(list(f.image_ids)) > 1 for f in rec.frames.values()):
         raise ValueError("the reconstruction has rigs (faces of 360-degree photos): use COLMAP's adjustment")
-    s = float(chunk.scale) if chunk.transform is not None else 1.0
-    names = chunk.meta["sfm"]["names"]
-    key_of = {v: int(k) for k, v in names.items()}
     image_ids = [iid for iid, img in rec.images.items() if img.has_pose]
     index = {iid: n for n, iid in enumerate(image_ids)}
     cam_ids = sorted({rec.images[iid].camera_id for iid in image_ids})
@@ -685,9 +687,38 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 op.append(pindex[pid])
                 oxy.append(rec.images[el.image_id].points2D[el.point2D_idx].xy)
     points = np.array([rec.points3D[pid].xyz for pid in point_ids], float).reshape(-1, 3)
-    pb = Problem(np.array(rotations), np.array(centres), np.array([cam_index[rec.images[i].camera_id] for i in image_ids]),
-                 cameras, points, np.array(oi, int), np.array(op, int), np.array(oxy, float).reshape(-1, 2),
-                 rolling_shutter=rolling_shutter, gnss_bias=gnss == "bias")
+    image_camera = np.array([cam_index[rec.images[i].camera_id] for i in image_ids])
+    pb = Problem(np.array(rotations), np.array(centres), image_camera, cameras, points, np.array(oi, int),
+                 np.array(op, int), np.array(oxy, float).reshape(-1, 2))
+    pb.free_intrinsics = [[k for k in range(len(params)) if k not in _principal_point(model)]
+                          for model, params, _width, _height in cameras]
+    if len(image_ids) >= 2:  # the block needs a place and a size: the first photo and the farthest hold them
+        far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
+        pb.fixed_images = {0, far}
+    return pb, {"images": image_ids, "cameras": cam_ids, "points": point_ids, "markers": []}
+
+
+def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", rolling_shutter: bool = False,
+                       fit_principal_point: bool = False, hold_focal: bool = False) -> tuple[Problem, dict]:
+    """The adjustment of ``chunk`` (its reconstruction ``rec``, internal frame): tie points
+    (:func:`problem_from_reconstruction`, whose gauge and free calibration give way to the chunk's own: the
+    photos and sensors held, the focal length and the principal point as asked, a photo held only when the
+    block has no references to place it); with ``use_markers`` the measured projections of the markers, the
+    control points (enabled reference, not check points) with their accuracy and the enabled control scale
+    bars; with ``gnss`` "plain" or "bias" the camera references (with a bias per flight); rolling shutter.
+    ``hold_focal``: the focal lengths are not refined (photos looking down from one height cannot
+    tell them from the distance to the ground). Returns the problem and the ids that
+    :func:`write_back` needs."""
+    from ..markers import gcp
+    from .sfm import _rec_fixed_cameras
+
+    pb, ids = problem_from_reconstruction(rec)
+    s = float(chunk.scale) if chunk.transform is not None else 1.0
+    names = chunk.meta["sfm"]["names"]
+    key_of = {v: int(k) for k, v in names.items()}
+    image_ids, cam_ids, cameras = ids["images"], ids["cameras"], pb.cameras
+    index = {iid: n for n, iid in enumerate(image_ids)}
+    pb.rolling_shutter, pb.gnss_bias = rolling_shutter, gnss == "bias"
     if rolling_shutter:  # the prior as pixels of shift: the depth of the scene and the focal length of each photo
         focal = np.array([float(cameras[c][1][0]) for c in pb.image_camera])
         depth = np.ones(len(image_ids))
@@ -698,7 +729,7 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 depth[n] = float(np.median(z[z > 0])) if (z > 0).any() else 1.0
         pb.rs_sigma = ROLLING_SHUTTER_SIGMA_PX * depth / focal
         pb.rs_sigma_angular = ROLLING_SHUTTER_SIGMA_PX / focal
-    # what stays as it is
+    # what stays as it is (in place of the gauge and the free calibration of the plain problem)
     fixed = _rec_fixed_cameras(chunk, rec)
     pb.fixed_images = {index[i] for i in image_ids if i in fixed}
     pb.free_intrinsics = []
@@ -710,9 +741,8 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
         if True in held:
             pb.free_intrinsics.append([])
             continue
-        single = model_name in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
-        principal = (1, 2) if single else (2, 3)
-        focal = ((0,) if single else (0, 1)) if hold_focal else ()
+        principal = _principal_point(model_name)
+        focal = ((0,) if model_name in _SINGLE_FOCAL else (0, 1)) if hold_focal else ()
         pb.free_intrinsics.append([k for k in range(n) if (fit_principal_point or k not in principal) and k not in focal])
     marker_keys = []
     if use_markers:
@@ -768,7 +798,7 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
         if not pb.bars:  # and a size: the second one too
             far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
             pb.fixed_images.add(far)
-    ids = {"images": image_ids, "cameras": cam_ids, "points": point_ids, "markers": marker_keys}
+    ids["markers"] = marker_keys
     return pb, ids
 
 
