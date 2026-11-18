@@ -1296,18 +1296,79 @@ def limit_tie_points(db_path: Path, out_path: Path, per_image: int, progress: Pr
             "photos_pruned": pruned_images}
 
 
+class GlobalBlockRejected(RuntimeError):
+    """The block of the global mapper refused by :func:`_global_check` right after global positioning,
+    before any adjustment of it; ``why`` says why, in the words of ``global_fallback``."""
+
+    def __init__(self, why: str) -> None:
+        super().__init__(why)
+        self.why = why
+
+
 def _global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int):
     """All the cameras at once (COLMAP's global SfM, GLOMAP): rotations averaged over every pair,
     then positions, then the bundle adjustment on a selection of the tracks - ``tiepoint_limit / 4``
     per photo, as the tie point limit of Metashape, retriangulated afterwards. Tell Sultan sample
-    (57 photos): 58 s against 293 s one photo at a time, the same cameras within 2 cm."""
+    (57 photos): 58 s against 293 s one photo at a time, the same cameras within 2 cm.
+
+    The block is judged right after global positioning, before its adjustment (:func:`_global_check`),
+    in the model-update callback of the pipeline: COLMAP calls it with the positioned block first, then
+    after each round of the adjustment and after the retriangulation - for each component of the
+    matches, the largest first. A block that placed too few photos or cannot fit their GPS raises
+    :class:`GlobalBlockRejected` there, and the adjustment it would have gone through (an hour on a
+    thousand photos) is not paid. Returns the reconstructions by index, as ``pycolmap.global_mapping``
+    does, written in ``out``."""
     import pycolmap
 
     per_view = max(500, int((chunk.meta.get("sfm") or {}).get("tiepoint_limit", 8000)) // 4)
     opts = pycolmap.GlobalPipelineOptions()
+    opts.image_path = opts.mapper.image_path = root  # as pycolmap.global_mapping sets them: the colours of the points
     opts.mapper.track_required_tracks_per_view = per_view
     opts.mapper.keep_max_num_tracks = per_view * max(n, 1)
-    return pycolmap.global_mapping(str(db_path), root, str(out), opts)
+    manager = pycolmap.ReconstructionManager()
+    judged = False
+
+    def on_model_update() -> None:
+        nonlocal judged
+        if judged:
+            return
+        judged = True
+        why = _global_check(chunk, {i: manager.get(i) for i in range(manager.size())}, n)
+        if why:
+            raise GlobalBlockRejected(why)
+
+    database = pycolmap.Database.open(str(db_path))
+    try:
+        pipeline = pycolmap.GlobalPipeline(opts, database, manager)
+        pipeline.add_callback(pycolmap.GlobalPipelineCallback.MODEL_UPDATE_CALLBACK, on_model_update)
+        pipeline.run()
+    finally:
+        database.close()
+    manager.write(str(out))
+    return {i: manager.get(i) for i in range(manager.size())}
+
+
+def _global_check(chunk: Chunk, recs: dict, n: int, *, record: bool = True) -> str | None:
+    """Why the block of a global attempt - ``recs``, its reconstructions of ``n`` photos; the largest is
+    judged - is refused, in the words of ``global_fallback``: it placed fewer than 90 % of the photos, or
+    its cameras do not sit on the GPS of the photos (:func:`_block_fits_references`: parts at different
+    scales, with the matches sound). None when the block passes or cannot be judged (no GPS, few photos,
+    a trench: :func:`fits_references`). ``record`` keeps the verdict in ``chunk.meta["sfm"]["global_check"]``
+    as the check made right after global positioning: ``after``, ``fits`` (whether the block went on),
+    ``residual_m`` (the 90th percentile of the horizontal residuals of the cameras on their GPS, metres;
+    None when the block cannot be judged or placed too few photos to be measured)."""
+    best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
+    placed = best.num_reg_images() if best is not None else 0
+    residual = float("nan")
+    if placed < 0.9 * n:
+        why = f"placed {placed} of {n} photos"
+    else:
+        fits, residual = _block_fits_references(chunk, best)
+        why = None if fits else f"built a block whose cameras miss the GPS of the photos by {residual:.0f} m"
+    if record:
+        chunk.meta["sfm"]["global_check"] = {"after": "global_positioning", "fits": why is None,
+                                            "residual_m": None if np.isnan(residual) else float(residual)}
+    return why
 
 
 GLOBAL_FIT_FACTOR = 3.0  # cameras of a global block may miss their GPS by this times its accuracy (median, horizontal)
@@ -1637,7 +1698,9 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     global one failed now and then without noticing on a room photographed from a few stations,
     the incremental one never), for 360-degree rigs and calibrations held fixed, and whenever the
     global one leaves photos out or builds a block whose cameras do not sit on the GPS of the photos
-    (:func:`fits_references`).
+    (:func:`fits_references`) - judged right after global positioning, before the adjustment of the
+    block, and again on the adjusted block (:func:`_global_check`; the first verdict is kept in
+    ``chunk.meta["sfm"]["global_check"]``).
 
     ``use_gps`` (None: when the photos have them): the reference positions of the photos, with
     their accuracy, hold the block during the incremental alignment - COLMAP's pose priors,
@@ -1696,19 +1759,17 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     recs = {}
     if mapper == "global":
         progress(0.0, f"Aligning {n} cameras at once (global)")
+        info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
+        why = None
         try:
             with colmap_log.relay(progress.sub(0.0, 0.8), work, total=n, phases={"stage": (0.0, 1.0)}, stages=stages):
                 recs = _global_mapping(chunk, db_path, root, out, n)
+        except GlobalBlockRejected as exc:  # judged right after global positioning: no adjustment paid
+            why = exc.why
         except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
             progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
-        best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
-        why = None
-        if best is None or best.num_reg_images() < 0.9 * n:
-            why = f"placed {best.num_reg_images() if best else 0} of {n} photos"
-        else:
-            fits, residual = _block_fits_references(chunk, best)
-            if not fits:  # parts at different scales (Tell Tuqan): the matches are sound, the block is not
-                why = f"built a block whose cameras miss the GPS of the photos by {residual:.0f} m"
+        if why is None:  # the final check, on the block the adjustment and the retriangulation left
+            why = _global_check(chunk, recs, n, record=False)
         if why:
             log.warning("global alignment %s: aligning one photo at a time", why)
             progress(0.1, f"Global alignment {why}: one photo at a time")
