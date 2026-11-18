@@ -44,16 +44,19 @@ FEATURES = {
     "crinex": "crx2rnx",  # Hatanaka-compressed RINEX decoded (API 9)
     "tin": "tin_triangulate",  # constrained Delaunay triangulation and the TIN kernels (API 10)
     "convbin": "raw_to_rinex",  # raw receiver logs converted to RINEX by RTKLIB's convbin (API 11)
+    "bundle": "bundle_adjust",  # the bundle adjustment of the native engine (API 12)
 }
 TIN_API = 10  # tin_triangulate, tin_rasterize, tin_contours, tin_volume
 CONVBIN_API = 11  # raw_to_rinex, convert_cancel
+BUNDLE_API = 12  # bundle_adjust, bundle_evaluate
 
 
 def supports(model: str) -> bool:
     """The projection kernels know the camera model ``model`` (a COLMAP model name), or the
     extension has the feature ``model`` of :data:`FEATURES` (``"ppk"``: RTKLIB's post-processing,
     API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10;
-    ``"convbin"``: raw receiver logs converted to RINEX, API 11)."""
+    ``"convbin"``: raw receiver logs converted to RINEX, API 11; ``"bundle"``: the bundle adjustment
+    of the native engine, API 12)."""
     core = _core() if enabled() else None
     if core is None:
         return False

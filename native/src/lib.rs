@@ -9,6 +9,7 @@ mod ppk;
 mod rtklib;
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use numpy::ndarray::{Array1, Array2, Array3};
@@ -21,11 +22,11 @@ use rayon::prelude::*;
 
 // the kernels are in the crate ppg_engine (folder engine), which knows nothing of Python
 use ppg_engine::camera::{Camera, Pose};
-use ppg_engine::{camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, tin};
+use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, tin};
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
-/// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel).
-const API: u32 = 11;
+/// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate).
+const API: u32 = 12;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -531,7 +532,7 @@ fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>,
     let params = patchmatch::Params { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
                                       step, top_k, min_views, max_cost, seed };
     let out = py.detach(|| patchmatch::patchmatch(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, params, init,
-                                                         init_n));
+                                                  init_n));
     Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray(py),
         Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray(py),
         Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray(py)))
@@ -811,6 +812,296 @@ fn tin_volume(py: Python<'_>, xy: PyReadonlyArray2<'_, f64>, z: PyReadonlyArray1
     Ok(py.detach(|| tin::volume(&pts, &h, &tri, [plane.0, plane.1, plane.2])))
 }
 
+// ------------------------------------------------------------------- the bundle adjustment (API 12)
+/// One entry of a problem dict, by its key.
+fn entry<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    d.get_item(key)?.ok_or_else(|| PyValueError::new_err(format!("problem: the key {key:?} is missing")))
+}
+
+fn xyz_rows(a: &PyReadonlyArray2<'_, f64>, what: &str) -> PyResult<Vec<[f64; 3]>> {
+    if a.shape()[1] != 3 {
+        return Err(PyValueError::new_err(format!("{what} must be N x 3, not {:?}", a.shape())));
+    }
+    let v = a.as_array();
+    Ok((0..a.shape()[0]).map(|i| [v[[i, 0]], v[[i, 1]], v[[i, 2]]]).collect())
+}
+
+fn index_list(a: &PyReadonlyArray1<'_, i64>, what: &str) -> PyResult<Vec<usize>> {
+    let negative = |k: i64| PyValueError::new_err(format!("{what}: the index {k} is negative"));
+    a.as_array().iter().map(|&k| usize::try_from(k).map_err(|_| negative(k))).collect()
+}
+
+fn value_list(a: &PyReadonlyArray1<'_, f64>) -> Vec<f64> {
+    a.as_array().iter().copied().collect()
+}
+
+/// A number of an options dict, or `default` without the key.
+fn number(d: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {
+    match d.get_item(key)? {
+        Some(v) => v.extract(),
+        None => Ok(default),
+    }
+}
+
+/// The observations `(image, point, xy)` of three entries of a problem dict.
+fn observations(d: &Bound<'_, PyDict>, image: &str, point: &str, xy: &str) -> PyResult<Vec<bundle::Obs>> {
+    let images = index_list(&entry(d, image)?.extract()?, image)?;
+    let points = index_list(&entry(d, point)?.extract()?, point)?;
+    let pixels = xy_rows(&entry(d, xy)?.extract()?)?;
+    if points.len() != images.len() || pixels.len() != images.len() {
+        return Err(PyValueError::new_err(format!("{image}, {point} and {xy} must have one entry per observation")));
+    }
+    let obs = images.iter().zip(&points).zip(&pixels);
+    Ok(obs.map(|((&image, &point), &xy)| bundle::Obs { image, point, xy }).collect())
+}
+
+/// The problem of `engine/bundle.py` from the dict `bundle._to_native` builds of it: the fields of
+/// `bundle.Problem` with its lists of tuples as arrays, in float64, int64 and bool.
+fn bundle_problem(d: &Bound<'_, PyDict>) -> PyResult<bundle::Problem> {
+    let rot: PyReadonlyArray3<f64> = entry(d, "rotations")?.extract()?;
+    let s = rot.shape();
+    if s[1] != 3 || s[2] != 3 {
+        return Err(PyValueError::new_err(format!("rotations must be N x 3 x 3, not {s:?}")));
+    }
+    let r = rot.as_array();
+    let rotations = (0..s[0])
+        .map(|i| [[r[[i, 0, 0]], r[[i, 0, 1]], r[[i, 0, 2]]], [r[[i, 1, 0]], r[[i, 1, 1]], r[[i, 1, 2]]],
+                  [r[[i, 2, 0]], r[[i, 2, 1]], r[[i, 2, 2]]]])
+        .collect();
+    let models: Vec<String> = entry(d, "camera_models")?.extract()?;
+    let params: Vec<Vec<f64>> = entry(d, "camera_params")?.extract()?;
+    let sizes: PyReadonlyArray2<f64> = entry(d, "camera_sizes")?.extract()?;
+    let free: Vec<Vec<usize>> = entry(d, "free_intrinsics")?.extract()?;
+    let c = models.len();
+    if params.len() != c || free.len() != c || sizes.shape() != [c, 2] {
+        return Err(PyValueError::new_err("camera_models, camera_params, camera_sizes (N x 2) and free_intrinsics \
+                                          must have one entry per camera"));
+    }
+    let sv = sizes.as_array();
+    let mut cameras = Vec::with_capacity(c);
+    for k in 0..c {
+        let (model, _) = camera::Model::from_name(&models[k]).map_err(PyValueError::new_err)?;
+        cameras.push(bundle::CameraBlock { model, params: params[k].clone(), width: sv[[k, 0]], height: sv[[k, 1]],
+                                           free: free[k].clone() });
+    }
+    let gcp_marker = index_list(&entry(d, "gcp_marker")?.extract()?, "gcp_marker")?;
+    let gcp_target = xyz_rows(&entry(d, "gcp_target")?.extract()?, "gcp_target")?;
+    let gcp_sigma = xyz_rows(&entry(d, "gcp_sigma")?.extract()?, "gcp_sigma")?;
+    if gcp_target.len() != gcp_marker.len() || gcp_sigma.len() != gcp_marker.len() {
+        return Err(PyValueError::new_err("gcp_marker, gcp_target and gcp_sigma must have one entry per control point"));
+    }
+    let gcps = (0..gcp_marker.len()).map(|j| (gcp_marker[j], gcp_target[j], gcp_sigma[j])).collect();
+    let bar_a = index_list(&entry(d, "bar_a")?.extract()?, "bar_a")?;
+    let bar_b = index_list(&entry(d, "bar_b")?.extract()?, "bar_b")?;
+    let bar_distance = value_list(&entry(d, "bar_distance")?.extract()?);
+    let bar_sigma = value_list(&entry(d, "bar_sigma")?.extract()?);
+    if bar_b.len() != bar_a.len() || bar_distance.len() != bar_a.len() || bar_sigma.len() != bar_a.len() {
+        return Err(PyValueError::new_err("bar_a, bar_b, bar_distance and bar_sigma must have one entry per scale bar"));
+    }
+    let bars = (0..bar_a.len()).map(|j| (bar_a[j], bar_b[j], bar_distance[j], bar_sigma[j])).collect();
+    let gnss_image = index_list(&entry(d, "gnss_image")?.extract()?, "gnss_image")?;
+    let gnss_target = xyz_rows(&entry(d, "gnss_target")?.extract()?, "gnss_target")?;
+    let gnss_sigma = xyz_rows(&entry(d, "gnss_sigma")?.extract()?, "gnss_sigma")?;
+    let flights: PyReadonlyArray1<i64> = entry(d, "gnss_flight")?.extract()?;
+    let gnss_flight: Vec<i64> = flights.as_array().iter().copied().collect();
+    let k = gnss_image.len();
+    if gnss_target.len() != k || gnss_sigma.len() != k || gnss_flight.len() != k {
+        return Err(PyValueError::new_err("gnss_image, gnss_target, gnss_sigma and gnss_flight must have one entry \
+                                          per GNSS position"));
+    }
+    let gnss = (0..k).map(|j| (gnss_image[j], gnss_target[j], gnss_sigma[j], gnss_flight[j])).collect();
+    let fixed: PyReadonlyArray1<bool> = entry(d, "fixed_images")?.extract()?;
+    Ok(bundle::Problem {
+        rotations,
+        centres: xyz_rows(&entry(d, "centres")?.extract()?, "centres")?,
+        image_camera: index_list(&entry(d, "image_camera")?.extract()?, "image_camera")?,
+        cameras,
+        points: xyz_rows(&entry(d, "points")?.extract()?, "points")?,
+        obs: observations(d, "obs_image", "obs_point", "obs_xy")?,
+        markers: xyz_rows(&entry(d, "markers")?.extract()?, "markers")?,
+        mobs: observations(d, "mobs_image", "mobs_marker", "mobs_xy")?,
+        gcps,
+        bars,
+        gnss,
+        fixed_images: fixed.as_array().iter().copied().collect(),
+        rolling_shutter: entry(d, "rolling_shutter")?.extract()?,
+        gnss_bias: entry(d, "gnss_bias")?.extract()?,
+        pixel_sigma: entry(d, "pixel_sigma")?.extract()?,
+        marker_sigma: entry(d, "marker_sigma")?.extract()?,
+        rs_sigma: value_list(&entry(d, "rs_sigma")?.extract()?),
+        rs_sigma_angular: value_list(&entry(d, "rs_sigma_angular")?.extract()?),
+    })
+}
+
+/// The loss of the tie points by its word and scale.
+fn bundle_loss(loss: &str, scale: f64) -> PyResult<bundle::Loss> {
+    match loss {
+        "none" => Ok(bundle::Loss::None),
+        "huber" | "cauchy" if !(scale > 0.0) => {
+            Err(PyValueError::new_err(format!("loss_scale must be positive, not {scale}")))
+        }
+        "huber" => Ok(bundle::Loss::Huber(scale)),
+        "cauchy" => Ok(bundle::Loss::Cauchy(scale)),
+        other => Err(PyValueError::new_err(format!("loss must be none, huber or cauchy, not {other:?}"))),
+    }
+}
+
+/// The options of the solver from a dict, the defaults of `bundle::Options` for the keys not given.
+fn bundle_options(d: &Bound<'_, PyDict>) -> PyResult<bundle::Options> {
+    let mut opts = bundle::Options::default();
+    if let Some(v) = d.get_item("max_iterations")? {
+        opts.max_iterations = v.extract()?;
+    }
+    let loss: String = match d.get_item("loss")? {
+        Some(v) => v.extract()?,
+        None => "none".to_string(),
+    };
+    opts.loss = bundle_loss(&loss, number(d, "loss_scale", 1.0)?)?;
+    if let Some(v) = d.get_item("linear_solver")? {
+        opts.linear_solver = match v.extract::<String>()?.as_str() {
+            "auto" => bundle::LinearSolver::Auto,
+            "dense" => bundle::LinearSolver::Dense,
+            "sparse" => bundle::LinearSolver::Sparse,
+            "pcg" => bundle::LinearSolver::Pcg,
+            other => {
+                let message = format!("linear_solver must be auto, dense, sparse or pcg, not {other:?}");
+                return Err(PyValueError::new_err(message));
+            }
+        };
+    }
+    opts.function_tolerance = number(d, "function_tolerance", opts.function_tolerance)?;
+    opts.gradient_tolerance = number(d, "gradient_tolerance", opts.gradient_tolerance)?;
+    opts.parameter_tolerance = number(d, "parameter_tolerance", opts.parameter_tolerance)?;
+    Ok(opts)
+}
+
+fn termination_word(t: bundle::Termination) -> &'static str {
+    match t {
+        bundle::Termination::Function => "function",
+        bundle::Termination::Gradient => "gradient",
+        bundle::Termination::Parameters => "parameters",
+        bundle::Termination::MaxIterations => "max_iterations",
+        bundle::Termination::NoProgress => "no_progress",
+    }
+}
+
+fn linear_solver_word(s: bundle::LinearSolver) -> &'static str {
+    match s {
+        bundle::LinearSolver::Auto => "auto",
+        bundle::LinearSolver::Dense => "dense",
+        bundle::LinearSolver::Sparse => "sparse",
+        bundle::LinearSolver::Pcg => "pcg",
+    }
+}
+
+fn xyz_array<'py>(py: Python<'py>, rows: &[[f64; 3]]) -> Bound<'py, PyArray2<f64>> {
+    Array2::from_shape_vec((rows.len(), 3), rows.concat()).unwrap().into_pyarray(py)
+}
+
+/// The fields of a `bundle::Solution` as a dict: `rolling_shutter` None when it was not adjusted,
+/// `bias` `{flight: (3,)}`, `termination` and `linear_solver` as lower-case words.
+fn solution_dict<'py>(py: Python<'py>, sol: &bundle::Solution) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    let flat: Vec<f64> = sol.rotations.iter().flat_map(|r| r.concat()).collect();
+    d.set_item("rotations", Array3::from_shape_vec((sol.rotations.len(), 3, 3), flat).unwrap().into_pyarray(py))?;
+    d.set_item("centres", xyz_array(py, &sol.centres))?;
+    let params: Vec<_> = sol.camera_params.iter().map(|p| Array1::from_vec(p.clone()).into_pyarray(py)).collect();
+    d.set_item("camera_params", params)?;
+    d.set_item("points", xyz_array(py, &sol.points))?;
+    d.set_item("markers", xyz_array(py, &sol.markers))?;
+    match &sol.rolling_shutter {
+        Some(rs) => d.set_item("rolling_shutter",
+                               Array2::from_shape_vec((rs.len(), 6), rs.concat()).unwrap().into_pyarray(py))?,
+        None => d.set_item("rolling_shutter", py.None())?,
+    }
+    let bias = PyDict::new(py);
+    for (flight, b) in &sol.bias {
+        bias.set_item(*flight, Array1::from_vec(b.to_vec()).into_pyarray(py))?;
+    }
+    d.set_item("bias", bias)?;
+    d.set_item("cost_initial", sol.cost_initial)?;
+    d.set_item("cost", sol.cost)?;
+    d.set_item("gradient_max", sol.gradient_max)?;
+    d.set_item("iterations", sol.iterations)?;
+    d.set_item("termination", termination_word(sol.termination))?;
+    d.set_item("linear_solver", linear_solver_word(sol.linear_solver))?;
+    Ok(d)
+}
+
+/// The message of a panic of the engine.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "the native engine panicked".to_string()
+    }
+}
+
+/// The bundle adjustment of `engine/bundle.py` by the native engine (`bundle::solve`, API 12):
+/// ``problem`` the dict ``bundle._to_native`` builds of a ``Problem`` (float64, int64 and bool arrays;
+/// ``camera_models``, ``camera_params`` and ``free_intrinsics`` as lists), ``options`` any of
+/// ``max_iterations``, ``loss`` (``none``, ``huber``, ``cauchy``) with ``loss_scale``, ``linear_solver``
+/// (``auto``, ``dense``, ``sparse``, ``pcg``), ``function_tolerance``, ``gradient_tolerance``,
+/// ``parameter_tolerance``. The GIL is released; ``progress(iteration, cost)`` is called after every
+/// iteration with it taken back, and an exception it raises stops the adjustment and comes out as it
+/// is. Returns the fields of ``bundle::Solution`` as a dict (``bias`` ``{flight: (3,)}``,
+/// ``rolling_shutter`` None without it, ``termination`` and ``linear_solver`` as words). A problem that
+/// is not consistent is a ValueError; an error of the solver or a panic, a RuntimeError with its message.
+#[pyfunction]
+#[pyo3(signature = (problem, options, progress=None))]
+fn bundle_adjust<'py>(py: Python<'py>, problem: &Bound<'py, PyDict>, options: &Bound<'py, PyDict>,
+                      progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
+    let pb = bundle_problem(problem)?;
+    let opts = bundle_options(options)?;
+    pb.check().map_err(PyValueError::new_err)?;
+    let mut raised: Option<PyErr> = None;
+    let outcome = py.detach(|| {
+        let mut observe = |iteration: usize, cost: f64| -> bool {
+            let Some(callback) = progress.as_ref() else { return true };
+            Python::attach(|py| match callback.call1(py, (iteration, cost)) {
+                Ok(_) => true,
+                Err(e) => {
+                    raised = Some(e);
+                    false
+                }
+            })
+        };
+        catch_unwind(AssertUnwindSafe(|| bundle::solve(&pb, &opts, &mut observe)))
+    });
+    match outcome {
+        Ok(Ok(solution)) => solution_dict(py, &solution),
+        Ok(Err(message)) => Err(raised.unwrap_or_else(|| PyRuntimeError::new_err(message))),
+        Err(payload) => Err(PyRuntimeError::new_err(format!("bundle adjustment: {}", panic_text(&*payload)))),
+    }
+}
+
+type BundleEvaluation<'py> = (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<i64>>,
+                              Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>, f64);
+
+/// A problem (as :func:`bundle_adjust` takes it) evaluated at the parameters it holds
+/// (`bundle::evaluate`, API 12), with ``loss`` and ``loss_scale`` on the tie points: ``(residuals,
+/// gradient, rows, cols, values, cost)`` - the residual vector of ``_Model.residuals``, the gradient of
+/// the cost in the columns of ``_Layout``, the Jacobian of the residuals as COO triplets on the
+/// structure of ``_Model.sparsity``, and the cost ``0.5 sum(rho(r^2))``. The GIL is released.
+#[pyfunction]
+#[pyo3(signature = (problem, loss="none", loss_scale=1.0))]
+fn bundle_evaluate<'py>(py: Python<'py>, problem: &Bound<'py, PyDict>, loss: &str, loss_scale: f64)
+                        -> PyResult<BundleEvaluation<'py>> {
+    let pb = bundle_problem(problem)?;
+    let loss = bundle_loss(loss, loss_scale)?;
+    pb.check().map_err(PyValueError::new_err)?;
+    let ev = py.detach(|| catch_unwind(AssertUnwindSafe(|| bundle::evaluate(&pb, loss))))
+        .map_err(|payload| PyRuntimeError::new_err(format!("bundle evaluation: {}", panic_text(&*payload))))?;
+    let rows: Vec<i64> = ev.jacobian.iter().map(|&(r, _, _)| r as i64).collect();
+    let cols: Vec<i64> = ev.jacobian.iter().map(|&(_, c, _)| c as i64).collect();
+    let values: Vec<f64> = ev.jacobian.iter().map(|&(_, _, v)| v).collect();
+    Ok((Array1::from_vec(ev.residuals).into_pyarray(py), Array1::from_vec(ev.gradient).into_pyarray(py),
+        Array1::from_vec(rows).into_pyarray(py), Array1::from_vec(cols).into_pyarray(py),
+        Array1::from_vec(values).into_pyarray(py), ev.cost))
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -847,5 +1138,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tin_rasterize, m)?)?;
     m.add_function(wrap_pyfunction!(tin_contours, m)?)?;
     m.add_function(wrap_pyfunction!(tin_volume, m)?)?;
+    m.add_function(wrap_pyfunction!(bundle_adjust, m)?)?;
+    m.add_function(wrap_pyfunction!(bundle_evaluate, m)?)?;
     Ok(())
 }

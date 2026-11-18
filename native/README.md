@@ -30,6 +30,16 @@ signals of a satellite in an epoch are kept instead of 7, so on logs of many sig
 BeiDou B3I, B1C and B2a beside the others) the core may write fewer observation types than
 `convbin`; on RTKLIB's samples of u-blox, RTCM 3 and NovAtel (3 signals at most) the RINEX is the
 same.
+API 12 (the first piece of the native engine, same version): the bundle adjustment of
+`engine/bundle.py` solved in Rust (`bundle_adjust`: Levenberg-Marquardt over the camera system
+reduced by the Schur complement, in double precision on the CPU; dense Cholesky with the crate
+[faer](https://github.com/sarah-quinones/faer-rs) up to 15 000 reduced columns, its sparse Cholesky
+above, conjugate gradients with a block-Jacobi preconditioner when the factor would pass 4 GiB;
+Jacobians by forward dual numbers; the six camera models of the projection kernels; the losses
+none, Huber and Cauchy on the tie points; control points, scale bars, GNSS positions with a bias
+per flight and the rolling shutter as in the Python problem) and the same problem evaluated at its
+parameters (`bundle_evaluate`: residuals, gradient, Jacobian, cost). scipy stays the reference of
+the tests and what the program uses where the core is missing or a camera model is not among the six.
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 

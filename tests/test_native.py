@@ -833,6 +833,38 @@ def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
         assert pos == expected, f"{label}, under {name}: {epochs(pos)} epochs, 120 in the C locale ({message})"
 
 
+# ------------------------------------------------------------------------------- the bundle adjustment
+def test_a_core_with_the_bundle_adjustment_declares_api_12():
+    if not _native.has("bundle"):
+        pytest.skip("the native core with the bundle adjustment (API 12) is not installed")
+    assert _native.BUNDLE_API == 12 and _native.api() >= _native.BUNDLE_API
+    assert callable(ppg_core.bundle_adjust) and callable(ppg_core.bundle_evaluate)
+
+
+def test_the_bundle_bindings_refuse_what_is_not_a_problem():
+    """What the bindings check before the engine runs: a missing key, a word that is not a loss or a
+    solver, a problem that is not consistent; each with its name in the message."""
+    if not _native.has("bundle"):
+        pytest.skip("the native core with the bundle adjustment (API 12) is not installed")
+    from pyarchinit_photogrammetry.engine import bundle
+
+    pb = bundle.Problem(np.tile(np.eye(3), (2, 1, 1)), np.array([[0.0, 0, 0], [1, 0, 0]]), np.zeros(2, int),
+                        [("PINHOLE", [1000.0, 1000.0, 500.0, 400.0], 1000, 800)], np.array([[0.5, 0.0, 10.0]]),
+                        np.array([0, 1]), np.array([0, 0]), np.array([[550.0, 400.0], [450.0, 400.0]]))
+    problem = bundle._to_native(pb)
+    with pytest.raises(ValueError, match="obs_point"):
+        ppg_core.bundle_adjust({k: v for k, v in problem.items() if k != "obs_point"}, {})
+    with pytest.raises(ValueError, match="tukey"):
+        ppg_core.bundle_adjust(problem, {"loss": "tukey"})
+    with pytest.raises(ValueError, match="linear_solver"):
+        ppg_core.bundle_adjust(problem, {"linear_solver": "cholmod"})
+    with pytest.raises(ValueError, match="observation"):
+        ppg_core.bundle_evaluate({**problem, "obs_point": np.array([0, 7])}, "none", 1.0)
+    out = ppg_core.bundle_adjust(problem, {"max_iterations": 5}, None)
+    assert out["linear_solver"] == "dense" and out["iterations"] <= 5 and out["cost"] <= out["cost_initial"]
+    assert out["rolling_shutter"] is None and out["bias"] == {} and out["points"].shape == (1, 3)
+
+
 # ------------------------------------------------------------------------------------------- the TIN
 def _tin_triangles(t):
     return {tuple(r) for r in np.sort(t.triangles, axis=1).tolist()}
