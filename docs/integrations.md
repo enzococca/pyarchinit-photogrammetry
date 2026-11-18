@@ -410,9 +410,12 @@ terms. When a calibration sets them, the import fits the model's rational radial
 (`k1..k3` over `k4..k6`), its tangential terms and one scale of the focal length to
 Metashape's own projection on a grid over the whole photo, corners included (`cx/cy` and the
 ratio of `b1` stay exact), favouring the smallest worst error; a calibration without those
-terms is mapped as before, untouched. The worst and RMS residuals against Metashape's
-projection are reported after the import and kept in the chunk
-(`meta["import"]["calibrations"]`). Within 0.5 px (Metashape's own tie points sit at
+terms is mapped as before, untouched. The fitted lens is also held growing, with a positive
+denominator, out to 1.3 times the corner radius, so that a point just outside a photo's
+footprint cannot project back inside it (the in-view tests of markers and texturing stay
+reliable). The worst and RMS residuals against Metashape's projection are reported after the
+import and kept in the chunk (`meta["import"]["calibrations"]`, with Metashape's original
+terms). Within 0.5 px (Metashape's own tie points sit at
 0.3-1 px) the message is information: a `k4` of a few hundredths, `p3/p4` and a skew under a
 pixel are absorbed to 0.2 px. Beyond it the message says that the projection is not
 reproduced and by how many pixels: a `k4` of the order of 1 (a 48 MP drone lens calibrated

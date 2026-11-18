@@ -425,11 +425,15 @@ questi termini. Quando una calibrazione li ha, l'importazione adatta la parte ra
 del modello (`k1..k3` su `k4..k6`), i termini tangenziali e una scala della focale alla
 proiezione di Metashape su una griglia che copre l'intera foto, angoli compresi (`cx/cy` e il
 rapporto di `b1` restano esatti), cercando l'errore massimo più piccolo; una calibrazione senza
-quei termini viene convertita come prima, senza ritocchi. I residui massimo e RMS rispetto alla
-proiezione di Metashape vengono riportati a fine importazione e conservati nel chunk
-(`meta["import"]["calibrations"]`). Entro 0,5 px (i punti di legame di Metashape stanno a
-0,3-1 px) il messaggio è informativo: un `k4` di qualche centesimo, `p3/p4` e uno skew sotto
-il pixel vengono assorbiti entro 0,2 px. Oltre, il messaggio dice che la proiezione non è
+quei termini viene convertita come prima, senza ritocchi. L'obiettivo adattato viene anche
+tenuto crescente, con denominatore positivo, fino a 1.3 volte il raggio dell'angolo, così che
+un punto appena fuori dall'impronta di una foto non possa riproiettarsi al suo interno (le
+verifiche di visibilità di marker e texture restano affidabili). I residui massimo e RMS
+rispetto alla proiezione di Metashape vengono riportati a fine importazione e conservati nel
+chunk (`meta["import"]["calibrations"]`, con i termini originali di Metashape). Entro 0.5 px
+(i punti di legame di Metashape stanno a 0.3-1 px) il messaggio è informativo: un `k4` di
+qualche centesimo, `p3/p4` e uno skew sotto il pixel vengono assorbiti entro 0.2 px. Oltre, il
+messaggio dice che la proiezione non è
 riprodotta e di quanti pixel: un `k4` dell'ordine di 1 (un obiettivo da drone a 48 MP calibrato
 con tutti i termini) lascia 1-6 px agli angoli, uno skew di 25 px circa 14 px. Allora esegui
 *Ottimizza camere* qui, che ristima la calibrazione sui punti di legame, oppure ricalibra in
