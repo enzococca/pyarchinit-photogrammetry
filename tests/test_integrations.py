@@ -280,7 +280,9 @@ def test_metashape_calibration_with_k4_and_b2_is_fitted():
     assert params[0] / params[1] == pytest.approx((5370.5 + 0.6) / 5370.5)  # b1 kept in the ratio fx/fy
     err, corner_err = _errors_over_the_photo(sensor, DJI_CALIB)
     worst = max(err.max(), corner_err.max())
-    assert worst < 2.0 and np.sqrt(np.mean(err ** 2)) < 1.0, (worst, np.sqrt(np.mean(err ** 2)))
+    # 1.85 px worst, 1.26 px RMS: the price of holding the lens growing out to 1.3 x the corner (1.33 /
+    # 0.88 px without that constraint), against thousands of pixels when k4 was dropped
+    assert worst < 2.0 and np.sqrt(np.mean(err ** 2)) < 1.5, (worst, np.sqrt(np.mean(err ** 2)))
     # the pixel convention is unchanged: the optical axis lands at the centre of the photo plus cx, cy
     assert np.allclose(sensor.project(np.array([[0.0, 0.0, 1.0]])), [[w / 2 + 14.2, h / 2 - 22.7]])
     # the import says that the projection is not reproduced within half a pixel, and by how much
@@ -321,6 +323,58 @@ def test_metashape_calibration_beyond_the_model_is_reported():
     assert len(warn) == 1 and "non è riproducibile" in warn[0] and f"entro {FIT_TOLERANCE_PX:g} px" in warn[0]
     m = re.search(r"fino a (\d+\.\d) px", warn[0])
     assert m and abs(float(m.group(1)) - worst) < 0.5, warn[0]
+
+
+def _fold_of(params, r_max: float = 2.0) -> float:
+    """Where the radial function of FULL_OPENCV parameters stops growing or its denominator reaches
+    zero (test-side copy, independent of the importer)."""
+    k1, k2, k3, k4, k5, k6 = (params[i] for i in (4, 5, 8, 9, 10, 11))
+    r = np.linspace(0.0, r_max, 8001)
+    s = r * r
+    den = 1 + k4 * s + k5 * s ** 2 + k6 * s ** 3
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rd = r * (1 + k1 * s + k2 * s ** 2 + k3 * s ** 3) / np.where(den > 0, den, np.nan)
+    bad = ~(np.diff(rd) > 0)
+    return float(r[int(np.argmax(bad))]) if bad.any() else np.inf
+
+
+def test_metashape_fitted_lens_does_not_fold_outside_the_photo():
+    """A direction just outside the photo must not project back into it (photos_seeing and
+    project_valid would list photos that do not see a point): the fitted radial function keeps
+    growing, with a positive denominator, out to 1.3 x the corner radius. The rational fitted on the
+    photo alone had a pole 6 % outside the corner and came back in between 1.07 and 1.28 x."""
+    from pyarchinit_photogrammetry.integrations.metashape import FOLD_MARGIN, fold_radius
+
+    w, h = DJI_SIZE
+    assert FOLD_MARGIN >= 1.3
+    for calib in (DJI_CALIB, MILD_CALIB, dict(MILD_CALIB, b2=25.0)):
+        sensor, params, _ = _fitted_sensor(calib)
+        corner = np.hypot(w / 2, h / 2) / calib["f"]
+        assert _fold_of(params) >= 1.3 * corner, (_fold_of(params), corner)
+        assert fold_radius(params, 1.3 * corner) == np.inf
+        s = (np.linspace(0, 1.3 * corner, 200)) ** 2
+        assert (1 + params[9] * s + params[10] * s ** 2 + params[11] * s ** 3).min() > 0.05
+        # through pycolmap: directions along the diagonal at 1.03-1.28 x the corner radius land outside
+        theta = np.arctan2(h, w)
+        r = np.linspace(1.03, 1.28, 12) * corner
+        xy = np.column_stack([r * np.cos(theta), r * np.sin(theta)])
+        for sign in (1.0, -1.0):
+            uv = sensor.project(np.column_stack([sign * xy, np.ones(len(xy))]))
+            inside = (uv[:, 0] >= 0) & (uv[:, 0] <= w) & (uv[:, 1] >= 0) & (uv[:, 1] <= h)
+            assert not inside.any(), uv[inside]
+
+
+def test_metashape_calibration_that_does_not_invert_is_reported():
+    """A radial polynomial folding a couple of hundred pixels from the centre (an absurd
+    calibration): the direct mapping is kept and the message says that it does not invert, where,
+    and by how many pixels the projection is off where it does."""
+    from pyarchinit_photogrammetry.integrations.metashape import MsSensor, _direct_params, fit_calibration
+
+    s = MsSensor(0, "S", 4000, 3000, {"f": 3000.0, "k1": -40.0, "k4": 0.1})
+    fit = fit_calibration(s)
+    assert fit.params == _direct_params(s) and fit.fitted == ["k4"]
+    assert len(fit.warnings) == 1 and "non si inverte" in fit.warnings[0], fit.warnings
+    assert re.search(r"si ripiega a r = 0\.\d+", fit.warnings[0]) and re.search(r"fino a \d+ px", fit.warnings[0])
 
 
 def test_metashape_import_reports_the_calibration_fit(tmp_path):
