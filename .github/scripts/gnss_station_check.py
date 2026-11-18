@@ -5,7 +5,8 @@ gnss-check runs it on demand, with the native core built from the branch:
     python .github/scripts/gnss_station_check.py [--station MEDI00ITA] [--day 2026-10-06] [--partner BOLG00ITA]
         [--crx2rnx RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX] [--receiver-log no|yes|only] [--work DIR]
 
-The program downloads what it needs as it does for a user - the day of the two stations from BKG
+The program downloads what it needs as it does for a user - the day of the two stations from BKG, or from the EPN
+Historical Data Centre when BKG cannot be reached
 (stations.download_observations), the precise products of ESA, CODE or the IGS (ppp.products), igs20.atx, the broadcast
 navigation - one file at a time, into PPG_GNSS_DIR, which the script points to a folder of --work when it is not set:
 never the program's own folder. The truth is the multi-year solution of the EPN in IGS20 (the SSC file of the EPN

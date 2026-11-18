@@ -141,7 +141,7 @@ the epoch of its coordinates ([Reference frames and epochs](#reference-frames-an
 | --- | --- |
 | The drone's RINEX and its `Timestamp.MRK` | The folder of the flight on the drone's card: a DJI drone writes `<flight>_Rinex.obs` beside `<flight>_Timestamp.MRK` (often with `<flight>_PPKNAV.nav`); another receiver its observation file (`.obs`, `.##o`) |
 | The base's RINEX | Your own base (any receiver that records RINEX) on a mark, or a permanent station near the survey: the program downloads the observations of a station of the EPN, the IGS or RING for the hours of the flight (*A permanent station nearby as the base*, below), or you give the file of a station you downloaded yourself. The base must record during the whole flight, in one file or in **several**: the hourly files of a station, the two daily files of a flight across midnight (UTC), the pieces a receiver writes - *Add...* takes them all, and the program joins them into one (they must be of one receiver: the same marker, antenna and observation types) and says where the holes of the base fall within the flight. The nearer the better: beyond 20 km a fix gets hard (the program warns) |
-| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station; the daily broadcast file of the IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) is found too beside the observations, for their day and the days around it. For a station, a baseline or a PPP, when none is beside the drone's file, the program downloads the broadcast messages of the hours of the flight (`BRDC00WRD`, from BKG) |
+| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station; the daily broadcast file of the IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) is found too beside the observations, for their day and the days around it. For a station, a baseline or a PPP, when none is beside the drone's file, the program downloads the broadcast messages of the hours of the flight (`BRDC00WRD` from BKG, or `BRDC00GOP` from the EPN Central Bureau when BKG cannot be reached) |
 
 **Compressed files** are read as they are, as the archives of the stations give them: gzip (`.gz`), the Unix compress
 (`.Z`), a zip with one file in it (`.zip`) and Hatanaka (`.crx`, `.##d`: Compact RINEX 1.0, 3.0 and 3.1), one inside
@@ -222,7 +222,9 @@ dialog and in `ppg gnss ppk`:
   archives have the files of a station for the hours of the flight is found out when it is used: its observations
   at 1 s when the archive has them for the whole flight, else at 30 s, with ten minutes before and after (BKG's data
   centre for the stations of the EPN and of the IGS, RING's own archive, on the port 44324 that some firewalls close,
-  for those of RING); the program says when they are not online yet. Its coordinates come from the multi-year
+  for those of RING; when BKG cannot be reached, the daily files at 30 s of the stations of the EPN come from the EPN
+  Historical Data Centre of the EPN Central Bureau, `epncb.oma.be`, which has them a few days after the day, and the
+  log says so); the program says when they are not online yet. Its coordinates come from the multi-year
   solution of the EPN, from IGc20 of the IGS or from a straight line through two years of the daily positions of
   RING, brought to the epoch of the flight: the positions of the photos are in ITRF2020 at that epoch. A station
   known only by its approximate position (good to metres) is refused. The coordinates are those of the marker of the

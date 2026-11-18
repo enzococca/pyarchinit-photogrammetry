@@ -142,7 +142,7 @@ coordinate ([Sistemi di riferimento ed epoche](#sistemi-di-riferimento-ed-epoche
 | --- | --- |
 | Il RINEX del drone e il suo `Timestamp.MRK` | La cartella del volo sulla scheda del drone: un drone DJI scrive `<volo>_Rinex.obs` accanto a `<volo>_Timestamp.MRK` (spesso con `<volo>_PPKNAV.nav`); un altro ricevitore il suo file di osservazioni (`.obs`, `.##o`) |
 | Il RINEX della base | La tua base (qualsiasi ricevitore che registra in RINEX) su un punto, oppure una stazione permanente vicina al rilievo: il programma scarica le osservazioni di una stazione dell'EPN, dell'IGS o di RING per le ore del volo (*Una stazione permanente vicina come base*, più sotto), o gli dai il file di una stazione che hai scaricato tu. La base deve registrare per tutto il volo, in un file o in **più file**: i file orari di una stazione, i due file giornalieri di un volo a cavallo della mezzanotte (UTC), i pezzi che scrive un ricevitore - *Aggiungi...* li prende tutti, e il programma li unisce in uno (devono essere di un solo ricevitore: lo stesso punto, la stessa antenna, gli stessi tipi di osservazione) e dice dove cadono i buchi della base durante il volo. Più vicina è meglio è: oltre 20 km il fix diventa difficile (il programma lo avvisa) |
-| File di navigazione | Le effemeridi trasmesse: `.nav`, `.##n`, `.##g`, `.##p` o i RINEX 3 `*_MN.rnx` - quelli del drone, della base o il file giornaliero di una stazione; anche il file giornaliero delle effemeridi dell'IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) si trova accanto alle osservazioni, per il loro giorno e i giorni vicini. Per una stazione, una linea di base o un PPP, quando accanto al file del drone non ce n'è nessuno, il programma scarica i messaggi trasmessi delle ore del volo (`BRDC00WRD`, dal BKG) |
+| File di navigazione | Le effemeridi trasmesse: `.nav`, `.##n`, `.##g`, `.##p` o i RINEX 3 `*_MN.rnx` - quelli del drone, della base o il file giornaliero di una stazione; anche il file giornaliero delle effemeridi dell'IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) si trova accanto alle osservazioni, per il loro giorno e i giorni vicini. Per una stazione, una linea di base o un PPP, quando accanto al file del drone non ce n'è nessuno, il programma scarica i messaggi trasmessi delle ore del volo (`BRDC00WRD` dal BKG, o `BRDC00GOP` dall'EPN Central Bureau quando il BKG non risponde) |
 
 **I file compressi** si leggono così come sono, come li danno gli archivi delle stazioni: gzip (`.gz`), il compress di
 Unix (`.Z`), uno zip con un solo file dentro (`.zip`) e Hatanaka (`.crx`, `.##d`: Compact RINEX 1.0, 3.0 e 3.1),
@@ -225,7 +225,9 @@ e in `ppg gnss ppk`:
   si scarica). Se gli archivi hanno i file di una stazione per le ore del volo si scopre quando la si usa: le sue
   osservazioni a 1 s quando l'archivio le ha per tutto il volo, altrimenti a 30 s, con dieci minuti prima e dopo (il
   centro dati del BKG per le stazioni dell'EPN e dell'IGS, l'archivio di RING, sulla porta 44324 che alcuni firewall
-  chiudono, per quelle di RING); il programma dice quando non sono ancora in rete. Le sue coordinate vengono dalla
+  chiudono, per quelle di RING; quando il BKG non risponde, i file giornalieri a 30 s delle stazioni dell'EPN vengono
+  dal Centro dati storico dell'EPN presso l'EPN Central Bureau, `epncb.oma.be`, che li ha qualche giorno dopo la
+  giornata, e il log lo dice); il programma dice quando non sono ancora in rete. Le sue coordinate vengono dalla
   soluzione pluriennale dell'EPN, da IGc20 dell'IGS o da una retta per due anni di posizioni giornaliere di RING,
   portate all'epoca del volo: le posizioni delle foto sono in ITRF2020 a quell'epoca. Una stazione di cui si conosce
   solo la posizione approssimata (buona ai metri) si rifiuta. Le coordinate sono quelle del punto della stazione: il
