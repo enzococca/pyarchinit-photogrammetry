@@ -46,6 +46,36 @@ def set_engine_verbosity(verbose: bool = False) -> None:
 
 set_engine_verbosity()
 
+# the seed of the RANSAC of the geometric verification of the matches (COLMAP's ``ransac.random_seed``): a whole
+# number, 0 or more, in this variable makes two matchings of the same photos verify the same pairs with the same
+# inliers, so the repeats of ``ppg bench run --seed`` and the tests compare like with like; unset or empty, COLMAP's
+# default (-1) seeds from the clock, another seed at every run
+RANSAC_SEED_ENV = "PPG_RANSAC_SEED"
+
+
+def ransac_seed(environ=None) -> int:
+    """The seed of the geometric verification: :data:`RANSAC_SEED_ENV` in ``environ`` (the process's environment
+    when not given) as a whole number, 0 or more; ``-1`` when the variable is unset or empty. Any other text
+    raises ValueError naming the variable."""
+    text = (os.environ if environ is None else environ).get(RANSAC_SEED_ENV, "").strip()
+    if not text:
+        return -1
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"{RANSAC_SEED_ENV} must be a whole number, 0 or more, not {text!r}")
+    return int(text)
+
+
+def verification_options():
+    """COLMAP's options of the geometric verification of the matches (``TwoViewGeometryOptions``, its defaults)
+    with ``ransac.random_seed`` from :func:`ransac_seed`. Every verification of the classic engine takes its
+    options from here: COLMAP's matchers (``verification_options=``), ``verify_matches`` of the pairs matched
+    on the GPU and of the learned matches."""
+    import pycolmap
+
+    opts = pycolmap.TwoViewGeometryOptions()
+    opts.ransac.random_seed = ransac_seed()
+    return opts
+
 
 def mapping_camera(sensor) -> tuple[str, list[float]]:
     """COLMAP model and parameters used to align the photos of ``sensor``: a single focal
@@ -513,7 +543,7 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
                 pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
                                           camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                                           extraction_options=ext)
-            pycolmap.match_exhaustive(str(db_path))
+            pycolmap.match_exhaustive(str(db_path), verification_options=verification_options())
         con = sqlite3.connect(str(db_path))
         try:
             ids = dict(con.execute("SELECT image_id, name FROM images"))
@@ -684,6 +714,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
         finally:
             d.close()
 
+    vopts = verification_options()  # the one verification for the chunks of the CPU and the pairs of the GPUs
     threads = [threading.Thread(target=gpu_stream, args=(d,), name=f"ppg-gpu-matching-{d}", daemon=True)
                for d in devices]
     started = time.perf_counter()
@@ -709,7 +740,8 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
             popts = pycolmap.ImportedPairingOptions()
             popts.match_list_path = str(list_path)
             t0 = time.perf_counter()
-            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                       verification_options=vopts)
             cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
             with lock:
                 done["cpu"] += n
@@ -727,7 +759,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
         progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")
         gpu_list = work / "pairs_gpu.txt"
         gpu_list.write_text("\n".join(f"{a} {b}" for a, b in gpu_pairs))
-        pycolmap.verify_matches(str(db_path), str(gpu_list), pycolmap.TwoViewGeometryOptions())
+        pycolmap.verify_matches(str(db_path), str(gpu_list), vopts)
     return {"gpu_pairs": done["gpu"], "cpu_pairs": done["cpu"], "by_device": by_device}
 
 
@@ -900,6 +932,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         raise ValueError(f"apply_masks: one of {', '.join(MASK_MODES)}")
     if matcher not in learned.MATCHERS:
         raise ValueError(f"matcher: one of {', '.join(learned.MATCHERS)}")
+    ransac_seed()  # a PPG_RANSAC_SEED that is not a whole number is refused before the points are detected
     generic, reference = _preselection(pair_selection, generic, reference)
     try:  # the matching needs no system: what the alignment would refuse is only said here
         gcp.preflight(chunk)
@@ -1097,7 +1130,8 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                 learned.match_pairs(db_path, pairs, feats, progress.sub(0.55, 0.4))
         elif pairs is None:
             with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-                pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
+                pycolmap.match_exhaustive(str(db_path), matching_options=mopts,
+                                          verification_options=verification_options())
         elif pairs and devices:
             shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
         elif pairs:
@@ -1106,7 +1140,8 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
             popts = pycolmap.ImportedPairingOptions()
             popts.match_list_path = str(list_path)
             with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                           verification_options=verification_options())
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,

@@ -77,7 +77,8 @@ def photo_cache_mb(env: dict) -> int | None:
 
 def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 1, keep: bool = False,
         records: Path | None = None, *, mapper: str = "auto", extra_results: Callable | None = None,
-        targets: str | None = None, reference: Path | None = None, crs: str | None = None) -> list[Path]:
+        targets: str | None = None, reference: Path | None = None, crs: str | None = None,
+        seed: int | None = None) -> list[Path]:
     """``repeat`` runs of the chain ``steps`` (``align`` or ``all``, :data:`.steps.CHAINS`) on the photos of the folder
     ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run failed: then it
     stays with the child's log, said in the log by its name), the records written to ``records`` (default ``out``).
@@ -87,9 +88,15 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError), ``out`` or ``records``
     inside ``photos`` (ValueError; by the identity of the folders, whatever the case of the letters), ``records``
     inside a work folder (ValueError: it is removed after its run), a work folder of one of the repeats that exists
-    already (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), every
-    photo online-only (RuntimeError; no child is started). Photos that are online-only are left out of the run and
-    make the record not valid.
+    already (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), a
+    ``seed`` below 0 or a ``PPG_RANSAC_SEED`` in the environment that is not a whole number (ValueError, as the child
+    would refuse it), every photo online-only (RuntimeError; no child is started). Photos that are online-only are
+    left out of the run and make the record not valid.
+
+    ``seed`` (0 or more) fixes the RANSAC of the geometric verification of the matches in the child, through
+    ``PPG_RANSAC_SEED`` (:func:`..engine.sfm.verification_options`): runs with the same seed verify the same pairs, so
+    the repeats compare like with like. The record keeps the seed the child runs with as ``settings["ransac_seed"]``:
+    ``seed``, else the variable inherited from the environment, else ``-1`` (COLMAP's default, a seed from the clock).
 
     ``targets``, ``reference`` and ``crs`` go to the child, which detects the markers and imports the reference when
     they are given; ``all`` detects :data:`.steps.DEFAULT_TARGETS` when no targets are given, as ``ppg process`` does,
@@ -101,8 +108,17 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     kept as ``results["error"]`` and makes the record not valid, the times stay. A KeyboardInterrupt while the child
     runs terminates it and its children, writes the record with the error ``cancelled``, removes the work folder
     unless ``keep`` and is raised again."""
+    from ..engine import sfm
+
     photos = Path(photos).resolve()
     out, records = check(out, name, steps, repeat, records, photos=photos, mapper=mapper)
+    if seed is not None and int(seed) < 0:
+        raise ValueError("seed must be 0 or more")
+    env = dict(os.environ)
+    env.update(LIVE_LOG_ENV)
+    if seed is not None:
+        env[sfm.RANSAC_SEED_ENV] = str(int(seed))
+    verification_seed = sfm.ransac_seed(env)  # the seed the child verifies with; a text that is not one is refused here
     files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]
     local = tuple(p for p in files if not machine.is_online_only(p))
     if not local:
@@ -110,14 +126,12 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     set_ = machine.photo_set_facts(files)
     disk = machine.disk_facts(photos)
     disk["read_mb_s"] = machine.read_rate(list(local))
-    env = dict(os.environ)
-    env.update(LIVE_LOG_ENV)
     if targets is None and steps == "all":
         targets = child.DEFAULT_TARGETS
     reference = Path(reference).resolve() if reference else None
     settings = {**{key: None for key in child.SFM_SETTINGS}, **child.match_settings(), "pycolmap": None,
                 "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets,
-                "mapper_requested": mapper}
+                "mapper_requested": mapper, "ransac_seed": verification_seed}
     private = (photos, out, Path.home()) + ((reference,) if reference else ())
     plan = _Plan(name=name, steps=steps, mapper=mapper, local=local, out=out, records=records, keep=keep, env=env,
                  disk=disk, set=set_, settings=settings, private=private, names=tuple(p.name for p in files),

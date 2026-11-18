@@ -431,3 +431,53 @@ def test_tie_point_limit_and_hierarchical_mapper(scene_dir, tmp_path):
     assert ch.align_cameras(mapper="hierarchical") == len(ch.cameras)
     assert ch.meta["sfm"]["mapper"] == "hierarchical"
     assert ch.update_transform()["control_rmse"] < 0.002
+
+
+def test_a_fixed_ransac_seed_gives_the_same_pairs(scene_dir, tmp_path, monkeypatch):
+    """With the seed of the geometric verification fixed (``PPG_RANSAC_SEED``), two matchings of the
+    same photos leave the same verified pairs, inliers and geometries: the repeats of ``ppg bench``
+    compare like with like."""
+    import sqlite3
+
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "7")
+    columns = ("pair_id", "rows", "config", "data", "F", "E", "H")
+    tables = []
+    for copy in ("one", "two"):
+        (tmp_path / copy).mkdir()
+        _doc, ch = _matched(scene_dir, tmp_path / copy, "exhaustive")
+        con = sqlite3.connect(str(ch.data_dir / "sfm" / "database.db"))
+        try:
+            tables.append(con.execute(f"SELECT {', '.join(columns)} FROM two_view_geometries ORDER BY pair_id")
+                          .fetchall())
+        finally:
+            con.close()
+    first, second = tables
+    assert len(first) > 0
+    differing = {name: sum(1 for a, b in zip(first, second) if a[i] != b[i]) for i, name in enumerate(columns)}
+    differing = {name: n for name, n in differing.items() if n}
+    assert len(first) == len(second) and not differing, (len(first), len(second), differing)
+
+
+def test_the_ransac_seed_is_checked(scene_dir, tmp_path, monkeypatch):
+    import pycolmap
+
+    monkeypatch.delenv(sfm.RANSAC_SEED_ENV, raising=False)
+    assert sfm.verification_options().ransac.random_seed == -1  # COLMAP's default: a seed from the clock
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "")
+    assert sfm.verification_options().ransac.random_seed == -1
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "7")
+    opts = sfm.verification_options()
+    assert opts.ransac.random_seed == 7
+    mine, theirs = opts.todict(), pycolmap.TwoViewGeometryOptions().todict()  # COLMAP's defaults otherwise
+    assert {k: v for k, v in mine.items() if k != "ransac"} == {k: v for k, v in theirs.items() if k != "ransac"}
+    assert ({k: v for k, v in mine["ransac"].items() if k != "random_seed"}
+            == {k: v for k, v in theirs["ransac"].items() if k != "random_seed"})
+    for text in ("seven", "-1", "1.5", "0x7"):
+        monkeypatch.setenv(sfm.RANSAC_SEED_ENV, text)
+        with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
+            sfm.verification_options()
+    # the matching refuses it before any point is detected
+    _doc, ch = _project(scene_dir, tmp_path)
+    with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
+        ch.match_photos(quality="high")
+    assert not (ch.data_dir / "sfm" / "database.db").exists()

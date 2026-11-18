@@ -262,6 +262,8 @@ def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch
     assert result.exit_code == 2 and "--steps" in plain(result)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--mapper", "hierarchical"])
     assert result.exit_code == 2 and "--mapper" in plain(result) and "not 'hierarchical'" in plain(result)
+    result = invoke(["run", str(photos), str(out), "--name", "n", "--seed", "-1"])
+    assert result.exit_code == 2 and "--seed" in plain(result) and "not in the range" in plain(result)
     result = invoke(["run", str(photos), str(photos / "out"), "--name", "n"])
     assert result.exit_code == 2 and "must not be inside the folder of the photos" in plain(result)
     (out / "n-1").mkdir(parents=True)
@@ -292,11 +294,12 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
                      "--keep", "--records", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
     assert calls == [(photos, tmp_path / "o", "n", {"steps": "all", "repeat": 2, "keep": True,
-                                                   "records": tmp_path / "r", "mapper": "auto"})]
+                                                   "records": tmp_path / "r", "mapper": "auto", "seed": None})]
     assert "not valid (slow disk link: 480 Mb/s)" in result.output and "1.5 s" in result.output
-    result = invoke(["run", str(photos), str(tmp_path / "o2"), "--name", "n", "--mapper", "global"])
+    result = invoke(["run", str(photos), str(tmp_path / "o2"), "--name", "n", "--mapper", "global", "--seed", "7"])
     assert result.exit_code == 0, result.output
-    assert calls[1][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "global"}
+    assert calls[1][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "global",
+                           "seed": 7}
 
 
 def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_records_written(tmp_path, monkeypatch):

@@ -28,6 +28,8 @@ STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the p
               "(the default targets detected first; then depth maps, dense cloud, model, texture, DEM, orthophoto)")
 MAPPER_HELP = ("the mapper of the alignment: auto (the one ppg process picks for the set), incremental or global; the "
                "record keeps it as mapper_requested beside the mapper the run used")
+SEED_HELP = ("the seed of the RANSAC of the geometric verification of the matches (PPG_RANSAC_SEED in the child): runs "
+             "with the same seed verify the same pairs; without it a seed from the clock, and the record says -1")
 RECORDS_HELP = "the folder of the records (default: OUT)"
 
 
@@ -39,6 +41,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
                                                            "say the set and what is measured, e.g. trench-28-align"),
               steps: str = typer.Option("align", "--steps", help=STEPS_HELP),
               mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
+              seed: Optional[int] = typer.Option(None, "--seed", min=0, help=SEED_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
               records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
@@ -55,7 +58,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
                                  param_hint="--mapper")
     _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, mapper=mapper))
+              records=records, mapper=mapper, seed=seed))
 
 
 @bench_app.command("synthetic")
