@@ -6,9 +6,11 @@ name: rust
 #   deny          the licences and the sources of the crates of the workspace, against native/deny.toml;
 #   software-gpu  a check: the GPU kernels on the software rasterisers of the runners, which have no GPU
 #                 (lavapipe on Linux, WARP on Windows), required on both. The program never takes such an
-#                 adapter by itself, so the job names it: `ppg-bench match --device N` with the tiles the
+#                 adapter by itself, so the job names it: `ppg-bench match --device N --n 1024` with the tiles the
 #                 adapter's workgroup memory takes and again with `--workgroup-kb 16`, the small tiles (the
-#                 matcher must give the same matches with either, and the same as its CPU twin), and
+#                 matcher must give the same matches with either, and the same as its CPU twin; 1024 descriptors
+#                 because WARP takes minutes for the 4096 of the default, the bit-for-bit comparison at full size
+#                 being the Rust test `matching` of the job `test`), and
 #                 PPG_TEST_SOFTWARE_GPU=1 for the tests of the kernels in tests/test_native.py. One of them is
 #                 left out, the fusion compared with COLMAP's; the others run, SIFT included: a kernel that
 #                 fails on one of the rasterisers fails the check and is reported, never hidden by a filter.
@@ -101,26 +103,30 @@ jobs:
             exit 1
           fi
           echo "SOFTWARE_ADAPTERS=$software" >> "$GITHUB_ENV"
-      - name: Matching kernel on each software adapter (ppg-bench match --device N, with both tile sizes)
+      - name: Matching kernel on each software adapter (ppg-bench match --device N --n 1024, both tile sizes)
         id: matching
         shell: bash
         working-directory: native
         run: |
           # match without --device leaves the software adapters out (it answers "skipped" where there is no
           # GPU), so each is named: once with the tiles its workgroup memory takes, once with the small tiles
-          # (--workgroup-kb 16). A run that fails does not stop the next: the step fails at the end
+          # (--workgroup-kb 16). 1024 descriptors a set, not the 4096 of the default: WARP needs about 3.5
+          # minutes for 4096 x 4096 (one run of the first version of this step), 1024 x 1024 is a sixteenth of
+          # that and still spans several tiles of both sets with either tile size. A run that fails does not
+          # stop the next: the step fails at the end
           failed=0
           for device in $SOFTWARE_ADAPTERS; do
             for options in "" "--workgroup-kb 16"; do
               status=0
-              answer="$(cargo run --release -p ppg_bench -- match --device "$device" $options 2>&1)" || status=$?
+              answer="$(cargo run --release -p ppg_bench -- match --device "$device" --n 1024 $options 2>&1)" \
+                || status=$?
               printf '%s\n' "$answer"
               {
-                echo "ppg-bench match --device $device $options (exit code $status)"
+                echo "ppg-bench match --device $device --n 1024 $options (exit code $status)"
                 echo '```'; printf '%s\n' "$answer" | tail -20; echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
               if [ "$status" -ne 0 ]; then
-                echo "::error::ppg-bench match --device $device $options ended with exit code $status"
+                echo "::error::ppg-bench match --device $device --n 1024 $options ended with exit code $status"
                 failed=1
               fi
             done
