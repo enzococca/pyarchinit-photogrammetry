@@ -2,8 +2,9 @@
 //! bundle adjustment (`bundle`), the depth maps, PatchMatch, the TIN, the GPU kernels (wgpu), the
 //! CPU twins of the descriptor matching (`matching`) and of SIFT (`sift_cpu`), the photos read
 //! as COLMAP reads them (`image`), the feature store (`store`), the queue of units shared by the
-//! GPUs and the CPU (`sched`), the features step built on them (`features`) and the minimal
-//! solvers of two views (`geometry`) - so that they are built and tested on their own
+//! GPUs and the CPU (`sched`), the features step built on them (`features`), the minimal solvers
+//! of two views and the geometric verification of a pair (`geometry`) - so that they are built
+//! and tested on their own
 //! (`cargo test -p ppg_engine`) and timed by the binary `ppg-bench` (folder bench). The Python
 //! extension `ppg_core`, the root package of the workspace, turns numpy arrays into their
 //! arguments.

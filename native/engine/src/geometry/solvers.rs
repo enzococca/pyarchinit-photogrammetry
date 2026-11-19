@@ -12,32 +12,33 @@
 //! Frobenius norm of 1. Every function gives no solution (an empty vector or `None`), never NaN
 //! and never a panic, on degenerate or non-finite input.
 //!
-//! The null vectors and the decompositions come from a singular value decomposition computed here
-//! by one-sided Jacobi rotations, accurate to roundoff on every matrix. nalgebra's is not used:
-//! its special code for a static 3 x 3 matrix takes the eigenvectors of the Gram matrix, which
-//! lose the square of the condition number, and its general code, measured on the scenes of
-//! tests/solvers.rs, returned factorisations off by 1e-6 on a fundamental matrix and by 4e-2 on
-//! an essential matrix (two equal singular values), and by 1e-11 to 1e-8 on random matrices of
-//! the sizes used here. A tall least-squares system is reduced first to the R of nalgebra's QR
-//! decomposition, which has the same right singular vectors and came out exact to roundoff.
+//! The null vectors and the decompositions come from the singular value decomposition of
+//! `linalg` (one-sided Jacobi rotations, accurate to roundoff on every matrix; the module doc
+//! says why nalgebra's is not used). A tall least-squares system is reduced first to the R of
+//! nalgebra's QR decomposition, which has the same right singular vectors and came out exact to
+//! roundoff.
 
 use std::ops::{Add, Mul, Sub};
 
 use nalgebra::{DMatrix, Matrix3, SMatrix, SVector, Vector3, LU, QR};
+
+use super::linalg::{dynamic, jacobi_svd, unit};
 
 /// A singular value below this fraction of the largest counts as zero: the system has lost rank,
 /// the configuration is degenerate. Exact degeneracy computes to about 1e-16 of the largest; a
 /// configuration this close to it gives no usable model anyway.
 const RANK_TOLERANCE: f64 = 1e-10;
 
-/// The bound on the sweeps of the Jacobi decomposition, which converges in about ten on a 9 x 9
-/// matrix; a matrix that reaches it is decomposed to the accuracy reached.
-const MAX_SWEEPS: usize = 60;
-
 /// A solution of the five-point constraints is accepted when its residual is below this fraction
 /// of the bound on it (the norms of the constraint matrix and of the monomials): a converged one
 /// is at roundoff, 1e-15; a root the back-substitution could not place leaves 1e-4 or more.
 const CONVERGED: f64 = 1e-10;
+
+/// Two essential matrices of unit norm closer than this, up to sign, are the same solution: two
+/// roots of the polynomial that the refinement brought onto one solution (each is then at
+/// roundoff, 1e-15, from it; distinct solutions of five points are farther apart by orders of
+/// magnitude).
+const DUPLICATE_TOLERANCE: f64 = 1e-8;
 
 /// The essential matrices of five correspondences in normalised coordinates (Nister 2004, as
 /// COLMAP's `EssentialMatrixFivePointEstimator`): up to ten, each of unit Frobenius norm. The
@@ -45,12 +46,25 @@ const CONVERGED: f64 = 1e-10;
 /// constraints on E (`det E = 0`, `2 E E^T E - tr(E E^T) E = 0`) are reduced by Gauss-Jordan
 /// elimination to a 3 x 3 matrix of polynomials in z whose determinant, of degree ten, vanishes
 /// at the solutions; x and y follow from its null vector. No solution when the five points are
-/// degenerate (fewer than five independent constraints) or not finite.
+/// degenerate (fewer than five independent constraints) or not finite. Two roots the refinement
+/// brings onto one solution give it once (`DUPLICATE_TOLERANCE`).
 pub fn essential_five_point(x1: &[[f64; 2]; 5], x2: &[[f64; 2]; 5]) -> Vec<Matrix3<f64>> {
     five_point(x1, x2).unwrap_or_default()
 }
 
-fn five_point(x1: &[[f64; 2]; 5], x2: &[[f64; 2]; 5]) -> Option<Vec<Matrix3<f64>>> {
+/// The essential matrices of five or more correspondences in normalised coordinates: the
+/// five-point solver on the four right singular vectors of the smallest singular values of all
+/// the epipolar constraints (COLMAP's estimator with more than five points, the local step of its
+/// LO-RANSAC). With five points it is `essential_five_point`. No solution with fewer than five
+/// points, with lengths that differ, or when the points are degenerate or not finite.
+pub fn essential_n_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Matrix3<f64>> {
+    if x1.len() < 5 || x1.len() != x2.len() {
+        return Vec::new();
+    }
+    five_point(x1, x2).unwrap_or_default()
+}
+
+fn five_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Vec<Matrix3<f64>>> {
     if !(finite(x1) && finite(x2)) {
         return None;
     }
@@ -107,7 +121,21 @@ fn five_point(x1: &[[f64; 2]; 5], x2: &[[f64; 2]; 5]) -> Option<Vec<Matrix3<f64>
             solutions.push(e);
         }
     }
+    drop_duplicates(&mut solutions);
     Some(solutions)
+}
+
+/// Of matrices of unit norm, the later one of two closer than `DUPLICATE_TOLERANCE` up to sign is
+/// dropped.
+fn drop_duplicates(solutions: &mut Vec<Matrix3<f64>>) {
+    let mut kept: Vec<Matrix3<f64>> = Vec::with_capacity(solutions.len());
+    for e in solutions.drain(..) {
+        let same = |k: &Matrix3<f64>| (k - e).norm().min((k + e).norm()) <= DUPLICATE_TOLERANCE;
+        if !kept.iter().any(same) {
+            kept.push(e);
+        }
+    }
+    *solutions = kept;
 }
 
 /// The fundamental matrices of seven correspondences (as COLMAP's
@@ -183,21 +211,22 @@ pub fn homography_dlt(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Matrix3<f64>> 
 
 /// COLMAP's `ComputeSquaredSampsonError`: the square of `b^T F a` over the squared norm of its
 /// gradient (the first two components of `F a` and of `F^T b`), the first-order approximation of
-/// the squared geometric distance of the correspondence from the epipolar constraint. Zero over
-/// zero (both points on the epipoles) is zero, not NaN.
+/// the squared geometric distance of the correspondence from the epipolar constraint. Infinite,
+/// never zero or NaN, when the gradient vanishes (both points on the epipoles, the zero matrix) or
+/// is not finite: a degenerate correspondence is never an inlier.
 pub fn sampson_sq(f: &Matrix3<f64>, a: [f64; 2], b: [f64; 2]) -> f64 {
     let fa = f * Vector3::new(a[0], a[1], 1.0);
     let ftb = f.transpose() * Vector3::new(b[0], b[1], 1.0);
     let numerator = fa.x * b[0] + fa.y * b[1] + fa.z;
     let denominator = fa.x * fa.x + fa.y * fa.y + ftb.x * ftb.x + ftb.y * ftb.y;
-    if denominator == 0.0 {
-        if numerator == 0.0 {
-            0.0
-        } else {
-            f64::INFINITY
-        }
+    if !(denominator > 0.0 && denominator.is_finite()) {
+        return f64::INFINITY;
+    }
+    let error = numerator * numerator / denominator;
+    if error.is_nan() {
+        f64::INFINITY
     } else {
-        numerator * numerator / denominator
+        error
     }
 }
 
@@ -232,12 +261,20 @@ pub fn pose_from_essential(
     let (r1, r2, t) = decompose_essential(e)?;
     let mut best: Option<(Matrix3<f64>, Vector3<f64>, usize)> = None;
     for (r, t) in [(r1, t), (r2, t), (r1, -t), (r2, -t)] {
-        let count = x1.iter().zip(x2).filter(|(&a, &b)| in_front(&r, &t, a, b)).count();
+        let count = points_in_front(&r, &t, x1, x2);
         if best.is_none_or(|(_, _, n)| count >= n) {
             best = Some((r, t, count));
         }
     }
     best.filter(|(_, _, count)| *count > 0)
+}
+
+/// How many of the correspondences (normalised coordinates) are in front of both cameras under
+/// the pose cam2_from_cam1 `(r, t)`, once triangulated (COLMAP's `CheckCheirality`: a point counts
+/// when its depth in both cameras is above machine epsilon and below a thousand baselines; none
+/// when `t` is zero).
+pub fn points_in_front(r: &Matrix3<f64>, t: &Vector3<f64>, x1: &[[f64; 2]], x2: &[[f64; 2]]) -> usize {
+    x1.iter().zip(x2).filter(|(&a, &b)| in_front(r, t, a, b)).count()
 }
 
 fn decompose_essential(e: &Matrix3<f64>) -> Option<(Matrix3<f64>, Matrix3<f64>, Vector3<f64>)> {
@@ -306,79 +343,6 @@ fn homography_rows(a: [f64; 2], b: [f64; 2]) -> [[f64; 9]; 2] {
 /// The 3 x 3 matrix whose row-major entries are the nine components of `v`.
 fn as_matrix(v: &SVector<f64, 9>) -> Matrix3<f64> {
     Matrix3::from_row_slice(v.as_slice())
-}
-
-/// A 3 x 3 matrix as a dynamic one, for the decomposition.
-fn dynamic(m: &Matrix3<f64>) -> DMatrix<f64> {
-    DMatrix::from_fn(3, 3, |i, j| m[(i, j)])
-}
-
-/// A singular value decomposition by one-sided Jacobi rotations (Hestenes): `v` is orthogonal,
-/// the columns of `av = A v` are orthogonal and their norms are the singular values `s`, in
-/// descending order; the left singular vectors are the columns of `av` divided by them, where
-/// they are not zero.
-struct Svd {
-    v: DMatrix<f64>,
-    av: DMatrix<f64>,
-    s: Vec<f64>,
-}
-
-/// The decomposition of a square or tall matrix: pairs of columns of `A v` are rotated until
-/// every two are orthogonal (to a tolerance of roundoff times the root of the number of rows, as
-/// LAPACK's), the same rotations accumulated in `v`. Accurate to roundoff on every matrix; see
-/// the module doc for why nalgebra's is not used.
-fn jacobi_svd(a: &DMatrix<f64>) -> Svd {
-    let n = a.ncols();
-    let tolerance = f64::EPSILON * (a.nrows() as f64).sqrt();
-    let mut av = a.clone();
-    let mut v = DMatrix::<f64>::identity(n, n);
-    for _ in 0..MAX_SWEEPS {
-        let mut rotated = false;
-        for p in 0..n {
-            for q in p + 1..n {
-                let alpha = av.column(p).norm_squared();
-                let beta = av.column(q).norm_squared();
-                let gamma = av.column(p).dot(&av.column(q));
-                if gamma.abs() <= tolerance * (alpha * beta).sqrt() {
-                    continue;
-                }
-                rotated = true;
-                // the rotation that makes the two columns orthogonal, by the smaller angle
-                let zeta = (beta - alpha) / (2.0 * gamma);
-                let t = zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt());
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let s = c * t;
-                rotate_columns(&mut av, p, q, c, s);
-                rotate_columns(&mut v, p, q, c, s);
-            }
-        }
-        if !rotated {
-            break;
-        }
-    }
-    let norms: Vec<f64> = (0..n).map(|k| av.column(k).norm()).collect();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| norms[j].total_cmp(&norms[i]));
-    Svd {
-        v: DMatrix::from_fn(n, n, |i, j| v[(i, order[j])]),
-        av: DMatrix::from_fn(a.nrows(), n, |i, j| av[(i, order[j])]),
-        s: order.iter().map(|&k| norms[k]).collect(),
-    }
-}
-
-/// The columns `p` and `q` of `m` replaced by `c p - s q` and `s p + c q`.
-fn rotate_columns(m: &mut DMatrix<f64>, p: usize, q: usize, c: f64, s: f64) {
-    for row in 0..m.nrows() {
-        let (x, y) = (m[(row, p)], m[(row, q)]);
-        m[(row, p)] = c * x - s * y;
-        m[(row, q)] = s * x + c * y;
-    }
-}
-
-/// The matrix scaled to a Frobenius norm of 1; `None` when it is zero or not finite.
-fn unit(m: &Matrix3<f64>) -> Option<Matrix3<f64>> {
-    let norm = m.norm();
-    (norm > 0.0 && norm.is_finite()).then(|| m / norm)
 }
 
 /// A basis of the null space of the linear system `A f = 0` whose rows are given, of the dimension
@@ -742,42 +706,22 @@ mod tests {
     }
 
     #[test]
-    fn the_jacobi_decomposition_is_exact_to_roundoff() {
-        let mut random = Lcg(7);
-        for trial in 0..200 {
-            // random matrices of the sizes used, and essential matrices (two equal singular
-            // values, one zero), on which nalgebra's decomposition failed
-            let (rows, cols) = [(3, 3), (4, 4), (9, 9), (3, 3)][trial % 4];
-            let a = if trial % 4 == 3 {
-                let t = Vector3::new(random.symmetric(), random.symmetric(), random.symmetric());
-                let axis = Vector3::new(random.symmetric(), random.symmetric(), random.symmetric()).normalize();
-                let angle = random.symmetric();
-                let k = Matrix3::new(0.0, -axis.z, axis.y, axis.z, 0.0, -axis.x, -axis.y, axis.x, 0.0);
-                let r = Matrix3::identity() + k * angle.sin() + k * k * (1.0 - angle.cos());
-                dynamic(&(Matrix3::new(0.0, -t.z, t.y, t.z, 0.0, -t.x, -t.y, t.x, 0.0) * r))
-            } else {
-                DMatrix::from_fn(rows, cols, |_, _| random.symmetric())
-            };
-            let svd = jacobi_svd(&a);
-            // roundoff: a few units of machine epsilon times the size of the matrix
-            let roundoff = 64.0 * f64::EPSILON * a.norm();
-            let recomposed = &svd.av * svd.v.transpose();
-            let error = (&a - recomposed).norm();
-            assert!(error <= roundoff, "trial {trial}: |A - A V V^T| = {error}");
-            let identity = DMatrix::<f64>::identity(cols, cols);
-            assert!((svd.v.transpose() * &svd.v - identity).norm() <= 64.0 * f64::EPSILON, "trial {trial}: V");
-            for k in 1..cols {
-                assert!(svd.s[k - 1] >= svd.s[k], "trial {trial}: singular values {:?}", svd.s);
-                for j in 0..k {
-                    let dot = svd.av.column(j).dot(&svd.av.column(k));
-                    assert!(dot.abs() <= 64.0 * f64::EPSILON * svd.s[0] * svd.s[0], "trial {trial}: {j}, {k}: {dot}");
-                }
-            }
-            if trial % 4 == 3 {
-                let same = (svd.s[0] - svd.s[1]).abs() <= 1e-13 * svd.s[0] && svd.s[2] <= 1e-13 * svd.s[0];
-                assert!(same, "trial {trial}: an essential matrix has singular values {:?}", svd.s);
-            }
-        }
+    fn a_solution_found_twice_is_kept_once() {
+        let mut random = Lcg(5);
+        let a = unit(&random.matrix()).unwrap();
+        let b = unit(&random.matrix()).unwrap();
+        // the same solution again, with the other sign, and moved by less than the tolerance; a
+        // distinct one; one moved by more than the tolerance
+        let nudge = Matrix3::from_element(DUPLICATE_TOLERANCE / 10.0);
+        let mut solutions = vec![a, -a, a + nudge, b, a + nudge * 100.0];
+        drop_duplicates(&mut solutions);
+        assert_eq!(solutions.len(), 3, "{solutions:?}");
+        assert_eq!(solutions[0], a);
+        assert_eq!(solutions[1], b);
+        assert!((solutions[2] - a).norm() > DUPLICATE_TOLERANCE);
+        let mut none: Vec<Matrix3<f64>> = Vec::new();
+        drop_duplicates(&mut none);
+        assert!(none.is_empty());
     }
 
     #[test]

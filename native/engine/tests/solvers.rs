@@ -9,8 +9,8 @@
 use nalgebra::{Matrix3, Vector3};
 use ppg_engine::camera::Camera;
 use ppg_engine::geometry::solvers::{
-    essential_five_point, fundamental_eight_point, fundamental_seven_point, homography_dlt, homography_four_point,
-    pose_from_essential, sampson_sq, transfer_sq,
+    essential_five_point, essential_n_point, fundamental_eight_point, fundamental_seven_point, homography_dlt,
+    homography_four_point, pose_from_essential, sampson_sq, transfer_sq,
 };
 
 const FOCAL: f64 = 1000.0;
@@ -232,6 +232,77 @@ fn the_five_point_solver_finds_the_essential_matrix_of_exact_data() {
             assert!(distance < 1e-8, "scene {seed} (planar {planar}): the closest solution is {distance} off");
         }
     }
+}
+
+#[test]
+fn the_five_point_solutions_are_distinct_up_to_sign() {
+    // a root the refinement brings onto another one is dropped: no two solutions within the
+    // tolerance of the solver (1e-8 of a unit matrix, up to sign)
+    for seed in 1..=SCENES {
+        for planar in [false, true] {
+            let scene = Scene::new(seed, planar);
+            let (n1, n2) = scene.normalised();
+            let solutions = essential_five_point(&first::<5>(&n1), &first::<5>(&n2));
+            for (i, a) in solutions.iter().enumerate() {
+                for b in &solutions[i + 1..] {
+                    let d = distance_up_to_scale(a, b);
+                    assert!(d > 1e-8, "scene {seed} (planar {planar}): two solutions {d} apart");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_essential_matrix_of_every_point_fits_noisy_data() {
+    // the estimator of the local optimisation of RANSAC: the five-point machinery on the null
+    // space of all the correspondences
+    let mut random = Lcg(779);
+    for seed in 1..=SCENES {
+        let scene = Scene::new(seed, false);
+        let (e1, e2) = scene.normalised();
+        // exact data: the truth, to roundoff, among the solutions; five points give what the
+        // five-point solver gives
+        let exact = essential_n_point(&e1, &e2);
+        assert!(!exact.is_empty(), "scene {seed}: no solution on exact data");
+        let (distance, residual) = closest(&exact, &scene.essential(), |e| largest_sampson(e, &e1, &e2));
+        assert!(residual < 1e-9 && distance < 1e-8, "scene {seed}: {distance} off, a residual of {residual}");
+        let five = essential_five_point(&first::<5>(&e1), &first::<5>(&e2));
+        assert_eq!(essential_n_point(&e1[..5], &e2[..5]).len(), five.len());
+        // half a pixel of noise: the best solution keeps the median Sampson error below a pixel
+        let (x1, x2) = scene.noisy(&mut random, 0.5);
+        let n1: Vec<[f64; 2]> = x1.iter().map(|&p| normalised(p)).collect();
+        let n2: Vec<[f64; 2]> = x2.iter().map(|&p| normalised(p)).collect();
+        let solutions = essential_n_point(&n1, &n2);
+        assert!(!solutions.is_empty(), "scene {seed}: no solution on noisy data");
+        let best = solutions
+            .iter()
+            .map(|e| median(n1.iter().zip(&n2).map(|(&a, &b)| sampson_sq(e, a, b).sqrt() * FOCAL).collect()))
+            .fold(f64::INFINITY, f64::min);
+        assert!(best < 1.0, "scene {seed}: a median Sampson error of {best} px");
+    }
+    // fewer than five points, lengths that differ, points that are not numbers
+    let scene = Scene::new(1, false);
+    let (e1, e2) = scene.normalised();
+    assert!(essential_n_point(&e1[..4], &e2[..4]).is_empty());
+    assert!(essential_n_point(&e1[..6], &e2[..5]).is_empty());
+    assert!(essential_n_point(&[[f64::NAN; 2]; 6], &e2[..6]).is_empty());
+}
+
+#[test]
+fn the_sampson_error_of_a_degenerate_correspondence_is_infinite() {
+    // never an inlier: the zero matrix (numerator and denominator both zero), both points on the
+    // epipoles (the gradient vanishes), a matrix that is not a number
+    assert!(sampson_sq(&Matrix3::zeros(), [1.0, 2.0], [3.0, 4.0]).is_infinite());
+    let f = Matrix3::new(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    assert!(sampson_sq(&f, [0.0, 2.0], [0.0, 4.0]).is_infinite());
+    assert!(sampson_sq(&Matrix3::from_element(f64::NAN), [1.0, 2.0], [3.0, 4.0]).is_infinite());
+    assert!(sampson_sq(&Matrix3::from_element(f64::INFINITY), [1.0, 2.0], [3.0, 4.0]).is_infinite());
+    assert!(sampson_sq(&f, [f64::NAN, 2.0], [0.0, 4.0]).is_infinite());
+    // a regular correspondence has a finite error, zero on exact data
+    let scene = Scene::new(1, false);
+    let e = sampson_sq(&scene.fundamental(), scene.x1[0], scene.x2[0]);
+    assert!(e.is_finite() && e < 1e-18, "{e}");
 }
 
 #[test]

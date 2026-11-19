@@ -879,6 +879,98 @@ def test_the_bundle_bindings_refuse_what_is_not_a_problem():
     assert out["rolling_shutter"] is None and out["bias"] == {} and out["points"].shape == (1, 3)
 
 
+# ------------------------------------------------------------------- the geometric verification of a pair
+# The options the native verification reads (the names of ``two_view_defaults()``) and the attribute of
+# ``pycolmap.TwoViewGeometryOptions`` each one is the port of. The fields of pycolmap that are not read are
+# ``NOT_PORTED``: each is off by default, and the native engine behaves as COLMAP with them off.
+TWO_VIEW_FIELDS = {
+    "ransac_max_error": ("ransac", "max_error"),
+    "ransac_confidence": ("ransac", "confidence"),
+    "ransac_min_num_trials": ("ransac", "min_num_trials"),
+    "ransac_max_num_trials": ("ransac", "max_num_trials"),
+    "ransac_min_inlier_ratio": ("ransac", "min_inlier_ratio"),
+    "ransac_dyn_num_trials_multiplier": ("ransac", "dyn_num_trials_multiplier"),
+    "min_num_inliers": ("min_num_inliers",),
+    "min_e_f_inlier_ratio": ("min_E_F_inlier_ratio",),
+    "max_h_inlier_ratio": ("max_H_inlier_ratio",),
+    "watermark_min_inlier_ratio": ("watermark_min_inlier_ratio",),
+    "watermark_border_size": ("watermark_border_size",),
+    "watermark_detection_max_error": ("watermark_detection_max_error",),
+    "detect_watermark": ("detect_watermark",),
+    "use_sampson_refinement": ("use_sampson_refinement",),
+    "compute_relative_pose": ("compute_relative_pose",),
+}
+NOT_PORTED = {"min_inlier_ratio", "multiple_ignore_watermark", "filter_stationary_matches",
+              "stationary_matches_max_error", "force_H_use", "use_degensac", "multiple_models",
+              "ransac.random_seed", "ransac.num_threads"}
+
+
+def _two_view_core():
+    if not hasattr(ppg_core, "verify_pair"):
+        pytest.skip("the native core with the geometric verification of a pair is not installed")
+
+
+def test_the_two_view_options_are_colmaps():
+    """The defaults the binding reports are the fields of ``pycolmap.TwoViewGeometryOptions()`` of the
+    installed pycolmap, one by one and of the same type; every field of pycolmap is either read by the
+    native code or named as not ported."""
+    _two_view_core()
+    import pycolmap
+
+    defaults = ppg_core.two_view_defaults()
+    assert set(defaults) == set(TWO_VIEW_FIELDS)
+    options = pycolmap.TwoViewGeometryOptions()
+    for name, path in TWO_VIEW_FIELDS.items():
+        value = options
+        for attribute in path:
+            value = getattr(value, attribute)
+        assert defaults[name] == value and type(defaults[name]) is type(value), (name, defaults[name], value)
+    as_dict = options.todict()
+    every_field = {k for k in as_dict if k != "ransac"} | {"ransac." + k for k in as_dict["ransac"]}
+    ported = {".".join(path) for path in TWO_VIEW_FIELDS.values()}
+    assert not (ported & NOT_PORTED)
+    assert ported | NOT_PORTED == every_field, every_field - ported - NOT_PORTED
+
+
+def test_verify_pair_agrees_with_colmap(processed):
+    """On the three pairs of the trench with the most raw matches, read with COLMAP's own two-view geometry
+    from the classic database: the native verification gives the same configuration and an inlier count
+    within 5 % of COLMAP's (COLMAP's RANSAC is not seeded in the fixture, so its count moves by a few)."""
+    _two_view_core()
+    import pycolmap
+
+    _, ch, _ = processed
+    db = pycolmap.Database.open(str(ch.data_dir / "sfm" / "database.db"))
+    try:
+        pair_ids, all_matches = db.read_all_matches()
+        strongest = sorted(zip(pair_ids, all_matches), key=lambda p: -len(p[1]))[:3]
+        assert len(strongest) == 3
+        for pair_id, matches in strongest:
+            id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
+            colmap = db.read_two_view_geometry(id1, id2)
+            cameras, keypoints = [], []
+            for image_id in (id1, id2):
+                image = db.read_image(image_id)
+                cameras.append(db.read_camera(image.camera_id))
+                keypoints.append(db.read_keypoints(image_id))
+            calibrated = all(c.has_prior_focal_length for c in cameras)
+            c1, c2 = cameras
+            out = ppg_core.verify_pair(c1.model_name, np.asarray(c1.params), (c1.width, c1.height), keypoints[0],
+                                       c2.model_name, np.asarray(c2.params), (c2.width, c2.height), keypoints[1],
+                                       matches, np.ones(len(matches), np.float32), calibrated, pair_id)
+            n_colmap = len(colmap.inlier_matches)
+            assert n_colmap >= 15, "the strongest pairs of the trench are verified by COLMAP"
+            assert out["config"] == int(colmap.config), (id1, id2, out["config"], colmap.config)
+            n_native = len(out["inliers"])
+            assert abs(n_native - n_colmap) <= 0.05 * n_colmap, (id1, id2, n_native, n_colmap)
+            assert out["inliers"].dtype == np.uint32 and out["inliers"].shape == (n_native, 2)
+            assert set(map(tuple, out["inliers"].tolist())) <= set(map(tuple, matches.tolist()))
+            assert out["F"].shape == (3, 3) and out["H"].shape == (3, 3)
+            assert (out["E"] is None) == (not calibrated) or out["E"].shape == (3, 3)
+    finally:
+        db.close()
+
+
 # ------------------------------------------------------------------------------------------- the TIN
 def _tin_triangles(t):
     return {tuple(r) for r in np.sort(t.triangles, axis=1).tolist()}

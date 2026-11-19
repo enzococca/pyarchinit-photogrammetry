@@ -50,7 +50,16 @@ direct linear transform of the homography, the Sampson and transfer errors, the 
 the essential matrix and the choice of its pose by the triangulated points. The coefficient
 tables COLMAP generates offline are computed by polynomial arithmetic, and the roots and the
 decompositions are found by methods of this file's own; no file of COLMAP is compiled into the
-extension. COLMAP is distributed under the BSD 3-clause license below (after VLFeat's).
+extension. The robust estimation and the configuration of a pair - native/engine/src/geometry/
+ransac.rs and two_view.rs - are arranged as COLMAP's LO-RANSAC (src/colmap/optim/loransac.h,
+ransac.h, support_measurement.h: the support, the local optimisation, the dynamic number of
+trials and its bound) and as its estimation of the two-view geometry
+(src/colmap/estimators/two_view_geometry.cc: the thresholds, the decision between the essential,
+fundamental and homography models by their inlier counts, the watermark detection with its
+translation estimator, the relative pose), with the decomposition of the homography of
+src/colmap/geometry/homography_matrix.cc (Malis and Vargas 2007); the PROSAC sampler is written
+from the paper (Chum and Matas 2005). COLMAP is distributed under the BSD 3-clause license below
+(after VLFeat's).
 
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's.
 
