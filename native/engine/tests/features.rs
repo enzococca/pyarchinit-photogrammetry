@@ -14,6 +14,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use ppg_engine::features::{extract_all, extract_pixels, FeatureOptions, PhotoJob};
 use ppg_engine::gpu;
@@ -398,24 +399,39 @@ fn a_mask_drops_the_points_under_it() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A worker of the tests: `unit * 10`, failing on purpose at its `fail_at`-th unit. A CPU fake
-/// made `after_gpu` holds its first unit until the GPU fake has run twice, so that the GPU
-/// reaches its third unit before the CPU can drain the queue of trivial units (the scenarios
-/// are then the same at every run, whatever the threads do).
+/// A worker of the tests: `unit * 10`, failing on purpose at its `fail_at`-th unit, napping
+/// `nap` on every unit. A CPU fake `waits` for the GPU fake before its first unit - for its
+/// error, or for two units done by it - so that the GPU takes the units of its scenario before
+/// the CPU can drain a queue of trivial units.
 struct Fake {
     name: &'static str,
     fail_at: Option<usize>,
     served: usize,
-    after_gpu: bool,
+    waits: Wait,
+    nap: Duration,
 }
 
-/// Every call of `run` of every fake, and the units the GPU fake did.
+/// What a CPU fake waits for before its first unit.
+#[derive(Clone, Copy)]
+enum Wait {
+    Nothing,
+    /// The GPU fake has returned its error: deterministic, every unit of the GPU is behind it.
+    GpuError,
+    /// The GPU fake has done two units: the hook retires it at its third pop, which follows
+    /// within microseconds, while the CPU, napping a millisecond per unit, needs tens of
+    /// milliseconds to drain the queue - a window wide enough on a loaded computer.
+    TwoGpuRuns,
+}
+
+/// Every call of `run` of every fake; the units the GPU fake did; whether it failed.
 static CALLS: AtomicUsize = AtomicUsize::new(0);
 static GPU_RUNS: AtomicUsize = AtomicUsize::new(0);
+static GPU_FAILED: AtomicBool = AtomicBool::new(false);
 
-/// Held while the test hook's variable is set and by every test that runs GPU workers through
-/// the scheduler: the tests of this file run in parallel threads of one process, and the
-/// variable is read at the start of every `sched::run`.
+/// Held while the test hook's variable is set, and by every test that lists the adapters or
+/// runs GPU workers: the tests of this file run in parallel threads of one process, the
+/// variable is read at the start of every `sched::run`, and the drivers read the environment
+/// when the adapters are enumerated.
 static TURN: Mutex<()> = Mutex::new(());
 
 impl Worker<u32, u32> for Fake {
@@ -424,16 +440,24 @@ impl Worker<u32, u32> for Fake {
     }
 
     fn run(&mut self, unit: &u32) -> Result<u32, String> {
-        if self.after_gpu && self.served == 0 {
-            let started = std::time::Instant::now();
-            while GPU_RUNS.load(Ordering::SeqCst) < 2 {
-                assert!(started.elapsed() < std::time::Duration::from_secs(10), "the GPU fake never ran twice");
+        if self.served == 0 {
+            let started = Instant::now();
+            let waits = self.waits;
+            let ready = || match waits {
+                Wait::Nothing => true,
+                Wait::GpuError => GPU_FAILED.load(Ordering::SeqCst),
+                Wait::TwoGpuRuns => GPU_RUNS.load(Ordering::SeqCst) >= 2,
+            };
+            while !ready() {
+                assert!(started.elapsed() < Duration::from_secs(20), "the GPU fake never got there");
                 std::thread::yield_now();
             }
         }
+        std::thread::sleep(self.nap);
         self.served += 1;
         CALLS.fetch_add(1, Ordering::SeqCst);
         if self.fail_at == Some(self.served) {
+            GPU_FAILED.store(true, Ordering::SeqCst);
             return Err(format!("broken on purpose at unit {unit}"));
         }
         if self.name.starts_with("GPU") {
@@ -444,14 +468,15 @@ impl Worker<u32, u32> for Fake {
 }
 
 fn fake(name: &'static str, fail_at: Option<usize>) -> Box<dyn Worker<u32, u32>> {
-    Box::new(Fake { name, fail_at, served: 0, after_gpu: false })
+    Box::new(Fake { name, fail_at, served: 0, waits: Wait::Nothing, nap: Duration::ZERO })
 }
 
-/// The CPU fakes of the scenarios with a GPU: each holds its first unit until the GPU has run
-/// twice.
-fn cpu_after_gpu() -> Option<sched::Factory<'static, u32, u32>> {
+/// The CPU fakes of a scenario with a GPU: each waits for `waits` before its first unit and naps
+/// `nap` on every unit; the counters of the GPU fake start afresh.
+fn cpu_waiting(waits: Wait, nap: Duration) -> Option<sched::Factory<'static, u32, u32>> {
     GPU_RUNS.store(0, Ordering::SeqCst);
-    Some(Box::new(|| Box::new(Fake { name: "CPU", fail_at: None, served: 0, after_gpu: true })))
+    GPU_FAILED.store(false, Ordering::SeqCst);
+    Some(Box::new(move || Box::new(Fake { name: "CPU", fail_at: None, served: 0, waits, nap })))
 }
 
 #[test]
@@ -470,10 +495,12 @@ fn a_worker_that_fails_gives_its_units_back() {
     let calls_alone = std::mem::take(&mut *calls.lock().unwrap());
     assert_eq!((calls_alone.first(), calls_alone.last()), (Some(&(0, 20)), Some(&(20, 20))), "{calls_alone:?}");
 
-    // a GPU that fails at its third unit beside the CPU: the same answer, one line in the log
+    // a GPU that fails at its third unit beside the CPU (held until the GPU has failed): the same
+    // answer, one line in the log
     CALLS.store(0, Ordering::SeqCst);
     let failing = vec![fake("GPU 0 (fake)", Some(3))];
-    let shared = sched::run(units.clone(), failing, cpu_after_gpu(), 1, &never, &progress).unwrap();
+    let cpu_held = cpu_waiting(Wait::GpuError, Duration::ZERO);
+    let shared = sched::run(units.clone(), failing, cpu_held, 1, &never, &progress).unwrap();
     assert_eq!(shared.results, want);
     assert_eq!(shared.log.len(), 1, "{:?}", shared.log);
     assert!(shared.log[0].contains("GPU 0 (fake)") && shared.log[0].contains("broken on purpose"), "{:?}", shared.log);
@@ -503,11 +530,13 @@ fn a_worker_that_fails_gives_its_units_back() {
     assert!(empty.results.is_empty() && empty.log.is_empty());
 
     // the test hook of the lost GPU: PPG_TEST_GPU_FAIL_AFTER=3 retires every GPU worker at its
-    // third unit, without running it, as a GPU that fails would be retired
+    // third unit, without running it, as a GPU that fails would be retired; the CPU is held
+    // until the GPU has done two units and naps a millisecond per unit after that
     CALLS.store(0, Ordering::SeqCst);
     let turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     std::env::set_var(sched::FAIL_AFTER_VAR, "3");
-    let hooked = sched::run(units.clone(), vec![fake("GPU 0 (fake)", None)], cpu_after_gpu(), 1, &never, &progress);
+    let cpu_slow = cpu_waiting(Wait::TwoGpuRuns, Duration::from_millis(1));
+    let hooked = sched::run(units.clone(), vec![fake("GPU 0 (fake)", None)], cpu_slow, 1, &never, &progress);
     std::env::remove_var(sched::FAIL_AFTER_VAR);
     drop(turn);
     let hooked = hooked.unwrap();
@@ -521,6 +550,9 @@ fn a_worker_that_fails_gives_its_units_back() {
 
 #[test]
 fn extract_all_on_a_gpu_shares_the_photos_with_the_cpu() {
+    // taken before the adapters are listed: the drivers read the environment, which the hook
+    // scenario sets for a moment
+    let _turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     let Some(adapter) = gpu::adapters().into_iter().find(|a| a.device_type != "Cpu") else {
         eprintln!("no GPU adapter: the shared extraction is not run");
         return;
@@ -530,7 +562,6 @@ fn extract_all_on_a_gpu_shares_the_photos_with_the_cpu() {
         eprintln!("adapter {} ({}) skipped: {problem}", adapter.index, adapter.name);
         return;
     }
-    let _turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     let dir = folder("gpu");
     let photos = twelve_photos(&dir);
     let limit = 160;
@@ -565,6 +596,97 @@ fn extract_all_on_a_gpu_shares_the_photos_with_the_cpu() {
         assert!(view.keypoints().iter().all(inside), "{name}");
         let other = shared.get(name).unwrap();
         assert!(!other.keypoints().is_empty(), "{name}: no point in the shared store");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_panicking_progress_callback_ends_the_step_instead_of_hanging_it() {
+    let dir = folder("panic");
+    let photos = twelve_photos(&dir);
+    let jobs: Vec<PhotoJob> = photos.iter().map(|(name, _, _)| job(&dir, name, 160)).collect();
+    let store_dir = dir.join("store");
+    // the two panics of this scenario are expected (the callback's, then the scope's): the hook
+    // keeps them out of the output and hands every other panic to the hook that was there
+    let previous = std::sync::Arc::new(std::panic::take_hook());
+    let inner = previous.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        if !(text.contains("the callback raised") || text.contains("a scoped thread panicked")) {
+            inner(info);
+        }
+    }));
+    // the step runs on its own thread, so that a hang is a failed test and not a stuck one
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let store = FeatureStore::create(&store_dir).unwrap();
+        let o = cpu_options();
+        let progress = |done: usize, _: usize| {
+            if done == 2 {
+                panic!("the callback raised");
+            }
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract_all(&jobs, &store, None, &o, &[], &AtomicBool::new(false), &progress)
+        }));
+        let _ = tx.send(outcome.is_err());
+    });
+    let ended = rx.recv_timeout(Duration::from_secs(120));
+    std::panic::set_hook(Box::new(move |info| previous(info)));
+    match ended {
+        Ok(panicked) => assert!(panicked, "extract_all returned as if nothing had happened"),
+        Err(_) => panic!("extract_all did not end within 120 s: the readers were not released"),
+    }
+    // what was done before the panic is in the store, which opens
+    assert!(FeatureStore::open(&dir.join("store")).is_ok());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_store_that_cannot_be_written_ends_the_step_and_a_tiny_photo_is_skipped() {
+    let dir = folder("fatal");
+    let (w, h) = (320usize, 240usize);
+    for i in 0..3 {
+        write_png(&dir.join(format!("photo_{i}.png")), w, h, png::ColorType::Grayscale, &texture(w, h, 50 + i as u64));
+    }
+    let jobs: Vec<PhotoJob> = (0..3).map(|i| job(&dir, &format!("photo_{i}.png"), 160)).collect();
+    let o = FeatureOptions { cpu_threads: 1, ..cpu_options() };
+    let cancel = AtomicBool::new(false);
+    let quiet = |_: usize, _: usize| {};
+
+    // a photo of 6 x 6 is below what the kernels take: skipped as unsupported, no error
+    write_png(&dir.join("tiny.png"), 6, 6, png::ColorType::Grayscale, &[128u8; 36]);
+    let store = FeatureStore::create(&dir.join("store")).unwrap();
+    let report = extract_all(&[job(&dir, "tiny.png", 0)], &store, None, &o, &[], &cancel, &quiet).unwrap();
+    assert_eq!((report.done, report.unsupported.len()), (0, 1), "{:?}", report.log);
+    assert_eq!(report.unsupported, ["tiny.png"]);
+    assert!(report.log.iter().any(|line| line.contains("8 x 8")), "{:?}", report.log);
+
+    // options the kernels refuse are refused before any work, once
+    let bad = FeatureOptions { sift: Options { first_octave: -2, ..o.sift }, ..o.clone() };
+    let refused = extract_all(&jobs, &store, None, &bad, &[], &cancel, &quiet).err().unwrap();
+    assert!(refused.contains("first_octave") && !refused.contains("retired"), "{refused}");
+    assert!(store.is_empty());
+
+    // a store that cannot be written: the error of the step, naming the photo and the store's
+    // problem, no worker retired for it, nothing more attempted
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked_dir = dir.join("locked");
+        let locked = FeatureStore::create(&locked_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = extract_all(&jobs, &locked, None, &o, &[], &cancel, &quiet);
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        match outcome {
+            Ok(_) => eprintln!("the read-only store was written (run as root?): the fatal path is not exercised"),
+            Err(why) => {
+                assert!(why.contains("not written to the store") && why.contains("photo_"), "{why}");
+                assert!(!why.contains("retired"), "{why}");
+                assert!(locked.is_empty());
+            }
+        }
     }
     fs::remove_dir_all(&dir).unwrap();
 }

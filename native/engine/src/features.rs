@@ -14,14 +14,22 @@
 //! more than `2 * readers` of them are in memory beyond those the workers hold, whatever the
 //! number of photos. A photo the decoders of `image` do not read is `unsupported` (Python decodes
 //! it with OpenCV and gives the pixels to [`extract_pixels`]); one that cannot be read at all -
-//! damaged, missing, unreadable - is `unreadable`. A mask (`image::read_mask`) is applied only
-//! when it is of the size of the full photo, as the classic step applies it: a missing mask is
-//! no mask, one that cannot be read or is of another size is logged and not applied.
+//! damaged, missing, unreadable - is `unreadable`; one reduced below the 8 x 8 pixels the kernels
+//! take is `unsupported` too. A mask (`image::read_mask`) is applied only when it is of the size
+//! of the full photo, as the classic step applies it: a missing mask is no mask, one that cannot
+//! be read or is of another size is logged and not applied.
+//!
+//! What ends the step: a worker whose kernel fails is retired by the scheduler and its photo goes
+//! to the others (a lost GPU); a store that cannot be written (a full disk) is the step's failure,
+//! not a device's - the first such error stops every worker after its photo and is the error of
+//! the step; options the kernels refuse are refused before any work. The readers are released
+//! whatever ends the step, a panic of the progress callback included: the panic propagates to
+//! the caller instead of hanging the step.
 
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -94,6 +102,13 @@ enum Problem {
     Unsupported(String),
 }
 
+/// Why a unit was not done: the device's fault (its worker is retired, the unit goes to the
+/// others) or the step's (it ends, with this as its error).
+enum Failure {
+    Device(String),
+    Fatal(String),
+}
+
 /// A photo as the readers leave it for the workers: reduced to the size of its extraction (and
 /// of its preselection image), with its mask when applied.
 struct Decoded {
@@ -128,6 +143,9 @@ struct Pantry {
     changed: Condvar,
     requests: Mutex<Option<Sender<usize>>>,
     window: usize,
+    /// Set when the step ends or stops: no request is made any more and the readers decode
+    /// nothing more.
+    stopped: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -138,14 +156,18 @@ impl Pantry {
     fn new(n: usize, window: usize, requests: Sender<usize>) -> Pantry {
         let slots = (0..n).map(|_| Slot::Waiting).collect();
         Pantry { state: Mutex::new(Shelves { slots, taken: vec![false; n], lo: 0, hi: n }), changed: Condvar::new(),
-                 requests: Mutex::new(Some(requests)), window }
+                 requests: Mutex::new(Some(requests)), window, stopped: AtomicBool::new(false) }
     }
 
     /// A pantry without readers: its `n` units are delivered by the caller.
     fn unfed(n: usize) -> Pantry {
         let slots = (0..n).map(|_| Slot::Waiting).collect();
         Pantry { state: Mutex::new(Shelves { slots, taken: vec![false; n], lo: 0, hi: n }), changed: Condvar::new(),
-                 requests: Mutex::new(None), window: 0 }
+                 requests: Mutex::new(None), window: 0, stopped: AtomicBool::new(false) }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     /// The decoding of unit `i` asked of the readers.
@@ -159,8 +181,12 @@ impl Pantry {
         shelves.slots[i] = Slot::Failed(Problem::Unreadable("no reader thread is left to decode the photo".to_owned()));
     }
 
-    /// The requests for the next `window` units at each end that are neither done nor held.
+    /// The requests for the next `window` units at each end that are neither done nor held;
+    /// none once the step stopped.
     fn refill(&self, shelves: &mut Shelves) {
+        if self.is_stopped() {
+            return;
+        }
         let n = shelves.slots.len();
         while shelves.lo < n && matches!(shelves.slots[shelves.lo], Slot::Done) {
             shelves.lo += 1;
@@ -229,9 +255,13 @@ impl Pantry {
         self.refill(&mut shelves);
     }
 
-    /// What a reader made of unit `i`.
+    /// What a reader made of unit `i`; nothing when the unit is done or failed already (a decode
+    /// that came back after the step stopped).
     fn deliver(&self, i: usize, result: Result<Decoded, Problem>) {
         let mut shelves = lock(&self.state);
+        if matches!(shelves.slots[i], Slot::Done | Slot::Failed(_)) {
+            return;
+        }
         shelves.slots[i] = match result {
             Ok(decoded) => Slot::Ready(Arc::new(decoded)),
             Err(problem) => Slot::Failed(problem),
@@ -239,9 +269,33 @@ impl Pantry {
         self.changed.notify_all();
     }
 
-    /// No more requests: the readers end once the pending ones are served.
+    /// The step stops before its units are done: no more requests, and every worker waiting for
+    /// a photo is released with a failure (the step ends in an error, so no unit is reported).
+    fn halt(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let mut shelves = lock(&self.state);
+        for slot in &mut shelves.slots {
+            if matches!(slot, Slot::Waiting | Slot::Requested) {
+                *slot = Slot::Failed(Problem::Unreadable("the step stopped before the photo was decoded".to_owned()));
+            }
+        }
+        self.changed.notify_all();
+    }
+
+    /// No more requests: the readers end.
     fn close(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         lock(&self.requests).take();
+    }
+}
+
+/// Closes the pantry when dropped - at the end of the step, and while a panic unwinds through
+/// it - so that the readers never wait for requests that will not come.
+struct PantryOpen<'a>(&'a Pantry);
+
+impl Drop for PantryOpen<'_> {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -253,11 +307,24 @@ struct Context<'a> {
     small: Option<(&'a FeatureStore, usize)>,
     o: &'a FeatureOptions,
     log: Mutex<Vec<String>>,
+    /// The error that ends the step: the first one.
+    fatal: Mutex<Option<String>>,
 }
 
 impl Context<'_> {
     fn note(&self, line: String) {
         lock(&self.log).push(line);
+    }
+
+    /// The step ends with `why` (the first call keeps its reason): the pantry stops, the workers
+    /// drain what is left without work.
+    fn halt(&self, why: String) {
+        lock(&self.fatal).get_or_insert(why);
+        self.pantry.halt();
+    }
+
+    fn fatal(&self) -> Option<String> {
+        lock(&self.fatal).clone()
     }
 }
 
@@ -329,11 +396,14 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// A reader thread: the units asked for, decoded in the order of the requests, until the
-/// requests end.
+/// requests end or the step stops.
 fn reader(requests: &Mutex<Receiver<usize>>, ctx: &Context<'_>) {
     loop {
         let next = lock(requests).recv();
         let Ok(i) = next else { return };
+        if ctx.pantry.is_stopped() {
+            return;
+        }
         let result = catch_unwind(AssertUnwindSafe(|| decode(&ctx.jobs[i], ctx)))
             .unwrap_or_else(|payload| Err(Problem::Unreadable(format!("panicked: {}", panic_text(&*payload)))));
         ctx.pantry.deliver(i, result);
@@ -366,15 +436,28 @@ fn to_full_photo(kp: Vec<[f32; 4]>, desc: Vec<u8>, reduced: (usize, usize), full
     (keypoints, descriptors)
 }
 
+/// An image the kernels refuse: below 8 x 8 (a photo that small, or one reduced to it without
+/// a limit).
+fn too_small(image: &Grey) -> Option<Problem> {
+    if image.width < 8 || image.height < 8 {
+        let (w, h) = (image.width, image.height);
+        Some(Problem::Unsupported(format!("reduced to {w} x {h}, below the 8 x 8 the SIFT takes")))
+    } else {
+        None
+    }
+}
+
 enum Engine {
     Gpu { sift: Arc<Sift>, index: usize },
     Cpu,
 }
 
-/// What a worker says of a unit: the features stored, or the photo skipped.
+/// What a worker says of a unit: the features stored, the photo skipped, or the failure that
+/// ends the step (the units after it are drained without work).
 enum Outcome {
     Done { implementation: Impl, points: usize, seconds: PhaseSeconds },
     Skipped(Problem),
+    Fatal(String),
 }
 
 /// A worker of the step: a GPU or the CPU, extracting into the store (and the small store).
@@ -393,16 +476,18 @@ impl FeatureWorker<'_> {
 
     /// The features of `image` (the photo reduced to `reduced`) extracted with `sift`, brought
     /// to the full photo and written to `store` under the name of `job`: the points kept and
-    /// the seconds of the SIFT and of the write.
+    /// the seconds of the SIFT and of the write. A kernel that fails is the device's failure; a
+    /// store that cannot be written is the step's.
     fn extract_into(&self, job: &PhotoJob, image: &Grey, decoded: &Decoded, limit: usize, sift: &Options,
-                    store: &FeatureStore) -> Result<(usize, PhaseSeconds), String> {
+                    store: &FeatureStore) -> Result<(usize, PhaseSeconds), Failure> {
         let (w, h) = (image.width, image.height);
         let pixels: Vec<f32> = image.pixels.iter().map(|&p| f32::from(p) / 255.0).collect();
         let started = Instant::now();
-        let (kp, desc) = match &self.engine {
-            Engine::Gpu { sift: kernel, .. } => kernel.extract(&pixels, w, h, sift)?,
-            Engine::Cpu => sift_cpu::extract(&pixels, w, h, sift)?,
+        let extracted = match &self.engine {
+            Engine::Gpu { sift: kernel, .. } => kernel.extract(&pixels, w, h, sift),
+            Engine::Cpu => sift_cpu::extract(&pixels, w, h, sift),
         };
+        let (kp, desc) = extracted.map_err(Failure::Device)?;
         let sift_seconds = started.elapsed().as_secs_f64();
         let (keypoints, descriptors) = to_full_photo(kp, desc, (w, h), decoded.full, decoded.mask.as_ref());
         let params = ExtractParams { max_image_size: limit as u32, reduced_width: w as u32, reduced_height: h as u32,
@@ -412,14 +497,21 @@ impl FeatureWorker<'_> {
         let features = PhotoFeatures { width, height, implementation: self.implementation(), image_id: None, params,
                                        keypoints, descriptors };
         let started = Instant::now();
-        store.put(&job.name, &features).map_err(|e| format!("{}: not written to the store: {e}", job.name))?;
+        let not_written = |e: io::Error| Failure::Fatal(format!("{}: not written to the store: {e}", job.name));
+        store.put(&job.name, &features).map_err(not_written)?;
         Ok((points, PhaseSeconds { decode: 0.0, sift: sift_seconds, write: started.elapsed().as_secs_f64() }))
     }
 
-    fn process(&self, job: &PhotoJob, decoded: &Decoded) -> Result<(usize, PhaseSeconds), String> {
+    /// The photo of `job` through the kernels and into the stores: done, or skipped when it is
+    /// too small for them.
+    fn process(&self, job: &PhotoJob, decoded: &Decoded) -> Result<Outcome, Failure> {
+        if let Some(problem) = too_small(&decoded.reduced).or_else(|| decoded.small.as_ref().and_then(too_small)) {
+            return Ok(Outcome::Skipped(problem));
+        }
         let o = self.ctx.o;
         let (points, mut seconds) =
             self.extract_into(job, &decoded.reduced, decoded, job.limit, &o.sift, self.ctx.store)?;
+        seconds.decode = decoded.seconds;
         let small = (self.ctx.small, &decoded.small, job.small_limit);
         if let (Some((small_store, cap)), Some(small), Some(limit)) = small {
             let options = Options { max_features: cap, ..o.sift };
@@ -427,7 +519,7 @@ impl FeatureWorker<'_> {
             seconds.sift += more.sift;
             seconds.write += more.write;
         }
-        Ok((points, seconds))
+        Ok(Outcome::Done { implementation: self.implementation(), points, seconds })
     }
 }
 
@@ -441,7 +533,13 @@ impl Worker<usize, Outcome> for FeatureWorker<'_> {
 
     fn run(&mut self, unit: &usize) -> Result<Outcome, String> {
         let i = *unit;
-        let pantry = &self.ctx.pantry;
+        let ctx = self.ctx;
+        let pantry = &ctx.pantry;
+        if let Some(why) = ctx.fatal() {
+            // the step is ending: the units left are drained without work
+            pantry.done(i);
+            return Ok(Outcome::Fatal(why));
+        }
         let decoded = match pantry.fetch(i) {
             Ok(decoded) => decoded,
             Err(problem) => {
@@ -449,15 +547,19 @@ impl Worker<usize, Outcome> for FeatureWorker<'_> {
                 return Ok(Outcome::Skipped(problem));
             }
         };
-        match self.process(&self.ctx.jobs[i], &decoded) {
-            Ok((points, seconds)) => {
+        match self.process(&ctx.jobs[i], &decoded) {
+            Ok(outcome) => {
                 pantry.done(i);
-                let seconds = PhaseSeconds { decode: decoded.seconds, ..seconds };
-                Ok(Outcome::Done { implementation: self.implementation(), points, seconds })
+                Ok(outcome)
             }
-            Err(problem) => {
+            Err(Failure::Device(why)) => {
                 pantry.give_back(i);
-                Err(problem)
+                Err(why)
+            }
+            Err(Failure::Fatal(why)) => {
+                pantry.done(i);
+                ctx.halt(why.clone());
+                Ok(Outcome::Fatal(why))
             }
         }
     }
@@ -477,12 +579,29 @@ fn gpu_workers<'a>(devices: &[usize], ctx: &'a Context<'a>, log: &mut Vec<String
     gpus
 }
 
-/// The units run through the queue with the workers of `devices` and of the CPU: the outcomes
-/// in the order of the units, with the log.
-fn run_units<'a>(ctx: &'a Context<'a>, units: Vec<usize>, devices: &[usize], cancel: &AtomicBool,
-                 progress: &(dyn Fn(usize, usize) + Sync)) -> Result<(Vec<Outcome>, Vec<String>), String> {
-    let mut log = Vec::new();
-    let gpus = gpu_workers(devices, ctx, &mut log);
+/// The options the kernels refuse, refused before any work (a worker failing on them would be
+/// retired for the step's mistake): the kernels' own check of the first octave.
+fn check_options(o: &FeatureOptions) -> Result<(), String> {
+    if o.sift.first_octave < -1 {
+        return Err("first_octave: -1, 0 or positive".to_owned());
+    }
+    Ok(())
+}
+
+/// The error of a step, with the lines of its log after it.
+fn failed(reason: String, lines: Vec<String>) -> String {
+    if lines.is_empty() {
+        reason
+    } else {
+        format!("{reason}\n{}", lines.join("\n"))
+    }
+}
+
+/// The units run through the queue with the GPU workers `gpus` and the CPU's: the outcomes in
+/// the order of the units, with the log (`log` first, then the scheduler's lines).
+fn run_units<'a>(ctx: &'a Context<'a>, units: Vec<usize>, gpus: Vec<Box<dyn Worker<usize, Outcome> + 'a>>,
+                 mut log: Vec<String>, cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync))
+    -> Result<(Vec<Outcome>, Vec<String>), String> {
     let cpu_threads = if gpus.is_empty() { ctx.o.cpu_threads.max(1) } else { ctx.o.cpu_threads };
     let cpu: Option<sched::Factory<'a, usize, Outcome>> = if cpu_threads > 0 {
         let make = move || Box::new(FeatureWorker { engine: Engine::Cpu, ctx }) as Box<dyn Worker<usize, Outcome> + 'a>;
@@ -498,7 +617,7 @@ fn run_units<'a>(ctx: &'a Context<'a>, units: Vec<usize>, devices: &[usize], can
         Err((reason, lines)) => {
             log.extend(lines);
             log.extend(std::mem::take(&mut *lock(&ctx.log)));
-            Err(if log.is_empty() { reason } else { format!("{reason}\n{}", log.join("\n")) })
+            Err(failed(reason, log))
         }
     }
 }
@@ -507,29 +626,42 @@ fn run_units<'a>(ctx: &'a Context<'a>, units: Vec<usize>, devices: &[usize], can
 /// points - the preselection features of the photos with a `small_limit` into that store) on
 /// the GPUs `devices` (adapter indices) and the CPU together. `progress(done, total)` after
 /// every photo; `cancel` set stops the step after the photos being done, with an error
-/// `"cancelled"`. An error, with the log of the run, when the queue is left with photos and no
-/// worker (every GPU lost and no CPU thread), or on a cancel; the photos done before it are in
-/// the store either way.
+/// `"cancelled"`. An error, with the log of the run, on a cancel, when the queue is left with
+/// photos and no worker (every GPU lost and no CPU thread), when a store cannot be written (the
+/// first such photo names the error, the others are not attempted) or when the options are ones
+/// the kernels refuse; the photos done before it are in the store either way. A panic of
+/// `progress` propagates (the readers are released first).
 pub fn extract_all(photos: &[PhotoJob], store: &FeatureStore, small: Option<(&FeatureStore, usize)>, o: &FeatureOptions,
                    devices: &[usize], cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync))
     -> Result<FeatureReport, String> {
     if photos.is_empty() {
         return Ok(FeatureReport::default());
     }
+    check_options(o)?;
     let readers = o.readers.max(1);
     let (tx, rx) = mpsc::channel();
     let requests = Mutex::new(rx);
     let pantry = Pantry::new(photos.len(), readers, tx);
-    let ctx = Context { jobs: photos, pantry, store, small, o, log: Mutex::new(Vec::new()) };
+    let ctx = Context { jobs: photos, pantry, store, small, o, log: Mutex::new(Vec::new()), fatal: Mutex::new(None) };
+    // the GPUs are opened before any reader thread exists: a panic of the driver here (wgpu's
+    // handler of an uncaptured error panics) leaves nothing behind it
+    let mut log = Vec::new();
+    let gpus = gpu_workers(devices, &ctx, &mut log);
     let run = thread::scope(|s| {
+        // closed when this closure ends, by its return or by a panic unwinding through it: the
+        // readers then leave, and the scope joins them instead of waiting for ever
+        let _open = PantryOpen(&ctx.pantry);
         for _ in 0..readers {
             s.spawn(|| reader(&requests, &ctx));
         }
-        let run = run_units(&ctx, (0..photos.len()).collect(), devices, cancel, progress);
-        ctx.pantry.close();
-        run
+        run_units(&ctx, (0..photos.len()).collect(), gpus, log, cancel, progress)
     });
     let (outcomes, log) = run?;
+    if let Some(why) = ctx.fatal() {
+        let mut lines = std::mem::take(&mut *lock(&ctx.log));
+        lines.extend(log);
+        return Err(failed(why, lines));
+    }
     let mut report = FeatureReport { log: std::mem::take(&mut *lock(&ctx.log)), ..FeatureReport::default() };
     for (job, outcome) in photos.iter().zip(outcomes) {
         match outcome {
@@ -552,6 +684,7 @@ pub fn extract_all(photos: &[PhotoJob], store: &FeatureStore, small: Option<(&Fe
                 report.log.push(format!("{}: not decoded here ({why})", job.name));
                 report.unsupported.push(job.name.clone());
             }
+            Outcome::Fatal(why) => return Err(failed(why, log)),
         }
     }
     report.log.extend(log);
@@ -566,19 +699,24 @@ pub fn extract_all(photos: &[PhotoJob], store: &FeatureStore, small: Option<(&Fe
 pub fn extract_pixels(job: &PhotoJob, grey: Grey, full: (usize, usize), store: &FeatureStore,
                       small: Option<(&FeatureStore, usize)>, o: &FeatureOptions, devices: &[usize])
     -> Result<Impl, String> {
+    check_options(o)?;
     let jobs = std::slice::from_ref(job);
-    let ctx = Context { jobs, pantry: Pantry::unfed(1), store, small, o, log: Mutex::new(Vec::new()) };
+    let ctx = Context { jobs, pantry: Pantry::unfed(1), store, small, o, log: Mutex::new(Vec::new()),
+                        fatal: Mutex::new(None) };
     let started = Instant::now();
     let mask = mask_of(job, full, &ctx);
     let decoded = reduce(job, &grey, full, mask, small.is_some(), started.elapsed().as_secs_f64());
     drop(grey);
     ctx.pantry.deliver(0, Ok(decoded));
-    let (outcomes, _) = run_units(&ctx, vec![0], devices, &AtomicBool::new(false), &|_, _| {})?;
+    let mut log = Vec::new();
+    let gpus = gpu_workers(devices, &ctx, &mut log);
+    let (outcomes, _) = run_units(&ctx, vec![0], gpus, log, &AtomicBool::new(false), &|_, _| {})?;
     match outcomes.into_iter().next() {
         Some(Outcome::Done { implementation, .. }) => Ok(implementation),
         Some(Outcome::Skipped(Problem::Unreadable(why))) | Some(Outcome::Skipped(Problem::Unsupported(why))) => {
             Err(format!("{}: {why}", job.name))
         }
+        Some(Outcome::Fatal(why)) => Err(why),
         None => Err(format!("{}: no outcome", job.name)),
     }
 }
