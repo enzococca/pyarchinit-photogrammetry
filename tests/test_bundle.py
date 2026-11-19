@@ -328,10 +328,11 @@ def _copy_of_the_trench(processed, tmp_path):
 
 
 @pytest.mark.parametrize("solver", SOLVERS)
-def test_own_adjustment_of_the_trench(processed, tmp_path, solver):
+def test_own_adjustment_of_the_trench(processed, tmp_path, monkeypatch, solver):
     """``optimize_cameras(engine="ppg", solver=...)`` on the synthetic trench, by either solver: control
     points pulled by their accuracy, two of them left as check points, the metric thresholds of the
-    pipeline kept; the report says which solver ran."""
+    pipeline kept; the report says which solver ran. The control points place the block, so the focal
+    length is refined as before (the report says it was not held)."""
     import pyarchinit_photogrammetry as ppg
     from pyarchinit_photogrammetry.markers import gcp
 
@@ -340,6 +341,11 @@ def test_own_adjustment_of_the_trench(processed, tmp_path, solver):
     for m in ch.markers[:2]:
         m.checkpoint = True
     gcp.update_transform(ch)
+    sensor = next(iter(ch.sensors.values()))
+    focal = tuple(sensor.params[:2])
+    seen = []
+    real = bundle.adjust
+    monkeypatch.setattr(bundle, "adjust", lambda pb, **kwargs: seen.append(pb) or real(pb, **kwargs))
     err = ch.optimize_cameras(engine="ppg", solver=solver)
     rep = ch.meta["sfm"]["optimize"]
     assert rep["engine"] == "ppg" and rep["control_points"] >= 4 and err < 0.5
@@ -347,6 +353,8 @@ def test_own_adjustment_of_the_trench(processed, tmp_path, solver):
     assert rep["solver"]["requested"] == solver and rep["solver"]["used"] == solver
     assert rep["solver"]["fallback"] is None and rep["solver"]["seconds"] > 0
     assert rep["solver"]["linear_solver"] == ("dense" if solver == "native" else None)
+    assert rep["focal_held"] is None and seen[-1].absolute and seen[-1].free_intrinsics == [[0, 1, 4, 5, 6, 7]]
+    assert tuple(sensor.params[:2]) != focal  # refined
     # the photos of the trench have a global shutter: asked for, the velocities stay close to nothing
     ch.optimize_cameras(engine="ppg", rolling_shutter=True, solver=solver)
     rep = ch.meta["sfm"]["optimize"]
@@ -452,6 +460,36 @@ def test_a_fixed_sensor_holds_its_calibration_and_no_photo(processed):
     assert far != 0 and plain.fixed_images == {0, far} and plain.free_intrinsics == [[]]
     lay = bundle._Layout(plain)
     assert lay.size == 6 * (len(plain.centres) - 2) + 3 * len(plain.points)  # no intrinsic column, two photos held
+
+
+def test_a_problem_says_whether_its_references_place_it_and_its_focal_length_can_be_held():
+    """``Problem.absolute``: three control points or more, or three GNSS positions or more, place the block
+    (bars give it a size, not a place); ``hold_focal_length`` takes the focal length out of the free parameters
+    of every camera - one index for the models with a single focal length, two for the others - and leaves
+    the rest, doing nothing more a second time."""
+    rng = np.random.default_rng(12)
+    pb, truth = block(rng, n_points=40)
+    assert pb.absolute is False and pb.gcps == [] and pb.gnss == []
+    pb.gcps = _gcps(truth, which=(0, 1))
+    pb.bars = [(0, 2, 1.0, 0.001), (1, 3, 1.0, 0.001)]
+    assert pb.absolute is False
+    pb.gcps = _gcps(truth)
+    assert pb.absolute is True
+    pb.gcps = []
+    pb.gnss = [(i, truth["centres"][i].copy(), np.full(3, 0.02), 0) for i in range(2)]
+    assert pb.absolute is False
+    pb.gnss.append((2, truth["centres"][2].copy(), np.full(3, 0.02), 0))
+    assert pb.absolute is True
+    assert pb.cameras[0][0] == "OPENCV" and pb.free_intrinsics == [[0, 1, 4, 5]]  # the block frees k1, k2 only
+    bundle.hold_focal_length(pb)
+    assert pb.free_intrinsics == [[4, 5]]
+    bundle.hold_focal_length(pb)
+    assert pb.free_intrinsics == [[4, 5]]
+    two = bundle.Problem(**{**pb.__dict__, "cameras": [("SIMPLE_RADIAL", [F, W / 2, H / 2, 0.0], W, H),
+                                                      ("PINHOLE", [F, F, W / 2, H / 2], W, H)],
+                            "free_intrinsics": [[0, 1, 2, 3], [0, 1, 2, 3]]})
+    bundle.hold_focal_length(two)
+    assert two.free_intrinsics == [[1, 2, 3], [2, 3]]
 
 
 def test_gnss_positions_in_the_coordinate_system_of_the_chunk(processed):

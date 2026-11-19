@@ -2382,6 +2382,9 @@ GNSS_PRIOR_MAX_M = 0.5  # m: positions this accurate (mean horizontal accuracy: 
 GNSS_PRIOR_SPREAD = 50.0  # the positions must spread across the block this many times their accuracy
 BEND_FACTOR = 3.0  # an optimisation that leaves the cameras farther from their accurate positions than this
 BEND_MARGIN_M = 0.3  # many times the offsets before, and this much more, is undone
+# why optimize_cameras kept the focal length of the alignment: report["focal_held"] (None when it was refined)
+FOCAL_HELD_BY_POSITIONS = "the camera positions hold the block"
+FOCAL_HELD_NO_REFERENCES = "no references: the focal length cannot be told from the depth"
 
 
 def accurate_gnss(camera) -> bool:
@@ -2708,7 +2711,11 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
                   progress: Progress, hold_focal: bool = False, *, solver: str = "auto") -> float:
     """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
     their accuracy, scale bars as distances, GNSS positions of the photos (with a bias per flight),
-    rolling shutter; ``hold_focal``: the focal length of the alignment kept; ``solver``: the one of
+    rolling shutter; ``hold_focal``: the focal length of the alignment kept (the positions hold the block).
+    On a block whose references do not place it (:attr:`bundle.Problem.absolute` False: fewer than three
+    control points and fewer than three positions) the focal length is kept whatever was asked - photos of
+    flat ground from one height cannot tell it from the depth, and the native solver walks that valley -
+    and ``report["focal_held"]`` says why it was kept (None when it was refined); ``solver``: the one of
     :func:`bundle.adjust` (``report["solver"]`` says which ran)."""
     from ..markers import gcp
     from . import bundle
@@ -2724,6 +2731,11 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
                                         rolling_shutter=rolling_shutter, fit_principal_point=fit_principal_point,
                                         hold_focal=hold_focal)
+    if not pb.absolute:  # nothing places the block: the focal length and the depth scale together at the same cost
+        bundle.hold_focal_length(pb)
+        focal_held = FOCAL_HELD_NO_REFERENCES
+    else:
+        focal_held = FOCAL_HELD_BY_POSITIONS if hold_focal else None
     res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
@@ -2744,7 +2756,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
               "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
               "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()},
               "gnss": {"mode": gnss, "photos": len(held), "states": _gnss_states(held)},
-              "focal_held": bool(hold_focal)}
+              "focal_held": focal_held}
     if res.rolling_shutter is not None:
         speed = np.linalg.norm(lin @ res.rolling_shutter[:, :3].T, axis=0)
         report["rolling_shutter_m"] = {"median": float(np.median(speed)), "max": float(speed.max())}
@@ -2786,7 +2798,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     ``"off"``: the positions take no part (the adjustment of before). Fixed points:
     :func:`fixed_points_hold`. ``report["gnss"]`` says how many photos held the block (``photos``,
     ``states``; ``termination`` and ``usable`` of the solve: a solve that cannot be used holds
-    nothing), ``report["focal_held"]`` whether the focal length of the alignment was kept.
+    nothing), ``report["focal_held"]`` why the focal length of the alignment was kept
+    (:data:`FOCAL_HELD_BY_POSITIONS`; with ``engine="ppg"`` also :data:`FOCAL_HELD_NO_REFERENCES`,
+    below), None when it was refined.
 
     A safety net for every engine: with accurate positions, the root mean square distance of the
     cameras from them is measured before and after (:func:`_undo_a_bend`; when the optimisation fits a
@@ -2803,12 +2817,17 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     markers, the GNSS positions of the photos (``gnss`` "plain", or "bias" with a bias per
     flight, the focal length refined; "auto" is "plain" with the focal length of the alignment
     kept when the positions can hold the block and no fixed points do, else "off") and the
-    ``rolling_shutter`` of the camera (a velocity per photo). ``solver`` (an option of ``engine="ppg"``,
-    :data:`bundle.SOLVERS`): ``"auto"`` the solver of the program (scipy until the native one has
-    passed its gate, or ``PPG_ENGINE=native``), ``"native"`` the Levenberg-Marquardt of the core,
-    ``"scipy"`` the reference; where the native one cannot run scipy adjusts the block and
-    ``report["solver"]`` says so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``).
-    With ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
+    ``rolling_shutter`` of the camera (a velocity per photo). On a block nothing places (fewer than
+    three control points and fewer than three positions in the adjustment: no references, or scale
+    bars alone; :attr:`bundle.Problem.absolute`) the focal length is held whatever was asked, and
+    ``report["focal_held"]`` says why: photos of flat ground from one height cannot tell it from the
+    depth, the two scale together at the same cost, and the native solver, a Newton method, walks
+    that valley. ``solver`` (an option of ``engine="ppg"``, :data:`bundle.SOLVERS`): ``"auto"`` the
+    solver of the program (the native one since it passed its gate, :data:`bundle.NATIVE_BY_DEFAULT`;
+    scipy where it cannot run), ``"native"`` the Levenberg-Marquardt of the core, ``"scipy"`` the
+    reference; where the native one cannot run scipy adjusts the block and ``report["solver"]`` says
+    so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``). With
+    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
     from .bundle import SOLVERS
 
     progress = as_progress(progress)
@@ -2954,7 +2973,7 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     holding = bool(solver and solver["usable"])  # a solve that cannot be used held nothing
     report["gnss"] = {"mode": gnss, "photos": len(priors) if holding else 0,
                       "states": _gnss_states(held) if holding else {}, **(solver or {})}
-    report["focal_held"] = holding
+    report["focal_held"] = FOCAL_HELD_BY_POSITIONS if holding else None
     if points or gcp.control_scalebars(chunk):
         gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:

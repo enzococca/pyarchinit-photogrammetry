@@ -1124,6 +1124,15 @@ PARAM_SKIP = {"image_root", "names", "gpu_shares", "nodes", "ba_schedule", "tie_
 ENGINE_METHODS = {"sfm": ("match_photos", "align_cameras"), "dense": ("build_depth_maps",)}
 
 
+def _focal_held_value(w: Words, value) -> str:
+    """The *focal length held* row of the optimisation: yes with the reason the optimisation gives (English
+    prose, as the solver's fallback), no when it was refined; a report written when the value was yes or no
+    alone prints that."""
+    if isinstance(value, str) and value:
+        return f"{w.yes_no(True)} ({value})"
+    return w.yes_no(bool(value))
+
+
 def _param_value(w: Words, key: str, value) -> str | None:
     """A parameter as text (None: not shown)."""
     if value is None:
@@ -1205,6 +1214,8 @@ def parameter_rows(chunk, w: Words) -> list[tuple[str, str, str]]:
                 continue  # in the optimisation's rows
             if key == "optimize" and k == "solver":
                 text, label = _solver_value(meta[k]), w("p_solver_used")
+            elif key == "optimize" and k == "focal_held":
+                text, label = _focal_held_value(w, meta[k]), w("p_focal_held")
             else:
                 text, label = _param_value(w, k, meta[k]), (w(f"p_{k}") if f"p_{k}" in TEXT else k)
             if text is None:

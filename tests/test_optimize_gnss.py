@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.core.camera import Camera, Sensor
 from pyarchinit_photogrammetry.engine import sfm
 from pyarchinit_photogrammetry.gnss.apply import set_camera_position
@@ -23,6 +24,9 @@ from pyarchinit_photogrammetry.markers import gcp
 
 pycolmap = pytest.importorskip("pycolmap")
 
+needs_native = pytest.mark.skipif(not _native.has("bundle"), reason="the native core with the bundle adjustment "
+                                                                    "(API 12) is not installed")
+SOLVERS = ["scipy", pytest.param("native", marks=needs_native)]  # the solvers of our own adjustment
 W, H, F = 1000, 750, 1000.0
 K1, K2 = -0.05, 0.01
 ORIGIN = np.array([500000.0, 4500000.0, 60.0])  # the internal frame is the projected system less this
@@ -219,7 +223,7 @@ def test_rtk_block_stays_on_its_positions(tmp_path):
     assert {k: rep["gnss"][k] for k in ("mode", "photos", "states")} == {"mode": "auto", "photos": 40,
                                                                           "states": {"fix": 40}}
     assert rep["gnss"]["usable"] is True and rep["gnss"]["termination"] in ("CONVERGENCE", "NO_CONVERGENCE")
-    assert rep["focal_held"] is True
+    assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS
     assert rep["reverted"] is False
     assert rep["camera_offsets"] == {"cameras": 40, "before": pytest.approx(_rms(aligned)),
                                      "after": pytest.approx(_rms(optimised)), "placed": False}
@@ -300,7 +304,7 @@ def test_gnss_off_keeps_todays_behaviour(tmp_path, monkeypatch):
     ch.optimize_cameras()
     assert built == [] and free == [1]
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["gnss"] == {"mode": "auto", "photos": 0, "states": {}} and rep["focal_held"] is False
+    assert rep["gnss"] == {"mode": "auto", "photos": 0, "states": {}} and rep["focal_held"] is None
     assert "reverted" not in rep and "camera_offsets" not in rep
     for cam in ch.cameras:
         assert np.allclose(cam.center, expected[names[str(cam.key)]], atol=1e-4)
@@ -492,7 +496,7 @@ def test_control_points_in_another_height_datum_are_kept(tmp_path):
     assert rep["reverted"] is False, rep["camera_offsets"]
     assert rep["camera_offsets"]["placed"] is True and rep["camera_offsets"]["after"] < 0.05, rep["camera_offsets"]
     assert rep["control_points"] == 5 and rep["after"]["control"] < 0.01
-    assert rep["gnss"]["photos"] == 0 and rep["focal_held"] is False
+    assert rep["gnss"]["photos"] == 0 and rep["focal_held"] is None
     assert ch.transform[2, 3] - lifted == pytest.approx(30.0, abs=0.05)  # the new georeference stays
 
 
@@ -593,7 +597,7 @@ def test_an_unusable_solve_holds_nothing(tmp_path, monkeypatch, caplog):
         ch.optimize_cameras()
     rep = ch.meta["sfm"]["optimize"]
     assert rep["gnss"] == {"mode": "auto", "photos": 0, "states": {}, "termination": "FAILURE", "usable": False}
-    assert rep["focal_held"] is False and rep["reverted"] is False
+    assert rep["focal_held"] is None and rep["reverted"] is False
     for cam in ch.cameras:
         assert np.allclose(cam.center, centres[cam.key], atol=1e-6)
     messages = [r.getMessage() for r in caplog.records]
@@ -651,18 +655,59 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     assert sfm.gnss_hold(ch)["photos"] == 40
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["gnss"]["mode"] == "plain" and rep["gnss"]["photos"] == 40 and rep["focal_held"] is True
+    assert rep["gnss"]["mode"] == "plain" and rep["gnss"]["photos"] == 40
+    assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS
     assert seen[-1].free_intrinsics[0] == [4, 5, 6, 7]  # OPENCV: the distortion refined, fx, fy (and cx, cy) held
     ch.optimize_cameras(engine="ppg", gnss="plain")
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["focal_held"] is False and seen[-1].free_intrinsics[0] == [0, 1, 4, 5, 6, 7]
+    assert rep["focal_held"] is None and seen[-1].free_intrinsics[0] == [0, 1, 4, 5, 6, 7]
 
     _add_control_points(ch)
     assert sfm.gnss_hold(ch)["why"] == "markers"
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["gnss"]["mode"] == "off" and rep["gnss"]["photos"] == 0 and rep["focal_held"] is False
+    assert rep["gnss"]["mode"] == "off" and rep["gnss"]["photos"] == 0 and rep["focal_held"] is None
     assert seen[-1].gnss == [] and len(seen[-1].gcps) == 5
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_a_block_without_references_holds_its_focal_length(tmp_path, monkeypatch, solver):
+    """A block nothing places - the references of the cameras off, no control point, no scale bar - through our
+    own adjustment keeps the focal length of every sensor exactly, by either solver and whatever was asked
+    (``gnss="plain"`` with no position to use, the principal point fitted): seen from one height over flat
+    ground, the focal length and the depth of the scene scale together at the same cost, and a Newton solver
+    walks that valley. The report says why it was held; the distortion is still refined; the first photo and
+    the farthest from it hold the block."""
+    from pyarchinit_photogrammetry.engine import bundle
+
+    doc, ch = _rtk_block(tmp_path)
+    for cam in ch.cameras:
+        cam.reference.enabled = False
+    assert sfm.gnss_hold(ch)["why"] == "none" and not sfm.fixed_points_hold(ch)
+    focal = tuple(ch.sensors[0].params[:2])
+    seen = []
+    real = bundle.adjust
+    monkeypatch.setattr(bundle, "adjust", lambda pb, **kwargs: seen.append(pb) or real(pb, **kwargs))
+    err = ch.optimize_cameras(engine="ppg", solver=solver)
+    rep = ch.meta["sfm"]["optimize"]
+    assert err < 1.0 and rep["solver"]["used"] == solver and rep["solver"]["fallback"] is None
+    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
+    assert rep["gnss"] == {"mode": "off", "photos": 0, "states": {}}
+    assert rep["control_points"] == rep["scale_bars"] == rep["gnss_positions"] == 0
+    assert tuple(ch.sensors[0].params[:2]) == focal  # exactly
+    assert ch.sensors[0].params[4] == pytest.approx(K1, abs=0.002)  # the distortion is refined, near the true one
+    pb = seen[-1]
+    assert not pb.absolute and pb.free_intrinsics == [[4, 5, 6, 7]]  # OPENCV: fx, fy (and cx, cy) held
+    far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
+    assert pb.fixed_images == {0, far}
+    assert "reverted" not in rep and "camera_offsets" not in rep  # nothing for the safety net to judge
+
+    monkeypatch.setattr(bundle, "adjust", lambda pb, **kwargs: seen.append(pb) or _unchanged(pb))
+    ch.optimize_cameras(engine="ppg", gnss="plain", fit_principal_point=True, solver=solver)
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["gnss"]["mode"] == "plain" and rep["gnss_positions"] == 0  # asked for, with no position to use
+    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
+    assert seen[-1].free_intrinsics == [[2, 3, 4, 5, 6, 7]] and tuple(ch.sensors[0].params[:2]) == focal
 
 
 def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
@@ -677,11 +722,18 @@ def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
     doc, ch = _rtk_block(tmp_path)
     ch.optimize_cameras()
     english = rows(ch, "en")
-    assert ("Focal length of the alignment held", "yes") in english
+    assert ("Focal length of the alignment held", f"yes ({sfm.FOCAL_HELD_BY_POSITIONS})") in english
     assert ("Undone by the safety net", "no") in english
     assert all(label in {t[1] for t in rc.TEXT.values()} for label, _value in english), english  # no raw key
     italian = rows(ch, "it")
-    assert ("Focale dell'allineamento tenuta", "si") in italian and ("Annullata dalla rete di sicurezza", "no") in italian
+    assert ("Focale dell'allineamento tenuta", f"si ({sfm.FOCAL_HELD_BY_POSITIONS})") in italian
+    assert ("Annullata dalla rete di sicurezza", "no") in italian
+    # a report written when the row was yes or no alone, and one of a block whose focal length was refined
+    ch.meta["sfm"]["optimize"]["focal_held"] = True
+    assert ("Focal length of the alignment held", "yes") in rows(ch, "en")
+    ch.meta["sfm"]["optimize"]["focal_held"] = None
+    assert ("Focal length of the alignment held", "no") in rows(ch, "en")
+    assert ("Focale dell'allineamento tenuta", "no") in rows(ch, "it")
 
     kept = _mean_reprojection_error(ch)
     monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))

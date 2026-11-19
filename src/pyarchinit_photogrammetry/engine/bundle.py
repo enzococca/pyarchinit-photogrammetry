@@ -92,6 +92,14 @@ class Problem:
     rs_sigma: float | np.ndarray = ROLLING_SHUTTER_SIGMA_M  # units of the problem (one, or one per photo)
     rs_sigma_angular: float | np.ndarray = ROLLING_SHUTTER_SIGMA_RAD
 
+    @property
+    def absolute(self) -> bool:
+        """The references place the block: three control points or more, or three GNSS positions or more
+        (scale bars give it a size, not a place). Else :func:`problem_from_chunk` holds a photo - two,
+        without bars - and the camera optimisation holds the focal length, which a block nothing places
+        cannot tell from the depth of the scene (:func:`hold_focal_length`)."""
+        return len(self.gcps) >= 3 or len(self.gnss) >= 3
+
 
 def _rodrigues(rotvecs: np.ndarray) -> np.ndarray:
     from scipy.spatial.transform import Rotation
@@ -654,6 +662,24 @@ def _principal_point(model_name: str) -> tuple[int, int]:
     return (1, 2) if model_name in _SINGLE_FOCAL else (2, 3)
 
 
+def _focal_indices(model_name: str) -> tuple[int, ...]:
+    """The indices of the focal length among the parameters of a COLMAP camera model: one (f) or two (fx, fy)."""
+    return (0,) if model_name in _SINGLE_FOCAL else (0, 1)
+
+
+def hold_focal_length(pb: Problem) -> None:
+    """The focal length of every camera of ``pb`` taken out of its free parameters, in place (what ``hold_focal``
+    of :func:`problem_from_chunk` does as the problem is built); the rest of the calibration stays as free as it
+    was. The camera optimisation does this to a block whose references do not place it (:attr:`Problem.absolute`
+    False): photos of flat ground taken from one height cannot tell the focal length from the depth of the scene,
+    the two scale together at the same cost, and a Newton solver walks that valley."""
+    if pb.free_intrinsics is None:  # the solvers' default: every parameter free
+        pb.free_intrinsics = [list(range(len(c[1]))) for c in pb.cameras]
+    for n, (model_name, *_rest) in enumerate(pb.cameras):
+        focal = _focal_indices(model_name)
+        pb.free_intrinsics[n] = [k for k in pb.free_intrinsics[n] if k not in focal]
+
+
 def problem_from_reconstruction(rec) -> tuple[Problem, dict]:
     """The plain adjustment of a reconstruction (its internal frame): the tie points of its posed images and
     nothing else - no markers, no references -, every camera with its focal length and distortion free and
@@ -742,7 +768,7 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
             pb.free_intrinsics.append([])
             continue
         principal = _principal_point(model_name)
-        focal = ((0,) if model_name in _SINGLE_FOCAL else (0, 1)) if hold_focal else ()
+        focal = _focal_indices(model_name) if hold_focal else ()
         pb.free_intrinsics.append([k for k in range(n) if (fit_principal_point or k not in principal) and k not in focal])
     marker_keys = []
     if use_markers:
@@ -792,8 +818,7 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 target = chunk.to_internal(np.asarray([positions[cam.key]], float))[0]
                 sigma = np.maximum(np.asarray(cam.reference.accuracy, float), 1e-6) / s
                 pb.gnss.append((index[iid], target, sigma, groups.get(cam.key, 0)))
-    absolute = len(pb.gcps) >= 3 or len(pb.gnss) >= 3
-    if not absolute and not pb.fixed_images and len(image_ids) >= 2:
+    if not pb.absolute and not pb.fixed_images and len(image_ids) >= 2:  # nothing places the block
         pb.fixed_images = {0}  # the block needs a place: the first photo holds it
         if not pb.bars:  # and a size: the second one too
             far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))

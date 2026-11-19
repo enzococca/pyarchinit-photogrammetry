@@ -1329,7 +1329,8 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
         text += (f", the adjustment held by the GNSS positions failed ({held['termination']}): the block is left as "
                  "the alignment made it")
     if rep.get("focal_held"):
-        text += ", focal length of the alignment held"
+        why = rep["focal_held"] if isinstance(rep["focal_held"], str) else ""  # the reason (yes alone before it)
+        text += ", focal length of the alignment held" + (f" ({why})" if why else "")
     ran = rep.get("solver") or {}
     if ran.get("fallback") or ran.get("used") == "native":  # scipy doing what was asked has nothing to say
         text += f", solver {ran['used']}" + (f" ({ran['fallback']})" if ran.get("fallback") else "")
