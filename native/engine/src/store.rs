@@ -16,11 +16,14 @@
 //!
 //! Key points are in the pixels of the full photo with COLMAP's centre of the first pixel at
 //! (0.5, 0.5), the scale in pixels of the full photo, the orientation in radians: what a COLMAP
-//! database holds. A feature file is written whole to a temporary name and renamed into place,
-//! then the index is rewritten the same way, so the store on disk is whole at every moment;
-//! `put` is thread-safe (the index under a lock, the file written outside it). `open` reads the
-//! header of every file the index names and refuses the store at the first whose magic, version
-//! or length is wrong, naming the file and what was read.
+//! database holds. Every `put` writes a new file (the next number of the counter), then rewrites
+//! the index to a temporary name renamed into place, then deletes the file the name had before:
+//! the index never names a file that is not complete, no file is ever written or renamed over
+//! (a reader may have it mapped, which Windows refuses), and a crash leaves at worst a file the
+//! index does not name - an orphan, which `open` ignores. `put` is thread-safe (the index under
+//! a lock, the file written outside it). `open` reads the header of every file the index names
+//! and refuses the store at the first whose magic, version or length is wrong, naming the file
+//! and what was read.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -297,7 +300,8 @@ fn check_file(path: &Path, points: u32) -> io::Result<()> {
 
 /// The features of one photo, memory-mapped from their file: the header, the key points and the
 /// descriptors as slices of the map. The map stays valid while the view lives; the store never
-/// truncates a file in place (a photo put again is written to a new file renamed over the old).
+/// writes a file in place (a photo put again goes to a new file; the old one is deleted once the
+/// index names the new, or stays an orphan when it cannot be deleted yet).
 pub struct FeatureView {
     header: FeatureHeader,
     map: Mmap,
@@ -374,20 +378,27 @@ impl Index {
         Ok(Index { next, photos })
     }
 
-    /// The index written to `dir`, whole: a temporary file renamed into place.
+    /// The index written to `dir`, whole: a temporary file renamed into place. It is rewritten
+    /// after every put, so a step of N photos writes O(N^2) bytes of JSON - tens of megabytes
+    /// for a thousand photos, gigabytes for ten thousand; a journal appended to would be the
+    /// next step, when a project of that size asks for it.
     fn write(&self, dir: &Path) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.to_json()).map_err(|e| invalid(e.to_string()))?;
         write_whole(&dir.join(format!("{INDEX_FILE}.tmp")), &dir.join(INDEX_FILE), &bytes)
     }
 }
 
+/// `bytes` written to the new file `path`.
+fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let describe = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let mut file = File::create(path).map_err(describe)?;
+    file.write_all(bytes).map_err(describe)
+}
+
 /// `bytes` written to `tmp`, then renamed to `path`.
 fn write_whole(tmp: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let describe = |e: io::Error, what: &Path| io::Error::new(e.kind(), format!("{}: {e}", what.display()));
-    let mut file = File::create(tmp).map_err(|e| describe(e, tmp))?;
-    file.write_all(bytes).map_err(|e| describe(e, tmp))?;
-    drop(file);
-    fs::rename(tmp, path).map_err(|e| describe(e, path))
+    write_file(tmp, bytes)?;
+    fs::rename(tmp, path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
 /// A feature store: the folder, and its index under a lock.
@@ -433,7 +444,10 @@ impl FeatureStore {
     }
 
     /// The features of the photo `name` written to the store, replacing what it held for that
-    /// name. Thread-safe: the file is written outside the lock of the index.
+    /// name. Thread-safe: the file is written outside the lock of the index. Every put goes to a
+    /// new file: no file is written over (a view may have it mapped), two puts of one name share
+    /// no path, and a crash before the index is written leaves an orphan, never a file that
+    /// disagrees with the index.
     pub fn put(&self, name: &str, f: &PhotoFeatures) -> io::Result<()> {
         if f.descriptors.len() != f.keypoints.len() * DESC {
             let (points, bytes) = (f.keypoints.len(), f.descriptors.len());
@@ -443,23 +457,27 @@ impl FeatureStore {
         let header = f.header();
         let file = {
             let mut index = self.index();
-            match index.photos.get(name) {
-                Some(entry) => entry.file.clone(),
-                None => {
-                    let file = format!("{:08}.{EXTENSION}", index.next);
-                    index.next += 1;
-                    file
-                }
-            }
+            let file = format!("{:08}.{EXTENSION}", index.next);
+            index.next += 1;
+            file
         };
         let mut bytes = Vec::with_capacity(file_bytes(header.points) as usize);
         bytes.extend_from_slice(&encode_header(&header));
         bytes.extend_from_slice(bytemuck::cast_slice(&f.keypoints));
         bytes.extend_from_slice(&f.descriptors);
-        write_whole(&self.dir.join(format!("{file}.tmp")), &self.dir.join(&file), &bytes)?;
-        let mut index = self.index();
-        index.photos.insert(name.to_owned(), Entry { file, points: header.points });
-        index.write(&self.dir)
+        write_file(&self.dir.join(&file), &bytes)?;
+        let before = {
+            let mut index = self.index();
+            let before = index.photos.insert(name.to_owned(), Entry { file, points: header.points });
+            index.write(&self.dir)?;
+            before
+        };
+        if let Some(old) = before {
+            // the file the name had: gone, or left an orphan when it cannot go yet (mapped, on
+            // Windows); `open` ignores files the index does not name
+            let _ = fs::remove_file(self.dir.join(&old.file));
+        }
+        Ok(())
     }
 
     /// The features of the photo `name`, memory-mapped; `None` when the store has no such photo
