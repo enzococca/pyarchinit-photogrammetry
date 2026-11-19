@@ -45,10 +45,10 @@ ROLLING_SHUTTER_SIGMA_RAD = 0.005
 # ... for a chunk, as the pixels the motion would shift the image by: a still camera unless the photos say otherwise
 ROLLING_SHUTTER_SIGMA_PX = 2.0
 FLIGHT_GAP_S = 20 * 60  # photos taken more than this apart belong to different flights
-# the solvers of adjust(): "auto" is scipy until the native one has passed its gate (NATIVE_BY_DEFAULT) or
-# PPG_ENGINE=native asks for it
+# the solvers of adjust(): "auto" is the native one since it passed its gate (NATIVE_BY_DEFAULT; it was scipy
+# before, and PPG_ENGINE=native still asks for it by name), scipy where it cannot run (native_ready) or by name
 SOLVERS = ("auto", "native", "scipy")
-NATIVE_BY_DEFAULT = False
+NATIVE_BY_DEFAULT = True
 LOSSES = ("none", "huber", "cauchy")  # on the tie points; the scale in the units of the residuals
 # relative decrease of the cost that ends the adjustment: scipy's ftol and the native solver's; under Huber and
 # Cauchy the native solver applies at least ROBUST_FUNCTION_TOLERANCE (the cost of a wrong track is a plateau
@@ -563,9 +563,10 @@ def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = N
            loss: str = "none", loss_scale: float = 1.0) -> Result:
     """Least squares of every residual of ``pb`` (see the module docstring) by ``solver``: ``"scipy"``
     the trust-region least squares of scipy (the reference), ``"native"`` the Levenberg-Marquardt of the
-    core (API 12), ``"auto"`` the native one when :data:`NATIVE_BY_DEFAULT` or ``PPG_ENGINE=native``,
-    otherwise scipy. Where the native solver cannot run (:func:`native_ready`) scipy adjusts the block,
-    ``Result.fallback`` says why and the log has a line: never an error. ``loss`` ``"huber"`` or
+    core (API 12), ``"auto"`` the native one since it passed its gate (:data:`NATIVE_BY_DEFAULT`; it was
+    scipy before, and ``PPG_ENGINE=native`` still asks for the native one by name). Where the native
+    solver cannot run (:func:`native_ready`) scipy adjusts the block, ``Result.fallback`` says why and the
+    log has a line (a warning when the native solver was asked for by name): never an error. ``loss`` ``"huber"`` or
     ``"cauchy"`` with ``loss_scale`` (in the units of the residuals: pixels over ``pixel_sigma``) weighs the
     tie points robustly; scipy applies a loss to every residual, so asked for by name it takes a robust
     loss on a problem of tie points alone (ValueError otherwise), and on the fallback from the native

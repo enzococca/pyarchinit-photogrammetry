@@ -153,8 +153,9 @@ def test_the_native_residuals_are_those_of_the_reference():
 
 def test_the_solver_is_chosen_and_said(monkeypatch, caplog):
     """``solver="native"`` without the native solver falls back on scipy, says why and warns once;
-    ``"auto"`` is scipy until the gate; a word that is not a solver, or a robust loss on the scipy
-    path with other residuals than tie points, is refused."""
+    ``"auto"``, which takes the native solver since its gate, falls back the same way with a line of the
+    log that is no warning; a word that is not a solver, or a robust loss on the scipy path with other
+    residuals than tie points, is refused."""
     rng = np.random.default_rng(6)
     pb, truth = block(rng, n_points=40)
     tie_only = {"fixed_images": {0, 5}, "markers": np.zeros((0, 3)), "mobs_image": np.zeros(0, int),
@@ -169,10 +170,15 @@ def test_the_solver_is_chosen_and_said(monkeypatch, caplog):
     assert res.solver == "scipy" and "API 12" in res.fallback
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "API 12" in r.getMessage()]
     assert len(warnings) == 1
-    res = bundle.adjust(pb, max_iterations=2, solver="auto")
-    assert res.solver == "scipy" and res.fallback is None and res.linear_solver is None
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        res = bundle.adjust(pb, max_iterations=2, solver="auto")  # auto wanted the native solver too
+    assert res.solver == "scipy" and "API 12" in res.fallback and res.linear_solver is None
     assert isinstance(res.termination, str) and np.isfinite(res.cost) and np.isfinite(res.gradient_max)
     assert res.seconds > 0
+    said = [r.levelno for r in caplog.records if "API 12" in r.getMessage()]
+    assert said == [logging.WARNING, logging.INFO]  # asked for by name: a warning; auto on its own: a line
+    res = bundle.adjust(pb, max_iterations=2, solver="scipy")  # scipy by name has nothing to say
+    assert res.solver == "scipy" and res.fallback is None
     with pytest.raises(ValueError, match="auto, native or scipy"):
         bundle.adjust(pb, solver="ceres")
     with pytest.raises(ValueError, match="control point"):  # scipy would weigh the control points by the loss too
@@ -203,7 +209,7 @@ def test_the_fallback_keeps_the_squared_loss_on_a_block_with_references(monkeypa
     with pytest.raises(ValueError, match="control point"):
         bundle.adjust(pb, max_iterations=2, solver="scipy", loss="huber")
     # "auto" turned to the native solver on its own: the fallback is a line of the log, the dropped loss a warning
-    monkeypatch.setattr(bundle, "NATIVE_BY_DEFAULT", True)
+    assert bundle.NATIVE_BY_DEFAULT is True
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
         plain = bundle.adjust(pb, max_iterations=2, solver="auto")
@@ -215,23 +221,37 @@ def test_the_fallback_keeps_the_squared_loss_on_a_block_with_references(monkeypa
 
 
 @needs_native
-def test_the_native_solver_is_taken_when_asked_or_set(monkeypatch, caplog):
+def test_auto_takes_the_native_solver_when_the_core_is_present(monkeypatch, caplog):
+    """Since its gate ``solver="auto"`` is the native solver (:data:`bundle.NATIVE_BY_DEFAULT`), with or without
+    ``PPG_ENGINE=native``; scipy runs by name. Where the native solver cannot take the block - a camera model
+    outside its kernels, the core switched off - ``auto`` falls back on scipy as before, with the reason in the
+    result and a line of the log (a warning when the native solver was asked for by name)."""
     rng = np.random.default_rng(7)
     pb, truth = block(rng, n_points=40)
     pb.gcps = _gcps(truth)
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert bundle.native_ready(pb) is None
-    assert bundle.adjust(pb, max_iterations=2, solver="auto").solver == "scipy"
-    monkeypatch.setenv("PPG_ENGINE", "native")
+    monkeypatch.delenv("PPG_NATIVE", raising=False)
+    assert bundle.NATIVE_BY_DEFAULT is True and bundle.native_ready(pb) is None
     res = bundle.adjust(pb, solver="auto")
     assert res.solver == "native" and res.fallback is None and res.linear_solver == "dense"
+    monkeypatch.setenv("PPG_ENGINE", "native")
+    assert bundle.adjust(pb, max_iterations=2, solver="auto").solver == "native"
+    monkeypatch.delenv("PPG_ENGINE")
     assert bundle.adjust(pb, max_iterations=2, solver="scipy").solver == "scipy"
     fisheye = bundle.Problem(**{**pb.__dict__, "cameras": [("OPENCV_FISHEYE", [F, F, W / 2, H / 2, 0, 0, 0, 0], W, H)]})
     assert "OPENCV_FISHEYE" in bundle.native_ready(fisheye)
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        res = bundle.adjust(fisheye, max_iterations=2, solver="auto")
+    assert res.solver == "scipy" and "OPENCV_FISHEYE" in res.fallback
+    assert [r.levelno for r in caplog.records if "OPENCV_FISHEYE" in r.getMessage()] == [logging.INFO]
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         res = bundle.adjust(fisheye, max_iterations=2, solver="native")
     assert res.solver == "scipy" and "OPENCV_FISHEYE" in res.fallback
     assert any("OPENCV_FISHEYE" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    res = bundle.adjust(pb, max_iterations=2, solver="auto")
+    assert res.solver == "scipy" and "PPG_NATIVE=0" in res.fallback
 
 
 @needs_native
