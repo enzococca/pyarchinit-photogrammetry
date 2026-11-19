@@ -569,7 +569,9 @@ una sola quota non la distinguono dalla distanza dal suolo). I punti fissi sono
 `engine.sfm.fixed_points_hold(chunk, use_markers)`, l'unica regola dei due motori e del dialogo;
 `engine.sfm.gnss_hold(chunk)` dice che cosa faranno le posizioni. `report["gnss"]` dice quante foto
 hanno tenuto il blocco, con la `termination` della soluzione e se è `usable` (una soluzione che non lo è
-non tiene nulla), `report["focal_held"]` se la focale dell'allineamento è rimasta quella; `gnss="off"`
+non tiene nulla), `report["focal_held"]` perché la focale dell'allineamento è rimasta quella (`"the camera
+positions hold the block"`; con la nostra compensazione anche `"no references: the focal length cannot be
+told from the depth"`, sotto), None quando è stata rifinita; `gnss="off"`
 lascia fuori le posizioni. Una rete di sicurezza per ogni motore: quando le camere finiscono più lontane
 dalle loro posizioni accurate di 3 volte lo scarto di prima e di 0,3 m più di quello (scarto quadratico
 medio; dopo la similarità che meglio colloca il blocco quando l'ottimizzazione calcola una nuova
@@ -585,7 +587,13 @@ l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resocon
 rifiniscono la focale; `"auto"` vale `"plain"` con la focale tenuta quando le posizioni possono tenere il
 blocco e nessun punto fisso lo tiene, altrimenti `"off"`), `rolling_shutter=True` e `solver="auto"`,
 `"native"` o `"scipy"` (sotto; un'opzione della nostra compensazione: con `engine="colmap"` qualsiasi
-parola diversa da `"auto"` viene rifiutata prima di ogni lavoro). `report["solver"]` dice quale
+parola diversa da `"auto"` viene rifiutata prima di ogni lavoro). Su un blocco che nulla colloca - meno di
+tre punti di controllo e meno di tre posizioni delle camere nella compensazione: nessun riferimento, o solo
+barre di scala - la focale resta ferma qualunque cosa sia stato chiesto, e `report["focal_held"]` dice
+perché: foto di un terreno piano prese da una sola quota non distinguono la focale dalla profondità, le due
+scalano insieme allo stesso costo, e il risolutore nativo, un metodo di Newton, percorre quella valle (la
+prima foto e la più lontana da essa tengono posto e dimensione di un blocco così; `bundle.Problem.absolute`
+dice se i riferimenti lo collocano). `report["solver"]` dice quale
 risolutore ha girato: `requested`, `used`, `fallback` (perché quello nativo non ha girato benché
 richiesto), i `seconds` della soluzione, `linear_solver`; il resoconto di elaborazione stampa una riga
 *Risolutore* quando ha girato quello nativo o quando scipy ne ha preso il posto, con il motivo
@@ -602,8 +610,9 @@ risolutore nativo del nucleo (`solver="native"`, `ppg_core` API 12) è lo stesso
 Levenberg-Marquardt sul sistema delle camere ridotto con il complemento di Schur, jacobiani analitici,
 una loss robusta (`loss="huber"` o `"cauchy"` con `loss_scale`) sui punti di legame; prende i sei
 modelli di camera del motore nativo (SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, OPENCV,
-FULL_OPENCV) e nessun rig. `solver="auto"` è scipy finché il risolutore nativo non ha superato la sua
-verifica (`bundle.NATIVE_BY_DEFAULT`) o `PPG_ENGINE=native` lo chiede. Dove il risolutore nativo non
+FULL_OPENCV) e nessun rig. `solver="auto"` è il risolutore nativo da quando ha superato la sua
+verifica (`bundle.NATIVE_BY_DEFAULT`; prima era scipy, e `PPG_ENGINE=native` continua a chiederlo per
+nome). Dove il risolutore nativo non
 può girare - nucleo assente o più vecchio dell'API 12, spento da `PPG_NATIVE=0`, un altro modello di
 camera - scipy compensa il blocco, `Result.fallback` dice perché e il log ha una riga: mai un errore
 (una loss robusta viene allora lasciata cadere su un blocco con riferimenti, e il motivo lo dice).

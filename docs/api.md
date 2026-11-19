@@ -552,7 +552,9 @@ tell it from the distance to the ground). Fixed points are `engine.sfm.fixed_poi
 use_markers)`, the one rule of both engines and of the dialog; `engine.sfm.gnss_hold(chunk)` says what
 the positions will do. `report["gnss"]` says how many photos held the block, with the `termination` of
 the solve and whether it is `usable` (a solve that is not holds nothing), `report["focal_held"]`
-whether the focal length of the alignment was kept; `gnss="off"` leaves the positions out. A safety
+why the focal length of the alignment was kept (`"the camera positions hold the block"`; with our own
+adjustment also `"no references: the focal length cannot be told from the depth"`, below), None when
+it was refined; `gnss="off"` leaves the positions out. A safety
 net for every engine: when the cameras end farther from their accurate positions than 3 times the
 offset before and 0.3 m more than it (root mean square; once the best similarity places the block when
 the optimisation fits a new georeference; each position less the bias of its flight after our
@@ -567,7 +569,13 @@ there was none).
 the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the
 block and no fixed points do, else `"off"`), `rolling_shutter=True` and `solver="auto"`, `"native"` or
 `"scipy"` (below; an option of our own adjustment: with `engine="colmap"` any word but `"auto"` is
-refused before any work). `report["solver"]` says which solver ran: `requested`, `used`, `fallback`
+refused before any work). On a block nothing places - fewer than three control points and fewer than
+three camera positions in the adjustment: no references at all, or scale bars alone - the focal length
+is held whatever was asked, and `report["focal_held"]` says why: photos of flat ground taken from one
+height cannot tell the focal length from the depth, the two scale together at the same cost, and the
+native solver, a Newton method, walks that valley (the first photo and the farthest from it hold the
+place and the size of such a block; `bundle.Problem.absolute` says whether the references place it).
+`report["solver"]` says which solver ran: `requested`, `used`, `fallback`
 (why the native one did not run though it was wanted), the `seconds` of the solve, `linear_solver`;
 the processing report prints a *Solver* row when the native one ran or when scipy stood in for it,
 with the reason (`ppg optimize --engine ppg --solver native`).
@@ -583,8 +591,9 @@ core (`solver="native"`, `ppg_core` API 12) is the same problem in Rust: Levenbe
 camera system reduced by the Schur complement, analytic Jacobians, a robust loss (`loss="huber"` or
 `"cauchy"` with `loss_scale`) on the tie points; it takes the six camera models of the native engine
 (SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, OPENCV, FULL_OPENCV) and no rigs. `solver="auto"` is
-scipy until the native solver has passed its gate (`bundle.NATIVE_BY_DEFAULT`) or `PPG_ENGINE=native`
-asks for it. Where the native solver cannot run - the core missing or older than API 12, switched off
+the native solver since it passed its gate (`bundle.NATIVE_BY_DEFAULT`; it was scipy before, and
+`PPG_ENGINE=native` still asks for it by name). Where the native solver cannot run - the core missing
+or older than API 12, switched off
 by `PPG_NATIVE=0`, another camera model - scipy adjusts the block, `Result.fallback` says why and the
 log has a line: never an error (a robust loss is then dropped on a block with references, the reason
 saying so). `bundle.Result` carries the adjusted block and what the solve was: `cost`,
