@@ -182,6 +182,14 @@ speed of the two; the matches of the GPU go into the database and through COLMAP
 verification, and the alignment sees no difference. The guided matching and the rigs of 360-degree
 photos stay on the CPU. `meta["sfm"]["gpu"]`, `gpu_pairs` and `cpu_pairs` say what did what.
 
+The lists of pairs handed to COLMAP (the chunks of the CPU, the verification of the pairs of the
+GPU and of the learned matches) are lines of `name1 name2` that COLMAP splits at the blanks, with
+no quoting, dropping in silence every pair it then cannot find: a photo whose folder or file name
+holds a blank goes into the list under an alias for the time of the call, its name put back right
+after (a survey with its photos under "2024 camera/..." had lost 7,901 of its 10,553 pairs that
+way, and aligned 34 photos of 1,356). `pairs_unmatched` counts the pairs asked for that COLMAP
+left without a two-view geometry; when there are any, the log says so.
+
 The key points too: with the native core 0.4 COLMAP's SIFT (VLFeat's) is a set of WGSL kernels
 as well (`ppg_core.gpu_sift`) - the Gaussian pyramid, its differences, the extrema with their
 refinement, the orientations and the descriptors of a photo, an octave per submission. The photos
