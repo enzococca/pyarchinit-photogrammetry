@@ -1198,8 +1198,9 @@ fn two_view_defaults(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 }
 
 /// Key points as the engine takes them: an ``(n, k)`` float32 array with ``x`` and ``y`` in the first
-/// two columns (the four of the feature store, or the six of a COLMAP database; the others are kept
-/// when present and ignored).
+/// two columns, the only ones the verification reads (the four of the feature store, or the six of a
+/// COLMAP database, whose third and fourth columns are the affine shape, not a scale and an
+/// orientation: they are carried along and ignored).
 fn keypoint_rows(a: &PyReadonlyArray2<'_, f32>, what: &str) -> PyResult<Vec<[f32; 4]>> {
     let s = a.shape();
     if s[1] < 2 {
@@ -1239,7 +1240,7 @@ fn verify_pair<'py>(py: Python<'py>, model1: &str, params1: PyReadonlyArray1<'py
     let cam2 = camera(model2, &params2.as_array().to_vec(), size2.0, size2.1)?;
     let k1 = keypoint_rows(&kp1, "kp1")?;
     let k2 = keypoint_rows(&kp2, "kp2")?;
-    if matches.shape().len() != 2 || matches.shape()[1] != 2 {
+    if matches.shape()[1] != 2 {
         return Err(PyValueError::new_err(format!("matches must be (n, 2), not {:?}", matches.shape())));
     }
     let m = matches.as_array();

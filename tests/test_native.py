@@ -971,6 +971,93 @@ def test_verify_pair_agrees_with_colmap(processed):
         db.close()
 
 
+def _synthetic_pair(seed=3, n=300, outliers=0.3, noise=0.5):
+    """A general scene seen by two pinhole cameras of 2000 x 1500 px with a focal length of 1000: the key points
+    of both photos (COLMAP pixels, ``[x, y, scale, orientation]`` float32), the matches (``i`` to ``i``) with
+    30 % outliers built at least 100 px (Sampson) from the true epipolar geometry, their quality, which are true,
+    and the pose cam2_from_cam1 ``(R, t)``."""
+    rng = np.random.default_rng(seed)
+    f, cx, cy, w, h = 1000.0, 1000.0, 750.0, 2000, 1500
+    axis = np.array([0.2, 1.0, 0.1]) / np.linalg.norm([0.2, 1.0, 0.1])
+    skew = lambda v: np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])  # noqa: E731
+    r = np.eye(3) + np.sin(0.2) * skew(axis) + (1 - np.cos(0.2)) * skew(axis) @ skew(axis)
+    t = np.array([0.8, 0.1, 0.05])
+    points = rng.uniform([-1.5, -1.1, 3.0], [1.5, 1.1, 6.0], (4 * n, 3))
+    moved = points @ r.T + t
+    x1 = np.c_[f * points[:, 0] / points[:, 2] + cx, f * points[:, 1] / points[:, 2] + cy]
+    x2 = np.c_[f * moved[:, 0] / moved[:, 2] + cx, f * moved[:, 1] / moved[:, 2] + cy]
+    seen = (x1 >= 0).all(1) & (x1 < [w, h]).all(1) & (x2 >= 0).all(1) & (x2 < [w, h]).all(1)
+    x1, x2 = x1[seen][:n].copy(), x2[seen][:n].copy()
+    assert len(x1) == n
+    k_inverse = np.linalg.inv(np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]]))
+    fundamental = k_inverse.T @ skew(t) @ r @ k_inverse
+    truth = np.ones(n, bool)
+    for i in range(n - int(outliers * n), n):
+        truth[i] = False
+        while True:
+            b = rng.uniform([0, 0], [w, h])
+            fa = fundamental @ [*x1[i], 1]
+            ftb = fundamental.T @ [*b, 1]
+            sampson = abs(np.dot([*b, 1], fa)) / np.hypot(np.hypot(fa[0], fa[1]), np.hypot(ftb[0], ftb[1]))
+            if sampson >= 100:
+                x2[i] = b
+                break
+    x1 += rng.normal(0, noise, x1.shape)
+    x2 += rng.normal(0, noise, x2.shape)
+    kp1 = np.c_[x1, np.ones(n), np.zeros(n)].astype(np.float32)
+    kp2 = np.c_[x2, np.ones(n), np.zeros(n)].astype(np.float32)
+    matches = np.c_[np.arange(n), np.arange(n)].astype(np.uint32)
+    quality = np.where(truth, rng.uniform(0.4, 0.75, n), rng.uniform(0.6, 0.8, n)).astype(np.float32)
+    return kp1, kp2, matches, quality, truth, r, t
+
+
+def _rotation_of(q):
+    """The rotation matrix of a unit quaternion ``(w, x, y, z)``."""
+    w, x, y, z = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def test_verify_pair_options_and_refusals():
+    """The binding on a synthetic pair: the configuration and the inliers, the pose under
+    ``compute_relative_pose`` (``qvec``, ``tvec``, None without it), an empty quality (the matches in their
+    order), and the ValueErrors that name what is wrong: a match outside the key points, a quality of another
+    length, matches that are not pairs, an option the engine does not know, a camera model it does not know."""
+    _two_view_core()
+    kp1, kp2, matches, quality, truth, r, t = _synthetic_pair()
+    params = np.array([1000.0, 1000.0, 750.0])
+    size = (2000, 1500)
+    args = ("SIMPLE_PINHOLE", params, size, kp1, "SIMPLE_PINHOLE", params, size, kp2, matches, quality, True, 11)
+    out = ppg_core.verify_pair(*args)
+    assert out["config"] == 2 and out["qvec"] is None and out["tvec"] is None
+    inliers = out["inliers"]
+    assert inliers.dtype == np.uint32 and truth[inliers[:, 0]].all() and len(inliers) >= 0.95 * truth.sum()
+    assert out["E"].shape == (3, 3) and out["F"].shape == (3, 3) and out["H"].shape == (3, 3)
+    with_pose = ppg_core.verify_pair(*args, options={"compute_relative_pose": True})
+    assert with_pose["config"] == 2 and with_pose["qvec"].shape == (4,) and with_pose["tvec"].shape == (3,)
+    assert np.allclose(np.linalg.norm(with_pose["tvec"]), 1.0)
+    direction = np.arccos(np.clip(with_pose["tvec"] @ t / np.linalg.norm(t), -1, 1))
+    assert direction < 1e-2, direction
+    turn = _rotation_of(with_pose["qvec"]) @ r.T
+    assert np.arccos(np.clip((np.trace(turn) - 1) / 2, -1, 1)) < 5e-3
+    plain = ppg_core.verify_pair(*args[:9], np.zeros(0, np.float32), True, 11)
+    assert plain["config"] == 2 and len(plain["inliers"]) >= 0.95 * truth.sum()
+    assert np.array_equal(ppg_core.verify_pair(*args)["inliers"], inliers), "the same seed, the same inliers"
+    outside = matches.copy()
+    outside[0, 1] = len(kp2)
+    with pytest.raises(ValueError, match="outside the key points"):
+        ppg_core.verify_pair(*args[:8], outside, quality, True, 11)
+    with pytest.raises(ValueError, match="qualities"):
+        ppg_core.verify_pair(*args[:9], quality[:-1], True, 11)
+    with pytest.raises(ValueError, match=r"matches must be \(n, 2\)"):
+        ppg_core.verify_pair(*args[:8], np.c_[matches, matches[:, :1]], quality, True, 11)
+    with pytest.raises(ValueError, match="unknown two-view option"):
+        ppg_core.verify_pair(*args, options={"ransac_threshold": 1.0})
+    with pytest.raises(ValueError, match="camera model"):
+        ppg_core.verify_pair("SPHERICAL", *args[1:])
+
+
 # ------------------------------------------------------------------------------------------- the TIN
 def _tin_triangles(t):
     return {tuple(r) for r in np.sort(t.triangles, axis=1).tolist()}
