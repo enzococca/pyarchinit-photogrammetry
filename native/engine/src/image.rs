@@ -221,7 +221,8 @@ fn read_png(reader: BufReader<File>) -> Result<Raster, ReadError> {
         other => return Err(ReadError::Unsupported(format!("PNG: {other:?}"))),
     };
     too_large(width, height, "a PNG")?;
-    let size = png.output_buffer_size().ok_or_else(|| ReadError::Unsupported("PNG: too large for this reader".to_owned()))?;
+    let too_large_for_png = || ReadError::Unsupported("PNG: too large for this reader".to_owned());
+    let size = png.output_buffer_size().ok_or_else(too_large_for_png)?;
     let mut data = vec![0u8; size];
     let frame = png.next_frame(&mut data).map_err(png_error)?;
     data.truncate(frame.line_size * frame.height as usize);
@@ -315,7 +316,8 @@ pub fn read_mask(path: &Path) -> Result<Grey, ReadError> {
     }
     let raster = read_png(reader)?;
     if raster.channels != 1 {
-        return Err(ReadError::Unsupported(format!("a mask is an 8-bit grey PNG, not one of {} channels", raster.channels)));
+        let channels = raster.channels;
+        return Err(ReadError::Unsupported(format!("a mask is an 8-bit grey PNG, not one of {channels} channels")));
     }
     Ok(raster.grey())
 }

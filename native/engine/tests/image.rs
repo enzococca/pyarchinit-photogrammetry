@@ -2,14 +2,17 @@
 //! with the alpha dropped and a grey file read as it is; the Rec. 709 weights in the order of the
 //! channels; the size COLMAP reduces to; the DCT scale a JPEG is decoded at; a truncated JPEG, a
 //! GIF, a 16-bit PNG and a missing file told apart; the masks; the triangle filter on a row worked
-//! by hand. The fixtures are written by the tests themselves under cargo's temporary folder of
-//! the target (`CARGO_TARGET_TMPDIR`): nothing binary is committed.
+//! by hand; a grey JPEG and an odd size at a DCT scale. The fixtures are written by the tests
+//! themselves under cargo's temporary folder of the target (`CARGO_TARGET_TMPDIR`), the JPEGs by
+//! the writer of `baseline_jpeg`: nothing binary is committed and no encoder crate is used.
 
 use std::fs;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use ppg_engine::image::{colmap_size, read_grey, read_mask, rescale_as_colmap, Grey, ReadError};
+
+mod baseline_jpeg;
 
 /// The odd sizes of the pattern, on purpose.
 const W: usize = 1203;
@@ -88,10 +91,9 @@ fn write_tiff<C: tiff::encoder::colortype::ColorType<Inner = u8>>(path: &Path, w
     encoder.write_image::<C>(w as u32, h as u32, data).unwrap();
 }
 
-/// A baseline JPEG of quality 90.
+/// A baseline JPEG of RGB data, through the writer of `baseline_jpeg`.
 fn write_jpeg(path: &Path, w: usize, h: usize, rgb: &[u8]) {
-    let encoder = jpeg_encoder::Encoder::new_file(path, 90).unwrap();
-    encoder.encode(rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb).unwrap();
+    baseline_jpeg::write(path, w, h, 3, rgb);
 }
 
 /// The mean and the largest absolute difference of two images of the same size.
@@ -201,6 +203,33 @@ fn dct_scale_is_the_smallest_above_the_target() {
     let reduced = rescale_as_colmap(&full, 800, 600);
     let (mean, largest) = difference(&at(500, true).1.pixels, &reduced.pixels);
     assert!(mean < 1.0 && largest <= 8, "DCT 1/2 against the triangle filter: mean {mean:.3}, largest {largest}");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_grey_jpeg_and_an_odd_size_at_a_dct_scale() {
+    let dir = folder("grey_jpeg");
+    // the red gradient of the smooth pattern as a one-component JPEG of 1,203 x 805
+    let plane = channel(&smooth(W, H), 3, 0);
+    let grey = dir.join("grey.jpg");
+    baseline_jpeg::write(&grey, W, H, 1, &plane);
+    let (full, size) = read_grey(&grey, 0, false).unwrap();
+    assert_eq!((size_of(&full), size), ((W, H), (W, H)));
+    let (mean, largest) = difference(&full.pixels, &plane);
+    assert!(mean < 1.0 && largest <= 8, "a grey JPEG against its plane: mean {mean:.3}, largest {largest}");
+
+    // the odd size at a DCT scale: 1/8 gives ceil(1203 / 8) = 151, below 300; 1/4 gives 301 x 202
+    let (quarter, size) = read_grey(&grey, 300, true).unwrap();
+    assert_eq!((size_of(&quarter), size), ((301, 202), (W, H)));
+    let (mean, largest) = difference(&quarter.pixels, &rescale_as_colmap(&full, 301, 202).pixels);
+    assert!(
+        mean < 1.0 && largest <= 8,
+        "DCT 1/4 of an odd size against the triangle filter: mean {mean:.3}, largest {largest}"
+    );
+    // and a colour JPEG of the odd pattern at the same scale
+    let colour = dir.join("pattern.jpg");
+    write_jpeg(&colour, W, H, &pattern(W, H));
+    assert_eq!(size_of(&read_grey(&colour, 300, true).unwrap().0), (301, 202));
     fs::remove_dir_all(&dir).unwrap();
 }
 

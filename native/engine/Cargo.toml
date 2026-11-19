@@ -23,7 +23,3 @@ faer = { version = "0.24", default-features = false, features = ["std", "rayon",
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.18"
 tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw", "jpeg"] }
-
-[dev-dependencies]
-# the baseline JPEG the tests of image.rs write (MIT OR Apache-2.0)
-jpeg-encoder = "0.6"
