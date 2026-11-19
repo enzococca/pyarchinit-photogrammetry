@@ -30,8 +30,9 @@ routines of the IAU SOFA library that RTKLIB bundles in sofa.c for the positions
 Moon (an option that is not built; SOFA has a licence of its own). See vendor/rtklib/VERSION.
 
 The Rust crates compiled into the extension (PyO3, numpy, rayon, wgpu, spade for the constrained
-Delaunay triangulation of the TIN, and their dependencies) are distributed under the MIT or the
-Apache-2.0 license, both compatible with the GPL.
+Delaunay triangulation of the TIN, nalgebra for the linear algebra of the two-view solvers, and
+their dependencies) are distributed under the MIT or the Apache-2.0 license, both compatible with
+the GPL.
 
 The SIFT kernels of the extension - native/engine/src/gpu_sift.rs (on the GPU, wgpu) and
 native/engine/src/sift_cpu.rs (its twin on the CPU) - follow the structure and the identifiers of
@@ -40,7 +41,18 @@ descriptor and the layout of its bins; sigman, winf, magnif, wsigma, xper), so t
 find are those of VLFeat and of COLMAP, which uses VLFeat. No file of VLFeat is compiled into the
 extension. VLFeat is distributed under the BSD 2-clause license below (after RTKLIB's).
 
-RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's.
+The minimal solvers of two views - native/engine/src/geometry/solvers.rs - are arranged as
+COLMAP's estimators (src/colmap/estimators/essential_matrix.cc, fundamental_matrix.cc,
+homography_matrix.cc, utils.cc and src/colmap/geometry/essential_matrix.cc, triangulation.cc):
+the five-point algorithm with its null space, Gauss-Jordan elimination, 3 x 3 polynomial matrix
+and tenth-degree determinant, the seven-point cubic, the normalised eight-point algorithm, the
+direct linear transform of the homography, the Sampson and transfer errors, the decomposition of
+the essential matrix and the choice of its pose by the triangulated points. The coefficient
+tables COLMAP generates offline are computed by polynomial arithmetic, and the roots and the
+decompositions are found by methods of this file's own; no file of COLMAP is compiled into the
+extension. COLMAP is distributed under the BSD 3-clause license below (after VLFeat's).
+
+RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's.
 
 ================================================================================
 
@@ -116,3 +128,43 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+================================================================================
+
+COLMAP's license (its file COPYING.txt) follows; it applies to
+native/engine/src/geometry/solvers.rs as explained above.
+
+--------------------------------------------------------------------------------
+
+The COLMAP library is licensed under the new BSD license. Note that this text
+refers only to the license for COLMAP itself, independent of its dependencies,
+which are separately licensed. Building COLMAP with these dependencies may
+affect the resulting COLMAP license.
+
+    Copyright (c), ETH Zurich and UNC Chapel Hill.
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+        * Redistributions of source code must retain the above copyright
+          notice, this list of conditions and the following disclaimer.
+
+        * Redistributions in binary form must reproduce the above copyright
+          notice, this list of conditions and the following disclaimer in the
+          documentation and/or other materials provided with the distribution.
+
+        * Neither the name of ETH Zurich and UNC Chapel Hill nor the names of
+          its contributors may be used to endorse or promote products derived
+          from this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
