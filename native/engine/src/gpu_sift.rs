@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use crate::gpu::{rank, read_back, AdapterInfo};
+use crate::sift_cpu::{cap_and_order, decimate, upsample2};
 
 pub const DESC: usize = 128;
 const MAX_CANDIDATES: usize = 1 << 17;
@@ -525,14 +526,15 @@ impl Sift {
         let dsigma0 = sigma0 * (1.0 - 1.0 / (sigmak * sigmak)).sqrt();
         let n_levels = s_res + 3;
         let s_min: i32 = -1;
-        // the base of the first octave on the CPU: doubled (as VLFeat), copied, or halved
+        // the base of the first octave on the CPU: doubled (as VLFeat), copied, or halved - with
+        // the helpers of the CPU twin, so that both start from the same pixels
         let (mut bw, mut bh, mut base) = match o.first_octave {
             -1 => (2 * w, 2 * h, upsample2(image, w, h)),
             0 => (w, h, image.to_vec()),
             n if n > 0 => {
                 let mut cur = image.to_vec();
                 let (mut cw, mut ch) = (w, h);
-                for _ in 0..n { let (nw, nh) = (cw / 2, ch / 2); cur = decimate_cpu(&cur, cw, nw, nh); cw = nw; ch = nh; }
+                for _ in 0..n { let (nw, nh) = (cw / 2, ch / 2); cur = decimate(&cur, cw, nw, nh); cw = nw; ch = nh; }
                 (cw, ch, cur)
             }
             _ => return Err("first_octave: -1, 0 or positive".into()),
@@ -664,65 +666,11 @@ impl Sift {
             bh /= 2;
             octave += 1;
         }
-        // COLMAP keeps the key points of the largest scales when there are too many
-        if keypoints.len() > o.max_features {
-            let mut idx: Vec<usize> = (0..keypoints.len()).collect();
-            idx.sort_by(|&a, &b| keypoints[b][2].partial_cmp(&keypoints[a][2]).unwrap_or(std::cmp::Ordering::Equal));
-            idx.truncate(o.max_features);
-            idx.sort_unstable();
-            let kp2: Vec<[f32; 4]> = idx.iter().map(|&i| keypoints[i]).collect();
-            let mut d2 = Vec::with_capacity(idx.len() * DESC);
-            for &i in &idx { d2.extend_from_slice(&descriptors[i * DESC..(i + 1) * DESC]); }
-            keypoints = kp2;
-            descriptors = d2;
-        }
-        // the same order every time (the atomics of the kernels give any): by row, column, scale, orientation
-        let mut idx: Vec<usize> = (0..keypoints.len()).collect();
-        idx.sort_by(|&a, &b| {
-            let (ka, kb) = (&keypoints[a], &keypoints[b]);
-            [1usize, 0, 2, 3].iter().map(|&i| ka[i].partial_cmp(&kb[i]).unwrap_or(std::cmp::Ordering::Equal))
-                .find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let kp2: Vec<[f32; 4]> = idx.iter().map(|&i| keypoints[i]).collect();
-        let mut d2 = Vec::with_capacity(idx.len() * DESC);
-        for &i in &idx { d2.extend_from_slice(&descriptors[i * DESC..(i + 1) * DESC]); }
-        Ok((kp2, d2))
+        // COLMAP's cap (the largest scales kept), then the same order every time (the atomics of
+        // the kernels give any): by row, column, scale, orientation - the one implementation the
+        // CPU twin uses too
+        Ok(cap_and_order(keypoints, descriptors, o.max_features))
     }
-}
-
-/// VLFeat's doubling: a pixel copied, the one between two the mean (rows, then columns).
-fn upsample2(img: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let (w2, h2) = (2 * w, 2 * h);
-    let mut rows = vec![0.0f32; w2 * h];
-    for y in 0..h {
-        for x in 0..w {
-            let v = img[y * w + x];
-            let n = img[y * w + (x + 1).min(w - 1)];
-            rows[y * w2 + 2 * x] = v;
-            rows[y * w2 + 2 * x + 1] = 0.5 * (v + n);
-        }
-    }
-    let mut out = vec![0.0f32; w2 * h2];
-    for y in 0..h {
-        let yn = (y + 1).min(h - 1);
-        for x in 0..w2 {
-            let v = rows[y * w2 + x];
-            let n = rows[yn * w2 + x];
-            out[(2 * y) * w2 + x] = v;
-            out[(2 * y + 1) * w2 + x] = 0.5 * (v + n);
-        }
-    }
-    out
-}
-
-fn decimate_cpu(img: &[f32], w: usize, nw: usize, nh: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; nw * nh];
-    for y in 0..nh {
-        for x in 0..nw {
-            out[y * nw + x] = img[(2 * y) * w + 2 * x];
-        }
-    }
-    out
 }
 
 /// Sifts per adapter, created on first use.

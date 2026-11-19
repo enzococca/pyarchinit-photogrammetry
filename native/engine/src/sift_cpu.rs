@@ -182,8 +182,9 @@ pub fn extract(image: &[f32], w: usize, h: usize, o: &Options) -> Result<(Vec<[f
 }
 
 /// COLMAP's cap - the key points of the largest scales when there are too many - then the order
-/// of the GPU kernel: by row, column, scale, orientation.
-fn cap_and_order(mut keypoints: Vec<[f32; 4]>, mut descriptors: Vec<u8>, max_features: usize)
+/// both kernels give: by row, column, scale, orientation. The one implementation of the output
+/// contract: `Sift::extract` on the GPU ends with it too.
+pub(crate) fn cap_and_order(mut keypoints: Vec<[f32; 4]>, mut descriptors: Vec<u8>, max_features: usize)
     -> (Vec<[f32; 4]>, Vec<u8>) {
     let pick = |idx: &[usize], keypoints: &[[f32; 4]], descriptors: &[u8]| -> (Vec<[f32; 4]>, Vec<u8>) {
         let kp: Vec<[f32; 4]> = idx.iter().map(|&i| keypoints[i]).collect();
@@ -212,8 +213,8 @@ fn cap_and_order(mut keypoints: Vec<[f32; 4]>, mut descriptors: Vec<u8>, max_fea
 // ------------------------------------------------------------------------------- the scale space
 
 /// VLFeat's doubling: a pixel copied, the one between two the mean (rows, then columns); the base
-/// of octave -1, computed as the GPU kernel computes it before the upload.
-fn upsample2(img: &[f32], w: usize, h: usize) -> Vec<f32> {
+/// of octave -1, which the GPU kernel computes here too, before the upload.
+pub(crate) fn upsample2(img: &[f32], w: usize, h: usize) -> Vec<f32> {
     let (w2, h2) = (2 * w, 2 * h);
     let mut rows = vec![0.0f32; w2 * h];
     for y in 0..h {
@@ -237,8 +238,9 @@ fn upsample2(img: &[f32], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
-/// Every other pixel of `img` (`w` wide): `nw x nh`, as VLFeat halves an octave.
-fn decimate(img: &[f32], w: usize, nw: usize, nh: usize) -> Vec<f32> {
+/// Every other pixel of `img` (`w` wide): `nw x nh`, as VLFeat halves an octave; the GPU kernel
+/// halves its base this way for a first octave above 0.
+pub(crate) fn decimate(img: &[f32], w: usize, nw: usize, nh: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; nw * nh];
     for y in 0..nh {
         for x in 0..nw {
