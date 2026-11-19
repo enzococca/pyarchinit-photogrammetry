@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 // the kernels are in the crate ppg_engine (folder engine), which knows nothing of Python
 use ppg_engine::camera::{Camera, Pose};
-use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, tin};
+use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, sift_cpu, tin};
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
 /// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate).
@@ -618,10 +618,40 @@ fn gpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, ma
         let s = gpu_sift::sift_for(device)?;
         s.extract(&data, w, h, &o)
     }).map_err(PyRuntimeError::new_err)?;
+    sift_arrays(py, kp, desc)
+}
+
+/// The key points ``(n, 4)`` and descriptors ``(n, 128)`` of a SIFT extraction as numpy arrays.
+fn sift_arrays(py: Python<'_>, kp: Vec<[f32; 4]>, desc: Vec<u8>)
+    -> PyResult<(Bound<'_, PyArray2<f32>>, Bound<'_, PyArray2<u8>>)> {
     let n = kp.len();
     let flat: Vec<f32> = kp.iter().flat_map(|k| k.iter().copied()).collect();
     Ok((Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray(py),
         Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray(py)))
+}
+
+/// SIFT key points and descriptors of a grey image (``h x w`` float32 in [0, 1]) on the CPU, the
+/// twin of :func:`gpu_sift` (`sift_cpu::extract`): the same points, descriptors, units (the centre
+/// of the first pixel at (0, 0)) and order, on the threads of rayon, the GIL released. An image
+/// smaller than 8 x 8 or a first octave below -1 is a RuntimeError, as on the GPU; so is a panic.
+#[pyfunction]
+#[pyo3(name = "cpu_sift")]
+#[pyo3(signature = (image, max_features=8192, first_octave=-1, num_octaves=4, octave_resolution=3,
+                    peak_threshold=0.02 / 3.0, edge_threshold=10.0, max_orientations=2, upright=false))]
+#[allow(clippy::too_many_arguments)]
+fn cpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, max_features: usize, first_octave: i32,
+                 num_octaves: u32, octave_resolution: u32, peak_threshold: f32, edge_threshold: f32,
+                 max_orientations: u32, upright: bool)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u8>>)> {
+    let a = image.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let data: Vec<f32> = a.iter().copied().collect();
+    let o = gpu_sift::Options { first_octave, num_octaves, octave_resolution, peak_threshold, edge_threshold,
+                                max_orientations, upright, max_features };
+    let (kp, desc) = py.detach(|| catch_unwind(AssertUnwindSafe(|| sift_cpu::extract(&data, w, h, &o))))
+        .map_err(|payload| PyRuntimeError::new_err(format!("cpu_sift: {}", panic_text(&*payload))))?
+        .map_err(PyRuntimeError::new_err)?;
+    sift_arrays(py, kp, desc)
 }
 
 type FuseMapArgs<'py> = (i64, Option<PyReadonlyArray2<'py, f32>>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
@@ -1123,6 +1153,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_adapters, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_sift_features, m)?)?;
+    m.add_function(wrap_pyfunction!(cpu_sift_features, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_depth_maps, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_cached, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_forget, m)?)?;
