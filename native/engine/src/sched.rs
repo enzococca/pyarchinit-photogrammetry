@@ -3,10 +3,11 @@
 //! its own pace and the split between them is decided by their speeds, not in advance (the
 //! calibration pass of the design is left out on purpose: the queue needs none). A worker whose
 //! unit fails is retired and its unit goes back to the queue for the others - a lost GPU gives
-//! its units back - with a line in the log; with units left and no worker alive the run is an
-//! error; `cancel` set stops every worker after its unit. The results come back in the order of
-//! the units given, whatever the threads did, so a run is reproducible whichever device did
-//! which unit.
+//! its units back - with a line in the log; a worker that finds the queue empty while another is
+//! still on a unit waits for it, since that unit comes back if its worker fails; with units left
+//! and no worker alive the run is an error; `cancel` set stops every worker after its unit. The
+//! results come back in the order of the units given, whatever the threads did, so a run is
+//! reproducible whichever device did which unit.
 //!
 //! Test hook: with the environment variable `PPG_TEST_GPU_FAIL_AFTER` set to N (read once, at the
 //! start of [`run`]), every GPU worker is retired at its N-th unit as if that unit had failed,
@@ -16,7 +17,7 @@
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 /// A worker of one device: `run` does one unit, an `Err` retires the worker (its unit goes back
@@ -58,8 +59,17 @@ struct Done<U, R> {
     log: Vec<String>,
 }
 
+/// The units left, and how many are being done: a worker that finds the queue empty while one
+/// of them is in flight waits for it (it comes back when its worker fails).
+struct Queue<U> {
+    units: VecDeque<(usize, U)>,
+    in_flight: usize,
+}
+
 struct Shared<U, R> {
-    queue: Mutex<VecDeque<(usize, U)>>,
+    queue: Mutex<Queue<U>>,
+    /// Signalled when a unit is done or comes back: the waiting workers look at the queue again.
+    idle: Condvar,
     done: Mutex<Done<U, R>>,
 }
 
@@ -78,6 +88,42 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// The next unit from `side` of the queue, `None` when the queue is empty and no unit is in
+/// flight any more (or `cancel` is set); while a unit is in flight the worker waits, as it may
+/// come back.
+fn take<U>(shared: &Shared<U, impl Sized>, side: Side, cancel: &AtomicBool) -> Option<(usize, U)> {
+    let mut queue = lock(&shared.queue);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        let taken = match side {
+            Side::Front => queue.units.pop_front(),
+            Side::Back => queue.units.pop_back(),
+        };
+        match taken {
+            Some(item) => {
+                queue.in_flight += 1;
+                return Some(item);
+            }
+            None if queue.in_flight == 0 => return None,
+            None => queue = shared.idle.wait(queue).unwrap_or_else(PoisonError::into_inner),
+        }
+    }
+}
+
+/// A unit in flight: when dropped - the unit done, given back, or the worker's thread unwinding
+/// from a panic of the progress callback - the count of units in flight goes down and the
+/// waiting workers look at the queue again.
+struct InFlight<'a, U, R>(&'a Shared<U, R>);
+
+impl<U, R> Drop for InFlight<'_, U, R> {
+    fn drop(&mut self) {
+        lock(&self.0.queue).in_flight -= 1;
+        self.0.idle.notify_all();
+    }
+}
+
 /// One worker serving the queue from its `side` until the queue is empty, `cancel` is set, or a
 /// unit fails (the unit goes back, the worker leaves). A panic in `run` counts as a failure of
 /// the unit: the worker is retired, the run goes on.
@@ -85,17 +131,8 @@ fn serve<U, R>(worker: &mut dyn Worker<U, R>, side: Side, shared: &Shared<U, R>,
                progress: &(dyn Fn(usize, usize) + Sync), fail_after: Option<usize>) {
     let mut served = 0;
     loop {
-        if cancel.load(Ordering::SeqCst) {
-            return;
-        }
-        let taken = {
-            let mut queue = lock(&shared.queue);
-            match side {
-                Side::Front => queue.pop_front(),
-                Side::Back => queue.pop_back(),
-            }
-        };
-        let Some((i, unit)) = taken else { return };
+        let Some((i, unit)) = take(shared, side, cancel) else { return };
+        let _flight = InFlight(shared);
         served += 1;
         let outcome = if fail_after == Some(served) {
             Err(FAIL_AFTER_VAR.to_owned())
@@ -117,14 +154,14 @@ fn serve<U, R>(worker: &mut dyn Worker<U, R>, side: Side, shared: &Shared<U, R>,
                 {
                     let mut queue = lock(&shared.queue);
                     match side {
-                        Side::Front => queue.push_front((i, unit)),
-                        Side::Back => queue.push_back((i, unit)),
+                        Side::Front => queue.units.push_front((i, unit)),
+                        Side::Back => queue.units.push_back((i, unit)),
                     }
                 }
                 let line = format!("{}: unit {} of {total} failed ({problem}); the worker is retired and the unit \
                                     goes back to the queue", worker.name(), i + 1);
                 lock(&shared.done).log.push(line);
-                return;
+                return; // `_flight` is dropped after the unit went back: the waiting workers see it
             }
         }
     }
@@ -155,7 +192,8 @@ pub fn run<'a, U: Send + 'a, R: Send + 'a>(
     let fail_after = fail_after();
     progress(0, total);
     let shared = Shared {
-        queue: Mutex::new(units.into_iter().enumerate().collect()),
+        queue: Mutex::new(Queue { units: units.into_iter().enumerate().collect(), in_flight: 0 }),
+        idle: Condvar::new(),
         done: Mutex::new(Done { results: (0..total).map(|_| None).collect(), count: 0, log: Vec::new() }),
     };
     thread::scope(|s| {
@@ -173,7 +211,7 @@ pub fn run<'a, U: Send + 'a, R: Send + 'a>(
             }
         }
     });
-    let left = shared.queue.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let left = shared.queue.into_inner().unwrap_or_else(PoisonError::into_inner).units;
     let done = shared.done.into_inner().unwrap_or_else(PoisonError::into_inner);
     if !left.is_empty() {
         let reason = if cancel.load(Ordering::SeqCst) {
