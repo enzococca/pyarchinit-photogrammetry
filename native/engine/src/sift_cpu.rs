@@ -10,10 +10,12 @@
 //! the orientations, the oriented key points of the descriptors; every stage keeps the row order,
 //! so the answer does not depend on the threads.
 //!
-//! Where the twins differ by design: the GPU keeps at most 2^17 candidates and 2^17 oriented key
-//! points per octave (the size of its buffers), in no particular order, where the CPU keeps them
-//! all; and the GPU reads the finer octave with a stride of twice its own width when it halves it,
-//! which is the finer width only when that width is even.
+//! Where the twins differ: the GPU keeps at most 2^17 candidates and 2^17 oriented key points per
+//! octave (the size of its buffers), in no particular order, where the CPU keeps them all. And a
+//! known defect of the GPU kernel's halving, to be fixed in Task 4 of the native engine plan: its
+//! `decimate` reads the finer octave with a stride of twice the coarser width (gpu_sift.rs), which
+//! is the finer width only when that is even, so an odd width shears every coarser octave; the
+//! twin halves with the true stride, and on such a photo its points are the right ones.
 //!
 //! Units as [`crate::gpu_sift::Sift::extract`]: `(x, y, sigma, orientation)` in the pixels of the
 //! image with the centre of the first pixel at (0, 0); the caller adds COLMAP's 0.5.
@@ -274,8 +276,10 @@ fn blur(src: &[f32], w: usize, h: usize, weights: &[f32]) -> Vec<f32> {
         for k in 0..=2 * r {
             let wk = weights[k.abs_diff(r)];
             let shift = k as isize - r as isize;
-            // the interior (x + shift inside the row) without the clamp, the two borders with it
-            let (lo, hi) = ((-shift).max(0) as usize, (w as isize - shift.max(0)) as usize);
+            // the interior (x + shift inside the row) without the clamp, the two borders with it;
+            // a row narrower than the radius has no interior and every pixel clamps, as on the GPU
+            let lo = ((-shift).max(0) as usize).min(w);
+            let hi = ((w as isize - shift.max(0)).max(0) as usize).max(lo);
             for x in lo..hi {
                 out[x] += row[(x as isize + shift) as usize] * wk;
             }
@@ -572,12 +576,14 @@ mod tests {
     /// The blur is the kernel's, pixel by pixel: every pixel the sum from -r to r of the clamped
     /// neighbour times the weight, rows then columns - written here as one scalar loop, which the
     /// blurred rows (interior and borders apart, the columns as row operations) must equal bit
-    /// for bit.
+    /// for bit; also on rows and columns narrower than the radius (8 pixels against radii of 13
+    /// and 45), where every pixel clamps.
     #[test]
     fn the_blur_is_the_clamped_separable_sum_of_the_kernel() {
-        let (w, h) = (37usize, 23usize);
-        let img: Vec<f32> = (0..w * h).map(|i| ((i * 7919 % 1000) as f32) / 1000.0).collect();
-        for sigma in [0.6f32, 1.2491, 2.0159, 3.1] {
+        let cases = [(37usize, 23usize, 0.6f32), (37, 23, 1.2491), (37, 23, 2.0159), (37, 23, 3.1),
+                     (8, 8, 3.1), (8, 8, 11.1), (8, 23, 3.1), (23, 8, 3.1)];
+        for (w, h, sigma) in cases {
+            let img: Vec<f32> = (0..w * h).map(|i| ((i * 7919 % 1000) as f32) / 1000.0).collect();
             let weights = gaussian(sigma);
             let r = weights.len() as i32 - 1;
             let weight = |k: i32| weights[k.unsigned_abs() as usize];
@@ -602,7 +608,7 @@ mod tests {
                     want[y as usize * w + x as usize] = acc;
                 }
             }
-            assert!(blur(&img, w, h, &weights) == want, "sigma {sigma}: the blur differs from the scalar sum");
+            assert!(blur(&img, w, h, &weights) == want, "{w} x {h}, sigma {sigma}: not the scalar sum");
         }
     }
 }

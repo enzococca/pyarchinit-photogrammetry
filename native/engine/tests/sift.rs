@@ -23,43 +23,50 @@ impl Lcg {
     }
 }
 
-/// The image: value noise at four grid spacings (the structure of a photo, so that points are
-/// found everywhere, the finest grids standing for its grain) and blobs of three sizes - sigma
-/// 2.5, 6 and 16 pixels, whose extrema fall in different octaves - on a grey of 0.5, clipped to
+/// An image of `w x h` from `seed`: value noise at four grid spacings (the structure of a photo,
+/// so that points are found everywhere, the finest grids standing for its grain) and blobs of
+/// three sizes - sigma 2.5, 6 and 16 pixels, whose extrema fall in different octaves, as many per
+/// area as the 640 x 480 image has and at least one of each - on a grey of 0.5, clipped to
 /// [0, 1]; the same at every run.
-fn image() -> Vec<f32> {
-    let mut random = Lcg(2026);
-    let mut img = vec![0.5f32; W * H];
+fn image_of(w: usize, h: usize, seed: u64) -> Vec<f32> {
+    let mut random = Lcg(seed);
+    let mut img = vec![0.5f32; w * h];
     for (spacing, amplitude) in [(3usize, 0.10f32), (8, 0.12), (32, 0.12), (128, 0.14)] {
-        let (gw, gh) = (W / spacing + 2, H / spacing + 2);
+        let (gw, gh) = (w / spacing + 2, h / spacing + 2);
         let grid: Vec<f32> = (0..gw * gh).map(|_| random.unit() - 0.5).collect();
-        for y in 0..H {
+        for y in 0..h {
             let fy = y as f32 / spacing as f32;
             let (gy, ty) = (fy as usize, fy.fract());
-            for x in 0..W {
+            for x in 0..w {
                 let fx = x as f32 / spacing as f32;
                 let (gx, tx) = (fx as usize, fx.fract());
                 let top = grid[gy * gw + gx] * (1.0 - tx) + grid[gy * gw + gx + 1] * tx;
                 let bottom = grid[(gy + 1) * gw + gx] * (1.0 - tx) + grid[(gy + 1) * gw + gx + 1] * tx;
-                img[y * W + x] += amplitude * (top * (1.0 - ty) + bottom * ty);
+                img[y * w + x] += amplitude * (top * (1.0 - ty) + bottom * ty);
             }
         }
     }
+    let margin = 40.0f32.min(w.min(h) as f32 / 4.0);
     for (sigma, count) in [(2.5f32, 24usize), (6.0, 16), (16.0, 8)] {
-        for _ in 0..count {
-            let cx = 40.0 + random.unit() * (W as f32 - 80.0);
-            let cy = 40.0 + random.unit() * (H as f32 - 80.0);
+        for _ in 0..(count * w * h / (W * H)).max(1) {
+            let cx = margin + random.unit() * (w as f32 - 2.0 * margin);
+            let cy = margin + random.unit() * (h as f32 - 2.0 * margin);
             let sign = if random.unit() < 0.5 { -0.35 } else { 0.35 };
             let reach = (3.0 * sigma).ceil() as i64;
-            for y in (cy as i64 - reach).max(0)..=(cy as i64 + reach).min(H as i64 - 1) {
-                for x in (cx as i64 - reach).max(0)..=(cx as i64 + reach).min(W as i64 - 1) {
+            for y in (cy as i64 - reach).max(0)..=(cy as i64 + reach).min(h as i64 - 1) {
+                for x in (cx as i64 - reach).max(0)..=(cx as i64 + reach).min(w as i64 - 1) {
                     let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-                    img[y as usize * W + x as usize] += sign * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+                    img[y as usize * w + x as usize] += sign * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
                 }
             }
         }
     }
     img.iter().map(|v| v.clamp(0.0, 1.0)).collect()
+}
+
+/// The image of the tests, 640 x 480.
+fn image() -> Vec<f32> {
+    image_of(W, H, 2026)
 }
 
 /// The key points are in the order of the GPU kernel: by row, then column, scale, orientation.
@@ -150,6 +157,30 @@ fn cpu_sift_is_repeatable_and_ordered() {
     assert_ordered(&zero);
     let (one, _) = sift_cpu::extract(&img, W, H, &Options { first_octave: 1, ..at_zero }).expect("first octave 1");
     assert!(!one.is_empty() && one.len() < zero.len());
+    // an odd width and height: the twin halves every octave with the true stride
+    let (ow, oh) = (641usize, 481usize);
+    let odd = image_of(ow, oh, 2027);
+    let (kp_odd, desc_odd) = sift_cpu::extract(&odd, ow, oh, &o).expect("the odd-sized image");
+    let again_odd = sift_cpu::extract(&odd, ow, oh, &o).expect("the odd-sized image again");
+    eprintln!("{} key points on the textured {ow} x {oh} image", kp_odd.len());
+    assert!(kp_odd.len() > 2000 && kp_odd.iter().any(|k| k[2] > 10.0), "{} points at {ow} x {oh}", kp_odd.len());
+    assert!(again_odd == (kp_odd.clone(), desc_odd), "two runs differ at {ow} x {oh}");
+    assert_ordered(&kp_odd);
+    // images whose coarsest octaves are narrower than the blur radius (40 x 40 reaches 10 x 10, a
+    // radius of 13; one level per octave reaches 20 x 20 with a radius of 45) and the smallest
+    // image the kernel accepts: extracted, repeatable, ordered, inside the image
+    let one_level = Options { octave_resolution: 1, ..o };
+    for (sw, sh, options) in [(40usize, 40usize, o), (48, 48, o), (44, 60, o), (8, 8, o), (160, 160, one_level)] {
+        let small = image_of(sw, sh, 7);
+        let (kp_s, desc_s) = sift_cpu::extract(&small, sw, sh, &options).unwrap_or_else(|p| panic!("{sw} x {sh}: {p}"));
+        eprintln!("{sw} x {sh}, {} levels per octave: {} points", options.octave_resolution, kp_s.len());
+        assert!(sw < 40 || !kp_s.is_empty(), "no point at {sw} x {sh}");
+        assert_eq!(desc_s.len(), kp_s.len() * DESC);
+        assert!(sift_cpu::extract(&small, sw, sh, &options).expect("again") == (kp_s.clone(), desc_s), "{sw} x {sh}");
+        assert_ordered(&kp_s);
+        let inside = |k: &[f32; 4]| k[0] >= 0.0 && k[0] < sw as f32 && k[1] >= 0.0 && k[1] < sh as f32;
+        assert!(kp_s.iter().all(inside), "a key point outside the {sw} x {sh} image");
+    }
     // a flat image has no extremum
     let flat = vec![0.5f32; W * H];
     let (none, no_desc) = sift_cpu::extract(&flat, W, H, &o).expect("a flat image is extracted");
@@ -170,9 +201,19 @@ fn cpu_and_gpu_sift_agree() {
         eprintln!("no GPU adapter: the kernels are not compared");
         return;
     }
-    let img = image();
+    // the images: the textured one and two small ones whose coarsest octave (10 and 11 pixels
+    // wide) is narrower than the blur radius; even widths only until Task 4 fixes the kernel's
+    // halving (gpu_sift.rs, decimate: the stride of the finer octave is right only when even)
     let o = Options { max_features: 40000, ..Options::default() };
-    let (cpu, cpu_desc) = sift_cpu::extract(&img, W, H, &o).expect("the CPU extraction");
+    let cases: Vec<(String, usize, usize, Vec<f32>)> = vec![
+        (format!("{W} x {H}"), W, H, image()),
+        ("40 x 40".into(), 40, 40, image_of(40, 40, 7)),
+        ("44 x 60".into(), 44, 60, image_of(44, 60, 7)),
+    ];
+    let on_cpu = |(name, w, h, img): &(String, usize, usize, Vec<f32>)| {
+        sift_cpu::extract(img, *w, *h, &o).unwrap_or_else(|p| panic!("{name} on the CPU: {p}"))
+    };
+    let twins: Vec<(Vec<[f32; 4]>, Vec<u8>)> = cases.iter().map(on_cpu).collect();
     for adapter in &adapters {
         let sift = match Sift::new(Some(adapter.index)) {
             Ok(sift) => sift,
@@ -182,13 +223,16 @@ fn cpu_and_gpu_sift_agree() {
                 continue;
             }
         };
-        let (gpu, gpu_desc) = sift.extract(&img, W, H, &o).unwrap_or_else(|p| panic!("{}: {p}", adapter.name));
-        let (twins, median) = agreement(&gpu, &gpu_desc, &cpu, &cpu_desc);
-        eprintln!("adapter {} ({}): {} points on the GPU, {} on the CPU, {:.4} twins, median cosine {median:.5}",
-                  adapter.index, adapter.name, gpu.len(), cpu.len(), twins);
-        assert!(twins > 0.95, "{}: {twins:.3} of the GPU's points have a CPU twin", adapter.name);
-        assert!((cpu.len() as f64 - gpu.len() as f64).abs() < 0.05 * gpu.len() as f64,
-                "{}: {} points on the CPU, {} on the GPU", adapter.name, cpu.len(), gpu.len());
-        assert!(median > 0.99, "{}: median cosine similarity {median:.4}", adapter.name);
+        for ((name, w, h, img), (cpu, cpu_desc)) in cases.iter().zip(&twins) {
+            let what = format!("adapter {} ({}), {name}", adapter.index, adapter.name);
+            let (gpu, gpu_desc) = sift.extract(img, *w, *h, &o).unwrap_or_else(|p| panic!("{what}: {p}"));
+            let (share, median) = agreement(&gpu, &gpu_desc, cpu, cpu_desc);
+            eprintln!("{what}: {} points on the GPU, {} on the CPU, {share:.4} twins, median cosine {median:.5}",
+                      gpu.len(), cpu.len());
+            assert!(share > 0.95, "{what}: {share:.3} of the GPU's points have a CPU twin");
+            assert!((cpu.len() as f64 - gpu.len() as f64).abs() < 0.05 * gpu.len() as f64,
+                    "{what}: {} points on the CPU, {} on the GPU", cpu.len(), gpu.len());
+            assert!(median > 0.99, "{what}: median cosine similarity {median:.4}");
+        }
     }
 }
