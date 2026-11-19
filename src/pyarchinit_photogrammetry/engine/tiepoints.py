@@ -35,7 +35,7 @@ import numpy as np
 
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
-from .sfm import drop_missing_points, import_reconstruction, load_reconstruction
+from .sfm import drop_missing_points, import_reconstruction, load_reconstruction, read_only_uri
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class _Keypoints:
         if not db.exists():
             return
         try:
-            self.con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            self.con = sqlite3.connect(read_only_uri(db), uri=True)
             self.ids = dict(self.con.execute("SELECT name, image_id FROM images").fetchall())
         except sqlite3.Error as exc:
             log.info("Keypoints not read from %s: %s", db, exc)

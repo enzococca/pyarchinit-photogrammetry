@@ -14,6 +14,7 @@ tangential distortion); *Optimize cameras* refines every parameter afterwards.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -590,6 +591,15 @@ def _db_image_names(db_path: Path) -> set[str]:
 
 
 COLMAP_MAX_IMAGES = 2147483647  # COLMAP's kMaxNumImages: pair_id = id1 * COLMAP_MAX_IMAGES + id2, id1 < id2
+LIST_NAMES_FILE = "pairs_names.json"  # beside the database: the names of the photos aliased for a pair list
+
+
+def read_only_uri(path: Path, *flags: str) -> str:
+    """The sqlite URI that opens the database at ``path`` read-only, with any other ``flags`` of
+    the query (``immutable=1``): the path escaped by ``as_uri``, since a ``#`` or a ``?`` in a
+    folder of the project ends a raw ``file:`` URI early and another file is opened ("no such
+    table: images" on a project saved as "Saggio #3.ppg")."""
+    return Path(path).resolve().as_uri() + "?" + "&".join(("mode=ro", *flags))
 
 
 def _plain_name(name: str) -> bool:
@@ -609,6 +619,69 @@ def _free_prefix(names, base: str) -> str:
     return base
 
 
+def _image_names_by_id(db_path: Path) -> dict[int, str]:
+    import sqlite3
+
+    con = sqlite3.connect(read_only_uri(db_path), uri=True)
+    try:
+        return {int(i): str(n) for i, n in con.execute("SELECT image_id, name FROM images")}
+    finally:
+        con.close()
+
+
+def _rename_images(db_path: Path, by_id: dict[int, str]) -> None:
+    """The names of the images of the database set to ``by_id``, in one transaction."""
+    import sqlite3
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.executemany("UPDATE images SET name = ? WHERE image_id = ?", [(n, i) for i, n in by_id.items()])
+        con.commit()
+    finally:
+        con.close()
+
+
+def _alias_list_names(db_path: Path) -> dict[str, str]:
+    """The photos whose name COLMAP's reader of a pair list cannot take (:func:`_plain_name`)
+    renamed in the database to an alias it can, and the mapping name -> alias of every photo (the
+    name itself for the others). The originals go first into :data:`LIST_NAMES_FILE` beside the
+    database, with their alias, so a call that never ends (the process dies in COLMAP) can be
+    undone by :func:`restore_list_names`; a database whose names are all plain is not touched."""
+    names = _image_names_by_id(db_path)
+    alias = {n: n for n in names.values()}
+    renamed = {i: n for i, n in names.items() if not _plain_name(n)}
+    if renamed:
+        prefix = _free_prefix(names.values(), "ppg_list_")
+        for i, n in renamed.items():
+            alias[n] = f"{prefix}{i}"
+        (db_path.parent / LIST_NAMES_FILE).write_text(
+            json.dumps({str(i): [alias[n], n] for i, n in renamed.items()}), encoding="utf-8")
+        _rename_images(db_path, {i: alias[n] for i, n in renamed.items()})
+    return alias
+
+
+def restore_list_names(db_path: Path) -> int:
+    """The names of the photos a pair list aliased (:func:`_alias_list_names`) put back from the
+    record beside the database, and the record removed: only the photos still under the alias
+    recorded are renamed (a database rebuilt since holds other photos under those ids and is left
+    alone). Nothing to do without a record. Returns how many names came back; when any did, the
+    log says that a matching was interrupted."""
+    record = db_path.parent / LIST_NAMES_FILE
+    if not record.exists():
+        return 0
+    back = 0
+    if db_path.exists():
+        kept = json.loads(record.read_text(encoding="utf-8"))
+        current = _image_names_by_id(db_path)
+        by_id = {int(i): name for i, (alias, name) in kept.items() if current.get(int(i)) == alias}
+        if by_id:
+            _rename_images(db_path, by_id)
+            back = len(by_id)
+            log.warning("%d photos still had the alias names of an interrupted matching: their names are back", back)
+    record.unlink()
+    return back
+
+
 @contextlib.contextmanager
 def colmap_list_names(db_path: Path):
     """The names the photos go by in a pair list written for COLMAP. COLMAP reads a line of the
@@ -616,38 +689,25 @@ def colmap_list_names(db_path: Path):
     cannot find is logged ("Image ... does not exist") and dropped, with no error: a survey with
     its photos under "2024 camera/..." lost 7,901 of its 10,553 pairs and aligned 34 photos of
     1,356. Inside the block the photos whose name COLMAP's reader cannot take (:func:`_plain_name`)
-    are renamed in the database to an alias it can; the mapping name -> alias (the name itself for
-    the others) is yielded to write the list with; the names are put back on the way out, whatever
-    happened. The matcher reads the features and writes the matches by image id, so the alias is
-    seen nowhere else; a database whose names are all plain is not touched."""
-    import sqlite3
-
-    def rename(by_id: dict[int, str]) -> None:
-        con = sqlite3.connect(str(db_path))
+    are renamed in the database to an alias it can (:func:`_alias_list_names`); the mapping
+    name -> alias (the name itself for the others) is yielded to write the list with; the names are
+    put back on the way out, whatever happened (:func:`restore_list_names`; a restore that fails,
+    the database locked, is logged and leaves the error that ended the block as the one raised: the
+    record beside the database lets the next matching or alignment put the names back). The
+    matcher reads the features and writes the matches by image id, so the alias is seen nowhere
+    else."""
+    restore_list_names(db_path)  # a call that never ended (the process died in COLMAP): its names first
+    alias = _alias_list_names(db_path)
+    try:
+        yield alias
+    except BaseException:
         try:
-            con.executemany("UPDATE images SET name = ? WHERE image_id = ?", [(n, i) for i, n in by_id.items()])
-            con.commit()
-        finally:
-            con.close()
-
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    try:
-        names = {int(i): str(n) for i, n in con.execute("SELECT image_id, name FROM images")}
-    finally:
-        con.close()
-    alias = {n: n for n in names.values()}
-    renamed = {i: n for i, n in names.items() if not _plain_name(n)}
-    if not renamed:
-        yield alias
-        return
-    prefix = _free_prefix(names.values(), "ppg_list_")
-    for i, n in renamed.items():
-        alias[n] = f"{prefix}{i}"
-    rename({i: alias[n] for i, n in renamed.items()})
-    try:
-        yield alias
-    finally:
-        rename(renamed)
+            restore_list_names(db_path)
+        except Exception as exc:  # noqa: BLE001 - the error that ended the block is the one to see
+            log.error("the names of the photos could not be put back in %s (%s): they are kept in %s and go back "
+                      "at the next matching or alignment", db_path, exc, LIST_NAMES_FILE)
+        raise
+    restore_list_names(db_path)
 
 
 def _unmatched_pairs(db_path: Path, pairs) -> int:
@@ -656,7 +716,7 @@ def _unmatched_pairs(db_path: Path, pairs) -> int:
     the pairs it never saw: lines of the list it could not read, photos without an entry."""
     import sqlite3
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(read_only_uri(db_path), uri=True)
     try:
         ids = {str(n): int(i) for i, n in con.execute("SELECT image_id, name FROM images")}
         done = {int(p) for (p,) in con.execute("SELECT pair_id FROM two_view_geometries")}
@@ -743,7 +803,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     # the descriptors are read without taking any lock on the database (sqlite ``immutable``: the
     # rows of the descriptors never change while the CPU matcher writes its matches): a reader
     # holding a shared lock would make COLMAP's commit fail, and COLMAP aborts the process on it
-    reader = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, check_same_thread=False)
+    reader = sqlite3.connect(read_only_uri(db_path, "immutable=1"), uri=True, check_same_thread=False)
 
     def descriptors(image_id: int) -> np.ndarray:
         with lock:
@@ -1028,6 +1088,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                     "%s", exc)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
+    restore_list_names(db_path)  # the names a matching that died in COLMAP left aliased, before anything reads them
     root, names = image_root_and_names(chunk)
     rigs = rig_configs(chunk, names)
     if matcher != "sift" and rigs:
@@ -1317,7 +1378,7 @@ def limit_tie_points(db_path: Path, out_path: Path, per_image: int, progress: Pr
     import pycolmap
 
     progress = as_progress(progress)
-    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    src = sqlite3.connect(read_only_uri(db_path), uri=True)
     try:
         pairs = src.execute("SELECT pair_id, rows, cols, data, config, F, E, H, qvec, tvec FROM two_view_geometries "
                             "WHERE rows > 0").fetchall()
@@ -1826,6 +1887,7 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     db_path = work / "database.db"
     if not db_path.exists():
         raise RuntimeError("run match_photos() before align_cameras()")
+    restore_list_names(db_path)  # the names a matching that died in COLMAP left aliased: the mapper goes by them
     info = chunk.meta["sfm"]
     root = info["image_root"]
     out = work / "mapper"
