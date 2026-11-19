@@ -2095,6 +2095,10 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
     cams = [c for c in chunk.cameras if c.aligned and c.key in names]
     if not cams:
         raise RuntimeError("no aligned camera to write")
+    # COLMAP's reader of images.txt stops a name at the first blank: such a photo goes in under an alias and
+    # gets its name back through the API before the model is written (the binary model holds names whole)
+    prefix = _free_prefix(names.values(), "ppg_image_")
+    renamed = {img_id: names[c.key] for img_id, c in enumerate(cams, 1) if not _plain_name(names[c.key])}
     sensor_ids = {}
     with open(txt / "cameras.txt", "w") as f:
         for i, key in enumerate(sorted({c.sensor_key for c in cams}), 1):
@@ -2133,8 +2137,9 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
             obs.append((x, y, int(pid) + 1))
         q = pycolmap.Rotation3d(cfw[:3, :3]).quat  # x, y, z, w
         t = cfw[:3, 3]
+        name = f"{prefix}{img_id}" if img_id in renamed else names[c.key]
         image_lines.append(f"{img_id} " + " ".join(_g(v) for v in (q[3], q[0], q[1], q[2], t[0], t[1], t[2]))
-                           + f" {sensor_ids[c.sensor_key]} {names[c.key]}\n"
+                           + f" {sensor_ids[c.sensor_key]} {name}\n"
                            + " ".join(f"{_g(x)} {_g(y)} {p}" for x, y, p in obs) + "\n")
     with open(txt / "images.txt", "w") as f:
         f.writelines(image_lines)
@@ -2145,6 +2150,9 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
             f.write(f"{pid} {_g(x)} {_g(y)} {_g(z)} {int(r)} {int(g)} {int(b)} 0.5 " + " ".join(f"{i} {j}" for i, j in tr) + "\n")
     rec = pycolmap.Reconstruction()
     rec.read_text(str(txt))
+    for image in rec.images.values():  # the photos written under an alias: their names, whole
+        if image.image_id in renamed:
+            image.name = renamed[image.image_id]
     out.mkdir(parents=True)
     rec.write(str(out))
     chunk._set_product("reconstruction", out)

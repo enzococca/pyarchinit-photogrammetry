@@ -155,3 +155,20 @@ def test_the_pairs_colmap_leaves_out_are_counted_and_said(scene_dir, tmp_path, m
     assert lost > 0 and ch.meta["sfm"]["pairs_unmatched"] == lost
     said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "pairs" in r.getMessage()]
     assert said and f"{lost:,}" in said[-1] and f"{asked:,}" in said[-1]
+
+
+def test_a_model_written_from_the_cameras_keeps_names_with_blanks(processed, tmp_path):
+    """COLMAP's text reader stops an image name at the first blank: a model written from the
+    cameras of the chunk (an import from Metashape, merged chunks) comes back with the names of
+    the photos all the same."""
+    doc0, _, _ = processed
+    src = Path(doc0.path)
+    shutil.copytree(src.parent, tmp_path / "copia", ignore=shutil.ignore_patterns("dense"))
+    ch = ppg.Document.open(tmp_path / "copia" / src.name).chunks[0]
+    for i, cam in enumerate(ch.cameras):
+        cam.path = str(tmp_path / "rilievo 2024" / ("camera A" if i % 2 else "camera B") / f"foto {i:04d}.jpg")
+    sfm.write_reconstruction_from_chunk(ch)
+    _root, names = sfm.image_root_and_names(ch)
+    rec = sfm.load_reconstruction(ch)
+    assert {im.name for im in rec.images.values()} == set(names.values()) and len(rec.images) == len(ch.cameras)
+    assert ch.meta["sfm"]["names"] == {str(k): v for k, v in names.items()}
