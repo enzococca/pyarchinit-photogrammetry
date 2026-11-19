@@ -5,13 +5,19 @@
 //!
 //! - `ppg-bench adapters`: the GPU adapters wgpu finds, an array with the `index`, `name`,
 //!   `backend` and `device_type` of each.
-//! - `ppg-bench match [--n 4096] [--device N]`: the matching of descriptors, timed on two
-//!   generated sets of `n` descriptors of which the right matches are known; it prints `device`
-//!   (the name of the adapter), `n`, `dim`, `matches`, `correct` and `seconds` (the time of one
-//!   call, the first on a new matcher: not a repeated or a warmed timing). Without `--device`
-//!   the first adapter that is no software rasteriser is taken; when there is none the answer
-//!   is `{"skipped": "no adapter"}`, with exit code 0. `n` is 46336 at most (`MAX_N`): more is
-//!   a command line the binary refuses, before a device is opened.
+//! - `ppg-bench match [--n 4096] [--device N] [--workgroup-kb 16|32] [--cpu]`: the matching of
+//!   descriptors, timed on two generated sets of `n` descriptors of which the right matches are
+//!   known; it prints `device` (the name of the adapter), `n`, `dim`, `matches`, `correct`,
+//!   `seconds` (the time of one call, the first on a new matcher: not a repeated or a warmed
+//!   timing) and `workgroup_kb` (16 or 32: the workgroup memory of the kernels the matcher
+//!   chose from the adapter's limits, or the one `--workgroup-kb` forced - 16 on any adapter
+//!   exercises the small tiles). Without `--device` the first adapter that is no software
+//!   rasteriser is taken; when there is none the answer is `{"skipped": "no adapter"}`, with
+//!   exit code 0. `n` is 46336 at most with the tiles of 128 descriptors and 32768 with those of
+//!   64 (`most_descriptors`): more is a command line the binary refuses, before a device is
+//!   opened. With `--cpu` the CPU twin of the kernels (`matching::matches_cpu`) is timed instead,
+//!   on any computer, with `"device": "cpu"` and no `workgroup_kb`; it takes no `--device` and no
+//!   `--workgroup-kb`, and no bound on `n` (it binds no buffer).
 //! - `ppg-bench adjust [--photos 200] [--points 2000] [--solver auto|dense|sparse|pcg] [--seed 1]`:
 //!   the bundle adjustment of the synthetic grid block of `bundle::synthetic::grid_block`
 //!   (`photos` photos, `points` points - `points / photos` per photo, rounded up - perturbed from
@@ -24,7 +30,7 @@ use std::time::Instant;
 
 use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{solve, LinearSolver, Options};
-use ppg_engine::gpu;
+use ppg_engine::{gpu, matching};
 use serde_json::{json, Value};
 
 /// The descriptors of each set when `--n` is not given: a choice, not a measured figure.
@@ -35,18 +41,40 @@ const DEFAULT_PHOTOS: usize = 200;
 const DEFAULT_POINTS: usize = 2000;
 const DEFAULT_SEED: u64 = 1;
 
-/// The most descriptors `--n` takes: derived, not measured. The buffer of the matching kernel
-/// that grows fastest holds its partial results, 8 bytes for every tile of the first set (128
-/// descriptors, `TILE_A` in gpu.rs of the engine; the last tile counts whole) and every
-/// descriptor of the second, and the kernel binds it whole as a storage buffer: for two sets of
-/// `n` that is ceil(n / 128) * n * 8 bytes, within 128 MiB up to 46336 (362 tiles, 134 189 056
-/// bytes) and above it from 46337 (363 tiles, 134 562 648 bytes). 128 MiB is the storage binding
-/// wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size` of
-/// `Limits::default()`). The engine does not say what the device it opens holds, and with a
-/// buffer beyond that the kernel, which has no error scope, ends in a panic of wgpu: the figure
-/// is what can be said without the device. Many devices hold more, and an adapter below the
-/// defaults of wgpu (a downlevel one) holds less.
-const MAX_N: usize = 46336;
+/// The storage binding wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size`
+/// of `Limits::default()`): 128 MiB. The engine does not say what the device it opens holds, and
+/// with a buffer beyond that the kernel, which has no error scope, ends in a panic of wgpu. Many
+/// devices hold more, and an adapter below the defaults of wgpu (a downlevel one) holds less.
+const BINDING: usize = 128 << 20;
+
+/// The most descriptors `--n` takes with tiles of `rows` descriptors of the first set (the
+/// `rows` of `gpu::Tile`): derived, not measured. The buffer of the matching kernel that grows
+/// fastest holds its partial results, 8 bytes for every tile of the first set (the last tile
+/// counts whole) and every descriptor of the second, and the kernel binds it whole as a storage
+/// buffer: for two sets of `n` that is ceil(n / rows) * n * 8 bytes, to stay within `BINDING`.
+/// With the large tiles (128 rows) that is 46336 (362 tiles, 134 189 056 bytes; 46337 takes 363
+/// tiles, 134 562 648 bytes); with the small ones (64 rows) 32768 (512 tiles, 128 MiB exactly).
+/// The figure is what can be said without the device.
+fn most_descriptors(rows: usize) -> usize {
+    let fits = |n: usize| n.div_ceil(rows) * n * 8 <= BINDING;
+    // n * n * 8 / rows <= the partials, so the answer is at most sqrt(BINDING / 8 * rows): from
+    // there, or one above it against the rounding of the root, down to the first that fits
+    let mut n = ((BINDING / 8 * rows) as f64).sqrt() as usize + 1;
+    while !fits(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// The tiles of the matching kernels `--workgroup-kb` names, or the large ones when it is not
+/// given: the bound on `--n` is theirs before a device is opened (an adapter with the small
+/// tiles only is held to its own bound once it is).
+fn tiles_asked(workgroup_kb: Option<u32>) -> gpu::Tile {
+    match workgroup_kb {
+        Some(16) => gpu::SMALL_TILE,
+        _ => gpu::LARGE_TILE,
+    }
+}
 
 // COLMAP's matching options as the program passes them: the defaults of `gpu_match` in
 // src/pyarchinit_photogrammetry/_native.py, copied here (to be changed with them)
@@ -156,9 +184,36 @@ fn adapters() -> Value {
         .collect()
 }
 
-/// The matching of two sets of `n` descriptors on the adapter `device`, timed: the record to
-/// print.
-fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
+/// Where `match` runs: a GPU adapter, named or the first that is no software rasteriser, with the
+/// tiles its workgroup memory takes or the ones `--workgroup-kb` forces; or the CPU twin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Where {
+    Gpu { device: Option<usize>, workgroup_kb: Option<u32> },
+    Cpu,
+}
+
+/// The record of a matching of two sets of `n` descriptors on `device` that took `seconds`:
+/// the matches, and how many of them join a descriptor to its twin.
+fn record(device: &str, n: usize, matches: &[[u32; 2]], twin_of: &[usize], seconds: f64) -> Value {
+    let correct = matches.iter().filter(|pair| twin_of[pair[1] as usize] == pair[0] as usize).count();
+    json!({"device": device, "n": n, "dim": gpu::DIM, "matches": matches.len(), "correct": correct,
+           "seconds": seconds})
+}
+
+/// The matching of two sets of `n` descriptors `on` a device, timed: the record to print.
+fn time_matching(n: usize, on: Where) -> Result<Value, String> {
+    let (device, workgroup_kb) = match on {
+        Where::Cpu => {
+            let (a, b, twin_of) = descriptor_sets(n);
+            // what is timed is the twin alone, the bests of both directions and the matches
+            // chosen among them, on every core rayon finds
+            let start = Instant::now();
+            let matches = matching::matches_cpu(&a, &b, MAX_RATIO, MAX_DISTANCE, CROSS_CHECK);
+            let seconds = start.elapsed().as_secs_f64();
+            return Ok(record("cpu", n, &matches, &twin_of, seconds));
+        }
+        Where::Gpu { device, workgroup_kb } => (device, workgroup_kb),
+    };
     let index = match device {
         Some(index) => index,
         // a software rasteriser (the type wgpu calls Cpu) is not timed as if it were a GPU: it is
@@ -168,7 +223,21 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
             None => return Ok(json!({"skipped": "no adapter"})),
         },
     };
-    let mut matcher = gpu::Matcher::new(Some(index))?;
+    let mut matcher = match workgroup_kb {
+        Some(kb) => gpu::Matcher::with_workgroup_bytes(Some(index), kb * 1024)?,
+        None => gpu::Matcher::new(Some(index))?,
+    };
+    // an adapter with the small tiles only, taken without --workgroup-kb: the bound of its tiles,
+    // below the one the command line was held to, holds before the kernel binds its buffer
+    let rows = matcher.tile().rows;
+    let most = most_descriptors(rows);
+    if n > most {
+        return Err(format!(
+            "{}: {n} descriptors are more than the {most} its tiles of {rows} take (the kernel's working \
+             buffer for more is above the {} MiB a device is sure to bind)",
+            matcher.info.name, BINDING >> 20
+        ));
+    }
     let (a, b, twin_of) = descriptor_sets(n);
     // the device is there: what is timed is the matching alone, from the descriptors sent to the
     // GPU (under the key 0: the matcher does not keep them on it) to the matches chosen among what
@@ -179,9 +248,9 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
     let start = Instant::now();
     let matches = matcher.matches(0, &a, 0, &b, MAX_RATIO, MAX_DISTANCE, CROSS_CHECK)?;
     let seconds = start.elapsed().as_secs_f64();
-    let correct = matches.iter().filter(|pair| twin_of[pair[1] as usize] == pair[0] as usize).count();
-    Ok(json!({"device": matcher.info.name, "n": n, "dim": gpu::DIM, "matches": matches.len(),
-              "correct": correct, "seconds": seconds}))
+    let mut answer = record(&matcher.info.name, n, &matches, &twin_of, seconds);
+    answer["workgroup_kb"] = json!(matcher.workgroup_bytes() / 1024);
+    Ok(answer)
 }
 
 /// The name of a solver of the reduced system on the command line and in the record.
@@ -216,7 +285,7 @@ fn time_adjustment(photos: usize, points: usize, solver: LinearSolver, seed: u64
 
 enum Command {
     Adapters,
-    Match { n: usize, device: Option<usize> },
+    Match { n: usize, on: Where },
     Adjust { photos: usize, points: usize, solver: LinearSolver, seed: u64 },
 }
 
@@ -230,7 +299,7 @@ fn command(words: &[String]) -> Result<Command, String> {
             Some(word) => Err(format!("adapters takes no argument: {word}")),
         },
         Some("match") => {
-            let (mut n, mut device) = (DEFAULT_N, None);
+            let (mut n, mut device, mut workgroup_kb, mut cpu) = (DEFAULT_N, None, None, false);
             while let Some(option) = words.next() {
                 match option {
                     "--n" => {
@@ -238,18 +307,37 @@ fn command(words: &[String]) -> Result<Command, String> {
                         if n == 0 {
                             return Err("--n takes 1 or more: two empty sets have nothing to match".into());
                         }
-                        if n > MAX_N {
-                            return Err(format!(
-                                "--n takes {MAX_N} at most: the kernel's working buffer for more is above the \
-                                 128 MiB a device is sure to bind"
-                            ));
-                        }
                     }
                     "--device" => device = Some(whole_number(option, words.next())?),
+                    "--workgroup-kb" => {
+                        let word = words.next().ok_or("--workgroup-kb takes 16 or 32")?;
+                        workgroup_kb = match word {
+                            "16" => Some(16),
+                            "32" => Some(32),
+                            _ => return Err(format!("--workgroup-kb takes 16 or 32, not {word}")),
+                        };
+                    }
+                    "--cpu" => cpu = true,
                     _ => return Err(format!("match has no option {option}")),
                 }
             }
-            Ok(Command::Match { n, device })
+            if cpu {
+                if device.is_some() || workgroup_kb.is_some() {
+                    return Err("match --cpu takes no --device and no --workgroup-kb: the CPU twin has no adapter"
+                        .into());
+                }
+                return Ok(Command::Match { n, on: Where::Cpu });
+            }
+            let rows = tiles_asked(workgroup_kb).rows;
+            let most = most_descriptors(rows);
+            if n > most {
+                return Err(format!(
+                    "--n takes {most} at most with tiles of {rows} descriptors: the kernel's working buffer for \
+                     more is above the {} MiB a device is sure to bind",
+                    BINDING >> 20
+                ));
+            }
+            Ok(Command::Match { n, on: Where::Gpu { device, workgroup_kb } })
         }
         Some("adjust") => {
             let (mut photos, mut points) = (DEFAULT_PHOTOS, DEFAULT_POINTS);
@@ -293,12 +381,12 @@ fn main() -> ExitCode {
     let words: Vec<String> = std::env::args_os().skip(1).map(|word| word.to_string_lossy().into_owned()).collect();
     let answer = match command(&words) {
         Ok(Command::Adapters) => Ok(adapters()),
-        Ok(Command::Match { n, device }) => time_matching(n, device),
+        Ok(Command::Match { n, on }) => time_matching(n, on),
         Ok(Command::Adjust { photos, points, solver, seed }) => time_adjustment(photos, points, solver, seed),
         Err(problem) => {
             eprintln!("ppg-bench: {problem}");
             eprintln!("usage: ppg-bench adapters");
-            eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N]");
+            eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N] [--workgroup-kb 16|32] [--cpu]");
             eprintln!(
                 "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS} (in all, rounded \
                  up to a multiple of the photos)] [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
@@ -337,22 +425,59 @@ mod tests {
     #[test]
     fn the_largest_size_is_the_last_whose_partial_results_fit_a_storage_binding() {
         // the bytes of the kernel's buffer of partial results for two sets of n descriptors (8 for
-        // every tile of 128 descriptors of the first and every descriptor of the second), against
-        // the 128 MiB of a storage binding: the two figures MAX_N is derived from
-        let partials = |n: usize| n.div_ceil(128) * n * 8;
-        let binding = 128 << 20;
-        assert!(partials(MAX_N) <= binding, "{} bytes for {MAX_N} descriptors", partials(MAX_N));
-        assert!(partials(MAX_N + 1) > binding, "{} bytes for one descriptor more", partials(MAX_N + 1));
+        // every tile of `rows` descriptors of the first and every descriptor of the second),
+        // against the 128 MiB of a storage binding: the figures the bound is derived from, for
+        // the tiles of both kernels
+        for (tile, most) in [(gpu::LARGE_TILE, 46336), (gpu::SMALL_TILE, 32768)] {
+            let partials = |n: usize| n.div_ceil(tile.rows) * n * 8;
+            assert_eq!(most_descriptors(tile.rows), most, "tiles of {} rows", tile.rows);
+            assert!(partials(most) <= BINDING, "{} bytes for {most} descriptors", partials(most));
+            assert!(partials(most + 1) > BINDING, "{} bytes for one descriptor more", partials(most + 1));
+        }
     }
 
     #[test]
     fn the_largest_size_is_taken_and_one_more_is_refused() {
-        let (most, more) = (MAX_N.to_string(), (MAX_N + 1).to_string());
-        let taken = command(&words(&["match", "--n", &most]));
-        assert!(matches!(taken, Ok(Command::Match { n: MAX_N, device: None })), "{most} descriptors are refused");
-        // the refusal says how many are taken, with or without an adapter named
-        let refused = command(&words(&["match", "--n", &more, "--device", "0"])).err();
-        assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{more} descriptors: {refused:?}");
+        let asked =
+            [(None, vec![]), (Some(32), vec!["--workgroup-kb", "32"]), (Some(16), vec!["--workgroup-kb", "16"])];
+        for (kb, option) in asked {
+            let bound = most_descriptors(tiles_asked(kb).rows);
+            let (most, more) = (bound.to_string(), (bound + 1).to_string());
+            let mut line = vec!["match", "--n", &most];
+            line.extend(&option);
+            let taken = command(&words(&line));
+            let on = Where::Gpu { device: None, workgroup_kb: kb };
+            assert!(matches!(taken, Ok(Command::Match { n, on: o }) if n == bound && o == on), "{line:?} is refused");
+            // the refusal says how many are taken, with or without an adapter named
+            let mut line = vec!["match", "--n", &more, "--device", "0"];
+            line.extend(&option);
+            let refused = command(&words(&line)).err();
+            assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{line:?}: {refused:?}");
+        }
+        // the small tiles take fewer: a size the large ones take is refused with them
+        assert!(command(&words(&["match", "--n", "46336", "--workgroup-kb", "16"])).is_err());
+    }
+
+    #[test]
+    fn match_reads_where_it_runs() {
+        let on = |line: &[&str]| match command(&words(line)) {
+            Ok(Command::Match { n, on }) => Ok((n, on)),
+            Ok(_) => panic!("{line:?} is another command"),
+            Err(problem) => Err(problem),
+        };
+        assert_eq!(on(&["match"]), Ok((DEFAULT_N, Where::Gpu { device: None, workgroup_kb: None })));
+        assert_eq!(on(&["match", "--device", "2", "--workgroup-kb", "16"]),
+                   Ok((DEFAULT_N, Where::Gpu { device: Some(2), workgroup_kb: Some(16) })));
+        assert_eq!(on(&["match", "--workgroup-kb", "32", "--n", "9"]),
+                   Ok((9, Where::Gpu { device: None, workgroup_kb: Some(32) })));
+        assert_eq!(on(&["match", "--cpu", "--n", "9"]), Ok((9, Where::Cpu)));
+        // the CPU twin binds no buffer: no bound on n
+        assert_eq!(on(&["match", "--n", "46337", "--cpu"]), Ok((46337, Where::Cpu)));
+        let refused: [&[&str]; 4] = [&["match", "--workgroup-kb"], &["match", "--workgroup-kb", "24"],
+                                     &["match", "--cpu", "--device", "0"], &["match", "--cpu", "--workgroup-kb", "16"]];
+        for line in refused {
+            assert!(on(line).is_err(), "{line:?} is taken");
+        }
     }
 
     #[test]

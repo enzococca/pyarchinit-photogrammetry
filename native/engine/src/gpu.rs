@@ -3,21 +3,66 @@
 //! cost of the alignment of many photos.
 //!
 //! The descriptors are COLMAP's: 128 unsigned bytes each (an L2 norm of 512 before the
-//! quantisation), so a dot product is an integer below 2^18 and exact in f32. One pass over a
-//! pair of photos gives, for every descriptor of A, its best and second-best dot product over B
-//! (the rows) and, through partials per tile merged by a second kernel, the same for every
-//! descriptor of B over A (the columns): COLMAP's ratio test, distance test and cross check come
-//! out of the one pass. A workgroup of 16 x 16 threads takes 128 descriptors of A against every
-//! tile of 64 of B, 8 x 4 dot products per thread, the tiles transposed in workgroup memory
-//! (word-major) so that a step over one word of the descriptors reads consecutive entries.
-//! Apple M4 Pro: 2.06 TFLOP/s, 198 ms for 40 000 x 40 000 descriptors, both directions.
+//! quantisation), so a dot product is an integer below 2^18 and exact in f32 (below 2^24 for any
+//! bytes). One pass over a pair of photos gives, for every descriptor of A, its best and
+//! second-best dot product over B (the rows) and, through partials per tile merged by a second
+//! kernel, the same for every descriptor of B over A (the columns): COLMAP's ratio test, distance
+//! test and cross check come out of the one pass. A workgroup of 16 x 16 threads takes a tile of
+//! descriptors of A against every tile of B, the tiles transposed in workgroup memory
+//! (word-major) so that a step over one word of the descriptors reads consecutive entries. The
+//! tiles come in two sizes, chosen from the workgroup memory of the adapter (`Tile`): 128 x 64,
+//! 8 x 4 dot products per thread, in 32 KiB; or 64 x 32, 4 x 2 per thread, in the 16 KiB of the
+//! downlevel limits of wgpu. Either size, and `matching::bests_cpu` on the CPU, gives the same
+//! bests bit for bit: the lowest index wins a tie in both directions, and on a tie the second
+//! best equals the best. Apple M4 Pro, large tiles: 2.06 TFLOP/s, 198 ms for 40 000 x 40 000
+//! descriptors, both directions.
 use std::collections::{HashMap, VecDeque};
 
 use wgpu::util::DeviceExt;
 
 pub const DIM: usize = 128;
-const TILE_A: usize = 128;
 const CACHE_BYTES: usize = 768 << 20; // descriptors kept on the GPU across the pairs of the same photos
+
+/// The tiles of the matching kernel: `rows` descriptors of A against `cols` of B per workgroup
+/// and pass, in workgroup memory. A workgroup has 16 x 16 threads, so a thread holds
+/// `rows / 16` x `cols / 16` dot products.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tile {
+    pub rows: usize,
+    pub cols: usize,
+}
+
+/// The tiles of a GPU with 32 KiB of workgroup memory or more (the kernel as first written).
+pub const LARGE_TILE: Tile = Tile { rows: 128, cols: 64 };
+/// The tiles that fit 16 KiB of workgroup memory, the downlevel limit of wgpu (GL, some virtual
+/// and mobile adapters): half the rows, half the columns, half the scratch.
+pub const SMALL_TILE: Tile = Tile { rows: 64, cols: 32 };
+
+impl Tile {
+    /// The entries of `scratch`: 16 thread rows by the columns of the tile when the columns are
+    /// merged, 16 thread columns by half the rows when the rows are (the same figure for both
+    /// sizes).
+    const fn scratch(&self) -> usize {
+        if 16 * self.cols > 8 * self.rows {
+            16 * self.cols
+        } else {
+            8 * self.rows
+        }
+    }
+
+    /// The workgroup memory the kernel declares: the two tiles as u32 words (32 per descriptor)
+    /// and `scratch` as vec2<u32>.
+    pub const fn workgroup_bytes(&self) -> u32 {
+        ((self.rows * 32 + 32 * self.cols) * 4 + self.scratch() * 8) as u32
+    }
+}
+
+/// The tiles the kernels use on an adapter with `workgroup_bytes` of workgroup memory
+/// (`max_compute_workgroup_storage_size`): the large ones from 32768 bytes, the small ones from
+/// 16384, none below.
+pub fn tile_for(workgroup_bytes: u32) -> Option<Tile> {
+    [LARGE_TILE, SMALL_TILE].into_iter().find(|tile| tile.workgroup_bytes() <= workgroup_bytes)
+}
 
 /// The bytes of descriptors kept on the GPU: ``PPG_GPU_CACHE_MB`` when set (the tests make it
 /// small to make the cache full), else ``CACHE_BYTES``.
@@ -42,162 +87,186 @@ struct Params {
     _pad: u32,
 }
 
-/// The two kernels, generated: the inner loop is written out in full (32 accumulators in
-/// registers; arrays indexed in loops are kept in memory by some compilers).
-fn shader() -> String {
+/// The two kernels for `tile`, generated: the inner loop is written out in full (the
+/// accumulators in registers; arrays indexed in loops are kept in memory by some compilers), and
+/// the sizes of the tiles, of the loads and of the merges follow the tile.
+///
+/// A thread of the 16 x 16 holds the rows `tr .. tr + R` of the tile of A (R = rows / 16) against
+/// the columns `tc .. tc + C` (C = cols / 16) of every tile of B, so the columns a thread visits
+/// are those whose index modulo the tile width falls in its C: the merge of the rows over the
+/// threads therefore compares indices on equal scores, to make the lowest index win as a scan
+/// does. The columns are merged over thread rows and tiles that hold rows in increasing order, so
+/// there a strict comparison is the lowest index.
+fn shader(tile: Tile) -> String {
+    let Tile { rows, cols } = tile;
+    let (per_row, per_col) = (rows / 16, cols / 16); // dot products of a thread: per_row x per_col
+    let half = rows / 2; // rows merged at a time: scratch holds 16 threads x half
+    let scratch = tile.scratch();
+    let (a_words, b_words) = (rows * 32, cols * 32);
+    let a_loads = a_words / 256; // words of the A tile each thread loads
+    let b_threads = 256 / cols; // threads that load one column of the B tile ...
+    let b_loads = 32 / b_threads; // ... and the words each of them loads
+    debug_assert!(rows % 16 == 0 && cols % 16 == 0 && a_words % 256 == 0 && 256 % cols == 0);
+    debug_assert!(32 % b_threads == 0 && half == 8 * per_row && rows <= 256);
+    debug_assert!(scratch >= 16 * cols && scratch >= 16 * half);
     let mut s = String::new();
-    s.push_str(r#"
-struct Params { n_a: u32, n_b: u32, tiles_a: u32, pad: u32 };
+    s.push_str(&format!(r#"
+struct Params {{ n_a: u32, n_b: u32, tiles_a: u32, pad: u32 }};
 @group(0) @binding(0) var<storage, read> a: array<u32>;
 @group(0) @binding(1) var<storage, read> b: array<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read_write> col_part: array<vec2<u32>>;
 @group(0) @binding(4) var<uniform> p: Params;
 
-var<workgroup> a_tile: array<u32, 4096>;
-var<workgroup> b_tile: array<u32, 2048>;
-var<workgroup> scratch: array<vec2<u32>, 1024>;
+var<workgroup> a_tile: array<u32, {a_words}>;
+var<workgroup> b_tile: array<u32, {b_words}>;
+var<workgroup> scratch: array<vec2<u32>, {scratch}>;
 
-fn unpack(v: u32) -> vec4<f32> {
+fn unpack(v: u32) -> vec4<f32> {{
     return vec4<f32>(f32(v & 255u), f32((v >> 8u) & 255u), f32((v >> 16u) & 255u), f32(v >> 24u));
-}
+}}
 
 @compute @workgroup_size(16, 16)
 fn gemm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(local_invocation_index) li: u32) {
-    let a0 = wg.x * 128u;
-    for (var e = 0u; e < 16u; e++) {
+        @builtin(local_invocation_index) li: u32) {{
+    let a0 = wg.x * {rows}u;
+    for (var e = 0u; e < {a_loads}u; e++) {{
         let idx = e * 256u + li;
-        let k = idx / 128u;
-        let row = idx % 128u;
+        let k = idx / {rows}u;
+        let row = idx % {rows}u;
         let g = a0 + row;
         a_tile[idx] = select(0u, a[g * 32u + k], g < p.n_a);
-    }
+    }}
     workgroupBarrier();
-    let tr = lid.y * 8u;
-    let tc = lid.x * 4u;
-"#);
-    for r in 0..8 {
+    let tr = lid.y * {per_row}u;
+    let tc = lid.x * {per_col}u;
+"#));
+    for r in 0..per_row {
         s.push_str(&format!("    var rb1_{r}: f32 = -1.0; var rb2_{r}: f32 = -1.0; var ri_{r}: u32 = 0u;\n"));
     }
-    s.push_str(r#"
-    let tiles_b = (p.n_b + 63u) / 64u;
-    for (var t = 0u; t < tiles_b; t++) {
-        let b0 = t * 64u;
-        {
-            let col = li / 4u;
-            let k0 = (li % 4u) * 8u;
+    s.push_str(&format!(r#"
+    let tiles_b = (p.n_b + {}u) / {cols}u;
+    for (var t = 0u; t < tiles_b; t++) {{
+        let b0 = t * {cols}u;
+        {{
+            let col = li / {b_threads}u;
+            let k0 = (li % {b_threads}u) * {b_loads}u;
             let g = b0 + col;
-            for (var e = 0u; e < 8u; e++) {
-                b_tile[(k0 + e) * 64u + col] = select(0u, b[g * 32u + k0 + e], g < p.n_b);
-            }
-        }
+            for (var e = 0u; e < {b_loads}u; e++) {{
+                b_tile[(k0 + e) * {cols}u + col] = select(0u, b[g * 32u + k0 + e], g < p.n_b);
+            }}
+        }}
         workgroupBarrier();
-"#);
-    for r in 0..8 {
-        for c in 0..4 {
+"#, cols - 1));
+    for r in 0..per_row {
+        for c in 0..per_col {
             s.push_str(&format!("        var acc_{r}{c}: f32 = 0.0;\n"));
         }
     }
-    s.push_str("        for (var k = 0u; k < 32u; k++) {\n            let kb = k * 64u + tc;\n            let ka = k * 128u + tr;\n");
-    for c in 0..4 {
+    s.push_str(&format!(
+        "        for (var k = 0u; k < 32u; k++) {{\n            let kb = k * {cols}u + tc;\n            let ka = k * {rows}u + tr;\n"));
+    for c in 0..per_col {
         s.push_str(&format!("            let bv{c} = unpack(b_tile[kb + {c}u]);\n"));
     }
-    for r in 0..8 {
+    for r in 0..per_row {
         s.push_str(&format!("            let av{r} = unpack(a_tile[ka + {r}u]);\n"));
     }
-    for r in 0..8 {
-        for c in 0..4 {
+    for r in 0..per_row {
+        for c in 0..per_col {
             s.push_str(&format!("            acc_{r}{c} += dot(av{r}, bv{c});\n"));
         }
     }
     s.push_str("        }\n");
-    for c in 0..4 {
+    for c in 0..per_col {
         s.push_str(&format!("        let jc{c} = b0 + tc + {c}u;\n"));
     }
-    for r in 0..8 {
-        for c in 0..4 {
+    for r in 0..per_row {
+        for c in 0..per_col {
             s.push_str(&format!(
                 "        if (jc{c} < p.n_b) {{ if (acc_{r}{c} > rb1_{r}) {{ rb2_{r} = rb1_{r}; rb1_{r} = acc_{r}{c}; ri_{r} = jc{c}; }} else if (acc_{r}{c} > rb2_{r}) {{ rb2_{r} = acc_{r}{c}; }} }}\n"));
         }
     }
-    for c in 0..4 {
+    for c in 0..per_col {
         s.push_str(&format!("        var cb1_{c}: f32 = -1.0; var cb2_{c}: f32 = -1.0; var cr_{c}: u32 = 0u;\n"));
-        for r in 0..8 {
+        for r in 0..per_row {
             s.push_str(&format!(
                 "        if (acc_{r}{c} > cb1_{c}) {{ cb2_{c} = cb1_{c}; cb1_{c} = acc_{r}{c}; cr_{c} = tr + {r}u; }} else if (acc_{r}{c} > cb2_{c}) {{ cb2_{c} = acc_{r}{c}; }}\n"));
         }
         s.push_str(&format!(
-            "        scratch[lid.y * 64u + tc + {c}u] = vec2<u32>((u32(max(cb1_{c}, 0.0)) << 8u) | cr_{c}, u32(max(cb2_{c}, 0.0)));\n"));
+            "        scratch[lid.y * {cols}u + tc + {c}u] = vec2<u32>((u32(max(cb1_{c}, 0.0)) << 8u) | cr_{c}, u32(max(cb2_{c}, 0.0)));\n"));
     }
-    s.push_str(r#"
+    s.push_str(&format!(r#"
         workgroupBarrier();
-        if (li < 64u) {
+        if (li < {cols}u) {{
             let col = li;
             var best: u32 = 0u;
             var second: u32 = 0u;
-            for (var y = 0u; y < 16u; y++) {
-                let e = scratch[y * 64u + col];
+            for (var y = 0u; y < 16u; y++) {{
+                let e = scratch[y * {cols}u + col];
                 let sc = e.x >> 8u;
-                if (sc > (best >> 8u)) { second = max(best >> 8u, e.y); best = e.x; }
-                else { second = max(second, max(sc, e.y)); }
-            }
+                if (sc > (best >> 8u)) {{ second = max(best >> 8u, e.y); best = e.x; }}
+                else {{ second = max(second, max(sc, e.y)); }}
+            }}
             let j = b0 + col;
-            if (j < p.n_b) { col_part[wg.x * p.n_b + j] = vec2<u32>(best, second); }
-        }
+            if (j < p.n_b) {{ col_part[wg.x * p.n_b + j] = vec2<u32>(best, second); }}
+        }}
         workgroupBarrier();
-    }
-"#);
+    }}
+"#));
     for h in 0..2 {
-        s.push_str(&format!("    {{\n        workgroupBarrier();\n        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * 64u + (tr - {}u);\n", h * 64));
-        for r in 0..8 {
+        let first = h * half; // the first row of this half of the tile
+        s.push_str(&format!(
+            "    {{\n        workgroupBarrier();\n        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
+        for r in 0..per_row {
             s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb1_{r}, 0.0)), ri_{r});\n"));
         }
-        s.push_str(r#"        }
+        s.push_str(&format!(r#"        }}
         workgroupBarrier();
         var w_x: u32 = 0u; var w_best: u32 = 0u; var w_col: u32 = 0u; var sob: u32 = 0u;
-        if (li < 64u) {
-            for (var x = 0u; x < 16u; x++) {
-                let e = scratch[x * 64u + li];
-                if (e.x > w_best) { sob = w_best; w_best = e.x; w_col = e.y; w_x = x; } else { sob = max(sob, e.x); }
-            }
-        }
+        if (li < {half}u) {{
+            for (var x = 0u; x < 16u; x++) {{
+                let e = scratch[x * {half}u + li];
+                if (e.x > w_best || (e.x == w_best && e.y < w_col)) {{ sob = w_best; w_best = e.x; w_col = e.y; w_x = x; }}
+                else {{ sob = max(sob, e.x); }}
+            }}
+        }}
         workgroupBarrier();
-"#);
-        s.push_str(&format!("        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * 64u + (tr - {}u);\n", h * 64));
-        for r in 0..8 {
+"#));
+        s.push_str(&format!(
+            "        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
+        for r in 0..per_row {
             s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb2_{r}, 0.0)), 0u);\n"));
         }
         s.push_str(&format!(r#"        }}
         workgroupBarrier();
-        if (li < 64u) {{
-            let row = a0 + {}u + li;
+        if (li < {half}u) {{
+            let row = a0 + {first}u + li;
             if (row < p.n_a) {{
-                let second = max(sob, scratch[w_x * 64u + li].x);
+                let second = max(sob, scratch[w_x * {half}u + li].x);
                 out[row] = vec4<u32>(w_best, w_col, second, 0u);
             }}
         }}
     }}
-"#, h * 64));
+"#));
     }
-    s.push_str(r#"}
+    s.push_str(&format!(r#"}}
 
 @compute @workgroup_size(256)
-fn merge(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn merge(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let j = gid.x;
-    if (j >= p.n_b) { return; }
+    if (j >= p.n_b) {{ return; }}
     var best: u32 = 0u;
     var row: u32 = 0u;
     var second: u32 = 0u;
-    for (var t = 0u; t < p.tiles_a; t++) {
+    for (var t = 0u; t < p.tiles_a; t++) {{
         let e = col_part[t * p.n_b + j];
         let sc = e.x >> 8u;
-        if (sc > best) { second = max(best, e.y); best = sc; row = t * 128u + (e.x & 255u); }
-        else { second = max(second, max(sc, e.y)); }
-    }
+        if (sc > best) {{ second = max(best, e.y); best = sc; row = t * {rows}u + (e.x & 255u); }}
+        else {{ second = max(second, max(sc, e.y)); }}
+    }}
     out[p.n_a + j] = vec4<u32>(best, row, second, 0u);
-}
-"#);
+}}
+"#));
     s
 }
 
@@ -225,10 +294,12 @@ pub(crate) fn rank(t: wgpu::DeviceType) -> u8 {
     }
 }
 
-/// A matcher on one GPU: the kernels compiled once, the descriptors of the recent photos kept on
-/// the device, the working buffers grown as needed.
+/// A matcher on one GPU: the kernels compiled once for the tiles the adapter's workgroup memory
+/// takes, the descriptors of the recent photos kept on the device, the working buffers grown as
+/// needed.
 pub struct Matcher {
     pub info: AdapterInfo,
+    tile: Tile,
     device: wgpu::Device,
     queue: wgpu::Queue,
     gemm: wgpu::ComputePipeline,
@@ -245,8 +316,33 @@ pub struct Matcher {
 
 impl Matcher {
     /// On the adapter ``index`` of :func:`adapters`, or the best one (a discrete GPU, else an
-    /// integrated one; a software rasteriser only when nothing else exists).
+    /// integrated one; a software rasteriser only when nothing else exists). The tiles of the
+    /// kernels follow the adapter's workgroup memory (:func:`tile_for`): an adapter below 16384
+    /// bytes is an error naming its figure and the one needed.
     pub fn new(index: Option<usize>) -> Result<Matcher, String> {
+        Self::open(index, None)
+    }
+
+    /// As :meth:`new`, with the kernels of an adapter that had ``bytes`` of workgroup memory: the
+    /// small tiles for 16384, the large ones for 32768 - the small path forced on a large GPU, for
+    /// the tests and ``ppg-bench``. An error when the adapter has less than ``bytes``.
+    pub fn with_workgroup_bytes(index: Option<usize>, bytes: u32) -> Result<Matcher, String> {
+        Self::open(index, Some(bytes))
+    }
+
+    /// The workgroup memory the kernels of this matcher declare: 32768 bytes with the large
+    /// tiles, 16384 with the small ones.
+    pub fn workgroup_bytes(&self) -> u32 {
+        self.tile.workgroup_bytes()
+    }
+
+    /// The tiles of the kernels of this matcher: ``rows`` descriptors of A by ``cols`` of B per
+    /// workgroup and pass (the row within a tile is packed in 8 bits in the partials).
+    pub fn tile(&self) -> Tile {
+        self.tile
+    }
+
+    fn open(index: Option<usize>, bytes: Option<u32>) -> Result<Matcher, String> {
         let inst = instance();
         let mut all = inst.enumerate_adapters(wgpu::Backends::all());
         if all.is_empty() {
@@ -260,14 +356,23 @@ impl Matcher {
         let info = describe(&all[chosen], chosen);
         let adapter = all.swap_remove(chosen);
         let limits = adapter.limits();
-        if limits.max_compute_workgroup_storage_size < 32768 {
-            return Err(format!("{}: {} bytes of workgroup memory, 32768 needed", info.name, limits.max_compute_workgroup_storage_size));
-        }
+        let available = limits.max_compute_workgroup_storage_size;
+        let needed = SMALL_TILE.workgroup_bytes();
+        let tile = match bytes {
+            Some(asked) if asked > available => {
+                let name = &info.name;
+                return Err(format!("{name}: {available} bytes of workgroup memory, {asked} asked"));
+            }
+            Some(asked) => tile_for(asked)
+                .ok_or_else(|| format!("{asked} bytes of workgroup memory asked, {needed} needed"))?,
+            None => tile_for(available)
+                .ok_or_else(|| format!("{}: {available} bytes of workgroup memory, {needed} needed", info.name))?,
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor { label: Some("ppg_core"), required_limits: limits, ..Default::default() }, None))
             .map_err(|e| format!("{}: {e}", info.name))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("match"), source: wgpu::ShaderSource::Wgsl(shader().into()) });
+            label: Some("match"), source: wgpu::ShaderSource::Wgsl(shader(tile).into()) });
         let buffer = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
@@ -284,7 +389,7 @@ impl Matcher {
         let gemm = make("gemm");
         let merge = make("merge");
         let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Ok(Matcher { info, device, queue, gemm, merge, layout, params, out: None, partials: None,
+        Ok(Matcher { info, tile, device, queue, gemm, merge, layout, params, out: None, partials: None,
                      cache: HashMap::new(), order: VecDeque::new(), cached_bytes: 0, limit: cache_limit() })
     }
 
@@ -356,7 +461,8 @@ impl Matcher {
     }
 
     /// The best and second-best dot products: ``(best, index, second)`` for every descriptor of
-    /// A over B, then for every descriptor of B over A.
+    /// A over B, then for every descriptor of B over A (ties: the lowest index, a second best equal
+    /// to the best); nothing when either set is empty. The same as `matching::bests_cpu`.
     pub fn bests(&mut self, a_key: u64, a: &[u8], b_key: u64, b: &[u8]) -> Result<Vec<[u32; 3]>, String> {
         if a.len() % DIM != 0 || b.len() % DIM != 0 {
             return Err("descriptors are 128 bytes each".into());
@@ -365,7 +471,7 @@ impl Matcher {
         if n_a == 0 || n_b == 0 {
             return Ok(Vec::new());
         }
-        let tiles_a = (n_a + TILE_A - 1) / TILE_A;
+        let tiles_a = n_a.div_ceil(self.tile.rows);
         let a_buf = self.descriptors(a_key, a, b_key);
         let b_buf = self.descriptors(b_key, b, a_key);
         let out_size = ((n_a + n_b) * 16) as u64;
@@ -452,6 +558,26 @@ pub fn select_matches(bests: &[[u32; 3]], n_a: usize, n_b: usize, max_ratio: f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tiles_fill_their_workgroup_memory_and_are_chosen_from_it() {
+        assert_eq!(LARGE_TILE.workgroup_bytes(), 32768);
+        assert_eq!(SMALL_TILE.workgroup_bytes(), 16384);
+        assert_eq!(tile_for(65536), Some(LARGE_TILE));
+        assert_eq!(tile_for(32768), Some(LARGE_TILE));
+        assert_eq!(tile_for(32767), Some(SMALL_TILE));
+        assert_eq!(tile_for(16384), Some(SMALL_TILE));
+        assert_eq!(tile_for(16383), None);
+        // the kernels declare the arrays the figures count: words of the two tiles, entries of scratch
+        let small = shader(SMALL_TILE);
+        for declared in ["a_tile: array<u32, 2048>", "b_tile: array<u32, 1024>", "scratch: array<vec2<u32>, 512>"] {
+            assert!(small.contains(declared), "the small kernel has no {declared}");
+        }
+        let large = shader(LARGE_TILE);
+        for declared in ["a_tile: array<u32, 4096>", "b_tile: array<u32, 2048>", "scratch: array<vec2<u32>, 1024>"] {
+            assert!(large.contains(declared), "the large kernel has no {declared}");
+        }
+    }
 
     #[test]
     fn matches_from_bests() {

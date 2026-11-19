@@ -49,6 +49,19 @@ fn adapters_prints_the_adapters_of_the_engine_as_a_json_array() {
     }
 }
 
+/// What every record of `match` on `n` descriptors says, whatever the device: the matches join
+/// descriptors to their twins only, all but a handful of them, in a time.
+fn joins_the_twins(record: &Value, n: u64) -> u64 {
+    assert_eq!(record["n"], json!(n));
+    assert_eq!(record["dim"], json!(gpu::DIM));
+    let matches = record["matches"].as_u64().expect("matches is a whole number");
+    assert_eq!(record["correct"], json!(matches), "a match joins a descriptor to another than its twin: {record}");
+    // n less a margin of six for twins that differ by noise of 2 % of the norm: not measured
+    assert!(matches >= n - 6, "{matches} matches of {n}: {record}");
+    assert!(record["seconds"].as_f64().is_some_and(|seconds| seconds > 0.0), "{record}");
+    matches
+}
+
 #[test]
 fn match_joins_the_descriptors_to_their_twins_or_says_that_it_skipped() {
     let record = printed(&["match", "--n", "512"]);
@@ -56,15 +69,11 @@ fn match_joins_the_descriptors_to_their_twins_or_says_that_it_skipped() {
         assert_eq!(record, json!({"skipped": "no adapter"}));
         return;
     };
-    assert_eq!(keys(&record), ["correct", "device", "dim", "matches", "n", "seconds"], "{record}");
+    assert_eq!(keys(&record), ["correct", "device", "dim", "matches", "n", "seconds", "workgroup_kb"], "{record}");
     assert_eq!(record["device"], json!(adapter.name));
-    assert_eq!(record["n"], json!(512));
-    assert_eq!(record["dim"], json!(gpu::DIM));
-    let matches = record["matches"].as_u64().expect("matches is a whole number");
-    assert_eq!(record["correct"], json!(matches), "a match joins a descriptor to another than its twin: {record}");
-    // 512 less a margin of six for twins that differ by noise of 2 % of the norm: not measured
-    assert!(matches >= 506, "{matches} matches of 512: {record}");
-    assert!(record["seconds"].as_f64().is_some_and(|seconds| seconds > 0.0), "{record}");
+    joins_the_twins(&record, 512);
+    // the tiles the matcher chose from the adapter's workgroup memory
+    assert!(record["workgroup_kb"] == json!(16) || record["workgroup_kb"] == json!(32), "{record}");
 }
 
 #[test]
@@ -72,8 +81,39 @@ fn match_without_options_takes_4096_descriptors() {
     let record = printed(&["match"]);
     if first_gpu().is_some() {
         assert_eq!(record["n"], json!(4096), "{record}");
+        assert!(record["workgroup_kb"] == json!(16) || record["workgroup_kb"] == json!(32), "{record}");
     } else {
         assert_eq!(record, json!({"skipped": "no adapter"}));
+    }
+}
+
+#[test]
+fn match_on_the_cpu_joins_the_descriptors_to_their_twins_on_any_computer() {
+    // the CPU twin needs no adapter: never skipped, no workgroup memory to report
+    let record = printed(&["match", "--n", "512", "--cpu"]);
+    assert_eq!(keys(&record), ["correct", "device", "dim", "matches", "n", "seconds"], "{record}");
+    assert_eq!(record["device"], json!("cpu"));
+    joins_the_twins(&record, 512);
+}
+
+#[test]
+fn match_with_small_tiles_gives_the_matches_of_the_large_ones_and_of_the_cpu() {
+    let cpu = joins_the_twins(&printed(&["match", "--n", "512", "--cpu"]), 512);
+    let Some(adapter) = first_gpu() else {
+        assert_eq!(printed(&["match", "--n", "512", "--workgroup-kb", "16"]), json!({"skipped": "no adapter"}));
+        return;
+    };
+    // the small tiles on any adapter; the large ones where the adapter has the memory
+    let small = printed(&["match", "--n", "512", "--workgroup-kb", "16"]);
+    assert_eq!(small["device"], json!(adapter.name));
+    assert_eq!(small["workgroup_kb"], json!(16), "{small}");
+    assert_eq!(joins_the_twins(&small, 512), cpu, "the small tiles and the CPU twin disagree");
+    let chosen = printed(&["match", "--n", "512"]);
+    assert_eq!(joins_the_twins(&chosen, 512), cpu, "the tiles the matcher chose and the CPU twin disagree");
+    if chosen["workgroup_kb"] == json!(32) {
+        let large = printed(&["match", "--n", "512", "--workgroup-kb", "32"]);
+        assert_eq!(large["workgroup_kb"], json!(32), "{large}");
+        assert_eq!(joins_the_twins(&large, 512), cpu, "the large tiles and the CPU twin disagree");
     }
 }
 
@@ -123,7 +163,7 @@ fn adjust_takes_the_solver_and_the_seed_it_is_given() {
 
 #[test]
 fn a_command_line_the_binary_does_not_know_is_refused() {
-    let refused: [&[&str]; 14] = [
+    let refused: [&[&str]; 19] = [
         &[],                           // no command
         &["bogus"],                    // not a command
         &["adapters", "--n", "8"],     // adapters takes no option
@@ -132,6 +172,11 @@ fn a_command_line_the_binary_does_not_know_is_refused() {
         &["match", "--n", "many"],     // not a number
         &["match", "--n", "0"],        // nothing to match
         &["match", "--device", "-1"],  // not an index
+        &["match", "--workgroup-kb"],  // no value
+        &["match", "--workgroup-kb", "24"],          // the kernels come in 16 and 32 KiB
+        &["match", "--cpu", "--device", "0"],        // the CPU twin has no adapter ...
+        &["match", "--cpu", "--workgroup-kb", "16"], // ... and no workgroup memory
+        &["match", "--n", "32769", "--workgroup-kb", "16"], // beyond the bound of the small tiles
         &["adjust", "--n", "8"],       // adjust has no --n
         &["adjust", "--photos", "0"],  // no photo to adjust
         &["adjust", "--points", "0"],  // no point to adjust
@@ -150,14 +195,22 @@ fn a_command_line_the_binary_does_not_know_is_refused() {
 
 #[test]
 fn a_size_beyond_the_largest_is_refused_before_the_kernel_is_called() {
-    // 46336 is the most the binary takes (its MAX_N): one more is refused as `--n 0` is, and so is
-    // the largest number the option reads, whatever adapters the computer has
-    for n in [String::from("46337"), usize::MAX.to_string()] {
-        let output = ppg_bench(&["match", "--n", &n]);
+    // 46336 is the most the binary takes with the large tiles (128 descriptors) and 32768 with the
+    // small ones (64): one more is refused as `--n 0` is, and so is the largest number the option
+    // reads, whatever adapters the computer has; the refusal names the bound and the tiles
+    let largest = usize::MAX.to_string();
+    let small: &[&str] = &["--workgroup-kb", "16"];
+    let beyond = [("46337", &[][..], "46336", "128"), (largest.as_str(), &[], "46336", "128"),
+                  ("32769", small, "32768", "64"), ("46336", small, "32768", "64")];
+    for (n, options, most, rows) in beyond {
+        let mut args = vec!["match", "--n", n];
+        args.extend(options);
+        let output = ppg_bench(&args);
         let said = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "ppg-bench match --n {n} said: {said}");
-        assert!(output.stdout.is_empty(), "--n {n} printed {:?}", String::from_utf8_lossy(&output.stdout));
-        assert!(said.starts_with("ppg-bench: --n takes 46336 at most"), "ppg-bench match --n {n} said: {said}");
-        assert!(said.contains("usage: ppg-bench"), "ppg-bench match --n {n} said: {said}");
+        assert_eq!(output.status.code(), Some(2), "ppg-bench {args:?} said: {said}");
+        assert!(output.stdout.is_empty(), "{args:?} printed {:?}", String::from_utf8_lossy(&output.stdout));
+        let start = format!("ppg-bench: --n takes {most} at most with tiles of {rows} descriptors");
+        assert!(said.starts_with(&start), "ppg-bench {args:?} said: {said}");
+        assert!(said.contains("usage: ppg-bench"), "ppg-bench {args:?} said: {said}");
     }
 }
