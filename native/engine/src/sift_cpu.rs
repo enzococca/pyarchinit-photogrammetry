@@ -11,11 +11,9 @@
 //! so the answer does not depend on the threads.
 //!
 //! Where the twins differ: the GPU keeps at most 2^17 candidates and 2^17 oriented key points per
-//! octave (the size of its buffers), in no particular order, where the CPU keeps them all. And a
-//! known defect of the GPU kernel's halving, to be fixed in Task 4 of the native engine plan: its
-//! `decimate` reads the finer octave with a stride of twice the coarser width (gpu_sift.rs), which
-//! is the finer width only when that is even, so an odd width shears every coarser octave; the
-//! twin halves with the true stride, and on such a photo its points are the right ones.
+//! octave (the size of its buffers), in no particular order, where the CPU keeps them all. Both
+//! halve an octave with the stride of the finer one (an odd width halves to (w - 1) / 2), so an
+//! odd-sized photo gives the same points on either.
 //!
 //! Units as [`crate::gpu_sift::Sift::extract`]: `(x, y, sigma, orientation)` in the pixels of the
 //! image with the centre of the first pixel at (0, 0); the caller adds COLMAP's 0.5.

@@ -4,7 +4,9 @@
 //! the largest scales, the two checks of the GPU refuse the same inputs; and, on every adapter that
 //! opens a device, the GPU's points have their twins among the CPU's: at least 95 % within 0.5 px
 //! and 10 % of scale, the counts within 5 %, the median cosine similarity of the twins' descriptors
-//! above 0.99 (the thresholds of `tests/test_native.py::test_gpu_sift_finds_colmaps_points`).
+//! above 0.99 (the thresholds of `tests/test_native.py::test_gpu_sift_finds_colmaps_points`), on
+//! even and odd sizes alike - the octaves the GPU reaches by halving an odd width hold the CPU's
+//! points too.
 
 use ppg_engine::gpu;
 use ppg_engine::gpu_sift::{Options, Sift, DESC};
@@ -201,12 +203,13 @@ fn cpu_and_gpu_sift_agree() {
         eprintln!("no GPU adapter: the kernels are not compared");
         return;
     }
-    // the images: the textured one and two small ones whose coarsest octave (10 and 11 pixels
-    // wide) is narrower than the blur radius; even widths only until Task 4 fixes the kernel's
-    // halving (gpu_sift.rs, decimate: the stride of the finer octave is right only when even)
+    // the images: the textured one, an odd-sized one (641 wide: the kernel halves its octave 0
+    // with a stride of 641, not 640, as the twin does) and two small ones whose coarsest octave
+    // (10 and 11 pixels wide) is narrower than the blur radius
     let o = Options { max_features: 40000, ..Options::default() };
     let cases: Vec<(String, usize, usize, Vec<f32>)> = vec![
         (format!("{W} x {H}"), W, H, image()),
+        ("641 x 481".into(), 641, 481, image_of(641, 481, 2027)),
         ("40 x 40".into(), 40, 40, image_of(40, 40, 7)),
         ("44 x 60".into(), 44, 60, image_of(44, 60, 7)),
     ];
@@ -234,5 +237,54 @@ fn cpu_and_gpu_sift_agree() {
                     "{what}: {} points on the CPU, {} on the GPU", cpu.len(), gpu.len());
             assert!(median > 0.99, "{what}: median cosine similarity {median:.4}");
         }
+    }
+}
+
+/// The share of the points of `kp` whose scale is `at_least`, among all of them: the points of the
+/// octaves the kernel reaches by halving.
+fn large(kp: &[[f32; 4]], desc: &[u8], at_least: f32) -> (Vec<[f32; 4]>, Vec<u8>) {
+    let idx: Vec<usize> = (0..kp.len()).filter(|&i| kp[i][2] >= at_least).collect();
+    let mut d = Vec::with_capacity(idx.len() * DESC);
+    for &i in &idx {
+        d.extend_from_slice(&desc[i * DESC..(i + 1) * DESC]);
+    }
+    (idx.iter().map(|&i| kp[i]).collect(), d)
+}
+
+#[test]
+fn gpu_halves_an_odd_width_as_the_cpu_does() {
+    let adapters = gpu::adapters();
+    if adapters.is_empty() {
+        eprintln!("no GPU adapter: the halving is not compared");
+        return;
+    }
+    // 641 wide: octave 0 is 641 x 481 and octave 1 is halved from it, so a kernel reading the
+    // finer octave with a stride of twice the coarser width (640) shears every octave from the
+    // first halving on; the points of those octaves are the ones of scale 4 and above (sigma0 of
+    // 2.016 doubled), and they must have their twins among the CPU's as the finer ones do
+    let (w, h) = (641usize, 481usize);
+    let img = image_of(w, h, 2027);
+    let o = Options { max_features: 40000, ..Options::default() };
+    let (cpu, cpu_desc) = sift_cpu::extract(&img, w, h, &o).expect("the odd-width image on the CPU");
+    let (cpu_large, _) = large(&cpu, &cpu_desc, 4.5);
+    assert!(cpu_large.len() > 50, "{} points of scale 4.5 and above on the CPU", cpu_large.len());
+    for adapter in &adapters {
+        let sift = match Sift::new(Some(adapter.index)) {
+            Ok(sift) => sift,
+            Err(problem) => {
+                eprintln!("adapter {} ({}) skipped: {problem}", adapter.index, adapter.name);
+                continue;
+            }
+        };
+        let what = format!("adapter {} ({}), {w} x {h}", adapter.index, adapter.name);
+        let (gpu, gpu_desc) = sift.extract(&img, w, h, &o).unwrap_or_else(|p| panic!("{what}: {p}"));
+        let (gpu_large, gpu_large_desc) = large(&gpu, &gpu_desc, 4.5);
+        let (share, median) = agreement(&gpu_large, &gpu_large_desc, &cpu, &cpu_desc);
+        eprintln!("{what}: {} points of scale 4.5 and above on the GPU, {} on the CPU, {share:.4} twins, \
+                   median cosine {median:.5}", gpu_large.len(), cpu_large.len());
+        assert!(share > 0.9, "{what}: {share:.3} of the GPU's points of the halved octaves have a CPU twin");
+        assert!((cpu_large.len() as f64 - gpu_large.len() as f64).abs() < 0.1 * cpu_large.len() as f64,
+                "{what}: {} points of the halved octaves on the CPU, {} on the GPU", cpu_large.len(), gpu_large.len());
+        assert!(median > 0.99, "{what}: median cosine similarity {median:.4} on the halved octaves");
     }
 }

@@ -55,8 +55,8 @@ struct Params {
     max_oriented: u32,
     max_orient: u32,
     upright: u32,
-    pad0: u32,
-    pad1: u32,
+    level_stride: u32, // floats per Gaussian level: the keys kernels read the levels of an octave one after the other
+    src_w: u32,        // the width of the finer octave a level is halved from (decimate)
     pad2: u32,
     kernel: [[f32; 4]; 12], // 48 weights: radius up to 23
 }
@@ -66,7 +66,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 
@@ -105,12 +105,13 @@ fn blur_v(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[y * p.w + x] = acc;
 }
 
-// src = the finer octave's level, dst = half size (every other pixel, as VLFeat)
+// src = the finer octave's level, p.src_w wide (an odd width halves to (w - 1) / 2: the stride is
+// the finer width, not twice the coarser one); dst = half size (every other pixel, as VLFeat)
 @compute @workgroup_size(16, 16)
 fn decimate(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = id.x; let y = id.y;
-    if (x >= p.w || y >= p.h) { return; }  // p.w, p.h = the size of dst; src is 2 x
-    dst[y * p.w + x] = src[(2u * y) * (2u * p.w) + 2u * x];
+    if (x >= p.w || y >= p.h) { return; }  // p.w, p.h = the size of dst
+    dst[y * p.w + x] = src[(2u * y) * p.src_w + 2u * x];
 }
 "#;
 
@@ -119,7 +120,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 @group(0) @binding(0) var<storage, read> a: array<f32>;
@@ -141,7 +142,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 @group(0) @binding(0) var<storage, read> d0: array<f32>;
@@ -228,10 +229,10 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
-// the Gaussian levels of the octave, one after the other (stride p.pad0 = floats per level)
+// the Gaussian levels of the octave, one after the other (p.level_stride floats per level)
 @group(0) @binding(0) var<storage, read> levels: array<f32>;
 @group(0) @binding(1) var<storage, read> cands: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> counts: array<atomic<u32>>;
@@ -250,7 +251,7 @@ fn level_of(s: f32) -> u32 {
 fn pix(level: u32, x: i32, y: i32) -> f32 {
     let xx = clamp(x, 0, i32(p.w) - 1);
     let yy = clamp(y, 0, i32(p.h) - 1);
-    return levels[level * p.pad0 + u32(yy) * p.w + u32(xx)];
+    return levels[level * p.level_stride + u32(yy) * p.w + u32(xx)];
 }
 
 fn gradient(level: u32, x: i32, y: i32) -> vec2<f32> {
@@ -557,11 +558,12 @@ impl Sift {
             let counts = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("counts"), contents: bytemuck::cast_slice(&[0u32; 4]), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
             // the parameters of every dispatch, in slots
             let mut slots: Vec<Params> = Vec::new();
-            let mut param = |w_: usize, h_: usize, radius: u32, level: u32, kernel: [[f32; 4]; 12]| -> u32 {
+            let mut param = |w_: usize, h_: usize, src_w: usize, radius: u32, level: u32, kernel: [[f32; 4]; 12]| -> u32 {
                 slots.push(Params { w: w_ as u32, h: h_ as u32, radius, level, peak: o.peak_threshold, edge: o.edge_threshold,
                                     sigma0, sigmak, s_scale: 1.0 / s_res as f32, max_cand: MAX_CANDIDATES as u32,
                                     max_oriented: MAX_ORIENTED as u32, max_orient: o.max_orientations.max(1),
-                                    upright: o.upright as u32, pad0: stride_f as u32, pad1: 0, pad2: 0, kernel });
+                                    upright: o.upright as u32, level_stride: stride_f as u32, src_w: src_w as u32, pad2: 0,
+                                    kernel });
                 (slots.len() - 1) as u32
             };
             let zero = [[0.0f32; 4]; 12];
@@ -577,35 +579,33 @@ impl Sift {
             if oct == 0 {
                 self.queue.write_buffer(&levels, 0, bytemuck::cast_slice(&base));
             } else if let Some((pl, pw, _ph, pstride)) = prev_levels.take() {
-                // decimate level s_min + S of the finer octave into level 0 of this one
-                let src_level = (s_res as i32) as usize; // index of s = s_min + S = S - 1 -> level S? (s - s_min) = S
+                // level s_min + S of the finer octave (pw wide: the stride of the kernel) halved
+                // into level 0 of this one
                 let s_best = (s_min + s_res as i32).min(s_min + n_levels as i32 - 1) - s_min; // level index
-                let _ = src_level;
-                let sp = param(bw, bh, 0, 0, zero);
+                let sp = param(bw, bh, pw, 0, 0, zero);
                 dispatches.push((2, sp, vec![(pl.clone(), s_best as u64 * pstride, pstride), lv(0)], img_groups));
-                let _ = pw;
             }
             if let Some((_s, (radius, kernel))) = first_blur {
-                let sp = param(bw, bh, radius, 0, kernel);
+                let sp = param(bw, bh, 0, radius, 0, kernel);
                 dispatches.push((0, sp, vec![lv(0), whole(&tmp)], img_groups));
                 dispatches.push((1, sp, vec![whole(&tmp), lv(0)], img_groups));
             }
             for s in 1..n_levels {
                 let sd = dsigma0 * sigmak.powi(s as i32 + s_min);
                 let (radius, kernel) = gaussian(sd);
-                let sp = param(bw, bh, radius, s as u32, kernel);
+                let sp = param(bw, bh, 0, radius, s as u32, kernel);
                 dispatches.push((0, sp, vec![lv(s - 1), whole(&tmp)], img_groups));
                 dispatches.push((1, sp, vec![whole(&tmp), lv(s)], img_groups));
             }
             for d in 0..n_levels - 1 {
-                let sp = param(bw, bh, 0, d as u32, zero);
+                let sp = param(bw, bh, 0, 0, d as u32, zero);
                 dispatches.push((3, sp, vec![lv(d), lv(d + 1), dg(d)], img_groups));
             }
             for d in 1..n_levels - 2 {
-                let sp = param(bw, bh, 0, d as u32, zero);
+                let sp = param(bw, bh, 0, 0, d as u32, zero);
                 dispatches.push((4, sp, vec![dg(d - 1), dg(d), dg(d + 1), whole(&cands), whole(&counts)], (((bw - 2) as u32 + 15) / 16, ((bh - 2) as u32 + 15) / 16)));
             }
-            let sp_keys = param(bw, bh, 0, 0, zero);
+            let sp_keys = param(bw, bh, 0, 0, 0, zero);
             let key_groups = ((MAX_CANDIDATES as u32 + 63) / 64, 1);
             dispatches.push((5, sp_keys, vec![whole(&levels), whole(&cands), whole(&counts), whole(&kps), whole(&descs)], key_groups));
             dispatches.push((6, sp_keys, vec![whole(&levels), whole(&cands), whole(&counts), whole(&kps), whole(&descs)], ((MAX_ORIENTED as u32 + 63) / 64, 1)));
