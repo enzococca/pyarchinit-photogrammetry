@@ -15,3 +15,7 @@ path = "src/main.rs"
 ppg_engine = { path = "../engine" }
 # what the binary prints is JSON
 serde_json = "1"
+
+[dev-dependencies]
+# the photos the test of `features` writes (the PNG crate of the engine's reader; MIT OR Apache-2.0)
+png = "0.18"

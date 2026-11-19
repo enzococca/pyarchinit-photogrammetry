@@ -1,14 +1,86 @@
 //! `ppg-bench` run as a script or a CI job runs it: the exit code says whether it worked, and
-//! what it prints on the standard output is JSON.
+//! what it prints on the standard output is JSON. The photos `features` is run on are written by
+//! the test under cargo's temporary folder of the target (`CARGO_TARGET_TMPDIR`), which is also
+//! the temporary folder the binary is given for its store.
 
+use std::fs;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use ppg_engine::gpu;
 use serde_json::{json, Value};
 
-/// The binary run with `args`.
+/// The binary run with `args`, its temporary folder under the target's.
 fn ppg_bench(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ppg-bench")).args(args).output().expect("ppg-bench starts")
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(tmp).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_ppg-bench"))
+        .args(args)
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .output()
+        .expect("ppg-bench starts")
+}
+
+/// Knuth's MMIX linear congruential generator, as in the other tests of the workspace.
+struct Lcg(u64);
+
+impl Lcg {
+    fn unit(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 40) as f32) / (1u64 << 24) as f32
+    }
+}
+
+/// A grey photo of `w x h` from `seed` with structure at several scales - value noise on a
+/// coarse grid, fine noise and a few blobs - so that the SIFT finds points in it.
+fn photo(w: usize, h: usize, seed: u64) -> Vec<u8> {
+    let mut random = Lcg(seed);
+    let mut img = vec![0.5f32; w * h];
+    for (spacing, amplitude) in [(4usize, 0.12f32), (24, 0.15)] {
+        let (gw, gh) = (w / spacing + 2, h / spacing + 2);
+        let grid: Vec<f32> = (0..gw * gh).map(|_| random.unit() - 0.5).collect();
+        for y in 0..h {
+            let (gy, ty) = (y / spacing, (y % spacing) as f32 / spacing as f32);
+            for x in 0..w {
+                let (gx, tx) = (x / spacing, (x % spacing) as f32 / spacing as f32);
+                let top = grid[gy * gw + gx] * (1.0 - tx) + grid[gy * gw + gx + 1] * tx;
+                let bottom = grid[(gy + 1) * gw + gx] * (1.0 - tx) + grid[(gy + 1) * gw + gx + 1] * tx;
+                img[y * w + x] += amplitude * (top * (1.0 - ty) + bottom * ty);
+            }
+        }
+    }
+    for _ in 0..6 {
+        let (cx, cy, sigma) = (random.unit() * w as f32, random.unit() * h as f32, 3.0 + random.unit() * 6.0);
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                img[y * w + x] += 0.3 * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+            }
+        }
+    }
+    img.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect()
+}
+
+/// A fresh folder of three grey PNG photos, a file that is no photo by its name and a JPEG by
+/// its name that holds no image: what `features` finds in a folder.
+fn photo_folder(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("cli_{name}"));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (w, h) = (200usize, 150usize);
+    for i in 0..3 {
+        let path = dir.join(format!("photo_{i}.PNG"));
+        let mut encoder = png::Encoder::new(BufWriter::new(fs::File::create(path).unwrap()), w as u32, h as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&photo(w, h, 31 + i)).unwrap();
+    }
+    fs::write(dir.join("notes.txt"), b"not a photo").unwrap();
+    fs::write(dir.join("broken.jpg"), b"\xFF\xD8\xFF\xE0 and nothing of a JPEG after the header").unwrap();
+    dir
 }
 
 /// What a run that worked printed: exit code 0 and one JSON value on the standard output.
@@ -161,9 +233,66 @@ fn adjust_takes_the_solver_and_the_seed_it_is_given() {
     assert_ne!(other["cost_initial"].as_f64(), Some(costs[0]), "{other}");
 }
 
+/// What every record of `features` on the folder of `photo_folder` says, whatever the device.
+fn extracted_the_folder(record: &Value) {
+    let expected = ["decode_seconds", "device", "done", "limit", "max_features", "photos", "photos_per_second",
+                    "points_per_photo", "seconds", "sift_seconds", "unreadable", "unsupported", "write_seconds"];
+    assert_eq!(keys(record), expected, "{record}");
+    // the three photos and the JPEG that holds none; the text file is no photo
+    assert_eq!((&record["photos"], &record["done"]), (&json!(4), &json!(3)), "{record}");
+    assert_eq!((&record["unreadable"], &record["unsupported"]), (&json!(1), &json!(0)), "{record}");
+    assert_eq!((&record["limit"], &record["max_features"]), (&json!(120), &json!(300)), "{record}");
+    assert!(record["points_per_photo"].as_f64().is_some_and(|p| p > 0.0 && p <= 300.0), "{record}");
+    for key in ["seconds", "photos_per_second", "decode_seconds", "sift_seconds", "write_seconds"] {
+        assert!(record[key].as_f64().is_some_and(|v| v > 0.0), "{key}: {record}");
+    }
+    // no name of a photo in the record
+    assert!(!record.to_string().contains("photo_"), "{record}");
+}
+
+#[test]
+fn features_extracts_the_photos_of_a_folder_and_prints_its_record() {
+    let dir = photo_folder("features");
+    let folder = dir.to_str().expect("a UTF-8 path");
+    let on_cpu = printed(&["features", folder, "--cpu", "--limit", "120", "--max-features", "300"]);
+    assert_eq!(on_cpu["device"], json!("cpu"), "{on_cpu}");
+    extracted_the_folder(&on_cpu);
+    // the store of the run is removed after it
+    let left: Vec<String> = fs::read_dir(env!("CARGO_TARGET_TMPDIR")).unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ppg-bench-features-"))
+        .collect();
+    assert!(left.is_empty(), "stores left behind: {left:?}");
+    let on_gpu = printed(&["features", folder, "--limit", "120", "--max-features", "300"]);
+    match first_gpu() {
+        Some(adapter) => {
+            assert_eq!(on_gpu["device"], json!(adapter.name), "{on_gpu}");
+            extracted_the_folder(&on_gpu);
+            assert_eq!(on_gpu["points_per_photo"], on_cpu["points_per_photo"], "the GPU and the CPU twin disagree");
+        }
+        None => assert_eq!(on_gpu, json!({"skipped": "no adapter"})),
+    }
+    // a folder without a photo, and one that does not exist: errors, not records
+    let empty = dir.join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    for missing in [empty.to_str().unwrap(), dir.join("nowhere").to_str().unwrap()] {
+        let output = ppg_bench(&["features", missing, "--cpu"]);
+        assert_eq!(output.status.code(), Some(1), "{missing}");
+        assert!(output.stdout.is_empty() && !output.stderr.is_empty(), "{missing}");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn a_command_line_the_binary_does_not_know_is_refused() {
-    let refused: [&[&str]; 19] = [
+    let refused: [&[&str]; 26] = [
+        &["features"],                                       // no folder
+        &["features", "--cpu"],                              // the folder comes first
+        &["features", "photos", "--n", "8"],                 // features has no --n
+        &["features", "photos", "--limit"],                  // no value
+        &["features", "photos", "--max-features", "0"],      // no point is no feature
+        &["features", "photos", "--cpu", "--device", "0"],   // the CPU twin has no adapter
+        &["features", "photos", "--device", "-1"],           // not an index
         &[],                           // no command
         &["bogus"],                    // not a command
         &["adapters", "--n", "8"],     // adapters takes no option

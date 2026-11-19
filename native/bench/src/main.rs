@@ -24,17 +24,46 @@
 //!   exact observations), timed; it prints `photos`, `points`, `observations`, `solver` (the one
 //!   used: what `auto` chose), `iterations`, `cost_initial`, `cost` and `seconds` (the time of
 //!   `solve` alone, the block made before the clock starts).
+//! - `ppg-bench features DIR [--limit 2016] [--max-features 8192] [--device N | --cpu]`: the
+//!   features step of the native engine (`features::extract_all`) on the JPEG, PNG and TIFF files
+//!   of the folder `DIR` (not of its subfolders), each reduced to `limit` on its long side (0 for
+//!   none) with at most `max-features` points, into a store under the temporary folder of the
+//!   system, removed after; it prints `device` (the name of the adapter, or `cpu`), `photos` (the
+//!   files found), `done`, `unreadable` and `unsupported` (counts), `points_per_photo` (the mean
+//!   over the photos done), `seconds` (the wall time of the step), `photos_per_second`, the
+//!   thread-seconds by phase `decode_seconds`, `sift_seconds` and `write_seconds`, `limit` and
+//!   `max_features` - never the name of a photo. On a GPU the CPU takes no photo, so the record
+//!   is the device's; with `--cpu` the CPU twin does them all; without `--device` the first
+//!   adapter that is no software rasteriser, else `{"skipped": "no adapter"}`.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{solve, LinearSolver, Options};
-use ppg_engine::{gpu, matching};
+use ppg_engine::features::{extract_all, FeatureOptions, PhotoJob};
+use ppg_engine::store::FeatureStore;
+use ppg_engine::{gpu, gpu_sift, matching};
 use serde_json::{json, Value};
 
 /// The descriptors of each set when `--n` is not given: a choice, not a measured figure.
 const DEFAULT_N: usize = 4096;
+
+/// What `features` reduces the photos to and keeps of them when it is not told otherwise: the
+/// program's defaults for the alignment (quality "high" on a 24-megapixel photo, COLMAP's cap of
+/// points), copied here as choices.
+const DEFAULT_LIMIT: usize = 2016;
+const DEFAULT_MAX_FEATURES: usize = 8192;
+
+/// The reader threads of `features`: a choice, not a measured figure (the decoding of a JPEG at
+/// a DCT scale takes a fraction of the SIFT; a few readers keep a GPU fed).
+const READERS: usize = 4;
+
+/// The files `features` takes for photos, by extension (either case).
+const PHOTO_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "tif", "tiff"];
 
 /// The block `adjust` makes when it is not told otherwise: choices, not measured figures.
 const DEFAULT_PHOTOS: usize = 200;
@@ -283,10 +312,90 @@ fn time_adjustment(photos: usize, points: usize, solver: LinearSolver, seed: u64
               "cost_initial": sol.cost_initial, "cost": sol.cost, "seconds": seconds}))
 }
 
+/// Where `features` runs: a GPU adapter, named or the first that is no software rasteriser, or
+/// the CPU twin of the kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Extractor {
+    Gpu(Option<usize>),
+    Cpu,
+}
+
+/// The photos of the folder `dir` as jobs of the features step: its files with an extension of
+/// `PHOTO_EXTENSIONS`, in the order of their names, each named by its file name.
+fn photo_jobs(dir: &Path, limit: usize) -> Result<Vec<PhotoJob>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let extension = Path::new(&name).extension().map(|e| e.to_string_lossy().to_lowercase());
+        let is_photo = extension.is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.as_str()));
+        if is_photo && entry.file_type().map_err(|e| format!("{name}: {e}"))?.is_file() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names
+        .into_iter()
+        .map(|name| PhotoJob { path: Some(dir.join(&name)), name, mask: None, limit, small_limit: None })
+        .collect())
+}
+
+/// The features step on the photos of `dir` with `on`, timed: the record to print.
+fn time_features(dir: &Path, limit: usize, max_features: usize, on: Extractor) -> Result<Value, String> {
+    let jobs = photo_jobs(dir, limit)?;
+    if jobs.is_empty() {
+        return Err(format!("{}: no JPEG, PNG or TIFF file", dir.display()));
+    }
+    let (devices, device, cpu_threads) = match on {
+        Extractor::Cpu => (Vec::new(), "cpu".to_owned(), 1),
+        Extractor::Gpu(index) => {
+            let adapters = gpu::adapters();
+            let index = match index {
+                Some(index) => index,
+                None => match adapters.iter().find(|adapter| adapter.device_type != "Cpu") {
+                    Some(adapter) => adapter.index,
+                    None => return Ok(json!({"skipped": "no adapter"})),
+                },
+            };
+            let name = adapters.into_iter().find(|adapter| adapter.index == index).map(|adapter| adapter.name);
+            (vec![index], name.ok_or_else(|| format!("GPU adapter {index} does not exist"))?, 0)
+        }
+    };
+    // the store lives for the run only, under the temporary folder of the system
+    let store_dir = std::env::temp_dir().join(format!("ppg-bench-features-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&store_dir);
+    let store = FeatureStore::create(&store_dir).map_err(|e| e.to_string())?;
+    let sift = gpu_sift::Options { max_features, ..gpu_sift::Options::default() };
+    let options = FeatureOptions { sift, dct: true, readers: READERS, cpu_threads };
+    // what is timed is the whole step - decoding, extraction and writing together, as a project
+    // pays it - from the jobs to the last file of the store
+    let start = Instant::now();
+    let report = extract_all(&jobs, &store, None, &options, &devices, &AtomicBool::new(false), &|_, _| {});
+    let seconds = start.elapsed().as_secs_f64();
+    drop(store);
+    let _ = fs::remove_dir_all(&store_dir);
+    let report = report?;
+    if on != Extractor::Cpu && report.by_impl.1 > 0 {
+        // a GPU that did not open leaves its photos to the CPU: not a timing of the device
+        let why: Vec<&str> = report.log.iter().filter(|line| line.starts_with("GPU")).map(String::as_str).collect();
+        let by_cpu = report.by_impl.1;
+        return Err(format!("{device}: {by_cpu} photos done by the CPU, not by the GPU ({})", why.join("; ")));
+    }
+    Ok(json!({
+        "device": device, "photos": jobs.len(), "done": report.done, "unreadable": report.unreadable.len(),
+        "unsupported": report.unsupported.len(), "points_per_photo": report.points as f64 / report.done.max(1) as f64,
+        "seconds": seconds, "photos_per_second": report.done as f64 / seconds, "decode_seconds": report.seconds.decode,
+        "sift_seconds": report.seconds.sift, "write_seconds": report.seconds.write, "limit": limit,
+        "max_features": max_features,
+    }))
+}
+
 enum Command {
     Adapters,
     Match { n: usize, on: Where },
     Adjust { photos: usize, points: usize, solver: LinearSolver, seed: u64 },
+    Features { dir: PathBuf, limit: usize, max_features: usize, on: Extractor },
 }
 
 /// The command of a command line, or what is wrong with it.
@@ -367,6 +476,33 @@ fn command(words: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Adjust { photos, points, solver, seed })
         }
+        Some("features") => {
+            let dir = match words.next() {
+                Some(word) if !word.starts_with("--") => PathBuf::from(word),
+                Some(word) => return Err(format!("features takes the folder of the photos first, not {word}")),
+                None => return Err("features takes the folder of the photos".into()),
+            };
+            let (mut limit, mut max_features, mut device, mut cpu) = (DEFAULT_LIMIT, DEFAULT_MAX_FEATURES, None, false);
+            while let Some(option) = words.next() {
+                match option {
+                    "--limit" => limit = whole_number(option, words.next())?,
+                    "--max-features" => {
+                        max_features = whole_number(option, words.next())?;
+                        if max_features == 0 {
+                            return Err("--max-features takes 1 or more: a photo without points has no features".into());
+                        }
+                    }
+                    "--device" => device = Some(whole_number(option, words.next())?),
+                    "--cpu" => cpu = true,
+                    _ => return Err(format!("features has no option {option}")),
+                }
+            }
+            if cpu && device.is_some() {
+                return Err("features --cpu takes no --device: the CPU twin has no adapter".into());
+            }
+            let on = if cpu { Extractor::Cpu } else { Extractor::Gpu(device) };
+            Ok(Command::Features { dir, limit, max_features, on })
+        }
         Some(word) => Err(format!("no command {word}")),
     }
 }
@@ -383,6 +519,7 @@ fn main() -> ExitCode {
         Ok(Command::Adapters) => Ok(adapters()),
         Ok(Command::Match { n, on }) => time_matching(n, on),
         Ok(Command::Adjust { photos, points, solver, seed }) => time_adjustment(photos, points, solver, seed),
+        Ok(Command::Features { dir, limit, max_features, on }) => time_features(&dir, limit, max_features, on),
         Err(problem) => {
             eprintln!("ppg-bench: {problem}");
             eprintln!("usage: ppg-bench adapters");
@@ -390,6 +527,10 @@ fn main() -> ExitCode {
             eprintln!(
                 "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS} (in all, rounded \
                  up to a multiple of the photos)] [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
+            );
+            eprintln!(
+                "       ppg-bench features DIR [--limit {DEFAULT_LIMIT}] [--max-features {DEFAULT_MAX_FEATURES}] \
+                 [--device N | --cpu]"
             );
             return ExitCode::from(2);
         }
@@ -497,6 +638,27 @@ mod tests {
         assert_eq!(solver_named("cholesky"), None);
         let refused = command(&words(&["adjust", "--solver", "cholesky"])).err();
         assert!(refused.as_ref().is_some_and(|problem| problem.contains("auto, dense, sparse or pcg")), "{refused:?}");
+    }
+
+    #[test]
+    fn features_reads_its_options_and_has_its_defaults() {
+        let on = |line: &[&str]| match command(&words(line)) {
+            Ok(Command::Features { dir, limit, max_features, on }) => Ok((dir, limit, max_features, on)),
+            Ok(_) => panic!("{line:?} is another command"),
+            Err(problem) => Err(problem),
+        };
+        let folder = PathBuf::from("photos");
+        assert_eq!(on(&["features", "photos"]), Ok((folder.clone(), 2016, 8192, Extractor::Gpu(None))));
+        assert_eq!(on(&["features", "photos", "--device", "1", "--limit", "0", "--max-features", "40000"]),
+                   Ok((folder.clone(), 0, 40000, Extractor::Gpu(Some(1)))));
+        assert_eq!(on(&["features", "photos", "--cpu", "--limit", "1024"]), Ok((folder, 1024, 8192, Extractor::Cpu)));
+        let refused: [&[&str]; 7] = [&["features"], &["features", "--cpu"], &["features", "photos", "--n", "8"],
+                                     &["features", "photos", "--limit"], &["features", "photos", "--limit", "many"],
+                                     &["features", "photos", "--max-features", "0"],
+                                     &["features", "photos", "--cpu", "--device", "0"]];
+        for line in refused {
+            assert!(on(line).is_err(), "{line:?} is taken");
+        }
     }
 
     #[test]
