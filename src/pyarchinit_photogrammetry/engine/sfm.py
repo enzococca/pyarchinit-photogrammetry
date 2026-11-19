@@ -594,12 +594,31 @@ COLMAP_MAX_IMAGES = 2147483647  # COLMAP's kMaxNumImages: pair_id = id1 * COLMAP
 LIST_NAMES_FILE = "pairs_names.json"  # beside the database: the names of the photos aliased for a pair list
 
 
+def sqlite_file_uri(path: str, windows: bool | None = None) -> str:
+    """The ``file:`` URI of the absolute ``path`` for SQLite, with no authority - its parser takes
+    none but an empty one or ``localhost``, while ``Path.as_uri`` gives ``file://NAS/...`` for a
+    Windows share, and ``resolve`` rewrites a mapped drive to its share - and the path
+    percent-escaped: a ``#`` or a ``?`` would end it early and another file be opened ("no such
+    table: images" on a project saved as "Saggio #3.ppg"), a ``%`` be decoded. POSIX
+    ``file:///home/...``; Windows (``windows``: this system when None) with forward slashes, a
+    drive ``file:///C:/...`` as SQLite documents, a share ``file:////NAS/share/...`` - an empty
+    authority, then the ``//host/share`` path Win32 takes."""
+    from urllib.parse import quote
+
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        path = path.replace("\\", "/")
+        if path.startswith("//"):
+            return "file://" + quote(path, safe="/:")
+        return "file:///" + quote(path.lstrip("/"), safe="/:")
+    return "file://" + quote(path, safe="/:")
+
+
 def read_only_uri(path: Path, *flags: str) -> str:
-    """The sqlite URI that opens the database at ``path`` read-only, with any other ``flags`` of
-    the query (``immutable=1``): the path escaped by ``as_uri``, since a ``#`` or a ``?`` in a
-    folder of the project ends a raw ``file:`` URI early and another file is opened ("no such
-    table: images" on a project saved as "Saggio #3.ppg")."""
-    return Path(path).resolve().as_uri() + "?" + "&".join(("mode=ro", *flags))
+    """The URI that opens the database at ``path`` read-only (:func:`sqlite_file_uri` of the path
+    resolved), with any other ``flags`` of the query (``immutable=1``)."""
+    return sqlite_file_uri(str(Path(path).resolve())) + "?" + "&".join(("mode=ro", *flags))
 
 
 def _plain_name(name: str) -> bool:

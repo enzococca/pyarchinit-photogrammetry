@@ -127,6 +127,42 @@ def test_a_project_in_a_folder_named_with_a_hash_matches_on_the_cpu(scene_dir, t
     assert ch.align_cameras(mapper="incremental", use_gps=False) == len(ch.cameras)
 
 
+def test_the_read_only_uri_has_no_authority_and_escapes_the_path(tmp_path):
+    """SQLite's URI parser takes no authority but an empty one or ``localhost``: a Windows share
+    (and a mapped drive, which ``resolve`` rewrites to its share) must not come out as
+    ``file://NAS/...``; a ``#`` or ``?`` in the path would end it early and a ``%`` be decoded; a
+    drive path keeps the form SQLite documents."""
+    uri = sfm.sqlite_file_uri
+    assert uri("/Users/enzo/Saggio #3/che cosa?/100% fatto/database.db", windows=False) == \
+        "file:///Users/enzo/Saggio%20%233/che%20cosa%3F/100%25%20fatto/database.db"
+    assert uri(r"C:\Users\enzo\Saggio #3\database.db", windows=True) == "file:///C:/Users/enzo/Saggio%20%233/database.db"
+    assert uri(r"\\NAS\scavi\Saggio #3\database.db", windows=True) == "file:////NAS/scavi/Saggio%20%233/database.db"
+    if os.name != "nt":  # the parser takes the share form: the path is missing, the authority not refused
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):  # (Windows would look for the share)
+            sqlite3.connect(uri(r"\\NAS\scavi\database.db", windows=True) + "?mode=ro", uri=True)
+    with pytest.raises(sqlite3.OperationalError, match="authority"):  # what as_uri gives for a share
+        sqlite3.connect("file://NAS/scavi/database.db?mode=ro", uri=True)
+    # a database under folders with those characters, through read_only_uri (the path resolved, the flags)
+    folder = tmp_path / "Saggio #3 100% fatto"
+    if os.name != "nt":
+        folder = folder / "che cosa?"  # not a file name Windows allows
+    folder.mkdir(parents=True)
+    db = folder / "database.db"
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE t(x)")
+    con.commit()
+    con.close()
+    ro = sfm.read_only_uri(db, "immutable=1")
+    assert ro.endswith("/database.db?mode=ro&immutable=1") and "#" not in ro and "%23" in ro and "%25" in ro
+    con = sqlite3.connect(ro, uri=True)
+    try:
+        assert con.execute("SELECT name FROM sqlite_master").fetchone() == ("t",)
+        with pytest.raises(sqlite3.OperationalError):  # read-only holds
+            con.execute("INSERT INTO t VALUES (1)")
+    finally:
+        con.close()
+
+
 def test_the_aliases_of_a_pair_list_go_back_whatever_happens(tmp_path, monkeypatch, caplog):
     """Inside the block the photos COLMAP's reader could not find go by an alias it can read; the
     others keep their name; on the way out, also after an error, the names are back. The originals
