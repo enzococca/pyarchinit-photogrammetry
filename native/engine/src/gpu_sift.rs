@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-use crate::gpu::{AdapterInfo, rank};
+use crate::gpu::{rank, read_back, AdapterInfo};
 
 pub const DESC: usize = 128;
 const MAX_CANDIDATES: usize = 1 << 17;
@@ -644,16 +644,9 @@ impl Sift {
             enc.copy_buffer_to_buffer(&kps, 0, &st_kps, 0, (MAX_ORIENTED * 16) as u64);
             enc.copy_buffer_to_buffer(&descs, 0, &st_descs, 0, (MAX_ORIENTED * DESC) as u64);
             self.queue.submit(Some(enc.finish()));
-            let read = |b: &wgpu::Buffer| -> Result<Vec<u8>, String> {
-                let slice = b.slice(..);
-                let (tx, rx) = std::sync::mpsc::channel();
-                slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-                self.device.poll(wgpu::Maintain::Wait);
-                rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                let v = slice.get_mapped_range().to_vec();
-                b.unmap();
-                Ok(v)
-            };
+            // waited for on the device's fence (gpu::read_back), never with Maintain::Wait, which
+            // wgpu 24 gives up after 60 s and treats as done
+            let read = |b: &wgpu::Buffer| read_back(&self.device, b, b.size());
             let c: Vec<u32> = bytemuck::cast_slice(&read(&st_counts)?).to_vec();
             let n_or = (c[1] as usize).min(MAX_ORIENTED);
             if n_or > 0 {

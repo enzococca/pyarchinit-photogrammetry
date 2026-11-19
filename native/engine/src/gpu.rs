@@ -462,27 +462,6 @@ impl Matcher {
         (out.clone(), staging.clone(), part.clone())
     }
 
-    /// Block until every submission of the queue has completed, reading the device's fence
-    /// (``Maintain::Poll``) until the queue is empty. Not ``Maintain::Wait``: in wgpu 24 it gives
-    /// up after 60 s without saying so and treats the submission as done - the results are mapped
-    /// and read before the kernel wrote them, and the queue is destroyed under the kernel (the
-    /// panic "We timed out while waiting on the last successful submission to complete!" and an
-    /// access violation on WARP, where 4096 x 4096 descriptors take minutes). The fence is read in
-    /// a tight loop for the first millisecond (a small pair answers within it), then with pauses
-    /// that grow to a millisecond, so a long kernel costs no core.
-    fn wait_idle(&self) {
-        let started = Instant::now();
-        let mut pause = Duration::from_micros(50);
-        while !self.device.poll(wgpu::Maintain::Poll).is_queue_empty() {
-            if started.elapsed() < Duration::from_millis(1) {
-                std::thread::yield_now();
-            } else {
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(Duration::from_millis(1));
-            }
-        }
-    }
-
     /// The best and second-best dot products: ``(best, index, second)`` for every descriptor of
     /// A over B, then for every descriptor of B over A (ties: the lowest index, a second best equal
     /// to the best); nothing when either set is empty. The same as `matching::bests_cpu`.
@@ -523,22 +502,7 @@ impl Matcher {
         }
         enc.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
         self.queue.submit(Some(enc.finish()));
-        let slice = staging.slice(..out_size);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        // the kernel has run and the results are mapped: the mapping is done by the poll that finds
-        // the copy complete, at the latest by the one after the queue is empty
-        let mapped = loop {
-            self.wait_idle();
-            match rx.try_recv() {
-                Ok(mapped) => break mapped,
-                Err(TryRecvError::Empty) => std::thread::yield_now(),
-                Err(TryRecvError::Disconnected) => return Err("the results of the matching were not mapped".into()),
-            }
-        };
-        mapped.map_err(|e| e.to_string())?;
-        let words: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
-        staging.unmap();
+        let words: Vec<u32> = bytemuck::cast_slice(&read_back(&self.device, &staging, out_size)?).to_vec();
         if a_key == 0 { a_buf.destroy(); }
         if b_key == 0 { b_buf.destroy(); }
         Ok(words.chunks_exact(4).map(|w| [w[0], w[1], w[2]]).collect())
@@ -553,6 +517,50 @@ impl Matcher {
         let bests = self.bests(a_key, a, b_key, b)?;
         Ok(select_matches(&bests, n_a, n_b, max_ratio, max_distance, cross_check))
     }
+}
+
+/// Block until every submission of the queue of `device` has completed, reading its fence
+/// (``Maintain::Poll``) until the queue is empty. Not ``Maintain::Wait``: in wgpu 24 it gives up
+/// after 60 s without saying so and treats the submission as done - the results are mapped and
+/// read before the kernel wrote them, and the queue is destroyed under the kernel (the panic "We
+/// timed out while waiting on the last successful submission to complete!" and an access violation
+/// on WARP, where 4096 x 4096 descriptors take minutes). The fence is read in a tight loop for the
+/// first millisecond (a small pair answers within it), then with pauses that grow to a
+/// millisecond, so a long kernel costs no core. Every kernel of the engine waits through this
+/// function (the matcher, the SIFT).
+pub(crate) fn wait_idle(device: &wgpu::Device) {
+    let started = Instant::now();
+    let mut pause = Duration::from_micros(50);
+    while !device.poll(wgpu::Maintain::Poll).is_queue_empty() {
+        if started.elapsed() < Duration::from_millis(1) {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(1));
+        }
+    }
+}
+
+/// The first `size` bytes of the staging buffer `buffer` (``MAP_READ``) once the submissions
+/// before this call have completed: mapped for reading, waited for with [`wait_idle`], copied out
+/// and unmapped. The mapping is done by the poll that finds the copy complete, at the latest by
+/// the one after the queue is empty.
+pub(crate) fn read_back(device: &wgpu::Device, buffer: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, String> {
+    let slice = buffer.slice(..size);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    let mapped = loop {
+        wait_idle(device);
+        match rx.try_recv() {
+            Ok(mapped) => break mapped,
+            Err(TryRecvError::Empty) => std::thread::yield_now(),
+            Err(TryRecvError::Disconnected) => return Err("the results of the kernel were not mapped".into()),
+        }
+    };
+    mapped.map_err(|e| e.to_string())?;
+    let bytes = slice.get_mapped_range().to_vec();
+    buffer.unmap();
+    Ok(bytes)
 }
 
 fn distance(score: u32) -> f32 {
