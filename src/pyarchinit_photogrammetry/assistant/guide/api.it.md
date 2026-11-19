@@ -187,6 +187,16 @@ della GPU vanno nel database e passano la verifica geometrica di COLMAP, e l'all
 differenze. L'abbinamento guidato e i rig di foto a 360 gradi restano sulla CPU.
 `meta["sfm"]["gpu"]`, `gpu_pairs` e `cpu_pairs` dicono chi ha fatto cosa.
 
+Le liste di coppie passate a COLMAP (i blocchi della CPU, la verifica delle coppie della GPU e
+delle corrispondenze apprese) sono righe `nome1 nome2` che COLMAP spezza agli spazi, senza
+virgolette, e ogni coppia che poi non trova la lascia cadere in silenzio: una foto con uno spazio
+nel nome della cartella o del file entra nella lista sotto un alias per la durata della chiamata, e
+il nome torna subito dopo (un rilievo con le foto in "2024 camera/..." aveva perso così 7.901 coppie
+su 10.553, allineando 34 foto su 1.356). Finché gli alias sono in uso, `pairs_names.json` accanto al
+database conserva i nomi: se nel frattempo il processo muore dentro COLMAP, il prossimo abbinamento o
+allineamento li rimette a posto da lì e lo dice. `pairs_unmatched` conta le coppie chieste che COLMAP
+ha lasciato senza geometria a due viste; se ce ne sono, il log lo dice.
+
 Anche i punti: con il nucleo nativo 0.4 il SIFT di COLMAP (quello di VLFeat) è a sua volta un
 insieme di kernel WGSL (`ppg_core.gpu_sift`) - la piramide gaussiana, le sue differenze, gli estremi
 con il loro raffinamento, le orientazioni e i descrittori di una foto, un'ottava per invio. Le foto
