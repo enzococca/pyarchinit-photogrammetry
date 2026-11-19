@@ -673,31 +673,55 @@ def _alias_list_names(db_path: Path) -> dict[str, str]:
         prefix = _free_prefix(names.values(), "ppg_list_")
         for i, n in renamed.items():
             alias[n] = f"{prefix}{i}"
-        (db_path.parent / LIST_NAMES_FILE).write_text(
-            json.dumps({str(i): [alias[n], n] for i, n in renamed.items()}), encoding="utf-8")
+        record = db_path.parent / LIST_NAMES_FILE
+        whole = record.with_name(record.name + ".tmp")  # written apart and put in place: never a record half written
+        whole.write_text(json.dumps({str(i): [alias[n], n] for i, n in renamed.items()}), encoding="utf-8")
+        os.replace(whole, record)
         _rename_images(db_path, {i: alias[n] for i, n in renamed.items()})
     return alias
+
+
+def _read_record(record: Path) -> dict[int, tuple[str, str]] | None:
+    """The record of the aliased names (image id -> alias, name), or None with a warning when it
+    cannot be read: a file left empty or cut by a process or a machine that died while it was
+    written must not stop every later matching and alignment of the chunk."""
+    try:
+        kept = json.loads(record.read_text(encoding="utf-8"))
+        return {int(i): (str(alias), str(name)) for i, (alias, name) in kept.items()}
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        log.warning("%s beside the database could not be read (%s): dropped, the names of the photos stay as they are",
+                    record.name, exc)
+        return None
+
+
+def _interrupted_names_back(db_path: Path) -> None:
+    """Before anything reads the names of the photos: those a matching that died in COLMAP left
+    aliased (:func:`restore_list_names`) put back, and the log told."""
+    back = restore_list_names(db_path)
+    if back:
+        log.warning("%d photos still had the alias names of an interrupted matching: their names are back", back)
 
 
 def restore_list_names(db_path: Path) -> int:
     """The names of the photos a pair list aliased (:func:`_alias_list_names`) put back from the
     record beside the database, and the record removed: only the photos still under the alias
     recorded are renamed (a database rebuilt since holds other photos under those ids and is left
-    alone). Nothing to do without a record. Returns how many names came back; when any did, the
-    log says that a matching was interrupted."""
+    alone); a record that cannot be read is dropped (:func:`_read_record`). Nothing to do without
+    a record. Returns how many names came back, in silence: the callers that recover an
+    interrupted matching say so (:func:`_interrupted_names_back`), the end of a block does not."""
     record = db_path.parent / LIST_NAMES_FILE
     if not record.exists():
         return 0
     back = 0
-    if db_path.exists():
-        kept = json.loads(record.read_text(encoding="utf-8"))
+    kept = _read_record(record)
+    if kept is not None and db_path.exists():
         current = _image_names_by_id(db_path)
-        by_id = {int(i): name for i, (alias, name) in kept.items() if current.get(int(i)) == alias}
+        by_id = {i: name for i, (alias, name) in kept.items() if current.get(i) == alias}
         if by_id:
             _rename_images(db_path, by_id)
             back = len(by_id)
-            log.warning("%d photos still had the alias names of an interrupted matching: their names are back", back)
-    record.unlink()
+    with contextlib.suppress(OSError):
+        record.unlink()
     return back
 
 
@@ -715,7 +739,7 @@ def colmap_list_names(db_path: Path):
     record beside the database lets the next matching or alignment put the names back). The
     matcher reads the features and writes the matches by image id, so the alias is seen nowhere
     else."""
-    restore_list_names(db_path)  # a call that never ended (the process died in COLMAP): its names first
+    _interrupted_names_back(db_path)  # a call that never ended (the process died in COLMAP): its names first
     alias = _alias_list_names(db_path)
     try:
         yield alias
@@ -1107,7 +1131,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                     "%s", exc)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
-    restore_list_names(db_path)  # the names a matching that died in COLMAP left aliased, before anything reads them
+    _interrupted_names_back(db_path)  # the names a matching that died in COLMAP left aliased, before anything reads them
     root, names = image_root_and_names(chunk)
     rigs = rig_configs(chunk, names)
     if matcher != "sift" and rigs:
@@ -1906,7 +1930,7 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     db_path = work / "database.db"
     if not db_path.exists():
         raise RuntimeError("run match_photos() before align_cameras()")
-    restore_list_names(db_path)  # the names a matching that died in COLMAP left aliased: the mapper goes by them
+    _interrupted_names_back(db_path)  # the names a matching that died in COLMAP left aliased: the mapper goes by them
     info = chunk.meta["sfm"]
     root = info["image_root"]
     out = work / "mapper"

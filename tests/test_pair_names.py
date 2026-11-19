@@ -190,6 +190,7 @@ def test_the_aliases_of_a_pair_list_go_back_whatever_happens(tmp_path, monkeypat
         assert sfm._db_image_names(db_path) == set(alias.values())  # what COLMAP reads meanwhile
         assert record.exists()
     assert sfm._db_image_names(db_path) == set(names) and not record.exists()
+    assert not [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]  # a completed block says nothing
     with pytest.raises(RuntimeError, match="stopped"):
         with sfm.colmap_list_names(db_path):
             assert sfm._db_image_names(db_path) != set(names)
@@ -218,6 +219,37 @@ def test_the_aliases_of_a_pair_list_go_back_whatever_happens(tmp_path, monkeypat
     # a record left behind by a database rebuilt since (other photos under those ids) renames nothing
     record.write_text('{"3": ["ppg_list_3", "elsewhere.jpg"]}')
     assert sfm.restore_list_names(db_path) == 0 and not record.exists()
+    assert sfm._db_image_names(db_path) == set(names)
+
+
+def test_an_unreadable_record_of_the_names_is_dropped(tmp_path, caplog):
+    """The record is written whole (a temporary file put in its place); one left empty or cut by a
+    machine that died while it was written is dropped with a warning, instead of stopping every
+    later matching and alignment of the chunk at their first line."""
+    import pycolmap
+
+    db_path = tmp_path / "database.db"
+    names = ["camera A/foto 1.jpg", "plain.jpg"]
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        cid = db.write_camera(pycolmap.Camera(model="SIMPLE_RADIAL", width=100, height=80, params=[90.0, 50.0, 40.0, 0.0]))
+        for name in names:
+            db.write_image(pycolmap.Image(name=name, camera_id=cid))
+    finally:
+        db.close()
+    record = db_path.parent / sfm.LIST_NAMES_FILE
+    sfm._alias_list_names(db_path)
+    assert record.exists() and not record.with_name(record.name + ".tmp").exists()
+    assert sfm.restore_list_names(db_path) == 1
+    for broken in ("", '{"1": ["ppg_list_1", "camera A/f', "[1, 2]", '{"1": ["ppg_list_1"]}'):
+        record.write_text(broken, encoding="utf-8")
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+            assert sfm.restore_list_names(db_path) == 0
+        assert not record.exists() and sfm._db_image_names(db_path) == set(names)
+        assert any(sfm.LIST_NAMES_FILE in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    with sfm.colmap_list_names(db_path) as alias:  # the block works as before
+        assert alias["camera A/foto 1.jpg"] != "camera A/foto 1.jpg"
     assert sfm._db_image_names(db_path) == set(names)
 
 
