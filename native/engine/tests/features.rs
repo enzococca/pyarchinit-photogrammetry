@@ -413,6 +413,11 @@ struct Fake {
 static CALLS: AtomicUsize = AtomicUsize::new(0);
 static GPU_RUNS: AtomicUsize = AtomicUsize::new(0);
 
+/// Held while the test hook's variable is set and by every test that runs GPU workers through
+/// the scheduler: the tests of this file run in parallel threads of one process, and the
+/// variable is read at the start of every `sched::run`.
+static TURN: Mutex<()> = Mutex::new(());
+
 impl Worker<u32, u32> for Fake {
     fn name(&self) -> String {
         self.name.to_string()
@@ -500,9 +505,11 @@ fn a_worker_that_fails_gives_its_units_back() {
     // the test hook of the lost GPU: PPG_TEST_GPU_FAIL_AFTER=3 retires every GPU worker at its
     // third unit, without running it, as a GPU that fails would be retired
     CALLS.store(0, Ordering::SeqCst);
+    let turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     std::env::set_var(sched::FAIL_AFTER_VAR, "3");
     let hooked = sched::run(units.clone(), vec![fake("GPU 0 (fake)", None)], cpu_after_gpu(), 1, &never, &progress);
     std::env::remove_var(sched::FAIL_AFTER_VAR);
+    drop(turn);
     let hooked = hooked.unwrap();
     assert_eq!(hooked.results, want);
     assert_eq!(hooked.log.len(), 1, "{:?}", hooked.log);
@@ -523,6 +530,7 @@ fn extract_all_on_a_gpu_shares_the_photos_with_the_cpu() {
         eprintln!("adapter {} ({}) skipped: {problem}", adapter.index, adapter.name);
         return;
     }
+    let _turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     let dir = folder("gpu");
     let photos = twelve_photos(&dir);
     let limit = 160;
