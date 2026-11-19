@@ -17,3 +17,13 @@ spade = "=2.15.1"
 # linear algebra of the bundle adjustment: the dense and the sparse Cholesky factorisation of the
 # reduced camera system (MIT); without its random and file features
 faer = { version = "0.24", default-features = false, features = ["std", "rayon", "linalg", "sparse-linalg"] }
+# the photos read without Python (image.rs): JPEG with the reduced DCT scales, one thread per
+# decode (the photos are read in parallel, not the components of one), PNG, TIFF without its fax
+# codec (no photo is a fax); MIT OR Apache-2.0
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.18"
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw", "jpeg"] }
+
+[dev-dependencies]
+# the baseline JPEG the tests of image.rs write (MIT OR Apache-2.0)
+jpeg-encoder = "0.6"
