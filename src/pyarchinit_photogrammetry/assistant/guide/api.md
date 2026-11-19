@@ -187,8 +187,10 @@ GPU and of the learned matches) are lines of `name1 name2` that COLMAP splits at
 no quoting, dropping in silence every pair it then cannot find: a photo whose folder or file name
 holds a blank goes into the list under an alias for the time of the call, its name put back right
 after (a survey with its photos under "2024 camera/..." had lost 7,901 of its 10,553 pairs that
-way, and aligned 34 photos of 1,356). `pairs_unmatched` counts the pairs asked for that COLMAP
-left without a two-view geometry; when there are any, the log says so.
+way, and aligned 34 photos of 1,356). While the aliases are in place `pairs_names.json` beside the
+database records the names: if the process dies in COLMAP meanwhile, the next matching or alignment
+puts them back from it and says so. `pairs_unmatched` counts the pairs asked for that COLMAP left
+without a two-view geometry; when there are any, the log says so.
 
 The key points too: with the native core 0.4 COLMAP's SIFT (VLFeat's) is a set of WGSL kernels
 as well (`ppg_core.gpu_sift`) - the Gaussian pyramid, its differences, the extrema with their

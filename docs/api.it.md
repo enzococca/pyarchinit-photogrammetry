@@ -192,8 +192,10 @@ delle corrispondenze apprese) sono righe `nome1 nome2` che COLMAP spezza agli sp
 virgolette, e ogni coppia che poi non trova la lascia cadere in silenzio: una foto con uno spazio
 nel nome della cartella o del file entra nella lista sotto un alias per la durata della chiamata, e
 il nome torna subito dopo (un rilievo con le foto in "2024 camera/..." aveva perso così 7.901 coppie
-su 10.553, allineando 34 foto su 1.356). `pairs_unmatched` conta le coppie chieste che COLMAP ha
-lasciato senza geometria a due viste; se ce ne sono, il log lo dice.
+su 10.553, allineando 34 foto su 1.356). Finché gli alias sono in uso, `pairs_names.json` accanto al
+database conserva i nomi: se nel frattempo il processo muore dentro COLMAP, il prossimo abbinamento o
+allineamento li rimette a posto da lì e lo dice. `pairs_unmatched` conta le coppie chieste che COLMAP
+ha lasciato senza geometria a due viste; se ce ne sono, il log lo dice.
 
 Anche i punti: con il nucleo nativo 0.4 il SIFT di COLMAP (quello di VLFeat) è a sua volta un
 insieme di kernel WGSL (`ppg_core.gpu_sift`) - la piramide gaussiana, le sue differenze, gli estremi
