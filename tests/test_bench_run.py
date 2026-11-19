@@ -698,7 +698,8 @@ def test_an_unknown_mapper_is_refused_before_any_child(tmp_path, monkeypatch):
 
 # --- the run on the small set -----------------------------------------------------------------------------------------
 
-def test_a_small_run_writes_one_record(small_set, tmp_path):
+def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
+    monkeypatch.delenv("PPG_ENGINE", raising=False)  # the engine the computer asks for is not this run's: auto
     out = tmp_path / "out"
     paths = runner.run(small_set, out, name="t", extra_results=lambda doc: {"chunks": len(doc.chunks)})
     r = the_record(out, paths)

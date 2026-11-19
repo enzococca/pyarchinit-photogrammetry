@@ -62,7 +62,9 @@ def _run(tmp_path: Path, script: str, *args: str, **env) -> dict:
     should it be on, nothing goes out."""
     path = tmp_path / "script.py"
     path.write_text(_PRELUDE + textwrap.dedent(script))
-    environment = {**os.environ, "PPG_GNSS_DIR": str(tmp_path / "gnss"), "PPG_NO_OPEN3D": "1",
+    # without the engine the computer asks for (PPG_ENGINE): the warnings these scripts count are the GNSS ones
+    inherited = {k: v for k, v in os.environ.items() if k != "PPG_ENGINE"}
+    environment = {**inherited, "PPG_GNSS_DIR": str(tmp_path / "gnss"), "PPG_NO_OPEN3D": "1",
                    "PROJ_USER_WRITABLE_DIRECTORY": str(tmp_path / "proj_user"),
                    "PROJ_NETWORK_ENDPOINT": "http://127.0.0.1:9", **env}
     # close_fds=False: started by posix_spawn, as the program starts its own processes - on macOS a child forked
