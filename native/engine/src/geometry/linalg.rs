@@ -1,4 +1,5 @@
-//! The singular value decomposition the two-view geometry shares (`solvers`, `two_view`): one-sided
+//! What the two-view geometry shares (`solvers`, `two_view`, `refine`): Hartley's normalisation of a
+//! set of points, and the singular value decomposition, one-sided
 //! Jacobi rotations, accurate to roundoff on every matrix. nalgebra's is not used: its special code
 //! for a static 3 x 3 matrix takes the eigenvectors of the Gram matrix, which lose the square of the
 //! condition number, and its general code, measured on the scenes of tests/solvers.rs, returned
@@ -81,6 +82,32 @@ pub(crate) fn dynamic(m: &Matrix3<f64>) -> DMatrix<f64> {
 pub(crate) fn unit(m: &Matrix3<f64>) -> Option<Matrix3<f64>> {
     let norm = m.norm();
     (norm > 0.0 && norm.is_finite()).then(|| m / norm)
+}
+
+/// Hartley's normalisation of a set of points: the similarity `matrix` that moves their centroid
+/// to the origin and makes their root mean square distance from it `sqrt 2`, the `points` it
+/// gives and its `inverse`.
+pub(crate) struct Normalisation {
+    pub(crate) points: Vec<[f64; 2]>,
+    pub(crate) matrix: Matrix3<f64>,
+    pub(crate) inverse: Matrix3<f64>,
+}
+
+/// `None` when the points coincide (the scale is not defined).
+pub(crate) fn normalise(points: &[[f64; 2]]) -> Option<Normalisation> {
+    let n = points.len() as f64;
+    let (sx, sy) = points.iter().fold((0.0, 0.0), |(x, y), p| (x + p[0], y + p[1]));
+    let (cx, cy) = (sx / n, sy / n);
+    let rms = (points.iter().map(|p| (p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sum::<f64>() / n).sqrt();
+    if !(rms > 0.0 && rms.is_finite()) {
+        return None;
+    }
+    let s = 2f64.sqrt() / rms;
+    Some(Normalisation {
+        points: points.iter().map(|p| [(p[0] - cx) * s, (p[1] - cy) * s]).collect(),
+        matrix: Matrix3::new(s, 0.0, -s * cx, 0.0, s, -s * cy, 0.0, 0.0, 1.0),
+        inverse: Matrix3::new(1.0 / s, 0.0, cx, 0.0, 1.0 / s, cy, 0.0, 0.0, 1.0),
+    })
 }
 
 #[cfg(test)]

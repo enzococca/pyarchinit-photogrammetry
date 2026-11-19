@@ -22,7 +22,7 @@ use std::ops::{Add, Mul, Sub};
 
 use nalgebra::{DMatrix, Matrix3, SMatrix, SVector, Vector3, LU, QR};
 
-use super::linalg::{dynamic, jacobi_svd, unit};
+use super::linalg::{dynamic, jacobi_svd, normalise, unit};
 
 /// A singular value below this fraction of the largest counts as zero: the system has lost rank,
 /// the configuration is degenerate. Exact degeneracy computes to about 1e-16 of the largest; a
@@ -370,32 +370,6 @@ fn null_space(rows: &[[f64; 9]], dim: usize) -> Option<Vec<SVector<f64, 9>>> {
 fn rank_two(f: &Matrix3<f64>) -> Matrix3<f64> {
     let svd = jacobi_svd(&dynamic(f));
     Matrix3::from_fn(|i, j| svd.av[(i, 0)] * svd.v[(j, 0)] + svd.av[(i, 1)] * svd.v[(j, 1)])
-}
-
-/// Hartley's normalisation of a set of points: the similarity `matrix` that moves their centroid
-/// to the origin and makes their root mean square distance from it `sqrt 2`, the `points` it
-/// gives and its `inverse`.
-struct Normalisation {
-    points: Vec<[f64; 2]>,
-    matrix: Matrix3<f64>,
-    inverse: Matrix3<f64>,
-}
-
-/// `None` when the points coincide (the scale is not defined).
-fn normalise(points: &[[f64; 2]]) -> Option<Normalisation> {
-    let n = points.len() as f64;
-    let (sx, sy) = points.iter().fold((0.0, 0.0), |(x, y), p| (x + p[0], y + p[1]));
-    let (cx, cy) = (sx / n, sy / n);
-    let rms = (points.iter().map(|p| (p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sum::<f64>() / n).sqrt();
-    if !(rms > 0.0 && rms.is_finite()) {
-        return None;
-    }
-    let s = 2f64.sqrt() / rms;
-    Some(Normalisation {
-        points: points.iter().map(|p| [(p[0] - cx) * s, (p[1] - cy) * s]).collect(),
-        matrix: Matrix3::new(s, 0.0, -s * cx, 0.0, s, -s * cy, 0.0, 0.0, 1.0),
-        inverse: Matrix3::new(1.0 / s, 0.0, cx, 0.0, 1.0 / s, cy, 0.0, 0.0, 1.0),
-    })
 }
 
 /// Exponents of x, y and z of the 20 monomials of degree up to three, in the order of the

@@ -9,7 +9,8 @@
 //! the border band of the photo, degenerate when no model gains `min_num_inliers`. With
 //! `compute_relative_pose` the pose cam2_from_cam1 is recovered (from the essential matrix, or
 //! from the homography, whose decomposition tells a plane from a pure rotation: then the
-//! configuration is `Planar` or `Panoramic`).
+//! configuration is `Planar` or `Panoramic`). The refinement of each model on its inliers is
+//! `refine`.
 //!
 //! Key points are in COLMAP pixels (the centre of the first pixel at 0.5, 0.5); the matches are
 //! pairs of indices into them with a quality each (the ratio of the two best descriptor
@@ -17,10 +18,11 @@
 //! caller (`pair_seed` of the two photo names): the same pair gives the same result in every
 //! run, every database and every thread.
 
-use nalgebra::{DMatrix, DVector, Matrix3, Rotation3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
-use super::linalg::{dynamic, jacobi_svd, unit};
-use super::ransac::{self, lo_ransac, Model, Report, Sampling, Support};
+use super::linalg::{dynamic, jacobi_svd};
+use super::ransac::{self, lo_ransac, Model, Report, Sampling, Translation};
+use super::refine::{refine_essential, refine_fundamental, refine_homography};
 use super::solvers::{
     essential_n_point, fundamental_eight_point, fundamental_seven_point, homography_dlt, points_in_front,
     pose_from_essential, sampson_sq, transfer_sq,
@@ -142,7 +144,7 @@ pub fn pair_seed(a: &str, b: &str) -> u64 {
 /// The essential matrix, on normalised coordinates: the five-point solver for the sample, the
 /// same machinery on all the inliers for the local step (as COLMAP's LO-RANSAC of it).
 #[derive(Clone, Debug)]
-struct Essential(Matrix3<f64>);
+pub(crate) struct Essential(pub(crate) Matrix3<f64>);
 
 impl Model for Essential {
     const MIN_SAMPLES: usize = 5;
@@ -164,7 +166,7 @@ impl Model for Essential {
 /// The fundamental matrix, in pixels: the seven-point solver for the sample, the eight-point
 /// algorithm on the inliers.
 #[derive(Clone, Debug)]
-struct Fundamental(Matrix3<f64>);
+pub(crate) struct Fundamental(pub(crate) Matrix3<f64>);
 
 impl Model for Fundamental {
     const MIN_SAMPLES: usize = 7;
@@ -188,7 +190,7 @@ impl Model for Fundamental {
 
 /// The homography, in pixels: the direct linear transform of four points and of the inliers.
 #[derive(Clone, Debug)]
-struct Homography(Matrix3<f64>);
+pub(crate) struct Homography(pub(crate) Matrix3<f64>);
 
 impl Model for Homography {
     const MIN_SAMPLES: usize = 4;
@@ -207,42 +209,16 @@ impl Model for Homography {
     }
 }
 
-/// A translation of the plane (COLMAP's `TranslationTransformEstimator<2>`, the model of a
-/// watermark): one match gives it, the mean over the inliers refines it.
-#[derive(Clone, Debug)]
-struct Shift([f64; 2]);
-
-impl Model for Shift {
-    const MIN_SAMPLES: usize = 1;
-    const MIN_LOCAL: usize = 1;
-
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Shift> {
-        Self::from_inliers(x1, x2)
-    }
-
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Shift> {
-        if x1.is_empty() {
-            return Vec::new();
-        }
-        let n = x1.len() as f64;
-        let (dx, dy) = x1.iter().zip(x2).fold((0.0, 0.0), |(sx, sy), (a, b)| (sx + b[0] - a[0], sy + b[1] - a[1]));
-        vec![Shift([dx / n, dy / n])]
-    }
-
-    fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
-        (b[0] - a[0] - self.0[0]).powi(2) + (b[1] - a[1] - self.0[1]).powi(2)
-    }
-}
-
 /// The verification of a pair: `kp1`, `kp2` the key points of the two photos (`[x, y, scale,
 /// orientation]`, COLMAP pixels; only x and y are read), `matches` pairs of indices into them,
 /// `quality` one value per match (lower is better; empty, the matches are taken in their order),
 /// `calibrated` whether both cameras have a prior focal length (then the essential matrix is
 /// estimated too, on `Camera::normalised` coordinates with the threshold scaled by the mean of
 /// the two focal lengths, as COLMAP's `CamFromImgThreshold`), `seed` the seed of the RANSAC
-/// (`pair_seed`; the fundamental, the homography and the watermark take the seeds after it). The
-/// inliers come back in the order of `matches`. An index outside the key points is a programming
-/// error (a panic), as is a `quality` of another length than `matches`.
+/// (`pair_seed`; the fundamental, the homography and the watermark take the seeds after it). Fewer
+/// matches than `min_num_inliers` are `Degenerate` at once, with no model estimated. The inliers
+/// come back in the order of `matches`. An index outside the key points is a programming error
+/// (a panic), as is a `quality` of another length than `matches`.
 #[allow(clippy::too_many_arguments)]
 pub fn verify(
     cam1: &Camera,
@@ -258,6 +234,10 @@ pub fn verify(
     assert!(quality.is_empty() || quality.len() == matches.len(), "one quality per match");
     let mut out =
         TwoView { config: Config::Degenerate, inliers: Vec::new(), e: None, f: None, h: None, cam2_from_cam1: None };
+    // fewer matches than inliers wanted: degenerate at once, no model estimated (COLMAP's early return)
+    if matches.len() < o.min_num_inliers {
+        return out;
+    }
     // the matches best first (a stable sort: equal qualities keep their order)
     let mut order: Vec<usize> = (0..matches.len()).collect();
     if !quality.is_empty() {
@@ -398,7 +378,7 @@ fn is_watermark(cam1: &Camera, cam2: &Camera, x1: &[[f64; 2]], x2: &[[f64; 2]], 
     let mut ro = o.ransac;
     ro.min_inlier_ratio = o.watermark_min_inlier_ratio;
     ro.max_error = o.watermark_detection_max_error;
-    lo_ransac::<Shift>(&p1, &p2, &ro, Sampling::Uniform, seed)
+    lo_ransac::<Translation>(&p1, &p2, &ro, Sampling::Uniform, seed)
         .is_some_and(|r| r.support.num_inliers as f64 / n as f64 >= o.watermark_min_inlier_ratio)
 }
 
@@ -517,341 +497,9 @@ fn decompose_homography(h: &Matrix3<f64>, k1: &Matrix3<f64>, k2: &Matrix3<f64>)
     vec![(r1, t1, n1), (r1, -t1, -n1), (r2, t2, n2), (r2, -t2, -n2)]
 }
 
-// ------------------------------------------------------------------- the refinement on the inliers
-
-/// A model with a local parametrisation about itself, for the least squares on its inliers.
-trait Refinable: Clone {
-    const PARAMS: usize;
-    const RESIDUALS: usize;
-    /// The model moved by `delta` (`PARAMS` values) along its parametrisation.
-    fn perturbed(&self, delta: &[f64]) -> Self;
-    /// The signed residuals (`RESIDUALS` values) of a correspondence.
-    fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]);
-}
-
-/// The step of the central differences of the Jacobian: the parameters are angles, ratios of
-/// singular values or entries of a matrix of unit norm.
-const DIFFERENCE_STEP: f64 = 1e-6;
-
-/// Levenberg-Marquardt from `start` on the correspondences: at most 20 steps, each from the
-/// normal equations with the diagonal damped, accepted when it lowers the sum of squared
-/// residuals (the damping then divided by 3, otherwise multiplied by 10 and the step tried
-/// again); stops when a step lowers the cost by less than 1e-10 of it, or the damping passes
-/// 1e8. Gives the best model reached.
-fn levenberg_marquardt<R: Refinable>(start: &R, x1: &[[f64; 2]], x2: &[[f64; 2]]) -> R {
-    let (p, k) = (R::PARAMS, R::RESIDUALS);
-    let mut scratch = vec![0.0; k];
-    let mut cost_of = |model: &R| -> f64 {
-        x1.iter().zip(x2).fold(0.0, |sum, (&a, &b)| {
-            model.residuals(a, b, &mut scratch);
-            sum + scratch.iter().map(|r| r * r).sum::<f64>()
-        })
-    };
-    let mut current = start.clone();
-    let mut cost = cost_of(&current);
-    if !cost.is_finite() {
-        return current;
-    }
-    let mut lambda = 1e-3;
-    let mut delta = vec![0.0; p];
-    for _ in 0..20 {
-        // the Jacobian by central differences, accumulated into the normal equations
-        let mut jtj = DMatrix::<f64>::zeros(p, p);
-        let mut jtr = DVector::<f64>::zeros(p);
-        let moved: Vec<(R, R)> = (0..p)
-            .map(|j| {
-                delta.fill(0.0);
-                delta[j] = DIFFERENCE_STEP;
-                let plus = current.perturbed(&delta);
-                delta[j] = -DIFFERENCE_STEP;
-                (plus, current.perturbed(&delta))
-            })
-            .collect();
-        let mut r = vec![0.0; k];
-        let (mut plus, mut minus) = (vec![0.0; k], vec![0.0; k]);
-        let mut jac = vec![0.0; k * p];
-        for (&a, &b) in x1.iter().zip(x2) {
-            current.residuals(a, b, &mut r);
-            for (j, (mp, mm)) in moved.iter().enumerate() {
-                mp.residuals(a, b, &mut plus);
-                mm.residuals(a, b, &mut minus);
-                for c in 0..k {
-                    jac[c * p + j] = (plus[c] - minus[c]) / (2.0 * DIFFERENCE_STEP);
-                }
-            }
-            for c in 0..k {
-                let row = &jac[c * p..(c + 1) * p];
-                for i in 0..p {
-                    jtr[i] += row[i] * r[c];
-                    for j in 0..p {
-                        jtj[(i, j)] += row[i] * row[j];
-                    }
-                }
-            }
-        }
-        if !(jtj.iter().all(|v| v.is_finite()) && jtr.iter().all(|v| v.is_finite())) {
-            break;
-        }
-        let mut accepted = false;
-        let mut converged = false;
-        while lambda <= 1e8 {
-            let mut damped = jtj.clone();
-            for i in 0..p {
-                damped[(i, i)] += lambda * jtj[(i, i)].max(1e-12);
-            }
-            let Some(step) = damped.lu().solve(&(-&jtr)) else {
-                lambda *= 10.0;
-                continue;
-            };
-            let candidate = current.perturbed(step.as_slice());
-            let candidate_cost = cost_of(&candidate);
-            if candidate_cost < cost {
-                converged = cost - candidate_cost <= 1e-10 * cost;
-                current = candidate;
-                cost = candidate_cost;
-                lambda /= 3.0;
-                accepted = true;
-                break;
-            }
-            lambda *= 10.0;
-        }
-        if !accepted || converged {
-            break;
-        }
-    }
-    current
-}
-
-/// The signed Sampson error (the square root of `sampson_sq` with the sign of `b^T F a`); zero
-/// where the gradient vanishes.
-fn sampson_signed(f: &Matrix3<f64>, a: [f64; 2], b: [f64; 2]) -> f64 {
-    let fa = f * Vector3::new(a[0], a[1], 1.0);
-    let ftb = f.transpose() * Vector3::new(b[0], b[1], 1.0);
-    let numerator = fa.x * b[0] + fa.y * b[1] + fa.z;
-    let denominator = fa.x * fa.x + fa.y * fa.y + ftb.x * ftb.x + ftb.y * ftb.y;
-    if denominator > 0.0 && denominator.is_finite() {
-        numerator / denominator.sqrt()
-    } else {
-        0.0
-    }
-}
-
-/// The rotation of the vector `w` (Rodrigues; the angle is its norm).
-fn exp_so3(w: &Vector3<f64>) -> Matrix3<f64> {
-    let angle = w.norm();
-    let k = Matrix3::new(0.0, -w.z, w.y, w.z, 0.0, -w.x, -w.y, w.x, 0.0);
-    if angle < 1e-12 {
-        return Matrix3::identity() + k;
-    }
-    Matrix3::identity() + k * (angle.sin() / angle) + k * k * ((1.0 - angle.cos()) / (angle * angle))
-}
-
-/// Two unit vectors orthogonal to the unit vector `t` and to each other.
-fn tangent_basis(t: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
-    let axis = if t.x.abs() <= t.y.abs() && t.x.abs() <= t.z.abs() {
-        Vector3::x()
-    } else if t.y.abs() <= t.z.abs() {
-        Vector3::y()
-    } else {
-        Vector3::z()
-    };
-    let b1 = t.cross(&axis).normalize();
-    (b1, t.cross(&b1))
-}
-
-/// The essential matrix as a pose: the rotation moved on SO(3), the unit translation on its
-/// sphere (five parameters, COLMAP's `RefineRelativePose`); the residual is the Sampson error in
-/// normalised coordinates.
-#[derive(Clone)]
-struct EssentialPose {
-    r: Matrix3<f64>,
-    t: Vector3<f64>,
-    b1: Vector3<f64>,
-    b2: Vector3<f64>,
-}
-
-impl EssentialPose {
-    fn new(r: Matrix3<f64>, t: Vector3<f64>) -> EssentialPose {
-        let t = t.normalize();
-        let (b1, b2) = tangent_basis(&t);
-        EssentialPose { r, t, b1, b2 }
-    }
-
-    fn essential(&self) -> Matrix3<f64> {
-        Matrix3::new(0.0, -self.t.z, self.t.y, self.t.z, 0.0, -self.t.x, -self.t.y, self.t.x, 0.0) * self.r
-    }
-}
-
-impl Refinable for EssentialPose {
-    const PARAMS: usize = 5;
-    const RESIDUALS: usize = 1;
-
-    fn perturbed(&self, d: &[f64]) -> EssentialPose {
-        let r = exp_so3(&Vector3::new(d[0], d[1], d[2])) * self.r;
-        EssentialPose::new(r, self.t + self.b1 * d[3] + self.b2 * d[4])
-    }
-
-    fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]) {
-        out[0] = sampson_signed(&self.essential(), a, b);
-    }
-}
-
-/// The fundamental matrix as `U diag(1, s, 0) V^T`, `U` and `V` rotations moved on SO(3) and `s`
-/// free (seven parameters, the rank kept at two); the residual is the Sampson error in pixels.
-#[derive(Clone)]
-struct FundamentalFactors {
-    u: Matrix3<f64>,
-    v: Matrix3<f64>,
-    s: f64,
-}
-
-impl FundamentalFactors {
-    /// `None` when `f` has rank below two or is not finite.
-    fn of(f: &Matrix3<f64>) -> Option<FundamentalFactors> {
-        if !f.iter().all(|v| v.is_finite()) {
-            return None;
-        }
-        let svd = jacobi_svd(&dynamic(f));
-        let s = &svd.s;
-        if !(s[0] > 0.0 && s[1] > 1e-10 * s[0]) {
-            return None;
-        }
-        let column = |m: &DMatrix<f64>, k: usize, scale: f64| Vector3::new(m[(0, k)], m[(1, k)], m[(2, k)]) / scale;
-        let (u1, u2) = (column(&svd.av, 0, s[0]), column(&svd.av, 1, s[1]));
-        let (v1, v2) = (column(&svd.v, 0, 1.0), column(&svd.v, 1, 1.0));
-        let u = Matrix3::from_columns(&[u1, u2, u1.cross(&u2)]);
-        let v = Matrix3::from_columns(&[v1, v2, v1.cross(&v2)]);
-        Some(FundamentalFactors { u, v, s: s[1] / s[0] })
-    }
-
-    fn fundamental(&self) -> Matrix3<f64> {
-        self.u * Matrix3::from_diagonal(&Vector3::new(1.0, self.s, 0.0)) * self.v.transpose()
-    }
-}
-
-impl Refinable for FundamentalFactors {
-    const PARAMS: usize = 7;
-    const RESIDUALS: usize = 1;
-
-    fn perturbed(&self, d: &[f64]) -> FundamentalFactors {
-        FundamentalFactors {
-            u: exp_so3(&Vector3::new(d[0], d[1], d[2])) * self.u,
-            v: exp_so3(&Vector3::new(d[3], d[4], d[5])) * self.v,
-            s: self.s + d[6],
-        }
-    }
-
-    fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]) {
-        out[0] = sampson_signed(&self.fundamental(), a, b);
-    }
-}
-
-/// The homography by its entries but the largest, which is held (eight parameters; the matrix is
-/// of unit norm); the residuals are the transfer error in the second photo, as RANSAC measures it.
-#[derive(Clone)]
-struct HomographyEntries {
-    h: Matrix3<f64>,
-    held: usize,
-}
-
-impl HomographyEntries {
-    fn of(h: &Matrix3<f64>) -> Option<HomographyEntries> {
-        let h = unit(h)?;
-        let held = (0..9).max_by(|&i, &j| h[i].abs().total_cmp(&h[j].abs())).expect("nine entries");
-        Some(HomographyEntries { h, held })
-    }
-}
-
-impl Refinable for HomographyEntries {
-    const PARAMS: usize = 8;
-    const RESIDUALS: usize = 2;
-
-    fn perturbed(&self, d: &[f64]) -> HomographyEntries {
-        let mut h = self.h;
-        let mut next = d.iter();
-        for i in 0..9 {
-            if i != self.held {
-                h[i] += next.next().expect("eight values");
-            }
-        }
-        HomographyEntries { h: unit(&h).unwrap_or(self.h), held: self.held }
-    }
-
-    fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]) {
-        let p = self.h * Vector3::new(a[0], a[1], 1.0);
-        if p.z != 0.0 && p.z.is_finite() {
-            out[0] = p.x / p.z - b[0];
-            out[1] = p.y / p.z - b[1];
-        } else {
-            out[0] = 0.0;
-            out[1] = 0.0;
-        }
-    }
-}
-
-/// The correspondences the mask selects.
-fn selected(mask: &[bool], x1: &[[f64; 2]], x2: &[[f64; 2]]) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
-    let keep = |x: &[[f64; 2]]| x.iter().zip(mask).filter(|(_, &m)| m).map(|(p, _)| *p).collect();
-    (keep(x1), keep(x2))
-}
-
-/// The report with `model` in place of its own when the support of `model` over all the
-/// correspondences is not worse; the inliers counted again either way.
-fn kept_if_not_worse<M: Model>(report: Report<M>, model: M, x1: &[[f64; 2]], x2: &[[f64; 2]], max_error: f64)
-                               -> Report<M> {
-    let max_residual = max_error * max_error;
-    let residuals: Vec<f64> = x1.iter().zip(x2).map(|(&a, &b)| model.residual_sq(a, b)).collect();
-    let support = Support::evaluate(&residuals, max_residual);
-    if report.support.better_than(&support) {
-        return report;
-    }
-    let inlier_mask = residuals.iter().map(|&r| r <= max_residual).collect();
-    Report { model, support, inlier_mask, num_trials: report.num_trials }
-}
-
-/// COLMAP's `RefineEssentialMatrix`: the pose of the essential matrix on its inliers, refined by
-/// least squares on the Sampson error, recomposed; the report kept as it is when the matrix has no
-/// pose (no point in front of both cameras).
-fn refine_essential(report: Report<Essential>, x1: &[[f64; 2]], x2: &[[f64; 2]], max_error: f64) -> Report<Essential> {
-    let (i1, i2) = selected(&report.inlier_mask, x1, x2);
-    let Some((r, t, _)) = pose_from_essential(&report.model.0, &i1, &i2) else {
-        return report;
-    };
-    let pose = levenberg_marquardt(&EssentialPose::new(r, t), &i1, &i2);
-    match unit(&pose.essential()) {
-        Some(e) => kept_if_not_worse(report, Essential(e), x1, x2, max_error),
-        None => report,
-    }
-}
-
-/// The fundamental matrix refined on its inliers by least squares on the Sampson error, its rank
-/// kept at two.
-fn refine_fundamental(report: Report<Fundamental>, x1: &[[f64; 2]], x2: &[[f64; 2]], max_error: f64)
-                      -> Report<Fundamental> {
-    let (i1, i2) = selected(&report.inlier_mask, x1, x2);
-    let Some(factors) = FundamentalFactors::of(&report.model.0) else {
-        return report;
-    };
-    let refined = levenberg_marquardt(&factors, &i1, &i2);
-    match unit(&refined.fundamental()) {
-        Some(f) => kept_if_not_worse(report, Fundamental(f), x1, x2, max_error),
-        None => report,
-    }
-}
-
-/// The homography refined on its inliers by least squares on the transfer error.
-fn refine_homography(report: Report<Homography>, x1: &[[f64; 2]], x2: &[[f64; 2]], max_error: f64)
-                     -> Report<Homography> {
-    let (i1, i2) = selected(&report.inlier_mask, x1, x2);
-    let Some(entries) = HomographyEntries::of(&report.model.0) else {
-        return report;
-    };
-    let refined = levenberg_marquardt(&entries, &i1, &i2);
-    kept_if_not_worse(report, Homography(refined.h), x1, x2, max_error)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::refine::exp_so3;
     use super::*;
 
     fn rotation(axis: Vector3<f64>, angle: f64) -> Matrix3<f64> {
@@ -888,30 +536,5 @@ mod tests {
         let solutions = decompose_homography(&(k * r * k.try_inverse().unwrap() * 3.0), &k, &k);
         assert_eq!(solutions.len(), 1);
         assert!((solutions[0].0 - r).norm() < 1e-9 && solutions[0].1 == Vector3::zeros());
-    }
-
-    #[test]
-    fn the_refinement_lowers_the_residuals_of_a_homography() {
-        // the identity moved by a translation, started from a matrix off by a per cent
-        let truth = Matrix3::new(1.0, 0.0, 5.0, 0.0, 1.0, -3.0, 0.0, 0.0, 1.0);
-        let x1: Vec<[f64; 2]> = (0..50).map(|i| [37.0 * (i % 7) as f64 + 11.0, 23.0 * (i % 11) as f64 + 5.0]).collect();
-        let x2: Vec<[f64; 2]> = x1.iter().map(|p| [p[0] + 5.0, p[1] - 3.0]).collect();
-        let off = Matrix3::new(0.01, 0.0, 1.0, 0.0, -0.01, 0.5, 0.0, 0.0, 0.0);
-        let start = HomographyEntries::of(&(truth + off)).unwrap();
-        let refined = levenberg_marquardt(&start, &x1, &x2);
-        let error = |h: &Matrix3<f64>| x1.iter().zip(&x2).map(|(&a, &b)| transfer_sq(h, a, b)).sum::<f64>();
-        assert!(error(&refined.h) < 1e-12 * error(&start.h), "{} against {}", error(&refined.h), error(&start.h));
-    }
-
-    #[test]
-    fn the_factors_of_a_fundamental_matrix_recompose_it() {
-        let skew = Matrix3::new(0.0, -0.3, 2.0, 0.3, 0.0, -1.0, -2.0, 1.0, 0.0);
-        let f = skew * Matrix3::new(1.0, 0.2, 0.0, -0.2, 1.0, 0.0, 0.0, 0.0, 1.0);
-        let factors = FundamentalFactors::of(&f).unwrap();
-        let back = factors.fundamental();
-        let (a, b) = (back / back.norm(), f / f.norm());
-        assert!((a - b).norm().min((a + b).norm()) < 1e-12);
-        assert!(FundamentalFactors::of(&Matrix3::zeros()).is_none());
-        assert!(FundamentalFactors::of(&Matrix3::from_element(f64::NAN)).is_none());
     }
 }

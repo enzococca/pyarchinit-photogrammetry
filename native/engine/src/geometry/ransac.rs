@@ -58,6 +58,34 @@ pub trait Model: Clone {
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64;
 }
 
+/// A translation of the plane (COLMAP's `TranslationTransformEstimator<2>`): one correspondence
+/// gives it, the mean over the inliers refines it, the residual is the squared distance. The
+/// model of a watermark (`two_view`), and the simplest model `lo_ransac` is tested on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Translation(pub [f64; 2]);
+
+impl Model for Translation {
+    const MIN_SAMPLES: usize = 1;
+    const MIN_LOCAL: usize = 1;
+
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Translation> {
+        Self::from_inliers(x1, x2)
+    }
+
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Translation> {
+        if x1.is_empty() {
+            return Vec::new();
+        }
+        let n = x1.len() as f64;
+        let (dx, dy) = x1.iter().zip(x2).fold((0.0, 0.0), |(sx, sy), (a, b)| (sx + b[0] - a[0], sy + b[1] - a[1]));
+        vec![Translation([dx / n, dy / n])]
+    }
+
+    fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
+        (b[0] - a[0] - self.0[0]).powi(2) + (b[1] - a[1] - self.0[1]).powi(2)
+    }
+}
+
 /// The support of a model (COLMAP's `InlierSupportMeasurer`): the inliers and the sum of their
 /// squared residuals. More inliers is better; as many with a smaller sum is better.
 #[derive(Clone, Copy, Debug, PartialEq)]

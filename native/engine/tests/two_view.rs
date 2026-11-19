@@ -12,7 +12,7 @@
 
 use nalgebra::{Matrix3, Vector3};
 use ppg_engine::camera::Camera;
-use ppg_engine::geometry::ransac::{self, lo_ransac, Lcg, Model, Sampling};
+use ppg_engine::geometry::ransac::{self, lo_ransac, Lcg, Sampling, Translation};
 use ppg_engine::geometry::solvers::{sampson_sq, transfer_sq};
 use ppg_engine::geometry::two_view::{self, pair_seed, verify, Config, TwoView};
 
@@ -381,6 +381,8 @@ fn ten_matches_are_degenerate() {
         assert_eq!(v.config, Config::Degenerate, "calibrated {calibrated}");
         assert!(v.inliers.is_empty());
         assert!(v.cam2_from_cam1.is_none());
+        // below min_num_inliers no model is estimated (COLMAP's early return)
+        assert!(v.e.is_none() && v.f.is_none() && v.h.is_none(), "calibrated {calibrated}: a model was estimated");
     }
     // no matches at all, and a single one
     let v = verify(&camera(), &pair.kp1, &camera(), &pair.kp2, &[], &[], true, &Default::default(), 1);
@@ -389,6 +391,37 @@ fn ten_matches_are_degenerate() {
     let o = two_view::Options::default();
     let v = verify(&camera(), &pair.kp1, &camera(), &pair.kp2, &matches[..1], &quality[..1], true, &o, 1);
     assert_eq!(v.config, Config::Degenerate);
+}
+
+#[test]
+fn matches_without_a_quality_are_taken_in_their_order() {
+    for seed in 1..=SCENES {
+        let pair = Pair::new(seed, Kind::General, 0.5);
+        let o = two_view::Options::default();
+        let v = verify(&camera(), &pair.kp1, &camera(), &pair.kp2, &pair.matches, &[], true, &o, seed);
+        assert_eq!(v.config, Config::Calibrated, "scene {seed}");
+        check_inliers(&pair, &v, &format!("scene {seed}, no quality"), false);
+    }
+}
+
+#[test]
+fn a_homography_without_a_fundamental_matrix_leaves_the_pair_planar_or_panoramic() {
+    // six exact matches of a plane with min_num_inliers lowered to four: the seven-point solver
+    // has no sample, the homography has its four. Without a prior focal length COLMAP keeps the
+    // fundamental matrix's inliers, so the pair is planar or panoramic with none; with one, the
+    // essential matrix (five points) takes over and its six inliers are the pair's
+    let pair = Pair::new(1, Kind::Planar, 0.0);
+    let matches: Vec<[u32; 2]> =
+        pair.matches.iter().zip(&pair.truth).filter(|(_, &t)| t).map(|(m, _)| *m).take(6).collect();
+    let quality = vec![0.5f32; 6];
+    let o = two_view::Options { min_num_inliers: 4, ..Default::default() };
+    let v = verify(&camera(), &pair.kp1, &camera(), &pair.kp2, &matches, &quality, false, &o, 3);
+    assert_eq!(v.config, Config::PlanarOrPanoramic);
+    assert!(v.inliers.is_empty() && v.f.is_none() && v.h.is_some() && v.e.is_none());
+    let v = verify(&camera(), &pair.kp1, &camera(), &pair.kp2, &matches, &quality, true, &o, 3);
+    assert_eq!(v.config, Config::PlanarOrPanoramic);
+    assert_eq!(v.inliers.len(), 6);
+    assert!(v.f.is_none() && v.h.is_some() && v.e.is_some());
 }
 
 #[test]
@@ -431,30 +464,6 @@ fn pair_seed_is_the_same_in_both_orders_and_is_fnv1a() {
     assert_eq!(pair_seed("b", "a"), 16560467112517592754);
 }
 
-/// A translation in the plane, the simplest model: one match gives it, the mean of the inliers
-/// refines it.
-#[derive(Clone, Debug, PartialEq)]
-struct Shift([f64; 2]);
-
-impl Model for Shift {
-    const MIN_SAMPLES: usize = 1;
-    const MIN_LOCAL: usize = 1;
-
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Shift> {
-        Self::from_inliers(x1, x2)
-    }
-
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Shift> {
-        let n = x1.len() as f64;
-        let (dx, dy) = x1.iter().zip(x2).fold((0.0, 0.0), |(sx, sy), (a, b)| (sx + b[0] - a[0], sy + b[1] - a[1]));
-        vec![Shift([dx / n, dy / n])]
-    }
-
-    fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
-        (b[0] - a[0] - self.0[0]).powi(2) + (b[1] - a[1] - self.0[1]).powi(2)
-    }
-}
-
 #[test]
 fn lo_ransac_finds_the_shift_of_the_majority_and_stops_early() {
     let mut random = Random(5);
@@ -477,7 +486,7 @@ fn lo_ransac_finds_the_shift_of_the_majority_and_stops_early() {
         })
         .collect();
     let o = ransac::Options::default();
-    let report = lo_ransac::<Shift>(&x1, &x2, &o, Sampling::Prosac, 42).expect("a model");
+    let report = lo_ransac::<Translation>(&x1, &x2, &o, Sampling::Prosac, 42).expect("a model");
     assert!((report.model.0[0] - 12.0).abs() < 0.3 && (report.model.0[1] + 7.0).abs() < 0.3, "{:?}", report.model);
     assert!(report.support.num_inliers >= 275 && report.support.num_inliers <= 280, "{}", report.support.num_inliers);
     assert!(report.inlier_mask[..280].iter().filter(|&&m| m).count() >= 275);
@@ -488,13 +497,13 @@ fn lo_ransac_finds_the_shift_of_the_majority_and_stops_early() {
     // lift the bound)
     assert_eq!(report.num_trials, 73);
     // the same seed gives the same report, bit for bit
-    let again = lo_ransac::<Shift>(&x1, &x2, &o, Sampling::Prosac, 42).expect("a model");
+    let again = lo_ransac::<Translation>(&x1, &x2, &o, Sampling::Prosac, 42).expect("a model");
     assert_eq!(report.model, again.model);
     assert_eq!(report.inlier_mask, again.inlier_mask);
     assert_eq!(report.num_trials, again.num_trials);
     // fewer points than the sample needs, and a sample that fits nothing
-    assert!(lo_ransac::<Shift>(&[], &[], &o, Sampling::Prosac, 1).is_none());
-    let unrelated = lo_ransac::<Shift>(&x1[..5], &x2[395..], &o, Sampling::Uniform, 1);
+    assert!(lo_ransac::<Translation>(&[], &[], &o, Sampling::Prosac, 1).is_none());
+    let unrelated = lo_ransac::<Translation>(&x1[..5], &x2[395..], &o, Sampling::Uniform, 1);
     assert!(unrelated.is_some_and(|r| r.support.num_inliers >= 1));
 }
 
