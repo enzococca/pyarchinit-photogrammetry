@@ -387,7 +387,7 @@ def match_pairs(db_path: Path, pairs, feats, progress: Progress | None = None) -
     database, then COLMAP's geometric verification of them all. Returns the pairs matched."""
     import pycolmap
 
-    from .sfm import verification_options
+    from .sfm import colmap_list_names, verification_options
 
     progress = as_progress(progress)
     work = Path(db_path).parent
@@ -429,10 +429,11 @@ def match_pairs(db_path: Path, pairs, feats, progress: Progress | None = None) -
     if written:
         progress(0.92, f"Verifying the {len(written):,} pairs matched by LightGlue")
         lst = work / "pairs_learned.txt"
-        lst.write_text("\n".join(f"{x} {y}" for x, y in written))
         opts = verification_options()  # COLMAP's defaults, the seed of PPG_RANSAC_SEED
         opts.min_num_inliers = MIN_INLIERS
         opts.min_inlier_ratio = MIN_INLIER_RATIO
-        pycolmap.verify_matches(str(db_path), str(lst), opts)
+        with colmap_list_names(db_path) as alias:  # the names as COLMAP reads them off the list
+            lst.write_text("\n".join(f"{alias.get(x, x)} {alias.get(y, y)}" for x, y in written))
+            pycolmap.verify_matches(str(db_path), str(lst), opts)
     progress(1.0, f"LightGlue: {len(written):,} pairs")
     return len(written)

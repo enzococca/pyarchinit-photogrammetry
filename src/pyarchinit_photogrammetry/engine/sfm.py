@@ -13,6 +13,7 @@ tangential distortion); *Optimize cameras* refines every parameter afterwards.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -588,6 +589,89 @@ def _db_image_names(db_path: Path) -> set[str]:
         db.close()
 
 
+COLMAP_MAX_IMAGES = 2147483647  # COLMAP's kMaxNumImages: pair_id = id1 * COLMAP_MAX_IMAGES + id2, id1 < id2
+
+
+def _plain_name(name: str) -> bool:
+    """Whether COLMAP's text readers take an image name as it is: a pair list (``match_list_path``
+    of the imported pairing, ``verify_matches``) splits its lines at the blanks and skips those
+    that start with ``#``, the reader of ``images.txt`` stops a name at the first blank; neither
+    has quoting."""
+    return bool(name) and not name.startswith("#") and not any(c.isspace() for c in name)
+
+
+def _free_prefix(names, base: str) -> str:
+    """``base`` with underscores added until no name begins with it: aliases built on it collide
+    with none of the names (``images.name`` is unique in COLMAP's database)."""
+    names = list(names)
+    while any(n.startswith(base) for n in names):
+        base += "_"
+    return base
+
+
+@contextlib.contextmanager
+def colmap_list_names(db_path: Path):
+    """The names the photos go by in a pair list written for COLMAP. COLMAP reads a line of the
+    list as ``name1 name2`` split at the blanks, with no quoting, and a pair whose names it then
+    cannot find is logged ("Image ... does not exist") and dropped, with no error: a survey with
+    its photos under "2024 camera/..." lost 7,901 of its 10,553 pairs and aligned 34 photos of
+    1,356. Inside the block the photos whose name COLMAP's reader cannot take (:func:`_plain_name`)
+    are renamed in the database to an alias it can; the mapping name -> alias (the name itself for
+    the others) is yielded to write the list with; the names are put back on the way out, whatever
+    happened. The matcher reads the features and writes the matches by image id, so the alias is
+    seen nowhere else; a database whose names are all plain is not touched."""
+    import sqlite3
+
+    def rename(by_id: dict[int, str]) -> None:
+        con = sqlite3.connect(str(db_path))
+        try:
+            con.executemany("UPDATE images SET name = ? WHERE image_id = ?", [(n, i) for i, n in by_id.items()])
+            con.commit()
+        finally:
+            con.close()
+
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        names = {int(i): str(n) for i, n in con.execute("SELECT image_id, name FROM images")}
+    finally:
+        con.close()
+    alias = {n: n for n in names.values()}
+    renamed = {i: n for i, n in names.items() if not _plain_name(n)}
+    if not renamed:
+        yield alias
+        return
+    prefix = _free_prefix(names.values(), "ppg_list_")
+    for i, n in renamed.items():
+        alias[n] = f"{prefix}{i}"
+    rename({i: alias[n] for i, n in renamed.items()})
+    try:
+        yield alias
+    finally:
+        rename(renamed)
+
+
+def _unmatched_pairs(db_path: Path, pairs) -> int:
+    """How many of the pairs of image names have no two-view geometry in the database. COLMAP
+    writes one for every pair of its list it took, also when the verification fails, so these are
+    the pairs it never saw: lines of the list it could not read, photos without an entry."""
+    import sqlite3
+
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        ids = {str(n): int(i) for i, n in con.execute("SELECT image_id, name FROM images")}
+        done = {int(p) for (p,) in con.execute("SELECT pair_id FROM two_view_geometries")}
+    finally:
+        con.close()
+    missing = 0
+    for a, b in pairs:
+        ia, ib = ids.get(a), ids.get(b)
+        if ia is None or ib is None:
+            missing += 1
+        elif (ia * COLMAP_MAX_IMAGES + ib if ia < ib else ib * COLMAP_MAX_IMAGES + ia) not in done:
+            missing += 1
+    return missing
+
+
 def _continuable(chunk: Chunk, db_path: Path, root, names: dict[int, str], matcher: str = "sift") -> bool:
     """Whether the matches and the alignment of the chunk can take more photos: database and
     model exist, the photos sit in the same folder, every photo of the database is still there,
@@ -612,7 +696,8 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     call re-reads the features - each as fast as it goes until the queue is empty. The matches of
     the GPUs go into the database between the chunks of the CPU and are verified by COLMAP at the
     end (``verify_matches``), so the alignment sees no difference. The pairs are sorted: a GPU
-    keeps the descriptors of the current photo on the device."""
+    keeps the descriptors of the current photo on the device. The lists of pairs for COLMAP name
+    the photos as its reader takes them (:func:`colmap_list_names`)."""
     import collections
     import sqlite3
     import threading
@@ -717,49 +802,50 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     vopts = verification_options()  # the one verification for the chunks of the CPU and the pairs of the GPUs
     threads = [threading.Thread(target=gpu_stream, args=(d,), name=f"ppg-gpu-matching-{d}", daemon=True)
                for d in devices]
-    started = time.perf_counter()
-    for t in threads:
-        t.start()
     least = max(8, 4 * (os.cpu_count() or 4))
     list_path = work / "pairs_cpu.txt"
     cpu_rate = None  # pairs per second of the CPU stream, measured on its first chunk
-    try:
-        while True:
-            with lock:
-                if failure or cancelled or not queue:
-                    break
-                left = len(queue)
-                if cpu_rate is None:
-                    n = max(1, left // 4)  # a first chunk to measure the CPU by, the GPUs meanwhile measured too
-                else:
-                    gpu_rate = done["gpu"] / max(time.perf_counter() - started, 1e-3)
-                    n = int(round(left * cpu_rate / max(cpu_rate + gpu_rate, 1e-9)))
-                n = min(left, max(n, min(least, left)))
-                batch = [queue.pop() for _ in range(n)]
-            list_path.write_text("\n".join(f"{a} {b}" for a, b in batch))
-            popts = pycolmap.ImportedPairingOptions()
-            popts.match_list_path = str(list_path)
-            t0 = time.perf_counter()
-            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
-                                       verification_options=vopts)
-            cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
-            with lock:
-                done["cpu"] += n
-            flush()
-            report(force=True)
-    finally:
+    with colmap_list_names(db_path) as alias:  # the names as COLMAP reads them off the lists (the GPUs go by id)
+        started = time.perf_counter()
         for t in threads:
-            t.join()
-        reader.close()
-    if failure:
-        raise RuntimeError(f"GPU matching failed: {failure[0]}") from failure[0]
-    progress.check()  # cancelled while a GPU stream was reporting: it stopped, the step stops here
-    flush()
-    if gpu_pairs:  # COLMAP's geometric verification of what the GPUs matched
-        progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")
-        gpu_list = work / "pairs_gpu.txt"
-        gpu_list.write_text("\n".join(f"{a} {b}" for a, b in gpu_pairs))
-        pycolmap.verify_matches(str(db_path), str(gpu_list), vopts)
+            t.start()
+        try:
+            while True:
+                with lock:
+                    if failure or cancelled or not queue:
+                        break
+                    left = len(queue)
+                    if cpu_rate is None:
+                        n = max(1, left // 4)  # a first chunk to measure the CPU by, the GPUs meanwhile measured too
+                    else:
+                        gpu_rate = done["gpu"] / max(time.perf_counter() - started, 1e-3)
+                        n = int(round(left * cpu_rate / max(cpu_rate + gpu_rate, 1e-9)))
+                    n = min(left, max(n, min(least, left)))
+                    batch = [queue.pop() for _ in range(n)]
+                list_path.write_text("\n".join(f"{alias.get(a, a)} {alias.get(b, b)}" for a, b in batch))
+                popts = pycolmap.ImportedPairingOptions()
+                popts.match_list_path = str(list_path)
+                t0 = time.perf_counter()
+                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                           verification_options=vopts)
+                cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
+                with lock:
+                    done["cpu"] += n
+                flush()
+                report(force=True)
+        finally:
+            for t in threads:
+                t.join()
+            reader.close()
+        if failure:
+            raise RuntimeError(f"GPU matching failed: {failure[0]}") from failure[0]
+        progress.check()  # cancelled while a GPU stream was reporting: it stopped, the step stops here
+        flush()
+        if gpu_pairs:  # COLMAP's geometric verification of what the GPUs matched
+            progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")
+            gpu_list = work / "pairs_gpu.txt"
+            gpu_list.write_text("\n".join(f"{alias.get(a, a)} {alias.get(b, b)}" for a, b in gpu_pairs))
+            pycolmap.verify_matches(str(db_path), str(gpu_list), vopts)
     return {"gpu_pairs": done["gpu"], "cpu_pairs": done["cpu"], "by_device": by_device}
 
 
@@ -1136,17 +1222,26 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
             shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
         elif pairs:
             list_path = work / "pairs.txt"
-            list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
             popts = pycolmap.ImportedPairingOptions()
             popts.match_list_path = str(list_path)
-            with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
-                                           verification_options=verification_options())
+            with colmap_list_names(db_path) as alias:  # the names as COLMAP reads them off the list
+                list_path.write_text("\n".join(f"{alias.get(a, a)} {alias.get(b, b)}" for a, b in sorted(pairs)))
+                with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
+                    pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                               verification_options=verification_options())
+        # a pair asked for and left without a two-view geometry was never seen by COLMAP (a line of a list it
+        # could not read, a photo without an entry): said, not lost in silence; the rigs skip the pairs within
+        # a frame on purpose, so theirs are not counted
+        unmatched = _unmatched_pairs(db_path, pairs) if pairs and not rigs else 0
+        if unmatched:
+            log.warning("%s of the %s pairs of photos asked for were not matched by COLMAP: the alignment may "
+                        "leave photos out", f"{unmatched:,}", f"{len(pairs):,}")
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
                          "matcher": matcher,
                          "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs is not None else None,
+                         "pairs_unmatched": unmatched if pairs is not None else None,
                          "generic": bool(generic), "reference": reference, "neighbours": int(neighbours),
                          "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),
                          "stationary_removed": removed, "rigs": len(rigs),
@@ -1158,7 +1253,8 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                          "cpu_pairs": shares["cpu_pairs"] if shares else (len(pairs) if pairs else None)}
     if keep and old.get("gps_priors"):
         chunk.meta["sfm"]["gps_priors"] = old["gps_priors"]  # the priors already in the database: same axes
-    progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
+    progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else "")
+             + (f" ({unmatched:,} of {len(pairs):,} pairs not matched)" if unmatched else ""))
 
 
 def remove_stationary_matches(db_path: Path, min_shift: float = 2.0, min_inliers: int = 15) -> int:
